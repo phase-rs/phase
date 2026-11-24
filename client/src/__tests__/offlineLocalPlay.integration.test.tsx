@@ -30,6 +30,7 @@ const test = vi.hoisted(() => {
     coveragePct: 100,
     archetype: null,
     bracket: null,
+    comboDeclaration: { kind: "undeclared" as const },
     knownFormat: "Commander",
   }];
   const ledger = {
@@ -65,6 +66,7 @@ const test = vi.hoisted(() => {
   const localAdapter = {
     cardDbLoaded: true,
     warmCardDatabase: vi.fn(async () => undefined),
+    getCardParseDetails: vi.fn(async () => null),
     initialize: vi.fn(async () => { ledger.adapterInitialize += 1; }),
     initializeGame: vi.fn(async () => {
       ledger.adapterInitializeGame += 1;
@@ -253,6 +255,7 @@ vi.mock("../services/deckCompatibility", () => ({
 }));
 vi.mock("../services/engineRuntime", () => ({
   companionCandidates: vi.fn(async () => []),
+  commanderCandidates: vi.fn(async () => []),
   commanderPartnerCandidates: vi.fn(async () => []),
   isCardCommanderEligibleForFormat: vi.fn(async () => false),
   maxDeckCopies: vi.fn(async () => ({ type: "UpTo", data: 4 })),
@@ -553,6 +556,42 @@ afterEach(async () => {
 });
 
 describe("offline local play integration", () => {
+  it("designates an offered commander in the offline editor", async () => {
+    vi.useRealTimers();
+    const { STORAGE_KEY_PREFIX } = await import("../constants/storage");
+    const { commanderCandidates, isCardCommanderEligibleForFormat } = await import("../services/engineRuntime");
+    const name = "Isamaru, Hound of Konda";
+    vi.mocked(commanderCandidates).mockImplementation(async ({ main_deck, commander }) =>
+      main_deck.includes(name) && commander.length === 0 ? [name] : [],
+    );
+    vi.mocked(isCardCommanderEligibleForFormat).mockImplementation(async (card) => card === name);
+    try {
+      localStorage.setItem(`${STORAGE_KEY_PREFIX}Offline Commander`, JSON.stringify({
+        main: [{ name, count: 2 }],
+        sideboard: [],
+        format: "Commander",
+      }));
+      render(<App />);
+      await screen.findByText("Home dashboard");
+      navigate("/deck-builder?deck=Offline%20Commander");
+      const user = userEvent.setup();
+      await user.click(await screen.findByRole("tab", { name: "Info" }));
+      await user.click(await screen.findByRole("button", { name }));
+      await waitFor(() => expect(commanderCandidates).toHaveBeenLastCalledWith({
+        main_deck: [name], commander: [name], selected_format: "Commander",
+        sideboard: [], companion: [], signature_spell: [], planar_deck: [], scheme_deck: [], sticker_sheets: [],
+      }, "commanders-outside"));
+      expect(commanderCandidates).toHaveBeenCalledWith({
+        main_deck: [name, name], commander: [], selected_format: "Commander",
+        sideboard: [], companion: [], signature_spell: [], planar_deck: [], scheme_deck: [], sticker_sheets: [],
+      }, "commanders-outside");
+      expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+    } finally {
+      vi.mocked(commanderCandidates).mockReset().mockResolvedValue([]);
+      vi.mocked(isCardCommanderEligibleForFormat).mockReset().mockResolvedValue(false);
+    }
+  });
+
   it("completes the prepared offline journey without remote continuation", async () => {
     vi.useRealTimers();
     const { STORAGE_KEY_PREFIX } = await import("../constants/storage");

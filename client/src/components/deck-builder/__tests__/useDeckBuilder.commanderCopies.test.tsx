@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 
+import type { CommanderCandidatesRequest } from "../../../services/engineRuntime";
+import { CommanderPanel } from "../CommanderPanel";
 import type { DeckEntry } from "../../../services/deckParser";
 import type { ScryfallCard } from "../../../services/scryfall";
 import type { GameFormat } from "../../../adapter/types";
@@ -15,16 +17,31 @@ const eligible = new Set<string>();
 const partnerCandidates = vi.fn(async () => [] as string[]);
 const cardDataCache = new Map<string, { name: string; cmc: number; color_identity: string[] }>();
 
+const defaultOffers = async (request: CommanderCandidatesRequest) =>
+  [...new Set(request.main_deck)].filter((name) => eligible.has(name) && !request.commander.includes(name));
+const candidateQuery = vi.fn((request: CommanderCandidatesRequest, _composition: string) => defaultOffers(request));
+const perName = vi.fn(async (name: string) => eligible.has(name));
+const companionQuery = vi.fn(async () => [] as string[]);
+const signatureQuery = vi.fn(async (): Promise<import("../../../services/engineRuntime").SignatureSpellSelectionPolicy> => ({ type: "None" }));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
 vi.mock("../../../services/engineRuntime", () => ({
-  isCardCommanderEligibleForFormat: vi.fn(async (name: string) => eligible.has(name)),
+  isCardCommanderEligibleForFormat: (name: string) => perName(name),
+  commanderCandidates: (request: CommanderCandidatesRequest, composition: string) => candidateQuery(request, composition),
   commanderPartnerCandidates: (...args: unknown[]) =>
     (partnerCandidates as unknown as (...a: unknown[]) => Promise<string[]>)(...args),
-  companionCandidates: vi.fn(async () => [] as string[]),
+  companionCandidates: () => companionQuery(),
   isCardCommanderEligible: vi.fn(async () => false),
   maxDeckCopies: vi.fn(async (name: string) => name === "Forest"
     ? { type: "Unlimited" }
     : { type: "Limited", data: 1 }),
-  signatureSpellSelectionPolicy: vi.fn(async () => null),
+  signatureSpellSelectionPolicy: () => signatureQuery(),
 }));
 
 vi.mock("../../../hooks/useDeckCardData", () => ({
@@ -67,17 +84,17 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
   const LEGEND = "Legend";
   const OTHER = "Other Legend";
 
-  function setup() {
+  function setup(format: GameFormat = "Commander") {
     return renderHook(() =>
       useDeckBuilder({
-        format: "Commander" as GameFormat,
+        format,
         onFormatChange: vi.fn(),
         searchFilters: {} as never,
       }),
     );
   }
 
-  /** Install a main deck and wait for the engine's eligibility scan to land. */
+  /** Install a main deck and wait for the panel and row answers. */
   async function withMain(
     result: { current: ReturnType<typeof useDeckBuilder> },
     main: DeckEntry[],
@@ -86,10 +103,9 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
       result.current.handleImport({ main, sideboard: [] });
     });
     await waitFor(() => {
-      // Reach guard: `handleSetCommander` early-returns unless the engine has
-      // marked the card eligible, so a test that skipped this wait would pass
-      // vacuously against a no-op handler.
+      // The tests click through both entrances, each with its own engine answer.
       expect(result.current.isCommanderEligible(LEGEND)).toBe(true);
+      expect(result.current.commanderCandidateNames).toContain(LEGEND);
     });
   }
 
@@ -101,6 +117,10 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
   }
 
   beforeEach(() => {
+    candidateQuery.mockReset().mockImplementation(defaultOffers);
+    perName.mockReset().mockImplementation(async (name) => eligible.has(name));
+    companionQuery.mockReset().mockResolvedValue([]);
+    signatureQuery.mockReset().mockResolvedValue({ type: "None" });
     eligible.clear();
     eligible.add(LEGEND);
     eligible.add(OTHER);
@@ -137,6 +157,124 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
 
     act(() => result.current.handleAddCard({ name: "Forest" } as ScryfallCard));
     expect(result.current.deck.main).toEqual([{ ...one, count: 5 }, dmu]);
+  });
+
+  it("projects both printings and uses outside composition even for Commander Draft", async () => {
+    const { result } = setup("CommanderDraft");
+    const name = "Isamaru, Hound of Konda";
+    const control = "Yargle, Glutton of Urborg";
+    const first = { count: 1, name, sourcePrinting: { setCode: "chk", collectorNumber: "19" } };
+    const second = { count: 1, name, sourcePrinting: { setCode: "j22", collectorNumber: "201" } };
+    const other = { count: 1, name: control };
+    eligible.add(name);
+    candidateQuery.mockImplementation(async ({ commander }) => commander.length === 0 ? [name, control] : [control]);
+    act(() => result.current.handleImport({ main: [first, second, other], sideboard: [] }));
+    await waitFor(() => expect(result.current.commanderCandidateNames).toEqual([name, control]));
+    expect(result.current.deck.main).toEqual([first, second, other]);
+    expect(candidateQuery).toHaveBeenLastCalledWith(expect.objectContaining({
+      main_deck: [name, name, control], commander: [], selected_format: "CommanderDraft",
+    }), "commanders-outside");
+    act(() => result.current.handleSetCommander(name));
+    await waitFor(() => expect(result.current.commanderCandidateNames).toEqual([control]));
+    expect(candidateQuery).toHaveBeenLastCalledWith(expect.objectContaining({
+      main_deck: [name, control], commander: [name], selected_format: "CommanderDraft",
+    }), "commanders-outside");
+
+    const main = result.current.deck.main;
+    expect(main).toEqual([second, other]);
+    expect(result.current.isCommanderEligible(name)).toBe(true);
+    await act(async () => result.current.handleSetCommander(name));
+    expect(result.current.commanders).toEqual([name]);
+    expect(result.current.deck.main).toEqual(main);
+    expect(partnerCandidates).not.toHaveBeenCalled();
+    await act(async () => result.current.handleSetCommander(second));
+    expect(partnerCandidates).toHaveBeenCalled();
+    expect(result.current.commanders).toEqual([name]);
+    expect(result.current.deck.main).toEqual([other, { count: 1, name }]);
+  });
+
+  it("publishes only the current candidate answer across A to B to A", async () => {
+    const { result } = setup();
+    const lateSuccess = deferred<string[]>();
+    const lateFailure = deferred<string[]>();
+    const latest = deferred<string[]>();
+    const importName = (name: string) =>
+      act(() => result.current.handleImport({ main: [{ name, count: 1 }], sideboard: [] }));
+    importName(LEGEND);
+    await waitFor(() => expect(result.current.commanderCandidateNames).toEqual([LEGEND]));
+    candidateQuery.mockReturnValueOnce(lateSuccess.promise)
+      .mockReturnValueOnce(lateFailure.promise).mockReturnValueOnce(latest.promise);
+    importName(OTHER);
+    expect(result.current.commanderCandidateNames).toBeNull();
+    importName(LEGEND);
+    expect(result.current.commanderCandidateNames).toBeNull();
+    importName(OTHER);
+    expect(result.current.commanderCandidateNames).toBeNull();
+    await act(async () => latest.resolve([OTHER]));
+    await act(async () => lateSuccess.resolve([LEGEND]));
+    await act(async () => lateFailure.reject(new Error("stale")));
+    expect(result.current.commanderCandidateNames).toEqual([OTHER]);
+  });
+
+  it("sets the offered commander from the panel while per-name eligibility is pending", async () => {
+    const pending = deferred<boolean>();
+    perName.mockReturnValue(pending.promise);
+    const name = "Isamaru, Hound of Konda";
+    const offer = deferred<string[]>();
+    candidateQuery.mockImplementation(({ main_deck }) => main_deck.includes(name) ? offer.promise : Promise.resolve([]));
+    function Consumer() {
+      const builder = useDeckBuilder({ format: "Commander", onFormatChange: vi.fn(), searchFilters: {} as never });
+      return <>
+        <button onClick={() => builder.handleImport({ main: [{ count: 1, name }], sideboard: [] })}>Load fixture</button>
+        <CommanderPanel
+          commanders={builder.commanders}
+          deck={builder.deck.main}
+          deckComposition="commanders-outside"
+          cardDataCache={new Map()}
+          deckSizeRule={builder.deckSizeRule}
+          commanderCandidates={builder.commanderCandidateNames}
+          onSetCommander={builder.handleSetCommander}
+          onRemoveCommander={builder.handleRemoveCommander}
+        />
+        <output>{builder.deck.main.length}</output>
+      </>;
+    }
+    render(<Consumer />);
+    fireEvent.click(screen.getByRole("button", { name: "Load fixture" }));
+    expect(perName).toHaveBeenCalledWith(name);
+    await act(async () => offer.resolve([name]));
+    fireEvent.click(screen.getByRole("button", { name }));
+    expect(await screen.findByRole("button", { name: "Remove" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("0");
+    await act(async () => pending.resolve(true));
+  });
+
+  it("moves the exact offered composite spelling", async () => {
+    const { result } = setup();
+    const composite = "Sheoldred // The True Scriptures";
+    candidateQuery.mockResolvedValueOnce([composite]);
+    act(() => result.current.handleImport({
+      main: [{ count: 1, name: "Sheoldred" }, { count: 1, name: composite }],
+      sideboard: [],
+    }));
+    await waitFor(() => expect(result.current.commanderCandidateNames).toEqual([composite]));
+    await act(async () => result.current.handleSetCommander(composite));
+    expect(result.current.commanders).toEqual([composite]);
+    expect(result.current.deck.main).toEqual([{ count: 1, name: "Sheoldred" }]);
+  });
+
+  it("keeps companion and signature-spell answers when the candidate query rejects", async () => {
+    const { result } = setup();
+    await waitFor(() => expect(result.current.commanderCandidateNames).toEqual([]));
+    const answer = deferred<string[]>();
+    candidateQuery.mockReturnValueOnce(answer.promise);
+    companionQuery.mockResolvedValueOnce(["Lurrus of the Dream-Den"]);
+    signatureQuery.mockResolvedValueOnce({ type: "Required", data: { candidates: ["Lightning Bolt"] } });
+    act(() => result.current.handleImport({ main: [{ count: 1, name: LEGEND }], sideboard: [] }));
+    await act(async () => answer.reject(new Error("candidate failure")));
+    expect(result.current.commanderCandidateNames).toBeNull();
+    expect(result.current.signatureSpellCandidates).toEqual(["Lightning Bolt"]);
+    expect(result.current.companionCandidateNames).toEqual(["Lurrus of the Dream-Den"]);
   });
 
   it("decrements the main-deck copy count rather than removing every copy", async () => {
@@ -234,6 +372,7 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
 
     // CR 702.124h: the engine confirms the pair, so this is an ADD, not a swap.
     partnerCandidates.mockResolvedValue([OTHER]);
+    await waitFor(() => expect(result.current.commanderCandidateNames).toContain(OTHER));
     await act(async () => {
       result.current.handleSetCommander(OTHER);
     });

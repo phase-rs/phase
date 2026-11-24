@@ -1,3 +1,4 @@
+import type { CommanderCandidatesRequest, CommanderDeckComposition } from "../adapter/engine-queries";
 import type {
   DeckCopyLimit,
   FormatConfig,
@@ -213,6 +214,16 @@ export async function signatureSpellSelectionPolicy(
   request: unknown,
 ): Promise<SignatureSpellSelectionPolicy> {
   return (await engine().query("signatureSpellSelectionPolicy", request)) as SignatureSpellSelectionPolicy;
+}
+
+export type { CommanderCandidatesRequest, CommanderDeckComposition } from "../adapter/engine-queries";
+
+/** Returns the engine-approved commander candidates in deck order. */
+export async function commanderCandidates(
+  request: CommanderCandidatesRequest,
+  composition: CommanderDeckComposition,
+): Promise<string[]> {
+  return (await engine().query("commanderCandidates", request, composition)) as string[];
 }
 
 /** Returns the engine-approved Commander-family companion candidates. */

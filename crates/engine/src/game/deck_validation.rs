@@ -158,6 +158,59 @@ pub fn signature_spell_selection_policy(
     SignatureSpellSelectionPolicy::Required { candidates }
 }
 
+/// Describes where a candidate request lists its designated commander copies.
+/// CR 903.5a counts commanders as part of the deck. CR 903.13f(2)
+/// allows multiple same-name copies from a Commander Draft pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommanderDeckComposition {
+    /// Main-deck occurrences include the designated copies.
+    CommandersInside,
+    /// Designated copies are listed separately from the main-deck occurrences.
+    CommandersOutside,
+}
+
+/// CR 903.3 + CR 903.5a: the main-deck cards that still have a copy free to be
+/// designated as a commander, as the first available occurrence of each card
+/// in main-deck order. Counts by resolved card, so two printing rows or two
+/// spellings of one card are two copies. Pairing and whole-deck legality are
+/// left to `can_pair_commanders` and `evaluate_deck_compatibility`.
+pub fn commander_candidates(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    composition: CommanderDeckComposition,
+) -> Vec<String> {
+    let format = match request.selected_format.as_ref().map(SelectedFormat::tag) {
+        None | Some(GameFormat::Horde) => {
+            if horde_survivor_format(request) != Some(SurvivorDeckFormat::Commander) {
+                return Vec::new();
+            }
+            GameFormat::Horde
+        }
+        Some(format) => format,
+    };
+    let main_counts = resolved_name_counts(db, request.main_deck.iter().map(String::as_str));
+    let designation_counts = resolved_name_counts(db, request.commander.iter().map(String::as_str));
+    let mut seen = HashSet::new();
+    request
+        .main_deck
+        .iter()
+        .filter_map(|name| {
+            let face = db.get_face_by_name(name)?;
+            if !is_card_commander_eligible_for_format(face, format) {
+                return None;
+            }
+            let key = canonical_deck_count_key(db, name);
+            let designated = designation_counts.get(&key).copied().unwrap_or_default();
+            let available = match composition {
+                CommanderDeckComposition::CommandersInside => main_counts[&key] > designated,
+                CommanderDeckComposition::CommandersOutside => designated == 0,
+            };
+            (available && seen.insert(key)).then(|| name.clone())
+        })
+        .collect()
+}
+
 /// Returns eligible companion cards that can be used with the deck under the
 /// selected format. Candidate evaluation uses the same typed predicate as
 /// pregame reveal validation and respects format minimum deck sizes.
@@ -4255,16 +4308,25 @@ enum CommandZoneNetting {
     CountVerbatim,
 }
 
+fn resolved_name_counts<'a>(
+    db: &CardDatabase,
+    names: impl IntoIterator<Item = &'a str>,
+) -> HashMap<String, u32> {
+    let mut counts = HashMap::new();
+    for name in names {
+        *counts
+            .entry(canonical_deck_count_key(db, name))
+            .or_insert(0) += 1;
+    }
+    counts
+}
+
 fn combined_copy_counts(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
     netting: CommandZoneNetting,
 ) -> HashMap<String, u32> {
-    let mut counts: HashMap<String, u32> = HashMap::new();
-    for name in construction_deck_cards(request) {
-        let canonical = canonical_deck_count_key(db, name);
-        *counts.entry(canonical).or_insert(0) += 1;
-    }
+    let mut counts = resolved_name_counts(db, construction_deck_cards(request));
     if netting == CommandZoneNetting::CountVerbatim {
         return counts;
     }
@@ -4295,22 +4357,16 @@ fn combined_copy_counts(
     // spell name one card — netting two copies away against a single main-deck
     // listing and hiding a genuine CR 903.5b violation. Netting must be the
     // exact CR 903.5a double-listing correction, never a blanket amnesty.
-    let mut main_deck_occurrences: HashMap<String, u32> = HashMap::new();
-    for name in &request.main_deck {
-        *main_deck_occurrences
-            .entry(canonical_deck_count_key(db, name))
-            .or_insert(0) += 1;
-    }
-    let mut command_zone_entries: HashMap<String, u32> = HashMap::new();
-    for entry in request
-        .commander
-        .iter()
-        .chain(request.signature_spell.iter())
-    {
-        *command_zone_entries
-            .entry(canonical_deck_count_key(db, entry))
-            .or_insert(0) += 1;
-    }
+    let main_deck_occurrences =
+        resolved_name_counts(db, request.main_deck.iter().map(String::as_str));
+    let command_zone_entries = resolved_name_counts(
+        db,
+        request
+            .commander
+            .iter()
+            .chain(&request.signature_spell)
+            .map(String::as_str),
+    );
     for (canonical, command_copies) in command_zone_entries {
         let netted = command_copies.min(
             main_deck_occurrences
@@ -4794,6 +4850,73 @@ fn summarize_cards(prefix: &str, cards: &BTreeSet<String>, max_names: usize) -> 
         listed.push(format!("+{} more", cards.len() - max_names));
     }
     format!("{prefix}: {}", listed.join(", "))
+}
+
+/// CR 903.3: Whether `face` can serve as `format`'s command-zone leader. The
+/// single authority behind both the per-card picker and `commander_candidates`.
+pub fn is_card_commander_eligible_for_format(face: &CardFace, format: GameFormat) -> bool {
+    // EXHAUSTIVE, deliberately: the `_ => false` this replaced is what made
+    // `GameFormat::CommanderDraft` silently answer "no card can be your
+    // commander" the moment the format became selectable. A wildcard here
+    // re-arms that for the next format, so every arm is named.
+    match format {
+        GameFormat::Commander | GameFormat::DuelCommander => is_commander_eligible(face),
+        // CR 903.3, unchanged by CR 810 seating: 2HG Commander decks
+        // designate commanders under Commander's own predicate.
+        GameFormat::TwoHeadedGiantCommander => is_commander_eligible(face),
+        // CR 904.13a + CR 903.3: Archenemy Commander decks designate
+        // commanders under Commander's own predicate.
+        GameFormat::ArchenemyCommander => is_commander_eligible(face),
+        GameFormat::PauperCommander => is_commander_eligible(face),
+        // CR 903.3, unchanged by CR 903.13f: the CR 903.13f(3) grant
+        // affects PAIRING, not eligibility, so Commander Draft uses
+        // Commander's own predicate.
+        GameFormat::CommanderDraft => is_commander_eligible(face),
+        GameFormat::FreeformCommander => is_freeform_commander_eligible(face),
+        GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
+        GameFormat::Oathbreaker => face.is_oathbreaker,
+        GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
+        // Horde is per-config (Commander-format survivors designate a
+        // standard-EDH-eligible commander; Constructed survivors have no
+        // commander slot and never consult this). Answer the EDH
+        // predicate: the only caller that can exist is the Commander
+        // horde's deck builder, and `false` here would silently tell it
+        // no card can be its commander.
+        GameFormat::Horde => is_commander_eligible(face),
+        // CR 903.3's commander eligibility test applies unchanged —
+        // planar doesn't change eligibility.
+        GameFormat::PlanechaseCommander => is_commander_eligible(face),
+        // Formats with no command zone: nothing can be designated.
+        GameFormat::Standard
+        | GameFormat::Pioneer
+        | GameFormat::Modern
+        | GameFormat::Premodern
+        | GameFormat::Legacy
+        | GameFormat::Vintage
+        | GameFormat::Historic
+        | GameFormat::Timeless
+        | GameFormat::Pauper
+        | GameFormat::Momir
+        | GameFormat::Planechase
+        | GameFormat::Archenemy
+        | GameFormat::FreeForAll
+        | GameFormat::TwoHeadedGiant
+        | GameFormat::Limited
+        | GameFormat::Freeform
+        | GameFormat::Dandan => false,
+        // Phase 1d wired a real custom-format deck-legality evaluator
+        // (`evaluate_custom_format`), but it is scoped to non-command-zone
+        // (constructed-shaped) custom formats — a command-zone custom
+        // (`CommandZoneMode::Enabled`, the shape a saved Commander/Brawl/
+        // Tiny-Leaders/Oathbreaker lobby produces) fails closed there too.
+        // This function also only ever receives a bare `GameFormat`, never
+        // the resolved `CommanderEligibilityRule` a command-zone custom
+        // format declares, so eligibility genuinely cannot be answered
+        // here regardless. `false` is the fail-closed reading — a
+        // permissive `true` would offer an unvalidated card as a
+        // commander.
+        GameFormat::Custom(_) => false,
+    }
 }
 
 /// CR 903.3: A card is eligible to be a commander if it is a legendary creature

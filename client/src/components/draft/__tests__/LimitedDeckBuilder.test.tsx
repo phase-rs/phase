@@ -162,7 +162,16 @@ vi.mock("../../../viewmodel/limitedPoolFilter", async (importOriginal) => {
 // CR 903.3 / CR 702.124: the ENGINE is the eligibility and pairing authority.
 // It cannot load under vitest, so both published surfaces are replaced with
 // per-test controllable fakes. Every other engineRuntime export stays real.
-const engineEligible = vi.fn(async (_name: string, _format: string) => false);
+type CandidateRequest = import("../../../services/engineRuntime").CommanderCandidatesRequest;
+const engineCandidates = vi.fn(async (_request: CandidateRequest, _composition: string) => [] as string[]);
+
+function offerCandidates(...names: string[]) {
+  engineCandidates.mockImplementation(async ({ main_deck, commander }) =>
+    names.filter((name) =>
+      main_deck.filter((card) => card === name).length > commander.filter((card) => card === name).length,
+    ),
+  );
+}
 const enginePartnerCandidates = vi.fn(
   async (_first: string, _candidates: string[], _draftSetCodes: readonly string[]) =>
     [] as string[],
@@ -172,8 +181,8 @@ vi.mock("../../../services/engineRuntime", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../services/engineRuntime")>();
   return {
     ...actual,
-    isCardCommanderEligibleForFormat: (name: string, format: string) =>
-      engineEligible(name, format),
+    commanderCandidates: (request: CandidateRequest, composition: string) =>
+      engineCandidates(request, composition),
     commanderPartnerCandidates: (
       first: string,
       candidates: string[],
@@ -1712,8 +1721,8 @@ function sectionScope(headingName: string) {
 describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   afterEach(() => {
     cleanup();
-    engineEligible.mockReset();
-    engineEligible.mockResolvedValue(false);
+    engineCandidates.mockReset();
+    engineCandidates.mockResolvedValue([]);
     enginePartnerCandidates.mockReset();
     enginePartnerCandidates.mockResolvedValue([]);
     compatibilityHarness.evaluate.mockClear();
@@ -1723,7 +1732,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   });
 
   function onlyVehicleIsEligible() {
-    engineEligible.mockImplementation(async (name: string) => name === "Vehicle Commander");
+    offerCandidates("Vehicle Commander");
   }
 
   it("preserves controlled duplicates in Commander Draft compatibility and renders raw reasons", async () => {
@@ -2014,7 +2023,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       })),
       raff,
     ];
-    engineEligible.mockImplementation(async (name: string) => name === raff.name);
+    offerCandidates(raff.name);
     render(
       <LimitedDeckBuilder
         local={{
@@ -2290,6 +2299,116 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     },
   );
 
+  it("keeps both Rograkh copies inside legacy requests through designation and submission", async () => {
+    const name = "Rograkh, Son of Rohgahh";
+    const first = { ...PRISMATIC_PIPER, name, set_code: "cmr", collector_number: "197" };
+    const second = { ...SECOND_PRISMATIC_PIPER, name, set_code: "cmr", collector_number: "575" };
+    const request = {
+      main_deck: [name, name], selected_format: "CommanderDraft", draft_set_codes: [],
+      sideboard: [], companion: [], signature_spell: [], planar_deck: [], scheme_deck: [], sticker_sheets: [],
+    };
+    engineCandidates.mockImplementation(async ({ commander }) => commander.length < 2 ? [name] : []);
+    enginePartnerCandidates.mockResolvedValue([name]);
+    const submit = vi.fn();
+    render(<LimitedDeckBuilder
+      view={{ ...COMMANDER_VIEW, commanders_required: 2, min_deck_size: 2, draft_set_codes: [], pool: [first, second] }}
+      mainDeck={[name, name]}
+      landCounts={NO_LANDS}
+      onAddToDeck={() => {}}
+      onRemoveFromDeck={() => {}}
+      onSetLandCount={() => {}}
+      onSubmitDeck={submit}
+      showSuggestions={false}
+    />);
+    expect(engineCandidates).toHaveBeenLastCalledWith({ ...request, commander: [] }, "commanders-inside");
+    fireEvent.click(await commanderPanelScope().findByRole("button", { name }));
+    await waitFor(() => expect(engineCandidates).toHaveBeenLastCalledWith({ ...request, commander: [name] }, "commanders-inside"));
+    fireEvent.click(await commanderPanelScope().findByRole("button", { name }));
+    await waitFor(() =>
+      expect(engineCandidates).toHaveBeenLastCalledWith({ ...request, commander: [name, name] }, "commanders-inside"),
+    );
+    expect(enginePartnerCandidates).toHaveBeenCalledWith(name, [name], []);
+    expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(2);
+    expect(commanderPanelScope().queryByRole("button", { name })).not.toBeInTheDocument();
+    const button = screen.getByRole("button", { name: "Submit Deck" });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() => expect(submit).toHaveBeenCalledWith([name, name]));
+  });
+
+  it("renders only the current workspace candidate answer and failure", async () => {
+    const name = "Rograkh, Son of Rohgahh";
+    const view = {
+      ...COMMANDER_VIEW,
+      min_deck_size: 1,
+      pool: [
+        { ...PRISMATIC_PIPER, name, set_code: "cmr", collector_number: "197" },
+        { ...SECOND_PRISMATIC_PIPER, name, set_code: "cmr", collector_number: "575" },
+        { ...SECOND_PRISMATIC_PIPER, instance_id: "reserve", name, set_code: "sld", collector_number: "9996" },
+      ],
+    };
+    const pending: {
+      request: CandidateRequest;
+      resolve: (names: string[]) => void;
+      reject: (error: Error) => void;
+    }[] = [];
+    engineCandidates.mockImplementation((request) => new Promise((resolve, reject) => {
+      pending.push({ request, resolve, reject });
+    }));
+    const initial: DraftWorkspaceState = {
+      schemaVersion: 1,
+      placements: {
+        "cmd-4": { zone: "deck", row: 0, column: 0, order: 0 },
+        "cmd-5": { zone: "deck", row: 0, column: 0, order: 1 },
+        plains: { zone: "deck", row: 0, column: 0, order: 2 },
+      },
+      virtualBasics: [{ instanceId: "plains", name: "Plains" }],
+    };
+    const renderBuilder = (workspace: DraftWorkspaceState) => <LimitedDeckBuilder local={{
+      view, workspace,
+      preferences: createDefaultDraftWorkspacePreferences(),
+      interactionLocked: false,
+      capabilities: { kind: "editable-pool", suggestions: false },
+      onWorkspaceChange: vi.fn(),
+      onPreferencesChange: vi.fn(),
+      onSubmitDeck: vi.fn(),
+      onAddBasicLand: vi.fn(),
+      onRemoveBasicLand: vi.fn(),
+    }} showSuggestions={false} />;
+    const { rerender } = render(renderBuilder(initial));
+    expect(engineCandidates).toHaveBeenLastCalledWith(expect.objectContaining({
+      main_deck: [name, name, "Plains"], commander: [], selected_format: "CommanderDraft", draft_set_codes: ["CMM"],
+    }), "commanders-inside");
+    await act(async () => pending[0].resolve([name]));
+    fireEvent.click(await commanderPanelScope().findByRole("button", { name }));
+    expect(pending[1].request).toMatchObject({ main_deck: [name, name, "Plains"], commander: [name] });
+    const oneCopy: DraftWorkspaceState = {
+      ...initial, placements: { ...initial.placements, "cmd-5": { zone: "sideboard", row: 0, column: 0, order: 0 } },
+    };
+    rerender(renderBuilder(oneCopy));
+    expect(pending[2].request).toMatchObject({ main_deck: [name, "Plains"], commander: [name] });
+    expect(commanderPanelScope().queryByRole("button", { name })).not.toBeInTheDocument();
+    rerender(renderBuilder(initial));
+    rerender(renderBuilder(oneCopy));
+    expect(pending[4].request).toMatchObject({ main_deck: [name, "Plains"], commander: [name] });
+    await act(async () => pending[4].resolve([]));
+    await act(async () => pending[1].resolve([name]));
+    await act(async () => pending[2].reject(new Error("stale")));
+    const unavailable = /Commander designation is unavailable/;
+    expect(screen.queryByText(unavailable)).not.toBeInTheDocument();
+    expect(commanderPanelScope().queryByRole("button", { name })).not.toBeInTheDocument();
+    await act(async () => pending[3].reject(new Error("also stale")));
+    expect(screen.queryByText(unavailable)).not.toBeInTheDocument();
+
+    rerender(renderBuilder(initial));
+    await act(async () => pending[5].reject(new Error("current")));
+    expect(screen.getByText(unavailable)).toBeInTheDocument();
+    rerender(renderBuilder(oneCopy));
+    await act(async () => pending[6].resolve([]));
+    expect(screen.queryByText(unavailable)).not.toBeInTheDocument();
+    expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(1);
+  });
+
   /**
    * V1 — CR 903.3: submission is blocked until a commander is designated, even
    * though the card count already satisfies `min_deck_size`.
@@ -2331,9 +2450,9 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   });
 
   /**
-   * V2 — CR 903.3 eligibility is the ENGINE's predicate, asked per name, per
-   * format. Reds in BOTH directions on a `type_line.includes("Legendary
-   * Creature")` implementation: it would offer the decoy and hide the Vehicle.
+   * V2 — CR 903.3 eligibility comes from the engine's candidate list for
+   * the deck. Filtering by legendary creature would offer the decoy and hide
+   * the Vehicle.
    */
   it("offers only the commanders the engine says are eligible", async () => {
     onlyVehicleIsEligible();
@@ -2359,7 +2478,15 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       candidateScope().queryByRole("button", { name: "Decoy Legend" }),
     ).toBeNull();
     // The format is passed through, not assumed: "Commander" would be wrong.
-    expect(engineEligible).toHaveBeenCalledWith("Vehicle Commander", "CommanderDraft");
+    expect(engineCandidates).toHaveBeenCalledWith(
+      expect.objectContaining({
+        main_deck: ["Vehicle Commander", "Decoy Legend"],
+        commander: [],
+        selected_format: "CommanderDraft",
+        draft_set_codes: ["CMM"],
+      }),
+      "commanders-inside",
+    );
   });
 
   /**
@@ -2426,9 +2553,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
    * while the view says "CMM", so the two authorities disagree on purpose.
    */
   it("pairs a second commander under the drafted set's CR 903.13f(3) grant", async () => {
-    engineEligible.mockImplementation(
-      async (name: string) => name === "Vehicle Commander" || name === "Second Commander",
-    );
+    offerCandidates("Vehicle Commander", "Second Commander");
     enginePartnerCandidates.mockImplementation(
       async (_first: string, candidates: string[], draftSetCodes: readonly string[]) =>
         draftSetCodes.includes("CMM") ? candidates : [],
@@ -2466,9 +2591,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
    * without this one a hard-coded `["CMM"]` passes the row above.
    */
   it("swaps rather than pairs when the draft grants no partner ability", async () => {
-    engineEligible.mockImplementation(
-      async (name: string) => name === "Vehicle Commander" || name === "Second Commander",
-    );
+    offerCandidates("Vehicle Commander", "Second Commander");
     enginePartnerCandidates.mockImplementation(
       async (_first: string, candidates: string[], draftSetCodes: readonly string[]) =>
         draftSetCodes.includes("CMM") ? candidates : [],
@@ -2778,7 +2901,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     expect(screen.getByRole("button", { name: /wind drake/i })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Commander", level: 4 })).toBeNull();
     await waitFor(() => expect(screen.getByRole("button", { name: "Submit Deck" })).not.toBeDisabled());
-    expect(engineEligible).not.toHaveBeenCalled();
+    expect(engineCandidates).not.toHaveBeenCalled();
   });
 
   /**
@@ -2943,7 +3066,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
    * `limitedDeck.filterUnavailable`.
    */
   it("announces that commander designation is unavailable when the engine rejects", async () => {
-    engineEligible.mockRejectedValue(new Error("engine unavailable"));
+    engineCandidates.mockRejectedValue(new Error("engine unavailable"));
     render(
       <LimitedDeckBuilder
         view={COMMANDER_VIEW}
@@ -2982,12 +3105,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
    * three commanders with Submit enabled.
    */
   it("cannot stack a third commander when two designations race one query", async () => {
-    engineEligible.mockImplementation(
-      async (name: string) =>
-        name === "Vehicle Commander" ||
-        name === "Second Commander" ||
-        name === "The Prismatic Piper",
-    );
+    offerCandidates("Vehicle Commander", "Second Commander", "The Prismatic Piper");
     // Hold every partner query open, so both clicks land before either answer.
     const answer: Array<() => void> = [];
     enginePartnerCandidates.mockImplementation(
@@ -3045,9 +3163,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   });
 
   it("invalidates an in-flight pairing response when its commander is removed", async () => {
-    engineEligible.mockImplementation(
-      async (name: string) => name === "Vehicle Commander" || name === "Second Commander",
-    );
+    offerCandidates("Vehicle Commander", "Second Commander");
     let resolvePairing!: () => void;
     enginePartnerCandidates.mockImplementation(
       (_first: string, candidates: string[]) => new Promise<string[]>((resolve) => {
@@ -3086,9 +3202,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   });
 
   it("rejects an in-flight pairing response after the candidate loses backing", async () => {
-    engineEligible.mockImplementation(
-      async (name: string) => name === "Vehicle Commander" || name === "Second Commander",
-    );
+    offerCandidates("Vehicle Commander", "Second Commander");
     let resolvePairing!: () => void;
     enginePartnerCandidates.mockImplementation(
       (_first: string, candidates: string[]) => new Promise<string[]>((resolve) => {
@@ -3137,9 +3251,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   });
 
   it("invalidates an in-flight pairing response when designation is suspended and re-entered", async () => {
-    engineEligible.mockImplementation(
-      async (name: string) => name === "Vehicle Commander" || name === "Second Commander",
-    );
+    offerCandidates("Vehicle Commander", "Second Commander");
     let resolvePairing!: () => void;
     enginePartnerCandidates.mockImplementation(
       (_first: string, candidates: string[]) => new Promise<string[]>((resolve) => {
@@ -3270,7 +3382,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   it.each(["desktop", "tablet-portrait", "phone-portrait"] as const)(
     "designates and submits two backed copies of The Prismatic Piper on %s",
     async (responsiveLayout) => {
-      engineEligible.mockImplementation(async (name: string) => name === "The Prismatic Piper");
+      offerCandidates("The Prismatic Piper");
       enginePartnerCandidates.mockResolvedValue(["The Prismatic Piper"]);
       const submitSpy = vi.fn();
       const view = {
@@ -3343,7 +3455,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   );
 
   it("uses the engine count in the controlled builder independently of draft kind", async () => {
-    engineEligible.mockImplementation(async (name: string) => name === "The Prismatic Piper");
+    offerCandidates("The Prismatic Piper");
     enginePartnerCandidates.mockResolvedValue(["The Prismatic Piper"]);
     const compatibilityResolvers: Array<(
       result: ReturnType<typeof compatibleResult>,
@@ -3402,7 +3514,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   it.each(["controlled", "workspace"] as const)(
     "fails closed when the engine requires more commanders than %s supports",
     async (mode) => {
-      engineEligible.mockImplementation(async (name: string) => name === "The Prismatic Piper");
+      offerCandidates("The Prismatic Piper");
       enginePartnerCandidates.mockResolvedValue(["The Prismatic Piper"]);
       const compatibilityResolvers: Array<(
         result: ReturnType<typeof compatibleResult>,
@@ -3477,7 +3589,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   );
 
   it("prunes duplicate designations to the currently backed copy count", async () => {
-    engineEligible.mockImplementation(async (name: string) => name === "The Prismatic Piper");
+    offerCandidates("The Prismatic Piper");
     enginePartnerCandidates.mockResolvedValue(["The Prismatic Piper"]);
     const view = { ...COMMANDER_VIEW, pool: [PRISMATIC_PIPER, SECOND_PRISMATIC_PIPER] };
 
@@ -3522,7 +3634,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   });
 
   it("does not let one copy back two designations", async () => {
-    engineEligible.mockImplementation(async (name: string) => name === "The Prismatic Piper");
+    offerCandidates("The Prismatic Piper");
     enginePartnerCandidates.mockResolvedValue(["The Prismatic Piper"]);
     render(
       <LimitedDeckBuilder
@@ -3553,7 +3665,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   });
 
   it("shows the commander requirement on phone when deck size is satisfied", async () => {
-    engineEligible.mockImplementation(async (name: string) => name === "The Prismatic Piper");
+    offerCandidates("The Prismatic Piper");
     render(
       <LimitedDeckBuilder
         local={{
@@ -3659,10 +3771,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
    * stopped offering candidates.
    */
   it("offers one candidate for a name the deck and the granted filler both hold", async () => {
-    engineEligible.mockImplementation(
-      async (name: string) =>
-        name === "Vehicle Commander" || name === "The Prismatic Piper",
-    );
+    offerCandidates("Vehicle Commander", "The Prismatic Piper");
 
     render(
       <LimitedDeckBuilder

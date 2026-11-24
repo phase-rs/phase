@@ -48,6 +48,7 @@ import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { useDeckSignals } from "../../hooks/useDeckSignals";
 import { projectSignatureSpellForFormat, serializeSavedDeck } from "../../services/savedDeckProjection";
 import {
+  commanderCandidates,
   commanderPartnerCandidates,
   companionCandidates,
   isCardCommanderEligibleForFormat,
@@ -211,6 +212,14 @@ export function useDeckBuilder({
     ...deck,
     commander: commanders.length > 0 ? commanders : undefined,
   }), [deck, commanders]);
+  const candidateRequest = useMemo(
+    () => ({ ...expandParsedDeck(currentDeck), selected_format: format }),
+    [currentDeck, format],
+  );
+  const [candidateAnswer, setCandidateAnswer] = useState<{
+    request: typeof candidateRequest;
+    names: string[] | null;
+  } | null>(null);
   const formatConfig = formatMetadata(format)?.default_config;
   // This editor offers only the commander family's dedicated companion slot.
   const offersDedicatedCompanion = formatMetadata(format)?.companion_slot.type === "CommanderFamily";
@@ -258,8 +267,7 @@ export function useDeckBuilder({
 
   useEffect(() => {
     let cancelled = false;
-    const request = { ...expandParsedDeck(currentDeck), selected_format: format };
-    Promise.all([signatureSpellSelectionPolicy(request), companionCandidates(request)])
+    Promise.all([signatureSpellSelectionPolicy(candidateRequest), companionCandidates(candidateRequest)])
       .then(([signaturePolicy, companionCandidates]) => {
         if (cancelled) return;
         setSignatureSpellCandidates(
@@ -278,9 +286,26 @@ export function useDeckBuilder({
     return () => {
       cancelled = true;
     };
-  }, [currentDeck, deckKey, format, offersDedicatedCompanion]);
+  }, [candidateRequest, offersDedicatedCompanion]);
 
   const isCommander = formatConfig?.command_zone ?? false;
+  const commanderCandidateNames = isCommander && candidateAnswer?.request === candidateRequest
+    ? candidateAnswer.names
+    : null;
+
+  useEffect(() => {
+    if (!isCommander) return;
+    let cancelled = false;
+    commanderCandidates(candidateRequest, "commanders-outside")
+      .then((names) => {
+        if (!cancelled) setCandidateAnswer({ request: candidateRequest, names });
+      })
+      .catch(() => {
+        if (!cancelled) setCandidateAnswer({ request: candidateRequest, names: null });
+      });
+    return () => { cancelled = true; };
+  }, [candidateRequest, isCommander]);
+
   const deckSizeRule: DeckSizeRule = formatConfig?.deck_size ?? { type: "Minimum", data: 60 };
 
   useEffect(() => {
@@ -777,7 +802,13 @@ export function useDeckBuilder({
   const handleSetCommander = useCallback(
     (card: string | DeckEntry) => {
       const cardName = typeof card === "string" ? card : card.name;
-      if (!commanderEligibleNames.has(cardName)) return;
+      // The panel passes a name from the engine's current candidate answer; a
+      // deck row passes its exact entry and answers to per-name eligibility,
+      // so a second copy of a designated card can still be picked from its row.
+      const eligible = typeof card === "string"
+        ? commanderCandidateNames?.includes(cardName)
+        : commanderEligibleNames.has(cardName);
+      if (!eligible) return;
       // CR 702.124: a second pick joins as a co-commander only when the engine
       // confirms it legally pairs with the existing one; otherwise it swaps. The
       // pairing decision is queried on demand (authoritative at click time) so a
@@ -825,7 +856,7 @@ export function useDeckBuilder({
         });
       })();
     },
-    [commanderEligibleNames, commanders, markDirty],
+    [commanderCandidateNames, commanderEligibleNames, commanders, markDirty],
   );
 
   // Eligibility predicate consulted by each main-deck row. The set is loaded
@@ -993,6 +1024,7 @@ export function useDeckBuilder({
     resolveSaveConflict,
     handleSetCommander,
     isCommanderEligible,
+    commanderCandidateNames,
     handleRemoveCommander,
     signatureSpellCandidates,
     companionCandidateNames,

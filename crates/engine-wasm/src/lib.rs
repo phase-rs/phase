@@ -37,14 +37,15 @@ use engine::game::deck_validation::{draft_set_concessions_for, evaluate_deck_for
 use engine::game::visibility::HandDisclosure;
 use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
-    can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket_for_request,
-    evaluate_deck_compatibility, filter_events_for_viewer, filter_state_for_viewer,
-    is_brawl_commander_eligible, is_commander_eligible, is_freeform_commander_eligible,
-    is_tiny_leader_eligible, load_and_hydrate_decks, max_deck_copies,
+    can_pair_commanders, commander_candidates, companion_candidates, deck_copy_limit_for,
+    estimate_bracket_for_request, evaluate_deck_compatibility, filter_events_for_viewer,
+    filter_state_for_viewer,
+    is_card_commander_eligible_for_format as engine_is_card_commander_eligible_for_format,
+    is_commander_eligible, load_and_hydrate_decks, max_deck_copies,
     rehydrate_game_from_card_db_with_finalization, resolve_deck_list,
     signature_spell_selection_policy, start_game, start_game_with_starting_player,
     validate_name_deck_for_format_full, BracketEstimate, BracketEstimateRequest,
-    DeckCompatibilityRequest, DeckList, PlayerDeckList, ReplayPlayer,
+    CommanderDeckComposition, DeckCompatibilityRequest, DeckList, PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::{DebugAction, DebugCardCreationKind};
 use engine::types::card_printing::{deserialize_deck_printings, validate_deck_printings_bounds};
@@ -1631,68 +1632,7 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
         let Some(face) = db.get_face_by_name(name) else {
             return false;
         };
-        // EXHAUSTIVE, deliberately: the `_ => false` this replaced is what made
-        // `GameFormat::CommanderDraft` silently answer "no card can be your
-        // commander" the moment the format became selectable. A wildcard here
-        // re-arms that for the next format, so every arm is named.
-        match format {
-            GameFormat::Commander | GameFormat::DuelCommander => is_commander_eligible(face),
-            // CR 903.3, unchanged by CR 810 seating: 2HG Commander decks
-            // designate commanders under Commander's own predicate.
-            GameFormat::TwoHeadedGiantCommander => is_commander_eligible(face),
-            // CR 904.13a + CR 903.3: Archenemy Commander decks designate
-            // commanders under Commander's own predicate.
-            GameFormat::ArchenemyCommander => is_commander_eligible(face),
-            GameFormat::PauperCommander => is_commander_eligible(face),
-            // CR 903.3, unchanged by CR 903.13f: the CR 903.13f(3) grant
-            // affects PAIRING, not eligibility, so Commander Draft uses
-            // Commander's own predicate.
-            GameFormat::CommanderDraft => is_commander_eligible(face),
-            GameFormat::FreeformCommander => is_freeform_commander_eligible(face),
-            GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
-            GameFormat::Oathbreaker => face.is_oathbreaker,
-            GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
-            // Horde is per-config (Commander-format survivors designate a
-            // standard-EDH-eligible commander; Constructed survivors have no
-            // commander slot and never consult this). Answer the EDH
-            // predicate: the only caller that can exist is the Commander
-            // horde's deck builder, and `false` here would silently tell it
-            // no card can be its commander.
-            GameFormat::Horde => is_commander_eligible(face),
-            // CR 903.3's commander eligibility test applies unchanged —
-            // planar doesn't change eligibility.
-            GameFormat::PlanechaseCommander => is_commander_eligible(face),
-            // Formats with no command zone: nothing can be designated.
-            GameFormat::Standard
-            | GameFormat::Pioneer
-            | GameFormat::Modern
-            | GameFormat::Premodern
-            | GameFormat::Legacy
-            | GameFormat::Vintage
-            | GameFormat::Historic
-            | GameFormat::Timeless
-            | GameFormat::Pauper
-            | GameFormat::Momir
-            | GameFormat::Planechase
-            | GameFormat::Archenemy
-            | GameFormat::FreeForAll
-            | GameFormat::TwoHeadedGiant
-            | GameFormat::Limited
-            | GameFormat::Freeform
-            | GameFormat::Dandan => false,
-            // Phase 1d wired a real custom-format deck-legality evaluator
-            // (`evaluate_custom_format`), but it is scoped to non-command-zone
-            // (constructed-shaped) custom formats — a command-zone custom
-            // (`CommandZoneMode::Enabled`, the shape a saved Commander/Brawl/
-            // Tiny-Leaders/Oathbreaker lobby produces) fails closed there too.
-            // This function also only ever receives a bare `GameFormat`, never
-            // the resolved `CommanderEligibilityRule` a command-zone custom
-            // format declares, so eligibility genuinely cannot be answered
-            // here regardless. `false` is the fail-closed reading — a
-            // permissive `true` would offer an unvalidated card as a
-            // commander.
-            GameFormat::Custom(_) => false,
-        }
+        engine_is_card_commander_eligible_for_format(face, format)
     })
 }
 
@@ -2053,6 +1993,24 @@ pub fn signature_spell_selection_policy_js(request: JsValue) -> Result<JsValue, 
             ));
         };
         Ok(to_js(&signature_spell_selection_policy(db, &request)))
+    })
+}
+
+/// Returns available commander candidates in deck order.
+#[wasm_bindgen(js_name = commanderCandidates)]
+pub fn commander_candidates_js(request: JsValue, composition: JsValue) -> Result<JsValue, JsValue> {
+    let request: DeckCompatibilityRequest = serde_wasm_bindgen::from_value(request)
+        .map_err(|e| JsValue::from_str(&format!("Invalid compatibility request: {e}")))?;
+    let composition: CommanderDeckComposition = serde_wasm_bindgen::from_value(composition)
+        .map_err(|e| JsValue::from_str(&format!("Invalid commander deck composition: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        Ok(to_js(&commander_candidates(db, &request, composition)))
     })
 }
 
