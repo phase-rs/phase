@@ -182,6 +182,14 @@ fn library_positions(order: &[ObjectId], initial: &[ObjectId]) -> Vec<usize> {
         .collect()
 }
 
+// CR 601.2i: A cast trigger resolves above the creature spell that triggered it.
+fn assert_spell_on_stack(r: &GameRunner, spell: ObjectId, name: &str) {
+    assert!(
+        r.state().stack.iter().any(|entry| entry.id == spell),
+        "{name}: expected the creature spell to still be on the stack"
+    );
+}
+
 // CR 701.20a + CR 701.23a + CR 701.23b + CR 701.24a + CR 701.24b: Only matching cards are offered.
 // Check both an empty choice and a find, which is revealed before the shuffle and finishes on top.
 fn search_to_top(
@@ -190,6 +198,7 @@ fn search_to_top(
     names: &[&str],
     eligible: &[usize],
     optional: bool,
+    cast_trigger: bool,
 ) {
     for pick in [None, Some(eligible[0])] {
         let mut s = table();
@@ -211,6 +220,9 @@ fn search_to_top(
                 "{name}: {:?}",
                 r.state().waiting_for
             );
+            if cast_trigger {
+                assert_spell_on_stack(&r, spell, name);
+            }
             events.extend(act(
                 &mut r,
                 GameAction::DecideOptionalEffect { accept: true },
@@ -229,6 +241,9 @@ fn search_to_top(
                 r.state().waiting_for
             );
         };
+        if cast_trigger {
+            assert_spell_on_stack(&r, spell, name);
+        }
         assert_eq!(*player, P0, "{name}");
         assert_eq!(*count, 1, "{name}");
         assert!(*allows_partial_find, "{name}");
@@ -244,8 +259,12 @@ fn search_to_top(
                 cards: found.into_iter().collect(),
             },
         ));
-        events.extend(pass_stack(&mut r));
-        settled(&r);
+        if cast_trigger {
+            assert_spell_on_stack(&r, spell, name);
+        } else {
+            events.extend(pass_stack(&mut r));
+            settled(&r);
+        }
         assert_eq!(shuffles(&events, P0), 1, "{name}, pick {pick:?}");
         assert_eq!(shuffles(&events, P1), 0, "{name}");
         for &id in &cards {
@@ -290,6 +309,11 @@ fn search_to_top(
         let mut before = cards;
         before.sort();
         assert_eq!(after, before, "{name}");
+        if cast_trigger {
+            pass_stack(&mut r);
+            settled(&r);
+            assert_eq!(r.state().objects[&spell].zone, Zone::Battlefield);
+        }
     }
 }
 
@@ -299,12 +323,14 @@ fn conduit_of_ruin_offers_only_large_colorless_creatures_and_may_decline() {
     // qualify. A find is revealed and put on top after one shuffle, while declining leaves the library alone.
     let names = [
         "Forest",
+        "Myr Battlesphere",
         "Darksteel Colossus",
+        "Darksteel Forge",
         "Colossal Dreadmaw",
         "Steel Hellkite",
         "Pelakka Wurm",
     ];
-    search_to_top("Conduit of Ruin", None, &names, &[1], true);
+    search_to_top("Conduit of Ruin", None, &names, &[1, 2], true, true);
     let mut s = table();
     let spell = card(&mut s, P0, "Conduit of Ruin", Zone::Hand);
     let cards = stock(&mut s, P0, &names);
@@ -314,11 +340,14 @@ fn conduit_of_ruin_offers_only_large_colorless_creatures_and_may_decline() {
         r.state().waiting_for,
         WaitingFor::OptionalEffectChoice { player: P0, .. }
     ));
-    let mut events = act(&mut r, GameAction::DecideOptionalEffect { accept: false });
-    events.extend(pass_stack(&mut r));
+    assert_spell_on_stack(&r, spell, "Conduit of Ruin");
+    let events = act(&mut r, GameAction::DecideOptionalEffect { accept: false });
+    assert_spell_on_stack(&r, spell, "Conduit of Ruin");
     assert_eq!(shuffles(&events, P0), 0);
     assert_eq!(library(&r, P0), cards);
+    pass_stack(&mut r);
     settled(&r);
+    assert_eq!(r.state().objects[&spell].zone, Zone::Battlefield);
 }
 
 #[test]
@@ -332,6 +361,7 @@ fn ainok_guide_search_mode_and_counter_mode() {
         Some(1),
         &["Evolving Wilds", "Forest", "Island"],
         &[1, 2],
+        false,
         false,
     );
     let mut s = table();
@@ -415,7 +445,7 @@ fn other_filtered_searches_reveal_and_put_the_found_card_on_top() {
             true,
         ),
     ] {
-        search_to_top(name, mode, &cards, eligible, optional);
+        search_to_top(name, mode, &cards, eligible, optional, false);
     }
 }
 
