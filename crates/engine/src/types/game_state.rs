@@ -44290,13 +44290,7 @@ impl GameState {
             attachments: &mut [AttachmentSnapshot],
             f: &mut impl FnMut(ObjectId, &mut u64),
         ) {
-            for AttachmentSnapshot {
-                object_id: _,
-                identity,
-                controller: _,
-                kind: _,
-            } in attachments
-            {
+            for AttachmentSnapshot { identity, .. } in attachments {
                 if let Some(reference) = identity {
                     f(reference.object_id, &mut reference.incarnation);
                 }

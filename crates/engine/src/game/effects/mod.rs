@@ -33738,13 +33738,7 @@ fn resolve_condition_referent(
             let id = targeting::extract_source_from_event(event)?;
             // Only the two spell events need a spell-specific pin; every other event names its own
             // object's incarnation through the one shared authority, `event_context_incarnation`.
-            let pin = if let GameEvent::SpellCast {
-                card_id: _,
-                controller: _,
-                object_id: _,
-                ..
-            } = event
-            {
+            let pin = if matches!(event, GameEvent::SpellCast { .. }) {
                 // CR 601.2i + CR 400.7: a cast trigger names the occurrence it was put on the
                 // stack for (`triggering_spell_identity`), so a same-id recast cannot answer for it.
                 Some(

@@ -4495,7 +4495,15 @@ pub(crate) fn resolve_quantity_scoped(
     scope_player: PlayerId,
     granting_object: Option<ObjectIncarnationRef>,
 ) -> i32 {
-    resolve_quantity_scoped_in(state, expr, source_id, scope_player, &[], granting_object)
+    resolve_quantity_scoped_in(
+        state,
+        expr,
+        source_id,
+        scope_player,
+        &[],
+        granting_object,
+        None,
+    )
 }
 
 /// Resolve a per-player `DamageEachPlayer` quantity that also references the
@@ -4514,12 +4522,6 @@ pub(crate) fn resolve_quantity_scoped(
 ///
 /// CR 120.3: per-player damage scope. CR 202.3e: mana value of an object off the
 /// stack (X = 0). CR 608.2c: object referents follow the instruction order.
-///
-/// `ability` is intentionally kept `None` in the `resolve_ref` call: the
-/// `ObjectScope::Target` arm reads ONLY `targets`, never `ability`, and passing
-/// `Some(ability)` would take `resolve_ref`'s `Some(_)` branch, which never
-/// assigns `scoped_iteration_player` — silently regressing every
-/// `ControllerRef::ScopedPlayer`-relative `DamageEachPlayer` (Acidic Soil et al.).
 pub(crate) fn resolve_quantity_scoped_with_targets(
     state: &GameState,
     expr: &QuantityExpr,
@@ -4527,7 +4529,26 @@ pub(crate) fn resolve_quantity_scoped_with_targets(
     scope_player: PlayerId,
     targets: &[TargetRef],
 ) -> i32 {
-    resolve_quantity_scoped_in(state, expr, source_id, scope_player, targets, None)
+    resolve_quantity_scoped_in(state, expr, source_id, scope_player, targets, None, None)
+}
+
+/// CR 400.7j: A per-player amount can also read a spell that a prior instruction
+/// of this ability moved. Carry the chain binding alongside the target list.
+pub(crate) fn resolve_quantity_scoped_for_ability(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+    scope_player: PlayerId,
+) -> i32 {
+    resolve_quantity_scoped_in(
+        state,
+        expr,
+        ability.source_id,
+        scope_player,
+        &ability.targets,
+        None,
+        Some(ability),
+    )
 }
 
 fn resolve_quantity_scoped_in(
@@ -4537,6 +4558,7 @@ fn resolve_quantity_scoped_in(
     scope_player: PlayerId,
     targets: &[TargetRef],
     granting_object: Option<ObjectIncarnationRef>,
+    ability: Option<&ResolvedAbility>,
 ) -> i32 {
     // CR 109.5: "you"/"your" in the quantity remain bound to the ability's
     // controller, not to the current DamageEachPlayer recipient.
@@ -4548,20 +4570,32 @@ fn resolve_quantity_scoped_in(
 
     match expr {
         QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => resolve_ref(
-            state,
-            qty,
-            ability_controller,
-            QuantityContext {
-                scoped_player: Some(scope_player),
-                granting_object,
-                ..QuantityContext::new(source_id)
-            },
-            targets,
-            None,
-            None,
-            None,
-        ),
+        QuantityExpr::Ref { qty } => {
+            // CR 400.7j: the event mana-value read needs the chain's object
+            // binding. Other reads keep the per-player filter context.
+            let ability = ability.filter(|_| {
+                matches!(
+                    qty,
+                    QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::EventSource
+                    }
+                )
+            });
+            resolve_ref(
+                state,
+                qty,
+                ability_controller,
+                QuantityContext {
+                    scoped_player: Some(scope_player),
+                    granting_object,
+                    ..QuantityContext::new(source_id)
+                },
+                targets,
+                None,
+                ability,
+                None,
+            )
+        }
         // Recurse into SELF so `targets` reach a `Target`-scoped leaf nested
         // inside a composite (e.g. the `right` operand of `Difference`).
         other => fold_compose(other, |inner| {
@@ -4572,6 +4606,7 @@ fn resolve_quantity_scoped_in(
                 scope_player,
                 targets,
                 granting_object,
+                ability,
             )
         }),
     }
@@ -9719,9 +9754,29 @@ fn resolve_object_mana_value(
             {
                 return mana_value;
             }
-            if let Some(mana_value) = object_lookback_event(state, ability)
-                .as_ref()
-                .and_then(|event| spell_cast_mana_value_for_event(state, event))
+            if let Some(mana_value) =
+                object_lookback_event(state, ability)
+                    .as_ref()
+                    .and_then(|event| {
+                        // CR 400.7j + CR 608.2h: If an earlier instruction of this
+                        // ability moved the triggering spell to a public zone, use
+                        // the exact successor it handed to this instruction.
+                        // CR 202.3e: the card off the stack treats X as zero.
+                        let moved_mana_value = || {
+                            let cast = crate::game::targeting::triggering_spell_identity_for_event(
+                                state, event,
+                            )?;
+                            let moved = ability?.effect_context_object.as_ref()?;
+                            let id = moved.live_object_id(state)?;
+                            let object = state.objects.get(&id)?;
+                            (id == cast.object_id
+                                && cast.incarnation.checked_add(1) == Some(moved.incarnation)
+                                && object.zone != Zone::Stack
+                                && object.zone.is_public())
+                            .then(|| u32_to_i32_saturating(object.effective_mana_value()))
+                        };
+                        moved_mana_value().or_else(|| spell_cast_mana_value_for_event(state, event))
+                    })
             {
                 return mana_value;
             }
