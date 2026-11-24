@@ -6262,6 +6262,7 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
