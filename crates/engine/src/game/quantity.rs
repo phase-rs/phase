@@ -25886,6 +25886,9 @@ mod tests {
         );
     }
 
+    /// CR 614.6 + CR 400.7: a creation record pins its incarnation in whatever
+    /// zone the object was created in (a token Hallowed Moonlight sent to exile),
+    /// so the pinned mana-value read must match that zone, not the battlefield.
     #[test]
     fn event_source_mana_value_reads_the_pinned_live_object_in_exile() {
         let mut state = GameState::new_two_player(42);
