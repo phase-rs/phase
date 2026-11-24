@@ -378,7 +378,7 @@ fn shark_typhoon_cycled_under_rest_in_peace_reads_x() {
             object.zone == Zone::Battlefield && object.is_token && object.name == "Shark"
         })
         .collect();
-    // CR 107.3i: The self-cycle trigger uses the announced X.
+    // Shark Typhoon's 2020-04-17 ruling ties the Shark's size to the X chosen for cycling.
     let [shark] = sharks.as_slice() else {
         panic!("expected one Shark, got {}", sharks.len())
     };
