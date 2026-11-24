@@ -30634,6 +30634,7 @@ mod entry_projection_tests {
         let record = |proposed: ProposedEvent| PendingReplacement {
             settled_damage_guards: Vec::new(),
             proposed,
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),

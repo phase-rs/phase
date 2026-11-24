@@ -7146,6 +7146,7 @@ mod paused_search_audience_tests {
         state.pending_replacement = Some(PendingReplacement {
             settled_damage_guards: Vec::new(),
             proposed: original.clone(),
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),

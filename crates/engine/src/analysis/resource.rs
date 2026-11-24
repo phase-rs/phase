@@ -7157,13 +7157,6 @@ fn eq_except_growable(
     for (id, zone, owner) in b_sites {
         crate::game::zones::remove_from_zone(&mut b.0, id, zone, owner); // allow-raw-zone: strips an accounted id from a discarded comparison CLONE, not a gameplay zone event
     }
-    // ONE-SIDED SAFETY: compare `post_replacement_token_substitution_count` here even though
-    // `impl PartialEq for GameState` excludes it. Excluding a COUNT from the cover gate is the
-    // fail-DANGEROUS direction (a growing count could let two cycles compare EQUAL → false
-    // CR 732.2a certification); COMPARING it is fail-safe. It is provably `None` at every loop
-    // sample beat (cleared whenever `waiting_for == Priority` — the sample gate itself), and on
-    // the only path that could leave it `Some` it is a DIRECT assignment of a CopyTokenOf
-    // substitution's fixed count, so comparing it can never suppress a legitimate loop.
     // (`resolution_source_relatch` VARIES per iteration, so it MUST stay excluded.)
     for frame in [&mut a, &mut b] {
         frame
@@ -7188,8 +7181,6 @@ fn eq_except_growable(
         }
     }
     a.0 == b.0
-        && a.post_replacement_token_substitution_count
-            == b.post_replacement_token_substitution_count
         // CR 104.4b + CR 615.3: `PartialEq` skips the floating registry, so this gate asks
         // the same `pending_shields_loop_eq` as `loop_states_equal`; it compares only LIVE
         // shields (a spent one can never apply again, CR 615.3 + CR 614.3), so identical

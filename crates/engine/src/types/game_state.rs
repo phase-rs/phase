@@ -6608,9 +6608,8 @@ pub enum OfferedBatchCustody {
     Settled,
     /// The offered batch's creation event paused on a replacement prompt, and no delivery
     /// has handed its tokens over yet. If the answer replaces the event with a different
-    /// creation (Jinnie Fay's Cats or Dogs, Moonlit Meditation's or Esix's copies), that
-    /// creation's tokens are this batch's tokens (CR 614.6), and the owner adopts them when
-    /// it resumes.
+    /// creation (a token substitute), that creation is delivered by the same answer and
+    /// settles the batch; the owner adopts on resume only what a later delivery hands it.
     AtReplacementPrompt,
 }
 
@@ -18470,6 +18469,11 @@ fn visit_persisted_live_zone_changed_records(
         // prevention shield's rider (CR 615.5) — their `turn_zone_change_index`
         // must be rebound on load for the same reason as the siblings above.
         "pending_combat_lifelink",
+        // `PendingSimultaneousTokenClause::accumulated` holds the parked
+        // token clause's spans, which include the seats' entry `ZoneChanged`
+        // records — their `turn_zone_change_index` must be rebound on load
+        // for the same reason as the siblings above.
+        "pending_simultaneous_token_clause",
         "stack",
         "waiting_for",
         "resolution_stack",
@@ -29481,6 +29485,13 @@ declare_game_state! {
 
     // Replacement effects
     pub pending_replacement: Option<PendingReplacement>,
+    /// CR 608.2f + CR 614.5: see [`PendingSimultaneousTokenClause`]. Boxed
+    /// like its `pending_combat_lifelink` sibling — `GameState` is moved by
+    /// value through the server action and AI paths and has a hard stack
+    /// budget (`game_state_size.rs`), so a multi-`Vec` parked record rides
+    /// behind a pointer, not inline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_simultaneous_token_clause: Option<Box<PendingSimultaneousTokenClause>>,
     /// CR 510.2 + CR 616.1: see [`PendingCombatLifelink`]. Boxed like its
     /// `pending_discard_batch` sibling — `GameState` is moved by value through
     /// the server action and AI paths and has a hard stack budget
@@ -29525,43 +29536,6 @@ declare_game_state! {
     /// CR 608.2c: transient insertion anchor for the population producer tail.
     #[serde(skip)]
     pub staged_population_parent: Option<StagedPopulationParent>,
-    /// CR 614.6 + CR 616.1: When an optional CreateToken replacement defers a
-    /// `ChooseOneOf` post-effect (Jinnie Fay class), the chosen branch's token
-    /// event must inherit the originating event's applied replacement ids so
-    /// the same replacement cannot re-prompt on its own substitute tokens.
-    ///
-    /// Ownership: this seed is OWNED by the originating token-choice
-    /// continuation and outlives every nested choice, every stashed sub-ability
-    /// continuation, AND every repeat/repeat-until drain. It is seeded exactly
-    /// once (`replacement.rs`, only when a `CreateToken` event is replaced by a
-    /// token-choice continuation — Jinnie Fay-class), read by every token
-    /// proposal (`effects/token.rs`), and cleared ONLY at true full-drain by
-    /// `effects/mod.rs::clear_post_replacement_token_choice_seed_if_resolution_drained`
-    /// (back at priority with an empty `resolution_stack`). The replacement pipeline and ChooseOneOf
-    /// completion NEVER clear it — a branch may stash a token-bearing
-    /// sub-ability or pause inside a repeat-until loop that drains only later
-    /// via `resolve_ability_chain`, so clearing earlier wipes the seed before
-    /// those later token proposals and re-prompts the originating token-choice
-    /// replacement (issue #4886).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "crate::types::deterministic_serde::option_hash_set"
-    )]
-    pub post_replacement_token_choice_applied:
-        Option<std::collections::HashSet<crate::types::proposed_event::AppliedReplacementKey>>,
-
-    /// CR 614.1a: "that many" copy count for a `CopyTokenOf` substitution
-    /// replacement (Moonlit Meditation). Seeded from the replaced
-    /// `CreateToken` event's `count` when the substitution is accepted, read by
-    /// `QuantityRef::EventContextAmount` (highest priority) while the
-    /// substitution continuation resolves, and cleared at true full-drain — same
-    /// transient, mid-resolution lifetime as `post_replacement_token_choice_applied`
-    /// above (and, like it, excluded from `PartialEq`). `None` outside a
-    /// copy-token substitution.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub post_replacement_token_substitution_count: Option<i32>,
-
     /// CR 614.12a + CR 707.9 + CR 603.2: the park. Entry occurrences whose
     /// collection is deferred, written by every producer that pauses an entry:
     /// an as-enters continuation's bracket, a mid-entry choice's capture
@@ -36066,6 +36040,38 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
     }
 }
 
+/// CR 608.2f + CR 614.5: a simultaneous multi-seat bare-token clause whose
+/// compound `CreateToken` event paused mid-flight — on a CR 616.1 ordering
+/// choice (several mandatory replacements), inside delivery (an entry-copy
+/// one-shot's copies pausing for as-enters choices), or on an optional
+/// replacement's accept/decline and its substitute's prompt. Installed before
+/// the pipeline runs; the installer's clause slice, the counter-drain feeds
+/// and the action-boundary feed (every whole action buffer after the
+/// installing one, `engine::apply_action_boundary_core`) reunite the clause
+/// span into `accumulated`, and the common priority boundary finishes the
+/// clause (terminal events, player actions, clause results, per-seat union)
+/// once no prompt, replacement, cursor, copy owner, resolving owner, or
+/// uncommitted entry remains.
+///
+/// Server authority, stripped from every viewer projection in `visibility.rs`
+/// like its `pending_combat_lifelink` sibling: the action-boundary feed
+/// carries every event of each action taken while the clause is paused, a
+/// departure's hidden-zone moves among them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingSimultaneousTokenClause {
+    /// The creating instruction's source, naming the deferred terminal events.
+    pub source_id: ObjectId,
+    /// The instructed seats, in fan-out order; the zero-fill domain and the
+    /// per-seat attribution keys at completion.
+    pub seats: Vec<PlayerId>,
+    /// Clause start within the installing action's buffer; the installing
+    /// action feeds only this slice, later actions feed whole buffers.
+    pub scoped_events_before: usize,
+    /// Every fed clause span, overlapping by construction (entry+exit feeds);
+    /// consumers dedup (union by object id, actions by first occurrence).
+    pub accumulated: Vec<GameEvent>,
+}
+
 /// A replacement-ordering pause. A zone change's library placement lives on
 /// `proposed` (`ProposedEvent::ZoneChange.library_placement`). Older saves also
 /// carried a carrier-level `library_placement` key;
@@ -36106,9 +36112,9 @@ pub struct PendingReplacement {
     /// `candidates` has exactly one entry (the real replacement); decline is synthetic.
     #[serde(default)]
     pub is_optional: bool,
-    /// Choice authority captured when an optional replacement is offered. This
-    /// is deliberately separate from CR 616 ordering, whose chooser remains
-    /// the affected player.
+    /// Choice authority captured when an optional replacement is offered, and,
+    /// for a compound token event (one with appended batches), the batch owner asked to order
+    /// (CR 616.1 + CR 101.4). `None` means the chooser is the affected player.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choice_player: Option<PlayerId>,
     /// CR 603.3a + CR 109.5: preserve the controller that resolved a
@@ -36178,6 +36184,32 @@ pub struct PendingReplacement {
         skip_serializing_if = "UnrepresentablePolicy::is_ignore_impossible"
     )]
     pub unrepresentable_life_change: UnrepresentablePolicy,
+    /// The accepted token substitute whose answer this parked `CreateToken` awaits.
+    /// `None` for every other parked event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_substitute: Option<PendingTokenSubstitute>,
+}
+
+/// CR 614.6 + CR 616.1: an accepted token substitute on a parked CreateToken event whose
+/// answer (a branch, or a creature to copy) its decider still owes; the answer applies it to
+/// the decider's part of the event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingTokenSubstitute {
+    /// The substitute's replacement; the parked record's one candidate.
+    pub replacement: ReplacementId,
+    /// Which answer the decider owes.
+    pub awaits: TokenSubstituteChoice,
+}
+
+/// The answer an accepted token substitute awaits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenSubstituteChoice {
+    /// One of the substitute's branches (Jinnie Fay: Cats or Dogs), answered on
+    /// `WaitingFor::ChooseOneOfBranch`.
+    Branch,
+    /// The creature its tokens copy (Esix, Fractal Bloom), answered on
+    /// `WaitingFor::CopyTargetChoice` with `CopyTargetPurpose::CopyTokenSource`.
+    CopySource,
 }
 
 /// CR 510.2 + CR 700.1 + CR 615.8 + CR 611.3a: what one simultaneous damage batch has
@@ -41062,14 +41094,13 @@ impl GameState {
             max_lands_per_turn: 1,
             priority_pass_count: 0,
             pending_replacement: None,
+            pending_simultaneous_token_clause: None,
             pending_combat_lifelink: None,
             liminal_entries: HashMap::new(),
             pending_liminal_entry_resume: None,
             entering_aura_authority: None,
             replacement_may_cost_paused: false,
             staged_population_parent: None,
-            post_replacement_token_choice_applied: None,
-            post_replacement_token_substitution_count: None,
             deferred_entry_events: Vec::new(),
             unsettled_entry_batch_events: Vec::new(),
             pending_token_battlefield_entry: None,
@@ -45036,12 +45067,14 @@ impl GameState {
             max_lands_per_turn: _,
             priority_pass_count: _,
             pending_replacement: _,
+            // Unbounded within its clause (entry+exit feeds), like its
+            // `pending_combat_lifelink` sibling's batch events.
+            pending_simultaneous_token_clause: _,
             pending_combat_lifelink: _,
             replacement_may_cost_paused: _,
             // CR 608.2c: a logical zone-change group id and a stack depth, no
             // object or incarnation id, so it is out of this class.
             staged_population_parent: _,
-            post_replacement_token_choice_applied: _,
             pending_token_battlefield_entry: _,
             layers_dirty: _,
             layers_read_current_step: _,
@@ -45328,7 +45361,6 @@ impl GameState {
             // for the next instruction; both frames compare it raw like the other
             // per-turn instruction state here.
             die_result_publication: _,
-            post_replacement_token_substitution_count: _,
             resolution_source_relatch: _,
             // PRE-EXISTING RAW PIN LIMITATIONS — outside the named issue rows:
             // hideaway source incarnations and cached LKI attachment pins remain raw.
@@ -45465,9 +45497,11 @@ impl GameState {
     /// instruction, a staged payment or a pending cast — each holds abilities
     /// whose pins no loop visitor walks (CR 400.7), so comparing them raw could
     /// equate a live pin with a stale one — or a player-scope sacrifice
-    /// completion, a choose-all-then-act unless poll, a discard or
-    /// combat-lifelink batch, deferred entry events, or undispatched
-    /// attack/blocker declaration events.
+    /// completion, a choose-all-then-act unless poll, a discard,
+    /// combat-lifelink or simultaneous-token-clause batch, deferred entry
+    /// events, or undispatched attack/blocker declaration events. A paused
+    /// simultaneous token clause is mid-action work in progress, never a
+    /// settled Priority position (CR 104.4b + CR 732.2a).
     pub(crate) fn is_loop_comparable(&self) -> bool {
         self.resolution_stack.is_empty()
             && self.pending_die_roll_instruction.is_none()
@@ -45478,6 +45512,7 @@ impl GameState {
             && self.pending_discard_batch.is_none()
             && self.pending_hero_event.is_none()
             && self.pending_combat_lifelink.is_none()
+            && self.pending_simultaneous_token_clause.is_none()
             && self.deferred_entry_events.is_empty()
             && self.unsettled_entry_batch_events.is_empty()
             && self.pending_attack_trigger_events.is_empty()
@@ -46290,12 +46325,14 @@ pub(crate) fn same_position(a: &GameState, b: &GameState) -> bool {
 
 /// CR 615.3 + CR 614.3: the LIVE floating shields in `state`, in registry order — the
 /// sequence [`pending_shields_loop_eq`] compares. A used-up shield can no longer apply at a
-/// priority beat, so it is not part of the position; production agrees, with one bounded
-/// exception that cannot span a sample: `find_applicable_replacements` skips a spent floating
-/// entry unless the SAME simultaneous combat batch is still applying it
-/// (`if repl_def.is_consumed && !consumed_replacement_applies_in_combat_batch(state, event, rid) { continue; }`
-/// in `game::replacement`), and that re-admission ledger exists only inside
-/// `replace_combat_damage_batch` (`DamageBatchLedger::applications`), which grants no priority,
+/// priority beat, so it is not part of the position; production agrees, with two bounded
+/// exceptions that cannot span a sample: `find_applicable_replacements` skips a spent floating
+/// entry unless the SAME simultaneous event is still applying it
+/// (`if repl_def.is_consumed && !consumed_one_shot_still_applies(state, event, rid, spent_by_event) { continue; }`
+/// in `game::replacement`): a combat batch's re-admission ledger exists only inside
+/// `replace_combat_damage_batch` (`DamageBatchLedger::applications`), and a compound token
+/// event's spent set is read from its own batch views, which exist only while that event is in
+/// the pipeline or parked on a replacement prompt; neither grants priority,
 /// so no loop sample ever observes a spent shield able to apply again. This is the same
 /// live-only reading `analysis::resource::replacement_def_is_live` gives the loop firewall
 /// (`last_known_records_grow_unread`), applied to both comparators here because they now share
@@ -46561,11 +46598,10 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
 ///
 /// Where the cover gate needs such an axis it compensates BY HAND at its own seam, which is
 /// the second site a reader has to know about: `analysis::resource::eq_except_growable`
-/// compares `post_replacement_token_substitution_count` and
-/// `game_state::pending_shields_loop_eq` on top of its `PartialEq` reuse, each with its own
+/// compares `game_state::pending_shields_loop_eq` on top of its `PartialEq` reuse, with its own
 /// one-sided-safety argument stated there.
 /// `analysis::resource::loyalty_activation_counts_match` is a sibling predicate over a
-/// per-object count, consulted at its own call sites, and not part of that pair.
+/// per-object count, consulted at its own call sites, and not part of that compensation.
 #[cfg(test)]
 fn _gamestate_partition_is_total(s: &GameState) {
     let GameState {
@@ -46640,6 +46676,14 @@ fn _gamestate_partition_is_total(s: &GameState) {
         max_lands_per_turn: _,
         priority_pass_count: _,
         pending_replacement: _,
+        //   - `pending_simultaneous_token_clause`: COMPARED (hand-written `impl
+        //     PartialEq` conjunct) — the parked span of one CR 608.2f token
+        //     clause. `accumulated` only GROWS within the clause, so two states
+        //     differing in this field are genuinely different points in the
+        //     same turn-based action and COMPARING it can never suppress a
+        //     legitimate loop's detection. Classified identically to its
+        //     `pending_combat_lifelink` sibling below.
+        pending_simultaneous_token_clause: _,
         //   - `pending_combat_lifelink`: COMPARED (hand-written `impl PartialEq` conjunct) — the
         //     parked tail of one CR 510.2 combat-damage batch. `remaining` only SHRINKS and
         //     `batch_events` only GROWS within a batch, so two states differing in this field are
@@ -46649,7 +46693,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_combat_lifelink: _,
         replacement_may_cost_paused: _,
         staged_population_parent: _,
-        post_replacement_token_choice_applied: _,
         deferred_entry_events: _,
         unsettled_entry_batch_events: _,
         pending_token_battlefield_entry: _,
@@ -47017,12 +47060,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //   - `pending_scoped_library_search`: COMPARED (upstream's `impl PartialEq`) — a
         //     paused multi-player search-selection state; a differing selection or player is
         //     correctly not a fixed-point repeat.
-        //   - `post_replacement_token_substitution_count` (CR 614.1a copy-token "that many" count):
-        //     COMPARED — upstream's PartialEq excludes it, but excluding a COUNT from the cover gate
-        //     is the fail-DANGEROUS direction, so `eq_except_growable` (resource.rs) compares it
-        //     explicitly. It is `None` at every sample beat (cleared whenever `waiting_for ==
-        //     Priority`, in `effects/mod.rs`) or a constant direct-assigned count across a real
-        //     copy-token loop, so COMPARING never suppresses a legitimate loop's detection.
         //   - `pending_discard_batch`: COMPARED (hand-written `impl PartialEq` conjunct) — a
         //     paused discard-batch interaction state, the direct sibling of
         //     `pending_player_scope_sacrifice_choice` above and classified identically. Its cursor
@@ -47060,7 +47097,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         completed_hidden_search_audiences: _,
         pending_search_found_batch: _,
         pending_die_roll_instruction: _,
-        post_replacement_token_substitution_count: _,
         //   - `resolution_source_relatch` (CR 400.7j self-move re-latch): EXCLUDED-REQUIRED (measured
         //     by ordering trace, not doc-trust). The `stack.rs` clears (`resolution_source_relatch =
         //     None`, one at each resolution-start site) fire at the START of the
@@ -47390,6 +47426,7 @@ impl PartialEq for GameState {
             && self.max_lands_per_turn == other.max_lands_per_turn
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
+            && self.pending_simultaneous_token_clause == other.pending_simultaneous_token_clause
             && self.deferred_entry_events == other.deferred_entry_events
             && self.unsettled_entry_batch_events == other.unsettled_entry_batch_events
             && self.pending_token_battlefield_entry == other.pending_token_battlefield_entry
@@ -49381,6 +49418,7 @@ mod tests {
                         copy: None,
                         enter_tapped: EtbTapState::Unspecified,
                         count: 2,
+                        applied: HashSet::new(),
                     },
                 }],
                 delivered: vec![PositionedTokenIds {
@@ -63877,6 +63915,46 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         );
     }
 
+    /// CR 104.4b + CR 732.2a: a state holding a paused simultaneous token
+    /// clause is mid-action work in progress, not a settled Priority position —
+    /// it never certifies a loop repeat, even against an identical copy of
+    /// itself. Clearing the clause restores comparability.
+    #[test]
+    fn a_paused_token_clause_makes_the_state_not_loop_comparable() {
+        let settled = GameState::new_two_player(7);
+        assert!(settled.is_loop_comparable());
+        assert!(
+            loop_states_equal(
+                &settled.normalize_for_loop(),
+                &settled.clone().normalize_for_loop()
+            ),
+            "reach guard: a settled state equals its copy"
+        );
+        let mut paused = settled.clone();
+        paused.pending_simultaneous_token_clause = Some(Box::new(PendingSimultaneousTokenClause {
+            source_id: ObjectId(50),
+            seats: vec![PlayerId(0)],
+            scoped_events_before: 0,
+            accumulated: Vec::new(),
+        }));
+        assert!(!paused.is_loop_comparable());
+        let normalized = paused.normalize_for_loop();
+        assert!(
+            !loop_states_equal(&normalized, &normalized.clone()),
+            "a paused clause is never loop-equal, even to itself"
+        );
+        let mut cleared = paused.clone();
+        cleared.pending_simultaneous_token_clause = None;
+        assert!(
+            cleared.is_loop_comparable(),
+            "reach guard: clearing the clause restores comparability"
+        );
+        assert!(
+            loop_states_equal(&cleared.normalize_for_loop(), &settled.normalize_for_loop()),
+            "reach guard: the cleared state equals the settled one"
+        );
+    }
+
     /// CR 104.4b (issue #6877): two states differing only in the
     /// pinned spell's incarnation must compare equal after
     /// `normalize_for_loop` — the pin carries an advancing all-zone
@@ -72565,6 +72643,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: policy,
+            token_substitute: None,
         }
     }
 
@@ -72598,6 +72677,34 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             legacy.unrepresentable_life_change,
             UnrepresentablePolicy::IgnoreImpossible
         );
+    }
+
+    /// Wire shape of the parked token-substitute record: it round-trips, is
+    /// omitted when absent, and an older payload (no key) decodes to `None`.
+    #[test]
+    fn pending_token_substitute_round_trips_and_defaults() {
+        let mut parked = pending_life_gain_replacement(UnrepresentablePolicy::IgnoreImpossible);
+        parked.token_substitute = Some(PendingTokenSubstitute {
+            replacement: ReplacementId {
+                source: ObjectId(11),
+                index: 2,
+            },
+            awaits: TokenSubstituteChoice::CopySource,
+        });
+        let json = serde_json::to_value(&parked).expect("record must serialize");
+        let round_trip: PendingReplacement =
+            serde_json::from_value(json).expect("record must deserialize");
+        assert_eq!(round_trip, parked);
+
+        let absent = pending_life_gain_replacement(UnrepresentablePolicy::IgnoreImpossible);
+        let json = serde_json::to_value(&absent).expect("record must serialize");
+        assert!(
+            json.get("token_substitute").is_none(),
+            "an absent record must be omitted from the wire: {json}"
+        );
+        let legacy: PendingReplacement =
+            serde_json::from_value(json).expect("legacy record must deserialize");
+        assert_eq!(legacy.token_substitute, None);
     }
 
     /// CR 400.7: wire shape of the parked damage source incarnation: elided
