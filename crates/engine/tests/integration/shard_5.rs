@@ -356,6 +356,7 @@ mod trigger_construction_cursor_release;
 mod trigger_construction_target_events;
 mod trigger_index_readiness;
 mod trigger_index_stale_entry_panics;
+mod trigger_that_creature_stat;
 mod triggered_ability_mana_ledger;
 mod triple_triad_owned_plus_lesser_mv_impulse;
 mod triumphant_chomp;
