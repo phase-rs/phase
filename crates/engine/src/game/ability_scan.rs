@@ -8807,6 +8807,12 @@ fn scan_resolved_continuous_static(
             history: attack_defended_history(attack_defended.as_ref()),
             ..Axes::CONSERVATIVE
         },
+        // CR 701.21a: a sacrifice prohibition reads history only through the
+        // permanent filter it names; every other axis stays fail-closed.
+        crate::types::statics::StaticMode::CantSacrifice { filter: _, who: _ } => Axes {
+            history: static_mode_axes(static_mode, mode).history,
+            ..Axes::CONSERVATIVE
+        },
         // CR 601.2f: a cost modification reads the spells it applies to and its count; a
         // fixed amount reads nothing.
         crate::types::statics::StaticMode::ModifyCost {
@@ -9059,6 +9065,7 @@ fn static_mode_axes(static_mode: &StaticMode, mode: ScanMode) -> Axes<'_> {
             BlockExceptionKind::MinBlockers { .. } => Axes::NONE,
         },
         StaticMode::CantBeBlockedBy { filter }
+        | StaticMode::CantSacrifice { filter, who: _ }
         | StaticMode::AttachmentRestriction { filter }
         | StaticMode::BlockRestriction { filter }
         | StaticMode::MaxUntapPerType { filter, .. } => census(filter, mode),
@@ -10334,6 +10341,47 @@ mod tests {
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    /// CR 701.21a: a sacrifice prohibition reads history only through its
+    /// permanent filter, judged through the production reader the draw-loop
+    /// certificate consults.
+    #[test]
+    fn sacrifice_prohibition_reads_the_history_in_its_permanent_filter() {
+        // Quark, Humble Proprietor (TRK).
+        let mut quark = printed_creature(
+            "Quark, Humble Proprietor",
+            "You can't sacrifice Treasure tokens.",
+        )
+        .statics;
+        assert_eq!(quark.len(), 1, "{quark:?}");
+        let quark = quark.remove(0);
+        assert!(
+            matches!(quark.mode, StaticMode::CantSacrifice { .. }),
+            "{quark:?}"
+        );
+        assert_eq!(
+            static_definition_history(&quark),
+            HistoryReads::NONE,
+            "{quark:?}"
+        );
+
+        // A prohibition whose filter reads the history still reports it.
+        let history = |filter| {
+            let def = StaticDefinition::new(StaticMode::CantSacrifice {
+                who: crate::types::statics::ProhibitionScope::Controller,
+                filter: TargetFilter::Typed(filter),
+            });
+            static_definition_history(&def)
+        };
+        assert_eq!(history(TypedFilter::creature()), HistoryReads::NONE);
+        assert_eq!(
+            history(TypedFilter::creature().properties(vec![FilterProp::EnteredThisTurn])),
+            HistoryReads::of(HistoryMember::TurnNumber)
+        );
+
+        // The arm keeps every non-history axis fail-closed.
+        assert!(scan_resolved_continuous_static(&quark, ScanMode::LoopFirewall).projected);
+    }
 
     /// CR 508.6: an attack restriction reads the attack history only when its defended filter
     /// names "a player it has already attacked this turn".

@@ -544,8 +544,8 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
     Some(after_sep)
 }
 
-/// CR 608.2c + CR 122.1 + CR 122.6: "[a[n]] [additional] counter of that kind
-/// on <recipient> [if it doesn't have a counter of that kind on it]" →
+/// CR 608.2c + CR 122.1 + CR 122.6: "[a[n]] [additional|another] counter of that
+/// kind on <recipient> [if it doesn't have a counter of that kind on it]" →
 /// `Effect::PutChosenCounter`. Anaphoric recipients bind to `ParentTarget` (The
 /// Caves of Androzani); declared typed recipients use the shared target parser
 /// (Aven Courier). A source-self recipient IS supported: its producer — the
@@ -558,7 +558,7 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
 pub(super) fn try_parse_put_chosen_counter(input: &str) -> Option<Effect> {
     let (recipient_text, _) = (
         opt(alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))),
-        opt(tag("additional ")),
+        opt(alt((tag("additional "), tag("another ")))),
         tag("counter of that kind on "),
     )
         .parse(input.trim())
@@ -2160,6 +2160,23 @@ mod tests {
         let effect =
             try_parse_put_chosen_counter("an additional counter of that kind on that permanent.")
                 .expect("Caves put clause must parse");
+        assert!(matches!(
+            effect,
+            Effect::PutChosenCounter {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                target_condition: None,
+            }
+        ));
+    }
+
+    /// CR 608.2c + CR 122.1: Dathon, His Heart Open's second sentence, "Put
+    /// another counter of that kind on it", is the same placement as "an
+    /// additional counter" with the anaphoric `it` bound to the parent target.
+    #[test]
+    fn put_chosen_counter_accepts_another_for_the_anaphoric_recipient() {
+        let effect = try_parse_put_chosen_counter("another counter of that kind on it.")
+            .expect("Dathon put clause must parse");
         assert!(matches!(
             effect,
             Effect::PutChosenCounter {

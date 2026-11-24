@@ -2068,6 +2068,17 @@ pub(crate) enum ChooseImperativeAst {
         domain: CounterKindDomain,
         chooser: CounterKindChooser,
     },
+    /// CR 115.1 + CR 608.2d + CR 122.1: "choose a counter on target <object>"
+    /// (Dathon, His Heart Open; Ichormoon Gauntlet; Clockspinning). The object
+    /// is a declared target, designated when the ability is put on the stack;
+    /// the kind of counter on it is chosen while the ability resolves. The
+    /// clause itself lowers to both: a `TargetOnly` owning the declared slot
+    /// and, chained beneath it, a `ChooseCounterKind` over that same target
+    /// (`ParentTarget`), so the choice's object is bound by the clause that
+    /// prints it rather than inferred from neighbouring instructions.
+    CounterKindOnTarget {
+        target: TargetFilter,
+    },
     /// CR 115.1 + CR 608.2d: A standalone, NON-target battlefield-object choice
     /// ("choose a creature an opponent controls"). The chooser is the ability's
     /// controller; the pick is made while the effect resolves (CR 608.2d), not
@@ -2440,9 +2451,12 @@ pub(crate) enum ZoneCounterImperativeAst {
     },
     /// CR 122.1 + CR 608.2d (Clockspinning sentence 2): "Remove that counter ...
     /// or put another of those counters on it." The single target object is
-    /// established by the preceding `TargetOnly` clause; this clause only records
-    /// the operation set the controller may choose among at resolution. Lowers to
-    /// `Effect::ChooseCounterAdjustment` (which has no target slot of its own).
+    /// established by the preceding `TargetOnly` clause, and the counter kind by
+    /// the `ChooseCounterKind` chained beneath it (sentence 1, "Choose a counter
+    /// on target ...", `ChooseImperativeAst::CounterKindOnTarget`); this clause
+    /// only records the operation set the controller may choose among at
+    /// resolution, over that chosen kind. Lowers to `Effect::ChooseCounterAdjustment`
+    /// (which has no target slot of its own).
     ChooseCounterAdjustment {
         adjustment: CounterAdjustment,
         counter_type: Option<CounterType>,

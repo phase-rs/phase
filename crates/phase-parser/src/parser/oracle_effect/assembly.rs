@@ -831,6 +831,10 @@ pub(super) enum AntecedentSelector {
     /// selector is accepted KNOWINGLY: the alternative is leaving a raw positional
     /// scan in the assembler, which reintroduces exactly the coupling U6 removes.
     Between { anchor: NodeId },
+    /// The node a clause body emitted, named by the parser's declared antecedent
+    /// `ClauseId` (CR 608.2c). Resolved over emission provenance, never by a
+    /// shape search of the output: the parser has already said which clause.
+    Clause(ClauseId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1409,6 +1413,12 @@ impl AssemblyEnv {
                 }
                 anchor_pos.and_then(|a| ((a + 1)..defs.len()).find(|i| passes(*i)))
             }
+            AntecedentSelector::Clause(clause) => self
+                .arena
+                .order
+                .iter()
+                .position(|id| self.arena.node(*id).prov.origin == Some(clause))
+                .filter(|i| passes(*i)),
             // "The most recent node with the role" IS the last member of the same
             // membership set the fan-out enumerates — one authority, two arities.
             AntecedentSelector::LastWithRole(role) => {
@@ -2884,7 +2894,10 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                         }
                         true
                     }
-                    ReplaceMeaningKind::Instead(instead_def) => {
+                    ReplaceMeaningKind::Instead {
+                        def: instead_def,
+                        antecedent: declared_antecedent,
+                    } => {
                         // CR 614.1a + CR 608.2c: assemble a multi-clause base + an
                         // "instead" override so the runtime can produce both
                         // branches. Clause 1 becomes the root and is the Cow-swap
@@ -2905,7 +2918,10 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                         // FirstEmitted. Its one structural refinement is an optional
                         // payment: there, the override replaces the immediate
                         // `IfYouDo` continuation, not the payment instruction.
-                        // Do not unify it with the `Last*` selectors.
+                        // Do not unify it with the `Last*` selectors. An override
+                        // whose anaphor names an earlier clause ("create two of
+                        // those tokens instead") begins from the clause the parser
+                        // declared for it instead (`instead_antecedent_index`).
                         let bound = env.resolve(
                             &defs,
                             AntecedentSelector::FirstEmitted,
@@ -2919,10 +2935,11 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                             // instructions before it (Goblin Charbelcher's reveal) are
                             // performed regardless and supply the quantity it reads.
                             let mut instead = *instead_def.clone();
-                            let base_index = instead_damage_antecedent_index(
+                            let base_index = instead_antecedent_index(
                                 &env,
                                 &defs,
                                 instead_override_body_mut(&mut instead),
+                                *declared_antecedent,
                             );
                             // Identity: the base is MOVED out of `defs` and back in —
                             // it keeps its NodeId (U6-C2 ruling). Capture before the take.
@@ -5377,12 +5394,28 @@ fn bind_instead_body_to_antecedent(body: &mut AbilityDefinition, antecedent: &Ab
 /// "that damage" anaphor — `DealDamage` over a multiple of the event-context
 /// amount ("deals double that damage instead") — names the DAMAGE instruction
 /// it restates, so it binds to the nearest preceding `DamageDealer` instead.
-/// Falls back to the first def when no later damage instruction exists.
-fn instead_damage_antecedent_index(
+/// An override whose anaphor names an earlier clause ("create two of those
+/// tokens instead") binds to the clause the parser declared for it. Other
+/// overrides, and a declared clause that is gone, fall back to the first def.
+fn instead_antecedent_index(
     env: &AssemblyEnv,
     defs: &[AbilityDefinition],
     instead_def: &AbilityDefinition,
+    declared: Option<ClauseId>,
 ) -> usize {
+    // CR 111.1 + CR 608.2c: the declared clause is the token creation the
+    // override restates, never the chain's first instruction (Conquest Mission
+    // puts a quest counter first).
+    if let Some(clause) = declared {
+        return env
+            .resolve(
+                defs,
+                AntecedentSelector::Clause(clause),
+                None,
+                OnMiss::Ignore,
+            )
+            .unwrap_or(0);
+    }
     let restates_damage = matches!(
         instead_def.effect.as_ref(),
         Effect::DealDamage {
@@ -6947,5 +6980,124 @@ mod arena_tests {
             }),
             "the attached set carries the Host relation: {target:?}"
         );
+    }
+
+    /// Every def reachable down `sub_ability` / `else_ability`, root first.
+    fn chain_nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        let mut nodes = vec![def];
+        for child in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            nodes.extend(chain_nodes(child));
+        }
+        nodes
+    }
+
+    /// The printed name of a `Token` instruction, if it is one.
+    fn token_name(def: &AbilityDefinition) -> Option<&str> {
+        if let Effect::Token { name, .. } = def.effect.as_ref() {
+            Some(name.as_str())
+        } else {
+            None
+        }
+    }
+
+    /// The def an "instead" override was attached to: the node whose
+    /// `sub_ability` carries the `ConditionInstead` override.
+    fn instead_antecedent(def: &AbilityDefinition) -> (&AbilityDefinition, &AbilityDefinition) {
+        chain_nodes(def)
+            .into_iter()
+            .find_map(|node| {
+                let sub = node.sub_ability.as_deref()?;
+                matches!(
+                    sub.condition,
+                    Some(AbilityCondition::ConditionInstead { .. })
+                )
+                .then_some((node, sub))
+            })
+            .expect("the chain carries an instead override")
+    }
+
+    /// CR 111.1 + CR 608.2c: Conquest Mission, verbatim. "Create two of those
+    /// tokens instead" restates the Borg creation, which the parser declares by
+    /// `ClauseId`; the quest-counter instruction, printed first, stays the
+    /// unconditional head.
+    #[test]
+    fn conquest_mission_instead_binds_its_declared_token_clause() {
+        use crate::parser::oracle::parse_oracle_text;
+        let parsed = parse_oracle_text(
+            "Whenever a nontoken artifact you control enters, put a quest counter on this enchantment. Create a 1/1 colorless Borg artifact creature token. If this enchantment has six or more quest counters on it, create two of those tokens instead.",
+            "Conquest Mission",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let def = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("the trigger has an effect");
+        assert!(
+            matches!(def.effect.as_ref(), Effect::PutCounter { .. }),
+            "the counter stays the unconditional head: {def:?}"
+        );
+        let (antecedent, override_def) = instead_antecedent(def);
+        assert_eq!(
+            token_name(antecedent),
+            Some("Borg"),
+            "the override replaces the token creation, got {antecedent:?}"
+        );
+        assert_eq!(
+            token_name(override_def),
+            Some("Borg"),
+            "the override restates the Borg token: {override_def:?}"
+        );
+    }
+
+    #[test]
+    fn throne_of_empires_terminal_override_keeps_its_activated_kind() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "{1}, {T}: Create a 1/1 white Soldier creature token. Create five of those tokens instead if you control artifacts named Crown of Empires and Scepter of Empires.",
+            "Throne of Empires",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+        let (base, replacement) = instead_antecedent(&parsed.abilities[0]);
+        assert_eq!(base.kind, AbilityKind::Activated);
+        assert_eq!(replacement.kind, base.kind);
+        assert!(matches!(
+            replacement.effect.as_ref(),
+            Effect::Token { name, count: QuantityExpr::Fixed { value: 5 }, .. } if name == "Soldier"
+        ));
+        assert!(replacement.sub_ability.is_none());
+    }
+
+    /// The declaration itself, read off the parsed IR: the override clause names
+    /// the Borg clause's `ClauseId`, not the counter clause's.
+    #[test]
+    fn those_tokens_instead_declares_the_token_clause_id() {
+        let ir = parse_effect_chain_ir(
+            "Put a quest counter on ~. Create a 1/1 colorless Borg artifact creature token. If ~ has six or more quest counters on it, create two of those tokens instead.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        let token_clause = ir
+            .clauses
+            .iter()
+            .find(|clause| matches!(clause.parsed.effect, Effect::Token { .. }))
+            .expect("the Borg clause")
+            .id;
+        let declared = ir.clauses.iter().find_map(|clause| {
+            if let ClauseDisposition::ReplaceMeaning {
+                kind: ReplaceMeaningKind::Instead { antecedent, .. },
+            } = &clause.disposition
+            {
+                Some(*antecedent)
+            } else {
+                None
+            }
+        });
+        assert_eq!(declared, Some(Some(token_clause)));
     }
 }

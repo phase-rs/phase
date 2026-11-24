@@ -1,8 +1,10 @@
 //! CR 122.1 + CR 608.2d (Clockspinning): choose a kind of counter present on the
 //! single target permanent or suspended card, then add and/or remove one of that
-//! kind.
+//! kind. When a preceding `Effect::ChooseCounterKind` over the same target already
+//! bound the kind ("Choose a counter on target permanent ... put another of those
+//! counters on it"), only that kind's branches are offered.
 //!
-//! The chosen counter KIND is decided at resolution from the kinds actually
+//! Otherwise the chosen counter KIND is decided at resolution from the kinds actually
 //! present on the target (a runtime fact), so the per-kind branch set must be
 //! built here rather than at parse time. The resolver delegates to the existing
 //! `choose_one_of` machinery: it constructs a flat `Effect::ChooseOneOf` of
@@ -109,7 +111,15 @@ pub fn resolve(
         // Build the flat per-kind branch set. For an `AddOrRemove` clause each
         // kind contributes a remove branch then an add branch (matching the
         // printed Oracle order "remove ... or put ...").
+        //
+        // CR 608.2c + CR 122.1: "Choose a counter on target ... Remove that
+        // counter ... or put another of those counters on it" (Clockspinning).
+        // The preceding instruction chose the kind; "that counter" is that
+        // kind, so only its branches are offered.
         None => {
+            if let Some(chosen) = super::choose_counter_kind::chosen_counter_kind(state) {
+                kinds.retain(|kind| *kind == chosen);
+            }
             for kind in kinds {
                 if adjustment.allows_remove() {
                     branches.push(remove_counter_branch(kind.clone(), &count));

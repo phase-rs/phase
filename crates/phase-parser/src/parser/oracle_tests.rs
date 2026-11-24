@@ -1279,7 +1279,24 @@ fn clockspinning_parses_choose_counter_adjustment_with_zero_unimplemented() {
     };
     assert_eq!(filters.len(), 2, "permanent + suspended card legs");
 
-    let sub = ability
+    // CR 608.2d + CR 122.1: sentence 1 chooses the counter on its own target.
+    let choice = ability
+        .sub_ability
+        .as_ref()
+        .expect("sentence-1 ChooseCounterKind over the declared target");
+    assert!(
+        matches!(
+            choice.effect.as_ref(),
+            Effect::ChooseCounterKind {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "got {:?}",
+        choice.effect
+    );
+
+    let sub = choice
         .sub_ability
         .as_ref()
         .expect("sentence-2 ChooseCounterAdjustment sub-ability");
@@ -1302,6 +1319,58 @@ fn clockspinning_parses_choose_counter_adjustment_with_zero_unimplemented() {
     assert!(
         !has_unimpl(ability),
         "no Unimplemented expected: {ability:?}"
+    );
+}
+
+/// CR 122.1 + CR 608.2d (Animation Module): sentence 1 ("Choose a counter on
+/// target permanent or player.") reaches the same declared-target counter-kind
+/// chain Clockspinning uses, but sentence 2 ("Give that permanent or player
+/// another counter of that kind.") has no parser. The card must stay an honest
+/// gap (`Effect::Unimplemented` in the chain), never a silently half-supported
+/// activation: the REACH assertions prove the chain was built, so the
+/// unimplemented tail is not a vacuous result of sentence 1 failing.
+#[test]
+fn animation_module_choose_counter_chain_keeps_its_give_clause_unimplemented() {
+    let parsed = parse_oracle_text(
+        "Whenever one or more +1/+1 counters are put on a permanent you control, you may pay {1}. If you do, create a 1/1 colorless Servo artifact creature token.\n{3}, {T}: Choose a counter on target permanent or player. Give that permanent or player another counter of that kind.",
+        "Animation Module",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(ability.effect.as_ref(), Effect::TargetOnly { .. }))
+        .unwrap_or_else(|| {
+            panic!(
+                "sentence 1 lowers to a TargetOnly head: {:?}",
+                parsed.abilities
+            )
+        });
+    let choice = ability
+        .sub_ability
+        .as_deref()
+        .expect("sentence 1 chains its counter-kind choice under the declared target");
+    assert!(
+        matches!(
+            choice.effect.as_ref(),
+            Effect::ChooseCounterKind {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "REACH: the chain was built: {:?}",
+        choice.effect
+    );
+
+    fn has_unimpl(def: &AbilityDefinition) -> bool {
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+            || def.sub_ability.as_deref().is_some_and(has_unimpl)
+    }
+    assert!(
+        has_unimpl(ability),
+        "the give-another-counter sentence has no parser and must stay a gap: {ability:?}"
     );
 }
 

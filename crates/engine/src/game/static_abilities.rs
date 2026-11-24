@@ -1770,6 +1770,11 @@ pub fn player_cant_sacrifice_as_cost(
     player_id: PlayerId,
     object_id: ObjectId,
 ) -> bool {
+    // CR 701.21a: a general "can't sacrifice <filter>" static (Quark) also bars
+    // paying a sacrifice cost with that permanent (CR 118.3).
+    if player_cant_sacrifice(state, player_id, object_id) {
+        return true;
+    }
     // CR 604.1: O(1) presence gate — no CantPayCost static means no prohibition.
     if !static_kind_present(state, StaticModeKind::CantPayCost) {
         return false;
@@ -1792,6 +1797,32 @@ pub fn player_cant_sacrifice_as_cost(
             filter,
             &FilterContext::from_source(state, source_obj.id),
         )
+    })
+}
+
+/// CR 701.21a + CR 101.2: Whether a `CantSacrifice` static forbids `player_id`
+/// from sacrificing `object_id`, in any context (cost or effect). Quark,
+/// Humble Proprietor: "You can't sacrifice Treasure tokens."
+///
+/// The filter is evaluated per candidate permanent, so a broad "sacrifice a
+/// permanent" instruction can still be satisfied with a legal permanent.
+pub fn player_cant_sacrifice(state: &GameState, player_id: PlayerId, object_id: ObjectId) -> bool {
+    // CR 604.1: O(1) presence gate — no CantSacrifice static means no prohibition.
+    if !static_kind_present(state, StaticModeKind::CantSacrifice) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
+    battlefield_active_statics(state).any(|(source_obj, def)| {
+        let StaticMode::CantSacrifice { who, filter } = &def.mode else {
+            return false;
+        };
+        prohibition_scope_matches_player(who, player_id, source_obj.id, state)
+            && matches_target_filter(
+                state,
+                object_id,
+                filter,
+                &FilterContext::from_source(state, source_obj.id),
+            )
     })
 }
 
@@ -2651,11 +2682,22 @@ pub fn object_has_static_other(state: &GameState, object_id: ObjectId, name: &st
 /// pre-derivation timing, the functioning-defs scan per graft — so exactly
 /// the actor-bound graft is exempted for other actors while an independent
 /// object-wide grant on the same object keeps barring them.
+///
+/// A player-scoped `CantSacrifice` static (Quark, Humble Proprietor: "You can't
+/// sacrifice Treasure tokens.") bars its scoped actors for the permanents its
+/// filter matches; it is checked first, through `player_cant_sacrifice`.
 pub(crate) fn object_cant_be_sacrificed_by(
     state: &GameState,
     actor: PlayerId,
     object_id: ObjectId,
 ) -> bool {
+    // CR 701.21a + CR 101.2: a player-scoped "can't sacrifice <filter>" static
+    // (Quark, Humble Proprietor) bars its scoped actors from sacrificing the
+    // matching permanents. It joins the object bars below so selection pools,
+    // cost guards and execution (`sacrifice_permanent`) all see one answer.
+    if player_cant_sacrifice(state, actor, object_id) {
+        return true;
+    }
     let mode = StaticMode::Other("CantBeSacrificed".to_string());
     // The live grant can already bar payment before the layer pass installs
     // the recipient's functioning definition.

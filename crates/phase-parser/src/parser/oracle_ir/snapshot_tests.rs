@@ -3963,7 +3963,7 @@ fn yidaro_cycle_history_two_layer() {
         .iter()
         .find_map(|clause| match &clause.disposition {
             ClauseDisposition::ReplaceMeaning {
-                kind: ReplaceMeaningKind::Instead(body),
+                kind: ReplaceMeaningKind::Instead { def: body, .. },
             } => Some(body),
             _ => None,
         })
