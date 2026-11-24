@@ -457,6 +457,7 @@ mod notion_thief_opponent_draw_redirect;
 mod nth_spell_ordinal_cost_reduction;
 mod null_summoner_exiled_card_cast;
 mod number_quality_gate_reach;
+mod nykthos_paragon_life_gain_counters;
 mod oath_cycle_target_restriction;
 mod oath_of_teferi;
 mod ob_nixilis_captive_kingpin_life_loss;
