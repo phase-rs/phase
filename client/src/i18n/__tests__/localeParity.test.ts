@@ -169,6 +169,7 @@ const WORKSPACE_SHELL_KEYS = [
  * English-driven and cannot catch an English family that was never authored.
  */
 const FOUR_FORM_STEMS: ReadonlyArray<{ ns: string; stem: string }> = [
+  { ns: "game.json", stem: "distributeAmong.assignRemainingTo" },
   { ns: "draft.json", stem: "intro.quantity.packsOpened" },
   { ns: "draft.json", stem: "intro.quantity.cardsContained" },
   { ns: "draft.json", stem: "intro.quantity.packSizeEntry" },

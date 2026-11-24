@@ -14708,6 +14708,10 @@ fn extract_trigger_subject_for_context(
     ctx: &mut ParseContext,
 ) -> TargetFilter {
     let lower = condition_text.to_lowercase();
+    // CR 608.2k: "On it" refers to the source of this mana ability.
+    if parse_self_mana_ability_resolves_trigger(&lower).is_ok() {
+        return TargetFilter::SelfRef;
+    }
     let after_keyword = alt((
         value((), tag::<_, _, OracleError<'_>>("whenever ")),
         value((), tag("when ")),
@@ -15057,6 +15061,19 @@ fn parse_object_head_noun(input: &str) -> OracleResult<'_, ()> {
     ))
     .parse(input)
 }
+
+/// CR 702.29c + CR 113.6k: the zones a "when you discard this card" trigger, and a "when you
+/// cycle this card" trigger (CR 702.29c: the same discard, made to pay a cycling cost),
+/// functions in. Neither can trigger from the battlefield, so each functions in the zones it
+/// can trigger from: its owner's graveyard, where a discard puts the card (CR 701.9a), or
+/// exile, where a replacement effect such as Leyline of the Void or Rest in Peace puts it
+/// instead (CR 614.6).
+///
+/// CR 400.2 + CR 603.2f: the hidden zones are not listed. Whether such a trigger fires from a
+/// library depends on the card having been visible to all players, and the trigger collector
+/// has no library or hand source, so a discard redirected to a library (Wheel of Sun and Moon)
+/// is not delivered.
+const DISCARDED_SELF_TRIGGER_ZONES: [Zone; 2] = [Zone::Graveyard, Zone::Exile];
 
 fn parse_self_cycle_trigger_head(input: &str) -> OracleResult<'_, ()> {
     value(
@@ -16718,6 +16735,21 @@ fn parse_passive_taps_for_mana_line(i: &str) -> OracleResult<'_, String> {
     )
     .parse(rest)?;
     Ok((rest, subject.to_string()))
+}
+
+/// CR 608.2p + CR 106.12: Matches resolution of a source's mana ability,
+/// including a mana ability without a tap cost.
+fn parse_self_mana_ability_resolves_trigger(i: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        all_consuming((
+            alt((tag("whenever "), tag("when "))),
+            tag("a mana ability of "),
+            parse_self_reference_subject,
+            tag(" resolves"),
+        )),
+    )
+    .parse(i)
 }
 
 /// CR 605.1b: Recognizes the aggregate mana-ability condition whose produced
@@ -22215,6 +22247,12 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
     }
 
+    if parse_self_mana_ability_resolves_trigger(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::ManaAbilityProduced;
+        return Some((TriggerMode::ManaAbilityProduced, def));
+    }
+
     if parse_land_ability_adds_chosen_color(lower).is_ok() {
         let mut def = make_base();
         def.mode = TriggerMode::ManaAbilityProduced;
@@ -22844,12 +22882,15 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::SpellCast, def));
     }
 
-    // CR 702.29c: use the existing graveyard self-cycle delivery route.
     if parse_self_cycle_trigger_head(lower).is_ok() {
         let mut def = make_base();
         def.mode = TriggerMode::Cycled;
         def.valid_card = Some(TargetFilter::SelfRef);
-        def.trigger_zones = vec![Zone::Graveyard];
+        // CR 702.29c: "When you cycle this card" means "When you discard this card to pay an
+        // activation cost of a cycling ability", and the ability triggers from whatever zone the
+        // card winds up in after it's cycled. Lowering still narrows a body that moves the card
+        // out of a named zone to that zone (Yidaro, Wandering Monster: "from your graveyard").
+        def.trigger_zones = DISCARDED_SELF_TRIGGER_ZONES.to_vec();
         return Some((TriggerMode::Cycled, def));
     }
 
@@ -25730,9 +25771,8 @@ fn try_parse_discard_trigger(
         // process_triggers scans the Discarded event, complete_discard_to_graveyard has
         // already moved the card hand->graveyard (CR 701.9a), so the trigger must
         // function from the graveyard it lands in (the same off-zone seam Necropotence-
-        // style self-discard triggers use). Exile keeps it live under a madness/RIP-class
-        // redirect (a redirected discard is still a discard).
-        def.trigger_zones = vec![Zone::Graveyard, Zone::Exile];
+        // style self-discard triggers use).
+        def.trigger_zones = DISCARDED_SELF_TRIGGER_ZONES.to_vec();
         return Some((TriggerMode::Discarded, def));
     }
 
@@ -25760,7 +25800,7 @@ fn try_parse_discard_trigger(
     if is_discarded_self_reference(after_verb) {
         def.mode = TriggerMode::Discarded;
         def.valid_card = Some(TargetFilter::SelfRef);
-        def.trigger_zones = vec![Zone::Graveyard, Zone::Exile];
+        def.trigger_zones = DISCARDED_SELF_TRIGGER_ZONES.to_vec();
         return Some((TriggerMode::Discarded, def));
     }
 

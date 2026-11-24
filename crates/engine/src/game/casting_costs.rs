@@ -18182,8 +18182,7 @@ fn auto_tap_mana_sources_inner(
                     })
                 });
                 // CR 605.3b + CR 605.3c: successful, unpaused resolution
-                // completes the activation even when its live amount is zero
-                // and no ManaAbilityProduced event is emitted.
+                // completes the activation even when its live amount is zero.
                 let completed = resolved.is_ok();
                 if completed {
                     completed_sources.insert(option.object_id);
@@ -18252,7 +18251,7 @@ fn auto_tap_mana_sources_inner(
                     activation_event,
                 )
                 .expect("intrinsic mana activation trigger collection cause must be live");
-                mana_payment::produce_mana(
+                let deposited = mana_payment::produce_mana(
                     state,
                     option.object_id,
                     option.mana_type,
@@ -18274,6 +18273,10 @@ fn auto_tap_mana_sources_inner(
                     player_id: player,
                     source_id: option.object_id,
                     produced: vec![option.mana_type],
+                    // CR 614.1a: Use the post-replacement deposit count.
+                    resolution: crate::types::events::ManaResolutionShare::WholeResolution {
+                        total: u32::try_from(deposited.len()).unwrap_or(u32::MAX),
+                    },
                     trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
                 });
             });

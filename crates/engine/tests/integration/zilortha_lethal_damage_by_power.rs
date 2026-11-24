@@ -26,10 +26,12 @@ use engine::game::combat::AttackTarget;
 use engine::game::combat_damage::combat_damage_to_defender;
 use engine::game::coverage::unimplemented_mechanics;
 use engine::game::engine::EngineError;
+use engine::game::replacement::replacement_choice_waiting_for;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{ChoiceType, ControllerRef, TargetFilter, TargetRef, TypedFilter};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CombatDamageAssignmentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -37,6 +39,7 @@ use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::proposed_event::ProposedEvent;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
@@ -188,12 +191,35 @@ fn attack_and_block(
     attackers: &[ObjectId],
     blocks: &[(ObjectId, ObjectId)],
 ) {
+    let attacks: Vec<_> = attackers
+        .iter()
+        .map(|&id| (id, AttackTarget::Player(P1)))
+        .collect();
+    declare_attacks_and_blocks(runner, &attacks, blocks);
+}
+
+fn declare_attacks_and_blocks(
+    runner: &mut GameRunner,
+    attacks: &[(ObjectId, AttackTarget)],
+    blocks: &[(ObjectId, ObjectId)],
+) {
+    declare_attacks_and_blocks_until(runner, attacks, blocks, Phase::CombatDamage);
+}
+
+fn declare_attacks_and_blocks_until(
+    runner: &mut GameRunner,
+    attacks: &[(ObjectId, AttackTarget)],
+    blocks: &[(ObjectId, ObjectId)],
+    stop_at: Phase,
+) {
     let mut declared_attackers = false;
     let mut declared_blockers = false;
     for _ in 0..64 {
         match &runner.state().waiting_for {
             WaitingFor::AssignCombatDamage { .. } => break,
-            WaitingFor::Priority { .. } if runner.state().phase == Phase::CombatDamage => break,
+            WaitingFor::Priority { .. } if declared_blockers && runner.state().phase == stop_at => {
+                break;
+            }
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass priority");
             }
@@ -201,12 +227,8 @@ fn attack_and_block(
                 assert_eq!(*player, P0);
                 assert!(!declared_attackers, "attackers are declared once");
                 declared_attackers = true;
-                let attacks: Vec<_> = attackers
-                    .iter()
-                    .map(|&id| (id, AttackTarget::Player(P1)))
-                    .collect();
                 runner
-                    .declare_attackers(&attacks)
+                    .declare_attackers(attacks)
                     .expect("declare attackers");
             }
             WaitingFor::DeclareBlockers { player, .. } => {
@@ -824,6 +846,27 @@ fn fully_redirected_infect_damage_deals_the_creature_nothing() {
     );
 }
 
+/// P0's Ghalta, Primal Hunger (12/12, "Trample") and Battle Mastery in P0's hand, not yet cast.
+fn ghalta_and_battle_mastery(scenario: &mut GameScenario) -> (ObjectId, ObjectId) {
+    let ghalta = scenario
+        .add_creature(P0, "Ghalta, Primal Hunger", 12, 12)
+        .as_legendary()
+        .from_oracle_text_with_keywords(&["Trample"], GHALTA)
+        .with_color(vec![ManaColor::Green])
+        .id();
+    (ghalta, battle_mastery(scenario))
+}
+
+fn battle_mastery(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_hand(P0, "Battle Mastery", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text_with_keywords(&["Enchant"], BATTLE_MASTERY)
+        .id()
+}
+
 /// P0's Ghalta, Primal Hunger (12/12, "Trample") wearing Battle Mastery, cast onto it from P0's
 /// hand, against P1's Zilortha and `partner` (a textless P1 creature). Returns the runner,
 /// Ghalta, Zilortha and the partner.
@@ -832,19 +875,7 @@ fn ghalta_board(
     defender: impl FnOnce(&mut GameScenario),
 ) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut scenario = board();
-    let ghalta = scenario
-        .add_creature(P0, "Ghalta, Primal Hunger", 12, 12)
-        .as_legendary()
-        .from_oracle_text_with_keywords(&["Trample"], GHALTA)
-        .with_color(vec![ManaColor::Green])
-        .id();
-    let mastery = scenario
-        .add_spell_to_hand(P0, "Battle Mastery", false)
-        .as_enchantment()
-        .with_subtypes(vec!["Aura"])
-        .with_mana_cost(ManaCost::zero())
-        .from_oracle_text_with_keywords(&["Enchant"], BATTLE_MASTERY)
-        .id();
+    let (ghalta, mastery) = ghalta_and_battle_mastery(&mut scenario);
     let z = zilortha(&mut scenario, P1);
     let (name, power, toughness) = partner;
     let partner = scenario.add_creature(P1, name, power, toughness).id();
@@ -1063,9 +1094,13 @@ fn zilortha_protected_after_blocks_stays_in_double_strike_forecast() {
     );
 }
 
-#[test]
-fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() {
+fn hydra_combat_board<T>(
+    counters: u32,
+    defender: impl FnOnce(&mut GameScenario) -> T,
+    prepare_defender: impl FnOnce(&mut GameRunner, &T),
+) -> (GameRunner, ObjectId, ObjectId, T) {
     let mut scenario = board();
+    scenario.with_life(P1, 30);
     scenario.at_phase(Phase::PostCombatMain);
     scenario.with_library_top(P0, &["Island"]);
     let hydra = scenario
@@ -1085,7 +1120,7 @@ fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() 
         .id();
     scenario.with_mana_pool(
         P1,
-        vec![ManaUnit::new(ManaType::Green, hydra, false, vec![]); 13],
+        vec![ManaUnit::new(ManaType::Green, hydra, false, vec![]); counters as usize + 1],
     );
     let ghalta = scenario
         .add_creature(P0, "Ghalta, Primal Hunger", 12, 12)
@@ -1100,6 +1135,7 @@ fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() 
         .with_mana_cost(ManaCost::zero())
         .from_oracle_text_with_keywords(&["Enchant"], BATTLE_MASTERY)
         .id();
+    let defender = defender(&mut scenario);
     let mut runner = scenario.build();
 
     let state = runner.state_mut();
@@ -1107,7 +1143,7 @@ fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() 
     state.priority_player = P1;
     state.waiting_for = WaitingFor::Priority { player: P1 };
 
-    let outcome = runner.cast(hydra).x(12).resolve();
+    let outcome = runner.cast(hydra).x(counters).resolve();
     outcome.assert_zone(&[hydra], Zone::Battlefield);
     assert!(matches!(
         outcome.final_waiting_for(),
@@ -1115,10 +1151,17 @@ fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() 
     ));
     assert!(outcome.state().stack.is_empty());
 
+    prepare_defender(&mut runner, &defender);
     runner.advance_to_phase(Phase::PreCombatMain);
     assert_eq!(runner.state().active_player, P0);
     cast_at(&mut runner, mastery, ghalta);
     assert!(runner.state().objects[&ghalta].has_keyword(&Keyword::DoubleStrike));
+    (runner, ghalta, hydra, defender)
+}
+
+#[test]
+fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() {
+    let (mut runner, ghalta, hydra, ()) = hydra_combat_board(12, |_| {}, |_, _| {});
     let p1_life = runner.life(P1);
     runner.advance_to_combat();
     runner
@@ -1155,4 +1198,548 @@ fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() 
         forecast, actual,
         "forecast must match the actual trample damage"
     );
+}
+
+#[test]
+fn zilortha_combat_forecast_drops_regenerated_blocker() {
+    let (mut runner, ghalta, hydra, (bears, regenerate)) = hydra_combat_board(
+        2,
+        |scenario| {
+            let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+            (bears, regenerate_spell(scenario))
+        },
+        |_, _| {},
+    );
+    runner.act(GameAction::PassPriority).unwrap();
+    cast_at(&mut runner, regenerate, bears);
+
+    runner.advance_to_combat();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareAttackers { player: P0, .. }
+    ));
+    let hypothetical_forecast = combat_damage_to_defender(runner.state(), ghalta, &[hydra, bears]);
+
+    let life_before = runner.life(P1);
+    attack_and_block(&mut runner, &[ghalta], &[(hydra, ghalta), (bears, ghalta)]);
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[hydra, bears]);
+
+    assign_split(&mut runner, vec![(hydra, 2), (bears, 2)], 8);
+    // CR 615.5 + CR 704.5f: Hydra loses its two counters and dies at 0/0.
+    assert_eq!(zone(&runner, hydra), Zone::Graveyard);
+    // CR 701.19a + CR 506.4: regeneration leaves Bears on the battlefield but removes it from combat.
+    assert_eq!(zone(&runner, bears), Zone::Battlefield);
+    assert!(runner.state().objects[&bears].tapped);
+    assert_eq!(marked(&runner, bears), 0);
+    assert_eq!(life_before - runner.life(P1), 8);
+
+    finish_combat(&mut runner);
+    // CR 702.19d: with both blockers gone, all 12 regular-step damage tramples over.
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 20);
+    assert_eq!(
+        hypothetical_forecast, actual,
+        "forecast before declaring attackers or blockers must match the actual trample damage"
+    );
+    assert_eq!(
+        forecast, actual,
+        "forecast must match the actual trample damage"
+    );
+}
+
+fn regenerate_spell(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Regenerate",
+            true,
+            "Regenerate target creature. (The next time that creature would be destroyed this turn, instead tap it, remove it from combat, and heal all damage on it.)",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id()
+}
+
+#[test]
+fn zilortha_forecast_skips_regular_step_after_double_strike_grant_dies() {
+    let mut scenario = board();
+    let ghalta = printed(
+        &mut scenario,
+        P0,
+        "Ghalta, Primal Hunger",
+        (12, 12),
+        &["Trample"],
+        GHALTA,
+    );
+    let grant = printed(
+        &mut scenario,
+        P1,
+        "Avatar of Slaughter",
+        (8, 8),
+        &[],
+        "All creatures have double strike and attack each combat if able.",
+    );
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let regenerate = regenerate_spell(&mut scenario);
+    let mut runner = scenario.build();
+    runner.act(GameAction::PassPriority).unwrap();
+    cast_at(&mut runner, regenerate, bears);
+
+    let life_before = runner.life(P1);
+    attack_and_block(&mut runner, &[ghalta], &[(grant, ghalta), (bears, ghalta)]);
+    assert!(runner.state().objects[&ghalta].has_keyword(&Keyword::DoubleStrike));
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[grant, bears]);
+    assign_split(&mut runner, vec![(grant, 8), (bears, 2)], 2);
+    assert_eq!(zone(&runner, grant), Zone::Graveyard);
+    assert_eq!(zone(&runner, bears), Zone::Battlefield);
+    assert!(runner.state().objects[&bears].tapped);
+    assert_eq!(zone(&runner, ghalta), Zone::Battlefield);
+    assert!(!runner.state().objects[&ghalta].has_keyword(&Keyword::DoubleStrike));
+    assert_eq!(life_before - runner.life(P1), 2);
+
+    finish_combat(&mut runner);
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 2);
+    assert_eq!(forecast, actual);
+}
+
+fn assert_zilortha_forecast_includes_first_step_trample_lifelink(regenerate: bool) {
+    let mut scenario = board();
+    scenario.with_life(P0, 10).with_life(P1, 50);
+    let avatar = printed(
+        &mut scenario,
+        P0,
+        "Serra Avatar",
+        (0, 0),
+        &[],
+        "Serra Avatar's power and toughness are each equal to your life total.\nWhen Serra Avatar is put into a graveyard from anywhere, shuffle it into its owner's library.",
+    );
+    let courage = unflinching_courage(&mut scenario);
+    let mastery = battle_mastery(&mut scenario);
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let shield = regenerate.then(|| regenerate_spell(&mut scenario));
+    let mut runner = scenario.build();
+    cast_at(&mut runner, courage, avatar);
+    cast_at(&mut runner, mastery, avatar);
+    if let Some(shield) = shield {
+        runner.act(GameAction::PassPriority).unwrap();
+        cast_at(&mut runner, shield, bears);
+    }
+
+    let life_before = runner.life(P1);
+    attack_and_block(&mut runner, &[avatar], &[(bears, avatar)]);
+    assert_eq!(prompt_minimum(&runner, bears), 2);
+    let forecast = combat_damage_to_defender(runner.state(), avatar, &[bears]);
+    assign(&mut runner, bears, 2, 10).expect("Serra Avatar assigns 12 with Unflinching Courage");
+    assert_eq!(runner.life(P0), 22);
+    assert_eq!(life_before - runner.life(P1), 10);
+    if regenerate {
+        assert_eq!(zone(&runner, bears), Zone::Battlefield);
+        assert!(runner.state().objects[&bears].tapped);
+    } else {
+        assert_eq!(zone(&runner, bears), Zone::Graveyard);
+    }
+
+    finish_combat(&mut runner);
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 34);
+    assert_eq!(forecast, actual);
+}
+
+#[test]
+fn zilortha_forecast_includes_first_step_trample_lifelink_with_regeneration() {
+    assert_zilortha_forecast_includes_first_step_trample_lifelink(true);
+}
+
+#[test]
+fn zilortha_forecast_previews_trample_lifelink_without_regeneration() {
+    assert_zilortha_forecast_includes_first_step_trample_lifelink(false);
+}
+
+#[test]
+fn zilortha_regeneration_alone_opens_first_strike_forecast() {
+    let mut regenerate = None;
+    let (mut runner, ghalta, z, yargle) =
+        ghalta_board(("Yargle, Glutton of Urborg", 9, 3), |scenario| {
+            regenerate = Some(regenerate_spell(scenario));
+        });
+    runner.act(GameAction::PassPriority).unwrap();
+    cast_at(&mut runner, regenerate.unwrap(), z);
+    let life_before = runner.life(P1);
+
+    attack_and_block(&mut runner, &[ghalta], &[(z, ghalta), (yargle, ghalta)]);
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[z, yargle]);
+    assign_split(&mut runner, vec![(z, 7), (yargle, 5)], 0);
+    runner.combat_damage();
+
+    assert_eq!(zone(&runner, z), Zone::Battlefield);
+    assert!(runner.state().objects[&z].tapped);
+    assert_eq!(marked(&runner, z), 0);
+    assert_eq!(marked(&runner, yargle), 5);
+    assert_eq!(prompt_minimum(&runner, yargle), 4);
+    assign(&mut runner, yargle, 4, 8).expect("Yargle still measures lethal damage by power");
+    finish_combat(&mut runner);
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 8);
+    assert_eq!(forecast, actual);
+}
+
+fn spider_umbra(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    scenario
+        .add_spell_to_hand(player, "Spider Umbra", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text_with_keywords(
+            &["Enchant", "Umbra armor"],
+            "Enchant creature\nEnchanted creature gets +1/+1 and has reach. (It can block creatures with flying.)\nUmbra armor (If enchanted permanent would be destroyed, instead remove all damage from it and destroy this Aura.)",
+        )
+        .id()
+}
+
+#[test]
+fn zilortha_forecast_uses_power_after_attacker_loses_umbra() {
+    let mut scenario = board();
+    scenario.with_life(P1, 30);
+    let (ghalta, mastery) = ghalta_and_battle_mastery(&mut scenario);
+    let umbra = spider_umbra(&mut scenario, P0);
+    let glissa = printed(
+        &mut scenario,
+        P1,
+        "Glissa, the Traitor",
+        (3, 3),
+        &["First strike", "Deathtouch"],
+        "First strike, deathtouch\nWhenever a creature an opponent controls dies, you may return target artifact card from your graveyard to your hand.",
+    );
+    let mut runner = scenario.build();
+    cast_at(&mut runner, mastery, ghalta);
+    cast_at(&mut runner, umbra, ghalta);
+    let life_before = runner.life(P1);
+
+    attack_and_block(&mut runner, &[ghalta], &[(glissa, ghalta)]);
+    assert_eq!(prompt_minimum(&runner, glissa), 3);
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[glissa]);
+
+    assign(&mut runner, glissa, 3, 10).expect("Ghalta assigns 13 with Spider Umbra");
+    assert_eq!(zone(&runner, glissa), Zone::Graveyard);
+    assert_eq!(zone(&runner, umbra), Zone::Graveyard);
+    assert_eq!(zone(&runner, ghalta), Zone::Battlefield);
+    assert_eq!(life_before - runner.life(P1), 10);
+
+    finish_combat(&mut runner);
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 22);
+    assert_eq!(forecast, actual);
+}
+
+#[test]
+fn zilortha_forecast_falls_back_when_destruction_replacement_needs_choice() {
+    let (mut runner, ghalta, hydra, (z, yargle, umbra, regenerate)) = hydra_combat_board(
+        1,
+        |scenario| {
+            let z = zilortha(scenario, P1);
+            let yargle = scenario
+                .add_creature(P1, "Yargle, Glutton of Urborg", 9, 3)
+                .as_legendary()
+                .id();
+            let umbra = spider_umbra(scenario, P1);
+            (z, yargle, umbra, regenerate_spell(scenario))
+        },
+        |runner, &(z, _, umbra, _)| {
+            cast_at(runner, umbra, z);
+            assert_eq!(zone(runner, umbra), Zone::Battlefield);
+        },
+    );
+    runner.act(GameAction::PassPriority).unwrap();
+    cast_at(&mut runner, regenerate, z);
+
+    attack_and_block(
+        &mut runner,
+        &[ghalta],
+        &[(hydra, ghalta), (z, ghalta), (yargle, ghalta)],
+    );
+    assert_eq!(prompt_minimum(&runner, hydra), 1);
+    assert_eq!(prompt_minimum(&runner, z), 8);
+    assert_eq!(prompt_minimum(&runner, yargle), 9);
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[hydra, z, yargle]);
+    // The assigned-damage fallback assumes Zilortha dies, then Yargle dies with 3 marked.
+    assert_eq!(forecast, 12);
+
+    assign_split(&mut runner, vec![(hydra, 1), (z, 8), (yargle, 3)], 0);
+    assert!(matches!(
+        runner.state().pending_replacement.as_ref().map(|pending| &pending.proposed),
+        Some(ProposedEvent::Destroy { object_id, .. }) if *object_id == z
+    ));
+    // CR 616.1: Zilortha's controller chooses between regeneration and umbra armor, so
+    // which creatures survive first strike depends on that choice.
+    let WaitingFor::ReplacementChoice { candidates, .. } =
+        replacement_choice_waiting_for(P1, runner.state())
+    else {
+        panic!("expected P1 to choose a destruction replacement");
+    };
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.source_id == umbra));
+}
+
+#[test]
+fn zilortha_forecast_skips_regular_step_after_hyena_umbra_is_destroyed() {
+    let mut scenario = board();
+    let ghalta = printed(
+        &mut scenario,
+        P0,
+        "Ghalta, Primal Hunger",
+        (12, 12),
+        &["Trample"],
+        GHALTA,
+    );
+    printed(
+        &mut scenario,
+        P0,
+        "Kwende, Pride of Femeref",
+        (2, 2),
+        &["Double strike"],
+        "Double strike\nCreatures you control with first strike have double strike.",
+    );
+    let umbra = scenario
+        .add_spell_to_hand(P0, "Hyena Umbra", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text_with_keywords(
+            &["Enchant", "Umbra armor"],
+            "Enchant creature\nEnchanted creature gets +1/+1 and has first strike.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)",
+        )
+        .id();
+    let glissa = printed(
+        &mut scenario,
+        P1,
+        "Glissa, the Traitor",
+        (3, 3),
+        &["First strike", "Deathtouch"],
+        "First strike, deathtouch\nWhenever a creature an opponent controls dies, you may return target artifact card from your graveyard to your hand.",
+    );
+    let mut runner = scenario.build();
+    cast_at(&mut runner, umbra, ghalta);
+    let life_before = runner.life(P1);
+
+    attack_and_block(&mut runner, &[ghalta], &[(glissa, ghalta)]);
+    assert!(runner.state().objects[&ghalta].has_keyword(&Keyword::DoubleStrike));
+    assert_eq!(prompt_minimum(&runner, glissa), 3);
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[glissa]);
+
+    assign(&mut runner, glissa, 3, 10).expect("Ghalta assigns 13 with Hyena Umbra");
+    assert_eq!(zone(&runner, glissa), Zone::Graveyard);
+    assert_eq!(zone(&runner, umbra), Zone::Graveyard);
+    assert_eq!(zone(&runner, ghalta), Zone::Battlefield);
+    assert!(!runner.state().objects[&ghalta].has_keyword(&Keyword::FirstStrike));
+    assert!(!runner.state().objects[&ghalta].has_keyword(&Keyword::DoubleStrike));
+    assert_eq!(life_before - runner.life(P1), 10);
+
+    // CR 702.4c + CR 510.4: Ghalta lost double strike after assigning in the first step.
+    finish_combat(&mut runner);
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 10);
+    assert_eq!(forecast, actual, "forecast must skip the regular step");
+}
+
+fn unflinching_courage(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_hand(P0, "Unflinching Courage", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text_with_keywords(
+            &["Enchant"],
+            "Enchant creature\nEnchanted creature gets +2/+2 and has trample and lifelink. (Damage dealt by the creature also causes its controller to gain that much life.)",
+        )
+        .id()
+}
+
+#[test]
+fn zilortha_forecast_counts_full_lifelink_against_regenerating_wall_of_ice() {
+    let mut scenario = board();
+    scenario.with_life(P0, 20).with_life(P1, 20);
+    let avatar = printed(
+        &mut scenario,
+        P0,
+        "Serra Avatar",
+        (0, 0),
+        &[],
+        "Serra Avatar's power and toughness are each equal to your life total.\nWhen Serra Avatar is put into a graveyard from anywhere, shuffle it into its owner's library.",
+    );
+    let courage = unflinching_courage(&mut scenario);
+    let mastery = battle_mastery(&mut scenario);
+    let wall = printed(
+        &mut scenario,
+        P1,
+        "Wall of Ice",
+        (0, 7),
+        &["Defender"],
+        "Defender (This creature can't attack.)",
+    );
+    let regenerate = regenerate_spell(&mut scenario);
+    let mut runner = scenario.build();
+    cast_at(&mut runner, courage, avatar);
+    cast_at(&mut runner, mastery, avatar);
+    runner.act(GameAction::PassPriority).unwrap();
+    cast_at(&mut runner, regenerate, wall);
+
+    let life_before = runner.life(P1);
+    attack_and_block(&mut runner, &[avatar], &[(wall, avatar)]);
+    assert_eq!(runner.life(P0), 20);
+    assert_eq!(prompt_minimum(&runner, wall), 7);
+    let forecast = combat_damage_to_defender(runner.state(), avatar, &[wall]);
+
+    assign(&mut runner, wall, 7, 15).expect("Serra Avatar assigns 22 with Unflinching Courage");
+    // CR 702.15b: lifelink counts all 22 damage dealt to the blocker and defender.
+    assert_eq!(runner.life(P0), 42);
+    assert_eq!(life_before - runner.life(P1), 15);
+    // CR 701.19a: the Wall survives, tapped and removed from combat with no marked damage.
+    assert_eq!(zone(&runner, wall), Zone::Battlefield);
+    assert!(runner.state().objects[&wall].tapped);
+    assert_eq!(marked(&runner, wall), 0);
+    assert!(!runner
+        .state()
+        .combat
+        .as_ref()
+        .expect("combat continues after first-strike damage")
+        .blocker_to_attacker
+        .contains_key(&wall));
+
+    runner.combat_damage();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 59);
+    assert_eq!(forecast, actual, "forecast must include full lifelink");
+}
+
+#[test]
+fn zilortha_forecast_preserves_planeswalker_damage_destination() {
+    let mut scenario = board();
+    scenario.with_life(P0, 20).with_life(P1, 20);
+    let malignus = printed(
+        &mut scenario,
+        P0,
+        "Malignus",
+        (0, 0),
+        &[],
+        "Malignus's power and toughness are each equal to half the highest life total among your opponents, rounded up.\nDamage that would be dealt by this creature can't be prevented.",
+    );
+    let mastery = battle_mastery(&mut scenario);
+    let courage = unflinching_courage(&mut scenario);
+    // Stage Karn after three +4 activations using the battlefield fixture's loyalty.
+    let karn = scenario
+        .add_creature(P1, "Karn Liberated", 0, 0)
+        .as_planeswalker_with_loyalty("Karn", 18)
+        .as_legendary()
+        .id();
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+    cast_at(&mut runner, mastery, malignus);
+    cast_at(&mut runner, courage, malignus);
+    let loyalty_before = runner.state().objects[&karn].counters[&CounterType::Loyalty];
+    assert_eq!(loyalty_before, 18);
+    assert_eq!(runner.state().objects[&malignus].power, Some(12));
+
+    declare_attacks_and_blocks(
+        &mut runner,
+        &[(malignus, AttackTarget::Planeswalker(karn))],
+        &[(bears, malignus)],
+    );
+    assert_eq!(prompt_minimum(&runner, bears), 2);
+    let forecast = combat_damage_to_defender(runner.state(), malignus, &[bears]);
+
+    assign(&mut runner, bears, 2, 10).expect("Malignus assigns 2 to Bears and 10 to Karn");
+    assert_eq!(zone(&runner, bears), Zone::Graveyard);
+    assert_eq!(runner.life(P1), 20);
+    let loyalty_after_first = runner.state().objects[&karn].counters[&CounterType::Loyalty];
+    assert_eq!(loyalty_after_first, 8);
+    assert_eq!(runner.state().objects[&malignus].power, Some(12));
+
+    let outcome = runner.combat_damage();
+    let regular_damage: u32 = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target_id),
+                amount,
+                is_combat: true,
+                ..
+            } if *source_id == malignus && *target_id == karn => Some(*amount),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(regular_damage, 12);
+    assert_eq!(zone(&runner, karn), Zone::Graveyard);
+    assert_eq!(runner.life(P1), 20);
+    let actual = loyalty_before - loyalty_after_first + regular_damage;
+    assert_eq!(actual, 22);
+    assert_eq!(i64::from(forecast), i64::from(actual));
+}
+
+#[test]
+fn zilortha_forecast_counts_trample_over_removed_planeswalker() {
+    let mut scenario = board();
+    let thrasta = printed(
+        &mut scenario,
+        P0,
+        "Thrasta, Tempest's Roar",
+        (7, 7),
+        &["Trample", "Haste", "Trample over planeswalkers"],
+        "This spell costs {3} less to cast for each other spell cast this turn.\nTrample, haste\nTrample over planeswalkers (This creature can deal excess combat damage to the controller of the planeswalker it's attacking.)\nThrasta has hexproof as long as it entered this turn.",
+    );
+    let mastery = battle_mastery(&mut scenario);
+    let karn = scenario
+        .add_creature(P1, "Karn Liberated", 0, 0)
+        .as_planeswalker_with_loyalty("Karn", 6)
+        .as_legendary()
+        .id();
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let downfall = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Hero's Downfall",
+            true,
+            "Destroy target creature or planeswalker.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    cast_at(&mut runner, mastery, thrasta);
+
+    declare_attacks_and_blocks_until(
+        &mut runner,
+        &[(thrasta, AttackTarget::Planeswalker(karn))],
+        &[(bears, thrasta)],
+        Phase::DeclareBlockers,
+    );
+    // CR 509.2: Pass the active player's post-blocks priority to the defender.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pass priority to P1");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    cast_at(&mut runner, downfall, karn);
+    assert_eq!(zone(&runner, karn), Zone::Graveyard);
+
+    let forecast = combat_damage_to_defender(runner.state(), thrasta, &[bears]);
+    let life_before = runner.life(P1);
+    runner.combat_damage();
+    assert_eq!(prompt_minimum(&runner, bears), 2);
+    assign(&mut runner, bears, 2, 5).expect("Thrasta assigns 2 to Bears and 5 to P1");
+    assert_eq!(zone(&runner, bears), Zone::Graveyard);
+    // CR 702.19e + CR 702.4b: The first step spills 5 to P1 and the regular step deals 7.
+    assert_eq!(life_before - runner.life(P1), 5);
+    finish_combat(&mut runner);
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 12);
+    assert_eq!(forecast, actual);
 }

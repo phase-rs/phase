@@ -5694,9 +5694,9 @@ pub fn parse_that_much_or_many(input: &str) -> OracleResult<'_, QuantityRef> {
 ///
 /// Two referent kinds under two different rules. CR 608.2h governs the VALUE forms
 /// ("that much", "the damage dealt"): information from the game is determined once, when the
-/// effect applies. CR 608.2k governs the OBJECT forms ("that creature's power"): a specific
-/// untargeted object previously referred to by the trigger condition. The source-object
-/// variants resolve via `extract_source_from_event` → live object or LKI cache.
+/// effect applies. CR 608.2k governs the OBJECT forms ("that creature's power").
+/// Without clause antecedents, the bare P/T forms provisionally use CostPaidObject.
+/// Where-X lowering binds a known trigger object directly to EventSource.
 fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         // CR 608.2h: bare demonstrative amount — delegate to the shared
@@ -7200,6 +7200,22 @@ pub(crate) fn parse_using_mana_produced_by_self(input: &str) -> OracleResult<'_,
     preceded(
         parse_using_mana_produced_by_head,
         super::duration::parse_self_reference_subject,
+    )
+    .parse(input)
+}
+
+/// CR 106.4 + CR 608.2i: Read the amount this source produced from the
+/// mana ability resolution that triggered the effect.
+pub(crate) fn parse_event_context_mana_produced_by_self(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::EventContextAmount,
+        all_consuming((
+            tag("the amount of mana "),
+            super::duration::parse_self_reference_subject,
+            tag(" produced"),
+        )),
     )
     .parse(input)
 }
@@ -8991,6 +9007,25 @@ mod tests {
         TypedFilter,
     };
     use crate::types::mana::ManaColor;
+
+    #[test]
+    fn event_context_mana_produced_by_self_requires_self_and_full_consumption() {
+        for phrase in [
+            "the amount of mana ~ produced",
+            "the amount of mana this creature produced",
+        ] {
+            assert_eq!(
+                parse_event_context_mana_produced_by_self(phrase).unwrap(),
+                ("", QuantityRef::EventContextAmount)
+            );
+        }
+        for phrase in [
+            "the amount of mana another creature produced",
+            "the amount of mana this creature produced last turn",
+        ] {
+            assert!(parse_event_context_mana_produced_by_self(phrase).is_err());
+        }
+    }
 
     fn fixed_legs(values: &[i32]) -> Vec<QuantityExpr> {
         values

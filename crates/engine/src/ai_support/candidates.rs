@@ -3549,13 +3549,10 @@ pub fn candidate_actions_broad_with_probe(
             attack_target,
             ..
         } => {
-            let mut remaining = *total_damage;
-            let mut assignments = Vec::new();
-            for slot in blockers {
-                let assign = remaining.min(slot.lethal_minimum);
-                assignments.push((slot.blocker_id, assign));
-                remaining = remaining.saturating_sub(assign);
-            }
+            use crate::game::combat::TrampleKind;
+            use crate::game::combat_damage::{lethal_first_split, ExcessRoute};
+            use crate::types::game_state::CombatDamageSplit;
+
             let has_recipient = state
                 .combat
                 .as_ref()
@@ -3568,39 +3565,37 @@ pub fn candidate_actions_broad_with_probe(
                 .and_then(|info| {
                     info.resolve_damage_target(
                         state,
-                        *trample == Some(crate::game::combat::TrampleKind::OverPlaneswalkers),
+                        *trample == Some(TrampleKind::OverPlaneswalkers),
                     )
                 })
                 .is_some();
-            // CR 506.4c + CR 702.19b: without a current excess recipient,
-            // ordinary trample still permits all damage to the blockers.
-            if (trample.is_none() || !has_recipient) && remaining > 0 {
-                if let Some(last) = assignments.last_mut() {
-                    last.1 += remaining;
-                    remaining = 0;
+            let route = match (trample, attack_target) {
+                (None, _) => ExcessRoute::ToBlockers,
+                (Some(TrampleKind::Standard | TrampleKind::OverPlaneswalkers), _)
+                    if !has_recipient =>
+                {
+                    ExcessRoute::ToBlockers
                 }
-            }
-            // CR 702.19c: For trample-over-PW attacking a PW, split excess:
-            // loyalty-worth to PW, remainder to controller.
-            let (trample_dmg, ctrl_dmg) = if *trample
-                == Some(crate::game::combat::TrampleKind::OverPlaneswalkers)
-                && matches!(
-                    attack_target,
-                    crate::game::combat::AttackTarget::Planeswalker(_)
-                ) {
-                let loyalty = pw_loyalty.unwrap_or(0);
-                let to_pw = remaining.min(loyalty);
-                let to_ctrl = remaining.saturating_sub(to_pw);
-                (to_pw, to_ctrl)
-            } else {
-                (if trample.is_some() { remaining } else { 0 }, 0)
+                (Some(TrampleKind::OverPlaneswalkers), AttackTarget::Planeswalker(_)) => {
+                    ExcessRoute::OverPlaneswalker {
+                        loyalty: pw_loyalty.unwrap_or(0),
+                    }
+                }
+                (Some(TrampleKind::Standard | TrampleKind::OverPlaneswalkers), _) => {
+                    ExcessRoute::Trample
+                }
             };
+            let CombatDamageSplit {
+                assignments,
+                trample_damage,
+                controller_damage,
+            } = lethal_first_split(*total_damage, blockers, route);
             let mut candidates = vec![candidate(
                 GameAction::AssignCombatDamage {
                     mode: crate::types::game_state::CombatDamageAssignmentMode::Normal,
                     assignments,
-                    trample_damage: trample_dmg,
-                    controller_damage: ctrl_dmg,
+                    trample_damage,
+                    controller_damage,
                 },
                 TacticalClass::Selection,
                 Some(*player),

@@ -2322,7 +2322,16 @@ fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
 /// subject. The split and the carry share one classifier, so a bare imperative or a
 /// new subject ("… and you choose a nonland card from it") stays fused for the
 /// reveal's own continuation grammar.
+///
+/// CR 608.2c + CR 603.12: inside an "if/when …, " prefix clause the conjunct
+/// belongs to that clause's body (for "when you do," the reflexive trigger's
+/// effect), which the conditional handler re-splits; splitting it here orphans
+/// it from the body's gate and subject (Cabal Therapist), mirroring the
+/// prefix-clause rule in `split_comma_clause_boundary`.
 fn reveal_hand_continues_with_conjugated_verb(before_lower: &str, remainder_trimmed: &str) -> bool {
+    if starts_prefix_clause(before_lower.trim_start()) {
+        return false;
+    }
     nom_primitives::scan_at_word_boundaries(before_lower, |input| {
         all_consuming(preceded(
             tag::<_, _, OracleError<'_>>("reveals "),
@@ -4852,6 +4861,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         room_door: a_room_door,
         granting_object: a_granting_object,
         bound_actor: a_bound_actor,
+        origin: a_origin,
     } = a;
     let StaticDefinition {
         mode: b_mode,
@@ -4872,6 +4882,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         room_door: b_room_door,
         granting_object: b_granting_object,
         bound_actor: b_bound_actor,
+        origin: b_origin,
     } = b;
     a_mode == b_mode
         && a_affected == b_affected
@@ -4890,6 +4901,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         && a_room_door == b_room_door
         && a_granting_object == b_granting_object
         && a_bound_actor == b_bound_actor
+        && a_origin == b_origin
 }
 
 /// Do two parses CONSUME the same thing? Compares everything the ENGINE READS and
@@ -11747,6 +11759,15 @@ mod tests {
             assert_eq!(chunks[0].text, head, "{text}");
             assert_eq!(chunks[1].text, tail, "{text}");
         }
+        // CR 608.2c: inside an "if you do, …" prefix clause the conjunct stays in
+        // the clause's body (the conditional handler re-splits it there with the
+        // gate and subject); the same body without the prefix splits as above.
+        let gated = "if you do, choose a card name, then that player reveals their hand and discards a creature card at random";
+        assert_eq!(split_clause_sequence(gated).len(), 1, "{gated}");
+        let body = "choose a card name, then that player reveals their hand and discards a creature card at random";
+        let body_chunks = split_clause_sequence(body);
+        assert_eq!(body_chunks.len(), 3, "{body}: {body_chunks:?}");
+        assert_eq!(body_chunks[2].text, "discards a creature card at random");
         for text in [
             "target opponent reveals their hand and you choose a nonland card from it",
             "Target player reveals their hand and the top card of their library",

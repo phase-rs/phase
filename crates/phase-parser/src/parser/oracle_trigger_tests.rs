@@ -8029,7 +8029,9 @@ fn trigger_pantlaza_etb_discover_x_is_entering_creature_toughness() {
                 matches!(
                     mana_value_limit,
                     QuantityExpr::Ref {
-                        qty: crate::types::ability::QuantityRef::Toughness { .. }
+                        qty: crate::types::ability::QuantityRef::Toughness {
+                            scope: crate::types::ability::ObjectScope::EventSource,
+                        }
                     }
                 ),
                 "discover X must bind to the entering creature's toughness, \
@@ -15903,6 +15905,134 @@ fn trigger_one_or_more_enchanted_creatures_attack_killian() {
     }
 }
 
+// SHAPE: CR 702.29c + CR 113.6k give the self-cycle leg both supported discard destinations.
+#[test]
+fn self_cycle_trigger_heads_function_in_graveyard_and_exile() {
+    let assert_self_cycle = |def: &TriggerDefinition| {
+        assert_eq!(def.mode, TriggerMode::Cycled);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.trigger_zones, [Zone::Graveyard, Zone::Exile]);
+    };
+    for (name, text) in [
+        (
+            "Titanoth Rex",
+            "When you cycle this card, put a trample counter on target creature you control.",
+        ),
+        (
+            "Shark Typhoon",
+            "When you cycle this card, create an X/X blue Shark creature token with flying.",
+        ),
+    ] {
+        let defs = parse_trigger_lines(text, name);
+        assert_eq!(defs.len(), 1, "{name}");
+        assert_self_cycle(&defs[0]);
+    }
+
+    let defs = parse_trigger_lines(
+        "When you cycle this card, you may pay {X}. If you do, create X 1/1 white Soldier creature tokens.",
+        "Decree of Justice",
+    );
+    assert_eq!(defs.len(), 1);
+    assert_self_cycle(&defs[0]);
+    // CR 603.5: The payment is optional.
+    assert!(defs[0].optional);
+
+    let defs = parse_trigger_lines(
+        "When you cycle Radiant Smite, if you weren't the starting player, you gain 2 life.",
+        "Radiant Smite",
+    );
+    assert_eq!(defs.len(), 1);
+    assert_self_cycle(&defs[0]);
+    // CR 603.4 + CR 103.1: The intervening condition checks who started the game.
+    assert_eq!(
+        defs[0].condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::WasStartingPlayer {
+                controller: ControllerRef::You
+            }),
+        }),
+    );
+
+    let defs = parse_trigger_lines(
+        "When you cycle this card and when this creature dies, you may have it deal 1 damage to any target.",
+        "Jund Sojourners",
+    );
+    assert_eq!(defs.len(), 2);
+    assert_self_cycle(&defs[0]);
+    // CR 700.4: The dies leg still observes a battlefield-to-graveyard move.
+    assert_eq!(defs[1].mode, TriggerMode::ChangesZone);
+    assert_eq!(defs[1].origin, Some(Zone::Battlefield));
+    assert_eq!(defs[1].destination, Some(Zone::Graveyard));
+    assert_eq!(defs[1].trigger_zones, [Zone::Graveyard]);
+
+    let defs = parse_trigger_lines(
+        r#"When you cast or cycle Warped Tusker, create a 0/1 colorless Eldrazi Spawn creature token with "Sacrifice this token: Add {C}.""#,
+        "Warped Tusker",
+    );
+    assert_eq!(defs.len(), 2);
+    // CR 601.2i: The cast leg observes the source becoming cast on the stack.
+    assert_eq!(defs[0].mode, TriggerMode::SpellCast);
+    assert_eq!(defs[0].valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(defs[0].trigger_zones, [Zone::Stack]);
+    assert_self_cycle(&defs[1]);
+
+    let another = Some(TargetFilter::Typed(
+        TypedFilter::default().properties(vec![FilterProp::Another]),
+    ));
+    let defs = parse_trigger_lines(
+        "Whenever you cycle this card or cycle another card while this enchantment is on the battlefield, you may exile target creature. If you do, return that card to the battlefield under its owner's control at the beginning of the next end step.",
+        "Astral Drift",
+    );
+    assert_eq!(defs.len(), 2);
+    assert_self_cycle(&defs[0]);
+    // CR 113.6b + CR 603.2: The observer checks its stated zone at the event.
+    assert_eq!(defs[1].mode, TriggerMode::Cycled);
+    assert_eq!(defs[1].valid_card, another);
+    assert_eq!(defs[1].trigger_zones, [Zone::Battlefield]);
+    assert_eq!(
+        defs[1].condition,
+        Some(TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::SourceInZone {
+                zone: Zone::Battlefield
+            }),
+        }),
+    );
+
+    // CR 113.6: The standalone observer abilities still function from the battlefield.
+    for (name, text, mode, valid_card) in [
+        ("Drannith Stinger", "Whenever you cycle another card, this creature deals 1 damage to each opponent.", TriggerMode::Cycled, another),
+        ("Drake Haven", "Whenever you cycle or discard a card, you may pay {1}. If you do, create a 2/2 blue Drake creature token with flying.", TriggerMode::CycledOrDiscarded, None),
+        ("Astral Slide", "Whenever a player cycles a card, you may exile target creature. If you do, return that card to the battlefield under its owner's control at the beginning of the next end step.", TriggerMode::Cycled, None),
+    ] {
+        let defs = parse_trigger_lines(text, name);
+        assert_eq!(defs.len(), 1, "{name}");
+        assert_eq!(defs[0].mode, mode, "{name}");
+        assert_eq!(defs[0].valid_card, valid_card, "{name}");
+        assert_eq!(defs[0].trigger_zones, [Zone::Battlefield], "{name}");
+    }
+}
+
+// SHAPE: CR 701.9a + CR 614.6 + CR 113.6k give both self-discard arms the same zones.
+#[test]
+fn self_discard_trigger_heads_function_in_graveyard_and_exile() {
+    use crate::types::ability::TriggerConstraint;
+
+    for (name, text, constraint) in [
+        (
+            "Guerrilla Tactics",
+            "When a spell or ability an opponent controls causes you to discard this card, it deals 4 damage to any target.",
+            Some(TriggerConstraint::EventSourceControlledBy { controller: ControllerRef::Opponent }),
+        ),
+        ("Titanbones, Towering Heart", "When you discard this card, you gain 3 life.", None),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::Discarded, "{name}");
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+        assert_eq!(def.constraint, constraint, "{name}");
+        assert_eq!(def.trigger_zones, [Zone::Graveyard, Zone::Exile], "{name}");
+    }
+}
+
 #[test]
 fn trigger_cycle_this_card() {
     let def = parse_trigger_line(
@@ -16615,6 +16745,80 @@ fn trigger_you_tap_a_land_for_colorless_mana() {
             ..
         } if matches!(count, QuantityExpr::Fixed { value: 1 })
     ));
+}
+
+#[test]
+fn self_mana_ability_resolution_head() {
+    for keyword in ["when", "whenever"] {
+        for subject in ["~", "this creature"] {
+            let head = format!("{keyword} a mana ability of {subject} resolves");
+            let (mode, trigger) = try_parse_player_trigger(&head).expect("mana resolution head");
+            assert_eq!(mode, TriggerMode::ManaAbilityProduced);
+            assert_eq!(trigger.mode, mode);
+            assert_eq!(trigger.valid_card, None);
+            assert_eq!(trigger.valid_target, None);
+            assert_eq!(trigger.mana_ability_produced, None);
+            assert_eq!(
+                extract_trigger_subject_for_context(&head, &mut ParseContext::default()),
+                TargetFilter::SelfRef
+            );
+        }
+    }
+}
+
+#[test]
+fn self_mana_ability_resolution_head_requires_self_and_complete_input() {
+    assert!(parse_self_mana_ability_resolves_trigger("when a mana ability of ~ resolves").is_ok());
+    for head in [
+        "when a mana ability of a creature resolves",
+        "when a mana ability of ~ resolves unexpectedly",
+    ] {
+        assert!(
+            parse_self_mana_ability_resolves_trigger(head).is_err(),
+            "{head}"
+        );
+    }
+}
+
+#[test]
+fn tyvar_the_bellicose_parses_the_granted_mana_trigger() {
+    let oracle = concat!(
+        "Whenever one or more Elves you control attack, they gain deathtouch until end of turn.\n",
+        "Each creature you control has \"Whenever a mana ability of this creature resolves, ",
+        "put a number of +1/+1 counters on it equal to the amount of mana this creature produced. ",
+        "This ability triggers only once each turn.\""
+    );
+    let parsed = parse_oracle_text(
+        oracle,
+        "Tyvar the Bellicose",
+        &[],
+        &["Creature".into()],
+        &["Elf".into(), "Warrior".into()],
+    );
+    let [grant] = parsed.statics.as_slice() else {
+        panic!("expected Tyvar's static grant, got {:?}", parsed.statics);
+    };
+    let [ContinuousModification::GrantTrigger { trigger }] = grant.modifications.as_slice() else {
+        panic!("expected a granted trigger, got {grant:?}");
+    };
+    assert_eq!(trigger.mode, TriggerMode::ManaAbilityProduced);
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
+    let execute = trigger.execute.as_deref().expect("granted trigger effect");
+    assert_eq!(
+        *execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            },
+            target: TargetFilter::SelfRef,
+        }
+    );
 }
 
 #[test]
@@ -40981,9 +41185,9 @@ fn ogre_marauder_attack_trigger_carries_defending_player_unless_sacrifice() {
             .iter()
             .any(|s| s.modifications.iter().any(|m| matches!(
                 m,
-                ContinuousModification::AddStaticMode {
-                    mode: StaticMode::CantBeBlocked
-                }
+                ContinuousModification::GrantStaticAbility { definition }
+                    if definition.affected == Some(TargetFilter::SelfRef)
+                        && definition.mode == StaticMode::CantBeBlocked
             ))),
         "the grant must add StaticMode::CantBeBlocked, got {statics:?}"
     );
@@ -47620,4 +47824,70 @@ fn proft_eidetic_memory_hoists_draw_gate_and_binds_counter_quantity() {
             }),
         }
     );
+}
+
+// CR 608.2c + CR 119.4 (issue #11294, SHAPE): Niv-Mizzet, Ghost Counsel's
+// "you may pay that much life" binds the payment to the triggering life-gain
+// amount; the "draw that many cards" continuation reads the same event amount.
+#[test]
+fn trigger_niv_mizzet_ghost_counsel_pay_that_much_life_shape() {
+    let def = parse_trigger_line(
+        "Whenever you gain life, you may pay that much life. If you do, draw that many cards.",
+        "Niv-Mizzet, Ghost Counsel",
+    );
+    assert_eq!(def.mode, TriggerMode::LifeGained);
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(execute.optional, "the pay clause is a 'you may'");
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::PayCost {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        }
+    );
+    let continuation = execute
+        .sub_ability
+        .as_deref()
+        .expect("If-you-do continuation");
+    assert_eq!(
+        continuation.effect.as_ref(),
+        &Effect::Draw {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            target: TargetFilter::Controller,
+        }
+    );
+    assert_no_unimplemented(execute);
+}
+
+// Issue #11295: Verrak, Warped Sengir's "pay that much life again" must stay
+// honestly Unimplemented until the paid-life condition + activation paid-life
+// binding land — the event-bound pay-life arm is full-consumption and declines
+// the "again" rider rather than dropping it.
+#[test]
+fn trigger_verrak_pay_that_much_life_again_stays_unimplemented() {
+    let def = parse_trigger_line(
+        "Whenever you activate an ability that isn't a mana ability, if life was paid to activate it, you may pay that much life again. If you do, copy that ability. You may choose new targets for the copy.",
+        "Verrak, Warped Sengir",
+    );
+    // Positive reach-guard: the trigger routed and the copy continuation built,
+    // so the pay clause below is genuinely reached, not skipped upstream.
+    assert_eq!(def.mode, TriggerMode::AbilityActivated);
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        execute.sub_ability.is_some(),
+        "copy continuation reached past the pay clause"
+    );
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Unimplemented { name, description }
+            if name == "unparsed_verb_arguments"
+                && description.as_deref() == Some("pay that much life again")
+    ));
 }

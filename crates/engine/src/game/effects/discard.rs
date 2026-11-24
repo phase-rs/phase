@@ -274,34 +274,24 @@ pub fn resolve(
     // the upper-bound expression and the may-pick-fewer flag. Plain
     // `QuantityExpr` means a mandatory count; wrapped in `UpTo` means the
     // player may discard 0..=count.
-    let (num_cards, up_to, unless_filter, target_filter, random, card_filter) = match &ability
-        .effect
-    {
-        Effect::DiscardCard { count, target } => (*count, false, None, target.clone(), false, None),
+    // The count is read by `discard_count` once the discarding player is known,
+    // so "their hand" in the count names that player's hand.
+    let (up_to, unless_filter, target_filter, random, card_filter) = match &ability.effect {
+        Effect::DiscardCard { target, .. } => (false, None, target.clone(), false, None),
         Effect::Discard {
             count,
             unless_filter,
             target,
             selection,
             filter,
-        } => {
-            let (inner, up_to) = count.peel_up_to();
-            (
-                // CR 107.1b: a calculation that would yield a negative number
-                // uses zero instead. Clamp before the `as u32` cast — a
-                // subtractive count ("discard cards equal to A minus B" when
-                // B > A) would otherwise wrap to ~4 billion and let the player
-                // discard their whole hand. Ability context also resolves X
-                // against the caster's chosen value. Mirrors `draw.rs`.
-                resolve_quantity_with_targets(state, inner, ability).max(0) as u32,
-                up_to,
-                unless_filter.clone(),
-                target.clone(),
-                selection.is_random(),
-                filter.clone(),
-            )
-        }
-        _ => (1, false, None, TargetFilter::Any, false, None),
+        } => (
+            count.peel_up_to().1,
+            unless_filter.clone(),
+            target.clone(),
+            selection.is_random(),
+            filter.clone(),
+        ),
+        _ => (false, None, TargetFilter::Any, false, None),
     };
 
     // CR 400.7 + CR 603.7c + CR 603.7b: a delayed discard whose pinned referent
@@ -532,8 +522,8 @@ pub fn resolve(
                 // unable to discard: a mandatory discard that requires cards fails (as
                 // below), a discard requiring zero cards is paid in full, and an "up to"
                 // discard simply discards zero.
-                PlayerHandDiscardPool::Muzzled => {
-                    if !up_to && num_cards > 0 {
+                PlayerHandDiscardPool::Muzzled { player } => {
+                    if !up_to && discard_count(state, ability, player) > 0 {
                         state.cost_payment_failed_flag = true;
                     }
                     events.push(GameEvent::EffectResolved {
@@ -544,6 +534,7 @@ pub fn resolve(
                     return Ok(());
                 }
             };
+        let num_cards = discard_count(state, ability, discard_player);
 
         // CR 701.9b: For "up to N" discards, present the full N to the player.
         // The available cards list naturally constrains actual selection.
@@ -782,7 +773,7 @@ pub(super) enum PlayerHandDiscardPool {
     NoPlayer,
     /// CR 701.9a + CR 609.3: an opponent's spell or ability can't force this
     /// player to discard (Tamiyo, Collector of Tales class).
-    Muzzled,
+    Muzzled { player: PlayerId },
     /// The discarding player and every card of theirs the instruction can
     /// discard.
     Eligible {
@@ -813,7 +804,9 @@ pub(super) fn player_hand_discard_pool(
         discard_player,
         crate::types::ability::CostCategory::Discards,
     ) {
-        return Ok(PlayerHandDiscardPool::Muzzled);
+        return Ok(PlayerHandDiscardPool::Muzzled {
+            player: discard_player,
+        });
     }
 
     // CR 701.9b: Player chooses which card(s) to discard (not "at random").
@@ -862,8 +855,7 @@ pub(crate) fn optional_discard_is_infeasible(state: &GameState, ability: &Resolv
     else {
         return false;
     };
-    let (inner, up_to) = count.peel_up_to();
-    if up_to
+    if count.peel_up_to().1
         || ability.optional_for.is_some()
         || ability.repeat_for.is_some()
         || ability.player_scope.is_some()
@@ -872,12 +864,42 @@ pub(crate) fn optional_discard_is_infeasible(state: &GameState, ability: &Resolv
     {
         return false;
     }
-    // CR 107.1b: a negative count discards zero cards.
-    let required = resolve_quantity_with_targets(state, inner, ability).max(0) as usize;
     match player_hand_discard_pool(state, ability, target, filter.as_ref()) {
-        Ok(PlayerHandDiscardPool::Eligible { cards, .. }) => cards.len() < required,
-        Ok(PlayerHandDiscardPool::Muzzled) => required > 0,
+        Ok(PlayerHandDiscardPool::Eligible { player, cards }) => {
+            cards.len() < discard_count(state, ability, player) as usize
+        }
+        Ok(PlayerHandDiscardPool::Muzzled { player }) => discard_count(state, ability, player) > 0,
         Ok(PlayerHandDiscardPool::NoPlayer) | Err(_) => false,
+    }
+}
+
+/// CR 608.2c + CR 608.2h + CR 701.9a: the number of cards this discard requires
+/// of `discard_player`, read once when the discard is applied (CR 608.2h) and
+/// evaluated with that player bound as "they", the same
+/// binding [`discard_filter_scope`] gives the card filter. "Target player
+/// reveals their hand and discards all nonland cards" counts the nonland cards
+/// in the DISCARDING player's hand, not the caster's; the controller is
+/// unchanged, so "you" keeps its meaning (CR 109.5).
+pub(super) fn discard_count(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    discard_player: PlayerId,
+) -> u32 {
+    match &ability.effect {
+        Effect::DiscardCard { count, .. } => *count,
+        // CR 107.1b: a calculation that would yield a negative number uses zero
+        // instead. Clamp before the `as u32` cast — a subtractive count
+        // ("discard cards equal to A minus B" when B > A) would otherwise wrap
+        // to ~4 billion and let the player discard their whole hand. Ability
+        // context also resolves X against the caster's chosen value. Mirrors
+        // `draw.rs`.
+        Effect::Discard { count, .. } => resolve_quantity_with_targets(
+            state,
+            count.peel_up_to().0,
+            &discard_filter_scope(ability, discard_player),
+        )
+        .max(0) as u32,
+        _ => 1,
     }
 }
 
@@ -3760,5 +3782,146 @@ mod tests {
         assert!(state.players[1].graveyard.contains(&p1_shock));
         assert!(state.players[1].hand.contains(&p1_opt));
         assert!(state.players[0].hand.contains(&p0_shock));
+    }
+
+    /// CR 701.9a + CR 608.2c: "discards all nonland cards" requires exactly the
+    /// matching cards in the DISCARDING player's hand. The count is the census of
+    /// those cards (`ZoneCardCount` over the scoped player's hand), so it agrees
+    /// with the pool: one matching card is moved by the forced branch, and a hand
+    /// with no matching card requires zero cards and is paid in full — no veto,
+    /// and an optional copy is not infeasible. The caster holds two nonland cards
+    /// throughout, so a count read against the caster's hand would require two.
+    #[test]
+    fn filtered_all_discard_requires_exactly_the_matching_cards() {
+        use crate::types::ability::{CountScope, QuantityRef, TypeFilter, ZoneRef};
+        use crate::types::card_type::CoreType;
+
+        let nonland = TargetFilter::Typed(
+            TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+        );
+        let discard_all_nonland = || {
+            ResolvedAbility::new(
+                Effect::Discard {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            zone: ZoneRef::Hand,
+                            card_types: vec![],
+                            filter: Some(nonland.clone()),
+                            scope: CountScope::ScopedPlayer,
+                        },
+                    },
+                    target: TargetFilter::Player,
+                    selection: CardSelectionMode::Chosen,
+                    unless_filter: None,
+                    filter: Some(nonland.clone()),
+                },
+                vec![TargetRef::Player(PlayerId(1))],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+        let board = |with_creature: bool| {
+            let mut state = GameState::new_two_player(42);
+            for (card, name) in [(10, "Mine A"), (11, "Mine B")] {
+                create_object(
+                    &mut state,
+                    CardId(card),
+                    PlayerId(0),
+                    name.into(),
+                    Zone::Hand,
+                );
+            }
+            let mut lands = Vec::new();
+            for (card, name) in [(1, "Forest"), (2, "Swamp")] {
+                let land = create_object(
+                    &mut state,
+                    CardId(card),
+                    PlayerId(1),
+                    name.into(),
+                    Zone::Hand,
+                );
+                state
+                    .objects
+                    .get_mut(&land)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Land);
+                lands.push(land);
+            }
+            let creature = with_creature.then(|| {
+                let creature = create_object(
+                    &mut state,
+                    CardId(3),
+                    PlayerId(1),
+                    "Grizzly Bears".into(),
+                    Zone::Hand,
+                );
+                state
+                    .objects
+                    .get_mut(&creature)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                creature
+            });
+            (state, lands, creature)
+        };
+
+        // One matching card: the forced branch moves exactly it.
+        let (mut state, lands, creature) = board(true);
+        let creature = creature.unwrap();
+        let mut events = Vec::new();
+        resolve(&mut state, &discard_all_nonland(), &mut events).unwrap();
+        assert!(
+            state.players[1].graveyard.contains(&creature),
+            "the matching nonland card is discarded"
+        );
+        for land in &lands {
+            assert!(state.players[1].hand.contains(land), "lands stay in hand");
+        }
+        assert_eq!(
+            state.players[0].hand.len(),
+            2,
+            "the caster's hand is untouched"
+        );
+        assert!(!state.cost_payment_failed_flag);
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::DiscardChoice { .. }),
+            "an all-matching discard is forced, never a choice"
+        );
+
+        // No matching card: zero cards are required, so the discard is paid in full.
+        let (mut state, lands, _) = board(false);
+        let mut optional = discard_all_nonland();
+        optional.optional = true;
+        assert!(
+            !optional_discard_is_infeasible(&state, &optional),
+            "discarding all of zero matching cards is a feasible option"
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &discard_all_nonland(), &mut events).unwrap();
+        for land in &lands {
+            assert!(state.players[1].hand.contains(land), "lands stay in hand");
+        }
+        assert!(
+            !state.cost_payment_failed_flag,
+            "an all-matching discard with no matching card requires zero cards"
+        );
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::DiscardChoice { .. }
+        ));
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Discard,
+                    ..
+                }
+            )),
+            "the empty discard publishes its completion marker"
+        );
     }
 }

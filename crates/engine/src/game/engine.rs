@@ -33,7 +33,7 @@ use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIn
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::TokenAttackRequest;
+use crate::types::proposed_event::{ProposedEvent, TokenAttackRequest};
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
 use crate::types::resolution::ResolutionFrame;
@@ -1481,10 +1481,10 @@ fn apply_action_boundary_core(
     // dispatcher's cleanup, and the sweep's exhaustive match pops only
     // `Dispatching`.
     //
-    // This is the OUTER action funnel — `apply_action_boundary_core` has exactly
-    // three call sites: two public/simulation entry points and one internal
-    // clone-local life-safety preview. Deliberately NOT `apply_action`, which
-    // the auto-pass and shortcut loops re-enter twelve further ways.
+    // This is the OUTER action funnel: every reducer action (public, simulation,
+    // prospective, replay, Resolve-All, and the clone-local life-safety preview)
+    // passes through `apply_action_boundary_core`. Deliberately NOT
+    // `apply_action`, its reducer.
     //
     // BEFORE `boundary_snapshot`, deliberately: every failure path restores that
     // same snapshot, and removing an impossible state is not part of the action
@@ -1618,6 +1618,9 @@ fn apply_action_boundary_core(
         && action.is_submitter_scoped()
         && !matches!(action, GameAction::Concede { .. } | GameAction::Debug(_)))
     .then(|| (action.clone(), authenticated_actor));
+    // The paused token clause this action begins with (if any): it is fed this
+    // action's whole buffer at the end of the core, after the follow-up below.
+    let token_clause_at_start = super::engine_replacement::paused_token_clause_source(state);
     // CR 510.2: whether this action answers a parked combat damage batch's choice.
     // The reducer fills a fresh `ActionResult`, so its events begin at index 0.
     let parked_combat_damage_answer =
@@ -1847,6 +1850,21 @@ fn apply_action_boundary_core(
                 Ok(moved) => moved,
                 Err(err) => break 'follow_up Some(err),
             };
+            // CR 800.4b + CR 608.2f + CR 616.1: a concession that left a parked
+            // token-creation replacement without its chooser or substitute
+            // decider is reconciled before the action returns. A park that
+            // re-proposed to a survivor prompt stands; one that settled joins
+            // the convergence pass below.
+            let reconciled_token_replacement =
+                match reconcile_parked_token_replacement_after_departure(
+                    state,
+                    committed_departure.as_ref(),
+                    &mut result,
+                    scan_from,
+                ) {
+                    Ok(moved) => moved,
+                    Err(err) => break 'follow_up Some(err),
+                };
             let realized_token_entry =
                 effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
             // CR 603.6a + CR 603.3b: the same convergence for entries of a completed
@@ -1869,7 +1887,10 @@ fn apply_action_boundary_core(
             let settled_entry_continuation_is_parked =
                 matches!(result.waiting_for, WaitingFor::Priority { .. })
                     && !state.deferred_entry_events.is_empty();
-            if ((resumed_combat_damage || resumed_parked_root || reconciled_unless_payment)
+            if ((resumed_combat_damage
+                || resumed_parked_root
+                || reconciled_unless_payment
+                || reconciled_token_replacement)
                 && matches!(result.waiting_for, WaitingFor::Priority { .. }))
                 || realized_token_entry
                 || settled_entry_batch
@@ -1909,6 +1930,14 @@ fn apply_action_boundary_core(
             }
             None
         };
+    // A paused simultaneous token clause owns every later action's events until
+    // it finishes, whatever the action answered; the follow-up above can still
+    // realize its token entries, so this runs after it.
+    super::engine_replacement::feed_paused_token_clause_after_action(
+        state,
+        token_clause_at_start,
+        &result.events,
+    );
     // Do not carry the core's window into finalization: that pass owns its own
     // scope over convergence, auto-pass, and re-convergence.
     state.ingress_life_window = None;
@@ -2210,6 +2239,107 @@ fn parked_unless_payment_repair(
         {
             Some(ParkedPaymentRepair::LostPrompt)
         }
+        _ => None,
+    }
+}
+
+/// CR 800.4b + CR 800.4d + CR 608.2f + CR 616.1 + CR 101.4: the
+/// departure-boundary reconciliation of a parked token-creation replacement
+/// whose chooser — or its accepted substitute's decider — left the game. The
+/// pruned event is re-proposed through the replacement authority before the
+/// action returns, so the survivors keep choosing for their own parts in APNAP
+/// order; the boundary feed then delivers the re-proposed creation's events to
+/// the paused clause, which finishes at its resumer. A park whose chooser is
+/// still in the game is untouched. Inert for an action that committed no
+/// departure; `true` when the park moved.
+fn reconcile_parked_token_replacement_after_departure(
+    state: &mut GameState,
+    departure: Option<&CommittedDeparture>,
+    result: &mut ActionResult,
+    _scan_from: usize,
+) -> Result<bool, EngineError> {
+    // The clause feed owns event collection (it feeds the whole action buffer
+    // after the follow-up block), so this repair takes no scan window of its
+    // own; the parameter mirrors the unless-payment sibling's signature.
+    if departure.is_none() {
+        return Ok(false);
+    }
+    reconcile_parked_token_replacement_inner(state, &mut result.waiting_for, &mut result.events)
+}
+
+/// The departure-agnostic core of the token-park repair, shared by the
+/// concession-boundary site above and the SBA-net site in
+/// `reconcile_terminal_sba` (an SBA departure carries no `CommittedDeparture`).
+/// The leaving set is always re-derived from liveness, never trusted from the
+/// triggering departure: prune is a fixpoint, the substitute record-take is
+/// single-fire, and once the chooser is alive the detection below renders
+/// re-entry inert — so SBA-then-Concede orderings and a restored save holding
+/// a stale park are each repaired correctly at the next boundary.
+fn reconcile_parked_token_replacement_inner(
+    state: &mut GameState,
+    waiting_for: &mut WaitingFor,
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, EngineError> {
+    if parked_token_replacement_repair(state, waiting_for).is_none() {
+        return Ok(false);
+    }
+    sync_waiting_for(state, waiting_for);
+    // Defensive prune: the repair never depends on prune having run — the
+    // leaving set is re-derived from liveness right here.
+    let leaving: HashSet<PlayerId> = state
+        .players
+        .iter()
+        .map(|player| player.id)
+        .filter(|player| !super::players::is_alive(state, *player))
+        .collect();
+    let Some(pending) = state.pending_replacement.as_mut() else {
+        return Ok(false);
+    };
+    match replacement::prune_departed_token_batches(pending, &leaving) {
+        replacement::TokenPruneOutcome::Survives => {
+            // No answer is read: the replacement authority re-proposes a park
+            // whose chooser left before it applies an index
+            // (`handle_replacement_choice`, `continue_replacement`).
+            *waiting_for = engine_replacement::handle_replacement_choice(state, 0, events)?;
+            state.waiting_for = waiting_for.clone();
+        }
+        replacement::TokenPruneOutcome::NoSurvivor => {
+            replacement::abandon_survivorless_token_park(state, &leaving);
+            *waiting_for = state.waiting_for.clone();
+        }
+        replacement::TokenPruneOutcome::NotATokenEvent => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// What a departure left to repair on a parked token-creation replacement.
+enum ParkedTokenRepair {
+    /// CR 616.1 + CR 800.4a: the park's chooser — or its substitute's decider —
+    /// left the game. The pruned event is re-proposed to whoever now chooses
+    /// for the surviving batches.
+    DepartedChooser,
+}
+
+/// The one reading of whether a parked token-creation replacement needs the
+/// departure's reconciliation: a token park whose chooser or decider left,
+/// under its prompt or the priority window the departure handed on while
+/// keeping the record.
+fn parked_token_replacement_repair(
+    state: &GameState,
+    waiting_for: &WaitingFor,
+) -> Option<ParkedTokenRepair> {
+    let pending = state.pending_replacement.as_ref()?;
+    if !matches!(pending.proposed, ProposedEvent::CreateToken { .. }) {
+        return None;
+    }
+    if !replacement::parked_token_chooser_has_left(state, pending) {
+        return None;
+    }
+    match waiting_for {
+        WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::ChooseOneOfBranch { .. }
+        | WaitingFor::CopyTargetChoice { .. }
+        | WaitingFor::Priority { .. } => Some(ParkedTokenRepair::DepartedChooser),
         _ => None,
     }
 }
@@ -3266,6 +3396,31 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     }
 
     super::elimination::ensure_game_over_if_terminal(state, &mut result.events);
+    // CR 800.4b + CR 608.2f: the same token-park repair behind the SBA
+    // trigger (an SBA departure leaves the same stale park a concession
+    // does). Inert when the game ended; otherwise the adopted wait is
+    // re-synced and settlement proceeds as below. A departure is never
+    // undone, so a failure is reported rather than returned.
+    if state.game_end.is_none() {
+        match reconcile_parked_token_replacement_inner(
+            state,
+            &mut result.waiting_for,
+            &mut result.events,
+        ) {
+            Ok(moved) => {
+                if moved {
+                    sync_waiting_for(state, &result.waiting_for);
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "a parked token replacement repair after a departure did not settle");
+                debug_assert!(
+                    false,
+                    "a parked token replacement repair after a departure did not settle: {error}"
+                );
+            }
+        }
+    }
     settle_finished_game(state, result);
 }
 
@@ -9072,6 +9227,8 @@ pub(crate) fn cost_includes_draw_instruction(cost: &crate::types::ability::Abili
 /// replaced is still resolving). That repeat follows the whole pass, so the
 /// pass's entry commits (CR 614.12a) land before the exposed owner completes.
 /// A repeat needs the position to strictly decrease, so the loop ends.
+/// Every pass starts and ends with the paused-token-clause finish
+/// (`finish_simultaneous_token_clause_if_ready`).
 pub(super) fn resume_pending_continuation_if_priority(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -9080,24 +9237,11 @@ pub(super) fn resume_pending_continuation_if_priority(
         let before = state.resolution_stack.position();
         resume_pending_continuation_pass(state, events)?;
         let after = state.resolution_stack.position();
-        // CR 117.2e + CR 608.2 + CR 614.6: a pass that shrinks the subtree and
-        // leaves a copy owner or a post-replacement drain on top has exposed it (a
-        // substitute's drain retired, or an inner copy owner completed). The work
-        // that frame belongs to is unfinished (for a copy owner, the ability whose
-        // creation the substitute replaced is still resolving), so no player may
-        // receive priority: pass again. The repeat follows the whole pass, so that
-        // pass's entry commits land first (CR 614.12a).
-        // CR 608.2c: a retired as-enters dispatch can also expose the zone-move
-        // owner above the spell's parked tail. Finish that move before returning
-        // priority, so its later instructions resume in this same action.
-        let exposes_resolving_owner = matches!(
-            state.resolution_stack.last(),
-            Some(
-                ResolutionFrame::CopyToken(_)
-                    | ResolutionFrame::PostReplacement(_)
-                    | ResolutionFrame::ChangeZone(_)
-            )
-        );
+        // A pass that shrinks the subtree and leaves an owner with unfinished
+        // resolving work on top has exposed it: no player may receive priority, so
+        // pass again. The repeat follows the whole pass, so that pass's entry
+        // commits land first (CR 614.12a).
+        let exposes_resolving_owner = top_frame_owes_resolving_work(state);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
             || (state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
                 && !exposes_resolving_owner)
@@ -9123,6 +9267,25 @@ pub(super) fn resume_pending_continuation_if_priority(
     }
 }
 
+/// CR 117.2e + CR 608.2 + CR 614.6: whether the frame on top owes unfinished
+/// resolving work — a copy owner or a post-replacement drain (a substitute's
+/// drain retired, or an inner copy owner completed). The work that frame belongs
+/// to is unfinished (for a copy owner, the ability whose creation the substitute
+/// replaced is still resolving), so no player may receive priority.
+/// CR 608.2c: a retired as-enters dispatch can also expose the zone-move owner
+/// above the spell's parked tail; that move finishes before priority returns, so
+/// its later instructions resume in the same action.
+pub(super) fn top_frame_owes_resolving_work(state: &GameState) -> bool {
+    matches!(
+        state.resolution_stack.last(),
+        Some(
+            ResolutionFrame::CopyToken(_)
+                | ResolutionFrame::PostReplacement(_)
+                | ResolutionFrame::ChangeZone(_)
+        )
+    )
+}
+
 /// CR 601.2h + CR 605.3b + CR 608.2c + CR 616.1: once a parked counter-cost
 /// root's replacement subtree has retired, resume that root at this boundary
 /// before any further frame, liminal-entry or phase-transition work.
@@ -9143,6 +9306,10 @@ fn resume_pending_continuation_pass(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    // CR 608.2f + CR 608.2c: a paused simultaneous token clause whose every seat
+    // has committed finishes here, at the common priority boundary every answer
+    // reaches, before the outer continuation resumes.
+    super::engine_replacement::finish_simultaneous_token_clause_if_ready(state, events);
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         // CR 118.3b + CR 119.4 + CR 616.1: A life-payment replacement child
         // drains to its recorded resolution boundary before the paid outer
@@ -9251,6 +9418,10 @@ fn resume_pending_continuation_pass(
             }
         }
     }
+    // CR 608.2f: and once more after this pass, which may have retired the
+    // clause's last resolving owner; the loop repeats only while an owner stays
+    // exposed, so the clause is never left for an unrelated later action.
+    super::engine_replacement::finish_simultaneous_token_clause_if_ready(state, events);
     settle_resolving_stack_entry_after_continuation_resume(state);
     Ok(())
 }

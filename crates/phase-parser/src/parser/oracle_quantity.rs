@@ -2029,6 +2029,9 @@ pub(crate) fn parse_event_context_quantity_with_context(
     {
         return Some(expr);
     }
+    if let Ok((_, qty)) = nom_quantity::parse_event_context_mana_produced_by_self(lower) {
+        return Some(QuantityExpr::Ref { qty });
+    }
     // CR 120.1 + CR 603.2c + CR 608.2c: "opponents dealt damage this way" in
     // trigger-context effects counts the damaged opponents, not the numeric
     // damage amount. Must precede the passive-voice "dealt damage" numeric
@@ -4254,6 +4257,30 @@ mod tests {
         RoundingMode, SubtypeExclusion, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
+
+    #[test]
+    fn event_context_mana_produced_by_self() {
+        for subject in ["~", "this creature"] {
+            let phrase = format!("the amount of mana {subject} produced");
+            assert_eq!(
+                parse_event_context_quantity(&phrase),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                })
+            );
+        }
+        for phrase in [
+            "the amount of mana another creature produced",
+            "the amount of mana this creature produced last turn",
+        ] {
+            assert_ne!(
+                parse_event_context_quantity(phrase),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                })
+            );
+        }
+    }
 
     // -----------------------------------------------------------------------
     // CR 608.2c — the spell-history swallow guard, and the narrow contract of

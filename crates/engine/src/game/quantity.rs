@@ -1836,6 +1836,7 @@ pub fn static_definition_is_cast_stable_for_pre_cast(definition: &StaticDefiniti
         room_door: None,
         granting_object: None,
         bound_actor: None,
+        origin: _,
     } = definition
     else {
         // This is intentionally a positive proof over every direct static
@@ -8358,7 +8359,7 @@ fn battlefield_departure_counter_context(
 /// undetermined amount from a determined zero (a delayed trigger freezing its
 /// creation-time amount, CR 603.7a) use `determined_event_context_amount`.
 /// Resolution-precedence ordered, after the proposed event's own amount
-/// (`ctx.event_amount`) and the Moonlit copy count:
+/// (`ctx.event_amount`):
 ///
 ///   0. CR 614.6 + CR 615.5: the amount a replacement's own action owns
 ///      (`with_replacement_action_scope`) — the amount of the event it
@@ -8397,13 +8398,6 @@ fn event_context_amount(
         // replacement-condition context, so every other caller falls through
         // to the cascade below unchanged.
         .event_amount
-        // CR 614.1a: Moonlit-scoped "that many" copy count — highest priority
-        // after the proposed event's own amount, which is never set while a
-        // substitution continuation resolves. `Some` only while a
-        // `CopyTokenOf` substitution continuation resolves (Moonlit
-        // Meditation); `None` otherwise, so it falls straight through to the
-        // existing trigger/effect cascade.
-        .or(state.post_replacement_token_substitution_count)
         // CR 614.6 + CR 615.5: a replacement's own action reads the amount of the
         // event it replaced or prevented, ahead of the die result and the trigger
         // tiers of the resolution around it. Farideh's Fireball's "deals 2 damage to
@@ -8912,17 +8906,25 @@ where
     F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
     G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
 {
-    read_object_pt_by_id_for_incarnation(state, id, None, obj_extract, lki_extract)
+    read_object_characteristic_for_incarnation(
+        state,
+        id,
+        None,
+        Zone::Battlefield,
+        obj_extract,
+        lki_extract,
+    )
 }
 
-/// CR 400.7 + CR 608.2h: read P/T for one exact incarnation when the triggering
-/// zone-change record identifies it. A leave and re-entry can reuse the same
-/// `ObjectId`, but the re-entered permanent is a new object; it must not replace
-/// the original entrant's LKI for an already-pending trigger.
-fn read_object_pt_by_id_for_incarnation<T, F, G>(
+/// CR 400.7 + CR 608.2h: read a characteristic (power, toughness, mana value)
+/// for one exact incarnation in its expected zone. Leaving and re-entering
+/// can reuse the same `ObjectId`, so the live object must match the pin before
+/// it can take precedence over the original entrant's LKI.
+fn read_object_characteristic_for_incarnation<T, F, G>(
     state: &GameState,
     id: ObjectId,
     expected_incarnation: Option<u64>,
+    expected_live_zone: Zone,
     obj_extract: &F,
     lki_extract: &G,
 ) -> Option<T>
@@ -8932,7 +8934,7 @@ where
 {
     let live = state.objects.get(&id);
     live.filter(|obj| {
-        obj.zone == crate::types::zones::Zone::Battlefield
+        obj.zone == expected_live_zone
             && expected_incarnation.is_none_or(|expected| obj.incarnation == expected)
     })
     .and_then(obj_extract)
@@ -8983,10 +8985,11 @@ where
         .and_then(obj_extract)
         .or_else(|| {
             ability.and_then(|_| {
-                read_object_pt_by_id_for_incarnation(
+                read_object_characteristic_for_incarnation(
                     state,
                     object.object_id,
                     Some(object.incarnation),
+                    Zone::Battlefield,
                     obj_extract,
                     lki_extract,
                 )
@@ -8998,37 +9001,79 @@ fn trigger_event_source_identity(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
     trigger_context: Option<StackTriggerContext<'_>>,
-) -> Option<(ObjectId, Option<u64>)> {
+) -> Option<(ObjectId, Option<(u64, Zone)>)> {
     let event = object_lookback_event(state, ability, trigger_context)?;
     let object_id = crate::game::targeting::extract_source_from_event(&event)?;
-    let expected_incarnation = match &event {
+    let pin = match &event {
         crate::types::events::GameEvent::ZoneChanged {
             object_id: event_object,
             record,
             ..
-        } if *event_object == object_id => record.entered_incarnation,
+        } if *event_object == object_id => record
+            .entered_incarnation
+            .map(|incarnation| (incarnation, record.to_zone)),
+        // CR 508.1a + CR 400.7: attackers are creatures the active player
+        // controls, so the declaration record pins a battlefield incarnation.
         crate::types::events::GameEvent::AttackersDeclared {
             declaration_records,
             ..
         } => declaration_records
             .iter()
             .find(|record| record.object_id == object_id)
-            .and_then(|record| record.incarnation),
+            .and_then(|record| record.incarnation)
+            .map(|incarnation| (incarnation, Zone::Battlefield)),
+        // CR 400.7: the remaining stamped events (tapped, blocked, combat
+        // damage source) name a permanent's battlefield incarnation.
         _ => crate::game::targeting::event_context_incarnation(
             &crate::types::ability::TargetFilter::TriggeringSource,
             &event,
             object_id,
         )
-        .map(|reference| reference.incarnation),
+        .map(|reference| (reference.incarnation, Zone::Battlefield)),
     };
-    Some((object_id, expected_incarnation))
+    Some((object_id, pin))
 }
 
-/// CR 608.2h + CR 603.10a + CR 400.7: power/toughness of the trigger-event
+/// CR 608.2h + CR 603.10a + CR 400.7: characteristics of the trigger-event
 /// source. A battlefield departure answers from its record-owned last-known
 /// information, which is exact after the step's `lki_cache` is cleared and
-/// after a same-id object has returned; other events use the guarded
-/// identity read.
+/// after a same-id object has returned. Other zone-change events read their
+/// pinned incarnation. Mana value uses the record's destination zone, while
+/// power and toughness retain their battlefield lookup. Unpinned events use
+/// the characteristic's usual reader.
+fn read_trigger_event_source_characteristic<F, G>(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+    trigger_context: Option<StackTriggerContext<'_>>,
+    obj_extract: &F,
+    lki_extract: &G,
+    live_zone_override: Option<Zone>,
+    read_unpinned: impl FnOnce(ObjectId) -> Option<i32>,
+) -> Option<i32>
+where
+    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+{
+    match departure_lookback(state, ability, trigger_context) {
+        DepartureLookback::Present(context) => return lki_extract(&context.lki),
+        DepartureLookback::Malformed => return None,
+        DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {}
+    }
+    let (id, pin) = trigger_event_source_identity(state, ability, trigger_context)?;
+    if let Some((incarnation, destination)) = pin {
+        read_object_characteristic_for_incarnation(
+            state,
+            id,
+            Some(incarnation),
+            live_zone_override.unwrap_or(destination),
+            obj_extract,
+            lki_extract,
+        )
+    } else {
+        read_unpinned(id)
+    }
+}
+
 fn read_trigger_event_source_pt<F, G>(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
@@ -9040,21 +9085,14 @@ where
     F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
     G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
 {
-    match departure_lookback(state, ability, trigger_context) {
-        DepartureLookback::Present(context) => return lki_extract(&context.lki),
-        DepartureLookback::Malformed => return None,
-        DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {}
-    }
-    trigger_event_source_identity(state, ability, trigger_context).and_then(
-        |(id, expected_incarnation)| {
-            read_object_pt_by_id_for_incarnation(
-                state,
-                id,
-                expected_incarnation,
-                obj_extract,
-                lki_extract,
-            )
-        },
+    read_trigger_event_source_characteristic(
+        state,
+        ability,
+        trigger_context,
+        obj_extract,
+        lki_extract,
+        Some(Zone::Battlefield),
+        |id| read_object_pt_by_id(state, id, obj_extract, lki_extract),
     )
 }
 
@@ -9127,10 +9165,11 @@ where
                 // the battlefield; if Grenzo leaves in response, the moved card
                 // is compared against the power it last had there, not the base
                 // P/T of the graveyard card that now occupies the storage id.
-                read_object_pt_by_id_for_incarnation(
+                read_object_characteristic_for_incarnation(
                     state,
                     ctx.source,
                     Some(incarnation),
+                    Zone::Battlefield,
                     &obj_extract,
                     &lki_extract,
                 )
@@ -9215,8 +9254,9 @@ where
         // mid-resolution (Fire Lord Ozai, The Meep, Venom, Broadside
         // Bombardiers).
         //   3. trigger-event source — the object named by this ability's
-        // trigger condition (Hamletback Goliath, Conclave Mentor), live
-        // object then LKI for dies/leaves-battlefield triggers.
+        // trigger condition in context-free references such as Yorvo's "that
+        // creature's power", with live and last-known information as applicable.
+        // Where-X bindings to the trigger event use EventSource directly.
         // CR 608.2k pins true cost/trigger referents; CR 608.2c makes a
         // same-resolution effect referent more specific than the trigger source
         // once the first slot is absent. Exact parity with the
@@ -9309,13 +9349,14 @@ where
                 // captured incarnation, and the LKI rung is qualified by that
                 // same incarnation rather than the id-keyed `state.lki_cache`,
                 // which `zones.rs` overwrites on every departure. Threading the
-                // incarnation into `read_object_pt_by_id_for_incarnation` gets
+                // incarnation into `read_object_characteristic_for_incarnation` gets
                 // both, plus its documented legacy-save handling. The
                 // binding-time `snapshot.lki` remains the last resort.
-                read_object_pt_by_id_for_incarnation(
+                read_object_characteristic_for_incarnation(
                     state,
                     snapshot.object_id,
                     Some(snapshot.incarnation),
+                    Zone::Battlefield,
                     &obj_extract,
                     &lki_extract,
                 )
@@ -9494,11 +9535,10 @@ fn spell_cast_mana_value_for_event(state: &GameState, event: &GameEvent) -> Opti
 /// CR 400.7 + CR 202.3: The mana value an event supplies for its OWN pinned
 /// subject incarnation, when the current trigger event carries one.
 ///
-/// Only `SagaChapterAbilityResolved` pins a subject today. Its Saga is routinely
-/// gone by the time an observer resolves — CR 714.4 sacrifices it the moment the
-/// final chapter ability leaves the stack — and a re-entered Saga can occupy the
-/// same storage id, so neither live state nor the id-keyed LKI cache can be
-/// trusted to answer for the original.
+/// `SagaChapterAbilityResolved` carries the subject's recorded mana value.
+/// CR 714.4 can sacrifice the Saga after the final chapter ability leaves the
+/// stack, and a re-entered Saga can occupy the same storage id before an
+/// observer resolves.
 fn event_source_mana_value_override(
     state: &GameState,
     trigger_context: Option<StackTriggerContext<'_>>,
@@ -9522,34 +9562,35 @@ fn resolve_object_mana_value(
     targets: &[TargetRef],
     ability: Option<&ResolvedAbility>,
 ) -> i32 {
-    // CR 608.2h + CR 603.10a + CR 400.7 + CR 708.2a: the trigger-event source's
-    // mana value. A battlefield departure answers from its record-owned
-    // last-known information (0 for a face-down permanent), never from a live
-    // same-id object that has since returned; other events keep the id-keyed
-    // live-then-LKI read.
-    let event_source_mana_value = || -> Option<i32> {
-        match departure_lookback(state, ability, ctx.stack_trigger_context) {
-            DepartureLookback::Present(context) => {
-                return Some(u32_to_i32_saturating(context.lki.mana_value));
-            }
-            DepartureLookback::Malformed => return Some(0),
-            DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {}
-        }
-        let id = object_lookback_event(state, ability, ctx.stack_trigger_context)
-            .and_then(|e| crate::game::targeting::extract_source_from_event(&e))?;
+    // CR 202.3d + CR 709.4b: combined MV for a split card off the stack;
+    // CR 202.3e: chosen X for an on-stack source.
+    let live = |object: &crate::game::game_object::GameObject| {
+        Some(u32_to_i32_saturating(object.effective_mana_value()))
+    };
+    let last_known =
+        |lki: &crate::types::game_state::LKISnapshot| Some(u32_to_i32_saturating(lki.mana_value));
+    let live_then_lki = |id| {
         state
             .objects
             .get(&id)
-            // CR 202.3d + CR 709.4b: combined MV for a split card off the
-            // stack; CR 202.3e: chosen X for an on-stack source.
-            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
-            .or_else(|| {
-                state
-                    .lki_cache
-                    .get(&id)
-                    .map(|lki| u32_to_i32_saturating(lki.mana_value))
-            })
+            .and_then(live)
+            .or_else(|| state.lki_cache.get(&id).and_then(last_known))
     };
+    // CR 608.2h + CR 603.10a + CR 400.7: the trigger-event source's
+    // mana value as the fallback slot of the cost-paid and demonstrative
+    // scopes. A battlefield departure answers from its record-owned last-known
+    // information (0 for a face-down permanent under CR 708.2a + CR 202.3a),
+    // even if a live same-id object has since returned. Other events keep
+    // the id-keyed live-then-LKI read.
+    let event_source_mana_value =
+        || match departure_lookback(state, ability, ctx.stack_trigger_context) {
+            DepartureLookback::Present(context) => last_known(&context.lki),
+            DepartureLookback::Malformed => Some(0),
+            DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {
+                trigger_event_source_identity(state, ability, ctx.stack_trigger_context)
+                    .and_then(|(id, _)| live_then_lki(id))
+            }
+        };
     match scope {
         // CR 202.3e: include cost_x_paid so on-stack spells report X's chosen value.
         ObjectScope::Source => {
@@ -9573,21 +9614,29 @@ fn resolve_object_mana_value(
             .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .unwrap_or(0),
         ObjectScope::EventSource => {
-            // CR 400.7 + CR 202.3: an event that pins its own subject incarnation
-            // answers for that incarnation directly. Reading live state (or the
-            // id-keyed LKI cache) would let a re-entered permanent at the same
-            // storage id supply the value instead — Narci draining for the NEW
-            // Saga's mana value after a blink. Checked first, so the id-based
-            // fallback below only runs for events with no pinned subject.
+            // CR 400.7 + CR 202.3: Saga events carry the subject's recorded
+            // mana value. Battlefield entries pin the entrant's incarnation,
+            // so Radagast the Brown reads the original face-down entrant's
+            // zero after it blinks (CR 708.2a + CR 202.3a). Unpinned events
+            // read the live object first, including a spell on the stack.
             if let Some(mana_value) =
                 event_source_mana_value_override(state, ctx.stack_trigger_context)
             {
                 return mana_value;
             }
-            event_source_mana_value().unwrap_or(0)
+            read_trigger_event_source_characteristic(
+                state,
+                ability,
+                ctx.stack_trigger_context,
+                &live,
+                &last_known,
+                None,
+                live_then_lki,
+            )
+            .unwrap_or(0)
         }
         // CR 603.2 + CR 202.3: mana value of the object that received the
-        // triggering damage. Same live-then-LKI resolution as `EventSource`.
+        // triggering damage. Read the live event target by id, then its LKI.
         ObjectScope::EventTarget => {
             let Some(object_id) =
                 object_id_for_scope(state, ObjectScope::EventTarget, ctx, targets)
@@ -11890,6 +11939,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
 
@@ -22436,6 +22486,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
         state
@@ -25592,6 +25643,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -25660,6 +25712,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             incarnation: 0,
@@ -25813,6 +25866,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             incarnation: 0,
@@ -25897,6 +25951,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             incarnation: 0,
@@ -25927,6 +25982,40 @@ mod tests {
             4,
             "effect-context mana value must win over trigger-source mana value"
         );
+    }
+
+    /// CR 614.6 + CR 400.7: a creation record pins its incarnation in whatever
+    /// zone the object was created in (a token Hallowed Moonlight sent to exile),
+    /// so the pinned mana-value read must match that zone, not the battlefield.
+    #[test]
+    fn event_source_mana_value_reads_the_pinned_live_object_in_exile() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Trained Armodon".to_string(),
+            Zone::Exile,
+        );
+        let object = state.objects.get_mut(&source).unwrap();
+        object.mana_cost = ManaCost::generic(3);
+        let record = ZoneChangeRecord {
+            entered_incarnation: Some(object.incarnation),
+            ..ZoneChangeRecord::test_minimal(source, None, Zone::Exile)
+        };
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: source,
+            from: None,
+            to: Zone::Exile,
+            record: Box::new(record),
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::EventSource,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 3);
     }
 
     /// CR 608.2k + CR 202.3 + CR 701.21a — Birthing Ritual (issue #420b): the
@@ -25979,6 +26068,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             incarnation: 0,
@@ -26047,6 +26137,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             incarnation: 0,
@@ -26112,6 +26203,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             incarnation: 0,
@@ -26170,6 +26262,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             incarnation: 0,
@@ -26251,6 +26344,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             incarnation: 0,
@@ -26962,6 +27056,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -27792,6 +27887,7 @@ mod tests {
                     is_suspected: false,
                     was_prepared: false,
                     attachments: Vec::new(),
+                    produceable_mana_types: Vec::new(),
                     intensity: 0,
                 },
             );

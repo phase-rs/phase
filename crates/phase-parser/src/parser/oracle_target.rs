@@ -10024,7 +10024,7 @@ pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
 ///
 /// CR 608.2c + CR 701.68c: the filter also names an object an earlier
 /// instruction of the same resolution bound, as "the blighted creature" does.
-fn parse_cost_paid_object_reference<'a>(
+pub(crate) fn parse_cost_paid_object_reference<'a>(
     input: &'a str,
     ctx: &ParseContext,
 ) -> nom::IResult<&'a str, TargetFilter, OracleError<'a>> {
