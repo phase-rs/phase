@@ -343,6 +343,38 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
     expect(result.current.deck.sideboard).toEqual([second]);
   });
 
+  it("discards a pending partner answer after loading another deck", async () => {
+    const { result } = setup();
+    const rograkh = "Rograkh, Son of Rohgahh";
+    const ardenn = "Ardenn, Intrepid Archaeologist";
+    eligible.add(ardenn);
+    const ardennRow = { name: ardenn, count: 1 };
+    await act(async () => result.current.handleImport({
+      main: [ardennRow],
+      sideboard: [],
+      commander: [rograkh],
+    }));
+    expect(result.current.commanders).toEqual([rograkh]);
+    await waitFor(() => expect(result.current.isCommanderEligible(ardenn)).toBe(true));
+
+    const pairing = deferred<string[]>();
+    partnerCandidates.mockReturnValueOnce(pairing.promise);
+    act(() => result.current.handleSetCommander(ardennRow));
+    expect(partnerCandidates).toHaveBeenCalledWith(rograkh, [ardenn], []);
+
+    const name = "Unmarked Commander";
+    const main = [{ name: "Isamaru, Hound of Konda", count: 1 }, { name: "Plains", count: 99 }];
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify({ main, sideboard: [], format: "Commander" }));
+    await act(async () => expect(await result.current.handleLoad(name)).toBe(true));
+    expect(result.current.deckName).toBe(name);
+
+    await act(async () => pairing.resolve([ardenn]));
+
+    expect(result.current.deck.main).toEqual(main);
+    expect(result.current.commanders).toEqual([]);
+    expect(result.current.dirty).toBe(false);
+  });
+
   it("removes the row entirely when the last copy is designated", async () => {
     const { result } = setup();
     await withMain(result, [{ count: 1, name: LEGEND }]);

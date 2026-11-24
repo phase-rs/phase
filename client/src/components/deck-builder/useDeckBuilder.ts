@@ -791,6 +791,7 @@ export function useDeckBuilder({
         ? commanderCandidateNames?.includes(cardName)
         : commanderEligibleNames.has(cardName);
       if (!eligible) return;
+      const captured = captureEditor();
       // CR 702.124: a second pick joins as a co-commander only when the engine
       // confirms it legally pairs with the existing one; otherwise it swaps. The
       // pairing decision is queried on demand (authoritative at click time) so a
@@ -813,6 +814,8 @@ export function useDeckBuilder({
           } catch {
             return;
           }
+          // A Load or Clone can switch decks while the pairing check is pending.
+          if (editorChangedSince(captured).reloaded) return;
         }
         markDirty();
         const displaced =
@@ -838,7 +841,7 @@ export function useDeckBuilder({
         });
       })();
     },
-    [commanderCandidateNames, commanderEligibleNames, commanders, markDirty],
+    [commanderCandidateNames, commanderEligibleNames, commanders, captureEditor, editorChangedSince, markDirty],
   );
 
   // Eligibility predicate consulted by each main-deck row. The set is loaded
