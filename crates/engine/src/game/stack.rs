@@ -1859,25 +1859,26 @@ pub(crate) fn bind_resolving_ability_referents(
     // `lower_trigger_ir`.
     if ability.scoped_player.is_none() {
         if let Some(event) = state.current_trigger_event.as_ref() {
-            match event {
-                GameEvent::AttackersDeclared { .. } => {
-                    // CR 506.2 + CR 101.4: the attacking player is the trigger's own binding,
-                    // not a `player_scope` seat leg, so the chain's instructions stay
-                    // boundaries where entries are observed (CR 603.6a + CR 608.2c).
-                    if let Some(pid) = targeting::extract_player_from_event(event, state) {
-                        ability.set_trigger_bound_player_recursive(pid);
-                    }
-                }
+            let attack = matches!(event, GameEvent::AttackersDeclared { .. });
+            let damage_to_player = matches!(
+                event,
                 GameEvent::DamageDealt {
                     target: TargetRef::Player(_),
                     ..
-                } => {
-                    // Keep the existing instruction binding for the damaged player.
-                    if let Some(pid) = targeting::extract_player_from_event(event, state) {
+                }
+            );
+            if attack || damage_to_player {
+                if let Some(pid) = targeting::extract_player_from_event(event, state) {
+                    if attack {
+                        // CR 506.2 + CR 101.4: the attacking player is the trigger's own
+                        // binding, not a `player_scope` seat leg, so the chain's instructions
+                        // stay boundaries where entries are observed (CR 603.6a + CR 608.2c).
+                        ability.set_trigger_bound_player_recursive(pid);
+                    } else {
+                        // Keep the existing instruction binding for the damaged player.
                         ability.set_scoped_player_recursive(pid);
                     }
                 }
-                _ => {}
             }
         }
     }

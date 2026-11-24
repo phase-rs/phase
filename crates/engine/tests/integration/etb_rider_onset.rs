@@ -1486,6 +1486,13 @@ fn iron_man_treasure_is_observed_before_the_optional_sacrifice() {
         );
         assert_eq!(state.deferred_triggers[0].pending.source_id, fireweaver);
         assert!(!state.instruction_boundary_marks.is_empty());
+        // The parked sacrifice frame is bound to the attacking player by its trigger, not
+        // by an instruction (the in-crate row reads the frame's entry-progress verdict).
+        let frame = state
+            .active_optional_effect_frame()
+            .expect("Iron Man's sacrifice prompt");
+        assert_eq!(frame.ability.scoped_player, Some(P0));
+        assert_eq!(frame.ability.context.trigger_bound_player, Some(P0));
         let answer = runner
             .act(GameAction::DecideOptionalEffect { accept })
             .unwrap();
