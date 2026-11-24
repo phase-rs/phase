@@ -75,9 +75,9 @@ function lethalPreset(data: AssignCombatDamage["data"], hasAttackTarget: boolean
   if (data.trample === "OverPlaneswalkers" && data.attack_target.type === "Planeswalker") {
     // CR 702.19c: the prompt carries the loyalty to assign before any spillover
     // to the planeswalker's controller. CR 702.19e: once the planeswalker has
-    // left combat the prompt carries no loyalty, and the excess stays unassigned.
-    if (data.pw_loyalty != null && data.pw_controller != null) {
-      trampleDamage = Math.min(excess, data.pw_loyalty);
+    // left combat the prompt carries no loyalty and names the original defender.
+    if (data.pw_controller != null) {
+      trampleDamage = Math.min(excess, data.pw_loyalty ?? 0);
       controllerDamage = excess - trampleDamage;
     }
   } else if (data.trample != null && hasAttackTarget) {
@@ -96,9 +96,10 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
 
   // CR 506.4c: the engine publishes each attacker's live attack target; an
   // attacker whose planeswalker or battle left combat has no entry.
-  const hasAttackTarget = useGameStore(
-    (s) => s.gameState?.derived?.attack_targets?.[String(data.attacker_id)] != null,
+  const attackTarget = useGameStore(
+    (s) => s.gameState?.derived?.attack_targets?.[String(data.attacker_id)],
   );
+  const hasAttackTarget = attackTarget != null;
   const preset = lethalPreset(data, hasAttackTarget);
   const presetTramples = preset.trampleDamage > 0 || preset.controllerDamage > 0;
 
@@ -125,9 +126,13 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
   const loyaltyMet = !isOverPw || controllerDamage === 0 ||
     trampleDamage >= (data.pw_loyalty ?? 0);
   const isValid = total === data.total_damage && trampleLethalMet && loyaltyMet;
+  // CR 702.19b: ordinary trample's excess goes to whatever the creature is
+  // attacking, so the row names the engine-reported planeswalker or battle.
   const trampleLabel = isOverPw
     ? t("combat.planeswalkerLoyalty", { loyalty: data.pw_loyalty ?? 0 })
-    : t("combat.defendingPlayerTrample");
+    : attackTarget && attackTarget.type !== "Player"
+      ? t("combat.attackTargetTrample", { name: getName(attackTarget.data) })
+      : t("combat.defendingPlayerTrample");
   const controllerLabel = t("combat.pwControllerTrample");
 
   const setAmount = useCallback((index: number, value: number) => {

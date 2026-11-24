@@ -838,6 +838,7 @@
     "lethalBadge": "Letale",
     "planeswalkerLoyalty": "Planeswalker (lealtà: {{loyalty}})",
     "defendingPlayerTrample": "Giocatore in difesa (Travolgere)",
+    "attackTargetTrample": "{{name}} (Travolgere)",
     "pwControllerTrample": "Controllore del PW (Travolgere sul PW)",
     "lethalButton": "Letale",
     "clearButton": "Azzera",

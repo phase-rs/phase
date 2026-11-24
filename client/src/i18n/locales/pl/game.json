@@ -838,6 +838,7 @@
     "lethalBadge": "Śmiertelne",
     "planeswalkerLoyalty": "Wędrowiec (lojalność: {{loyalty}})",
     "defendingPlayerTrample": "Broniący gracz (Tratowanie)",
+    "attackTargetTrample": "{{name}} (Tratowanie)",
     "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)",
     "lethalButton": "Śmiertelne",
     "clearButton": "Wyczyść",

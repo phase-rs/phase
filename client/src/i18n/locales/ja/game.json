@@ -871,6 +871,7 @@
     "lethalBadge": "致死",
     "planeswalkerLoyalty": "プレインズウォーカー（忠誠度: {{loyalty}}）",
     "defendingPlayerTrample": "防御プレイヤー（トランプル）",
+    "attackTargetTrample": "{{name}}（トランプル）",
     "pwControllerTrample": "PWコントローラー（PW越しのトランプル）",
     "lethalButton": "致死",
     "clearButton": "クリア",

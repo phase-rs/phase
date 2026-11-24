@@ -871,6 +871,7 @@
     "lethalBadge": "Lethal",
     "planeswalkerLoyalty": "Planeswalker (loyalty: {{loyalty}})",
     "defendingPlayerTrample": "Defending Player (Trample)",
+    "attackTargetTrample": "{{name}} (Trample)",
     "pwControllerTrample": "PW Controller (Trample Over PW)",
     "lethalButton": "Lethal",
     "clearButton": "Clear",

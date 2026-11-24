@@ -1163,6 +1163,7 @@
     "confirmAttackers": "确认攻击者（{{count}}）",
     "confirmBlockers": "确认阻挡者（{{count}}）",
     "defendingPlayerTrample": "防御牌手（践踏）",
+    "attackTargetTrample": "{{name}}（践踏）",
     "lethalBadge": "致命",
     "lethalLabel": "致命：{{amount}}",
     "menaceRequirement": "必须被{{count}}个生物阻挡，否则不能被阻挡",

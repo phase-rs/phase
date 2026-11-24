@@ -73,6 +73,8 @@ function renderDamagePrompt(overrides: Partial<DamagePrompt> = {}, live = true) 
         creature(10, "Rampager", data.total_damage, 4),
         creature(20, "Guard A", 3, 3),
         creature(21, "Guard B", 3, 3),
+        buildGameObjectWithCoreTypes(["Planeswalker"], { id: 30, name: "Jace Beleren" }),
+        buildGameObjectWithCoreTypes(["Battle"], { id: 31, name: "Invasion of Zendikar" }),
       ),
       derived: { attack_targets: live ? { [data.attacker_id]: data.attack_target } : {} },
     }),
@@ -226,19 +228,14 @@ describe("DamageAssignmentModal", () => {
       confirmDamage([[20, 7], [21, 3]]);
     });
 
-    it("leaves excess unassigned once a trample-over planeswalker has left combat", () => {
+    it("assigns excess to the original defender once a trample-over planeswalker has left combat", () => {
       // CR 702.19e: the engine then sends no loyalty, only the original defender as controller.
       renderDamagePrompt(
         { attack_target: planeswalkerTarget, trample: "OverPlaneswalkers", pw_controller: 1 },
         false,
       );
-      fireEvent.click(button("Lethal to blockers"));
-      expect(button("Assign Damage")).toBeDisabled();
-      expect(button("Clear damage assigned to Planeswalker (loyalty: 0)")).toBeDisabled();
-      expect(button("Clear damage assigned to PW Controller (Trample Over PW)")).toBeDisabled();
-
-      fireEvent.click(button("Assign the remaining 5 damage to Guard A"));
-      confirmDamage([[20, 7], [21, 3]]);
+      fireEvent.click(button("Lethal to blockers, rest tramples over"));
+      confirmDamage([[20, 2], [21, 3]], 0, 5);
     });
 
     it("disables the preset when there is no damage to assign", () => {
@@ -248,6 +245,19 @@ describe("DamageAssignmentModal", () => {
   });
 
   describe("row shortcuts", () => {
+    it.each([
+      { target: planeswalkerTarget, name: "Jace Beleren" },
+      { target: battleTarget, name: "Invasion of Zendikar" },
+      { target: playerTarget, name: "Defending Player" },
+    ])("names the live $target.type in the Standard trample row and shortcuts", ({ target, name }) => {
+      renderDamagePrompt({ attack_target: target });
+      const label = `${name} (Trample)`;
+
+      expect(screen.getByText(label)).toBeInTheDocument();
+      expect(button(`Clear damage assigned to ${label}`)).toBeInTheDocument();
+      expect(button(`Assign the remaining 10 damage to ${label}`)).toBeInTheDocument();
+    });
+
     it("uses the lethal minimum, caps at remaining damage and disables lethal when satisfied or exhausted", () => {
       renderDamagePrompt({
         total_damage: 4,

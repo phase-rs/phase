@@ -838,6 +838,7 @@
     "lethalBadge": "Tödlich",
     "planeswalkerLoyalty": "Planeswalker (Loyalität: {{loyalty}})",
     "defendingPlayerTrample": "Verteidigender Spieler (Trampelschaden)",
+    "attackTargetTrample": "{{name}} (Trampelschaden)",
     "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)",
     "lethalButton": "Tödlich",
     "clearButton": "Zurücksetzen",

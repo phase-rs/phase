@@ -102,7 +102,7 @@ describe("DistributeAmongModal", () => {
     render(
       <DistributeAmongModal
         data={distributeAmongData(
-          { type: "Life" },
+          { type: "Damage" },
           { type: "ResolutionCandidates", data: { pending_effect: {} } },
         )}
       />,
@@ -116,20 +116,27 @@ describe("DistributeAmongModal", () => {
     });
   });
 
-  it("requires an announced share on every target after assigning the remainder", () => {
-    render(<DistributeAmongModal data={distributeAmongData({ type: "Damage" })} />);
+  it("requires an announced life share on every target after assigning the remainder", () => {
+    render(
+      <DistributeAmongModal
+        data={{
+          ...distributeAmongData({ type: "Life" }),
+          targets: [{ Player: 0 }, { Player: 1 }],
+        }}
+      />,
+    );
 
     const confirm = screen.getByRole("button", { name: "Confirm" });
     const [firstMinus] = screen.getAllByRole("button", { name: "−" });
-    fireEvent.click(screen.getByRole("button", { name: "Assign the remaining 2 to Object 101" }));
+    fireEvent.click(screen.getByRole("button", { name: "Assign the remaining 2 to Opp 1" }));
     expect(confirm).toBeDisabled();
     fireEvent.click(firstMinus);
-    fireEvent.click(screen.getByRole("button", { name: "Assign the remaining 1 to Object 102" }));
+    fireEvent.click(screen.getByRole("button", { name: "Assign the remaining 1 to Opp 2" }));
     expect(confirm).toBeEnabled();
     fireEvent.click(confirm);
     expect(dispatchMock).toHaveBeenCalledExactlyOnceWith({
       type: "DistributeAmong",
-      data: { distribution: [[{ Object: 101 }, 1], [{ Object: 102 }, 1]] },
+      data: { distribution: [[{ Player: 0 }, 1], [{ Player: 1 }, 1]] },
     });
   });
 
@@ -138,10 +145,7 @@ describe("DistributeAmongModal", () => {
     try {
       render(
         <DistributeAmongModal
-          data={distributeAmongData(
-            { type: "Counters", data: "P1P1" },
-            { type: "ResolutionCandidates", data: { pending_effect: {} } },
-          )}
+          data={distributeAmongData({ type: "Counters", data: "P1P1" })}
         />,
       );
 
@@ -154,11 +158,12 @@ describe("DistributeAmongModal", () => {
       fireEvent.click(screen.getByRole("button", { name: "Assign the remaining 2 to Object 101" }));
       fireEvent.click(clear);
       expect(clear).toBeDisabled();
-      fireEvent.click(screen.getByRole("button", { name: "Assign the remaining 2 to Object 102" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "+" })[0]);
+      fireEvent.click(screen.getByRole("button", { name: "Assign the remaining 1 to Object 102" }));
       fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
       expect(dispatchMock).toHaveBeenCalledExactlyOnceWith({
         type: "DistributeAmong",
-        data: { distribution: [[{ Object: 102 }, 2]] },
+        data: { distribution: [[{ Object: 101 }, 1], [{ Object: 102 }, 1]] },
       });
     } finally {
       inspect.mockRestore();
