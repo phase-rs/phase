@@ -5,7 +5,8 @@ use crate::types::ability::{
 use crate::types::casting_costs::SettledTail;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActivationTargetSelection, GameState, PendingCast, TargetSelectionSlot, WaitingFor,
+    ActivationTargetSelection, GameState, PendingCast, StackEntryKind, TargetSelectionSlot,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -783,6 +784,25 @@ pub(crate) fn emit_ability_activated(
     announced_zone: crate::types::zones::Zone,
     events: &mut Vec<GameEvent>,
 ) -> usize {
+    let loyalty_counters_removed = if kind == crate::types::events::ActivatedAbilityKind::Loyalty {
+        stack_entry
+            .and_then(|placed| {
+                state.stack.iter().find_map(|entry| {
+                    (entry.id == placed).then_some(match &entry.kind {
+                        StackEntryKind::ActivatedAbility { ability, .. } => {
+                            ability.context.loyalty_counters_removed
+                        }
+                        StackEntryKind::Spell { .. }
+                        | StackEntryKind::TriggeredAbility { .. }
+                        | StackEntryKind::KeywordAction { .. }
+                        | StackEntryKind::CombatDamage { .. } => None,
+                    })
+                })
+            })
+            .flatten()
+    } else {
+        None
+    };
     let departed = announced_zone == Zone::Battlefield
         && state
             .objects
@@ -799,6 +819,7 @@ pub(crate) fn emit_ability_activated(
         trigger_state: crate::types::events::ActivationTriggerState::Pending,
         stack_entry,
         activation_cost,
+        loyalty_counters_removed,
     });
     events.len() - 1
 }

@@ -5225,6 +5225,7 @@ fn continue_mana_ability_cost_payment_in_node(
         let PausedCounterCostRemoval {
             in_flight,
             remaining,
+            aggregate_credit: _,
             replacement_subtree: _,
         } = *paused;
         let settled =
@@ -5235,6 +5236,7 @@ fn continue_mana_ability_cost_payment_in_node(
                 state,
                 remaining,
                 Some(&mut cursor.cost_removed_counters),
+                None,
                 events,
             )
         {
@@ -5759,6 +5761,7 @@ where
                     state,
                     removals,
                     Some(cost_removed_counters),
+                    None,
                     events,
                 )
             {
@@ -13095,6 +13098,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         assert!(!is_triggered_mana_ability(&ability, Some(&ev)));
     }

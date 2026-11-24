@@ -24,7 +24,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CounterCause, CounterMoveStage, CounterPlacement, ProposedEvent,
+    CounterCause, CounterMoveStage, CounterPlacement, LoyaltyCostRoot, ProposedEvent,
 };
 use crate::types::resolution::{ChildStackDepth, FrameGate, ResolutionFrame};
 use crate::types::resolved_commands::{
@@ -1807,6 +1807,36 @@ pub fn remove_counter_with_replacement(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) -> CounterRemovalOutcome {
+    remove_counter_with_replacement_inner(state, object_id, counter_type, count, None, events)
+}
+
+/// CR 602.2b + CR 606.4: propose one loyalty-counter cost removal with an
+/// identity marker that survives replacement ordering and distinguishes this
+/// root from any identical child removal.
+pub(crate) fn remove_loyalty_cost_counter_with_replacement(
+    state: &mut GameState,
+    object_id: ObjectId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> CounterRemovalOutcome {
+    remove_counter_with_replacement_inner(
+        state,
+        object_id,
+        CounterType::Loyalty,
+        count,
+        Some(LoyaltyCostRoot::InitiatingRemoval),
+        events,
+    )
+}
+
+fn remove_counter_with_replacement_inner(
+    state: &mut GameState,
+    object_id: ObjectId,
+    counter_type: CounterType,
+    count: u32,
+    loyalty_cost_root: Option<LoyaltyCostRoot>,
+    events: &mut Vec<GameEvent>,
+) -> CounterRemovalOutcome {
     // CR 101.2: "Can't" overrides "can" — if a static prohibits removal of
     // this counter type from this object, bail out immediately.
     if counter_removal_blocked(state, object_id, &counter_type) {
@@ -1817,6 +1847,7 @@ pub fn remove_counter_with_replacement(
         object_id,
         counter_type,
         count,
+        loyalty_cost_root,
         applied: HashSet::new(),
     };
 

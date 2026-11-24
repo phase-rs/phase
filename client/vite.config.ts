@@ -320,12 +320,26 @@ export default defineConfig(({ mode }) => {
           // over the placeholder shipped in the bundle. `.js` is in
           // globPatterns, so precaching it would pin the BUILD-TIME copy for
           // every client that already has a service worker, and the deployed
-          // one would never be read. Same mechanism as the wasm entries above,
-          // different motive: those are fetched by a runtime rule, this one
-          // must always come from the network.
+          // one would never be read. Same mechanism as the wasm entries above:
+          // the runtime rule below fetches it from the network instead.
           "**/config.js",
         ],
         runtimeCaching: [
+          {
+            // The deployment's /config.js (see the globIgnores entry above).
+            // NetworkFirst reads the deployed copy whenever the network
+            // answers, and falls back to the last copy seen only when it does
+            // not. Without that fallback an offline start loses the
+            // deployment's settings for the whole page — including the
+            // Supabase project cloud sync signs in to once connectivity
+            // returns — and runs on the build-time defaults instead.
+            urlPattern: ({ sameOrigin, url }) => sameOrigin && url.pathname === "/config.js",
+            handler: "NetworkFirst",
+            options: {
+              cacheName: "deployment-config",
+              expiration: { maxEntries: 1 },
+            },
+          },
           {
             // Tiny constant-size "what's new" pointer fetched on every app load
             // to drive the unread dot. StaleWhileRevalidate serves the cached
