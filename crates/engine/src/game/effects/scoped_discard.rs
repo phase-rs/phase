@@ -19,16 +19,15 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingPlayerScopeChoice, WaitingFor};
+use crate::types::game_state::{DiscardCause, GameState, PendingPlayerScopeChoice, WaitingFor};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-use super::discard::{player_hand_discard_pool, PlayerHandDiscardPool};
+use super::discard::{discard_count, player_hand_discard_pool, PlayerHandDiscardPool};
 
-/// CR 101.4: whether a `player_scope` fan-out of `ability` is a bare, chosen
-/// hand discard whose per-player choices must all be made before any card is
-/// discarded.
+/// CR 101.4: whether this player fan-out is a bare, chosen hand discard
+/// whose per-player choices must all be made before any card is discarded.
 ///
 /// Only the bare instruction is collected. A random discard makes no choice
 /// (CR 701.9b); an "unless" discard (CR 608.2c) and any per-player rider — an
@@ -39,11 +38,13 @@ pub(super) fn should_collect_player_scope_choices(ability: &ResolvedAbility) -> 
     matches!(
         &ability.effect,
         Effect::Discard {
-            target: TargetFilter::Controller | TargetFilter::ScopedPlayer,
+            target,
             selection,
             unless_filter: None,
             ..
         } if selection.is_chosen()
+            && (matches!(target, TargetFilter::Controller | TargetFilter::ScopedPlayer)
+                || (ability.multi_target.is_some() && super::is_multi_target_player_filter(target)))
     ) && ability.sub_ability.is_none()
         && ability.else_ability.is_none()
         && ability.unless_pay.is_none()
@@ -89,7 +90,16 @@ fn scoped_discard_step(
     original_controller: PlayerId,
     seat: PlayerId,
 ) -> ScopedDiscardStep {
-    let scoped = super::bind_scoped_seat(template, original_controller, seat);
+    let scoped = if template.multi_target.is_some() {
+        // CR 109.5 + CR 608.2e: Bind the chosen member, retaining the
+        // spell's controller for forced-action restrictions and caster reads.
+        let mut bound = template.clone();
+        bound.set_scoped_player_recursive(seat);
+        bound.set_unpinned_targets(vec![TargetRef::Player(seat)]);
+        bound
+    } else {
+        super::bind_scoped_seat(template, original_controller, seat)
+    };
     let Effect::Discard {
         count,
         target,
@@ -100,18 +110,18 @@ fn scoped_discard_step(
         return ScopedDiscardStep::Noop;
     };
     // CR 701.9b + CR 608.2d: `UpTo` is the may-pick-fewer flag, not a count.
-    let (inner, up_to) = count.peel_up_to();
-    // CR 107.1b: a calculation that would yield a negative number uses zero.
-    let wanted =
-        crate::game::quantity::resolve_quantity_with_targets(state, inner, &scoped).max(0) as usize;
+    let up_to = count.peel_up_to().1;
     let (player, pool) = match player_hand_discard_pool(state, &scoped, target, filter.as_ref()) {
         Ok(PlayerHandDiscardPool::Eligible { player, cards }) => (player, cards),
         // CR 608.2b + CR 701.9a + CR 609.3: no player, or a player no spell or
         // ability can force to discard, discards nothing.
-        Ok(PlayerHandDiscardPool::NoPlayer | PlayerHandDiscardPool::Muzzled) | Err(_) => {
+        Ok(PlayerHandDiscardPool::NoPlayer | PlayerHandDiscardPool::Muzzled { .. }) | Err(_) => {
             return ScopedDiscardStep::Noop;
         }
     };
+    // CR 608.2c + CR 107.1b: the count, read for the discarding player and
+    // clamped at zero by the shared discard authority.
+    let wanted = discard_count(state, &scoped, player) as usize;
     let count = if up_to {
         wanted
     } else {
@@ -197,13 +207,31 @@ fn deliver_scoped_discards(
         });
         return Ok(super::ResolutionProgress::Complete);
     }
+    let delivery = scoped_discard_delivery_node(template, cards, DiscardCause::Effect);
+    super::resolve_ability_chain_step(state, &delivery, events, depth)
+}
+
+/// CR 101.4 + CR 701.9a: the one specific-card discard node that delivers a
+/// simultaneous instruction's collected hand picks (`cards`, already checked
+/// to still be in hand). `cause` is the node's own (CR 118.12): `Effect` for
+/// "each opponent discards a card", `Cost` for the discards chosen to pay a
+/// CR 118.12a unless-cost (`simultaneous_unless`), which Library-of-Leng-class
+/// replacements must not touch.
+pub(super) fn scoped_discard_delivery_node(
+    template: &ResolvedAbility,
+    cards: Vec<TargetRef>,
+    cause: DiscardCause,
+) -> ResolvedAbility {
     let mut delivery = template.clone();
     delivery.effect = Effect::DiscardCard {
         count: cards.len() as u32,
         target: TargetFilter::ParentTarget,
     };
+    delivery.multi_target = None;
     delivery.targets = cards;
-    super::resolve_ability_chain_step(state, &delivery, events, depth)
+    delivery.context.discard_cause = cause;
+    delivery.sub_ability = None;
+    delivery
 }
 
 /// CR 101.4: walk `remaining` in APNAP order, collecting each seat's choice

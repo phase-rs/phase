@@ -2371,7 +2371,16 @@ fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
 /// subject. The split and the carry share one classifier, so a bare imperative or a
 /// new subject ("… and you choose a nonland card from it") stays fused for the
 /// reveal's own continuation grammar.
+///
+/// CR 608.2c + CR 603.12: inside an "if/when …, " prefix clause the conjunct
+/// belongs to that clause's body (for "when you do," the reflexive trigger's
+/// effect), which the conditional handler re-splits; splitting it here orphans
+/// it from the body's gate and subject (Cabal Therapist), mirroring the
+/// prefix-clause rule in `split_comma_clause_boundary`.
 fn reveal_hand_continues_with_conjugated_verb(before_lower: &str, remainder_trimmed: &str) -> bool {
+    if starts_prefix_clause(before_lower.trim_start()) {
+        return false;
+    }
     nom_primitives::scan_at_word_boundaries(before_lower, |input| {
         all_consuming(preceded(
             tag::<_, _, OracleError<'_>>("reveals "),
@@ -2921,6 +2930,12 @@ fn continues_inline_delayed_body(remainder_lower: &str) -> bool {
 fn starts_prefix_clause(current_lower: &str) -> bool {
     // CR 603.7a: Temporal prefix clauses must not be split on their internal comma.
     // CR 611.2b: "For as long as [condition], [effect]" — duration prefix clause.
+    // CR 608.2c: a sequence-connected prefix ("Then if ...", "Then, for each ...")
+    // owns its comma-delimited body exactly as the bare prefix does, so classify
+    // the clause after the shared connector is stripped. Regression: A Good Thing
+    // ("Then, if you have 1,000 or more life, you lose the game") — the splitter
+    // must not bisect the conditional at the comma and orphan the body.
+    let current_lower = strip_sequence_connector_lower(current_lower);
     alt((
         tag::<_, _, OracleError<'_>>("until "),
         tag("after "),
@@ -2928,12 +2943,6 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         tag("when "),
         tag("whenever "),
         tag("for each "),
-        tag("then if "),
-        // "then, if ..." (with comma after "then") — same scoping as "then if".
-        // Regression: A Good Thing ("Then, if you have 1,000 or more life, you
-        // lose the game") — without this, the splitter bisects the conditional
-        // at the comma between life and "you lose", orphaning the body.
-        tag("then, if "),
         tag("otherwise"),
         tag("if not"),
         tag("the next time "),
@@ -4900,6 +4909,8 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         protection_does_not_remove: a_protection_does_not_remove,
         room_door: a_room_door,
         granting_object: a_granting_object,
+        bound_actor: a_bound_actor,
+        origin: a_origin,
     } = a;
     let StaticDefinition {
         mode: b_mode,
@@ -4919,6 +4930,8 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         protection_does_not_remove: b_protection_does_not_remove,
         room_door: b_room_door,
         granting_object: b_granting_object,
+        bound_actor: b_bound_actor,
+        origin: b_origin,
     } = b;
     a_mode == b_mode
         && a_affected == b_affected
@@ -4936,6 +4949,8 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         && a_protection_does_not_remove == b_protection_does_not_remove
         && a_room_door == b_room_door
         && a_granting_object == b_granting_object
+        && a_bound_actor == b_bound_actor
+        && a_origin == b_origin
 }
 
 /// Do two parses CONSUME the same thing? Compares everything the ENGINE READS and
@@ -9487,7 +9502,9 @@ fn is_anaphoric_entry_counters_clause(sentence: &str) -> bool {
 /// with an optional source-keyword condition such as Ram Through's "If the
 /// creature you control has trample" prefix. The body remains the same
 /// CR 120.4a redirect; only the source-keyword gate is optional.
-fn parse_excess_damage_to_controller_rider(input: &str) -> OracleResult<'_, Option<KeywordKind>> {
+pub(crate) fn parse_excess_damage_to_controller_rider(
+    input: &str,
+) -> OracleResult<'_, Option<KeywordKind>> {
     /// CR 608.2c + CR 702: Parse the source-referential keyword gate.
     fn parse_source_keyword_condition(input: &str) -> OracleResult<'_, KeywordKind> {
         // This is not parse_inner_condition: Ram Through's definite phrase
@@ -11791,6 +11808,15 @@ mod tests {
             assert_eq!(chunks[0].text, head, "{text}");
             assert_eq!(chunks[1].text, tail, "{text}");
         }
+        // CR 608.2c: inside an "if you do, …" prefix clause the conjunct stays in
+        // the clause's body (the conditional handler re-splits it there with the
+        // gate and subject); the same body without the prefix splits as above.
+        let gated = "if you do, choose a card name, then that player reveals their hand and discards a creature card at random";
+        assert_eq!(split_clause_sequence(gated).len(), 1, "{gated}");
+        let body = "choose a card name, then that player reveals their hand and discards a creature card at random";
+        let body_chunks = split_clause_sequence(body);
+        assert_eq!(body_chunks.len(), 3, "{body}: {body_chunks:?}");
+        assert_eq!(body_chunks[2].text, "discards a creature card at random");
         for text in [
             "target opponent reveals their hand and you choose a nonland card from it",
             "Target player reveals their hand and the top card of their library",
@@ -11824,6 +11850,17 @@ mod tests {
         assert_eq!(split_clause_sequence(waltz).len(), 2, "{waltz}");
         let plain = "Draw a card. It gains flying until end of turn.";
         assert_eq!(split_clause_sequence(plain).len(), 2, "{plain}");
+    }
+
+    #[test]
+    fn then_for_each_prefix_keeps_its_effect_body_together() {
+        let text = "put a blight counter on it. Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card.";
+        let chunks = split_clause_sequence(text);
+        assert_eq!(chunks.len(), 2, "{chunks:#?}");
+        assert_eq!(
+            chunks[1].text,
+            "Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card"
+        );
     }
 
     #[test]

@@ -179,12 +179,10 @@ pub(crate) fn can_sacrifice_for_ability(
     object_id: ObjectId,
     player: PlayerId,
 ) -> bool {
+    // CR 109.5 + CR 701.21a: actor-aware object bar — the same authority as
+    // selection, cost guards and execution (`object_cant_be_sacrificed_by`).
     !sacrifice_cause_muzzled(state, ability, object_id, player)
-        && !crate::game::static_abilities::object_has_static_other(
-            state,
-            object_id,
-            "CantBeSacrificed",
-        )
+        && !crate::game::static_abilities::object_cant_be_sacrificed_by(state, player, object_id)
 }
 
 /// CR 701.21a: To sacrifice a permanent, its controller moves it to its owner's graveyard.
@@ -381,9 +379,9 @@ pub fn resolve(
         // CR 603.2 + CR 608.2k: An untargeted object anaphor on a triggered ability
         // (e.g. Slow Motion's "that player sacrifices that creature") names an object
         // carried by event context or attached host, not a target the controller chose,
-        // so `ability.targets` is empty. Resolve through `resolve_event_context_target`
-        // without falling back to `source_id` for unresolved ParentTarget.
-        crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+        // so `ability.targets` is empty. Resolve through the event-referent identity gate
+        // (CR 400.7) without falling back to `source_id` for unresolved ParentTarget.
+        crate::game::targeting::affected_event_context_target(state, ability, filter)
             .into_iter()
             .filter_map(|t| match t {
                 TargetRef::Object(id) => Some(id),
@@ -515,7 +513,15 @@ pub fn resolve(
                         obj.controller == chooser
                             && !obj.is_emblem
                             && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
-                            && !sacrifice_cause_muzzled(state, ability, *id, chooser)
+                            // CR 608.2d: a resolving player can't choose an
+                            // illegal option — a permanent its chooser is
+                            // barred from sacrificing (Call for Aid's
+                            // installer bar, an object-wide grant) or that
+                            // this ability is barred from making them
+                            // sacrifice is not a legal candidate. Offering it
+                            // lets the chooser name it and evade a mandatory
+                            // sacrifice while keeping a legal victim.
+                            && can_sacrifice_for_ability(state, ability, *id, chooser)
                     })
             })
             .collect();
@@ -609,6 +615,7 @@ pub fn resolve(
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
@@ -2299,6 +2306,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         }
     }

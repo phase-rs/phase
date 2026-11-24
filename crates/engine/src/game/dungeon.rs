@@ -1166,6 +1166,7 @@ pub fn room_effects(
             simple(
                 Effect::CreateEmblem {
                     statics: vec![StaticDefinition {
+                        origin: Default::default(),
                         mode: StaticMode::Continuous,
                         affected: Some(TargetFilter::Typed(
                             TypedFilter::creature().controller(ControllerRef::You),
@@ -1193,6 +1194,7 @@ pub fn room_effects(
                         protection_does_not_remove: None,
                         room_door: None,
                         granting_object: None,
+                        bound_actor: None,
                     }],
                     triggers: Vec::new(),
                 },

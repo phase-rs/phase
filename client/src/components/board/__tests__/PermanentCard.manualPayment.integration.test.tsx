@@ -1,6 +1,5 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { gunzipSync } from "node:zlib";
 
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -14,6 +13,7 @@ import init, {
 
 import type { DebugAction, GameAction, GameState, ObjectId, PlayerId } from "../../../adapter/types.ts";
 import { WasmAdapter } from "../../../adapter/wasm-adapter.ts";
+import { readIntegrationCards } from "../../../test/helpers/integrationCards.ts";
 import { dispatchAction } from "../../../game/dispatch.ts";
 import { clearPromptOverlayState } from "../../../game/sessionCleanup.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
@@ -57,7 +57,6 @@ vi.mock("../../zone/LibraryPile.tsx", () => ({ LibraryPile: () => null }));
 
 const REPO_ROOT = resolve(__dirname, "../../../../..");
 const WASM_PATH = resolve(REPO_ROOT, "client/src/wasm/engine_wasm_bg.wasm");
-const CARD_FIXTURE_PATH = resolve(REPO_ROOT, "crates/engine/tests/fixtures/integration_cards.json.gz");
 const CARD_NAMES = ["Formidable Speaker", "Grizzly Bears", "Forest", "Mountain", "Sol Ring"];
 
 const HUMAN: PlayerId = 0;
@@ -72,7 +71,7 @@ function isActivation(action: GameAction): action is ActivateAbilityAction {
 
 /** The exported faces, verbatim, for exactly the cards this board uses. */
 async function loadExportedCards(): Promise<void> {
-  const all = JSON.parse(gunzipSync(await readFile(CARD_FIXTURE_PATH)).toString("utf8")) as Record<string, unknown>;
+  const all = await readIntegrationCards();
   const subset = Object.fromEntries(CARD_NAMES.map((name) => {
     const face = all[name.toLowerCase()];
     if (!face) throw new Error(`${name} is missing from the integration card export`);

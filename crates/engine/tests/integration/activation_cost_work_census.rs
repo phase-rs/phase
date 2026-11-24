@@ -5,8 +5,10 @@
 //! work unsettled fails closed instead of paying a price that ignores the
 //! target-gated modifiers.
 //!
-//! This census pins the caller sets of the two primitives that pay activation
-//! costs. A new caller fails it until someone decides which class it is in:
+//! This census pins the caller sets of each primitive that pays an activation
+//! cost. The loyalty-tally variant is used by normal activated abilities so
+//! their actual loyalty payment can be observed; the base variant remains for
+//! routes that do not need that tally. New callers fail until classified:
 //! guarded (it can see an `Open` carrier), loyalty (the fast path carries no
 //! carrier), or excluded (it can't be target-gated at all).
 
@@ -27,7 +29,7 @@ enum Class {
     ManaAbilityNoTarget,
 }
 
-const PAY_ABILITY_COST: &[(&str, &str, Class)] = &[
+const PAY_ABILITY_COST_WITH_LOYALTY_TALLY: &[(&str, &str, Class)] = &[
     (
         "game/casting.rs",
         "activate_with_cost_carrier",
@@ -68,6 +70,9 @@ const PAY_ABILITY_COST: &[(&str, &str, Class)] = &[
         "finalize_loyalty_activation",
         Class::LoyaltyNoCarrier,
     ),
+];
+
+const PAY_ABILITY_COST: &[(&str, &str, Class)] = &[
     (
         "game/keywords.rs",
         "activate_ninjutsu",
@@ -335,6 +340,10 @@ fn assert_census(primitive: &str, expected: &[(&str, &str, Class)]) {
 #[test]
 fn every_activation_cost_payment_entry_is_classified() {
     assert_census("pay_ability_cost_for_activation", PAY_ABILITY_COST);
+    assert_census(
+        "pay_ability_cost_for_activation_with_loyalty_tally",
+        PAY_ABILITY_COST_WITH_LOYALTY_TALLY,
+    );
 }
 
 #[test]

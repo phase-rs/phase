@@ -66,14 +66,7 @@ expression: "&lowered"
             "value": 1
           },
           "target": {
-            "type": "Typed",
-            "type_filters": [
-              {
-                "Subtype": "Liliana"
-              }
-            ],
-            "controller": null,
-            "properties": []
+            "type": "SelfRef"
           }
         },
         "cost": null,
@@ -84,12 +77,11 @@ expression: "&lowered"
         "condition": null,
         "optional_targeting": false,
         "optional": false,
-        "target_choice_timing": "Resolution",
         "forward_result": false,
         "sub_link": "SequentialSibling"
       },
       "duration": null,
-      "description": "Exhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery.",
+      "description": "Exhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on ~. Activate only as a sorcery.",
       "target_prompt": null,
       "activation_restrictions": [
         {

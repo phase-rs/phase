@@ -157,7 +157,12 @@ expression: "&ir"
                         "affected": {
                           "type": "ParentTarget"
                         },
-                        "modifications": [],
+                        "modifications": [
+                          {
+                            "type": "AddStaticMode",
+                            "mode": "CantBeCountered"
+                          }
+                        ],
                         "condition": null,
                         "affected_zone": null,
                         "effect_zone": null,

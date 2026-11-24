@@ -54,6 +54,10 @@ pub fn resolve(
     // resolution event, so event-counting/trigger-index consumers aren't
     // perturbed by a draft that changed nothing.
     if changed {
+        // CR 613.4c: a static ability may read intensity for a power/toughness
+        // modification (Quickbeast Amulet's "+X/+X, where X is this Equipment's
+        // intensity"), so the new value must reach the next layer pass.
+        crate::game::layers::mark_layers_full(state);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,

@@ -5469,13 +5469,17 @@ fn build_enlist_trigger() -> TriggerDefinition {
     // CR 702.154a: "this creature gets +X/+0 until end of turn, where X is the
     // tapped creature's power." `Power { scope: Anaphoric }` reads the
     // enlisted creature from the linked trigger's `effect_context_object`.
+    // CR 107.1b: a negative tapped-creature power gives X = 0.
     let pump = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Pump {
-            power: PtValue::Quantity(QuantityExpr::Ref {
-                qty: QuantityRef::Power {
-                    scope: ObjectScope::Anaphoric,
-                },
+            power: PtValue::Quantity(QuantityExpr::ClampMin {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Anaphoric,
+                    },
+                }),
+                minimum: 0,
             }),
             toughness: PtValue::Fixed(0),
             target: TargetFilter::SelfRef,
@@ -8070,6 +8074,7 @@ pub fn synthesize_backup(face: &mut CardFace) {
                         filter: TargetFilter::SelfRef,
                         use_lki: false,
                         subject_slot: None,
+                        subject: ObjectScope::Target,
                     }),
                 })
                 .description(
@@ -10627,7 +10632,7 @@ fn build_oracle_face_inner(
     // CR 702.124j: "Partner with [Name]" — upgrade Generic → With(name).
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
     // Partner(Generic) via FromStr. Scan Oracle text for the actual partner name.
-    if mtgjson_keyword_names.contains(&"partner with".to_string()) {
+    if mtgjson_keyword_names.iter().any(|i| i == "partner with") {
         let lower_oracle = raw_oracle_text.to_lowercase();
         if let Some(line) = lower_oracle
             .lines()
@@ -11965,8 +11970,8 @@ mod job_select_synthesis_tests {
                     toughness,
                     crate::types::ability::PtValue::Fixed(1)
                 ));
-                assert!(types.contains(&"Creature".to_string()));
-                assert!(types.contains(&"Hero".to_string()));
+                assert!(types.iter().any(|i: &String| i == "Creature"));
+                assert!(types.iter().any(|i: &String| i == "Hero"));
                 assert!(colors.is_empty(), "Hero token should be colorless");
             }
             other => panic!("expected Token effect, got {:?}", other),
@@ -13251,8 +13256,8 @@ mod undying_persist_synthesis_tests {
         assert_eq!(name, "Spirit");
         assert!(matches!(power, PtValue::Fixed(1)));
         assert!(matches!(toughness, PtValue::Fixed(1)));
-        assert!(types.contains(&"Creature".to_string()));
-        assert!(types.contains(&"Spirit".to_string()));
+        assert!(types.iter().any(|i: &String| i == "Creature"));
+        assert!(types.iter().any(|i: &String| i == "Spirit"));
         assert_eq!(colors, &vec![ManaColor::White, ManaColor::Black]);
         assert_eq!(keywords, &vec![Keyword::Flying]);
         assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
@@ -14632,16 +14637,17 @@ mod provoke_synthesis_tests {
             matches!(target, TargetFilter::SelfRef),
             "pump must affect the attacker"
         );
-        assert!(
-            matches!(
-                power,
-                PtValue::Quantity(QuantityExpr::Ref {
+        assert_eq!(
+            *power,
+            PtValue::Quantity(QuantityExpr::ClampMin {
+                inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::Power {
                         scope: ObjectScope::Anaphoric
                     }
-                })
-            ),
-            "X must be the tapped creature's power via Power{{Anaphoric}}, got {power:?}"
+                }),
+                minimum: 0,
+            }),
+            "X must be the tapped creature's power, floored at 0 (CR 107.1b)"
         );
         assert!(
             matches!(toughness, PtValue::Fixed(0)),
@@ -24388,9 +24394,9 @@ mod living_weapon_synthesis_tests {
                     toughness,
                     crate::types::ability::PtValue::Fixed(0)
                 ));
-                assert!(types.contains(&"Creature".to_string()));
-                assert!(types.contains(&"Phyrexian".to_string()));
-                assert!(types.contains(&"Germ".to_string()));
+                assert!(types.iter().any(|i: &String| i == "Creature"));
+                assert!(types.iter().any(|i: &String| i == "Phyrexian"));
+                assert!(types.iter().any(|i: &String| i == "Germ"));
                 assert_eq!(
                     colors,
                     &vec![crate::types::mana::ManaColor::Black],
@@ -24504,8 +24510,8 @@ mod for_mirrodin_synthesis_tests {
                     toughness,
                     crate::types::ability::PtValue::Fixed(2)
                 ));
-                assert!(types.contains(&"Creature".to_string()));
-                assert!(types.contains(&"Rebel".to_string()));
+                assert!(types.iter().any(|i: &String| i == "Creature"));
+                assert!(types.iter().any(|i: &String| i == "Rebel"));
                 assert_eq!(
                     colors,
                     &vec![crate::types::mana::ManaColor::Red],

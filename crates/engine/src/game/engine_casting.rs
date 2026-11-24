@@ -2318,10 +2318,7 @@ mod tests {
     use crate::types::object_map::sweep_test_support::state_with_objects;
 
     fn printing(tag: &str) -> SharedPrinting {
-        SharedPrinting::new(CardPrinting {
-            set_code: tag.into(),
-            collector_number: "1".into(),
-        })
+        SharedPrinting::new(CardPrinting::owner(tag, "1"))
     }
 
     fn stamp(state: &mut GameState, id: ObjectId, tag: &str) {

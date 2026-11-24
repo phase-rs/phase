@@ -9,8 +9,8 @@
 //! returned `Paid` as a silent no-op. The land was never discarded, yet the
 //! artifact still entered (the cost was skipped). These tests drive the real
 //! parsed replacement through the as-enters pipeline and assert the land is
-//! discarded on accept, kept on decline, and that an unpayable accept routes
-//! the artifact to the graveyard.
+//! discarded on accept, kept on decline, and that an unpayable cost auto-declines
+//! and routes the artifact to the graveyard.
 //!
 //! CR 614.12a / CR 614.12: a declined/unpayable alternative routes to the
 //! owner's graveyard; CR 701.9a: discarding moves a card from hand to graveyard.
@@ -176,10 +176,10 @@ fn mox_diamond_decline_routes_to_graveyard_without_discard() {
     );
 }
 
-/// CR 614.12a: accepting with no land to discard is an unpayable cost — it falls
-/// through to the decline branch (Mox to graveyard), never entering for free.
+/// CR 118.3 + CR 614.12a: with no land card to discard the cost is unpayable, so
+/// the decline branch applies without a prompt (Mox to graveyard), never entering for free.
 #[test]
-fn mox_diamond_accept_unpayable_routes_to_graveyard() {
+fn mox_diamond_unpayable_cost_declines_without_prompt() {
     let mut scenario = GameScenario::new();
     let mox = scenario
         .add_creature_to_hand(P0, "Mox Diamond", 0, 0)
@@ -191,18 +191,11 @@ fn mox_diamond_accept_unpayable_routes_to_graveyard() {
     enter_via_change_zone(runner.state_mut(), mox);
 
     assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. }
-        ),
-        "expected Mox Diamond MayCost ReplacementChoice, got {:?}",
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "an unpayable MayCost should auto-decline without a prompt, got {:?}",
         runner.state().waiting_for
     );
-
-    runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("accepting an unpayable cost should resolve");
-
+    assert!(runner.state().stack.is_empty());
     assert_eq!(
         runner.state().objects[&mox].zone,
         Zone::Graveyard,

@@ -710,7 +710,7 @@ fn resolve_put_counter_pool(
 /// set, then the latest published tracked set, then explicit object targets.
 /// Captured ONCE at iteration start so per-member filtering reads a stable pool.
 fn resolve_category_pool(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
-    chain_tracked_set_cards(state)
+    chain_tracked_set_cards(state, ability)
         .or_else(|| {
             crate::game::targeting::latest_tracked_set_id(state)
                 .and_then(|id| state.tracked_object_sets.get(&id).cloned())
@@ -830,6 +830,7 @@ pub(crate) fn resolve_random_in_chain(
         }
         super::publish_fresh_tracked_set(state, picked.clone());
         ability.targets = picked.iter().map(|&id| TargetRef::Object(id)).collect();
+        ability.declared_player_target_slots.clear();
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,
@@ -955,6 +956,8 @@ impl PerPlayerSpec {
         // `Direct` and `Legacy` read each player's zone(s) (CR 101.4).
         // CR 608.2c: a pinned `Tracked` pool reads the set the instruction
         // named, not the chain set this iteration's own picks have rebound.
+        // CR 608.2c (D7): the pinned id is carried across this iteration's own
+        // rebinding, E3: raw members, equal for every player.
         let bound = match (self.candidate_source, tracked_pool) {
             (ZoneChoiceCandidateSource::Tracked, Some(set_id)) => Some(
                 state
@@ -1708,7 +1711,7 @@ fn resolve_candidate_cards(
         ZoneChoiceCandidateSource::Legacy => {}
     }
 
-    if let Some(cards) = chain_tracked_set_cards(state) {
+    if let Some(cards) = chain_tracked_set_cards(state, ability) {
         return Ok(retain_matching_candidates(state, ability, cards, filter));
     }
 
@@ -1754,7 +1757,7 @@ fn source_bound_candidates(
         ZoneChoiceCandidateSource::Tracked => Some(retain_matching_candidates(
             state,
             ability,
-            chain_tracked_set_cards(state).unwrap_or_default(),
+            chain_tracked_set_cards(state, ability).unwrap_or_default(),
             filter,
         )),
         // CR 400.7j + CR 601.2h + CR 602.2b + CR 608.2d: the candidates are the
@@ -1865,9 +1868,14 @@ fn retain_matching_candidates(
         .collect()
 }
 
-fn chain_tracked_set_cards(state: &GameState) -> Option<Vec<ObjectId>> {
+/// CR 608.2c + CR 730.3c: the chain set's population for a chain-pool chooser:
+/// the members, then the components this reader finds (D2, D7). `None` when
+/// there is no chain set.
+fn chain_tracked_set_cards(state: &GameState, ability: &ResolvedAbility) -> Option<Vec<ObjectId>> {
     let chain_id = state.chain_tracked_set_id?;
-    state.tracked_object_sets.get(&chain_id).cloned()
+    state.tracked_object_sets.contains_key(&chain_id).then(|| {
+        crate::game::merge::tracked_set_found_objects(state, chain_id, Some(ability), None)
+    })
 }
 
 /// The shape a [`ZoneChoiceCandidateSource::LibraryTop`] pick requires,
@@ -4593,6 +4601,7 @@ mod tests {
                 *zone_owner = ZoneOwner::TargetedPlayer;
             }
             ability.targets = targets;
+            ability.declared_player_target_slots.clear();
             ability
         };
         let earlier_set = || {
@@ -6844,5 +6853,70 @@ mod tests {
             state.resolving_stack_entry.as_ref().map(|entry| entry.id),
             Some(first)
         );
+    }
+
+    /// R8. CR 730.3c + CR 608.2c: a chain-pool "choose from among" reader offers
+    /// every object the chain set finds, the components of a merged member
+    /// included; a membership-only set offers its members only.
+    ///
+    /// Nearest printed card: Necromantic Selection ("Destroy all creatures, then
+    /// return a creature card put into a graveyard this way to the battlefield
+    /// under your control. It's a black Zombie in addition to its other colors
+    /// and types. Exile Necromantic Selection."). SYNTHETIC: for now
+    /// that clause (and Starfall Invocation's, Zero Point Ballad's and Danse
+    /// Macabre's) parses to `Effect::Unimplemented`, so no printed card reaches
+    /// the chain-pool reader; the merge and the sacrifice are staged by hand.
+    ///
+    /// Before this change: the offer is `[host]` for both sources.
+    /// Mutation: revert the `chain_tracked_set_cards` routing -> `[host]`.
+    #[test]
+    fn r8_chain_pool_offers_the_components_the_set_finds() {
+        use crate::game::merge_tests::finding::{departed_merged, install_chain, sacrifice_effect};
+        use crate::types::ability::ZoneChoiceCandidateSource;
+        use crate::types::game_state::WaitingFor;
+
+        let choose = |source| Effect::ChooseFromZone {
+            count: 1,
+            zone: Zone::Graveyard,
+            additional_zones: Vec::new(),
+            zone_owner: ZoneOwner::Controller,
+            filter: None,
+            chooser: Chooser::Controller.into(),
+            candidate_source: source,
+            reciprocal_role: None,
+            gather_role: None,
+            up_to: false,
+            constraint: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+        };
+        for source in [
+            ZoneChoiceCandidateSource::Tracked,
+            ZoneChoiceCandidateSource::Legacy,
+        ] {
+            for membership_only in [false, true] {
+                let mut d = departed_merged(false);
+                if membership_only {
+                    d.state.tracked_set_member_origins.remove(&d.set);
+                }
+                let reader = install_chain(&mut d.state, vec![sacrifice_effect(), choose(source)]);
+                let mut events = Vec::new();
+                resolve(&mut d.state, &reader, &mut events).expect("the chooser resolves");
+                let WaitingFor::ChooseFromZoneChoice { cards, .. } = &d.state.waiting_for else {
+                    panic!(
+                        "reach guard: the chooser offers a pick, got {:?}",
+                        d.state.waiting_for
+                    );
+                };
+                let expected = if membership_only {
+                    vec![d.host]
+                } else {
+                    vec![d.host, d.rider]
+                };
+                assert_eq!(
+                    cards, &expected,
+                    "source {source:?}, membership_only {membership_only}"
+                );
+            }
+        }
     }
 }

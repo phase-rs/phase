@@ -1960,6 +1960,7 @@ fn spell_alternative_cost_is_payable(
             legs,
             super::cost_payability::ObjectLegPayment::Unguided,
             super::cost_payability::CostSourceRole::SpellBeingCast,
+            super::cost_payability::ExileCostPopulation::PayerZones,
         )
         || !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, committed_life)
     {
@@ -2998,8 +2999,14 @@ pub(super) fn drain_deferred_triggers_after_stack_object_announcement(
     {
         return waiting_for;
     }
-    crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
-        .unwrap_or(waiting_for)
+    // CR 603.2c: every caller runs inside the reducer action on its own buffer,
+    // so the drain's window ranges are claimed for the post-action pipeline.
+    crate::game::triggers::drain_on_action_buffer(
+        state,
+        events,
+        crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement,
+    )
+    .unwrap_or(waiting_for)
 }
 
 /// CR 601.2c + CR 115.1: Find the next "of an opponent's choice" slot group — an
@@ -4593,13 +4600,14 @@ fn finish_selected_return_to_hand_after_automatic(
                 "return-cost continuation missing an activation ability index".to_string(),
             )
         })?;
-        match super::casting::pay_ability_cost_for_activation(
+        match super::costs::pay_ability_cost_for_activation_with_loyalty_tally(
             state,
             player,
             pending.object_id,
             &cost,
             Some(ability_index),
             &mut pending.ability.context.cost_removed_counter_amount,
+            &mut pending.ability.context.loyalty_counters_removed,
             events,
         )? {
             super::casting::PaymentOutcome::Paid => {}
@@ -5129,6 +5137,19 @@ fn validate_deferred_spell_sacrifices_at_commit(
                     .to_string(),
             ));
         }
+        // CR 118.3 + CR 701.21a: the commit gate must read the OBJECT-level
+        // bar, not just the player-level one — a bar granted on the selected
+        // permanent after selection (Stilt-Man-style grant, Call for Aid's
+        // bound "you can't sacrifice those creatures") fails the cost BEFORE
+        // mana moves. The determined-set (`All`) arm already inherits this
+        // through `find_determined_sacrifice_set` →
+        // `may_sacrifice_for_cost`'s `object_cant_be_sacrificed_by` check; the
+        // selected-permanent arm was the only gap.
+        if super::static_abilities::object_cant_be_sacrificed_by(state, player, id) {
+            return Err(EngineError::ActionNotAllowed(
+                "Deferred sacrifice permanent cannot be sacrificed as a cost".to_string(),
+            ));
+        }
         if super::static_abilities::player_cant_sacrifice_as_cost(state, player, id) {
             return Err(EngineError::ActionNotAllowed(
                 "Deferred sacrifice permanent cannot be sacrificed as a cost".to_string(),
@@ -5280,6 +5301,13 @@ fn pay_deferred_spell_sacrifices_at_commit(
             .map_err(|e| EngineError::InvalidAction(format!("{e}")))?
         {
             super::sacrifice::SacrificeOutcome::Complete => {}
+            // CR 601.2h: a mid-cast bar on the chosen victim fails the
+            // payment instead of recording an unsacrificed cost as paid.
+            super::sacrifice::SacrificeOutcome::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                 return Ok(pause_sacrifice_for_cost(
                     state,
@@ -5904,6 +5932,13 @@ pub(crate) fn resume_sacrifice_for_cost(
             .map_err(|error| EngineError::InvalidAction(error.to_string()))?
         {
             super::sacrifice::SacrificeOutcome::Complete => {}
+            // CR 601.2h + CR 602.2b: a mid-payment bar on the chosen victim
+            // fails the payment instead of recording an unsacrificed cost as paid.
+            super::sacrifice::SacrificeOutcome::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                 return Ok(pause_sacrifice_for_cost(
                     state,
@@ -6084,13 +6119,14 @@ pub(crate) fn handle_sacrifice_for_cost(
         pending.activation_cost = residual;
         if let Some(source_legs) = source_legs {
             let source_event_start = events.len();
-            match super::casting::pay_ability_cost_for_activation(
+            match super::costs::pay_ability_cost_for_activation_with_loyalty_tally(
                 state,
                 player,
                 pending.object_id,
                 &source_legs,
                 pending.activation_ability_index,
                 &mut pending.ability.context.cost_removed_counter_amount,
+                &mut pending.ability.context.loyalty_counters_removed,
                 events,
             )? {
                 super::casting::PaymentOutcome::Paid => {}
@@ -6239,6 +6275,13 @@ pub(crate) fn handle_sacrifice_for_cost(
             .map_err(|error| EngineError::InvalidAction(error.to_string()))?
         {
             super::sacrifice::SacrificeOutcome::Complete => {}
+            // CR 601.2h + CR 602.2b: a mid-payment bar on the chosen victim
+            // fails the payment instead of recording an unsacrificed cost as paid.
+            super::sacrifice::SacrificeOutcome::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                 return Ok(pause_sacrifice_for_cost(
                     state,
@@ -6389,6 +6432,13 @@ pub(crate) fn handle_resolution_optional_sacrifice_for_cost(
             .map_err(|error| EngineError::InvalidAction(error.to_string()))?
         {
             super::sacrifice::SacrificeOutcome::Complete => {}
+            // CR 118.3: a mid-payment bar on the chosen victim fails the
+            // cost instead of recording an unsacrificed cost as paid.
+            super::sacrifice::SacrificeOutcome::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                 return Ok(pause_sacrifice_for_cost(
                     state,
@@ -6616,13 +6666,14 @@ pub(crate) fn handle_return_to_hand_for_cost(
             pending.activation_cost = deferred_return_cost;
 
             if let Some(cost) = automatic_cost {
-                match super::casting::pay_ability_cost_for_activation(
+                match super::costs::pay_ability_cost_for_activation_with_loyalty_tally(
                     state,
                     player,
                     pending.object_id,
                     &cost,
                     Some(ability_index),
                     &mut pending.ability.context.cost_removed_counter_amount,
+                    &mut pending.ability.context.loyalty_counters_removed,
                     events,
                 )? {
                     super::casting::PaymentOutcome::Paid => {}
@@ -6919,7 +6970,11 @@ fn pay_selected_counter_cost(
         .activation_ability_index
         .is_some()
         .then_some(&mut pending.ability.context.cost_removed_counter_amount);
-    match super::costs::pay_counter_cost_removals(state, removals, ledger, events) {
+    let loyalty_ledger = pending
+        .activation_ability_index
+        .is_some()
+        .then_some(&mut pending.ability.context.loyalty_counters_removed);
+    match super::costs::pay_counter_cost_removals(state, removals, ledger, loyalty_ledger, events) {
         super::costs::CounterCostRemovalProgress::Complete => {}
         super::costs::CounterCostRemovalProgress::AwaitingReplacementChoice(removal) => {
             pending.mark_activation_cost_committed();
@@ -6975,13 +7030,14 @@ fn finish_counter_cost_payment(
             // automatic residual can pause on a cost replacement (a self-move or
             // a counter removal), so the typed continuation resumes this pending
             // activation without replaying the counters already removed.
-            match super::casting::pay_ability_cost_for_activation(
+            match super::costs::pay_ability_cost_for_activation_with_loyalty_tally(
                 state,
                 player,
                 pending.object_id,
                 &cost,
                 Some(ability_index),
                 &mut pending.ability.context.cost_removed_counter_amount,
+                &mut pending.ability.context.loyalty_counters_removed,
                 events,
             )? {
                 super::casting::PaymentOutcome::Paid => {}
@@ -7037,18 +7093,27 @@ pub(crate) fn resume_counter_cost_removal_payment(
     let PausedCounterCostRemoval {
         in_flight,
         remaining,
+        aggregate_credit,
         replacement_subtree: _,
     } = *removal;
     let settled = super::effects::counters::settled_in_flight_counter_removal(state, &in_flight);
     let is_activation = pending.activation_ability_index.is_some();
-    if is_activation {
+    let credit_aggregate = matches!(
+        aggregate_credit,
+        crate::types::game_state::CounterRemovalAggregateCredit::Credit
+    );
+    if is_activation && credit_aggregate {
         super::costs::credit_cost_removed_counters(
             &mut pending.ability.context.cost_removed_counter_amount,
             settled,
         );
     }
-    let ledger = is_activation.then_some(&mut pending.ability.context.cost_removed_counter_amount);
-    match super::costs::pay_counter_cost_removals(state, remaining, ledger, events) {
+    let ledger = (is_activation && credit_aggregate)
+        .then_some(&mut pending.ability.context.cost_removed_counter_amount);
+    let loyalty_ledger =
+        is_activation.then_some(&mut pending.ability.context.loyalty_counters_removed);
+    match super::costs::pay_counter_cost_removals(state, remaining, ledger, loyalty_ledger, events)
+    {
         super::costs::CounterCostRemovalProgress::Complete => {}
         super::costs::CounterCostRemovalProgress::AwaitingReplacementChoice(removal) => {
             state.pending_cost_move_resume =
@@ -8509,13 +8574,14 @@ fn surface_next_interactive_activation_cost_leg(
                     pending.activation_cost_snapshot.as_deref(),
                     super::casting::ActivationCostGuardSite::LibraryAggregateTierOne,
                 )?;
-                match super::costs::pay_ability_cost_for_activation(
+                match super::costs::pay_ability_cost_for_activation_with_loyalty_tally(
                     state,
                     player,
                     source_id,
                     &tier_one,
                     ability_index,
                     &mut pending.ability.context.cost_removed_counter_amount,
+                    &mut pending.ability.context.loyalty_counters_removed,
                     events,
                 )? {
                     super::casting::PaymentOutcome::Paid => {}
@@ -9529,13 +9595,14 @@ pub(super) fn push_activated_ability_to_stack(
             ));
         }
         if let super::casting::PaymentOutcome::Paused { remaining_cost } =
-            super::casting::pay_ability_cost_for_activation(
+            super::costs::pay_ability_cost_for_activation_with_loyalty_tally(
                 state,
                 player,
                 source_id,
                 cost,
                 Some(ability_index),
                 &mut resolved.context.cost_removed_counter_amount,
+                &mut resolved.context.loyalty_counters_removed,
                 events,
             )?
         {
@@ -12765,6 +12832,13 @@ fn pay_additional_cost_with_source(
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?
                 {
                     super::sacrifice::SacrificeOutcome::Complete => {}
+                    // CR 601.2h: a mid-cast bar on the chosen victim fails the
+                    // payment instead of recording an unsacrificed cost as paid.
+                    super::sacrifice::SacrificeOutcome::Prohibited => {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Cannot sacrifice this permanent as a cost".to_string(),
+                        ));
+                    }
                     super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                         return Ok(pause_sacrifice_for_cost(
                             state,
@@ -16277,9 +16351,10 @@ fn finalize_cast_with_phyrexian_choices_inner(
             expected_old_kind: Box::new(expected_old_kind),
             resulting_kind: Box::new(resulting_kind),
             expected_old_paid_facts: expected_old_paid_facts.map(Box::new),
-            resulting_paid_facts: Box::new(resulting_paid_facts),
+            resulting_paid_facts: Some(Box::new(resulting_paid_facts)),
             expected_old_cast_occurrence,
             resulting_cast_occurrence: Some(occurrence),
+            resulting_cycling_occurrence: None,
             cause,
         })
         .expect("resolved stack entry finalize must have a live journal cause");
@@ -17429,6 +17504,27 @@ impl AutoTapSourceCache {
     }
 }
 
+/// CR 605.3a + CR 605.3b: The distinct permanents, in the planner's preference
+/// order, whose mana abilities the automatic planner may activate for `player`
+/// and whose activation can do more than tap the permanent for mana: a cost
+/// beyond `{T}` or a resolution beyond adding mana
+/// ([`mana_sources::mana_source_option_has_drawback`]), or any source when a
+/// `TapsForMana` triggered mana ability with a non-mana effect is on the
+/// battlefield ([`mana_sources::taps_for_mana_trigger_has_non_mana_effect`]).
+/// Tapping any other source only adds mana (CR 106.4), which changes nothing
+/// beyond the mana pool.
+pub(super) fn auto_tap_sources_beyond_mana(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+    let every_tap_has_effects = mana_sources::taps_for_mana_trigger_has_non_mana_effect(state);
+    let mut seen: HashSet<ObjectId> = HashSet::new();
+    collect_sorted_auto_tap_source_options(state, player, None, &HashSet::new(), None)
+        .iter()
+        .filter(|option| {
+            every_tap_has_effects || mana_sources::mana_source_option_has_drawback(state, option)
+        })
+        .filter_map(|option| seen.insert(option.object_id).then_some(option.object_id))
+        .collect()
+}
+
 pub(super) fn build_auto_tap_source_cache(
     state: &GameState,
     player: PlayerId,
@@ -18105,8 +18201,7 @@ fn auto_tap_mana_sources_inner(
                     })
                 });
                 // CR 605.3b + CR 605.3c: successful, unpaused resolution
-                // completes the activation even when its live amount is zero
-                // and no ManaAbilityProduced event is emitted.
+                // completes the activation even when its live amount is zero.
                 let completed = resolved.is_ok();
                 if completed {
                     completed_sources.insert(option.object_id);
@@ -18175,7 +18270,7 @@ fn auto_tap_mana_sources_inner(
                     activation_event,
                 )
                 .expect("intrinsic mana activation trigger collection cause must be live");
-                mana_payment::produce_mana(
+                let deposited = mana_payment::produce_mana(
                     state,
                     option.object_id,
                     option.mana_type,
@@ -18197,6 +18292,10 @@ fn auto_tap_mana_sources_inner(
                     player_id: player,
                     source_id: option.object_id,
                     produced: vec![option.mana_type],
+                    // CR 614.1a: Use the post-replacement deposit count.
+                    resolution: crate::types::events::ManaResolutionShare::WholeResolution {
+                        total: u32::try_from(deposited.len()).unwrap_or(u32::MAX),
+                    },
                     trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
                 });
             });
@@ -19668,14 +19767,16 @@ pub(super) fn max_x_value_excluding(
                 spell_ctx.as_ref(),
                 object_id,
             );
-            let tap = tap_mode
-                .filter(|mode| {
-                    state.objects.get(&id).is_some_and(|o| {
-                        super::casting::tap_payment_eligible(state, o, player, *mode)
-                    })
+            if mana != 0 {
+                return mana;
+            }
+            // CR 101.2 + CR 701.26a: a prohibition on tapping overrides tap-payment permission.
+            u32::from(tap_mode.is_some_and(|mode| {
+                state.objects.get(&id).is_some_and(|object| {
+                    super::casting::tap_payment_eligible(state, object, player, mode)
+                        && !super::restrictions::object_cant_tap(state, id)
                 })
-                .map_or(0, |_| 1);
-            mana.max(tap)
+            }))
         })
         .sum();
     // CR 702.66a-b: Delve applies after total cost is determined and can pay
@@ -37844,6 +37945,154 @@ its replicate cost was paid.)\nDraw a card.";
                 22,
                 "{payment_mode:?}: X = 2 life"
             );
+        }
+    }
+
+    /// CR 601.2h + CR 118.3 + CR 701.21a: a bar granted on the SELECTED
+    /// deferred-sacrifice permanent after selection fails the commit BEFORE
+    /// mana moves.
+    ///
+    /// Altar's Reap (verbatim MTGJSON Oracle: "As an additional cost to cast
+    /// this spell, sacrifice a creature.\nDraw two cards.") parks the chosen
+    /// creature in `deferred_sacrificed_permanents`; Hithlain Rope's printed
+    /// static (verbatim MTGJSON Oracle: "This artifact can't be
+    /// sacrificed.\n{1}, {T}: ...") granted on that creature post-selection
+    /// must fail `pay_spell_mana_before_deferred_sacrifice` with the mana
+    /// pool untouched and the creature still on the battlefield. The
+    /// determined-set (`All`) arm already inherits the object-level bar
+    /// through `find_determined_sacrifice_set` → `may_sacrifice_for_cost`; the
+    /// selected-permanent arm was the only gap.
+    ///
+    /// Revert-to-red: deleting the `object_cant_be_sacrificed_by` arm from
+    /// `validate_deferred_spell_sacrifices_at_commit` lets the barred leg
+    /// return `Ok` and drain the pool.
+    #[test]
+    fn deferred_spell_sacrifice_commit_rejects_post_selection_object_bar_before_mana() {
+        use crate::game::zones::create_object;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::ControllerRef;
+        use crate::types::mana::ManaUnit;
+
+        const ALTARS_REAP: &str =
+            "As an additional cost to cast this spell, sacrifice a creature.\nDraw two cards.";
+        const HITHLAIN_ROPE: &str = "This artifact can't be sacrificed.\n{1}, {T}: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle. The player to your right gains control of this artifact.\n{2}, {T}: Draw a card. The player to your right gains control of this artifact.";
+
+        // Altar's Reap's verbatim Oracle must drive a sacrifice cost through
+        // the production parser — the shape the `Selected` fixture stands in
+        // for.
+        let reap_doc = parse_oracle_text(ALTARS_REAP, "Altar's Reap", &[], &[], &[]);
+        assert!(
+            format!("{:?}", reap_doc.additional_cost).contains("Sacrifice"),
+            "reach: Altar's Reap's verbatim Oracle must parse to a sacrifice additional cost"
+        );
+
+        // The bar the production static parser derives from Hithlain Rope's
+        // verbatim printed line — the same grant a resolving Rope would carry.
+        let rope_doc = parse_oracle_text(HITHLAIN_ROPE, "Hithlain Rope", &[], &[], &[]);
+        assert!(
+            rope_doc.statics.iter().any(|def| {
+                def.mode == crate::types::statics::StaticMode::Other("CantBeSacrificed".to_string())
+            }),
+            "reach: Hithlain Rope's verbatim Oracle must parse to a CantBeSacrificed static"
+        );
+
+        for barred in [false, true] {
+            let mut state = GameState::new_two_player(42);
+            let victim = create_object(
+                &mut state,
+                CardId(7_101),
+                PlayerId(0),
+                "Sacrificial Creature".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&victim)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            if barred {
+                // The bar lands AFTER the selection was recorded — the pause
+                // window (`auto_activate_spell_mana_abilities_...`) board change
+                // the commit gate must catch.
+                let obj = state.objects.get_mut(&victim).unwrap();
+                for def in rope_doc.statics.clone() {
+                    obj.static_definitions.push(def.clone());
+                    std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+                }
+            }
+            assert_eq!(
+                crate::game::static_abilities::object_cant_be_sacrificed_by(
+                    &state,
+                    PlayerId(0),
+                    victim
+                ),
+                barred,
+                "reach: the bar fixture must {verb} the victim",
+                verb = if barred { "bar" } else { "not bar" },
+            );
+
+            let spell = create_object(
+                &mut state,
+                CardId(7_102),
+                PlayerId(0),
+                "Altar's Reap".to_string(),
+                Zone::Stack,
+            );
+            // Altar's Reap's "sacrifice a creature" filter shape: a creature
+            // the payer controls.
+            let mut pending = make_spell_pending(spell);
+            pending.cost = ManaCost::generic(2);
+            pending.deferred_sacrificed_permanents = vec![DeferredSpellSacrifice::Selected {
+                object_id: victim,
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            }];
+            for _ in 0..2 {
+                state.players[0].mana_pool.add(ManaUnit::new(
+                    crate::types::mana::ManaType::Colorless,
+                    ObjectId(9_099),
+                    false,
+                    vec![],
+                ));
+            }
+            assert_eq!(state.players[0].mana_pool.total(), 2);
+
+            let mut events = Vec::new();
+            let outcome = pay_spell_mana_before_deferred_sacrifice(
+                &mut state,
+                PlayerId(0),
+                &pending,
+                None,
+                None,
+                &mut events,
+            );
+            if barred {
+                assert!(
+                    matches!(outcome, Err(EngineError::ActionNotAllowed(_))),
+                    "a post-selection object bar must fail the commit, got {outcome:?}"
+                );
+                assert_eq!(
+                    state.players[0].mana_pool.total(),
+                    2,
+                    "no mana may move when the commit gate fails"
+                );
+                assert_eq!(
+                    state.objects[&victim].zone,
+                    Zone::Battlefield,
+                    "the barred victim must stay on the battlefield"
+                );
+            } else {
+                assert!(
+                    matches!(outcome, Ok(Some(2))),
+                    "the unbarred control must pay {{2}} from the pool, got {outcome:?}"
+                );
+                assert_eq!(
+                    state.players[0].mana_pool.total(),
+                    0,
+                    "the unbarred control drains the pool"
+                );
+            }
         }
     }
 }

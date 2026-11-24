@@ -9,7 +9,7 @@ import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { cardImageLookup, ownerPrintedRefOf } from "../../services/cardImageLookup.ts";
+import { cardImageLookup, ownerPrintedRefOf, printingComparison } from "../../services/cardImageLookup.ts";
 import {
   collectObjectActions,
   deriveActivationAffordances,
@@ -81,7 +81,7 @@ function groupEmblems(
       const lookup = cardImageLookup(emblem);
       const p = lookup.ownerPrinting;
       const ref = ownerPrintedRefOf(lookup);
-      const ownerArtKey = p && ref ? [p.set_code, p.collector_number, ref.oracle_id, ref.face_name] : null;
+      const ownerArtKey = printingComparison(p, ref);
       key = JSON.stringify([legacyKey, ownerArtKey]);
     }
     const existing = byKey.get(key);
@@ -256,8 +256,9 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
       }
     >
       {/* No-delay custom hover tooltip — the chip is too small to show "where
-          it came from" and "what it does" inline. */}
-      <GameplayTooltip>
+          it came from" and "what it does" inline. A tap on an activatable chip
+          activates it, so only an inert chip opens its tooltip on a tap. */}
+      <GameplayTooltip touch={isActivatable ? "ignore" : "toggle"}>
         <span className="font-semibold text-amber-200">
           {label}
           {group.sourceName ? ` — ${group.sourceName}` : ""}

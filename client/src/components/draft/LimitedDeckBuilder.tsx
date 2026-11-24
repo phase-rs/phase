@@ -20,8 +20,7 @@ import { CommanderPanel } from "../deck-builder/CommanderPanel";
 import { ExportDeckControl } from "../deck-builder/ExportDeckControl";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import type { GameFormat } from "../../adapter/types";
-import type { DeckEntry } from "../../services/deckParser";
-import type { ParsedDeck } from "../../services/deckParser";
+import { countDeckEntriesByName, type DeckEntry, type ParsedDeck } from "../../services/deckParser";
 import {
   evaluateDeckCompatibility,
   type DeckCompatibilityResult,
@@ -291,7 +290,7 @@ function useCommanderDesignation({
   const commandersRef = useRef(commanders);
   const requestGenerationRef = useRef(0);
   const deckCounts = useMemo(
-    () => new Map(deckEntries.map((entry) => [entry.name, entry.count])),
+    () => countDeckEntriesByName(deckEntries),
     [deckEntries],
   );
   const deckCountsRef = useRef(deckCounts);

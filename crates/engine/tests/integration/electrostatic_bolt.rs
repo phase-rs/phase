@@ -10,7 +10,9 @@
 
 use engine::game::scenario::GameScenario;
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{AbilityCondition, Effect, EffectKind, TargetFilter, TypeFilter};
+use engine::types::ability::{
+    AbilityCondition, Effect, EffectKind, ObjectScope, TargetFilter, TypeFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::PlayerActionKind;
 use engine::types::game_state::WaitingFor;
@@ -81,6 +83,7 @@ fn electrostatic_bolt_parses_without_unimplemented() {
         filter,
         use_lki,
         subject_slot,
+        subject: ObjectScope::Target,
     } = inner.as_ref()
     else {
         panic!("expected TargetMatchesFilter inside ConditionInstead, got {inner:?}");

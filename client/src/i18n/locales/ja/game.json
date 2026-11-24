@@ -871,7 +871,14 @@
     "lethalBadge": "致死",
     "planeswalkerLoyalty": "プレインズウォーカー（忠誠度: {{loyalty}}）",
     "defendingPlayerTrample": "防御プレイヤー（トランプル）",
+    "attackTargetTrample": "{{name}}（トランプル）",
     "pwControllerTrample": "PWコントローラー（PW越しのトランプル）",
+    "lethalButton": "致死",
+    "clearButton": "クリア",
+    "assignLethalTo": "{{target}}に致死ダメージを割り振る",
+    "clearDamageFor": "{{target}}へのダメージの割り振りをクリア",
+    "lethalFirstButton": "致死ダメージを優先",
+    "lethalFirstTitle": "各ブロック・クリーチャーに順番に致死ダメージを割り振り、その後で残りを割り振る",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "残り{{count}}点のダメージを{{target}}に割り振る",
     "assignRemainingTo_many": "残り{{count}}点のダメージを{{target}}に割り振る",
@@ -1384,7 +1391,8 @@
       "title": "支払わなければ：{{effect}}",
       "titleChooseOne": "いずれかを支払わなければ：{{effect}}",
       "dontPay": "支払わない",
-      "takeEffect": "効果を受ける"
+      "takeEffect": "効果を受ける",
+      "priorChoice": "プレイヤー{{id}}：{{choice}}"
     },
     "spliceOffer": {
       "title": "秘儀に連繋しますか？",
@@ -1593,7 +1601,6 @@
     },
     "search": {
       "title": "ライブラリーを検索",
-      "instructionWithTitle": "{{title}}：{{instruction}}",
       "subtitleExact_one": "{{count}}枚のカードを選択",
       "subtitleExact_other": "{{count}}枚のカードを選択",
       "subtitleUpTo_one": "最大{{count}}枚のカードを選択",
@@ -2064,7 +2071,8 @@
     "scrollLeft": "左へスクロール",
     "scrollRight": "右へスクロール",
     "confirm": "確認",
-    "cancel": "キャンセル"
+    "cancel": "キャンセル",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "アドベンチャー",
@@ -2195,6 +2203,13 @@
   "entryController": {
     "title": "戦場に出る際のコントローラーを選択",
     "subtitle": "このパーマネントが戦場に出る際にコントロールする対戦相手を選択"
+  },
+  "replacementDecisionOrder": {
+    "title": "先に行う選択を選ぶ",
+    "subtitle": "これらの置換の選択は同時に行われます。先に行う選択を選んでください。",
+    "unknownObject": "不明なオブジェクト",
+    "attachedTo": "{{host}}についている",
+    "attachments": "{{names}}がついている"
   },
   "optionalCost": {
     "gift": {
@@ -2362,6 +2377,13 @@
     "creatureFallback": "クリーチャー{{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "残りの{{count}}を{{target}}に割り振る",
+    "assignRemainingTo_many": "残りの{{count}}を{{target}}に割り振る",
+    "assignRemainingTo_one": "残りの{{count}}を{{target}}に割り振る",
+    "assignRemainingTo_other": "残りの{{count}}を{{target}}に割り振る",
+    "clearButton": "クリア",
+    "clearTarget": "{{target}}への割り振りをクリア",
     "unitCounter": "{{counter}}カウンター",
     "unitDamage": "ダメージ",
     "unitLife": "ライフ",
@@ -2489,6 +2511,9 @@
     "entryLabel": "{{source}} — {{decision}}",
     "optionalTriggers": "任意の誘発型能力（{{count, number}}）",
     "replacementChoices": "置換効果の選択（{{count, number}}）"
+  },
+  "choiceModal": {
+    "holdForFullCard": "長押しでカード全体を表示"
   },
   "optionalEffect": {
     "sourceFallback": "効果",
@@ -2633,6 +2658,9 @@
     "partitionSubtitle": "あなたのクリーチャーを2つの束に分ける。{{chooser}}が1つを選ぶ。",
     "partitionSubtitleRemaining_one": "あなたのクリーチャーを2つの束に分ける。{{chooser}}が1つを選ぶ。（あなたの後に残りプレイヤー{{count}}人）",
     "partitionSubtitleRemaining_other": "あなたのクリーチャーを2つの束に分ける。{{chooser}}が1つを選ぶ。（あなたの後に残りプレイヤー{{count}}人）",
+    "partitionInstruction": "{{chooser}}が1つを選ぶ",
+    "partitionInstructionRemaining_one": "{{chooser}}が1つを選ぶ（あなたの後に残りプレイヤー{{count}}人）",
+    "partitionInstructionRemaining_other": "{{chooser}}が1つを選ぶ（あなたの後に残りプレイヤー{{count}}人）",
     "pileALabel": "束A：",
     "pileBLabel": "束B：",
     "pileAria": "{{name}} — 束{{pile}}",

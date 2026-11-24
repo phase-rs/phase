@@ -77,11 +77,7 @@ pub(super) fn tap_untap_target_ids(
         // delayed trigger whose referents were pinned into `targets`
         // (CR 603.7c) keeps the pinned-target arm below.
         filter if ability.targets.is_empty() && super::EVENT_SUBJECT_ANAPHORS.contains(filter) => {
-            crate::game::targeting::resolve_event_referent_permanents(
-                state,
-                filter,
-                ability.source_id,
-            )
+            crate::game::targeting::resolve_event_referent_permanents_for(state, ability, filter)
         }
         // CR 400.7 + CR 603.7c: a delayed tap/untap whose pinned referent became
         // a new object taps nothing. This arm is a RAW read that never reaches
@@ -393,6 +389,7 @@ fn prompt_resolution_tap_untap_choice(
         // Tap/untap selection performs no zone move, so no bounded-move
         // duration rides the round-trip.
         duration: None,
+        privacy_zones: None,
     };
     true
 }
@@ -730,8 +727,9 @@ mod tests {
     }
 
     /// CR 608.2b + CR 608.2k: class fence. A `SelfRef`-head → `TriggeringSource`
-    /// sub-effect (Blistercoil Weird: SpellCast trigger `Pump{SelfRef}` →
-    /// `SetTapState{TriggeringSource, "untap it"}`) with an EMPTY slot resolves
+    /// sub-effect (synthetic shape: after the CR 608.2c named-source rebinding,
+    /// Blistercoil Weird's "Untap it." parses to `SetTapState{SelfRef}`) with an
+    /// EMPTY slot resolves
     /// the anaphor from the published trigger event. Here no event is published,
     /// so the anaphor names no object
     /// and per CR 608.2b it must stay an inert no-op — it must NOT untap the

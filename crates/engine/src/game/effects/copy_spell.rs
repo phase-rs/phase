@@ -300,6 +300,14 @@ pub fn resolve(
             crate::game::announcement_triggers::take_inline_trigger_span(state, events, copied_at);
         if !owned.is_empty() {
             crate::game::triggers::collect_triggers_into_deferred(state, &[spell_copied]);
+            // CR 603.2c: collected once, here. Claim the occurrence so no later collector of
+            // this action (the priority pass, the CopyRetarget walk) collects it again.
+            crate::game::announcement_triggers::claim_ordinary_collected_span(
+                state,
+                events,
+                copied_at,
+                copied_at + 1,
+            );
         }
     }
 
@@ -402,11 +410,13 @@ fn drain_spell_copied_observer_triggers(
     spell_copied_collected: bool,
 ) -> Result<(), EffectError> {
     if spell_copied_collected {
-        if let Some(wf) =
-            crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(
-                state, events,
-            )
-        {
+        // CR 603.2c: the resolving effect's buffer is the reducer action's, so
+        // the drain's window ranges are claimed for the post-action pipeline.
+        if let Some(wf) = crate::game::triggers::drain_on_action_buffer(
+            state,
+            events,
+            crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement,
+        ) {
             state.waiting_for = wf;
         }
     }
@@ -3007,6 +3017,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: Some(ObjectId(100)),
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3163,6 +3174,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: Some(ObjectId(100)),
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3240,6 +3252,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: Some(ObjectId(100)),
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3320,6 +3333,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         let copy_that_ability = ResolvedAbility::new(
             Effect::CopySpell {
@@ -4499,6 +4513,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             incarnation: 0,
