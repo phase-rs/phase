@@ -10644,6 +10644,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition, host_zones: &[Zone]) 
         room_door,
         granting_object,
         bound_actor,
+        origin: _,
     } = static_ability;
     condition.is_none()
         && per_player_condition.is_none()
@@ -12414,6 +12415,7 @@ fn static_definition_reads_filter_population(
         room_door: _,
         granting_object: _,
         bound_actor: _,
+        origin: _,
     } = static_def;
     affected
         .as_ref()
