@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::game::filter;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::priority;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
@@ -11,14 +12,42 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CounterCause, CounterPlacement, ProposedEvent};
 
 use super::resolve_ability_chain;
 
 /// Add a +1/+1 counter to the exploring creature via the replacement pipeline.
-fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mut Vec<GameEvent>) {
+///
+/// CR 701.44a + CR 701.44c + CR 400.7: the counter lands only on the exploring
+/// incarnation while it is on the battlefield. A carried pin names that
+/// incarnation (current pin plus battlefield zone); without a pin the live
+/// explorer must be on the battlefield - a departed self-explorer (or a
+/// replacement-nested departed explorer, whose stamped targets give identity
+/// but no pin) gets no counter, while a blinked-and-back self keeps today's
+/// counter. Mirrors `super::connive::add_connive_counters`.
+///
+/// CR 702.26b + CR 702.26d: a phased-out explorer is still on the battlefield
+/// (phasing preserves zone and incarnation, so a carried pin stays current)
+/// but is treated as though it does not exist and cannot be affected — the
+/// phase conjunct sits alongside the pin check on both arms, never inside it,
+/// while the reveal still proceeds per CR 701.44a + CR 701.44b.
+fn add_explore_counter(
+    state: &mut GameState,
+    explorer_id: ObjectId,
+    explorer_pin: Option<ObjectIncarnationRef>,
+    events: &mut Vec<GameEvent>,
+) {
+    let live = state.objects.get(&explorer_id);
+    let current = match (live, explorer_pin) {
+        (Some(object), Some(pin)) => object.is_phased_in_permanent() && pin.is_current(state),
+        (Some(object), None) => object.is_phased_in_permanent(),
+        (None, _) => false,
+    };
+    if !current {
+        return;
+    }
     let proposed = ProposedEvent::AddCounter {
         placement: CounterPlacement::Object {
             actor: state
@@ -214,24 +243,44 @@ fn advance_explore_all(
 ///   chooses to put the card back on top or into their graveyard
 ///   (reuses WaitingFor::DigChoice with keep_count=1).
 ///
-/// The exploring creature defaults to the ability's source_id.
-/// If the ability has a targeted object, that creature explores instead.
+/// The exploring creature is the ability's first targeted object; else the
+/// departed event subject named by a carried incarnation pin (CR 701.44c);
+/// else the ability's source (self-explore).
+///
+/// Bare self-explore heads (Jadelight Ranger, Merfolk Branchwalker, Francisco,
+/// Fowl Marauder - `ChangesZone`-SelfRef and `DamageDoneOnceByController`
+/// triggers executing a bare `Effect::Explore`) carry no pins:
+/// `effect_parent_ref_slots` surfaces no slot for `Effect::Explore`, so
+/// seeding writes none, and `extract_event_context_filter` yields no
+/// event-filter parent for the carry, so selection always falls through to the
+/// source for them.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // Determine the exploring creature
-    let explorer_id = ability
-        .targets
-        .iter()
-        .find_map(|t| {
-            if let TargetRef::Object(id) = t {
-                Some(*id)
-            } else {
-                None
-            }
-        })
+    // Determine the exploring creature: a targeted object first, else a carried
+    // departed-subject pin's object (CR 701.44c - the parent-to-child hand-off
+    // carries exactly one such pin onto an otherwise empty Explore child, see
+    // `super::carry_departed_event_explorer_pin`), else the ability source.
+    let targeted = ability.targets.iter().find_map(|t| {
+        if let TargetRef::Object(id) = t {
+            Some(*id)
+        } else {
+            None
+        }
+    });
+    let explorer_pin = if targeted.is_none() {
+        ability
+            .target_incarnations
+            .iter()
+            .find(|pin| pin.incarnation != crate::types::identifiers::LEGACY_INCARNATION)
+            .copied()
+    } else {
+        None
+    };
+    let explorer_id = targeted
+        .or_else(|| explorer_pin.map(|pin| pin.object_id))
         .unwrap_or(ability.source_id);
 
     // CR 701.44a + CR 614.1a + CR 614.5: Consult explore replacements (Twists and
@@ -260,23 +309,61 @@ pub fn resolve(
         }
     }
 
-    resolve_explore_effect(state, ability, explorer_id, events)
+    resolve_explore_effect(state, ability, explorer_id, explorer_pin, events)
 }
 
 /// CR 701.44a: Run the explore reveal/counter/land pipeline without consulting
 /// replacement effects. Used when a replacement effect's "instead" chain
 /// already resolved the replacement (nested explores must not re-enter).
+///
+/// `explorer_pin` is the carried departed-subject pin `resolve` selected the
+/// explorer from, if any - by construction it always names `explorer_id`.
 pub(crate) fn resolve_explore_effect(
     state: &mut GameState,
     ability: &ResolvedAbility,
     explorer_id: ObjectId,
+    explorer_pin: Option<ObjectIncarnationRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let controller = state
+    // CR 701.44a + CR 701.44c: whose library the explore reveals from. A
+    // carried pin names the exact exploring incarnation, so its
+    // incarnation-keyed controller (live while current, else the departure
+    // record) answers first. Without a pin, a live battlefield explorer uses
+    // its current controller; a departed SELF (bare `Explore` heads take no
+    // pins) uses its source incarnation's LKI - `source_incarnation` is
+    // stamped on every triggered/activated ability at stack push; otherwise
+    // the ability controller (replacement-nested departs inherit this rung's
+    // stolen-controller gap: their stamped targets give identity but no pin).
+    // Live-first ordering keeps blinked-and-back selves on today's behavior;
+    // the LKI rung only answers departed explorers.
+    let live_battlefield_controller = state
         .objects
         .get(&explorer_id)
-        .map(|object| object.controller)
-        .unwrap_or(ability.controller);
+        .filter(|object| object.zone == crate::types::zones::Zone::Battlefield)
+        .map(|object| object.controller);
+    let controller = match explorer_pin {
+        Some(pin) => crate::game::ability_utils::incarnation_controller(
+            state,
+            pin.object_id,
+            pin.incarnation,
+        )
+        .or(live_battlefield_controller)
+        .unwrap_or(ability.controller),
+        None => live_battlefield_controller
+            .or_else(|| {
+                (explorer_id == ability.source_id)
+                    .then_some(ability.source_incarnation)
+                    .flatten()
+                    .and_then(|incarnation| {
+                        crate::game::ability_utils::incarnation_controller(
+                            state,
+                            ability.source_id,
+                            incarnation,
+                        )
+                    })
+            })
+            .unwrap_or(ability.controller),
+    };
 
     // Find the controller's library
     let player = state
@@ -288,7 +375,7 @@ pub(crate) fn resolve_explore_effect(
     let library = state.library_of(player.id);
     if library.is_empty() {
         // CR 701.44a: Explore with empty library — just put a +1/+1 counter.
-        add_explore_counter(state, explorer_id, events);
+        add_explore_counter(state, explorer_id, explorer_pin, events);
 
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
@@ -344,7 +431,7 @@ pub(crate) fn resolve_explore_effect(
     } else {
         // CR 701.44a: Nonland revealed — put a +1/+1 counter on the creature,
         // then player chooses to put the card back on top or into graveyard.
-        add_explore_counter(state, explorer_id, events);
+        add_explore_counter(state, explorer_id, explorer_pin, events);
 
         // CR 701.44a: the player may put the revealed nonland card back on top
         // of their library, or put it into their graveyard. Model with
