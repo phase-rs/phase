@@ -483,7 +483,7 @@ impl FromStr for ExileCastCost {
 ///   counts (Tinybones, Bauble Burglar: "...cards you don't own with stash
 ///   counters on them from exile"). Unlike the source-keyed pools above, no
 ///   exile-link record is consulted: which permanent put the counter there is
-///   irrelevant (CR 406.2: exile is one shared zone), and the pool is a live
+///   irrelevant (CR 400.1: exile is one shared zone), and the pool is a live
 ///   read recomputed at every gate (CR 611.3a), so a removed counter exits the
 ///   pool immediately. Clone-only: the `CounterMatch` payload cannot be `Copy`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
