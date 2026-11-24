@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "DerivedViews gains combat_damage_suggestion, the engine's lethal-first default for an open AssignCombatDamage prompt (CR 510.1c, CR 702.19b/c/e); the damage modal's one-tap fill renders only from it"
+}

@@ -1222,6 +1222,11 @@ pub enum GameEvent {
         /// `Unknown` for an event predating the field; omitted on the wire then.
         #[serde(default, skip_serializing_if = "BoundActivationCost::is_unknown")]
         activation_cost: BoundActivationCost,
+        /// CR 606.4 + CR 602.2b + CR 603.4: loyalty counters actually removed
+        /// to pay this activation, after replacement effects. `None` is unknown
+        /// or inapplicable; a tracked zero is `Some(0)`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loyalty_counters_removed: Option<u32>,
     },
     /// CR 603.6a: Enters-the-battlefield and zone-change triggers fire on this
     /// event. `from` is `None` when an object is created directly in a zone
@@ -2512,6 +2517,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             };
             let json = serde_json::to_value(&event).unwrap();
             let back: GameEvent = serde_json::from_value(json).unwrap();
@@ -2520,6 +2526,39 @@ mod tests {
                 other => panic!("expected AbilityActivated, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn ability_activated_loyalty_tally_preserves_zero_and_defaults_for_legacy_events() {
+        let event = |loyalty_counters_removed| GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: ObjectId(9),
+            kind: ActivatedAbilityKind::Loyalty,
+            departed_source_lki: None,
+            trigger_state: ActivationTriggerState::Pending,
+            stack_entry: Some(ObjectId(42)),
+            activation_cost: BoundActivationCost::Unknown,
+            loyalty_counters_removed,
+        };
+        for count in [Some(0), Some(3)] {
+            let original = event(count);
+            let wire = serde_json::to_value(&original).unwrap();
+            assert_eq!(wire["data"]["loyalty_counters_removed"], count.unwrap());
+            assert_eq!(serde_json::from_value::<GameEvent>(wire).unwrap(), original);
+        }
+
+        let mut legacy = serde_json::to_value(event(Some(3))).unwrap();
+        legacy["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("loyalty_counters_removed");
+        assert!(matches!(
+            serde_json::from_value::<GameEvent>(legacy).unwrap(),
+            GameEvent::AbilityActivated {
+                loyalty_counters_removed: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2534,6 +2573,7 @@ mod tests {
             trigger_state: ActivationTriggerState::Pending,
             stack_entry,
             activation_cost: BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         let named = event(Some(ObjectId(42)));
         let json = serde_json::to_value(&named).unwrap();
@@ -2561,6 +2601,7 @@ mod tests {
             trigger_state: ActivationTriggerState::Pending,
             stack_entry: None,
             activation_cost,
+            loyalty_counters_removed: None,
         };
         let x_cost = AbilityCost::Composite {
             costs: vec![

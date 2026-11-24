@@ -552,6 +552,7 @@ mod plaguecrafter_etb_class;
 mod planar_birth_owners_control_1126;
 mod planechase_commander;
 mod planeswalker_token;
+mod planet_station_thresholds;
 mod play_card_during_resolution;
 mod play_with_fire_damage_scry;
 mod player_action_recording_after_choice;

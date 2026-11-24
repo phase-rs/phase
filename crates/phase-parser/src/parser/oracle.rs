@@ -6864,15 +6864,23 @@ fn parse_normalized_oracle_ir(
         }
     }
 
-    // CR 702.184a + CR 721.2: Pre-parse Spacecraft "N+ | body" threshold lines
-    // into charge-counter-gated statics / triggers / activated abilities. The
-    // `Station` reminder-text paragraph is handled independently: the keyword
-    // itself comes from MTGJSON, and the creature-shift at the highest symbol
+    // CR 702.184b + CR 721.2a: Pre-parse a station card's "N+ | body" threshold
+    // lines into charge-counter-gated statics / triggers / activated abilities.
+    // A station card is one with the Station keyword, whatever its subtype
+    // (Spacecraft or Planet); the `N+ |` notation alone is not enough, since d20
+    // result tables print it too. The creature-shift at the highest symbol
     // (CR 721.2b) is synthesized post-parse in `database::synthesis::synthesize_station`
     // where `face.power` / `face.toughness` are available for the base P/T.
-    let spacecraft_consumed = if subtypes.iter().any(|s| s == "Spacecraft") {
+    let station_card = mtgjson_keyword_names
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case("station"))
+        || printed_keyword_lines
+            .iter()
+            .flatten()
+            .any(|keyword| matches!(keyword, Keyword::Station));
+    let spacecraft_consumed = if station_card {
         // CR 707.9a: Pass the running trigger count so any "has this ability"
-        // retain modification inside a Spacecraft threshold trigger body
+        // retain modification inside a station threshold trigger body
         // resolves to the correct printed-trigger slot.
         let (sc_statics, sc_triggers, sc_abilities, consumed) =
             parse_spacecraft_threshold_lines(&lines, card_name, PrintedTriggerIndex::placeholder());
@@ -6880,7 +6888,7 @@ fn parse_normalized_oracle_ir(
             emitter.static_ir_at_route(line, ir, OuterRoute::Spacecraft);
         }
         for (line, trigger) in sc_triggers {
-            // CR 702.184a + CR 721.2 station gate, same shape as the leveler
+            // CR 702.184b + CR 721.2a station gate, same shape as the leveler
             // graft above: the condition is stamped inside the preprocessor on
             // the lowered definition, so identity lowering is what keeps it.
             emitter.trigger_ir_at_route(

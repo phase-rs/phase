@@ -1416,6 +1416,7 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         triggering_object: None,
                         declared_slot_view: None,
                         granting_object: None,
+                        stack_trigger_context: None,
                         pre_entry_battlefield: None,
                     };
                     // CR 712.12 + CR 101.2: a spell//land modal card is played
@@ -27705,6 +27706,7 @@ fn apply_mana_spell_grants(
                 triggering_object: None,
                 declared_slot_view: None,
                 granting_object: None,
+                stack_trigger_context: None,
                 pre_entry_battlefield: None,
             };
             if !crate::game::filter::matches_target_filter(
@@ -33660,15 +33662,18 @@ fn activate_with_cost_carrier(
             stamp_top_library_exile_cost_paid_object(state, player, &mut resolved, cost);
         // CR 602.2b: this activation's own payment writes its removed-counter
         // count onto `resolved`, which the pause clones and the push consumes.
-        if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
-            state,
-            player,
-            source_id,
-            cost,
-            Some(ability_index),
-            &mut resolved.context.cost_removed_counter_amount,
-            events,
-        )? {
+        if let PaymentOutcome::Paused { remaining_cost } =
+            super::costs::pay_ability_cost_for_activation_with_loyalty_tally(
+                state,
+                player,
+                source_id,
+                cost,
+                Some(ability_index),
+                &mut resolved.context.cost_removed_counter_amount,
+                &mut resolved.context.loyalty_counters_removed,
+                events,
+            )?
+        {
             let mut pending = pending_activation_after_cost_pause(
                 source_id,
                 resolved.clone(),
@@ -33960,6 +33965,17 @@ pub(crate) fn record_activation_announcement(
     ability.start_target_record_recursive();
     ability.activation_record =
         capture_activation_record(state, player, source_id, ability_index, ability).map(Box::new);
+    // CR 606.4: a newly announced loyalty activation has a known tally even
+    // when its cost removes no loyalty counters. Legacy in-flight contexts
+    // remain unknown and are never inferred during resume.
+    if ability
+        .activation_record
+        .as_ref()
+        .is_some_and(|record| record.is_loyalty_ability)
+        && ability.context.loyalty_counters_removed.is_none()
+    {
+        ability.context.loyalty_counters_removed = Some(0);
+    }
     let provenance = state
         .objects
         .get(&source_id)

@@ -12621,6 +12621,7 @@ fn trigger_condition_reads_filter_population(
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana
+        | TriggerCondition::LoyaltyCountersRemovedAtLeast { .. }
         | TriggerCondition::DealtDamageBySourceThisTurn
         | TriggerCondition::FirstTimeObjectTappedThisTurn
         | TriggerCondition::FirstTimeObjectCountersAddedThisTurn
@@ -35197,6 +35198,7 @@ pub(crate) fn evaluate_condition(
                 entering: None,
                 source: ability.source_id,
                 trigger_source: ability.trigger_source.clone(),
+                stack_trigger_context: None,
                 recipient: None,
                 scoped_player: ability.scoped_player,
                 damage_source: None,
