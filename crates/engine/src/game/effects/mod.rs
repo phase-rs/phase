@@ -26859,7 +26859,7 @@ fn try_resolve_simultaneous_token_fan_out(
     for seat in matching_players {
         let bound = bind_scoped_seat(scoped_template, controller, *seat);
         match token::propose_token_batch(state, &bound, None) {
-            token::TokenBatchProposal::Ready(event) => singles.push(event),
+            token::TokenBatchProposal::Ready(event) => singles.push(*event),
             token::TokenBatchProposal::Parked | token::TokenBatchProposal::NoToken => {
                 state.waiting_for = waiting_before;
                 return SimultaneousTokenOutcome::NotApplicable;

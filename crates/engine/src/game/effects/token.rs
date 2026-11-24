@@ -720,7 +720,7 @@ pub fn resolve(
 /// calls it and then runs the pipeline, delivery, and bookkeeping.
 pub(crate) enum TokenBatchProposal {
     /// The seat's single-batch event, ready for the replacement pipeline.
-    Ready(ProposedEvent),
+    Ready(Box<ProposedEvent>),
     /// CR 608.2b: no token can be created (the owner failed to resolve); the
     /// caller emits the shared `no_token` outcome.
     NoToken,
@@ -892,7 +892,7 @@ pub(crate) fn propose_token_batch(
     // Replacement effects (Doubling Season, Primal Vigor) modify count. A
     // token substitute's branch tokens are rewritten into the event they
     // modify, so a fresh proposal carries an empty applied set.
-    TokenBatchProposal::Ready(ProposedEvent::CreateToken {
+    TokenBatchProposal::Ready(Box::new(ProposedEvent::CreateToken {
         redirected_to: None,
         owner: token_owner,
         spec: Box::new(spec),
@@ -901,7 +901,7 @@ pub(crate) fn propose_token_batch(
         count,
         appended: Vec::new(),
         applied: HashSet::new(),
-    })
+    }))
 }
 
 /// `resolve` with a pre-chosen token host. `Some` resumes a "one of them"
@@ -918,7 +918,7 @@ pub(crate) fn resolve_with_host_override(
         TokenBatchProposal::Parked => Ok(()),
         TokenBatchProposal::NoToken => no_token(state, ability, events),
         TokenBatchProposal::Ready(proposed) => {
-            match replacement::replace_event(state, proposed, events) {
+            match replacement::replace_event(state, *proposed, events) {
                 ReplacementResult::Execute(event) => {
                     // CR 614.1a + CR 608.2c: the delivery authority publishes the whole
                     // event's created referent, appended batches included.
