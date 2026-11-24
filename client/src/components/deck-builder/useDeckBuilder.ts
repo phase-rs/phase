@@ -147,19 +147,30 @@ export function useDeckBuilder({
   }, []);
   // Bumped whenever the editor switches to another deck: a Load, or a Clone that opens its copy.
   const deckIdentityRevision = useRef(0);
+  // Automatic commander projection changes the snapshot a write can claim.
+  const commanderRevision = useRef(0);
   interface EditorCapture {
     identity: number;
     edit: number;
+    commander: number;
   }
-  // Captured before an await, so the work after it can tell whether a Load, Clone or edit happened meanwhile.
+  const pendingLoadInference = useRef<EditorCapture | null>(null);
+  const editorFormatRef = useRef({ format, onFormatChange });
+  editorFormatRef.current = { format, onFormatChange };
+  // Compare the snapshot taken before an await with the live editor.
   const captureEditor = useCallback(
-    (): EditorCapture => ({ identity: deckIdentityRevision.current, edit: editRevision.current }),
+    (): EditorCapture => ({
+      identity: deckIdentityRevision.current,
+      edit: editRevision.current,
+      commander: commanderRevision.current,
+    }),
     [],
   );
   const editorChangedSince = useCallback(
     (captured: EditorCapture) => ({
       reloaded: captured.identity !== deckIdentityRevision.current,
       edited: captured.edit !== editRevision.current,
+      commanderProjected: captured.commander !== commanderRevision.current,
     }),
     [],
   );
@@ -574,9 +585,11 @@ export function useDeckBuilder({
   }, []);
 
   const applyDeckToEditor = useCallback((next: ParsedDeck) => {
+    // Import can call this after asynchronous parsing and commander inference.
+    const { format, onFormatChange } = editorFormatRef.current;
     projectDeckToEditor(next, format);
-    if (next.commander?.length && !isCommander) onFormatChange("Commander");
-  }, [projectDeckToEditor, format, isCommander, onFormatChange]);
+    if (next.commander?.length && !formatMetadata(format)?.default_config.command_zone) onFormatChange("Commander");
+  }, [projectDeckToEditor]);
 
   const handleImport = useCallback((imported: ParsedDeck) => {
     applyDeckToEditor(imported);
@@ -585,7 +598,7 @@ export function useDeckBuilder({
 
   const handleSave = useCallback(async (): Promise<SaveOutcome> => {
     if (!deckName.trim()) return "refused";
-    const captured = captureEditor();
+    let captured = captureEditor();
     // Fixed now, before any await: the name this save should vacate if renamed, and the bytes
     // it should still hold, so a Load of a different deck queued behind this save cannot retarget it.
     const previous = savedDeckRef.current;
@@ -594,10 +607,12 @@ export function useDeckBuilder({
     const inferred =
       (resolved.commander?.length ?? 0) > (currentDeck.commander?.length ?? 0);
     const changed = editorChangedSince(captured);
-    if (inferred && !changed.reloaded && !changed.edited) {
+    if (inferred && !changed.reloaded && !changed.edited && !changed.commanderProjected) {
       // Reflect the engine's choice in the editor so the displayed state
       // matches what we're about to persist.
       applyDeckToEditor(resolved);
+      commanderRevision.current += 1;
+      captured = captureEditor();
     }
     // The editor can still hold spellings the saved-deck name repair already replaced.
     const data = serializeSavedDeck(await canonicalizeDeckNames(resolved), format, bracket, comboDeclaration);
@@ -618,15 +633,21 @@ export function useDeckBuilder({
     if (!saved.ok || saved.value === null) return "refused";
     const after = editorChangedSince(captured);
     if (!after.reloaded) {
-      setJustSaved(true);
-      if (!after.edited) setDirty(false);
+      setJustSaved(!after.commanderProjected);
+      if (after.commanderProjected) {
+        setDirty(true);
+      } else if (!after.edited) {
+        // The completed Save now defines the editor's clean snapshot.
+        pendingLoadInference.current = null;
+        setDirty(false);
+      }
       showNotification({
         title: t("toolbar.savedToastTitle"),
         description: t("toolbar.savedToastDescription", { name: nextName }),
       });
     }
     setSavedDecks(listSavedDecks());
-    return after.reloaded || after.edited ? "saved-then-changed" : "saved";
+    return after.reloaded || after.edited || after.commanderProjected ? "saved-then-changed" : "saved";
   }, [
     deckName,
     captureEditor,
@@ -664,9 +685,14 @@ export function useDeckBuilder({
           setDeckFolder(txn, name, folderAtClick);
         }
         const c = editorChangedSince(captured);
-        // An edit alone must also block the claim, or the next Save moves this copy onto
-        // the still-open source.
-        if (!c.reloaded && !c.edited) savedDeckRef.current = copy;
+        // Adopt the storage baseline and switch editor identity together.
+        if (!c.reloaded && !c.edited && !c.commanderProjected) {
+          savedDeckRef.current = copy;
+          deckIdentityRevision.current += 1;
+          setDeckName(copy.name);
+          setJustSaved(true);
+          setDirty(false);
+        }
         return copy;
       }),
     );
@@ -677,12 +703,6 @@ export function useDeckBuilder({
       title: t("toolbar.clonedToastTitle"),
       description: t("toolbar.clonedToastDescription", { name: cloneName }),
     });
-    const changed = editorChangedSince(captured);
-    if (changed.reloaded || changed.edited) return;
-    deckIdentityRevision.current += 1;
-    setDeckName(cloneName);
-    setJustSaved(true);
-    setDirty(false);
   }, [deckName, captureEditor, editorChangedSince, currentDeck, format, bracket, comboDeclaration, showNotification, t]);
 
   useEffect(() => {
@@ -691,24 +711,31 @@ export function useDeckBuilder({
     return () => clearTimeout(timer);
   }, [justSaved]);
 
-  const loadFormatRef = useRef({ format, onFormatChange });
-  loadFormatRef.current = { format, onFormatChange };
-
   const inferLoadedCommander = useCallback((
     parsed: ParsedDeck,
     normalized: ParsedDeck,
     explicitFormat?: GameFormat,
   ) => {
     const captured = captureEditor();
+    pendingLoadInference.current = captured;
     void resolveCommander(parsed).then((resolved) => {
+      if (pendingLoadInference.current !== captured) return;
+      pendingLoadInference.current = null;
       if (normalized.commander?.length || !resolved.commander?.length) return;
-      const { reloaded, edited } = editorChangedSince(captured);
-      if (reloaded || edited) return;
-      const { onFormatChange } = loadFormatRef.current;
+      const { reloaded, edited, commanderProjected } = editorChangedSince(captured);
+      if (reloaded || edited || commanderProjected) return;
+      const { onFormatChange } = editorFormatRef.current;
+      commanderRevision.current += 1;
+      setJustSaved(false);
       projectDeckToEditor(resolved, explicitFormat ?? "Commander");
-      if (!explicitFormat) onFormatChange("Commander");
+      if (!explicitFormat) {
+        // A catalog lookup or import can finish before the format prop renders.
+        editorFormatRef.current = { format: "Commander", onFormatChange };
+        onFormatChange("Commander");
+      }
     }, () => {
       // Inference is best-effort. The normalized deck is already open.
+      if (pendingLoadInference.current === captured) pendingLoadInference.current = null;
     });
   }, [captureEditor, editorChangedSince, projectDeckToEditor]);
 
@@ -722,12 +749,13 @@ export function useDeckBuilder({
       const captured = captureEditor();
       const decks = await loadPreconDeckMap();
       const found = Object.entries(decks ?? {}).find(([, entry]) => PRECON_PREFIX + `${entry.name} (${entry.code})` === name);
+      // A projection of the old deck can finish while this catalog lookup runs.
       const { reloaded, edited } = editorChangedSince(captured);
       if (!found || reloaded || edited) return false;
       const [deckId, deckEntry] = found;
       const parsedPrecon = preconDeckEntryToParsedDeck(deckEntry);
       const normalized = repairParsedDeck(parsedPrecon);
-      const { format, onFormatChange } = loadFormatRef.current;
+      const { format, onFormatChange } = editorFormatRef.current;
       const targetFormat = normalized.commander?.length && !formatMetadata(format)?.default_config.command_zone
         ? "Commander"
         : format;
@@ -751,7 +779,7 @@ export function useDeckBuilder({
         )?.format
       : undefined;
     const normalized = repairParsedDeck(parsed);
-    const { format, onFormatChange } = loadFormatRef.current;
+    const { format, onFormatChange } = editorFormatRef.current;
     const targetFormat = savedFormat ?? (normalized.commander?.length ? "Commander" : format);
     projectDeckToEditor(normalized, targetFormat);
     setActiveSurface("deck");

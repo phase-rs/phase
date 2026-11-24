@@ -2949,13 +2949,15 @@ describe("DeckBuilder", () => {
 
   it("saved-deck Load inference that resolves after the user edits the opened deck does not overwrite that edit", async () => {
     const user = userEvent.setup();
+    const commander = "Isamaru, Hound of Konda";
+    const plains = { name: "Plains", count: 99 };
     localStorage.setItem(
       STORAGE_KEY_PREFIX + "Deck A",
       JSON.stringify({ main: [{ name: "Alpha", count: 1 }, { name: "Beta", count: 1 }], sideboard: [], format: "Standard" }),
     );
     localStorage.setItem(
       STORAGE_KEY_PREFIX + "Deck B",
-      JSON.stringify({ main: [{ name: "Gamma", count: 1 }, { name: "Zimone, Mystery Unraveler", count: 1 }], sideboard: [], format: "Standard" }),
+      JSON.stringify({ main: [plains, { name: commander, count: 1 }], sideboard: [], format: "Standard" }),
     );
 
     render(
@@ -2984,19 +2986,23 @@ describe("DeckBuilder", () => {
 
     // Deck B is already open while its commander inference is pending.
     expect(nameInput).toHaveValue("Deck B");
-    await user.click(screen.getByRole("button", { name: "remove-Gamma" }));
+    expect(resolveCommander).toHaveBeenLastCalledWith(expect.objectContaining({
+      main: [plains, { name: commander, count: 1 }],
+    }));
+    expect(screen.getByText("99 Plains")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "remove-Plains" }));
     await act(async () => {
       resolveB({
-        main: [{ name: "Gamma", count: 1 }],
+        main: [plains],
         sideboard: [],
-        commander: ["Zimone, Mystery Unraveler"],
+        commander: [commander],
       });
       await held;
     });
     expect(nameInput).toHaveValue("Deck B");
-    expect(screen.queryByText("1 Gamma")).not.toBeInTheDocument();
-    expect(screen.getByText("1 Zimone, Mystery Unraveler")).toBeInTheDocument();
-    expect(screen.queryByText("Zimone, Mystery Unraveler", { exact: true })).not.toBeInTheDocument();
+    expect(screen.getByText("98 Plains")).toBeInTheDocument();
+    expect(screen.getByText(`1 ${commander}`)).toBeInTheDocument();
+    expect(screen.queryByText(commander, { exact: true })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Menu/ }));
     expect(await screen.findByRole("button", { name: "Discard" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
