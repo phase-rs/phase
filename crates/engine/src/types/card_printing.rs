@@ -462,6 +462,22 @@ impl DeckPrintingRecord {
             .map(|entry| entry.name.as_str())
     }
 
+    /// `lookup_name`, but only when no other face identity in `section` shares the key.
+    /// A continuation carries a section's rows under a key only if it identifies one face.
+    pub(crate) fn unambiguous_lookup_name(
+        &self,
+        section: DeckSection,
+        face: &CardFace,
+    ) -> Option<&str> {
+        let name = self.lookup_name(section, face)?;
+        // Hand-built resolved payloads can share a key across faces. Ingress cannot:
+        // round_trip_name depends only on the database and face.
+        let shared = self.lookup_names.iter().any(|entry| {
+            entry.section == section && entry.name == name && !entry.names(section, face)
+        });
+        (!shared).then_some(name)
+    }
+
     /// `face`'s rows in `section`, in stream order. Both names are normalized round-trip
     /// names (the row's by `normalize_deck_printings`, the binding's by `round_trip_name`),
     /// never a raw face-name compare. Empty when the record binds no such face there.
@@ -470,7 +486,15 @@ impl DeckPrintingRecord {
         section: DeckSection,
         face: &CardFace,
     ) -> impl Iterator<Item = &DeckPrinting> {
-        let name = self.lookup_name(section, face);
+        self.rows_named(section, self.lookup_name(section, face))
+    }
+
+    /// `section`'s rows under the normalized `name`, in stream order; none for `None`.
+    pub(crate) fn rows_named<'a>(
+        &'a self,
+        section: DeckSection,
+        name: Option<&'a str>,
+    ) -> impl Iterator<Item = &'a DeckPrinting> {
         self.rows
             .iter()
             .filter(move |row| row.section == section && Some(row.name.as_str()) == name)
