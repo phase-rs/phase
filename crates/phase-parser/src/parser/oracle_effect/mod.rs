@@ -3698,11 +3698,17 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         // hand down the event-source binding so the bare spell anaphor is not
         // refined to a parent target the delayed trigger does not have.
         // Standalone mode, matching this builder's pre-existing entry point.
+        //
+        // CR 608.2k + CR 601.2a: a bare "it" in the body names the cast spell, the event subject of
+        // the trigger condition. `trigger_object_pronoun_ref_for_condition` pins the same antecedent
+        // for a printed "whenever you cast ..." body, but its "you cast " tag cannot match "you next
+        // cast", so this arm pins `TriggeringSource` itself.
         let lowered =
-            lower_ability_ir_with_provenance(&parse_ability_ir_standalone_with_spell_anaphor(
+            lower_ability_ir_with_provenance(&parse_ability_ir_standalone_with_object_pronoun(
                 effect_text,
                 AbilityKind::Spell,
                 SpellAnaphorBinding::EventSource,
+                Some(TargetFilter::TriggeringSource),
             ));
         history.extend(lowered.history.into_iter().map(|record| {
             crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
@@ -48496,12 +48502,25 @@ pub(crate) fn parse_ability_ir_standalone_with_spell_anaphor(
     kind: AbilityKind,
     binding: SpellAnaphorBinding,
 ) -> AbilityIr {
+    parse_ability_ir_standalone_with_object_pronoun(text, kind, binding, None)
+}
+
+/// [`parse_ability_ir_standalone_with_spell_anaphor`] plus a pinned bare-object-pronoun
+/// antecedent (`ParseContext::object_pronoun_ref`), for a delayed body whose "it" names the
+/// trigger's event subject. `None` leaves the pronoun unpinned.
+pub(crate) fn parse_ability_ir_standalone_with_object_pronoun(
+    text: &str,
+    kind: AbilityKind,
+    binding: SpellAnaphorBinding,
+    object_pronoun_ref: Option<TargetFilter>,
+) -> AbilityIr {
     parse_ability_ir(
         text,
         kind,
         ChainLoweringMode::Standalone,
         &mut ParseContext {
             spell_anaphor_binding: binding,
+            object_pronoun_ref,
             ..ParseContext::default()
         },
     )

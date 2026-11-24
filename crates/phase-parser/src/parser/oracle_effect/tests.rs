@@ -55585,6 +55585,146 @@ fn when_next_cast_that_spell_grant_binds_triggering_source() {
     );
 }
 
+/// CR 608.2k + CR 601.2a + CR 603.7 + CR 707.10: in a "when you next cast <spell> this
+/// turn" delayed body, the bare pronoun "it" names the newly-cast spell (the trigger's
+/// event source), exactly like "that spell". Left unpinned, `resolve_pronoun_target` falls
+/// back to `ParentTarget`, which names no object of a `WhenNextEvent` delayed trigger. With
+/// the base parse the runtime witnesses for Summon: G.F. Cerberus, The Clone Saga and Najal
+/// make no copy; an activated ability's untargeted `ParentTarget` copy (Adaptive Training
+/// Post, Rimefire Torque, Jeong Jeong) still reaches the cast spell through the engine's
+/// untargeted fallback, so for those the pin corrects the parsed antecedent only.
+#[test]
+fn when_next_cast_copy_it_binds_triggering_source() {
+    for text in [
+        "When you next cast an instant or sorcery spell this turn, copy it. You may choose new targets for the copy.",
+        "When you next cast a creature spell this turn, copy it, except the copy isn't legendary.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect else {
+            panic!("expected CreateDelayedTrigger for {text:?}, got {:?}", def.effect);
+        };
+        let Effect::CopySpell { target, .. } = &*effect.effect else {
+            panic!("expected CopySpell body for {text:?}, got {:?}", effect.effect);
+        };
+        assert_eq!(
+            target,
+            &TargetFilter::TriggeringSource,
+            "'copy it' must name the cast spell, not a parent target: {text:?}"
+        );
+    }
+}
+
+/// CR 608.2k + CR 601.2a + CR 611.2c: "it gains haste until end of turn" in a next-cast
+/// delayed body grants the cast creature spell, not the source that created the trigger
+/// (Summon: Brynhildr chapters II and III).
+#[test]
+fn when_next_cast_it_gains_haste_binds_triggering_source() {
+    use crate::types::ability::ContinuousModification;
+    use crate::types::keywords::Keyword;
+    let def = parse_effect_chain(
+        "When you next cast a creature spell this turn, it gains haste until end of turn.",
+        AbilityKind::Spell,
+    );
+    let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect else {
+        panic!("expected CreateDelayedTrigger, got {:?}", def.effect);
+    };
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*effect.effect
+    else {
+        panic!("expected GenericEffect grant body, got {:?}", effect.effect);
+    };
+    assert_eq!(static_abilities.len(), 1, "one grant static expected");
+    assert_eq!(
+        static_abilities[0].affected,
+        Some(TargetFilter::TriggeringSource),
+        "the 'it' grant must bind the cast spell, not the creating source"
+    );
+    assert!(
+        static_abilities[0].modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            }
+        )),
+        "the grant must add Haste: {:?}",
+        static_abilities[0].modifications
+    );
+}
+
+/// The pin applies only to the bare cast-spell pronoun. A later "put it onto the battlefield"
+/// after a search still names the found card (the structural forward result), "copy that
+/// spell" stays the cast spell, and an "enters with an additional counter" rider is not
+/// rebound (Vivien, Monsters' Advocate; Striking Palette; Kumano Faces Kakkazan).
+#[test]
+fn when_next_cast_pronoun_pin_keeps_other_bindings() {
+    let search = parse_effect_chain(
+        "When you next cast a creature spell this turn, search your library for a creature card with lesser mana value, put it onto the battlefield, then shuffle.",
+        AbilityKind::Activated,
+    );
+    let Effect::CreateDelayedTrigger { effect, .. } = &*search.effect else {
+        panic!("expected CreateDelayedTrigger, got {:?}", search.effect);
+    };
+    assert!(
+        matches!(&*effect.effect, Effect::SearchLibrary { .. }),
+        "reach: the search body parsed, got {:?}",
+        effect.effect
+    );
+    let put = effect
+        .sub_ability
+        .as_deref()
+        .expect("the search is followed by the put clause");
+    let Effect::ChangeZone {
+        destination,
+        target,
+        ..
+    } = &*put.effect
+    else {
+        panic!(
+            "expected the put clause as ChangeZone, got {:?}",
+            put.effect
+        );
+    };
+    assert_eq!(destination, &Zone::Battlefield);
+    assert_eq!(
+        target,
+        &TargetFilter::Any,
+        "'put it' after a search names the found card, not the cast spell"
+    );
+
+    let that_spell = parse_effect_chain(
+        "When you next cast an instant or sorcery spell this turn, copy that spell.",
+        AbilityKind::Spell,
+    );
+    let Effect::CreateDelayedTrigger { effect, .. } = &*that_spell.effect else {
+        panic!("expected CreateDelayedTrigger, got {:?}", that_spell.effect);
+    };
+    assert!(
+        matches!(
+            &*effect.effect,
+            Effect::CopySpell {
+                target: TargetFilter::TriggeringSource,
+                ..
+            }
+        ),
+        "'copy that spell' still names the cast spell, got {:?}",
+        effect.effect
+    );
+
+    let rider = parse_effect_chain(
+        "When you next cast a creature spell this turn, that creature enters with an additional +1/+1 counter on it.",
+        AbilityKind::Spell,
+    );
+    let Effect::CreateDelayedTrigger { effect, .. } = &*rider.effect else {
+        panic!("expected CreateDelayedTrigger, got {:?}", rider.effect);
+    };
+    assert!(
+        matches!(&*effect.effect, Effect::AddPendingETBCounters { .. }),
+        "the counter rider is unchanged, got {:?}",
+        effect.effect
+    );
+}
+
 /// CR 603.7 + CR 707.10: Magus Lucea Kane Psychic Stimulus delayed copy.
 #[test]
 fn magus_lucea_kane_psychic_stimulus_parses_delayed_copy() {
