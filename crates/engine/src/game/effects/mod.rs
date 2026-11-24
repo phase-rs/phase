@@ -10185,6 +10185,11 @@ fn instruction_outlives_declined_gate(
 fn duration_outlives_declined_gate(duration: &Duration) -> bool {
     match duration {
         Duration::UntilEndOfTurn | Duration::UntilEndOfCombat | Duration::Permanent => true,
+        // CR 611.2a + CR 500.7: the granted-turn window names the grant's own
+        // turn identity, nothing the gated action produced — and the bind
+        // prelude fails closed when the grant itself was declined, so this is
+        // observably identical to `false` in that case.
+        Duration::UntilEndOfGrantedTurn { .. } => true,
         Duration::UntilNextTurnOf { player }
         | Duration::UntilEndOfNextTurnOf { player }
         | Duration::UntilNextStepOf { step: _, player } => match player {
@@ -11949,6 +11954,7 @@ fn duration_reads_filter_population(
         | Duration::UntilEndOfCombat
         | Duration::UntilNextTurnOf { .. }
         | Duration::UntilEndOfNextTurnOf { .. }
+        | Duration::UntilEndOfGrantedTurn { .. }
         | Duration::UntilHostLeavesPlay
         | Duration::WhileHostOnBattlefield
         | Duration::WhileControllingHost

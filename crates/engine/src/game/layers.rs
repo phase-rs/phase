@@ -709,6 +709,9 @@ fn permission_duration_expires_at(
         // `prune_untap_step_casting_permissions`) and ended by the cleanup arm
         // above. It never expires directly, at any seam.
         Duration::UntilEndOfNextTurnOf { .. } => false,
+        // CR 611.2a: the granted-turn window is never a seam expiry; the
+        // bound turn's end and both skip sites retire it (`turns.rs`).
+        Duration::UntilEndOfGrantedTurn { .. } => false,
         Duration::UntilNextStepOf { step, player } => {
             PermissionSeam::for_step(*step) == Some(seam)
                 && permission_scope_selects(player, keyed, active_player)
@@ -809,6 +812,9 @@ pub(crate) fn casting_permission_duration_is_enforceable(
         // transient continuous effects only — no pass revokes a casting
         // permission when a spell becomes cast.
         Duration::UntilEvent { .. } => false,
+        // CR 611.2a: the granted-turn window is unrepresentable on a casting
+        // permission — refused, fail-closed.
+        Duration::UntilEndOfGrantedTurn { .. } => false,
     }
 }
 
@@ -1237,6 +1243,7 @@ pub(crate) fn prune_lapsed_host_bound_casting_permissions(state: &mut GameState)
                 | Duration::UntilEndOfCombat
                 | Duration::UntilNextTurnOf { .. }
                 | Duration::UntilEndOfNextTurnOf { .. }
+                | Duration::UntilEndOfGrantedTurn { .. }
                 | Duration::UntilNextStepOf { .. }
                 | Duration::ForAsLongAs { .. }
                 | Duration::UntilSourceExilesAnotherCard
@@ -9923,6 +9930,7 @@ pub(crate) fn transient_effect_is_live(state: &GameState, tce: &TransientContinu
     transient_effect_passes_other_gates(state, tce)
         && transient_duration_holds(state, tce)
         && host_bound_duration_holds(state, &tce.duration, tce.source_id, tce.controller)
+        && granted_turn_duration_window_holds(state, &tce.duration)
 }
 
 fn transient_effect_passes_other_gates(state: &GameState, tce: &TransientContinuousEffect) -> bool {
@@ -10201,6 +10209,23 @@ pub(crate) fn transient_gate_conditions(
         .chain(tce.condition.as_ref())
 }
 
+/// CR 611.2a + CR 500.7: whether a granted-turn window still holds — the
+/// single authority for the `UntilEndOfGrantedTurn` reading, shared by
+/// liveness (`transient_effect_is_live`) and both
+/// `transient_grants_static_mode_to_*` queries. The window holds exactly
+/// while its bound turn is the turn in progress (mirrors the
+/// `AtBeginningOfGrantedTurn` firing gate in `triggers.rs`); an unbound
+/// anaphor never holds (fail-closed). Every other duration holds here —
+/// this predicate answers only the granted-turn window.
+pub(crate) fn granted_turn_duration_window_holds(state: &GameState, duration: &Duration) -> bool {
+    match duration {
+        Duration::UntilEndOfGrantedTurn { turn } => {
+            turn.is_some_and(|bound| state.current_extra_turn == Some(bound))
+        }
+        _ => true,
+    }
+}
+
 /// CR 611.2b: whether a host-bound STATE duration still holds — the single
 /// authority for both readings, shared by liveness, the settled-board prune
 /// (`prune_lapsed_host_bound_effects`) and the resolution-time start test
@@ -10240,6 +10265,7 @@ fn host_bound_duration_holds(
         | Duration::UntilEndOfCombat
         | Duration::UntilNextTurnOf { .. }
         | Duration::UntilEndOfNextTurnOf { .. }
+        | Duration::UntilEndOfGrantedTurn { .. }
         | Duration::UntilNextStepOf { .. }
         // CR 611.2b: `transient_duration_holds` owns this reading.
         | Duration::ForAsLongAs { .. }

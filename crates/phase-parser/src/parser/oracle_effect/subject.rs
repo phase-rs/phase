@@ -7895,13 +7895,14 @@ fn build_restriction_clause(
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
     let (predicate, duration) = super::strip_trailing_duration(&normalized);
-    // CR 701.32a + CR 904.9 + CR 608.2c: a trailing "that turn" on a
-    // restriction predicate is the anaphoric extra-turn window (All in Good
-    // Time: "Schemes can't be set in motion that turn"). The generic duration
-    // table has no bare-"that turn" production — it would amputate "Skip the
-    // untap step of that turn" — so the restriction path resolves it here,
-    // where the corpus holds exactly one shape. The window covers the
-    // controller's next (extra) turn and survives this turn's cleanup.
+    // CR 701.32a + CR 904.9 + CR 608.2c + CR 611.2a: a trailing "that
+    // turn" on a restriction predicate is the anaphoric extra-turn window
+    // (All in Good Time: "Schemes can't be set in motion that turn"). The
+    // generic duration table has no bare-"that turn" production — it would
+    // amputate "Skip the untap step of that turn" — so the restriction path
+    // resolves it here, where the corpus holds exactly one shape. The window
+    // binds the granted turn at resolve (the anaphor's antecedent is this
+    // chain's grant) instead of arming on the controller's next untap.
     let deperioded = predicate.trim_end_matches('.');
     let (predicate, duration) = match duration {
         Some(_) => (predicate, duration),
@@ -7910,9 +7911,7 @@ fn build_restriction_clause(
             match ends_with_that_turn_window(&lower_candidate) {
                 Some(_) => (
                     deperioded[..deperioded.len() - " that turn".len()].trim_end(),
-                    Some(Duration::UntilEndOfNextTurnOf {
-                        player: PlayerScope::Controller,
-                    }),
+                    Some(Duration::UntilEndOfGrantedTurn { turn: None }),
                 ),
                 None => (predicate, None),
             }
@@ -12581,55 +12580,61 @@ mod tests {
         )));
     }
 
-    /// CR 701.32a + CR 904.9 + CR 608.2c: All in Good Time's tail. "Schemes
-    /// can't be set in motion that turn" builds a `GenericEffect` carrying
-    /// `CantSetSchemeInMotion` over the scheme-typed subject, with the
-    /// trailing "that turn" resolved to the extra-turn window (the grant in
-    /// the preceding sentence) — not `UntilEndOfTurn`, which would expire
-    /// before the extra turn begins. The `AddStaticMode` grant propagation
-    /// is what the archenemy set-in-motion gate queries at runtime.
+    /// CR 701.32a + CR 904.9 + CR 608.2c + CR 611.2a: All in Good Time's
+    /// tail. "Schemes can't be set in motion that turn" builds a
+    /// `GenericEffect` carrying `CantSetSchemeInMotion` over the scheme-typed
+    /// subject, with the trailing "that turn" resolved to the granted-turn
+    /// window (the grant in the preceding sentence) — not `UntilEndOfTurn`,
+    /// which would expire before the extra turn begins. The `AddStaticMode`
+    /// grant propagation is what the archenemy set-in-motion gate queries at
+    /// runtime.
     #[test]
-    fn schemes_cant_be_set_in_motion_that_turn_builds_next_turn_restriction() {
-        let mut ctx = ParseContext::default();
-        let clause = try_parse_subject_restriction_clause(
+    fn schemes_cant_be_set_in_motion_that_turn_builds_granted_turn_restriction() {
+        for text in [
             "Schemes can't be set in motion that turn",
-            &mut ctx,
-        )
-        .expect("scheme prohibition should parse");
+            "Schemes cannot be set in motion that turn",
+        ] {
+            let mut ctx = ParseContext::default();
+            let clause = try_parse_subject_restriction_clause(text, &mut ctx)
+                .expect("scheme prohibition should parse");
 
-        let Effect::GenericEffect {
-            static_abilities,
-            duration,
-            target,
-            end_cost: _,
-        } = clause.effect
-        else {
-            panic!(
-                "expected GenericEffect restriction, got {:?}",
-                clause.effect
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+                end_cost: _,
+            } = clause.effect
+            else {
+                panic!(
+                    "expected GenericEffect restriction, got {:?}",
+                    clause.effect
+                );
+            };
+
+            assert_eq!(target, None, "{text}");
+            assert_eq!(
+                duration,
+                Some(Duration::UntilEndOfGrantedTurn { turn: None }),
+                "{text}"
             );
-        };
-
-        assert_eq!(target, None);
-        assert_eq!(
-            duration,
-            Some(Duration::UntilEndOfNextTurnOf {
-                player: PlayerScope::Controller
-            })
-        );
-        assert_eq!(static_abilities.len(), 1);
-        let def = &static_abilities[0];
-        assert_eq!(def.mode, StaticMode::CantSetSchemeInMotion);
-        assert_eq!(
-            def.affected,
-            Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Scheme)))
-        );
-        assert!(def.modifications.iter().any(|m| matches!(
-            m,
-            ContinuousModification::AddStaticMode {
-                mode: StaticMode::CantSetSchemeInMotion
-            }
-        )));
+            assert_eq!(static_abilities.len(), 1, "{text}");
+            let def = &static_abilities[0];
+            assert_eq!(def.mode, StaticMode::CantSetSchemeInMotion, "{text}");
+            assert_eq!(
+                def.affected,
+                Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Scheme))),
+                "{text}"
+            );
+            assert!(
+                def.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantSetSchemeInMotion
+                    }
+                )),
+                "{text}"
+            );
+        }
     }
 
     /// CR 119.7 + CR 608.2c + CR 104.1: Screaming Nemesis's rider. The

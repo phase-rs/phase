@@ -9595,6 +9595,7 @@ fn parse_graveyard_redirect_replacement(
         // judgement as `stated_clause_expiry` and `expiry_from_duration`.
         Some(Duration::UntilNextTurnOf { .. })
         | Some(Duration::UntilEndOfNextTurnOf { .. })
+        | Some(Duration::UntilEndOfGrantedTurn { .. })
         | Some(Duration::UntilNextStepOf { .. }) => return None,
         // CR 604.2 + CR 611.2b: these end on an event or a condition rather
         // than a turn window, so `expiry: None` is the CORRECT answer, not an
@@ -15845,6 +15846,7 @@ fn stated_clause_expiry(clause_lower: &str, window_anchor: &str) -> StatedClause
         // silently shorten the card's stated duration.
         Some(Duration::UntilNextTurnOf { .. })
         | Some(Duration::UntilEndOfNextTurnOf { .. })
+        | Some(Duration::UntilEndOfGrantedTurn { .. })
         | Some(Duration::UntilNextStepOf { .. }) => StatedClauseExpiry::Unsupported,
         // Not turn windows: these end on an event or a condition, so `None` is the
         // CORRECT answer, not an unmapped one — the battlefield-exit prune in

@@ -4634,6 +4634,17 @@ pub enum Duration {
     UntilEndOfNextTurnOf {
         player: PlayerScope,
     },
+    /// CR 611.2a + CR 500.7 + CR 603.7a: "that turn" on a granted extra turn
+    /// (All in Good Time: "Schemes can't be set in motion that turn"). The
+    /// window lasts as stated — the granted turn — and names it by
+    /// turn identity, never by player, so it is immune to the untap-arming
+    /// skip edge. `None` is the unbound parser anaphor (never installed;
+    /// fail-closed); `Some` is bound at resolve from
+    /// `last_granted_extra_turn_ids`.
+    UntilEndOfGrantedTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<ExtraTurnId>,
+    },
     /// CR 611.2a: Effect expires when the source object leaves the
     /// battlefield — the general "lasts as long as stated" rule.
     ///
@@ -4743,6 +4754,7 @@ impl Duration {
             | Self::UntilEndOfCombat
             | Self::UntilNextTurnOf { .. }
             | Self::UntilEndOfNextTurnOf { .. }
+            | Self::UntilEndOfGrantedTurn { .. }
             | Self::UntilNextStepOf { .. }
             | Self::ForAsLongAs { .. }
             | Self::UntilSourceExilesAnotherCard
@@ -4777,6 +4789,7 @@ impl Duration {
             | Self::UntilEndOfCombat
             | Self::UntilNextTurnOf { .. }
             | Self::UntilEndOfNextTurnOf { .. }
+            | Self::UntilEndOfGrantedTurn { .. }
             | Self::UntilNextStepOf { .. }
             | Self::ForAsLongAs { .. }
             | Self::UntilSourceExilesAnotherCard
@@ -4803,6 +4816,7 @@ impl Duration {
             | Self::UntilEndOfCombat
             | Self::UntilNextTurnOf { .. }
             | Self::UntilEndOfNextTurnOf { .. }
+            | Self::UntilEndOfGrantedTurn { .. }
             | Self::UntilNextStepOf { .. }
             | Self::UntilSourceExilesAnotherCard
             | Self::UntilOpponentBecomesMonarch
@@ -45171,8 +45185,11 @@ pub fn expiry_from_duration(duration: Option<&Duration>) -> ReplacementDurationE
         // `UntilEndOfNextTurnOf` needs replacement-side arming, while non-controller
         // turn/step scopes need a resolution-time player binding. Neither is present
         // at this seam, so applying an `EndOfTurn` default would be rules-incorrect.
+        // CR 611.2a: the granted-turn window likewise has no installation
+        // context here from which to bind it, so it fails closed too.
         Some(Duration::UntilNextTurnOf { .. })
         | Some(Duration::UntilEndOfNextTurnOf { .. })
+        | Some(Duration::UntilEndOfGrantedTurn { .. })
         | Some(Duration::UntilNextStepOf { .. }) => ReplacementDurationExpiry::Unsupported,
         // CR 611.2b: the CONTROL reading, and only it. The gate this class
         // promises is `ReplacementCondition::ControllerControlsSource`, which

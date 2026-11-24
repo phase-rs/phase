@@ -6165,6 +6165,9 @@ fn scan_duration(x: &Duration, mode: ScanMode) -> Axes<'_> {
             acc
         }
         Duration::UntilHostLeavesPlay => Axes::NONE,
+        // CR 611.2a + CR 500.7: a resolved turn identity, no filter or
+        // quantity read (follows the `AtBeginningOfGrantedTurn` precedent).
+        Duration::UntilEndOfGrantedTurn { turn: _ } => Axes::NONE,
         // CR 611.2b: payload-free, exactly like `UntilHostLeavesPlay` — the
         // controller it is measured against lives on the carrier.
         Duration::WhileControllingHost => Axes::NONE,

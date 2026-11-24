@@ -1552,6 +1552,7 @@ fn fmt_duration(d: &Duration) -> String {
         Duration::UntilEndOfNextTurnOf { player } => {
             format!("until end of next turn ({})", fmt_player_scope(player))
         }
+        Duration::UntilEndOfGrantedTurn { .. } => "until end of granted turn".to_string(),
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
         Duration::WhileHostOnBattlefield => "while it remains on the battlefield".to_string(),
         Duration::WhileControllingHost => "while its controller controls the source".to_string(),

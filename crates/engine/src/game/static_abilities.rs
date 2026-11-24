@@ -1099,6 +1099,11 @@ pub(crate) fn transient_grants_static_mode_to_player(
         {
             continue;
         }
+        // CR 611.2a + CR 500.7: a granted-turn window holds only during its
+        // bound turn.
+        if !crate::game::layers::granted_turn_duration_window_holds(state, &tce.duration) {
+            continue;
+        }
         // CR 702.11c + CR 702.18a: a resolved "you gain hexproof/shroud" is a keyword grant on the player.
         let grants_mode = tce.modifications.iter().any(|m| match m {
             ContinuousModification::AddStaticMode { mode: m_mode } => m_mode == mode,
@@ -1148,6 +1153,11 @@ pub(crate) fn transient_grants_static_mode_to_object(
         if !crate::game::layers::transient_gate_conditions(tce)
             .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
         {
+            continue;
+        }
+        // CR 611.2a + CR 500.7: a granted-turn window holds only during its
+        // bound turn.
+        if !crate::game::layers::granted_turn_duration_window_holds(state, &tce.duration) {
             continue;
         }
         let grants_mode = tce.modifications.iter().any(|m| {

@@ -2282,6 +2282,7 @@ fn legacy_duration(x: &Duration) -> bool {
         | Duration::Permanent
         | Duration::UntilNextTurnOf { .. }
         | Duration::UntilEndOfNextTurnOf { .. }
+        | Duration::UntilEndOfGrantedTurn { .. }
         | Duration::UntilNextStepOf { .. } => false,
     }
 }
@@ -5100,6 +5101,10 @@ fn rw_duration(x: &Duration) -> RwProfile {
         // module has no read/write walker for (delayed-trigger conditions are
         // not walked either).
         | Duration::UntilEvent { .. }
+        // CR 611.2a + CR 500.7: a turn identity, not player scope or
+        // condition — reads the global `current_extra_turn`, neither
+        // member-bound nor event-live.
+        | Duration::UntilEndOfGrantedTurn { .. }
         | Duration::Permanent => RwProfile::empty(),
         Duration::UntilNextTurnOf { player, .. }
         | Duration::UntilEndOfNextTurnOf { player, .. }
