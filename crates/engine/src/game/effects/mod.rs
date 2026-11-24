@@ -6792,6 +6792,15 @@ fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool 
     }
 }
 
+/// CR 101.4: is `node` bound to a player by an instruction (a `player_scope` seat leg, or a
+/// "that player" bound at resolution) rather than by its own trigger? A phase trigger's turn
+/// player (CR 603.2b + CR 102.1) and an attack trigger's attacking player (CR 506.2) are
+/// recorded in `SpellContext::trigger_bound_player` and are no seat leg; the equality guards a
+/// node a later binding rewrote without clearing the trigger's.
+pub(crate) fn bound_to_a_player_by_an_instruction(node: &ResolvedAbility) -> bool {
+    node.scoped_player.is_some() && node.scoped_player != node.context.trigger_bound_player
+}
+
 /// The deferral predicate D: at this boundary, is settling the earlier instructions' entries
 /// unsafe because the remaining chain may still change what entered, as part of its entry?
 ///
@@ -6804,10 +6813,10 @@ fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool 
 /// - **D2 (CR 303.4f, conservative):** `next` is an `Attach` following a forwarded result, or
 ///   following no known completed instruction.
 /// - **D3 (CR 603.6a + CR 101.4):** `next` is bound to a player by an instruction — a
-///   `player_scope` seat leg; the seats may form one simultaneous entry event. A phase
-///   trigger's binding to its turn player (CR 603.2b + CR 102.1, `SpellContext::phase_turn_player`)
-///   is not a seat leg: the trigger's own instructions complete one after another, so they are
-///   boundaries like a spell's.
+///   `player_scope` seat leg; the seats may form one simultaneous entry event. A trigger's own
+///   binding (`SpellContext::trigger_bound_player`: a phase trigger's turn player, CR 603.2b +
+///   CR 102.1; an attack trigger's attacking player, CR 506.2) is not a seat leg: the trigger's
+///   instructions complete one after another, so they are boundaries like a spell's.
 ///
 /// Carriers held only in chain-driver locals are measured over the generated card data, not
 /// walked (every `WithEntry` stamp site lowers to an instruction of a kind that measurement
@@ -6816,14 +6825,6 @@ fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool 
 /// D3 (every seat leg carries `scoped_player`); a multi-target-player fan-out's `after_fanout`
 /// tail reaches no entering leg; and no entering `repeat_for` / nested driver carries a later
 /// candidate outside its iterated subtree.
-/// CR 101.4 + CR 603.2b: is `node` bound to a player by an instruction (a `player_scope` seat
-/// leg, or a "that player" bound at resolution) rather than by its phase trigger's turn player?
-/// A binding that is the phase's own is no seat leg; the equality guards a node a later binding
-/// rewrote without clearing the phase's.
-pub(crate) fn bound_to_a_player_by_an_instruction(node: &ResolvedAbility) -> bool {
-    node.scoped_player.is_some() && node.scoped_player != node.context.phase_turn_player
-}
-
 fn entry_observation_deferred(
     state: &GameState,
     next: &ResolvedAbility,
@@ -73596,31 +73597,31 @@ mod entry_observation_settlement_tests {
     }
 
     /// CR 608.2c + CR 101.4: a boundary marks the instruction on the ledger before a node bound
-    /// to its phase trigger's turn player, but not between the seat legs of a player-scope
+    /// by its own trigger, but not between the seat legs of a player-scope
     /// clause still in progress, whose seats' actions are one simultaneous event: neither
     /// before a seat leg resumed without a sidecar (Grismold, the Dreadsower reaches it; see the
     /// integration suite) nor under a sidecar. Synthetic: the nodes and the sidecar are built
     /// by hand.
     #[test]
     fn boundary_marks_the_instruction_outside_seat_legs() {
-        let mut seat_scoped = node(put_counter());
-        seat_scoped.scoped_player = Some(PlayerId(0));
-
-        // A node bound to its phase trigger's turn player is an ordinary instruction.
-        let mut phase_bound = node(put_counter());
-        phase_bound.set_phase_turn_player_recursive(PlayerId(0));
+        // A node bound by its trigger is an ordinary instruction.
+        let mut trigger_bound = node(put_counter());
+        trigger_bound.set_trigger_bound_player_recursive(PlayerId(0));
         let mut state = GameState::new_two_player(3);
         let (_, events) = entered(&mut state, 1);
-        settle_entries_before_instruction(&mut state, &events, &phase_bound, None);
+        settle_entries_before_instruction(&mut state, &events, &trigger_bound, None);
         assert_eq!(
             state.instruction_boundary_marks,
             vec![state.zone_changes_this_turn.len()],
             "the completed instruction's entry is below the mark"
         );
+        assert_eq!(state.battlefield_entry_observations.len(), 1);
         // A second boundary with no new ledger row marks nothing.
-        settle_entries_before_instruction(&mut state, &events, &phase_bound, None);
+        settle_entries_before_instruction(&mut state, &events, &trigger_bound, None);
         assert_eq!(state.instruction_boundary_marks.len(), 1);
 
+        let mut seat_scoped = trigger_bound;
+        seat_scoped.set_scoped_player_recursive(PlayerId(0));
         // A seat leg resumed without a sidecar: no observation (D3) and no mark.
         let mut state = GameState::new_two_player(3);
         let (_, events) = entered(&mut state, 1);
@@ -73648,6 +73649,64 @@ mod entry_observation_settlement_tests {
             state.instruction_boundary_marks.is_empty(),
             "the next seat leg is part of the same clause"
         );
+
+        let mut with_entry = with_entry(generic());
+        with_entry.set_trigger_bound_player_recursive(PlayerId(0));
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        settle_entries_before_instruction(&mut state, &events, &with_entry, None);
+        assert!(
+            state.battlefield_entry_observations.is_empty(),
+            "D1 defers a trigger-bound WithEntry rider"
+        );
+    }
+
+    /// CR 101.4: Iron Man's optional instruction runs outside a player-scope seat leg.
+    #[test]
+    fn iron_man_optional_frame_is_outside_entry_progress() {
+        use crate::game::combat::AttackTarget;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::ManaCost;
+
+        const IRON_MAN: &str = "Flying, haste\nGenius Industrialist — Whenever Iron Man attacks, create a Treasure token, then you may sacrifice a noncreature artifact. If you do, search your library for an artifact card with mana value equal to 1 plus the sacrificed artifact's mana value, put it onto the battlefield tapped, then shuffle.";
+        const FIREWEAVER: &str = "Whenever an artifact you control enters, this creature deals 1 damage to each opponent.";
+        const SOL_RING: &str = "{T}: Add {C}{C}.";
+
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        let iron_man = scenario
+            .add_creature_from_oracle(P0, "Iron Man, Titan of Innovation", 4, 4, IRON_MAN)
+            .from_oracle_text_with_keywords(&["Flying", "Haste"], IRON_MAN)
+            .as_artifact_creature()
+            .as_legendary()
+            .with_subtypes(vec!["Human", "Hero"])
+            .id();
+        scenario.add_creature_from_oracle(P0, "Reckless Fireweaver", 1, 3, FIREWEAVER);
+        let _ring = scenario
+            .add_spell_to_library_top(P0, "Sol Ring", false)
+            .as_artifact()
+            .with_mana_cost(ManaCost::generic(1))
+            .from_oracle_text(SOL_RING)
+            .id();
+        scenario.with_library_top(P0, &["Plains", "Island"]);
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(iron_man, AttackTarget::Player(P1))])
+            .unwrap();
+        runner.advance_until_stack_empty();
+        let state = runner.state();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == iron_man)
+        );
+        let frame = state
+            .active_optional_effect_frame()
+            .expect("Iron Man's sacrifice prompt");
+        assert_eq!(frame.ability.scoped_player, Some(P0));
+        assert!(
+            !crate::game::triggers::battlefield_entry_in_progress(state),
+            "Iron Man's optional frame must not count as an entry in progress"
+        );
+        assert_eq!(frame.ability.context.trigger_bound_player, Some(P0));
     }
 
     /// G2: a parked mid-entry entry is skipped by its ledger key, even under a
