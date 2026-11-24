@@ -941,6 +941,7 @@ fn commander_candidates_horde_uses_resolved_rules_before_challenge() {
         request.selected_challenge_deck = Some(constructed);
         assert!(commander_candidates(&db, &request, CommandersOutside).is_empty());
     }
+    request.selected_challenge_deck = Some(constructed);
     request.selected_format = Some(SelectedFormat::Resolved(Box::new(FormatConfig::horde(
         commander.default_ruleset(),
     ))));

@@ -170,11 +170,11 @@ pub enum CommanderDeckComposition {
     CommandersOutside,
 }
 
-/// CR 903.3 + CR 903.5a: the main-deck cards that still have a copy free to be
-/// designated as a commander, as the first available occurrence of each card
-/// in main-deck order. Counts by resolved card, so two printing rows or two
-/// spellings of one card are two copies. Pairing and whole-deck legality are
-/// left to `can_pair_commanders` and `evaluate_deck_compatibility`.
+/// Returns the first available main-deck occurrence of each card eligible for
+/// the selected format, in main-deck order. Counts by resolved card, so two
+/// printing rows or two spellings of one card are two copies. Pairing and
+/// whole-deck legality are left to `can_pair_commanders` and
+/// `evaluate_deck_compatibility`.
 pub fn commander_candidates(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
