@@ -1839,6 +1839,45 @@ fn validate_token_substitute_answer(
     Ok(())
 }
 
+/// CR 602.2b + CR 606.4: consume the concrete result of a marked parked root
+/// exactly once into the already-known activation tally. Unknown legacy
+/// contexts remain unknown.
+fn credit_parked_loyalty_cost_receipt(state: &mut GameState, removed: u32) {
+    match state.pending_cost_move_resume.as_mut() {
+        Some(PendingCostMoveResume::CounterCostRemovalPayment {
+            pending: Some(pending),
+            ..
+        }) => {
+            if let Some(tally) = pending.ability.context.loyalty_counters_removed.as_mut() {
+                *tally = tally.saturating_add(removed);
+            }
+        }
+        Some(PendingCostMoveResume::LoyaltyActivation { resolved, .. }) => {
+            if let Some(tally) = resolved.context.loyalty_counters_removed.as_mut() {
+                *tally = tally.saturating_add(removed);
+            }
+        }
+        None
+        | Some(
+            PendingCostMoveResume::Cast { .. }
+            | PendingCostMoveResume::SacrificeForCost { .. }
+            | PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+            | PendingCostMoveResume::Foretell { .. }
+            | PendingCostMoveResume::CollectEvidencePayment { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::CounterCostRemovalPayment { pending: None, .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::TurnFaceUpCostMove { .. }
+            | PendingCostMoveResume::PlayerScopeUnlessSettlement(_),
+        ) => {}
+    }
+}
+
 fn handle_replacement_choice_inner(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -2481,15 +2520,23 @@ fn handle_replacement_choice_inner(
                     object_id,
                     counter_type,
                     count,
+                    loyalty_cost_root,
                     ..
                 } => {
-                    effects::counters::apply_counter_removal(
+                    let removed = effects::counters::apply_counter_removal(
                         state,
                         object_id,
                         counter_type,
                         count,
                         events,
                     );
+                    // CR 602.2b + CR 606.4: the marker belongs only to the
+                    // parked root proposal. Latch its actual delivered result
+                    // into the owning activation before the proposal is
+                    // consumed; identical replacement children remain inert.
+                    if loyalty_cost_root.is_some() {
+                        credit_parked_loyalty_cost_receipt(state, removed);
+                    }
                 }
                 move_counter @ ProposedEvent::MoveCounter { .. } => {
                     if !effects::counters::apply_move_counter_after_replacement(

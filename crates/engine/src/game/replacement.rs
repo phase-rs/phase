@@ -21635,6 +21635,7 @@ mod tests {
                     object_id: ObjectId(1),
                     counter_type: CounterType::Plus1Plus1,
                     count: 1,
+                    loyalty_cost_root: None,
                     applied: HashSet::new(),
                 },
                 vec![ReplacementEvent::RemoveCounter],
