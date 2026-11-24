@@ -1857,7 +1857,24 @@ fn credit_parked_loyalty_cost_receipt(state: &mut GameState, removed: u32) {
                 *tally = tally.saturating_add(removed);
             }
         }
-        _ => {}
+        None
+        | Some(
+            PendingCostMoveResume::Cast { .. }
+            | PendingCostMoveResume::SacrificeForCost { .. }
+            | PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+            | PendingCostMoveResume::Foretell { .. }
+            | PendingCostMoveResume::CollectEvidencePayment { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::CounterCostRemovalPayment { pending: None, .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::TurnFaceUpCostMove { .. }
+            | PendingCostMoveResume::PlayerScopeUnlessSettlement(_),
+        ) => {}
     }
 }
 

@@ -7769,7 +7769,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana
-        | TriggerCondition::LoyaltyCountersRemovedAtLeast { .. }
+        | TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum: _ }
         | TriggerCondition::FirstTimeObjectTappedThisTurn
         | TriggerCondition::WasType { .. }
         | TriggerCondition::AttackedThisTurn

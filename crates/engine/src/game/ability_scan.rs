@@ -5630,7 +5630,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
         }
         TriggerCondition::CastVariantPaidPersistent { variant: _ } => Axes::NONE,
         TriggerCondition::ActivatedAbilityIsNonMana => Axes::NONE,
-        TriggerCondition::LoyaltyCountersRemovedAtLeast { .. } => Axes {
+        TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum: _ } => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,

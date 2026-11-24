@@ -5,7 +5,8 @@ use crate::types::ability::{
 use crate::types::casting_costs::SettledTail;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActivationTargetSelection, GameState, PendingCast, TargetSelectionSlot, WaitingFor,
+    ActivationTargetSelection, GameState, PendingCast, StackEntryKind, TargetSelectionSlot,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -788,11 +789,13 @@ pub(crate) fn emit_ability_activated(
             .and_then(|placed| {
                 state.stack.iter().find_map(|entry| {
                     (entry.id == placed).then_some(match &entry.kind {
-                        crate::types::game_state::StackEntryKind::ActivatedAbility {
-                            ability,
-                            ..
-                        } => ability.context.loyalty_counters_removed,
-                        _ => None,
+                        StackEntryKind::ActivatedAbility { ability, .. } => {
+                            ability.context.loyalty_counters_removed
+                        }
+                        StackEntryKind::Spell { .. }
+                        | StackEntryKind::TriggeredAbility { .. }
+                        | StackEntryKind::KeywordAction { .. }
+                        | StackEntryKind::CombatDamage { .. } => None,
                     })
                 })
             })
