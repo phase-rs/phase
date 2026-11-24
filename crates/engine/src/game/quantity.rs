@@ -17,6 +17,7 @@ use crate::game::filter::{
 };
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::speed::effective_speed;
+use crate::game::targeting::StackTriggerContext;
 use crate::game::targeting::TriggeringSpell;
 use crate::types::ability::{
     filter_recipient_read, quantity_ref_object_scope_read, AbilityCondition, AbilityCost,
@@ -54,7 +55,7 @@ use crate::types::zones::Zone;
 /// resolve against the source only and go through `resolve_quantity`; the
 /// replacement pipeline threads a richer context via `resolve_quantity_with_ctx`.
 #[derive(Debug, Clone)]
-pub struct QuantityContext {
+pub struct QuantityContext<'a> {
     /// The object entering the battlefield, when in an ETB-scoped replacement.
     /// `None` outside that context.
     pub entering: Option<ObjectId>,
@@ -64,6 +65,9 @@ pub struct QuantityContext {
     /// triggered ability or its intervening-if. `source` remains attribution;
     /// source-relative facts must use this context instead of rebinding it.
     pub trigger_source: Option<TriggerSourceContext>,
+    /// CR 603.2 + CR 400.7: selected stack-entry trigger provenance for a
+    /// call-scoped legality evaluation. This never mutates ambient game state.
+    pub stack_trigger_context: Option<StackTriggerContext<'a>>,
     /// CR 613.4c: The per-recipient binding for "<subject> gets +N/+M for
     /// each X attached to it" Aura/Equipment statics. Set by the layer
     /// evaluator when the dynamic modification's filter contains
@@ -96,13 +100,14 @@ pub struct QuantityContext {
     pub granting_object: Option<ObjectIncarnationRef>,
 }
 
-impl QuantityContext {
+impl<'a> QuantityContext<'a> {
     /// A context naming only its source; every other binding is absent.
     pub fn new(source: ObjectId) -> Self {
         Self {
             entering: None,
             source,
             trigger_source: None,
+            stack_trigger_context: None,
             recipient: None,
             scoped_player: None,
             damage_source: None,
@@ -122,6 +127,14 @@ impl QuantityContext {
                 trigger_source.map_or(ObjectId(0), |source| source.identity.reference.object_id),
             )
         }
+    }
+
+    pub(crate) fn with_stack_trigger_context(
+        mut self,
+        context: Option<StackTriggerContext<'a>>,
+    ) -> Self {
+        self.stack_trigger_context = context;
+        self
     }
 
     /// Object to resolve "self"-scoped spell refs (e.g., colors spent to cast)
@@ -4141,6 +4154,18 @@ pub fn resolve_quantity_with_targets(
     expr: &QuantityExpr,
     ability: &ResolvedAbility,
 ) -> i32 {
+    resolve_quantity_with_targets_and_trigger_context(state, expr, ability, None)
+}
+
+/// CR 603.2 + CR 400.7: resolve a quantity against an explicitly selected
+/// stack entry's trigger event. The ordinary wrapper above retains ambient
+/// compatibility for callers that are not operating on a selected entry.
+pub(crate) fn resolve_quantity_with_targets_and_trigger_context(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+    trigger_context: Option<StackTriggerContext<'_>>,
+) -> i32 {
     let controller = ability.original_controller.unwrap_or(ability.controller);
     match expr {
         QuantityExpr::Fixed { value } => *value,
@@ -4148,25 +4173,31 @@ pub fn resolve_quantity_with_targets(
             state,
             qty,
             controller,
-            ability_quantity_context(ability),
+            ability_quantity_context(ability).with_stack_trigger_context(trigger_context),
             &ability.targets,
             ability.chosen_x,
             Some(ability),
             None,
         ),
         other => fold_compose(other, |inner| {
-            resolve_quantity_with_targets(state, inner, ability)
+            resolve_quantity_with_targets_and_trigger_context(
+                state,
+                inner,
+                ability,
+                trigger_context,
+            )
         }),
     }
 }
 
 /// The quantity context `resolve_quantity_with_targets` resolves `ability`'s
 /// quantities in.
-fn ability_quantity_context(ability: &ResolvedAbility) -> QuantityContext {
+fn ability_quantity_context(ability: &ResolvedAbility) -> QuantityContext<'_> {
     QuantityContext {
         entering: None,
         source: ability.source_id,
         trigger_source: ability.trigger_source.clone(),
+        stack_trigger_context: None,
         recipient: None,
         scoped_player: ability.scoped_player,
         damage_source: None,
@@ -4346,6 +4377,7 @@ pub fn resolve_quantity_with_parked_targets(
                 entering: None,
                 source: source_id,
                 trigger_source: None,
+                stack_trigger_context: None,
                 recipient: None,
                 scoped_player: parked.scoped_player,
                 damage_source: None,
@@ -5105,6 +5137,7 @@ fn resolve_ref(
         }
     };
     filter_ctx.recipient_id = ctx.recipient;
+    filter_ctx.stack_trigger_context = ctx.stack_trigger_context;
     filter_ctx.ability_targets = ability_targets;
     // CR 614.12 + CR 614.1c: a quantity read for an ENTERING object's replacement
     // (`ctx.entering`) counts the battlefield as it was before the simultaneous
@@ -7468,9 +7501,9 @@ fn matches_zone_card_filter(
 fn scoped_players<'a>(
     state: &'a GameState,
     scope: &'a CountScope,
-    ctx: QuantityContext,
+    ctx: QuantityContext<'a>,
     controller: PlayerId,
-) -> impl Iterator<Item = &'a crate::types::player::Player> {
+) -> impl Iterator<Item = &'a crate::types::player::Player> + 'a {
     scoped_players_matching(state, scope, ctx, controller, false)
 }
 
@@ -7480,19 +7513,19 @@ fn scoped_players<'a>(
 fn history_scoped_players<'a>(
     state: &'a GameState,
     scope: &'a CountScope,
-    ctx: QuantityContext,
+    ctx: QuantityContext<'a>,
     controller: PlayerId,
-) -> impl Iterator<Item = &'a crate::types::player::Player> {
+) -> impl Iterator<Item = &'a crate::types::player::Player> + 'a {
     scoped_players_matching(state, scope, ctx, controller, true)
 }
 
 fn scoped_players_matching<'a>(
     state: &'a GameState,
     scope: &'a CountScope,
-    ctx: QuantityContext,
+    ctx: QuantityContext<'a>,
     controller: PlayerId,
     include_departed: bool,
-) -> impl Iterator<Item = &'a crate::types::player::Player> {
+) -> impl Iterator<Item = &'a crate::types::player::Player> + 'a {
     let scoped_player = ctx
         .scoped_player
         .or_else(|| triggering_event_player(state))
@@ -7551,7 +7584,7 @@ fn scoped_zone_holders<'a>(
     state: &'a GameState,
     zone: &ZoneRef,
     scope: &'a CountScope,
-    ctx: QuantityContext,
+    ctx: QuantityContext<'a>,
     controller: PlayerId,
 ) -> impl Iterator<Item = &'a crate::types::player::Player> {
     distinct_zone_holders(
@@ -8111,6 +8144,7 @@ pub(crate) fn distinct_counter_kinds_among(
             entering: None,
             source: filter_ctx.source_id,
             trigger_source: filter_ctx.trigger_source.cloned(),
+            stack_trigger_context: filter_ctx.stack_trigger_context,
             recipient: None,
             scoped_player: None,
             damage_source: None,
@@ -8210,17 +8244,21 @@ fn current_or_detection_trigger_event(state: &GameState) -> Option<GameEvent> {
 fn object_lookback_event(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
+    trigger_context: Option<StackTriggerContext<'_>>,
 ) -> Option<GameEvent> {
-    ability
+    let creation_lookback = ability
         .and_then(|a| a.context.creation_lookback_event.as_deref())
-        .cloned()
-        .or_else(|| current_or_detection_trigger_event(state))
+        .cloned();
+    match trigger_context {
+        Some(context) => creation_lookback.or_else(|| context.event.cloned()),
+        None => creation_lookback.or_else(|| current_or_detection_trigger_event(state)),
+    }
 }
 
 /// CR 603.2 + CR 603.7 + CR 608.2h: whether an object look-back read has a triggering-event source.
 /// See [`object_lookback_event`].
 fn event_source_referent_present(state: &GameState, ability: Option<&ResolvedAbility>) -> bool {
-    object_lookback_event(state, ability)
+    object_lookback_event(state, ability, None)
         .and_then(|event| crate::game::targeting::extract_source_from_event(&event))
         .is_some()
 }
@@ -8237,8 +8275,12 @@ enum DepartureLookback {
     Malformed,
 }
 
-fn departure_lookback(state: &GameState, ability: Option<&ResolvedAbility>) -> DepartureLookback {
-    let Some(event) = object_lookback_event(state, ability) else {
+fn departure_lookback(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+    trigger_context: Option<StackTriggerContext<'_>>,
+) -> DepartureLookback {
+    let Some(event) = object_lookback_event(state, ability, trigger_context) else {
         return DepartureLookback::NotBattlefieldDeparture;
     };
     match battlefield_departure_counter_context(&event) {
@@ -8274,7 +8316,7 @@ fn departure_context_for_scope(
     {
         return None;
     }
-    match departure_lookback(state, ability) {
+    match departure_lookback(state, ability, None) {
         DepartureLookback::Present(context) => Some(Some(context)),
         DepartureLookback::Malformed => Some(None),
         DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => None,
@@ -8443,7 +8485,7 @@ fn event_context_counter_count_from_lki(
         ) => counter_type,
         _ => return None,
     };
-    let event = object_lookback_event(state, ability)?;
+    let event = object_lookback_event(state, ability, None)?;
     let count = match battlefield_departure_counter_context(&event) {
         BattlefieldDepartureCounterContext::Present { context } => {
             counter_count_from_map(&context.lki.counters, Some(counter_type))
@@ -8561,7 +8603,7 @@ fn read_counters_on_scope<T>(
         // the event's prior incarnation, not a same-id object that has since
         // returned. Other event kinds retain the ordinary scope lookup below.
         ObjectScope::EventSource => {
-            let event = object_lookback_event(state, ability);
+            let event = object_lookback_event(state, ability, None);
             match event
                 .as_ref()
                 .map(battlefield_departure_counter_context)
@@ -8958,8 +9000,9 @@ where
 fn trigger_event_source_identity(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
+    trigger_context: Option<StackTriggerContext<'_>>,
 ) -> Option<(ObjectId, Option<(u64, Zone)>)> {
-    let event = object_lookback_event(state, ability)?;
+    let event = object_lookback_event(state, ability, trigger_context)?;
     let object_id = crate::game::targeting::extract_source_from_event(&event)?;
     let pin = match &event {
         crate::types::events::GameEvent::ZoneChanged {
@@ -8969,7 +9012,24 @@ fn trigger_event_source_identity(
         } if *event_object == object_id => record
             .entered_incarnation
             .map(|incarnation| (incarnation, record.to_zone)),
-        _ => None,
+        // CR 508.1a + CR 400.7: attackers are creatures the active player
+        // controls, so the declaration record pins a battlefield incarnation.
+        crate::types::events::GameEvent::AttackersDeclared {
+            declaration_records,
+            ..
+        } => declaration_records
+            .iter()
+            .find(|record| record.object_id == object_id)
+            .and_then(|record| record.incarnation)
+            .map(|incarnation| (incarnation, Zone::Battlefield)),
+        // CR 400.7: the remaining stamped events (tapped, blocked, combat
+        // damage source) name a permanent's battlefield incarnation.
+        _ => crate::game::targeting::event_context_incarnation(
+            &crate::types::ability::TargetFilter::TriggeringSource,
+            &event,
+            object_id,
+        )
+        .map(|reference| (reference.incarnation, Zone::Battlefield)),
     };
     Some((object_id, pin))
 }
@@ -8984,6 +9044,7 @@ fn trigger_event_source_identity(
 fn read_trigger_event_source_characteristic<F, G>(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
+    trigger_context: Option<StackTriggerContext<'_>>,
     obj_extract: &F,
     lki_extract: &G,
     live_zone_override: Option<Zone>,
@@ -8993,12 +9054,12 @@ where
     F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
     G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
 {
-    match departure_lookback(state, ability) {
+    match departure_lookback(state, ability, trigger_context) {
         DepartureLookback::Present(context) => return lki_extract(&context.lki),
         DepartureLookback::Malformed => return None,
         DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {}
     }
-    let (id, pin) = trigger_event_source_identity(state, ability)?;
+    let (id, pin) = trigger_event_source_identity(state, ability, trigger_context)?;
     if let Some((incarnation, destination)) = pin {
         read_object_characteristic_for_incarnation(
             state,
@@ -9016,6 +9077,7 @@ where
 fn read_trigger_event_source_pt<F, G>(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
+    trigger_context: Option<StackTriggerContext<'_>>,
     obj_extract: &F,
     lki_extract: &G,
 ) -> Option<i32>
@@ -9026,6 +9088,7 @@ where
     read_trigger_event_source_characteristic(
         state,
         ability,
+        trigger_context,
         obj_extract,
         lki_extract,
         Some(Zone::Battlefield),
@@ -9162,9 +9225,14 @@ where
         // CR 608.2h + CR 603.10a: the triggering-event source ("this creature
         // dies, ... its power"). When the source has left the battlefield, prefer
         // its buffed LKI over a base-only live read via the shared guarded read.
-        ObjectScope::EventSource => {
-            read_trigger_event_source_pt(state, ability, &obj_extract, &lki_extract).unwrap_or(0)
-        }
+        ObjectScope::EventSource => read_trigger_event_source_pt(
+            state,
+            ability,
+            ctx.stack_trigger_context,
+            &obj_extract,
+            &lki_extract,
+        )
+        .unwrap_or(0),
         // CR 603.2 + CR 208.1: the power/toughness of the object that received
         // the triggering damage ("that creature's toughness"). Same guarded
         // live-then-LKI resolution as `EventSource`, keyed on the recipient
@@ -9221,7 +9289,13 @@ where
                 // record's incarnation prevents a blinked object from reading
                 // the re-entered permanent's live P/T instead of original LKI.
                 // Slots 1 and 2 (snapshot-only) are unchanged.
-                read_trigger_event_source_pt(state, ability, &obj_extract, &lki_extract)
+                read_trigger_event_source_pt(
+                    state,
+                    ability,
+                    ctx.stack_trigger_context,
+                    &obj_extract,
+                    &lki_extract,
+                )
             })
             .unwrap_or(0),
         // CR 608.2c: A demonstrative noun phrase ("that creature's toughness")
@@ -9248,7 +9322,13 @@ where
             .or_else(|| {
                 // CR 400.7 + CR 608.2h: slot 2 trigger-event source uses exact
                 // ETB incarnation identity. Slots 1 and 3 are unchanged.
-                read_trigger_event_source_pt(state, ability, &obj_extract, &lki_extract)
+                read_trigger_event_source_pt(
+                    state,
+                    ability,
+                    ctx.stack_trigger_context,
+                    &obj_extract,
+                    &lki_extract,
+                )
             })
             .or_else(|| {
                 ability
@@ -9297,7 +9377,13 @@ where
                 // `CostPaidObject` / `Demonstrative` slots, so a phase-delayed
                 // payload reads its creation departure (CR 603.7 + CR 603.10a).
                 // Slots 1 and 3 (snapshot-only) are unchanged.
-                read_trigger_event_source_pt(state, ability, &obj_extract, &lki_extract)
+                read_trigger_event_source_pt(
+                    state,
+                    ability,
+                    ctx.stack_trigger_context,
+                    &obj_extract,
+                    &lki_extract,
+                )
             })
             .or_else(|| {
                 ability
@@ -9453,8 +9539,15 @@ fn spell_cast_mana_value_for_event(state: &GameState, event: &GameEvent) -> Opti
 /// CR 714.4 can sacrifice the Saga after the final chapter ability leaves the
 /// stack, and a re-entered Saga can occupy the same storage id before an
 /// observer resolves.
-fn event_source_mana_value_override(state: &GameState) -> Option<i32> {
-    match current_or_detection_trigger_event(state)? {
+fn event_source_mana_value_override(
+    state: &GameState,
+    trigger_context: Option<StackTriggerContext<'_>>,
+) -> Option<i32> {
+    let event = match trigger_context {
+        Some(context) => context.event.cloned(),
+        None => current_or_detection_trigger_event(state),
+    }?;
+    match event {
         GameEvent::SagaChapterAbilityResolved { saga, .. } => {
             Some(u32_to_i32_saturating(saga.lki.mana_value))
         }
@@ -9489,13 +9582,15 @@ fn resolve_object_mana_value(
     // information (0 for a face-down permanent under CR 708.2a + CR 202.3a),
     // even if a live same-id object has since returned. Other events keep
     // the id-keyed live-then-LKI read.
-    let event_source_mana_value = || match departure_lookback(state, ability) {
-        DepartureLookback::Present(context) => last_known(&context.lki),
-        DepartureLookback::Malformed => Some(0),
-        DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {
-            trigger_event_source_identity(state, ability).and_then(|(id, _)| live_then_lki(id))
-        }
-    };
+    let event_source_mana_value =
+        || match departure_lookback(state, ability, ctx.stack_trigger_context) {
+            DepartureLookback::Present(context) => last_known(&context.lki),
+            DepartureLookback::Malformed => Some(0),
+            DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {
+                trigger_event_source_identity(state, ability, ctx.stack_trigger_context)
+                    .and_then(|(id, _)| live_then_lki(id))
+            }
+        };
     match scope {
         // CR 202.3e: include cost_x_paid so on-stack spells report X's chosen value.
         ObjectScope::Source => {
@@ -9524,12 +9619,15 @@ fn resolve_object_mana_value(
             // so Radagast the Brown reads the original face-down entrant's
             // zero after it blinks (CR 708.2a + CR 202.3a). Unpinned events
             // read the live object first, including a spell on the stack.
-            if let Some(mana_value) = event_source_mana_value_override(state) {
+            if let Some(mana_value) =
+                event_source_mana_value_override(state, ctx.stack_trigger_context)
+            {
                 return mana_value;
             }
             read_trigger_event_source_characteristic(
                 state,
                 ability,
+                ctx.stack_trigger_context,
                 &live,
                 &last_known,
                 None,
@@ -9644,7 +9742,7 @@ fn resolve_object_mana_value(
             .and_then(|a| a.effect_context_object.as_ref())
             .map(|s| u32_to_i32_saturating(s.lki.mana_value))
             .or_else(|| {
-                object_lookback_event(state, ability)
+                object_lookback_event(state, ability, ctx.stack_trigger_context)
                     .as_ref()
                     .and_then(|event| spell_cast_mana_value_for_event(state, event))
             })
@@ -28669,7 +28767,7 @@ mod tests {
         (state, spell, target, ability)
     }
 
-    fn chain_root_ctx(spell: ObjectId) -> QuantityContext {
+    fn chain_root_ctx(spell: ObjectId) -> QuantityContext<'static> {
         QuantityContext::new(spell)
     }
 
@@ -30087,7 +30185,7 @@ mod player_count_list_tests {
     const P2: PlayerId = PlayerId(2);
     const P3: PlayerId = PlayerId(3);
 
-    fn ctx() -> QuantityContext {
+    fn ctx() -> QuantityContext<'static> {
         QuantityContext::new(ObjectId(1))
     }
 

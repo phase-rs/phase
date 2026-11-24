@@ -2700,10 +2700,21 @@ fn restore_engine_derived_retarget_prompts(
     if let WaitingFor::RetargetChoice {
         player,
         stack_entry_index,
+        stack_entry_id,
         scope,
         ..
     } = state.waiting_for.clone()
     {
+        if stack_entry_id.is_some_and(|expected| {
+            state
+                .stack
+                .get(stack_entry_index)
+                .is_none_or(|entry| entry.id != expected)
+        }) {
+            return Err(PersistedRestoreError::PrioritySettlementFailed(
+                "retarget prompt stack entry identity no longer matches".into(),
+            ));
+        }
         if let Some(prompt) =
             effects::change_targets::retarget_prompt(state, stack_entry_index, &scope, player)
         {
@@ -17429,6 +17440,7 @@ fn apply_non_priority_pass_action(
             WaitingFor::RetargetChoice {
                 player,
                 stack_entry_index,
+                stack_entry_id,
                 scope,
                 current_targets,
                 slots,
@@ -17443,6 +17455,7 @@ fn apply_non_priority_pass_action(
             RetargetSubmission {
                 player: *player,
                 stack_entry_index: *stack_entry_index,
+                stack_entry_id: *stack_entry_id,
                 scope,
                 current_targets,
                 slots,
@@ -17460,6 +17473,7 @@ fn apply_non_priority_pass_action(
             WaitingFor::RetargetChoice {
                 player,
                 stack_entry_index,
+                stack_entry_id,
                 scope: RetargetScope::Single,
                 current_targets,
                 slots,
@@ -17474,6 +17488,7 @@ fn apply_non_priority_pass_action(
             RetargetSubmission {
                 player: *player,
                 stack_entry_index: *stack_entry_index,
+                stack_entry_id: *stack_entry_id,
                 scope: &RetargetScope::Single,
                 current_targets,
                 slots,
@@ -17767,6 +17782,7 @@ fn check_debug_action_access(state: &GameState, actor: PlayerId) -> Result<(), E
 #[derive(Clone, Copy)]
 pub(crate) struct RetargetProposal<'a> {
     pub(crate) stack_entry_index: usize,
+    pub(crate) stack_entry_id: Option<ObjectId>,
     pub(crate) scope: &'a RetargetScope,
     pub(crate) current_targets: &'a [TargetRef],
     pub(crate) slots: &'a [RetargetSlotAddress],
@@ -17779,6 +17795,7 @@ pub(crate) struct RetargetProposal<'a> {
 struct RetargetSubmission<'a> {
     player: PlayerId,
     stack_entry_index: usize,
+    stack_entry_id: Option<ObjectId>,
     scope: &'a RetargetScope,
     current_targets: &'a [TargetRef],
     slots: &'a [RetargetSlotAddress],
@@ -17798,10 +17815,21 @@ fn apply_retarget(
 ) -> Result<WaitingFor, EngineError> {
     let player = submission.player;
     let stack_entry_index = submission.stack_entry_index;
+    if submission.stack_entry_id.is_some_and(|expected| {
+        state
+            .stack
+            .get(stack_entry_index)
+            .is_none_or(|entry| entry.id != expected)
+    }) {
+        return Err(EngineError::InvalidAction(
+            "Retarget prompt no longer refers to the selected stack entry".into(),
+        ));
+    }
     let mutated = validate_retarget_submission(
         state,
         &RetargetProposal {
             stack_entry_index,
+            stack_entry_id: submission.stack_entry_id,
             scope: submission.scope,
             current_targets: submission.current_targets,
             slots: submission.slots,
@@ -17977,6 +18005,7 @@ pub(crate) fn validate_retarget_submission(
 ) -> Result<crate::types::ability::ResolvedAbility, EngineError> {
     let RetargetProposal {
         stack_entry_index,
+        stack_entry_id,
         scope,
         current_targets,
         slots,
@@ -17985,15 +18014,38 @@ pub(crate) fn validate_retarget_submission(
         new_targets,
     } = *proposal;
 
+    let Some(entry) = state.stack.get(stack_entry_index) else {
+        return Err(EngineError::InvalidAction(
+            "Invalid stack entry index for retargeting".to_string(),
+        ));
+    };
+    if stack_entry_id.is_some_and(|expected| entry.id != expected) {
+        return Err(EngineError::InvalidAction(
+            "Retarget prompt no longer refers to the selected stack entry".to_string(),
+        ));
+    }
+    let trigger_context = Some(crate::game::targeting::StackTriggerContext::for_entry(
+        state, entry,
+    ));
+    // CR 603.2 + CR 115.7e + CR 400.7: a restored triggered entry whose own event
+    // provenance is absent cannot safely accept a changed target. The prompt's
+    // saved pool may still contain the pre-save alternatives, but re-evaluating
+    // a trigger-relative filter without its event would otherwise let that
+    // stale pool bypass the live provenance check. Keeping every target is
+    // still the CR 115.7d no-change path; any election fails closed.
+    let missing_trigger_event = matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })
+        && trigger_context.is_some_and(|context| context.event.is_none())
+        && entry
+            .ability()
+            .is_some_and(crate::game::ability_utils::retarget_requires_trigger_event_provenance);
+
     // CR 115.7d + CR 601.2c: derived here (rather than only after the match
     // below) because H3's outer-empty re-derivation needs it before
     // `pool_for` is built. The address space the player was OFFERED must be
     // the one their submission is validated, admitted and written against;
     // the payload snapshots it, `chain_retarget_slots` re-derives it.
-    let derived = state
-        .stack
-        .get(stack_entry_index)
-        .and_then(|entry| entry.ability())
+    let derived = entry
+        .ability()
         .map(crate::game::ability_utils::chain_retarget_slots)
         .unwrap_or_default();
 
@@ -18027,6 +18079,7 @@ pub(crate) fn validate_retarget_submission(
                     entry,
                     stack_ability,
                     &derived,
+                    trigger_context,
                 )
             }
             None => Vec::new(),
@@ -18118,12 +18171,7 @@ pub(crate) fn validate_retarget_submission(
         slot_pools.is_empty() || slot_pools.len() == slots.len(),
         "slot_pools must be aligned 1:1 with slots or absent",
     );
-    if stack_entry_index >= state.stack.len() {
-        return Err(EngineError::InvalidAction(
-            "Invalid stack entry index for retargeting".to_string(),
-        ));
-    }
-    let Some(pre) = state.stack[stack_entry_index].ability() else {
+    let Some(pre) = entry.ability() else {
         return Err(EngineError::InvalidAction(
             "Retarget: stack entry has no ability to retarget".to_string(),
         ));
@@ -18147,6 +18195,11 @@ pub(crate) fn validate_retarget_submission(
     // announced incarnation is gone (an election of the returned object).
     let positions_changed =
         crate::game::ability_utils::retarget_positions_changed(state, pre, &written, new_targets);
+    if missing_trigger_event && positions_changed.iter().any(|changed| *changed) {
+        return Err(EngineError::InvalidAction(
+            "Retarget: triggered entry is missing its event provenance".into(),
+        ));
+    }
     // CR 115.7a + CR 115.7b: Single changes one target; keeping the same
     // occurrence is not a response, including through the legacy pool fallback.
     if matches!(scope, RetargetScope::Single) && positions_changed.first() != Some(&true) {
@@ -18282,6 +18335,7 @@ pub(crate) fn validate_retarget_submission(
         &derived,
         &changed,
         pool_controller,
+        trigger_context,
     )?;
     crate::game::ability_utils::changed_dependent_targets_are_legal(
         state,
@@ -18290,6 +18344,7 @@ pub(crate) fn validate_retarget_submission(
         &derived,
         &changed,
         pool_controller,
+        trigger_context,
     )?;
     Ok(mutated)
 }
