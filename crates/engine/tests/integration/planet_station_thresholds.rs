@@ -196,6 +196,54 @@ fn uthros_pays_for_djinn_after_stationing_and_explicit_activation() {
     assert!(outcome.state().stack.is_empty());
 }
 
+/// Uthros with an empty pool and one untapped Island to pay its `{U}`.
+fn uthros_island_board(counters: u32) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = add_planet(
+        &mut scenario,
+        UTHROS,
+        "{U}",
+        "12+ | {U}, {T}: Add {U} for each artifact you control.",
+        counters,
+    );
+    let island = scenario.add_basic_land(P0, ManaColor::Blue);
+    for _ in 0..3 {
+        scenario.add_artifact_from_oracle(P0, "Darksteel Relic", "Indestructible");
+    }
+    let djinn = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Tempest Djinn",
+            0,
+            4,
+            "Flying\nThis creature gets +1/+0 for each basic Island you control.",
+        )
+        .with_subtypes(vec!["Djinn"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{U}{U}{U}"))
+        .id();
+    (scenario.build(), land, island, djinn)
+}
+
+#[test]
+fn uthros_threshold_ability_funds_an_automatic_payment() {
+    // CR 721.2a: at 11 counters the Island and Uthros's printed ability make
+    // only two blue, so the cast cannot be funded.
+    let (below, _, _, djinn) = uthros_island_board(11);
+    assert!(!can_cast_object_now(below.state(), P0, djinn));
+
+    // CR 605.3b + CR 721.2a: at 12 the payment taps the Island for the
+    // threshold ability's {U}, which makes three blue for the Djinn.
+    let (mut at, land, island, djinn) = uthros_island_board(12);
+    assert!(can_cast_object_now(at.state(), P0, djinn));
+    let outcome = at.cast(djinn).resolve();
+    outcome.assert_zone(&[djinn], Zone::Battlefield);
+    let state = outcome.state();
+    assert!(state.objects[&land].tapped);
+    assert!(state.objects[&island].tapped);
+    assert!(state.stack.is_empty());
+}
+
 fn adagia_board(phase: Phase, counters: u32) -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(phase);
