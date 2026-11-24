@@ -12,6 +12,7 @@ import { POOL_GROUP_LABEL_KEYS } from "../poolGroupLabels";
 import { removeVirtualBasic } from "./workspaceProjection";
 import {
   DRAFT_WORKSPACE_SCHEMA_VERSION,
+  SORT_GROUP_KINDS,
   type DraftCardPlacement,
   type DraftWorkspaceState,
   type DraftZone,
@@ -393,13 +394,6 @@ function axisGroups(sort: DraftBoardSort, groups: DraftPoolGroups): readonly Dra
   }
 }
 
-const SORT_GROUP_KINDS: Readonly<Record<DraftBoardSort, ReadonlySet<DraftPoolGroupKind>>> = {
-  cmc: new Set(["mana_value0", "mana_value1", "mana_value2", "mana_value3", "mana_value4", "mana_value5", "mana_value6_plus"]),
-  color: new Set(["white", "blue", "black", "red", "green", "multicolor", "colorless"]),
-  rarity: new Set(["mythic", "rare", "uncommon", "common", "rarity_other"]),
-  type: new Set(["creature", "instant", "sorcery", "enchantment", "artifact", "planeswalker", "land", "other"]),
-};
-
 function cardSortGroup(card: DraftCardInstance, sort: DraftBoardSort): DraftPoolGroupKind {
   switch (sort) {
     case "cmc":
@@ -494,26 +488,6 @@ interface AllocatableGroup {
   columns: number[];
 }
 
-/**
- * The column each sort group was given the last time a zone was sorted.
- *
- * The workspace records where cards are, not how the board was laid out, so
- * once a group's last card leaves the zone nothing says where the group lived.
- * A later pick of that group needs that answer (a merged column's partner is
- * still there; the group itself is not), and no function of the board alone
- * can give it. This client-side memory is written by `rebuildWorkspaceZone`
- * and read by `resolveWorkspaceSortColumn`, which trusts it only while the
- * board still matches it. It is never sent over the network or persisted: a
- * reload simply starts without it and placement falls back to the board.
- */
-interface RecordedSortLayout {
-  sort: DraftBoardSort;
-  columnCount: number;
-  columns: ReadonlyMap<DraftPoolGroupKind, number>;
-}
-
-const recordedSortLayouts = new Map<DraftZone, RecordedSortLayout>();
-
 /** The column each of `count` ordered groups gets on `columnCount` columns. */
 function allocateColumnIndexes(count: number, columnCount: number): number[] {
   if (count > columnCount) {
@@ -598,9 +572,12 @@ export function rebuildWorkspaceZone(
   const rowFor = (instanceId: string) => rowCount === 1
     ? 0
     : Math.min(1, Math.max(0, state.placements[instanceId]?.row ?? 0));
+  const { recordedSortLayouts, ...workspace } = state;
+  const nextLayouts = { ...recordedSortLayouts };
   const sortColumns = new Map<DraftPoolGroupKind, number[]>();
-  if (effective.sort !== "cmc") {
-    const boardGroups = axisGroups(effective.sort, poolGroups).flatMap((group) => {
+  const { sort, columnCount } = effective;
+  if (sort !== "cmc") {
+    const boardGroups = axisGroups(sort, poolGroups).flatMap((group) => {
       const bundles = group.cards.flatMap((entry) => {
         const ids = entry.instance_ids.filter((instanceId) => (
           poolIds.has(instanceId) && affectedIds.has(instanceId)
@@ -609,15 +586,15 @@ export function rebuildWorkspaceZone(
       });
       return bundles.length === 0 ? [] : [{ group, bundles, columns: [] }];
     });
-    allocateGroups(boardGroups, effective.columnCount);
-    boardGroups.forEach(({ group, columns }) => sortColumns.set(group.kind, columns));
-    recordedSortLayouts.set(zone, {
-      sort: effective.sort,
-      columnCount: effective.columnCount,
-      columns: new Map(boardGroups.map(({ group, columns }) => [group.kind, columns[0]])),
-    });
+    allocateGroups(boardGroups, columnCount);
+    const columns: Partial<Record<DraftPoolGroupKind, number>> = {};
+    for (const { group, columns: allocated } of boardGroups) {
+      sortColumns.set(group.kind, allocated);
+      if (SORT_GROUP_KINDS[sort].has(group.kind)) columns[group.kind] = allocated[0];
+    }
+    nextLayouts[zone] = { sort, columnCount, columns };
   } else {
-    recordedSortLayouts.delete(zone);
+    delete nextLayouts[zone];
   }
 
   for (let row = 0; row < rowCount; row += 1) {
@@ -681,7 +658,11 @@ export function rebuildWorkspaceZone(
       });
     });
   }
-  return { ...state, placements: nextPlacements };
+  return {
+    ...workspace,
+    placements: nextPlacements,
+    ...(nextLayouts.deck || nextLayouts.sideboard ? { recordedSortLayouts: nextLayouts } : {}),
+  };
 }
 
 export function rebuildWorkspaceZoneRows(
@@ -1184,24 +1165,24 @@ export function resolveWorkspaceSortColumn(
   // The column the last sort gave this group, while the board still matches
   // that sort. This is what returns a group whose own cards have all left the
   // zone to its place, including beside a merged-column partner.
-  const layout = recordedSortLayouts.get(zone);
+  const layout = workspace.recordedSortLayouts?.[zone];
   if (
     layout !== undefined
     && layout.sort === model.effectiveSort
     && layout.columnCount === model.columnCount
     && [...groupColumns].every(([kind, columns]) => {
-      const laidOut = layout.columns.get(kind);
+      const laidOut = layout.columns[kind];
       return laidOut === undefined || (columns.size === 1 && columns.has(laidOut));
     })
   ) {
-    const home = layout.columns.get(groupKind);
+    const home = layout.columns[groupKind];
     const homeColumn = home === undefined ? undefined : model.columns[home];
     const homeOccupants = holding.find(({ column }) => column.column === home);
     if (
       home !== undefined
       && homeColumn !== undefined
       && (homeColumn.count === 0
-        || homeOccupants?.kinds.every((kind) => layout.columns.get(kind) === home) === true)
+        || homeOccupants?.kinds.every((kind) => layout.columns[kind] === home) === true)
     ) {
       return home;
     }

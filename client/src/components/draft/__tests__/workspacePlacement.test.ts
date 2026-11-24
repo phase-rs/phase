@@ -396,6 +396,24 @@ describe("workspace placement", () => {
       expect(pickFor(board, sendTo(board.state, "satyr", "sideboard"), "satyr", "deck")).toBe(5);
     });
 
+    it("clears only the recorded layout of the zone switched to mana value", () => {
+      const board = colorBoard([
+        ["pacifism", "white", "deck"], ["manalith", "colorless", "sideboard"],
+      ], 2);
+      const both = rebuildWorkspaceZone(board.state, "sideboard", board.pool, board.poolGroups, board.preferences);
+      const resorted = rebuildWorkspaceZone(both, "deck", board.pool, board.poolGroups, {
+        ...board.preferences, sort: "cmc",
+      });
+
+      expect(board.state.recordedSortLayouts).toEqual({
+        deck: { sort: "color", columnCount: 2, columns: { white: 0 } },
+      });
+      expect(resorted.recordedSortLayouts).toEqual({
+        sideboard: { sort: "color", columnCount: 2, columns: { colorless: 0 } },
+      });
+      expect(both.recordedSortLayouts?.deck).toEqual(board.state.recordedSortLayouts?.deck);
+    });
+
     it("stops_trusting_the_recorded_layout_once_a_group_was_moved_by_hand", () => {
       const board = colorBoard([
         ["pacifism", "white", "deck"], ["satyr", "multicolor", "deck"],
