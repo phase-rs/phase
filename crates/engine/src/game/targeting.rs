@@ -9870,6 +9870,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
 
         state.current_trigger_event = Some(activation(Some(ObjectId(100))));
@@ -9936,6 +9937,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }

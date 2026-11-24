@@ -8612,10 +8612,95 @@ pub struct PendingCounterRemovalInFlight {
 pub struct PausedCounterCostRemoval {
     pub in_flight: PendingCounterRemovalInFlight,
     pub remaining: Vec<PendingCounterRemoval>,
+    /// Whether settlement contributes to the legacy all-counter aggregate.
+    /// Old pause records carried only that aggregate, so absence preserves it.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_counter_removal_aggregate_credit"
+    )]
+    pub aggregate_credit: CounterRemovalAggregateCredit,
     /// Where this removal's replacement subtree begins, recorded when the payer
     /// proposed it. Required on the wire: a missing boundary must not decode as
     /// depth 0, which would read a mid-resolution subtree as retired.
     pub replacement_subtree: ReplacementSubtreeBoundary,
+}
+
+#[cfg(test)]
+mod paused_counter_cost_aggregate_credit_tests {
+    use super::*;
+
+    fn paused() -> PausedCounterCostRemoval {
+        PausedCounterCostRemoval {
+            in_flight: PendingCounterRemovalInFlight {
+                removal: PendingCounterRemoval {
+                    object_id: ObjectId(7),
+                    counter_type: CounterType::Loyalty,
+                    count: 1,
+                },
+                counter_count_before: 2,
+            },
+            remaining: Vec::new(),
+            aggregate_credit: CounterRemovalAggregateCredit::Credit,
+            replacement_subtree: ReplacementSubtreeBoundary {
+                resolution_depth: 0,
+                enclosing: None,
+            },
+        }
+    }
+
+    #[test]
+    fn aggregate_credit_round_trips_and_decodes_legacy_boolean_or_absence() {
+        let current = paused();
+        let value = serde_json::to_value(&current).unwrap();
+        assert_eq!(value["aggregate_credit"], "Credit");
+        assert_eq!(
+            serde_json::from_value::<PausedCounterCostRemoval>(value.clone()).unwrap(),
+            current
+        );
+
+        let mut legacy = value.clone();
+        legacy["aggregate_credit"] = serde_json::Value::Bool(true);
+        assert_eq!(
+            serde_json::from_value::<PausedCounterCostRemoval>(legacy).unwrap(),
+            current,
+            "old paused records credit the aggregate by default"
+        );
+
+        let mut absent = value;
+        absent.as_object_mut().unwrap().remove("aggregate_credit");
+        assert_eq!(
+            serde_json::from_value::<PausedCounterCostRemoval>(absent).unwrap(),
+            current,
+            "legacy records without the field preserve the prior credit behavior"
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CounterRemovalAggregateCredit {
+    #[default]
+    Credit,
+    Skip,
+}
+
+fn deserialize_counter_removal_aggregate_credit<'de, D>(
+    deserializer: D,
+) -> Result<CounterRemovalAggregateCredit, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum WireValue {
+        Legacy(bool),
+        Current(CounterRemovalAggregateCredit),
+    }
+
+    match WireValue::deserialize(deserializer)? {
+        WireValue::Legacy(true) => Ok(CounterRemovalAggregateCredit::Credit),
+        WireValue::Legacy(false) => Ok(CounterRemovalAggregateCredit::Skip),
+        WireValue::Current(value) => Ok(value),
+    }
 }
 
 /// CR 616.1 + CR 608.2c: where a counter removal's replacement subtree begins.
@@ -13234,6 +13319,10 @@ pub enum PendingCostMoveResume {
         pw_id: ObjectId,
         resolved: Box<ResolvedAbility>,
         ability_index: usize,
+        /// CR 616.1: retain the marked removal's boundary so the activation
+        /// resumes only after its replacement subtree retires.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paused_removal: Option<Box<PausedCounterCostRemoval>>,
     },
     /// CR 118.12 + CR 122.1 + CR 616.1: A counter-addition unless-cost paused
     /// on a replacement choice. Covers Ward's player-counter payment and the
@@ -13373,6 +13462,10 @@ impl PendingCostMoveResume {
     pub(crate) fn paused_counter_removal(&self) -> Option<&PausedCounterCostRemoval> {
         match self {
             Self::CounterCostRemovalPayment { removal, .. } => Some(removal),
+            Self::LoyaltyActivation {
+                paused_removal: Some(removal),
+                ..
+            } => Some(removal),
             Self::ManaAbilityPayment { cursor, .. } => cursor.counter_removal.as_deref(),
             Self::Cast { .. }
             | Self::SacrificeForCost { .. }
@@ -13383,7 +13476,10 @@ impl PendingCostMoveResume {
             | Self::CollectEvidencePayment { .. }
             | Self::UnlessBouncePayment { .. }
             | Self::ActivationMillPayment { .. }
-            | Self::LoyaltyActivation { .. }
+            | Self::LoyaltyActivation {
+                paused_removal: None,
+                ..
+            }
             | Self::CounterAdditionUnlessPayment { .. }
             | Self::RandomDiscardUnlessPayment(_)
             | Self::PlayerScopeUnlessSettlement(_)
@@ -64274,6 +64370,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     trigger_state: ActivationTriggerState::Pending,
                     stack_entry: Some(ObjectId(41)),
                     activation_cost: BoundActivationCost::Unknown,
+                    loyalty_counters_removed: None,
                 }),
                 description: None,
                 source_name: String::new(),
@@ -74393,6 +74490,7 @@ mod restored_exact_attack_authority_tests {
                             pw_id: attacker,
                             resolved: node.clone(),
                             ability_index: 0,
+                            paused_removal: None,
                         });
                     state.waiting_for.clone()
                 }
@@ -74492,6 +74590,7 @@ mod restored_exact_attack_authority_tests {
                                     counter_count_before: 1,
                                 },
                                 remaining: Vec::new(),
+                                aggregate_credit: CounterRemovalAggregateCredit::Credit,
                                 replacement_subtree: ReplacementSubtreeBoundary::at(
                                     &state.resolution_stack,
                                 ),

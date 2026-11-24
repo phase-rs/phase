@@ -3017,6 +3017,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: Some(ObjectId(100)),
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3173,6 +3174,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: Some(ObjectId(100)),
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3250,6 +3252,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: Some(ObjectId(100)),
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3330,6 +3333,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         let copy_that_ability = ResolvedAbility::new(
             Effect::CopySpell {

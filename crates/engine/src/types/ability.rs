@@ -2086,6 +2086,10 @@ pub struct SpellContext {
     /// the copy uses that same information").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_removed_counter_amount: Option<u32>,
+    /// CR 606.4 + CR 602.2b: loyalty counters actually removed for this
+    /// activation's cost, separate from the all-counter result above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loyalty_counters_removed: Option<u32>,
     /// CR 106.12 + CR 106.12b: the tap state of the activated mana ability whose
     /// inline sub-chain this chain is. A "tapped for mana" replacement modifies a
     /// production made "while such an ability is resolving and producing mana", so

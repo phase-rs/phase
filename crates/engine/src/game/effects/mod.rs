@@ -12602,6 +12602,7 @@ fn trigger_condition_reads_filter_population(
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana
+        | TriggerCondition::LoyaltyCountersRemovedAtLeast { .. }
         | TriggerCondition::DealtDamageBySourceThisTurn
         | TriggerCondition::FirstTimeObjectTappedThisTurn
         | TriggerCondition::FirstTimeObjectCountersAddedThisTurn
