@@ -4,7 +4,7 @@
 //! FIXTURE CONVENTION, stated because it is load-bearing. The validator
 //! computes the UNION `main_deck.len() + (commander.len() - represented_in_main)`,
 //! so it is convention-agnostic per logical deck but NOT agnostic about what a
-//! fixture author means by "a 59-card deck". Every fixture here is
+//! fixture author means by "a 59-card deck". The original Draft fixtures below are
 //! commanders-INSIDE: `main_deck` carries the complete list and the designated
 //! commander is a member of it (CR 903.5a, "including its commander", which
 //! CR 903.13f(1) rescales to "at least 60" without disturbing the "including").
@@ -18,11 +18,11 @@ use std::collections::BTreeMap;
 
 use engine::database::CardDatabase;
 use engine::game::{
-    can_pair_commanders, commander_candidates, evaluate_deck_compatibility,
+    can_pair_commanders, commander_candidates, evaluate_deck_compatibility, infer_commander,
     is_card_commander_eligible_for_format, is_commander_eligible,
     validate_name_deck_for_format_full,
     CommanderDeckComposition::{CommandersInside, CommandersOutside},
-    DeckCompatibilityRequest,
+    CommanderInferenceRow, DeckCompatibilityRequest,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType, Supertype};
@@ -578,6 +578,7 @@ fn picker_db() -> CardDatabase {
 {
   "isamaru, hound of konda": {
     "name": "Isamaru, Hound of Konda",
+    "legalities": {"commander": "legal"},
     "mana_cost": {"type": "Cost", "shards": ["White"], "generic": 0},
     "card_type": {"supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Dog"]},
     "oracle_text": null,
@@ -592,6 +593,7 @@ fn picker_db() -> CardDatabase {
   },
   "yargle, glutton of urborg": {
     "name": "Yargle, Glutton of Urborg",
+    "legalities": {"commander": "legal"},
     "mana_cost": {"type": "Cost", "shards": ["Black"], "generic": 4},
     "card_type": {"supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Frog", "Spirit"]},
     "oracle_text": null,
@@ -701,8 +703,44 @@ fn picker_db() -> CardDatabase {
     "static_abilities": [],
     "replacements": []
   },
+  "snow-covered wastes": {
+    "name": "Snow-Covered Wastes",
+    "mana_cost": {"type": "NoCost"},
+    "card_type": {"supertypes": ["Basic", "Snow"], "core_types": ["Land"], "subtypes": []},
+    "oracle_text": "{T}: Add {C}.",
+    "keywords": [],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "cid, timeless artificer": {
+    "name": "Cid, Timeless Artificer",
+    "mana_cost": {"type": "Cost", "shards": ["White", "Blue"], "generic": 2},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Human", "Artificer"]},
+    "oracle_text": "Artifact creatures and Heroes you control get +1/+1 for each Artificer you control and each Artificer card in your graveyard.\nA deck can have any number of cards named Cid, Timeless Artificer.\nCycling {W}{U} ({W}{U}, Discard this card: Draw a card.)",
+    "deck_copy_limit": {"type": "Unlimited"},
+    "keywords": [],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "seven dwarves": {
+    "name": "Seven Dwarves",
+    "mana_cost": {"type": "Cost", "shards": ["Red"], "generic": 1},
+    "card_type": {"supertypes": [], "core_types": ["Creature"], "subtypes": ["Dwarf"]},
+    "oracle_text": "This creature gets +1/+1 for each other creature named Seven Dwarves you control.\nA deck can have up to seven cards named Seven Dwarves.",
+    "deck_copy_limit": {"type": "UpTo", "data": 7},
+    "keywords": [],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
   "plains": {
     "name": "Plains",
+    "legalities": {"commander": "legal"},
     "mana_cost": {"type": "NoCost"},
     "card_type": {"supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Plains"]},
     "oracle_text": "({T}: Add {W}.)",
@@ -956,4 +994,222 @@ fn commander_candidates_horde_uses_resolved_rules_before_challenge() {
     assert!(commander_candidates(&db, &request, CommandersOutside).is_empty());
     request.selected_format = Some(SelectedFormat::Tag(GameFormat::Standard));
     assert!(commander_candidates(&db, &request, CommandersOutside).is_empty());
+}
+
+fn infer_from_rows(db: &CardDatabase, rows: &[(&str, u64)]) -> Option<String> {
+    let rows: Vec<_> = rows
+        .iter()
+        .map(|&(name, count)| CommanderInferenceRow {
+            name: name.into(),
+            count,
+        })
+        .collect();
+    infer_commander(db, &rows)
+}
+
+#[test]
+fn inference_requires_exact_size_and_handles_oversized_counts() {
+    let db = picker_db();
+    assert_eq!(infer_from_rows(&db, &[]), None);
+    for count in [98, 100, (1 << 32) + 99, u64::MAX] {
+        assert_eq!(
+            infer_from_rows(&db, &[(ISAMARU, 1), ("Plains", count)]),
+            None,
+            "{count} Plains"
+        );
+    }
+    assert_eq!(
+        infer_from_rows(&db, &[("Plains", 9_007_199_254_740_994)]),
+        None
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), ("Plains", 99)]).as_deref(),
+        Some(ISAMARU)
+    );
+}
+
+#[test]
+fn inference_aggregates_printing_rows_and_respects_basic_and_printed_exemptions() {
+    let db = picker_db();
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), (RING, 1), (RING, 1), ("Plains", 97)]),
+        None
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), (RING, 1), ("Plains", 98)]).as_deref(),
+        Some(ISAMARU)
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), ("Plains", 50), ("Plains", 49)]).as_deref(),
+        Some(ISAMARU)
+    );
+    for name in ["Snow-Covered Wastes", "Relentless Rats"] {
+        assert_eq!(
+            infer_from_rows(&db, &[(ISAMARU, 1), (name, 2), ("Plains", 97)]).as_deref(),
+            Some(ISAMARU),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn inference_ignores_zero_count_rows_in_tally_and_selection() {
+    let db = picker_db();
+    assert_eq!(
+        infer_from_rows(
+            &db,
+            &[(YARGLE, 0), (ISAMARU, 1), (YARGLE, 1), ("Plains", 98)]
+        )
+        .as_deref(),
+        Some(ISAMARU)
+    );
+    assert_eq!(
+        infer_from_rows(
+            &db,
+            &[(YARGLE, 1), (ISAMARU, 1), (YARGLE, 0), ("Plains", 98)]
+        )
+        .as_deref(),
+        Some(YARGLE)
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), ("Plains", 99), (RING, 0)]).as_deref(),
+        Some(ISAMARU)
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), ("Plains", 97), (RING, 2)]),
+        None
+    );
+}
+
+#[test]
+fn inference_requires_exactly_one_copy_of_an_unlimited_legend() {
+    let db = picker_db();
+    let cid = "Cid, Timeless Artificer";
+    assert_eq!(
+        infer_from_rows(&db, &[(cid, 2), (ISAMARU, 1), ("Plains", 97)]).as_deref(),
+        Some(ISAMARU)
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(cid, 1), (ISAMARU, 1), ("Plains", 98)]).as_deref(),
+        Some(cid)
+    );
+}
+
+#[test]
+fn inference_enforces_finite_printed_copy_limits() {
+    let db = picker_db();
+    let dwarves = "Seven Dwarves";
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), (dwarves, 7), ("Plains", 92)]).as_deref(),
+        Some(ISAMARU)
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), (dwarves, 8), ("Plains", 91)]),
+        None
+    );
+}
+
+#[test]
+fn inference_counts_resolved_identity_and_returns_request_spelling() {
+    let db = picker_db();
+    for spelling in [SHEOLDRED, SHEOLDRED_COMPOSITE] {
+        assert_eq!(
+            infer_from_rows(&db, &[(spelling, 1), ("Plains", 99)]).as_deref(),
+            Some(spelling)
+        );
+    }
+    assert_eq!(
+        infer_from_rows(
+            &db,
+            &[
+                (SHEOLDRED, 1),
+                (SHEOLDRED_COMPOSITE, 1),
+                (ISAMARU, 1),
+                ("Plains", 97)
+            ]
+        ),
+        None
+    );
+}
+
+#[test]
+fn inference_selects_the_first_eligible_occurrence_in_request_order() {
+    let db = picker_db();
+    for (first, second) in [(ISAMARU, YARGLE), (YARGLE, ISAMARU)] {
+        assert_eq!(
+            infer_from_rows(&db, &[(RING, 1), (first, 1), (second, 1), ("Plains", 97)]).as_deref(),
+            Some(first)
+        );
+    }
+    assert_eq!(
+        infer_from_rows(&db, &[(RING, 1), ("Jace Beleren", 1), ("Plains", 98)]),
+        None
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(RING, 1), (ISAMARU, 1), ("Plains", 98)]).as_deref(),
+        Some(ISAMARU)
+    );
+}
+
+#[test]
+fn inference_skips_unknown_singletons_and_rejects_unknown_duplicates() {
+    let db = picker_db();
+    let missing = "Unknown Card";
+    assert_eq!(infer_from_rows(&db, &[(missing, 1), ("Plains", 99)]), None);
+    assert_eq!(
+        infer_from_rows(&db, &[(missing, 1), (ISAMARU, 1), ("Plains", 98)]).as_deref(),
+        Some(ISAMARU)
+    );
+    assert_eq!(
+        infer_from_rows(
+            &db,
+            &[(missing, 1), (ISAMARU, 1), (missing, 1), ("Plains", 97)]
+        ),
+        None
+    );
+}
+
+#[test]
+fn selected_commander_warnings_distinguish_constructed_from_draft() {
+    let db = picker_db();
+    let singleton = format!("Singleton violations: {YARGLE} (2 copies)");
+    let identity = format!("Cards outside commander's color identity: {YARGLE}");
+    // CR 903.4 / CR 903.5b / CR 903.5c: constructed checks both copies and color.
+    // CR 903.13f(2): Draft keeps the color check and allows duplicate pool cards.
+    for (format, mut main, mut reasons) in [
+        (
+            GameFormat::Commander,
+            vec!["Plains".to_owned(); 97],
+            vec![singleton, identity.clone()],
+        ),
+        (
+            GameFormat::CommanderDraft,
+            [vec![ISAMARU.into()], vec!["Plains".into(); 57]].concat(),
+            vec![identity],
+        ),
+    ] {
+        main.extend([YARGLE.into(), YARGLE.into()]);
+        let mut request = DeckCompatibilityRequest {
+            main_deck: main,
+            commander: vec![ISAMARU.into()],
+            selected_format: Some(SelectedFormat::Tag(format)),
+            summary_only: false,
+            ..Default::default()
+        };
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false), "{format:?}");
+        let mut actual = result.selected_format_reasons;
+        actual.sort();
+        reasons.sort();
+        assert_eq!(actual, reasons, "{format:?}");
+
+        request
+            .main_deck
+            .iter_mut()
+            .filter(|name| name.as_str() == YARGLE)
+            .for_each(|name| *name = "Plains".into());
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(true), "{format:?}");
+        assert!(result.selected_format_reasons.is_empty());
+    }
 }

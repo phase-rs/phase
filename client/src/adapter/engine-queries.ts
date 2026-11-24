@@ -13,7 +13,7 @@
  */
 import type * as EngineWasm from "@wasm/engine";
 
-import type { ExpandedDeck } from "../services/deckParser";
+import type { DeckEntry, ExpandedDeck } from "../services/deckParser";
 import type { ChallengeDeck, FormatConfig, GameFormat } from "./types";
 
 /**
@@ -41,6 +41,8 @@ export type CommanderCandidatesRequest =
     draft_set_codes?: readonly string[];
   };
 
+export type CommanderInferenceRow = Pick<DeckEntry, "name" | "count">;
+
 export type EngineModule = typeof EngineWasm;
 
 interface EngineQuery {
@@ -57,10 +59,6 @@ export const ENGINE_QUERIES = {
   classifyDeck: {
     needsCardDb: true,
     run: (engine: EngineModule, cardNames: string[]) => engine.classify_deck_js(cardNames),
-  },
-  isCardCommanderEligible: {
-    needsCardDb: true,
-    run: (engine: EngineModule, name: string) => engine.is_card_commander_eligible(name),
   },
   isCardCommanderEligibleForFormat: {
     needsCardDb: true,
@@ -80,6 +78,11 @@ export const ENGINE_QUERIES = {
     needsCardDb: true,
     run: (engine: EngineModule, request: CommanderCandidatesRequest, composition: CommanderDeckComposition) =>
       engine.commanderCandidates(request, composition),
+  },
+  inferCommander: {
+    needsCardDb: true,
+    run: (engine: EngineModule, main: readonly CommanderInferenceRow[]): string | null =>
+      engine.inferCommander(main),
   },
   companionCandidates: {
     needsCardDb: true,

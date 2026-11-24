@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
 import "fake-indexeddb/auto";
@@ -67,6 +67,7 @@ const test = vi.hoisted(() => {
     cardDbLoaded: true,
     warmCardDatabase: vi.fn(async () => undefined),
     getCardParseDetails: vi.fn(async () => null),
+    checkDeckCompatibility: vi.fn(),
     initialize: vi.fn(async () => { ledger.adapterInitialize += 1; }),
     initializeGame: vi.fn(async () => {
       ledger.adapterInitializeGame += 1;
@@ -241,10 +242,11 @@ vi.mock("../game/controllers/gameLoopController", () => ({
   createGameLoopController: () => ({ start: vi.fn(), dispose: vi.fn() }),
 }));
 vi.mock("../services/deckCompatibility", () => ({
-  evaluateDeckCompatibility: vi.fn(async () => ({
+  evaluateDeckCompatibility: vi.fn(async (): Promise<import("../services/deckCompatibility").DeckCompatibilityResult> => ({
     selected_format_compatible: true,
-    standard: { compatible: true },
-    commander: { compatible: true },
+    selected_format_reasons: [],
+    standard: { compatible: true, reasons: [] },
+    commander: { compatible: true, reasons: [] },
     bo3_ready: true,
     unknown_cards: [],
     coverage: { total_unique: 1, supported_unique: 1, unsupported_cards: [] },
@@ -256,6 +258,7 @@ vi.mock("../services/deckCompatibility", () => ({
 vi.mock("../services/engineRuntime", () => ({
   companionCandidates: vi.fn(async () => []),
   commanderCandidates: vi.fn(async () => []),
+  inferCommander: vi.fn(async (): Promise<string | null> => null),
   commanderPartnerCandidates: vi.fn(async () => []),
   isCardCommanderEligibleForFormat: vi.fn(async () => false),
   maxDeckCopies: vi.fn(async () => ({ type: "UpTo", data: 4 })),
@@ -559,7 +562,8 @@ describe("offline local play integration", () => {
   it("designates an offered commander in the offline editor", async () => {
     vi.useRealTimers();
     const { STORAGE_KEY_PREFIX } = await import("../constants/storage");
-    const { commanderCandidates, isCardCommanderEligibleForFormat } = await import("../services/engineRuntime");
+    const { commanderCandidates, inferCommander, isCardCommanderEligibleForFormat } = await import("../services/engineRuntime");
+    vi.mocked(inferCommander).mockClear();
     const name = "Isamaru, Hound of Konda";
     vi.mocked(commanderCandidates).mockImplementation(async ({ main_deck, commander }) =>
       main_deck.includes(name) && commander.length === 0 ? [name] : [],
@@ -576,7 +580,9 @@ describe("offline local play integration", () => {
       navigate("/deck-builder?deck=Offline%20Commander");
       const user = userEvent.setup();
       await user.click(await screen.findByRole("tab", { name: "Info" }));
-      await user.click(await screen.findByRole("button", { name }));
+      const candidate = await screen.findByRole("button", { name });
+      expect(vi.mocked(inferCommander).mock.calls).toEqual([[[{ name, count: 2 }]]]);
+      await user.click(candidate);
       await waitFor(() => expect(commanderCandidates).toHaveBeenLastCalledWith({
         main_deck: [name], commander: [name], selected_format: "Commander",
         sideboard: [], companion: [], signature_spell: [], planar_deck: [], scheme_deck: [], sticker_sheets: [],
@@ -589,6 +595,73 @@ describe("offline local play integration", () => {
     } finally {
       vi.mocked(commanderCandidates).mockReset().mockResolvedValue([]);
       vi.mocked(isCardCommanderEligibleForFormat).mockReset().mockResolvedValue(false);
+    }
+  });
+
+  it.each([true, false])("renders only selected Commander warnings when present = %s", async (selected) => {
+    vi.useRealTimers();
+    const { STORAGE_KEY_PREFIX } = await import("../constants/storage");
+    const { evaluateDeckCompatibility } = await import("../services/deckCompatibility");
+    const compatibilityService = await vi.importActual<typeof import("../services/deckCompatibility")>(
+      "../services/deckCompatibility",
+    );
+    const { inferCommander } = await import("../services/engineRuntime");
+    const name = "Offline Warnings";
+    const commander = ["Isamaru, Hound of Konda"];
+    const yargle = "Yargle, Glutton of Urborg";
+    const yargleRows = [
+      { name: yargle, count: 1, sourcePrinting: { setCode: "dom", collectorNumber: "113" } },
+      { name: yargle, count: 1, sourcePrinting: { setCode: "mul", collectorNumber: "19" } },
+    ];
+    const plains = { name: "Plains", count: 97 };
+    const main = selected ? [...yargleRows, plains] : [plains, ...yargleRows];
+    const reasons = [
+      `Singleton violations: ${yargle} (2 copies)`,
+      `Cards outside commander's color identity: ${yargle}`,
+    ];
+    const deck = { main, sideboard: [], commander };
+    const mock = vi.mocked(evaluateDeckCompatibility);
+    const original = mock.getMockImplementation()!;
+    const adapter = test.localAdapter.checkDeckCompatibility;
+    adapter.mockReset().mockResolvedValue({
+      standard: { compatible: true, reasons: [] },
+      bo3_ready: true,
+      unknown_cards: [],
+      color_identity: [],
+      color_distribution: [],
+      format_legality: { commander: "legal" },
+      selected_format_compatible: !selected,
+      selected_format_reasons: selected ? reasons : [],
+      commander: { compatible: false, reasons },
+    });
+    mock.mockImplementation(compatibilityService.evaluateDeckCompatibility);
+    vi.mocked(inferCommander).mockClear();
+
+    try {
+      localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify({ ...deck, format: "Commander" }));
+      render(<App />);
+      await screen.findByText("Home dashboard");
+      navigate("/deck-builder?deck=Offline%20Warnings&format=commander");
+      await userEvent.setup().click(await screen.findByRole("tab", { name: "Info" }));
+      const info = within(screen.getByRole("tabpanel", { name: "Info" }));
+      const heading = await info.findByRole("heading", { name: "Commander" });
+      const panel = within(heading.parentElement!);
+      await panel.findByText(commander[0]);
+      await info.findByTitle(/^commander: legal$/i);
+      const basicNames = Array<string>(97).fill(plains.name);
+      expect(adapter).toHaveBeenCalledWith(expect.objectContaining({
+        selected_format: "Commander",
+        commander,
+        main_deck: selected ? [yargle, yargle, ...basicNames] : [...basicNames, yargle, yargle],
+      }));
+      expect(inferCommander).not.toHaveBeenCalled();
+      for (const reason of reasons) {
+        if (selected) expect(await panel.findByText(reason, { exact: true })).toBeInTheDocument();
+        else expect(panel.queryByText(reason, { exact: true })).not.toBeInTheDocument();
+      }
+    } finally {
+      mock.mockImplementation(original);
+      adapter.mockReset();
     }
   });
 

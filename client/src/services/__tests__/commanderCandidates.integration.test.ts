@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import init, { commanderCandidates, isCardCommanderEligibleForFormat, load_card_database } from "@wasm/engine";
+import init, { commanderCandidates, inferCommander, isCardCommanderEligibleForFormat, load_card_database } from "@wasm/engine";
 import { expandParsedDeck } from "../deckParser";
 
 const WASM_PATH = resolve(__dirname, "../../wasm/engine_wasm_bg.wasm");
@@ -38,5 +38,27 @@ describe.skipIf(!INPUTS_PRESENT)("commander candidates over the real engine", ()
   it("preserves the single-card format eligibility export", () => {
     expect(isCardCommanderEligibleForFormat("Isamaru, Hound of Konda", "Commander")).toBe(true);
     expect(isCardCommanderEligibleForFormat("The One Ring", "Commander")).toBe(false);
+  });
+
+  const isamaru = { name: "Isamaru, Hound of Konda", count: 1 };
+  const plains = (count: number) => ({ name: "Plains", count });
+
+  it("returns the exact inferred name or literal null", () => {
+    expect(inferCommander([isamaru, plains(99)])).toBe(isamaru.name);
+    expect(inferCommander([isamaru, plains(100)])).toBeNull();
+  });
+
+  it("decodes oversized integer-valued numbers without narrowing the total", () => {
+    for (const count of [4294967296, 9007199254740994]) {
+      expect(inferCommander([plains(count)])).toBeNull();
+    }
+    for (const count of [2 ** 32 + 99, Number.MAX_SAFE_INTEGER, 2 ** 64, Infinity]) {
+      expect(inferCommander([isamaru, plains(count)])).toBeNull();
+    }
+  });
+
+  it.each(["99", 99.5, -1, NaN])("rejects malformed count %s", (count) => {
+    const malformed = [{ name: "Plains", count }] as ReturnType<typeof plains>[];
+    expect(() => inferCommander(malformed)).toThrow(/Invalid commander inference request/);
   });
 });

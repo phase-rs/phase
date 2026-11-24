@@ -11,7 +11,15 @@ import {
   type DeckCompatibilityResult,
 } from "../../../services/deckCompatibility";
 import { resolveCommander } from "../../../services/commanderResolution";
-import { SAVED_DECK_REWRITTEN_EVENT, STORAGE_KEY_PREFIX } from "../../../constants/storage";
+import { SAVED_DECK_REWRITTEN_EVENT, STORAGE_KEY_PREFIX, loadSavedDeck } from "../../../constants/storage";
+
+import {
+  installFifoWebLocks,
+  resetSavedDeckLibraryForTests,
+  uninstallWebLocks,
+} from "../../../test/helpers/webLocks";
+
+const inference = vi.fn<(rows: readonly Pick<DeckEntry, "name" | "count">[]) => Promise<string | null>>();
 
 const eligible = new Set<string>();
 const partnerCandidates = vi.fn(async () => [] as string[]);
@@ -37,7 +45,7 @@ vi.mock("../../../services/engineRuntime", () => ({
   commanderPartnerCandidates: (...args: unknown[]) =>
     (partnerCandidates as unknown as (...a: unknown[]) => Promise<string[]>)(...args),
   companionCandidates: () => companionQuery(),
-  isCardCommanderEligible: vi.fn(async () => false),
+  inferCommander: (rows: Parameters<typeof inference>[0]) => inference(rows),
   maxDeckCopies: vi.fn(async (name: string) => name === "Forest"
     ? { type: "Unlimited" }
     : { type: "Limited", data: 1 }),
@@ -486,5 +494,86 @@ describe("useDeckBuilder — Load's rewrite-listener cleanup on rejection", () =
     // removed on the rejection path, not just the success path.
     expect(rewriteAdds).toBeGreaterThan(0);
     expect(rewriteRemoves).toBe(rewriteAdds);
+  });
+});
+
+describe("useDeckBuilder — counted Commander inference", () => {
+  const plains = [{ name: "Plains", count: 60 }];
+  const unmarked = { main: plains, sideboard: [] };
+
+  beforeEach(async () => {
+    await resetSavedDeckLibraryForTests();
+    installFifoWebLocks();
+    inference.mockReset().mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallWebLocks();
+  });
+
+  function openBuilder() {
+    return renderHook(() => useDeckBuilder({
+      format: "Commander",
+      onFormatChange: vi.fn(),
+      searchFilters: {} as never,
+    }));
+  }
+
+  it("loads an unmarked 60-card deck when inference rejects", async () => {
+    const name = "Loaded Plains";
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(unmarked));
+    const { result } = openBuilder();
+    await act(async () => result.current.handleImport({ main: [{ name: "Forest", count: 2 }], sideboard: [] }));
+    inference.mockRejectedValueOnce(new Error("engine initialization failed"));
+
+    await act(async () => expect(await result.current.handleLoad(name)).toBe(true));
+    expect(inference.mock.calls).toEqual([[plains]]);
+    expect(result.current.deckName).toBe(name);
+    expect(result.current.deck.main).toEqual(plains);
+    expect(result.current.commanders).toEqual([]);
+  });
+
+  it("saves an unmarked 60-card deck when inference rejects", async () => {
+    const name = "Saved Plains";
+    const { result } = openBuilder();
+    await act(async () => {
+      result.current.handleImport(unmarked);
+      result.current.handleDeckNameChange(name);
+    });
+    inference.mockRejectedValueOnce(new Error("engine initialization failed"));
+
+    await act(async () => expect(await result.current.handleSave()).toBe("saved"));
+    expect(inference.mock.calls).toEqual([[plains]]);
+    const saved = loadSavedDeck(name);
+    expect(saved?.main).toEqual(plains);
+    expect(saved?.commander).toBeUndefined();
+  });
+
+  it("discards a stale inference answer and commits a current Load", async () => {
+    const name = "Unmarked Commander";
+    const commander = "Isamaru, Hound of Konda";
+    const main = [{ name: commander, count: 1 }, { name: "Plains", count: 99 }];
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify({ main, sideboard: [] }));
+    const { result } = openBuilder();
+    const waiting = deferred<string | null>();
+    inference.mockReturnValueOnce(waiting.promise);
+    const pending = result.current.handleLoad(name);
+    expect(inference.mock.calls).toEqual([[main]]);
+    const edit = { main: [{ name: "Forest", count: 2 }], sideboard: [] };
+    await act(async () => result.current.handleImport(edit));
+    await act(async () => {
+      waiting.resolve(commander);
+      expect(await pending).toBe(false);
+    });
+    expect(result.current.deck.main).toEqual(edit.main);
+    expect(result.current.commanders).toEqual([]);
+
+    inference.mockResolvedValueOnce(commander);
+    await act(async () => expect(await result.current.handleLoad(name)).toBe(true));
+    expect(inference.mock.calls).toEqual([[main], [main]]);
+    expect(result.current.deckName).toBe(name);
+    expect(result.current.deck.main).toEqual(main.slice(1));
+    expect(result.current.commanders).toEqual([commander]);
   });
 });

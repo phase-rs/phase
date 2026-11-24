@@ -585,12 +585,7 @@ export function useDeckBuilder({
     // Fixed now, before any await: the name this save should vacate if renamed, and the bytes
     // it should still hold, so a Load of a different deck queued behind this save cannot retarget it.
     const previous = savedDeckRef.current;
-    // Save-time commander inference: when a Commander-format deck is shaped
-    // like a 100-singleton list with no explicit commander, ask the engine
-    // (via resolveCommander → WASM isCardCommanderEligible) to pick one. This
-    // is the architectural successor to the deleted reactive auto-resolve
-    // effect — running here means the user is never surprised mid-edit, and
-    // every persisted record has a commander when one is derivable.
+    // Ask the engine to infer an unmarked commander at save time, outside the edit flow.
     const resolved = isCommander ? await resolveCommander(currentDeck) : currentDeck;
     const inferred =
       (resolved.commander?.length ?? 0) > (currentDeck.commander?.length ?? 0);

@@ -1928,19 +1928,32 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   }
 
   it("preserves workspace instances in compatibility and renders the raw named reason", async () => {
-    onlyVehicleIsEligible();
+    const isamaru = "Isamaru, Hound of Konda";
+    const yargle = "Yargle, Glutton of Urborg";
+    offerCandidates(isamaru);
     const submitSpy = vi.fn();
-    const reason = "Cards outside commander's color identity: Wind Drake";
+    const reason = `Cards outside commander's color identity: ${yargle}`;
+    const singleton = `Singleton violations: ${yargle} (2 copies)`;
     compatibilityHarness.evaluate.mockImplementation(async () => ({
       ...compatibleResult(),
+      commander: { compatible: false, reasons: [singleton] },
       selected_format_compatible: false,
       selected_format_reasons: [reason],
     }));
     const fixture = workspaceDeckFixture();
+    const pool = fixture.cards.map((card, index) => {
+      if (card.instance_id === VEHICLE_COMMANDER.instance_id) {
+        return { ...card, name: isamaru, type_line: "Legendary Creature — Dog", cmc: 1 };
+      }
+      if (index < 2) {
+        return { ...card, name: yargle, type_line: "Legendary Creature — Frog Spirit", colors: ["B"], cmc: 5 };
+      }
+      return { ...card, name: "Plains", type_line: "Basic Land — Plains", colors: [], cmc: 0 };
+    });
     const { container } = render(
       <LimitedDeckBuilder
         local={{
-          view: { ...COMMANDER_VIEW, pool: fixture.cards },
+          view: { ...COMMANDER_VIEW, pool },
           workspace: fixture.workspace,
           preferences: createDefaultDraftWorkspacePreferences(),
           interactionLocked: false,
@@ -1955,19 +1968,23 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Vehicle Commander" }));
+    fireEvent.click(await screen.findByRole("button", { name: isamaru }));
     await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
       {
         main: [
-          { name: "Wind Drake", count: 59 },
-          { name: "Vehicle Commander", count: 1 },
+          { name: yargle, count: 2 },
+          { name: "Plains", count: 57 },
+          { name: isamaru, count: 1 },
         ],
         sideboard: [],
-        commander: ["Vehicle Commander"],
+        commander: [isamaru],
       },
       { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
     ));
-    expect(await screen.findByText(reason)).toBeInTheDocument();
+    const heading = screen.getByRole("heading", { name: "Commander", level: 4 });
+    const panel = within(heading.parentElement!);
+    expect(await panel.findByText(reason, { exact: true })).toBeInTheDocument();
+    expect(panel.queryByText(singleton, { exact: true })).not.toBeInTheDocument();
     const submits = within(container).getAllByRole("button", { name: "Submit Deck" });
     expect(submits).toHaveLength(1);
     expect(submits[0]).toBeDisabled();

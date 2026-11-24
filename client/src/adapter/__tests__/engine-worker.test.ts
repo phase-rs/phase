@@ -15,6 +15,7 @@ const wasm = vi.hoisted(() => ({
   load_card_database: vi.fn(),
   classify_deck_js: vi.fn(),
   commanderCandidates: vi.fn(),
+  inferCommander: vi.fn(),
   deckSupplyForFormat: vi.fn(),
   submit_action: vi.fn(),
   request_takeback_js: vi.fn(),
@@ -230,6 +231,12 @@ describe("engine worker — requests", () => {
         draft_set_codes: ["CMM"],
       };
       const candidates = { type: "query", name: "commanderCandidates", args: [request, "commanders-inside"] };
+      const name = "Isamaru, Hound of Konda";
+      const rows = [{ name, count: 1 }, { name: "Plains", count: 99 }];
+      const inference = { type: "query", name: "inferCommander", args: [rows] };
+      await send({ ...inference, id: 1015 });
+      expect(responseTo(1015)).toMatchObject({ type: "error", message: expect.stringMatching(/card database/i) });
+      expect(wasm.inferCommander).not.toHaveBeenCalled();
       await send({ ...candidates, id: 1010 });
       await send({ ...classify, id: 1002 });
       wasm.load_card_database.mockReturnValueOnce(0);
@@ -261,6 +268,16 @@ describe("engine worker — requests", () => {
       expect(responseTo(1012)).toEqual({ type: "result", id: 1012, data: ordered });
       expect(responseTo(1013)).toEqual({ type: "result", id: 1013, data: [] });
       expect(responseTo(1014)).toMatchObject({ type: "error", message: "invalid composition" });
+
+      wasm.inferCommander.mockReturnValueOnce(null).mockReturnValueOnce(name)
+        .mockImplementationOnce(() => { throw new Error("invalid inference request"); });
+      await send({ ...inference, id: 1016 });
+      await send({ ...inference, id: 1017 });
+      await send({ ...inference, id: 1018 });
+      expect(wasm.inferCommander.mock.calls).toEqual([[rows], [rows], [rows]]);
+      expect(responseTo(1016)).toEqual({ type: "result", id: 1016, data: null });
+      expect(responseTo(1017)).toEqual({ type: "result", id: 1017, data: name });
+      expect(responseTo(1018)).toMatchObject({ type: "error", message: "invalid inference request" });
 
       expect(responseTo(1005)).toEqual({ type: "result", id: 1005, data: 5 });
       expect(wasm.classify_deck_js).toHaveBeenCalledWith(["Forest"]);

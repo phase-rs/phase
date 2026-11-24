@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   parseDeckFile,
   exportDeckFile,
@@ -16,9 +16,10 @@ import {
   parsedDeckHasCards,
 } from '../deckParser';
 import { resolveCommander } from '../commanderResolution';
+import { inferCommander } from '../engineRuntime';
 
 vi.mock('../engineRuntime', () => ({
-  isCardCommanderEligible: vi.fn(),
+  inferCommander: vi.fn(),
 }));
 
 describe('deckParser', () => {
@@ -927,11 +928,12 @@ Commander
 });
 
 describe('resolveCommander waterfall', () => {
+  beforeEach(() => {
+    vi.mocked(inferCommander).mockReset().mockResolvedValue(null);
+  });
+
   it('promotes the first eligible card when the deck is 100 singletons', async () => {
-    const { isCardCommanderEligible } = await import('../engineRuntime');
-    vi.mocked(isCardCommanderEligible).mockImplementation((name) =>
-      Promise.resolve(name === 'Zimone, Infinite Analyst')
-    );
+    vi.mocked(inferCommander).mockResolvedValue('Zimone, Infinite Analyst');
 
     const main = [
       { count: 1, name: 'Sol Ring' },
@@ -946,14 +948,10 @@ describe('resolveCommander waterfall', () => {
     expect(resolved.main[0].name).toBe('Sol Ring');
     expect(resolved.main).not.toContainEqual({ count: 1, name: 'Zimone, Infinite Analyst' });
     expect(resolved.main).toHaveLength(87 + 2);
-    expect(isCardCommanderEligible).toHaveBeenCalledWith('Sol Ring');
-    expect(isCardCommanderEligible).toHaveBeenCalledWith('Zimone, Infinite Analyst');
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[main]]);
   });
 
-  it('does not promote when the first card is not commander-eligible', async () => {
-    const { isCardCommanderEligible } = await import('../engineRuntime');
-    vi.mocked(isCardCommanderEligible).mockResolvedValue(false);
-
+  it('does not promote a deck when the engine returns null', async () => {
     const main = [
       { count: 1, name: 'Sol Ring' },
       ...Array.from({ length: 86 }, (_, i) => ({ count: 1, name: `Card ${i}` })),
@@ -966,25 +964,26 @@ describe('resolveCommander waterfall', () => {
     expect(resolved.main).toEqual(main);
   });
 
-  it('skips lookup when the deck already has a commander', async () => {
-    const { isCardCommanderEligible } = await import('../engineRuntime');
-    vi.mocked(isCardCommanderEligible).mockReset();
+  it.each([
+    ['an existing commander', { commander: ['Zimone, Infinite Analyst'], sideboard: [] }],
+    ['a retained sideboard', { sideboard: [{ name: 'Opt', count: 2 }] }],
+  ] as const)('skips inference for %s and promotes once it is cleared', async (_label, zones) => {
+    const main = [{ name: 'Zimone, Infinite Analyst', count: 1 }, { name: 'Forest', count: 99 }];
+    const deck = { ...zones, main, sideboard: [...zones.sideboard], commander: 'commander' in zones ? [...zones.commander] : undefined };
+    vi.mocked(inferCommander).mockResolvedValue(main[0].name);
 
-    const resolved = await resolveCommander({
-      main: [{ count: 1, name: 'Sol Ring' }],
-      sideboard: [],
-      commander: ['Zimone, Infinite Analyst'],
+    expect(await resolveCommander(deck)).toEqual(repairParsedDeck(deck));
+    expect(inferCommander).not.toHaveBeenCalled();
+    expect(await resolveCommander({ main, sideboard: [] })).toMatchObject({
+      commander: [main[0].name], main: [main[1]],
     });
-
-    expect(resolved.commander).toEqual(['Zimone, Infinite Analyst']);
-    expect(isCardCommanderEligible).not.toHaveBeenCalled();
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[main]]);
   });
 
   it('end-to-end: handles an unmarked Archidekt-style 100-card paste with empty set codes', async () => {
-    const { isCardCommanderEligible } = await import('../engineRuntime');
-    vi.mocked(isCardCommanderEligible).mockResolvedValue(true);
+    vi.mocked(inferCommander).mockResolvedValue('Zimone, Infinite Analyst');
 
-    // 87 singletons + 7 Island + 6 Forest = 100 cards, no commander/sideboard headers.
+    // 87 singletons + 7 Snow-Covered Wastes + 6 Forest = 100 cards, no commander/sideboard headers.
     // Includes "Three Visits () 315" with an empty set code (Archidekt edge case).
     const singletons = Array.from({ length: 86 }, (_, i) =>
       i === 30 ? '1 Three Visits () 315' : `1 Generic Card ${i} (SOC) ${i + 1}`
@@ -992,7 +991,7 @@ describe('resolveCommander waterfall', () => {
     const content = [
       '1 Zimone, Infinite Analyst (SOC) 10',
       ...singletons,
-      '7 Island (SOS) 274',
+      '7 Snow-Covered Wastes (MH3) 229',
       '4 Forest (SOS) 280',
       '2 Forest (ONE) 276',
     ].join('\n');
@@ -1003,6 +1002,16 @@ describe('resolveCommander waterfall', () => {
     expect(parsed.main[0]).toMatchObject({ count: 1, name: 'Zimone, Infinite Analyst' });
 
     const resolved = await resolveCommander(parsed);
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[
+      [
+        { name: 'Zimone, Infinite Analyst', count: 1 },
+        ...Array.from({ length: 86 }, (_, i) => ({ name: i === 30 ? 'Three Visits' : `Generic Card ${i}`, count: 1 })),
+        { name: 'Snow-Covered Wastes', count: 7 },
+        { name: 'Forest', count: 4 },
+        { name: 'Forest', count: 2 },
+      ],
+    ]]);
+    expect(resolved.main).toEqual(parsed.main.slice(1));
     expect(resolved.commander).toEqual(['Zimone, Infinite Analyst']);
     expect(resolved.main).not.toContainEqual({ count: 1, name: 'Zimone, Infinite Analyst' });
     expect(resolved.main.filter(({ name }) => name === 'Forest')).toEqual([
@@ -1012,17 +1021,34 @@ describe('resolveCommander waterfall', () => {
     expect(resolved.main.reduce((s, e) => s + e.count, 0)).toBe(99);
   });
 
-  it('skips lookup when the deck is not 100 cards', async () => {
-    const { isCardCommanderEligible } = await import('../engineRuntime');
-    vi.mocked(isCardCommanderEligible).mockReset();
+  it.each([
+    [99, 0, 'Isamaru, Hound of Konda'],
+    [97, 2, null],
+  ] as const)('sends parsed counts with %i Plains and %i Sol Ring', async (plains, ring, answer) => {
+    const name = 'Isamaru, Hound of Konda';
+    const deck = detectAndParseDeck(`1 ${name}\n${plains} Plains\n${ring} Sol Ring`);
+    const rows = [{ name, count: 1 }, { name: 'Plains', count: plains }, { name: 'Sol Ring', count: ring }];
+    vi.mocked(inferCommander).mockResolvedValue(answer);
+    const resolved = await resolveCommander(deck);
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[rows]]);
+    expect(resolved.commander).toEqual(answer === null ? undefined : [answer]);
+    expect(resolved.main).toEqual(answer === null ? rows : rows.slice(1));
+  });
 
-    const resolved = await resolveCommander({
-      main: [{ count: 60, name: 'Mountain' }],
-      sideboard: [],
-    });
+  it('keeps a wrong-size deck unmarked after either null or a query rejection', async () => {
+    const deck = { main: [{ count: 60, name: 'Mountain' }], sideboard: [] };
+    expect(await resolveCommander(deck)).toEqual(repairParsedDeck(deck));
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[deck.main]]);
 
-    expect(resolved.commander).toBeUndefined();
-    expect(isCardCommanderEligible).not.toHaveBeenCalled();
+    vi.mocked(inferCommander).mockRejectedValueOnce(new Error('engine unavailable'));
+    expect(await resolveCommander(deck)).toEqual(repairParsedDeck(deck));
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[deck.main], [deck.main]]);
+  });
+
+  it('bypasses inference for an empty main deck', async () => {
+    const deck = { main: [], sideboard: [] };
+    expect(await resolveCommander(deck)).toEqual(repairParsedDeck(deck));
+    expect(inferCommander).not.toHaveBeenCalled();
   });
 });
 

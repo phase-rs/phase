@@ -211,6 +211,69 @@ pub fn commander_candidates(
         .collect()
 }
 
+/// A counted main-deck row for unmarked Commander inference.
+#[derive(Deserialize)]
+pub struct CommanderInferenceRow {
+    pub name: String,
+    #[serde(deserialize_with = "deserialize_commander_inference_count")]
+    pub count: u64,
+}
+
+fn deserialize_commander_inference_count<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let count = f64::deserialize(deserializer)?;
+    if count.is_nan() || count < 0.0 || (count.is_finite() && count.fract() != 0.0) {
+        return Err(serde::de::Error::custom(
+            "expected a non-negative integer count",
+        ));
+    }
+    // Rust's saturating float cast also handles oversized parsed quantities.
+    Ok(count as u64)
+}
+
+/// Infers a commander from the counted main deck of an unmarked import.
+pub fn infer_commander(db: &CardDatabase, main: &[CommanderInferenceRow]) -> Option<String> {
+    let format = FormatConfig::commander();
+    // CR 903.5a: the potential commander is still included in the main deck.
+    let total = main
+        .iter()
+        .map(|row| row.count)
+        .fold(0, u64::saturating_add);
+    if !format.deck_size.accepts(usize::try_from(total).ok()?) {
+        return None;
+    }
+
+    let mut positive_rows = main.iter().filter(|row| row.count > 0);
+    // The size check bounds every positive row and bucket to 100 cards.
+    let counts = weighted_resolved_name_counts(
+        db,
+        positive_rows
+            .clone()
+            .map(|row| (row.name.as_str(), row.count as u32)),
+    );
+    // CR 100.2a / CR 903.5b / CR 101.1: basic lands and printed copy
+    // limits are exceptions to the ordinary Commander singleton cap.
+    if counts
+        .iter()
+        .any(|(key, &count)| match max_deck_copies(db, key, &format) {
+            DeckCopyLimit::Unlimited => false,
+            DeckCopyLimit::UpTo(limit) => count > limit,
+        })
+    {
+        return None;
+    }
+
+    // CR 903.3: only a card that can be a commander is promoted. Import
+    // policy: pick the first eligible single copy in request order.
+    positive_rows.find_map(|row| {
+        let key = canonical_deck_count_key(db, &row.name);
+        let face = db.get_face_by_name(&row.name)?;
+        (counts[&key] == 1 && is_commander_eligible(face)).then(|| row.name.clone())
+    })
+}
+
 /// Returns eligible companion cards that can be used with the deck under the
 /// selected format. Candidate evaluation uses the same typed predicate as
 /// pregame reveal validation and respects format minimum deck sizes.
@@ -4312,11 +4375,18 @@ fn resolved_name_counts<'a>(
     db: &CardDatabase,
     names: impl IntoIterator<Item = &'a str>,
 ) -> HashMap<String, u32> {
+    weighted_resolved_name_counts(db, names.into_iter().map(|name| (name, 1)))
+}
+
+fn weighted_resolved_name_counts<'a>(
+    db: &CardDatabase,
+    rows: impl IntoIterator<Item = (&'a str, u32)>,
+) -> HashMap<String, u32> {
     let mut counts = HashMap::new();
-    for name in names {
+    for (name, count) in rows {
         *counts
             .entry(canonical_deck_count_key(db, name))
-            .or_insert(0) += 1;
+            .or_insert(0) += count;
     }
     counts
 }

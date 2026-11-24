@@ -39,13 +39,14 @@ use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
     can_pair_commanders, commander_candidates, companion_candidates, deck_copy_limit_for,
     estimate_bracket_for_request, evaluate_deck_compatibility, filter_events_for_viewer,
-    filter_state_for_viewer,
+    filter_state_for_viewer, infer_commander,
     is_card_commander_eligible_for_format as engine_is_card_commander_eligible_for_format,
     is_commander_eligible, load_and_hydrate_decks, max_deck_copies,
     rehydrate_game_from_card_db_with_finalization, resolve_deck_list,
     signature_spell_selection_policy, start_game, start_game_with_starting_player,
     validate_name_deck_for_format_full, BracketEstimate, BracketEstimateRequest,
-    CommanderDeckComposition, DeckCompatibilityRequest, DeckList, PlayerDeckList, ReplayPlayer,
+    CommanderDeckComposition, CommanderInferenceRow, DeckCompatibilityRequest, DeckList,
+    PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::{DebugAction, DebugCardCreationKind};
 use engine::types::card_printing::{deserialize_deck_printings, validate_deck_printings_bounds};
@@ -2011,6 +2012,22 @@ pub fn commander_candidates_js(request: JsValue, composition: JsValue) -> Result
             ));
         };
         Ok(to_js(&commander_candidates(db, &request, composition)))
+    })
+}
+
+/// Infers a commander from counted main-deck rows.
+#[wasm_bindgen(js_name = inferCommander)]
+pub fn infer_commander_js(main: JsValue) -> Result<JsValue, JsValue> {
+    let main: Vec<CommanderInferenceRow> = serde_wasm_bindgen::from_value(main)
+        .map_err(|e| JsValue::from_str(&format!("Invalid commander inference request: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        Ok(to_js(&infer_commander(db, &main)))
     })
 }
 
