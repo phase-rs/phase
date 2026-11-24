@@ -596,7 +596,8 @@ struct PlayablePrintingAllocation<'a> {
     /// What each section's copies bind, up to that section's capacity.
     streams: [Vec<PrintingSpan<'a>>; 2],
     /// The registered rows of each section that no copy bound this game, in row order.
-    /// Disjoint from `streams`, so reading on into them never repeats a printing.
+    /// Counts exclude copies assigned to either stream, including the assigned portion
+    /// of a split row, so reading on into them never offers a registered copy twice.
     unabsorbed: [Vec<PrintingSpan<'a>>; 2],
 }
 
