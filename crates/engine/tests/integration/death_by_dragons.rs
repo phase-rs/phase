@@ -337,7 +337,7 @@ fn answer_named_choice(runner: &mut GameRunner, choice: &str) -> PlayerId {
         );
     };
     assert!(
-        options.contains(&choice.to_string()),
+        options.iter().any(|option| option == choice),
         "choice {choice:?} must be offered (choice_type={choice_type:?}), options={options:?}"
     );
     runner
