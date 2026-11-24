@@ -99,7 +99,6 @@ face = [
   { key = "arcane lighthouse", class = "missing_effect", clauses = ["{1}, {T}: Until end of turn, creatures your opponents control lose hexproof and shroud and can't have hexproof or shroud."] },
   { key = "archaeomancer's spade", class = "wrong_object", clauses = ["When this artifact enters, seek two cards with flashback and put them into your graveyard."] },
   { key = "archdemon of paliano", class = "missing_effect", clauses = ["Draft this card face up.", "As long as this card is face up during the draft, you can't look at booster packs and must draft cards at random.", "After you draft three cards this way, turn this card face down."] },
-  { key = "archfiend of depravity", class = "wrong_object", clauses = ["At the beginning of each opponent's end step, that player chooses up to two creatures they control, then sacrifices the rest."] },
   { key = "archghoul of thraben", class = "condition_wrong", clauses = ["If you don't put the card into your hand, you may put it into your graveyard."] },
   { key = "architects of will", class = "missing_effect", clauses = ["When this creature enters, look at the top three cards of target player's library, then put them back in any order."] },
   { key = "archivist of gondor", class = "trigger_wrong", clauses = ["At the beginning of the monarch's end step, that player draws a card."] },

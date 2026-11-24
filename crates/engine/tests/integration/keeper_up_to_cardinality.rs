@@ -17,6 +17,16 @@
 //! same time." / "Players may choose fewer than two creatures even if they
 //! control two or more creatures."
 //!
+//! Archfiend of Depravity, verbatim: "Flying\nAt the beginning of each
+//! opponent's end step, that player chooses up to two creatures they control,
+//! then sacrifices the rest." Rulings (2014-11-24): "The opponent chooses which
+//! creatures to spare, if any, as the ability resolves. This choice doesn't
+//! target the creatures." / "The opponent may choose to spare one or no
+//! creatures. If the player doesn't choose any creatures, they will sacrifice
+//! all creatures they control."
+//! CR 603.2b + CR 102.1 + CR 805.4d: "that player" is the player whose end step
+//! it is; Archfiend's controller and non-active opponents are not prompted.
+//!
 //! Creatures are textless vanilla fillers.
 
 use engine::ai_support::legal_actions;
@@ -38,6 +48,11 @@ use engine::types::zones::Zone;
 const COVETOUS_ELEGY: &str = "Each player chooses up to two creatures they control, then sacrifices the rest. Then you create a tapped Treasure token for each creature your opponents control.";
 /// Promise of Loyalty, verbatim (the exact-count keeper class).
 const PROMISE_OF_LOYALTY: &str = "Each player puts a vow counter on a creature they control and sacrifices the rest. Each of those creatures can't attack you or planeswalkers you control for as long as it has a vow counter on it.";
+/// Archfiend of Depravity, verbatim.
+const ARCHFIEND_OF_DEPRAVITY: &str = "Flying\nAt the beginning of each opponent's end step, that player chooses up to two creatures they control, then sacrifices the rest.";
+
+/// The third seat (`engine::game::scenario` exports only `P0` and `P1`).
+const P2: PlayerId = PlayerId(2);
 
 fn add_creatures(scenario: &mut GameScenario, player: PlayerId, count: usize) -> Vec<ObjectId> {
     (0..count)
@@ -381,4 +396,225 @@ fn exact_keeper_prompt_rejects_an_empty_keep() {
         })
         .expect("paired positive: keeping exactly one succeeds");
     assert_eq!(keep_prompt(runner.state()).0, P1);
+}
+
+/// Give P1 Archfiend of Depravity plus two fillers, P0 (the default active
+/// player) `p0_count` fillers and, in a three-player game, P2 `p2_count`, then
+/// advance through the production turn structure into P0's end step. Returns
+/// the runner with Archfiend's trigger on the stack, P0's fillers, P1's
+/// permanents (Archfiend first, then its fillers) and P2's fillers.
+fn archfiend_end_step(
+    players: u8,
+    p0_count: usize,
+    p2_count: usize,
+) -> (GameRunner, Vec<ObjectId>, Vec<ObjectId>, Vec<ObjectId>) {
+    let mut scenario = if players == 2 {
+        GameScenario::new()
+    } else {
+        GameScenario::new_n_player(players, 7)
+    };
+    // The postcombat main phase skips the declare-attackers prompt.
+    scenario.at_phase(Phase::PostCombatMain);
+    let archfiend = scenario
+        .add_creature_from_oracle(P1, "Archfiend of Depravity", 5, 4, ARCHFIEND_OF_DEPRAVITY)
+        .id();
+    let mut p1 = vec![archfiend];
+    p1.extend(add_creatures(&mut scenario, P1, 2));
+    let p0 = add_creatures(&mut scenario, P0, p0_count);
+    let p2 = if players == 2 {
+        Vec::new()
+    } else {
+        add_creatures(&mut scenario, P2, p2_count)
+    };
+    let mut runner = scenario.build();
+    runner.advance_to_end_step();
+
+    // Reach guard: CR 603.2b — Archfiend's trigger is on the stack in P0's end
+    // step.
+    let state = runner.state();
+    assert_eq!(state.phase, Phase::End);
+    assert_eq!(state.active_player, P0);
+    assert_eq!(state.stack.len(), 1, "exactly Archfiend's trigger");
+    assert_eq!(state.stack[0].source_id, archfiend);
+    (runner, p0, p1, p2)
+}
+
+/// Pass priority until Archfiend's keep prompt is published. A
+/// `TriggerTargetSelection` (the misparse's targeted shape) or any other prompt
+/// fails the test.
+fn pass_until_keep_prompt(runner: &mut GameRunner) {
+    for _ in 0..10 {
+        match &runner.state().waiting_for {
+            WaitingFor::KeepExactPermanentsChoice { .. } => return,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("expected Archfiend's keep prompt, got {other:?}"),
+        }
+    }
+    panic!("Archfiend's keep prompt was never published");
+}
+
+fn sorted(mut ids: Vec<ObjectId>) -> Vec<ObjectId> {
+    ids.sort();
+    ids
+}
+
+/// V1 — Archfiend ruling 3; CR 603.2b + CR 102.1 + CR 805.4d + CR 701.21a. The
+/// active opponent, not Archfiend's controller, gets a non-targeting keep
+/// prompt at resolution; keeping two of seven sacrifices five.
+#[test]
+fn archfiend_prompts_the_active_opponent_to_keep_two_of_seven() {
+    let (mut runner, p0, p1, _) = archfiend_end_step(2, 7, 0);
+    pass_until_keep_prompt(&mut runner);
+
+    let WaitingFor::KeepExactPermanentsChoice {
+        player,
+        target_player,
+        source_controller,
+        eligible,
+        required_count,
+        minimum_count,
+        scoped_players,
+        remaining_players,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        unreachable!("pass_until_keep_prompt returned on the keep prompt")
+    };
+    assert_eq!(*player, P0, "\"that player\" is the active opponent");
+    assert_ne!(*player, P1, "Archfiend's controller is not prompted");
+    assert_eq!(*target_player, P0);
+    assert_eq!(*source_controller, P1);
+    assert_eq!((*required_count, *minimum_count), (2, Some(0)));
+    assert_eq!(scoped_players, &vec![P0]);
+    assert!(remaining_players.is_empty());
+    assert_eq!(
+        sorted(eligible.clone()),
+        sorted(p0.clone()),
+        "only P0's own creatures are eligible"
+    );
+
+    runner
+        .act(GameAction::ChooseKeptPermanents {
+            kept: p0[..2].to_vec(),
+        })
+        .expect("P0 keeps two");
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(count_in(&runner, &p0, Zone::Graveyard), 5);
+    assert_eq!(count_in(&runner, &p0, Zone::Battlefield), 2);
+    assert_eq!(
+        count_in(&runner, &p1, Zone::Battlefield),
+        3,
+        "Archfiend and its controller's creatures are untouched"
+    );
+}
+
+/// V2 — Archfiend ruling 4: "If the player doesn't choose any creatures, they
+/// will sacrifice all creatures they control."
+#[test]
+fn archfiend_keep_none_sacrifices_all() {
+    let (mut runner, p0, p1, _) = archfiend_end_step(2, 3, 0);
+    pass_until_keep_prompt(&mut runner);
+    assert_eq!(
+        keep_prompt(runner.state()).0,
+        P0,
+        "positive guard: P0's prompt exists before the empty keep"
+    );
+
+    runner
+        .act(GameAction::ChooseKeptPermanents { kept: vec![] })
+        .expect("an up-to keeper may keep none");
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(count_in(&runner, &p0, Zone::Graveyard), 3);
+    assert_eq!(count_in(&runner, &p1, Zone::Battlefield), 3);
+}
+
+/// V3 — Archfiend rulings 3 and 4: a seat holding exactly the maximum is still
+/// prompted (it may spare one or none). Sibling: a seat with no creatures is
+/// never prompted and the trigger still resolves.
+#[test]
+fn archfiend_prompts_at_exactly_two_and_skips_an_empty_board() {
+    let (mut runner, p0, _, _) = archfiend_end_step(2, 2, 0);
+    pass_until_keep_prompt(&mut runner);
+    let (player, eligible, max, min) = keep_prompt(runner.state());
+    assert_eq!(player, P0);
+    assert_eq!(eligible.len(), 2, "an exactly-two pool is still a choice");
+    assert_eq!((max, min), (2, Some(0)));
+    runner
+        .act(GameAction::ChooseKeptPermanents { kept: vec![p0[0]] })
+        .expect("P0 keeps one of two");
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(zone(&runner, p0[0]), Zone::Battlefield);
+    assert_eq!(zone(&runner, p0[1]), Zone::Graveyard);
+
+    // Sibling: P0 controls no creatures. The reach guard inside
+    // `archfiend_end_step` shows the trigger on the stack.
+    let (mut runner, _, p1, _) = archfiend_end_step(2, 0, 0);
+    for _ in 0..10 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("an empty board publishes no prompt, got {other:?}"),
+        }
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "the trigger resolves without a prompt"
+    );
+    assert_eq!(count_in(&runner, &p1, Zone::Battlefield), 3);
+}
+
+/// V4 — CR 603.2b + CR 102.1 + CR 805.4d: in a three-player game only the
+/// active opponent is prompted. The non-active opponent (P2) and Archfiend's
+/// controller (P1) are excluded.
+#[test]
+fn archfiend_prompts_only_the_active_opponent_in_three_player() {
+    let (mut runner, p0, p1, p2) = archfiend_end_step(3, 3, 3);
+    pass_until_keep_prompt(&mut runner);
+    let WaitingFor::KeepExactPermanentsChoice {
+        player,
+        scoped_players,
+        remaining_players,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        unreachable!("pass_until_keep_prompt returned on the keep prompt")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(
+        scoped_players,
+        &vec![P0],
+        "only the active opponent is in scope"
+    );
+    assert!(remaining_players.is_empty(), "no further seat is prompted");
+
+    runner
+        .act(GameAction::ChooseKeptPermanents {
+            kept: p0[..2].to_vec(),
+        })
+        .expect("P0 keeps two");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::KeepExactPermanentsChoice { .. }
+        ),
+        "no second keep prompt"
+    );
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(count_in(&runner, &p0, Zone::Graveyard), 1);
+    assert_eq!(
+        count_in(&runner, &p2, Zone::Battlefield),
+        3,
+        "the non-active opponent keeps everything"
+    );
+    assert_eq!(count_in(&runner, &p1, Zone::Battlefield), 3);
 }
