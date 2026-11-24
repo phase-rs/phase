@@ -13363,7 +13363,7 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
         referent,
         Some(TargetReferent::DemonstrativeManaValue(noun))
             if effect.target_filter().is_some_and(|filter| {
-                target_filter_names_type(filter, noun == DemonstrativeNoun::Permanent)
+                target_filter_names_type(filter, noun)
             })
     );
     let where_x = if where_x.event_source_owner() && mana_value_names_target {
@@ -13381,7 +13381,7 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
         .filter(|referent| match referent {
             TargetReferent::Demonstrative(noun) => effect
                 .target_filter()
-                .is_some_and(|filter| target_filter_names_type(filter, *noun == DemonstrativeNoun::Permanent)),
+                .is_some_and(|filter| target_filter_names_type(filter, *noun)),
             // CR 608.2c: "its power" in the where-clause of "target creature gets
             // +X/…" names the clause subject, the announced target, not the source.
             TargetReferent::DemonstrativeManaValue(_) => false,
@@ -13757,7 +13757,7 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
             let rebind_from = referent
                 .filter(|referent| match referent {
                     TargetReferent::Demonstrative(noun) => target.as_ref().is_some_and(|filter| {
-                        target_filter_names_type(filter, *noun == DemonstrativeNoun::Permanent)
+                        target_filter_names_type(filter, *noun)
                     }),
                     _ => target.is_some(),
                 })
@@ -14072,6 +14072,7 @@ fn where_x_target_referent(where_x: WhereXBinding<'_>) -> Option<TargetReferent>
     .then_some(TargetReferent::SubjectPronoun)
 }
 
+/// Object noun in a demonstrative characteristic reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DemonstrativeNoun {
     Creature,
@@ -14243,24 +14244,40 @@ fn rebind_pt_value_scope_to_target(value: &mut PtValue, from: ObjectScope) {
 /// antecedent. Every remaining filter (`Any`, the player scopes, the stack and
 /// context refs) names no creature noun either.
 pub(super) fn target_filter_names_creature(filter: &TargetFilter) -> bool {
-    target_filter_names_type(filter, false)
+    target_filter_names_type(filter, DemonstrativeNoun::Creature)
 }
 
-fn target_filter_names_type(filter: &TargetFilter, allow_permanent: bool) -> bool {
+fn target_filter_names_type(filter: &TargetFilter, noun: DemonstrativeNoun) -> bool {
     match filter {
-        TargetFilter::Typed(typed) => typed.type_filters.iter().any(|kind| {
-            *kind == TypeFilter::Creature || (allow_permanent && *kind == TypeFilter::Permanent)
-        }),
+        TargetFilter::Typed(typed) => typed
+            .type_filters
+            .iter()
+            .any(|kind| type_filter_names_demonstrative(kind, noun)),
         TargetFilter::And { filters } => filters
             .iter()
-            .any(|filter| target_filter_names_type(filter, allow_permanent)),
+            .any(|filter| target_filter_names_type(filter, noun)),
         TargetFilter::Or { filters } => {
             !filters.is_empty()
                 && filters
                     .iter()
-                    .all(|filter| target_filter_names_type(filter, allow_permanent))
+                    .all(|filter| target_filter_names_type(filter, noun))
         }
         _ => false,
+    }
+}
+
+fn type_filter_names_demonstrative(filter: &TypeFilter, noun: DemonstrativeNoun) -> bool {
+    if let TypeFilter::AnyOf(filters) = filter {
+        return !filters.is_empty()
+            && filters
+                .iter()
+                .all(|filter| type_filter_names_demonstrative(filter, noun));
+    }
+    match noun {
+        DemonstrativeNoun::Creature => *filter == TypeFilter::Creature,
+        DemonstrativeNoun::Permanent => {
+            crate::parser::oracle_nom::condition::type_filter_is_permanent(filter)
+        }
     }
 }
 
@@ -17765,13 +17782,28 @@ mod where_x_tests {
                 false,
                 QuantityRef::ObjectManaValue { scope: ObjectScope::Target },
             ),
+            (
+                "Whenever another creature you control enters, put X +1/+1 counters on target artifact, where X is that permanent's mana value.",
+                false,
+                QuantityRef::ObjectManaValue { scope: ObjectScope::Target },
+            ),
+            (
+                "Whenever another creature you control enters, put X +1/+1 counters on target artifact or creature, where X is that permanent's mana value.",
+                false,
+                QuantityRef::ObjectManaValue { scope: ObjectScope::Target },
+            ),
+            (
+                "Whenever another creature you control enters, put X +1/+1 counters on target artifact, where X is that creature's mana value.",
+                false,
+                QuantityRef::ObjectManaValue { scope: ObjectScope::EventSource },
+            ),
         ] {
             let trigger = crate::parser::oracle_trigger::parse_trigger_line(oracle, "Synthetic");
             let body = trigger.execute.expect("trigger body");
             let Effect::PutCounter { count, target, .. } = body.effect.as_ref() else {
                 panic!("expected a counter effect: {body:?}");
             };
-            assert!(super::target_filter_names_type(target, true), "{oracle}: {target:?}");
+            assert!(super::target_filter_names_type(target, super::DemonstrativeNoun::Permanent), "{oracle}: {target:?}");
             assert_eq!(
                 super::target_filter_names_creature(target),
                 names_creature,

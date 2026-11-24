@@ -10,6 +10,7 @@
 
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::TargetRef;
 use engine::types::actions::{AlternativeCastDecision, CastChoice, GameAction};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{
@@ -30,6 +31,8 @@ const BEIFONG: &str = "Whenever a nonland creature you control dies, earthbend X
 const HAMZA: &str = "Whenever a creature you control is turned face up, it endures X, where X is that creature's toughness.\nLandfall — Whenever a land you control enters, seek a creature card and manifest it.";
 const MURDER: &str = "Destroy target creature.";
 const GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
+const CLONE: &str =
+    "You may have this creature enter as a copy of any creature on the battlefield.";
 const CLOUDSHIFT: &str = "Exile target creature you control, then return that card to the battlefield under your control.";
 const MYSTIC: &str = "{T}: Add {G}, {U}, or {R}.\nMorph {2} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its morph cost.)\nWhen this creature is turned face up, add {G}{U}{R}.";
 const BOLAS: &str = "When this creature enters, sacrifice another creature. You gain X life and draw X cards, where X is that creature's power.";
@@ -628,6 +631,121 @@ fn monkey_cage_reads_the_face_down_incarnation_after_cloudshift() {
     enter_face_down_then_blink(false);
 }
 
+fn choose_clone_donor(runner: &mut GameRunner, donor: ObjectId) {
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CopyTargetChoice { .. }
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(donor)),
+        })
+        .unwrap();
+}
+
+fn clone_then_cloudshift(mut scenario: GameScenario, eligible: &[ObjectId]) -> GameRunner {
+    scenario.with_mana_pool(
+        P0,
+        pool([
+            ManaType::Blue,
+            ManaType::White,
+            ManaType::Green,
+            ManaType::Green,
+            ManaType::Green,
+        ]),
+    );
+    let armodon = scenario
+        .add_creature(P0, "Trained Armodon", 3, 3)
+        .with_subtypes(vec!["Elephant"])
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let wurm = scenario
+        .add_creature(P0, "Spined Wurm", 5, 4)
+        .with_subtypes(vec!["Wurm"])
+        .with_mana_cost(ManaCost::generic(5))
+        .id();
+    let clone = scenario
+        .add_creature_to_hand_from_oracle(P0, "Clone", 0, 0, CLONE)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let blink = scenario
+        .add_spell_to_hand_from_oracle(P0, "Cloudshift", true, CLOUDSHIFT)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let mut runner = scenario.build();
+    for &eligible in eligible {
+        let types = runner.state().objects[&armodon].card_types.clone();
+        stage_library_creature(&mut runner, eligible, types);
+    }
+    runner.cast(clone).commit();
+    runner.pass_both_players();
+    choose_clone_donor(&mut runner, armodon);
+    assert_eq!(runner.state().stack.len(), 1);
+    let original = &runner.state().objects[&clone];
+    assert_eq!(original.zone, Zone::Battlefield);
+    assert_eq!(original.effective_mana_value(), 3);
+    let original_incarnation = original.incarnation;
+
+    runner.cast(blink).target_object(clone).commit();
+    runner.pass_both_players();
+    choose_clone_donor(&mut runner, wurm);
+    assert_eq!(runner.state().stack.len(), 2);
+    // CR 400.7 + CR 707.2: the returned Clone has a new incarnation and mana cost.
+    let returned = &runner.state().objects[&clone];
+    assert_eq!(returned.zone, Zone::Battlefield);
+    assert_ne!(returned.incarnation, original_incarnation);
+    assert_eq!(returned.effective_mana_value(), 5);
+    runner
+}
+
+#[test]
+fn radagast_reads_original_clone_mana_value_after_cloudshift() {
+    let mut scenario = main_phase();
+    scenario
+        .add_creature_from_oracle(P0, "Radagast the Brown", 2, 5, RADAGAST)
+        .with_subtypes(vec!["Avatar", "Wizard"]);
+    let eligible = [(); 5].map(|()| scenario.add_card_to_library_top(P0, "Grizzly Bears"));
+    let mut runner = clone_then_cloudshift(scenario, &eligible);
+    // CR 608.2h: the new entry sees the live Wurm copy, then the old entry
+    // uses the Armodon copy's last known mana value.
+    for expected in [5, 3] {
+        runner.pass_both_players();
+        let WaitingFor::DigChoice { cards, .. } = &runner.state().waiting_for else {
+            panic!(
+                "expected a look at {expected} cards, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(cards.len(), expected);
+        runner
+            .act(GameAction::SelectCards { cards: vec![] })
+            .unwrap();
+    }
+    assert_finished(&runner);
+}
+
+#[test]
+fn monkey_cage_reads_original_clone_mana_value_after_cloudshift() {
+    let mut scenario = main_phase();
+    let cage = scenario
+        .add_artifact_from_oracle(P0, "Monkey Cage", CAGE)
+        .id();
+    let mut runner = clone_then_cloudshift(scenario, &[]);
+    runner.pass_both_players();
+    assert_eq!(runner.state().objects[&cage].zone, Zone::Graveyard);
+    assert_eq!(token_count(&runner, "Monkey"), 5);
+    runner.pass_both_players();
+    assert_eq!(token_count(&runner, "Monkey"), 8);
+    assert_finished(&runner);
+}
+
 fn sacrifice_on_entry(name: &str, oracle: &str, gains_life: bool, mills: bool) {
     let mut scenario = main_phase();
     let entrant = if name == "Altar of the Wretched" {
@@ -642,10 +760,13 @@ fn sacrifice_on_entry(name: &str, oracle: &str, gains_life: bool, mills: bool) {
             .id()
     };
     let other = scenario.add_creature(P0, "Spined Wurm", 5, 4).id();
-    let fodder = scenario.add_creature(P0, "Trained Armodon", 3, 3).id();
+    let fodder = scenario
+        .add_creature(P0, "Trained Armodon", 3, 3)
+        .with_plus_counters(1)
+        .id();
     scenario.with_library_top(P0, &["Forest"; 12]);
     let mut runner = scenario.build();
-    let selected_power = runner.state().objects[&fodder].power.unwrap();
+    let selected_power = 4;
     let life = runner.life(P0);
     runner.cast(entrant).accept_optional().resolve();
     pass_to_prompt_or_completion(&mut runner);
@@ -706,10 +827,13 @@ fn shadowheart_reads_the_sacrificed_creature() {
         .add_creature_from_oracle(P0, "Shadowheart, Dark Justiciar", 3, 4, SHADOWHEART)
         .id();
     let other = scenario.add_creature(P0, "Spined Wurm", 5, 4).id();
-    let fodder = scenario.add_creature(P0, "Trained Armodon", 3, 3).id();
+    let fodder = scenario
+        .add_creature(P0, "Trained Armodon", 3, 3)
+        .with_plus_counters(1)
+        .id();
     scenario.with_library_top(P0, &["Forest"; 6]);
     let mut runner = scenario.build();
-    let selected_power = runner.state().objects[&fodder].power.unwrap();
+    let selected_power = 4;
     runner
         .act(GameAction::ActivateAbility {
             source_id: shadowheart,
