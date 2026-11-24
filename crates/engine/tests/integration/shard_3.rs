@@ -383,6 +383,7 @@ mod illuminated_folio_reveal_cost;
 mod immediate_chosen_player_attack_condition;
 mod immortal_obligation;
 mod incredible_hulk_enrage_attacking;
+mod incubation_druid_counter_mana;
 mod indestructible_survives_destroy;
 mod inevitable_betrayal_no_mana_cost;
 mod infantry_shield_mobilize_grant;
