@@ -1167,6 +1167,7 @@ pub fn room_effects(
             simple(
                 Effect::CreateEmblem {
                     statics: vec![StaticDefinition {
+                        origin: Default::default(),
                         mode: StaticMode::Continuous,
                         affected: Some(TargetFilter::Typed(
                             TypedFilter::creature().controller(ControllerRef::You),

@@ -4949,6 +4949,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         room_door: a_room_door,
         granting_object: a_granting_object,
         bound_actor: a_bound_actor,
+        origin: a_origin,
     } = a;
     let StaticDefinition {
         mode: b_mode,
@@ -4969,6 +4970,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         room_door: b_room_door,
         granting_object: b_granting_object,
         bound_actor: b_bound_actor,
+        origin: b_origin,
     } = b;
     a_mode == b_mode
         && a_affected == b_affected
@@ -4987,6 +4989,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         && a_room_door == b_room_door
         && a_granting_object == b_granting_object
         && a_bound_actor == b_bound_actor
+        && a_origin == b_origin
 }
 
 /// Do two parses CONSUME the same thing? Compares everything the ENGINE READS and

@@ -2493,7 +2493,7 @@ impl GameObject {
             "base must never hold a `Resolution`-origin replacement: the CR 613.1 \
              carry-over would then re-add it every pass, duplicating the effect"
         );
-        def.origin = crate::types::ability::ReplacementOrigin::Resolution;
+        def.origin = crate::types::ability::DefinitionOrigin::Resolution;
         self.replacement_definitions.push(def);
     }
 
@@ -6552,7 +6552,7 @@ mod tests {
     #[test]
     fn reseed_carrying_resolution_effects_is_idempotent_across_baselines() {
         let mut carried = eot_shield();
-        carried.origin = crate::types::ability::ReplacementOrigin::Resolution;
+        carried.origin = crate::types::ability::DefinitionOrigin::Resolution;
         carried.is_consumed = true;
 
         let base_x: Arc<Vec<ReplacementDefinition>> = Arc::new(vec![ReplacementDefinition::new(

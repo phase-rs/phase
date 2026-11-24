@@ -28,6 +28,7 @@ mod replacement_mill_trigger_collection;
 mod repro_pilot_crew;
 mod resolution_optional_payments;
 mod resolution_tap_x_binding;
+mod resolved_restriction_ability_removal;
 mod restricted_mana_face_down_and_face_up;
 mod restricted_mana_mv_or_x;
 mod restricted_mana_not_from_zone;

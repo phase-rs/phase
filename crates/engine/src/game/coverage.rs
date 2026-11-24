@@ -17799,6 +17799,7 @@ mod tests {
             trigger.execute = Some(Box::new(tracked_return_mid(uses_tracked_set, None)));
             CardFace {
                 static_abilities: vec![StaticDefinition {
+                    origin: Default::default(),
                     mode: StaticMode::Continuous,
                     affected: None,
                     modifications: vec![ContinuousModification::GrantTrigger {
@@ -24355,6 +24356,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             AbilityKind::Spell,
             Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition {
+                    origin: Default::default(),
                     mode: StaticMode::MustBeBlocked { by: None },
                     affected: None,
                     modifications: vec![ContinuousModification::AddStaticMode {
@@ -24402,6 +24404,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             AbilityKind::Spell,
             Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition {
+                    origin: Default::default(),
                     mode: StaticMode::Continuous,
                     affected: None,
                     modifications: vec![
@@ -27375,6 +27378,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let oracle = "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost {U} less to cast if you paid life this way. This effect reduces only the amount of blue mana you pay.";
         face.oracle_text = Some(oracle.to_string());
         face.static_abilities.push(StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::DefilerCostReduction {
                 color: ManaColor::Blue,
                 life_cost: 2,
@@ -27421,6 +27425,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let oracle = "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost {U} less to cast if you paid life this way. This effect reduces only the amount of blue mana you pay.";
         face.oracle_text = Some(oracle.to_string());
         face.static_abilities.push(StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::DefilerCostReduction {
                 color: ManaColor::Blue,
                 life_cost: 2,
@@ -27464,6 +27469,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let oracle = "As an additional cost to cast blue permanent spells, you may pay 2 life.\nThose spells cost {U} less to cast if you paid life this way.";
         face.oracle_text = Some(oracle.to_string());
         face.static_abilities.push(StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::DefilerCostReduction {
                 color: ManaColor::Blue,
                 life_cost: 2,
@@ -27503,6 +27509,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let oracle = "As an additional cost to cast artifact spells, you may pay 2 life. Those spells cost {1} less to cast.";
         face.oracle_text = Some(oracle.to_string());
         face.static_abilities.push(StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::DefilerCostReduction {
                 color: ManaColor::Blue,
                 life_cost: 2,
@@ -28236,6 +28243,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let oracle = "Skip your draw step.";
         face.oracle_text = Some(oracle.to_string());
         face.static_abilities.push(StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::SkipStep { step: Phase::Draw },
             affected: Some(TargetFilter::Controller),
             modifications: vec![],
@@ -28270,6 +28278,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let oracle = "Players skip their upkeep steps.";
         face.oracle_text = Some(oracle.to_string());
         face.static_abilities.push(StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::SkipStep {
                 step: Phase::Upkeep,
             },
@@ -28316,6 +28325,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let oracle = "Players can't draw cards.";
         face.oracle_text = Some(oracle.to_string());
         face.static_abilities.push(StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::CantDraw {
                 who: ProhibitionScope::AllPlayers,
             },
@@ -28353,6 +28363,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let oracle = "You can't draw cards.";
         face.oracle_text = Some(oracle.to_string());
         face.static_abilities.push(StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::CantDraw {
                 who: ProhibitionScope::Controller,
             },
@@ -28392,6 +28403,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let oracle = "Your opponents play with their hands revealed.";
         face.oracle_text = Some(oracle.to_string());
         face.static_abilities.push(StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::RevealHand {
                 who: ProhibitionScope::Opponents,
             },
@@ -28439,6 +28451,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             ),
         ] {
             face.static_abilities.push(StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::CantBeBlockedExceptBy { kind },
                 affected: Some(TargetFilter::SelfRef),
                 modifications: vec![],
@@ -28726,6 +28739,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let oracle = "Creatures your opponents control lose flying and can't have or gain flying.";
         face.oracle_text = Some(oracle.to_string());
         face.static_abilities.push(StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::CantHaveKeyword {
                 keyword: Keyword::Flying,
             },

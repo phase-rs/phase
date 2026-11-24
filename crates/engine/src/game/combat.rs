@@ -2783,6 +2783,12 @@ fn must_be_blocked_by_all_requirements_for_attacker<'a>(
 /// materialization), evaluate "your opponents" relative to the SPELL
 /// controller. Otherwise (`None` anchor — permanent-static lures) resolve the
 /// controller from the carrier object, unchanged.
+///
+/// The same anchor serves the blocker-side `BlockRestriction` consumers
+/// (`validate_blockers_core` and `can_block_pair_with_precomputed`): a
+/// controller-relative "can't block creatures you control" grafted onto
+/// another player's creature by a resolving spell (Immortal Obligation) reads
+/// "you" as that spell's controller (CR 509.1b + CR 608.2c).
 fn blocker_filter_context(
     state: &GameState,
     src_id: ObjectId,
@@ -3886,11 +3892,15 @@ fn validate_blockers_core(
             let StaticMode::BlockRestriction { filter } = &def.mode else {
                 continue;
             };
+            // CR 109.5 + CR 608.2c: a restriction grafted by a resolving
+            // effect reads "you" as its installing player (the graft's
+            // source_controller); a printed one has none and reads its
+            // source's controller.
             if !matches_target_filter(
                 state,
                 attacker_id,
                 filter,
-                &FilterContext::from_source(state, src_id),
+                &blocker_filter_context(state, src_id, def.source_controller),
             ) {
                 return Err(format!(
                     "{blocker_id:?} can block only creatures matching the block restriction"
@@ -8439,11 +8449,14 @@ pub fn can_block_pair_with_precomputed(
         let StaticMode::BlockRestriction { filter } = &def.mode else {
             continue;
         };
+        // CR 109.5 + CR 608.2c: a restriction grafted by a resolving effect
+        // reads "you" as its installing player (the graft's source_controller);
+        // a printed one has none and reads its source's controller.
         if !matches_target_filter(
             state,
             attacker_id,
             filter,
-            &FilterContext::from_source(state, src_id),
+            &blocker_filter_context(state, src_id, def.source_controller),
         ) {
             return false;
         }

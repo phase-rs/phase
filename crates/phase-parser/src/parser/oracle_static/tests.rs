@@ -14621,16 +14621,18 @@ fn quoted_ability_preserves_activation_restrictions() {
 }
 
 #[test]
-fn quoted_self_rule_static_grants_static_mode() {
+fn quoted_self_rule_static_grants_full_static_definition() {
     let modifications = parse_quoted_ability_modifications(
-        "It gains \"This creature attacks each combat if able.\"",
+        r#"It perpetually gains "This creature attacks each combat if able.""#,
     );
-    assert_eq!(
-        modifications,
-        vec![ContinuousModification::AddStaticMode {
-            mode: StaticMode::MustAttack,
-        }]
-    );
+    assert!(matches!(
+        modifications.as_slice(),
+        [ContinuousModification::GrantStaticAbility { definition }]
+            if definition.mode == StaticMode::MustAttack
+                && definition.affected == Some(TargetFilter::SelfRef)
+                && definition.condition.is_none()
+                && definition.modifications.is_empty()
+    ));
 }
 
 /// CR 113.3d + CR 604.1: A quoted continuous static whose inner scope is
@@ -32043,6 +32045,42 @@ fn planeswalker_only_defended_scope_reaches_every_static_consumer() {
     }));
 }
 
+/// CR 508.1b + CR 310.5: the singular "you or a permanent you control"
+/// (Immortal Obligation) names the same defended set as the plural
+/// "you or permanents you control" (Willie Lumpkin, Postman), and the nested
+/// " you or " prefix keeps the planeswalker-only, planeswalker and bare-player
+/// scopes distinct.
+#[test]
+fn defended_scope_reads_singular_permanent() {
+    use crate::parser::oracle_static::parse_cant_attack_defended_scope_nom;
+    use crate::types::triggers::AttackTargetFilter;
+    for (input, expected) in [
+        (
+            " you or a permanent you control",
+            AttackTargetFilter::PlayerOrPermanents,
+        ),
+        (
+            " you or permanents you control",
+            AttackTargetFilter::PlayerOrPermanents,
+        ),
+        (
+            " you or planeswalkers you control",
+            AttackTargetFilter::PlayerOrPlaneswalker,
+        ),
+        (
+            " planeswalkers you control",
+            AttackTargetFilter::Planeswalker { subtype: None },
+        ),
+        (" you", AttackTargetFilter::Player),
+    ] {
+        assert_eq!(
+            parse_cant_attack_defended_scope_nom(input).map_err(|e| format!("{e:?}")),
+            Ok(("", Some(expected))),
+            "{input:?}"
+        );
+    }
+}
+
 /// CR 508.1h + CR 118.12a: mixed casing must follow the same nom grammar and
 /// retain both the planeswalker-only defender and relative per-attacker tax.
 #[test]
@@ -40610,7 +40648,7 @@ fn marker_in_another_clause_keeps_its_owning_production() {
     use crate::types::statics::StaticMode;
 
     // ROW 1 — a quoted granted ability: the OUTER line is a subject grant, and the
-    // inner static is correctly decomposed into BOTH directions as `AddStaticMode`
+    // inner static is correctly decomposed into BOTH directions as full static grant
     // modifications by `anthem::parse_subject_continuous_static` (`dispatch.rs:1818`),
     // which runs well before the combat-rule family (`dispatch.rs:2261`). Only a
     // line-wide gate hoisted to the TOP of `parse_static_line_inner` could
@@ -40622,9 +40660,11 @@ fn marker_in_another_clause_keeps_its_owning_production() {
     let granted_modes: Vec<&StaticMode> = granted
         .modifications
         .iter()
-        .filter_map(|m| match m {
-            ContinuousModification::AddStaticMode { mode } => Some(mode),
-            _ => None,
+        .filter_map(|m| {
+            let ContinuousModification::GrantStaticAbility { definition } = m else {
+                return None;
+            };
+            Some(&definition.mode)
         })
         .collect();
     assert_eq!(
@@ -45137,4 +45177,114 @@ fn burden_of_proof_otherwise_branch_cannot_block_detectives() {
         "no clause may be swallowed; warnings = {:?}",
         parsed.parse_warnings
     );
+}
+
+/// SHAPE: the quoted static keeps the entire definition on the resolving effect.
+#[test]
+fn resolving_quote_keeps_full_static_definition() {
+    use crate::types::ability_visit::{visit_ability_def, visit_trigger};
+    use crate::types::statics::StaticMode;
+    use crate::types::triggers::AttackTargetFilter;
+    use std::ops::ControlFlow;
+
+    for (name, oracle, card_type, mode, defended) in [
+        (
+            "Incite Hysteria",
+            r#"Radiance — Until end of turn, target creature and each other creature that shares a color with it gain "This creature can't block.""#,
+            "Sorcery",
+            StaticMode::CantBlock,
+            None,
+        ),
+        (
+            "Carnage, Crimson Chaos",
+            r#"Trample
+When Carnage enters, return target creature card with mana value 3 or less from your graveyard to the battlefield. It gains "This creature attacks each combat if able" and "When this creature deals combat damage to a player, sacrifice it."
+Mayhem {B}{R}"#,
+            "Creature",
+            StaticMode::MustAttack,
+            None,
+        ),
+        (
+            "Elrond of the White Council",
+            r#"Secret council — When Elrond enters, each player secretly votes for fellowship or aid, then those votes are revealed. For each fellowship vote, the voter chooses a creature they control. You gain control of each creature chosen this way, and they gain "This creature can't attack its owner." Then for each aid vote, put a +1/+1 counter on each creature you control."#,
+            "Creature",
+            StaticMode::CantAttack,
+            Some(AttackTargetFilter::Owner),
+        ),
+    ] {
+        let parsed =
+            crate::parser::oracle::parse_oracle_text(oracle, name, &[], &[card_type.into()], &[]);
+        let mut found = false;
+        let mut visitor = |effect: &Effect| {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = effect
+            {
+                for outer in static_abilities {
+                    for (index, modification) in outer.modifications.iter().enumerate() {
+                        if let ContinuousModification::GrantStaticAbility { definition } =
+                            modification
+                        {
+                            if definition.mode != mode {
+                                continue;
+                            }
+                            assert_eq!(definition.affected, Some(TargetFilter::SelfRef), "{name}");
+                            assert_eq!(definition.attack_defended, defended, "{name}");
+                            if mode == StaticMode::MustAttack {
+                                assert!(matches!(
+                                    outer.modifications.get(index + 1),
+                                    Some(ContinuousModification::GrantTrigger { .. })
+                                ));
+                            }
+                            found = true;
+                        }
+                    }
+                }
+            }
+            ControlFlow::<()>::Continue(())
+        };
+        for ability in &parsed.abilities {
+            let _ = visit_ability_def(ability, &mut visitor);
+        }
+        for trigger in &parsed.triggers {
+            let _ = visit_trigger(trigger, &mut visitor);
+        }
+        assert!(found, "{name}: missing resolving {mode:?} grant");
+    }
+}
+
+#[test]
+fn printed_quote_controls_keep_nested_static_and_activated_shapes_distinct() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        r#"Job select (When this Equipment enters, create a 1/1 colorless Hero creature token, then attach this to it.)
+Equipped creature gets +2/+2, has lifelink and "Other commanders you control get +2/+2 and have lifelink," and is a Performer in addition to its other types.
+Krishna — Equip {3}"#,
+        "Dancer's Chakrams",
+        &[],
+        &["Artifact".into()],
+        &["Equipment".into()],
+    );
+    assert!(parsed
+        .statics
+        .iter()
+        .flat_map(|outer| &outer.modifications)
+        .any(|modification| matches!(modification,
+            ContinuousModification::GrantStaticAbility { definition }
+            if matches!(&definition.affected, Some(TargetFilter::Typed(filter))
+                if filter.controller == Some(ControllerRef::You)
+                    && filter.properties.contains(&FilterProp::Another)
+                    && filter.properties.contains(&FilterProp::IsCommander))
+                && definition.modifications == [
+                    ContinuousModification::AddPower { value: 2 },
+                    ContinuousModification::AddToughness { value: 2 },
+                    ContinuousModification::AddKeyword { keyword: Keyword::Lifelink },
+                ]
+        )));
+    // The activated quote from Ethereal Grasp contains its own cost separator.
+    assert!(matches!(
+        super::classify_quoted_inner("{8}: Untap this creature.").as_slice(),
+        [ContinuousModification::GrantAbility { definition }]
+            if matches!(&definition.cost, Some(crate::types::ability::AbilityCost::Mana { cost })
+                if *cost == crate::types::mana::ManaCost::generic(8))
+    ));
 }

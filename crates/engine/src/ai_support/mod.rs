@@ -6996,6 +6996,7 @@ mod tests {
                 properties: vec![],
             });
             let def = StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::CastWithKeyword { keyword: granted },
                 affected: Some(affected),
                 modifications: vec![],
@@ -7118,6 +7119,7 @@ mod tests {
             let obj = state.objects.get_mut(&omniscience_id).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             let def = StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::CastFromHandFree {
                     frequency: CastFrequency::Unlimited,
                     origin: CastFreeOrigin::Hand,

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "StaticDefinition gains origin (DefinitionOrigin): resolution-installed static grafts survive ability removal; old peers would drop it"
+}

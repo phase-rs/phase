@@ -377,6 +377,7 @@ mod idol_of_false_gods_counter_animation;
 mod if_you_do_declined_gate_later_instruction_p7;
 mod illuminated_folio_reveal_cost;
 mod immediate_chosen_player_attack_condition;
+mod immortal_obligation;
 mod imprison_this_insolent_wretch;
 mod incredible_hulk_enrage_attacking;
 mod indestructible_survives_destroy;

@@ -1691,12 +1691,29 @@ pub fn own_fields_name_granter(def: &StaticDefinition) -> bool {
     names
 }
 
+/// CR 201.5a: the definition of a token static's direct quoted-static grant whose
+/// references bind in the creator's frame, like the static's own fields. A grant
+/// with its own affected set, condition or modifications is bound at layer 6 instead.
+pub fn token_static_creator_grant(
+    modification: &ContinuousModification,
+) -> Option<&StaticDefinition> {
+    let ContinuousModification::GrantStaticAbility { definition } = modification else {
+        return None;
+    };
+    definition
+        .has_legacy_static_mode_shape()
+        .then_some(definition.as_ref())
+}
+
 /// CR 201.5a: whether a definition nested in `def`'s modifications names an unbound
-/// granter — together with [`own_fields_name_granter`], the whole of
-/// [`each_granter_symbol`]'s walk over a static.
+/// granter in a grant bound at layer 6. The token's direct creator-bound
+/// static grants are checked separately.
 pub fn nested_definitions_name_granter(def: &StaticDefinition) -> bool {
     let mut names = false;
     for m in &def.modifications {
+        if token_static_creator_grant(m).is_some() {
+            continue;
+        }
         granter_symbols::each_node_in(m, &mut |node| {
             granter_symbols::node_fields(node, &mut |symbol| {
                 names |= names_unbound_granter(&symbol);

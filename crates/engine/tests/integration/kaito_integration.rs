@@ -60,6 +60,7 @@ fn add_mana(runner: &mut GameRunner, player: PlayerId, color: ManaType, count: u
 /// Emblem static for "Ninjas you control get +1/+1".
 fn ninja_pump_static() -> StaticDefinition {
     StaticDefinition {
+        origin: Default::default(),
         mode: StaticMode::Continuous,
         affected: Some(TargetFilter::Typed(
             TypedFilter::creature()
