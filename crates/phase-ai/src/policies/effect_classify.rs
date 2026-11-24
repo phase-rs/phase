@@ -2752,6 +2752,7 @@ fn quoted_static_rides_a_trick(definition: &StaticDefinition) -> bool {
         | StaticMode::EntersWithAdditionalCounters { .. }
         | StaticMode::CountersCantBeRemoved { .. }
         | StaticMode::CountsAsNamed { .. }
+        | StaticMode::CantSetSchemeInMotion
         | StaticMode::Other(..) => false,
     }
 }

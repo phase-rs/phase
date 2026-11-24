@@ -1529,7 +1529,8 @@ fn quoted_static_mode_supports_redundancy(mode: &StaticMode) -> bool {
         | StaticMode::MaxUntapPerType { .. }
         | StaticMode::EntersWithAdditionalCounters { .. }
         | StaticMode::CountersCantBeRemoved { .. }
-        | StaticMode::CountsAsNamed { .. } => false,
+        | StaticMode::CountsAsNamed { .. }
+        | StaticMode::CantSetSchemeInMotion => false,
     }
 }
 
