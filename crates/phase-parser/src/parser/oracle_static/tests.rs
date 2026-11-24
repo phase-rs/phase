@@ -14621,16 +14621,18 @@ fn quoted_ability_preserves_activation_restrictions() {
 }
 
 #[test]
-fn quoted_self_rule_static_grants_static_mode() {
+fn quoted_self_rule_static_grants_full_static_definition() {
     let modifications = parse_quoted_ability_modifications(
-        "It gains \"This creature attacks each combat if able.\"",
+        r#"It perpetually gains "This creature attacks each combat if able.""#,
     );
-    assert_eq!(
-        modifications,
-        vec![ContinuousModification::AddStaticMode {
-            mode: StaticMode::MustAttack,
-        }]
-    );
+    assert!(matches!(
+        modifications.as_slice(),
+        [ContinuousModification::GrantStaticAbility { definition }]
+            if definition.mode == StaticMode::MustAttack
+                && definition.affected == Some(TargetFilter::SelfRef)
+                && definition.condition.is_none()
+                && definition.modifications.is_empty()
+    ));
 }
 
 /// CR 113.3d + CR 604.1: A quoted continuous static whose inner scope is
@@ -18346,6 +18348,88 @@ fn persistent_exile_play_permission_evendo_sacrificed_permanent_gate() {
             .any(|parsed_def| parsed_def.mode == def.mode && parsed_def.condition == def.condition),
         "full Oracle dispatch must route Evendo's line to the same static, got {:?}",
         parsed.statics
+    );
+}
+
+/// CR 508.1a + CR 611.3a: Pick Up the Pace's persistent play permission keeps
+/// its source-linked exile pool and gates the permission on the controller
+/// having attacked this turn.
+#[test]
+fn persistent_exile_play_permission_pick_up_the_pace_attack_gate() {
+    let card_text = "Whenever a creature you control that entered this turn attacks, exile the top card of your library.\nYou may play cards exiled with this enchantment as long as you attacked this turn.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        card_text,
+        "Pick Up the Pace",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let permission = parsed
+        .statics
+        .iter()
+        .find(|def| {
+            matches!(
+                def.mode,
+                StaticMode::ExileCastPermission {
+                    pool: ExileCardPool::Persistent,
+                    play_mode: CardPlayMode::Play,
+                    ..
+                }
+            )
+        })
+        .expect("Pick Up the Pace must lower its play-from-exile line as a static");
+    assert!(matches!(
+        permission.condition,
+        Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::AttackedThisTurn {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        })
+    ));
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .all(|ability| !matches!(ability.effect.as_ref(), Effect::CastFromZone { .. })),
+        "the permission must not fall through to a one-shot CastFromZone effect"
+    );
+    fn walk<'a>(ability: &'a AbilityDefinition, effects: &mut Vec<&'a Effect>) {
+        effects.push(&ability.effect);
+        if let Some(sub) = &ability.sub_ability {
+            walk(sub, effects);
+        }
+    }
+    let mut effects = Vec::new();
+    for ability in &parsed.abilities {
+        walk(ability, &mut effects);
+    }
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::Unimplemented { .. })),
+        "Pick Up the Pace must not emit Effect::Unimplemented: {effects:?}"
+    );
+    let swallowed_condition: Vec<_> = parsed
+        .parse_warnings
+        .iter()
+        .filter(|warning| {
+            matches!(
+                warning,
+                crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
+                    detector,
+                    ..
+                } if detector == "Condition_AsLongAs"
+            )
+        })
+        .collect();
+    assert!(
+        swallowed_condition.is_empty(),
+        "the condition must not be reported as swallowed: {swallowed_condition:?}"
     );
 }
 
@@ -31961,6 +32045,42 @@ fn planeswalker_only_defended_scope_reaches_every_static_consumer() {
     }));
 }
 
+/// CR 508.1b + CR 310.5: the singular "you or a permanent you control"
+/// (Immortal Obligation) names the same defended set as the plural
+/// "you or permanents you control" (Willie Lumpkin, Postman), and the nested
+/// " you or " prefix keeps the planeswalker-only, planeswalker and bare-player
+/// scopes distinct.
+#[test]
+fn defended_scope_reads_singular_permanent() {
+    use crate::parser::oracle_static::parse_cant_attack_defended_scope_nom;
+    use crate::types::triggers::AttackTargetFilter;
+    for (input, expected) in [
+        (
+            " you or a permanent you control",
+            AttackTargetFilter::PlayerOrPermanents,
+        ),
+        (
+            " you or permanents you control",
+            AttackTargetFilter::PlayerOrPermanents,
+        ),
+        (
+            " you or planeswalkers you control",
+            AttackTargetFilter::PlayerOrPlaneswalker,
+        ),
+        (
+            " planeswalkers you control",
+            AttackTargetFilter::Planeswalker { subtype: None },
+        ),
+        (" you", AttackTargetFilter::Player),
+    ] {
+        assert_eq!(
+            parse_cant_attack_defended_scope_nom(input).map_err(|e| format!("{e:?}")),
+            Ok(("", Some(expected))),
+            "{input:?}"
+        );
+    }
+}
+
 /// CR 508.1h + CR 118.12a: mixed casing must follow the same nom grammar and
 /// retain both the planeswalker-only defender and relative per-attacker tax.
 #[test]
@@ -40528,7 +40648,7 @@ fn marker_in_another_clause_keeps_its_owning_production() {
     use crate::types::statics::StaticMode;
 
     // ROW 1 — a quoted granted ability: the OUTER line is a subject grant, and the
-    // inner static is correctly decomposed into BOTH directions as `AddStaticMode`
+    // inner static is correctly decomposed into BOTH directions as full static grant
     // modifications by `anthem::parse_subject_continuous_static` (`dispatch.rs:1818`),
     // which runs well before the combat-rule family (`dispatch.rs:2261`). Only a
     // line-wide gate hoisted to the TOP of `parse_static_line_inner` could
@@ -40540,9 +40660,11 @@ fn marker_in_another_clause_keeps_its_owning_production() {
     let granted_modes: Vec<&StaticMode> = granted
         .modifications
         .iter()
-        .filter_map(|m| match m {
-            ContinuousModification::AddStaticMode { mode } => Some(mode),
-            _ => None,
+        .filter_map(|m| {
+            let ContinuousModification::GrantStaticAbility { definition } = m else {
+                return None;
+            };
+            Some(&definition.mode)
         })
         .collect();
     assert_eq!(
@@ -44859,6 +44981,95 @@ fn edgar_exile_permission_tapped_rider_declines() {
     );
 }
 
+// ── CR 120.6 + CR 704.5g: LethalDamageDeterminedByPower (Zilortha) ─────────────
+
+/// Verbatim static line of Zilortha, Strength Incarnate (MTGJSON).
+const ZILORTHA_LETHAL_LINE: &str =
+    "Lethal damage dealt to creatures you control is determined by their power rather than their toughness.";
+
+#[test]
+fn lethal_damage_determined_by_power_parses_the_subject_filter() {
+    let def = parse_static_line(ZILORTHA_LETHAL_LINE).expect("Zilortha's static parses");
+    assert_eq!(def.mode, StaticMode::LethalDamageDeterminedByPower);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+    );
+    assert_eq!(def.description.as_deref(), Some(ZILORTHA_LETHAL_LINE));
+
+    // Hostile grammar: only the power-for-toughness substitution, anchored to the sentence end.
+    for hostile in [
+        "Lethal damage dealt to creatures you control is determined by their toughness rather than their power.",
+        "Lethal damage dealt to creatures you control is determined by their power rather than their toughness and they have trample.",
+    ] {
+        let mode = parse_static_line(hostile).map(|d| d.mode);
+        assert_ne!(
+            mode,
+            Some(StaticMode::LethalDamageDeterminedByPower),
+            "{hostile}"
+        );
+    }
+    // The CR 510.1a Doran line is a different rule and keeps its own parse.
+    let doran = parse_static_line(
+        "Each creature assigns combat damage equal to its toughness rather than its power.",
+    )
+    .expect("Doran's static parses");
+    assert!(doran
+        .modifications
+        .contains(&ContinuousModification::AssignDamageFromToughness));
+}
+
+#[test]
+fn lethal_damage_determined_by_power_routes_as_a_static_line() {
+    assert!(crate::parser::oracle_classifier::is_static_pattern(
+        &ZILORTHA_LETHAL_LINE.to_lowercase()
+    ));
+}
+
+#[test]
+fn spell_cost_pt_qualifiers_parse_complete_static_definitions() {
+    let goreclaw = "Creature spells you cast with power 4 or greater cost {2} less to cast.";
+    let doran = "Each creature spell you cast with toughness greater than its power costs {1} less to cast.";
+
+    for (oracle, reduction, property) in [
+        (
+            goreclaw,
+            2,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            },
+        ),
+        (doran, 1, FilterProp::ToughnessGTPower),
+    ] {
+        let expected = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(reduction),
+            spell_filter: Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![property]),
+            )),
+            dynamic_count: None,
+            reach: CostReductionReach::SpillsToGeneric,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You),
+        ))
+        .description(oracle.to_string());
+        assert_eq!(parse_static_line(oracle), Some(expected), "{oracle}");
+    }
+}
+
+#[test]
+fn spell_cost_pt_qualifier_rejects_malformed_tail() {
+    assert!(parse_static_line(
+        "Creature spells you cast with power 4 or greater except on Tuesdays cost {2} less to cast."
+    ).is_none());
+}
+
 /// Burden of Proof, verbatim Oracle text (MTGJSON).
 const BURDEN_OF_PROOF_ORACLE: &str = "Flash\nEnchant creature\nEnchanted creature gets +2/+2 as long as it's a Detective you control. Otherwise, it has base power and toughness 1/1 and can't block Detectives.";
 
@@ -44966,4 +45177,114 @@ fn burden_of_proof_otherwise_branch_cannot_block_detectives() {
         "no clause may be swallowed; warnings = {:?}",
         parsed.parse_warnings
     );
+}
+
+/// SHAPE: the quoted static keeps the entire definition on the resolving effect.
+#[test]
+fn resolving_quote_keeps_full_static_definition() {
+    use crate::types::ability_visit::{visit_ability_def, visit_trigger};
+    use crate::types::statics::StaticMode;
+    use crate::types::triggers::AttackTargetFilter;
+    use std::ops::ControlFlow;
+
+    for (name, oracle, card_type, mode, defended) in [
+        (
+            "Incite Hysteria",
+            r#"Radiance — Until end of turn, target creature and each other creature that shares a color with it gain "This creature can't block.""#,
+            "Sorcery",
+            StaticMode::CantBlock,
+            None,
+        ),
+        (
+            "Carnage, Crimson Chaos",
+            r#"Trample
+When Carnage enters, return target creature card with mana value 3 or less from your graveyard to the battlefield. It gains "This creature attacks each combat if able" and "When this creature deals combat damage to a player, sacrifice it."
+Mayhem {B}{R}"#,
+            "Creature",
+            StaticMode::MustAttack,
+            None,
+        ),
+        (
+            "Elrond of the White Council",
+            r#"Secret council — When Elrond enters, each player secretly votes for fellowship or aid, then those votes are revealed. For each fellowship vote, the voter chooses a creature they control. You gain control of each creature chosen this way, and they gain "This creature can't attack its owner." Then for each aid vote, put a +1/+1 counter on each creature you control."#,
+            "Creature",
+            StaticMode::CantAttack,
+            Some(AttackTargetFilter::Owner),
+        ),
+    ] {
+        let parsed =
+            crate::parser::oracle::parse_oracle_text(oracle, name, &[], &[card_type.into()], &[]);
+        let mut found = false;
+        let mut visitor = |effect: &Effect| {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = effect
+            {
+                for outer in static_abilities {
+                    for (index, modification) in outer.modifications.iter().enumerate() {
+                        if let ContinuousModification::GrantStaticAbility { definition } =
+                            modification
+                        {
+                            if definition.mode != mode {
+                                continue;
+                            }
+                            assert_eq!(definition.affected, Some(TargetFilter::SelfRef), "{name}");
+                            assert_eq!(definition.attack_defended, defended, "{name}");
+                            if mode == StaticMode::MustAttack {
+                                assert!(matches!(
+                                    outer.modifications.get(index + 1),
+                                    Some(ContinuousModification::GrantTrigger { .. })
+                                ));
+                            }
+                            found = true;
+                        }
+                    }
+                }
+            }
+            ControlFlow::<()>::Continue(())
+        };
+        for ability in &parsed.abilities {
+            let _ = visit_ability_def(ability, &mut visitor);
+        }
+        for trigger in &parsed.triggers {
+            let _ = visit_trigger(trigger, &mut visitor);
+        }
+        assert!(found, "{name}: missing resolving {mode:?} grant");
+    }
+}
+
+#[test]
+fn printed_quote_controls_keep_nested_static_and_activated_shapes_distinct() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        r#"Job select (When this Equipment enters, create a 1/1 colorless Hero creature token, then attach this to it.)
+Equipped creature gets +2/+2, has lifelink and "Other commanders you control get +2/+2 and have lifelink," and is a Performer in addition to its other types.
+Krishna — Equip {3}"#,
+        "Dancer's Chakrams",
+        &[],
+        &["Artifact".into()],
+        &["Equipment".into()],
+    );
+    assert!(parsed
+        .statics
+        .iter()
+        .flat_map(|outer| &outer.modifications)
+        .any(|modification| matches!(modification,
+            ContinuousModification::GrantStaticAbility { definition }
+            if matches!(&definition.affected, Some(TargetFilter::Typed(filter))
+                if filter.controller == Some(ControllerRef::You)
+                    && filter.properties.contains(&FilterProp::Another)
+                    && filter.properties.contains(&FilterProp::IsCommander))
+                && definition.modifications == [
+                    ContinuousModification::AddPower { value: 2 },
+                    ContinuousModification::AddToughness { value: 2 },
+                    ContinuousModification::AddKeyword { keyword: Keyword::Lifelink },
+                ]
+        )));
+    // The activated quote from Ethereal Grasp contains its own cost separator.
+    assert!(matches!(
+        super::classify_quoted_inner("{8}: Untap this creature.").as_slice(),
+        [ContinuousModification::GrantAbility { definition }]
+            if matches!(&definition.cost, Some(crate::types::ability::AbilityCost::Mana { cost })
+                if *cost == crate::types::mana::ManaCost::generic(8))
+    ));
 }

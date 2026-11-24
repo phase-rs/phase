@@ -1454,7 +1454,8 @@ impl TargetedImperativeAst {
             | Self::ControlNextTurn { .. }
             | Self::Earthbend { .. }
             | Self::Airbend { .. }
-            | Self::ZoneCounterProxy(..) => None,
+            | Self::ZoneCounterProxy(..)
+            | Self::Unimplemented { .. } => None,
         }
     }
 }
@@ -1703,6 +1704,14 @@ pub(crate) enum TargetedImperativeAst {
     /// Proxy for zone-counter family (destroy/exile/put counter) used during
     /// compound splitting to unify targeted and zone-counter parsing.
     ZoneCounterProxy(Box<ZoneCounterImperativeAst>),
+    /// A targeted clause the parser recognized but must not execute (CR 201.4a: a
+    /// "with that name" discard after a name choice whose characteristic
+    /// `ChoiceType::CardName` cannot carry). Lowers to an honest `Effect::unimplemented`
+    /// named `gap` carrying the printed clause, mirroring `PutImperativeAst::Unimplemented`.
+    Unimplemented {
+        gap: &'static str,
+        fragment: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

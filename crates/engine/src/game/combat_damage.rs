@@ -1,4 +1,7 @@
-use crate::game::combat::{AttackTarget, CombatState, DamageAssignment, DamageTarget, TrampleKind};
+use crate::game::combat::{
+    record_block_edge, AttackTarget, AttackerInfo, CombatParticipation, CombatState,
+    DamageAssignment, DamageTarget, TrampleKind,
+};
 use crate::game::effects::deal_damage::{
     apply_damage_after_replacement, pre_replacement_damage_gate,
     settle_parked_player_damage_results, tally_map_from_record_entries,
@@ -8,6 +11,7 @@ use crate::game::effects::deal_damage::{
 use crate::game::effects::life::{ReplacementDeferred, StagedLifeGain};
 use crate::game::game_object::GameObject;
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::game::lethal_damage::{self, AssignedThisStep};
 use crate::game::replacement;
 use crate::game::sba;
 use crate::game::triggers;
@@ -16,15 +20,15 @@ use crate::types::ability::{DamageContextSnapshot, ShieldKind, TargetRef};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CombatDamageAssignmentMode, CombatDamageSubStep, CombatPreventionTally, DamageSlot, GameState,
-    PendingCombatDamageEntry, PendingCombatDamageReplacement, PendingCombatLeg,
-    PendingCombatLegProgress, PendingCombatLifelink, PendingCombatPhaseCRemnant,
+    CombatDamageAssignmentMode, CombatDamageSplit, CombatDamageSubStep, CombatPreventionTally,
+    DamageSlot, GameState, PendingCombatDamageEntry, PendingCombatDamageReplacement,
+    PendingCombatLeg, PendingCombatLegProgress, PendingCombatLifelink, PendingCombatPhaseCRemnant,
     PendingLifelinkGain, PerPlayerCombatDamage, PreventedDamageEntry, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
+use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent, ReplacementId};
 use std::collections::VecDeque;
 
 /// CR 510.1a + CR 613.11: Returns the amount of combat damage a creature assigns.
@@ -164,7 +168,7 @@ pub fn resolve_combat_damage(
     // resume completes the unapplied legs. Placed AHEAD of
     // `state.combat.as_ref()?` so no combat teardown can strand the record
     // behind that `?`.
-    if state.pending_combat_lifelink.is_some() {
+    if state.combat_damage_batch_parked() {
         // Any live prompt — the CR 616.1 ordering choice itself, or a sub-choice
         // raised while answering it — means an answer is still coming. Surface it
         // rather than re-collecting assignments. The `matches!` below excludes
@@ -174,14 +178,18 @@ pub fn resolve_combat_damage(
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return Some(state.waiting_for.clone());
         }
-        // Settled to priority with a batch still parked. Either the seat that
-        // owed the CR 616.1 answer left the game (CR 800.4a: `elimination` cleared
-        // `pending_replacement` and the reconcile wrote `Priority { next }`), or a
-        // sub-choice of the answer resolved through a dispatcher other than
-        // `handle_replacement_choice`. No further `ChooseReplacement` will arrive,
-        // so finish the batch here — otherwise the owed gains die with combat AND
-        // the `!regular_damage_done` completeness gate (priority.rs) re-enters
-        // this function forever.
+        // Settled to priority with a batch still parked. An answer that settles to
+        // priority finishes the batch in its own action
+        // (`engine::resume_parked_combat_damage_at_action_boundary`), also after the
+        // active player left the game (CR 800.4j: the completed batch's window goes
+        // to `engine::living_priority_seat`). So this is reached, from priority.rs's
+        // completeness gate, only when that convergence held back the batch's next
+        // prompt because it names a seat that left the game (CR 800.4a, the same
+        // aliveness test `turns::auto_advance_once` applies), or from a save written
+        // before that convergence existed. No further answer will
+        // arrive, so finish the batch here — otherwise the owed gains die with
+        // combat AND the `!regular_damage_done` completeness gate (priority.rs)
+        // re-enters this function forever.
         //
         // `events.len()` folds nothing: no answering action's events are in
         // flight on this path.
@@ -387,12 +395,14 @@ fn finish_combat_damage_sub_step(
 ///
 /// `action_event_start` is the index at which the ANSWERING action's events
 /// begin. It is a parameter, never stored: `handle_replacement_choice` captures
-/// it as a local before the answer is applied, and the re-entry guard passes
-/// `events.len()` when no answer is in flight. Both are `<= events.len()` by
-/// construction, so the slice below cannot be out of range.
+/// it as a local before the answer is applied, the action boundary takes it from
+/// its [`ParkedCombatDamageAnswer`], and the re-entry guard passes `events.len()`
+/// when no answer is in flight. It is clamped to `events.len()` at entry, so the
+/// fold and the claims below read one range that is never out of bounds.
 ///
 /// The answering action's events — the resumed `LifeChanged` among them — are
-/// folded into the parked batch, so "whenever you gain life" observers
+/// folded into the parked batch by the one fold rule,
+/// [`take_answer_events_into_batch`], so "whenever you gain life" observers
 /// (CR 119.9) join the SAME CR 603.3b batch as the combat-damage observers.
 /// CR 702.15b makes the gain simultaneous with the damage, and no player
 /// received priority for the CR 616.1 choice, so splitting them would be a rules
@@ -414,22 +424,18 @@ pub(crate) fn resume_pending_combat_lifelink(
     choice: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    let action_event_start = action_event_start.min(events.len());
     let mut record = *state.pending_combat_lifelink.take()?;
-    // Every pause below re-sets the marker when it re-parks on a gain; an
+    // Every pause below re-sets the marker when it re-parks on a gain's own choice; an
     // answer that resolved without reaching `take_staged_answer` (a Prevented
     // or substituted gain) must not leave it standing.
     record.awaiting_staged_gain = false;
-    record
-        .batch_events
-        .extend_from_slice(&events[action_event_start..]);
+    take_answer_events_into_batch(state, &mut record, events, action_event_start);
     let owed_from = record.batch_events.len();
     let sub_step = record.sub_step;
-    // CR 510.2 + CR 616.1: a batch parked on a LEG's life-loss pause or
-    // poison-counter result pause completes its Phase C tail before the
-    // lifelink drain runs. The paused leg's loss
-    // fully settled (the funnel only resumes here once the batch drain retires
-    // with no re-park). A re-pause re-parks with the batch so far, mirroring
-    // the lifelink arm below.
+    // CR 510.2 + CR 616.1: a batch parked in Phase C completes its Phase C tail
+    // before draining lifelink. The answer has settled the leg's result or the
+    // early gain's choice. Any new pause parks again with the batch so far.
     if let Some(remnant) = record.phase_c_remnant.take() {
         match complete_combat_phase_c_remnant(state, remnant, &mut record) {
             RemnantOutcome::Complete => {}
@@ -474,9 +480,17 @@ pub(crate) fn resume_pending_combat_lifelink(
             // entered through it by the all-pass gate in priority.rs, the one path
             // the inline first-strike step takes too; a regular batch is the last
             // step and ends with this window.
-            waiting_for.or(Some(WaitingFor::Priority {
-                player: state.active_player,
-            }))
+            //
+            // CR 800.4j: a batch answered after the active player left the game
+            // (a surviving chooser's answer to its parked choice) gives that window
+            // to the next player in turn order still in the game, never to the seat
+            // that left.
+            match waiting_for {
+                None | Some(WaitingFor::Priority { .. }) => Some(WaitingFor::Priority {
+                    player: super::engine::living_priority_seat(state),
+                }),
+                prompt => prompt,
+            }
         }
     }
 }
@@ -526,6 +540,116 @@ pub(crate) fn claim_combat_batch_events_for_ordinary_collection(
     event_start: usize,
 ) {
     triggers::claim_events_for_ordinary_collection(state, events, event_start);
+}
+
+/// CR 510.2: an action that answers a parked combat damage batch's choice, and
+/// where in its event buffer the answer's events begin.
+///
+/// Only an action that found the batch parked as it began is an answer. An
+/// action that parks the batch (declaring blockers, the step's start) publishes
+/// and claims its own events as it parks, so it never folds them a second time.
+/// Taken as a local at an action boundary and never stored, so no index outlives
+/// its action.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ParkedCombatDamageAnswer {
+    action_event_start: usize,
+}
+
+impl ParkedCombatDamageAnswer {
+    /// `Some` only when a combat damage batch is parked as the action begins;
+    /// `action_event_start` is the length of the action's event buffer then.
+    pub(crate) fn begin(state: &GameState, action_event_start: usize) -> Option<Self> {
+        state
+            .combat_damage_batch_parked()
+            .then_some(Self { action_event_start })
+    }
+
+    pub(crate) fn action_event_start(self) -> usize {
+        self.action_event_start
+    }
+}
+
+/// CR 510.2 + CR 603.2 + CR 603.2c + CR 603.3b: the one fold rule — a parked
+/// combat damage batch takes custody of its answering action's events, so each
+/// occurrence is collected once, by the batch's one placement when it completes.
+///
+/// Three kinds of occurrence are left out, each because another owner collects
+/// it, as the post-action pipeline leaves them out too:
+/// * an occurrence already claimed for ordinary collection, except a queued
+///   zone-change witness the batch has yet to take;
+/// * a parked battlefield entry, whose replay collects it (issue #830);
+/// * an occurrence a paused logical-zone or cost owner retains for its own
+///   settlement.
+///
+/// Keep a queued context's `ZoneChanged` witness even when a staged zone
+/// delivery claimed it for ordinary collection. The batch uses it to move
+/// the queued context into its placement instead of rescanning it. A claim
+/// covering delayed collectors still excludes the occurrence (CR 603.7b).
+/// Known gap: an occurrence claimed for all collectors while the batch is
+/// parked (a concession's departure, CR 800.4a) has no witness here, so its
+/// queued context is placed after the batch's placement, not in it
+/// (Command Zone #353).
+///
+/// The start is clamped: an anchor taken before the answer can exceed a buffer
+/// the answer shortened (`collect_answer_slice_matching` documents this for
+/// `zone_pipeline::drain_pending_batch_deliveries`).
+fn take_answer_events_into_batch(
+    state: &GameState,
+    record: &mut PendingCombatLifelink,
+    events: &[GameEvent],
+    action_event_start: usize,
+) {
+    let start = action_event_start.min(events.len());
+    let mut retained = crate::game::engine_priority::retained_logical_zone_events(state);
+    retained.extend(crate::game::engine_priority::retained_cost_events(state));
+    let consumed = &state.consumed_before_priority_trigger_events;
+    let ordinary = triggers::unclaimed_trigger_events_from(
+        events,
+        start,
+        triggers::TriggerCollectionRequester::Ordinary,
+        consumed,
+    );
+    let batch = triggers::unclaimed_trigger_events_from(
+        events,
+        start,
+        triggers::TriggerCollectionRequester::CombatDamageBatch,
+        consumed,
+    );
+    for (&position, event) in batch.positions().iter().zip(&batch.events) {
+        if crate::game::engine_replacement::entry_event_is_parked(state, event)
+            || retained.contains(event)
+        {
+            continue;
+        }
+        let queued_zone_witness = matches!(event, GameEvent::ZoneChanged { .. })
+            && !record.batch_events.contains(event)
+            && state.deferred_triggers.iter().any(|context| {
+                context.batch_origin == triggers::DeferredTriggerBatchOrigin::Ordinary
+                    && context.trigger_events.contains(event)
+            });
+        if ordinary.positions().binary_search(&position).is_ok() || queued_zone_witness {
+            record.batch_events.push(event.clone());
+        }
+    }
+}
+
+/// CR 603.2 + CR 603.3 + CR 510.3a: an answer that leaves the combat damage
+/// batch parked (its next choice is asked) hands the batch its events, so their
+/// triggers join the combat damage step's one placement once, when the batch
+/// completes. The events are claimed for ordinary collection, so no generic
+/// collector takes them in the meantime.
+pub(crate) fn hold_parked_combat_damage_answer_events(
+    state: &mut GameState,
+    answer: ParkedCombatDamageAnswer,
+    events: &[GameEvent],
+) {
+    let Some(mut record) = state.pending_combat_lifelink.take() else {
+        return;
+    };
+    let start = answer.action_event_start().min(events.len());
+    take_answer_events_into_batch(state, &mut record, events, start);
+    state.pending_combat_lifelink = Some(record);
+    claim_combat_batch_events_for_ordinary_collection(state, events, start);
 }
 
 /// Returns a terminal or trigger-ordering state produced while combat damage resolves.
@@ -683,7 +807,6 @@ fn combatant_has_regeneration_shield(object: &GameObject) -> bool {
         .any(|replacement| replacement.shield_kind == ShieldKind::Regeneration)
 }
 
-#[allow(dead_code)] // Reachable only through the deferred crate-visible assessment API.
 fn damage_is_not_fixed(
     state: &GameState,
     context: &DamageContext,
@@ -708,7 +831,6 @@ fn damage_is_not_fixed(
     .is_empty()
 }
 
-#[allow(dead_code)] // Reachable only through the deferred crate-visible assessment API.
 fn lethal_destruction_is_not_fixed(state: &GameState, object_id: ObjectId) -> bool {
     let proposed = ProposedEvent::Destroy {
         object_id,
@@ -725,9 +847,23 @@ fn lethal_destruction_is_not_fixed(state: &GameState, object_id: ObjectId) -> bo
 }
 
 #[allow(dead_code)] // Reachable only through the deferred crate-visible assessment API.
-fn survives_marked_damage(object: &GameObject, incoming_damage: u32) -> Option<bool> {
-    let toughness = object.toughness?.max(0) as u32;
-    Some(object.damage_marked.saturating_add(incoming_damage) < toughness)
+fn survives_marked_damage(
+    state: &GameState,
+    object: &GameObject,
+    incoming_damage: u32,
+) -> Option<bool> {
+    // CR 704.5f + CR 704.5g: a creature with toughness 0 or less dies regardless of damage;
+    // otherwise it survives unless its marked plus incoming damage is lethal (CR 120.6, whose
+    // basis may be power under CR 613.11).
+    let toughness = object.toughness?;
+    Some(
+        toughness > 0
+            && !lethal_damage::is_lethal_damage(
+                state,
+                object,
+                object.damage_marked.saturating_add(incoming_damage),
+            ),
+    )
 }
 
 /// Assess the next combat-damage exchange for a currently bound attacker/blocker pair.
@@ -858,8 +994,8 @@ pub(crate) fn assess_combat_impact(
     }
 
     let (Some(attacker_survives), Some(blocker_survives)) = (
-        survives_marked_damage(attacker_object, damage.blocker_to_attacker),
-        survives_marked_damage(blocker_object, damage.attacker_to_blocker),
+        survives_marked_damage(state, attacker_object, damage.blocker_to_attacker),
+        survives_marked_damage(state, blocker_object, damage.attacker_to_blocker),
     ) else {
         return CombatImpact::Indeterminate;
     };
@@ -918,14 +1054,7 @@ fn collect_damage_assignments(
         }
 
         let has_deathtouch = obj.has_keyword(&Keyword::Deathtouch);
-        // CR 702.19c takes precedence when both present — it subsumes regular trample behavior
-        let trample = if obj.has_keyword(&Keyword::TrampleOverPlaneswalkers) {
-            Some(TrampleKind::OverPlaneswalkers)
-        } else if obj.has_keyword(&Keyword::Trample) {
-            Some(TrampleKind::Standard)
-        } else {
-            None
-        };
+        let trample = combat_trample_kind(obj);
 
         // CR 510.1c + CR 702.19b: Check if interactive assignment is needed
         // (2+ blockers, or a single-blocker trample attacker with excess damage).
@@ -955,7 +1084,14 @@ fn collect_damage_assignments(
                 .flatten()
                 .map(|&bid| DamageSlot {
                     blocker_id: bid,
-                    lethal_minimum: lethal_damage_needed(state, bid, has_deathtouch),
+                    // CR 702.19b: counts damage earlier attackers committed this step; see
+                    // `combat_lethal_damage_remaining` for the CR 510.1e restriction.
+                    lethal_minimum: lethal_damage::combat_lethal_damage_remaining(
+                        state,
+                        bid,
+                        has_deathtouch,
+                        assigned_this_step(state, bid),
+                    ),
                 })
                 .collect();
             let assignment_modes = combat_damage_assignment_modes(
@@ -1217,11 +1353,48 @@ pub(crate) fn needs_interactive_assignment(
             .get(&attacker_info.object_id)
             .and_then(|b| b.first())
         {
-            return power > lethal_damage_needed(state, blocker_id, has_deathtouch);
+            return power
+                > lethal_damage::combat_lethal_damage_remaining(
+                    state,
+                    blocker_id,
+                    has_deathtouch,
+                    assigned_this_step(state, blocker_id),
+                );
         }
     }
 
     blocker_count >= 2
+}
+
+/// CR 702.19b: combat damage other attackers have already committed to `blocker_id` earlier in
+/// this combat damage step, split by whether the assigning source has deathtouch (CR 702.2c).
+///
+/// Reads the live `state.combat`, never a copy taken before the attacker loop, so it sees both
+/// earlier auto-assignments and an answered `AssignCombatDamage` prompt. Mirrors
+/// `compute_pw_loyalty_threshold` (CR 702.19c).
+///
+/// CR 510.1e (partial): only damage already committed is counted. An earlier attacker cannot
+/// assign excess based on damage that a later attacker will assign. Tracked by Command Zone #285.
+fn assigned_this_step(state: &GameState, blocker_id: ObjectId) -> AssignedThisStep {
+    let Some(combat) = state.combat.as_ref() else {
+        return AssignedThisStep::default();
+    };
+    combat
+        .pending_damage
+        .iter()
+        .filter(|(_, da)| da.target == DamageTarget::Object(blocker_id))
+        .fold(AssignedThisStep::default(), |mut acc, (source, da)| {
+            let source_has_deathtouch = state
+                .objects
+                .get(source)
+                .is_some_and(|obj| obj.has_keyword(&Keyword::Deathtouch));
+            if source_has_deathtouch {
+                acc.from_deathtouch += da.amount;
+            } else {
+                acc.from_other += da.amount;
+            }
+            acc
+        })
 }
 
 /// CR 702.19c: Compute effective PW loyalty threshold for trample-over-PW,
@@ -1263,6 +1436,71 @@ pub(crate) fn compute_pw_loyalty_threshold(
     }
 }
 
+/// CR 702.19c: trample over planeswalkers assigns damage up to the planeswalker's
+/// effective loyalty before any spills over to its controller. Returns
+/// `(to_planeswalker, to_controller)`.
+fn split_over_planeswalker(excess: u32, effective_loyalty: u32) -> (u32, u32) {
+    let to_planeswalker = excess.min(effective_loyalty);
+    (to_planeswalker, excess - to_planeswalker)
+}
+
+/// Where a lethal-first split sends what is left once every blocker has its
+/// lethal damage. Each caller picks the route from the inputs it is entitled to
+/// read; [`lethal_first_split`] owns the arithmetic.
+pub(crate) enum ExcessRoute {
+    /// CR 510.1c: no trample, or (CR 506.4c) trample with no current recipient —
+    /// all damage stays on the blockers.
+    ToBlockers,
+    /// CR 702.19b: the excess goes to what the creature is attacking.
+    Trample,
+    /// CR 702.19c: the excess goes to the attacked planeswalker up to `loyalty`,
+    /// then to its controller. CR 702.19e: a planeswalker that left combat has
+    /// no threshold (`loyalty` 0), so all of it goes to the defending player.
+    OverPlaneswalker { loyalty: u32 },
+}
+
+/// The default `Normal`-mode combat damage assignment: lethal damage to each
+/// blocker in order, as far as the damage reaches, then the remainder by `route`.
+///
+/// Single authority for this arithmetic. The AI's default candidate and the
+/// `DerivedViews::combat_damage_suggestion` view both call it, and neither
+/// re-derives the walk or the planeswalker split.
+pub(crate) fn lethal_first_split(
+    total_damage: u32,
+    blockers: &[DamageSlot],
+    route: ExcessRoute,
+) -> CombatDamageSplit {
+    let mut remaining = total_damage;
+    // CR 510.1c: Divide damage among blockers.
+    // CR 702.19b: Assign lethal to each blocker before assigning trample excess.
+    let assignments = blockers
+        .iter()
+        .map(|slot| {
+            let amount = remaining.min(slot.lethal_minimum);
+            remaining -= amount;
+            (slot.blocker_id, amount)
+        })
+        .collect();
+    let mut split = CombatDamageSplit {
+        assignments,
+        ..CombatDamageSplit::default()
+    };
+    match route {
+        ExcessRoute::ToBlockers => {
+            // With no blockers left there is nothing to assign to: the empty split.
+            if let Some((_, amount)) = split.assignments.last_mut() {
+                *amount += remaining;
+            }
+        }
+        ExcessRoute::Trample => split.trample_damage = remaining,
+        ExcessRoute::OverPlaneswalker { loyalty } => {
+            (split.trample_damage, split.controller_damage) =
+                split_over_planeswalker(remaining, loyalty);
+        }
+    }
+    split
+}
+
 /// Assign trample excess damage when attacking a PW with trample-over-PW.
 /// CR 702.19c: lethal to blocker(s) → loyalty-worth to PW → excess to PW controller.
 fn assign_trample_over_pw_excess(
@@ -1275,9 +1513,7 @@ fn assign_trample_over_pw_excess(
         return result;
     }
     let (pw_loyalty, pw_controller) = compute_pw_loyalty_threshold(state, attacker_info);
-    let effective_loyalty = pw_loyalty.unwrap_or(0);
-    let to_pw = excess.min(effective_loyalty);
-    let to_controller = excess.saturating_sub(to_pw);
+    let (to_pw, to_controller) = split_over_planeswalker(excess, pw_loyalty.unwrap_or(0));
 
     if to_pw > 0 {
         // CR 702.19e: trample_over_pw=true so PW removal falls back to defending player.
@@ -1295,6 +1531,45 @@ fn assign_trample_over_pw_excess(
         });
     }
     result
+}
+
+/// Which trample variant `obj` assigns combat damage with, if any.
+fn combat_trample_kind(obj: &GameObject) -> Option<TrampleKind> {
+    // CR 702.19c takes precedence when both present — it subsumes regular trample behavior.
+    if obj.has_keyword(&Keyword::TrampleOverPlaneswalkers) {
+        Some(TrampleKind::OverPlaneswalkers)
+    } else if obj.has_keyword(&Keyword::Trample) {
+        Some(TrampleKind::Standard)
+    } else {
+        None
+    }
+}
+
+/// Where a trampler's damage beyond its blockers' lethal damage goes (CR 702.19b). The one
+/// authority for combat's automatic assignment and for the forecast's first-step preview.
+fn assign_trample_excess(
+    state: &GameState,
+    attacker_info: &AttackerInfo,
+    trample_kind: TrampleKind,
+    excess: u32,
+) -> Vec<DamageAssignment> {
+    if trample_kind == TrampleKind::OverPlaneswalkers
+        && matches!(attacker_info.attack_target, AttackTarget::Planeswalker(..))
+    {
+        // CR 702.19c: Split excess between the planeswalker (up to loyalty) and its controller.
+        // CR 702.19e: If the planeswalker left combat, excess goes to the defending player.
+        assign_trample_over_pw_excess(state, attacker_info, excess)
+    } else {
+        // CR 702.19f + CR 506.4c: Excess follows the live attack target, with no
+        // fallback to the defending player if the attacked permanent left combat.
+        match attacker_info.resolve_damage_target(state, false) {
+            Some(target) => vec![DamageAssignment {
+                target,
+                amount: excess,
+            }],
+            None => Vec::new(),
+        }
+    }
 }
 
 fn combat_damage_assignment_modes(
@@ -1351,24 +1626,8 @@ fn assign_attacker_damage(
             if attacker_info.blocked {
                 // CR 702.19d: Trample (both variants) — blocked but no blockers remaining,
                 // assign all damage to attack target as though lethal was assigned.
-                if trample.is_some() {
-                    let is_over_pw = trample == Some(TrampleKind::OverPlaneswalkers);
-                    if is_over_pw
-                        && matches!(attacker_info.attack_target, AttackTarget::Planeswalker(..))
-                    {
-                        // CR 702.19d + CR 702.19c: Trample-over-PW with no blockers attacking PW
-                        return assign_trample_over_pw_excess(state, attacker_info, power);
-                    }
-                    // CR 702.19d: Standard trample with no blockers — all to attack target
-                    match attacker_info.resolve_damage_target(state, false) {
-                        Some(target) => {
-                            return vec![DamageAssignment {
-                                target,
-                                amount: power,
-                            }]
-                        }
-                        None => return Vec::new(),
-                    }
+                if let Some(trample_kind) = trample {
+                    return assign_trample_excess(state, attacker_info, trample_kind, power);
                 }
                 // CR 509.1h + CR 510.1c: Non-trample blocked creature with all
                 // blockers removed — still "blocked" and assigns no damage.
@@ -1394,7 +1653,12 @@ fn assign_attacker_damage(
                     // when power <= lethal (excess == 0). The excess sub-block below stays as
                     // the shared lethal-then-excess logic used by the no-blockers and PW paths.
                     // CR 702.19b: Trample — assign lethal to blocker, excess to attack target.
-                    let lethal = lethal_damage_needed(state, blockers[0], has_deathtouch);
+                    let lethal = lethal_damage::combat_lethal_damage_remaining(
+                        state,
+                        blockers[0],
+                        has_deathtouch,
+                        assigned_this_step(state, blockers[0]),
+                    );
                     let to_blocker = power.min(lethal);
                     let excess = power.saturating_sub(to_blocker);
                     let mut result = vec![DamageAssignment {
@@ -1402,27 +1666,12 @@ fn assign_attacker_damage(
                         amount: to_blocker,
                     }];
                     if excess > 0 {
-                        if trample_kind == TrampleKind::OverPlaneswalkers
-                            && matches!(attacker_info.attack_target, AttackTarget::Planeswalker(..))
-                        {
-                            // CR 702.19c: Trample-over-PW attacking PW — split excess
-                            // between PW (up to loyalty) and PW controller.
-                            result.extend(assign_trample_over_pw_excess(
-                                state,
-                                attacker_info,
-                                excess,
-                            ));
-                        } else {
-                            // CR 702.19f: Standard trample or trample-over-PW attacking
-                            // non-PW — excess goes to the attack target directly.
-                            if let Some(target) = attacker_info.resolve_damage_target(state, false)
-                            {
-                                result.push(DamageAssignment {
-                                    target,
-                                    amount: excess,
-                                });
-                            }
-                        }
+                        result.extend(assign_trample_excess(
+                            state,
+                            attacker_info,
+                            trample_kind,
+                            excess,
+                        ));
                     }
                     result
                 } else {
@@ -1455,7 +1704,8 @@ fn assign_attacker_damage(
 /// - CR 510.1c: a blocked creature assigns to its blockers, and none to the player.
 /// - CR 702.19b: trample assigns lethal to every blocker first, then the excess to
 ///   the player — and *no* damage to the player if lethal is not assigned to all of
-///   them. "Lethal" counts damage already marked (via `lethal_damage_needed`).
+///   them. "Lethal" counts damage already marked (via
+///   `lethal_damage::combat_lethal_damage_remaining`).
 /// - CR 702.19d: a blocked trampler with no blockers left when damage is assigned
 ///   assigns everything to the player, as though all blockers had been assigned
 ///   lethal damage. This is what makes the second strike of a double striker so
@@ -1463,6 +1713,12 @@ fn assign_attacker_damage(
 /// - CR 702.4b + CR 702.7b: first and double strike split combat into two damage
 ///   steps. Blockers killed in the first step are gone for the second, and a
 ///   first-striking blocker can kill the attacker before its regular-step damage.
+/// - CR 704.3 + CR 611.3b: the deaths between the steps are the repeated
+///   state-based-action check. A blocker that dies stops generating its static
+///   effects, so when it made lethal damage be measured by power (Zilortha,
+///   Strength Incarnate), a survivor's first-step damage is checked again against
+///   its toughness, and the regular step owes each survivor its lethal damage on
+///   that battlefield.
 /// - CR 702.2c: deathtouch makes 1 damage lethal, so a deathtouch trampler is
 ///   absorbed by almost nothing.
 ///
@@ -1470,6 +1726,11 @@ fn assign_attacker_damage(
 /// player, since the attacking player chooses (CR 702.19b): lethal is assigned to
 /// the cheapest blockers first, maximising how many die and therefore how little
 /// absorption survives into the second step.
+///
+/// The total is what the attacker assigns, not what the defender has life left to
+/// take. Callers compare it with a life or loyalty total, so a regular step is
+/// counted even when the first step alone would be lethal (CR 704.5a), as it is
+/// for an unblocked double striker.
 pub fn combat_damage_to_defender(
     state: &GameState,
     attacker_id: ObjectId,
@@ -1483,11 +1744,11 @@ pub fn combat_damage_to_defender(
     // rule-modifying effect, and 0 under "assigns no combat damage". Reading raw
     // power here would make this helper contradict the combat it exists to predict.
     // CR 510.1a: a creature assigning 0 or less assigns no combat damage at all.
-    let power = combat_damage_amount(attacker) as i32;
+    let power = combat_damage_amount(attacker);
     if power == 0 {
         return 0;
     }
-    let has_trample = attacker.has_keyword(&Keyword::Trample);
+    let trample = combat_trample_kind(attacker);
     let has_deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
     let has_double_strike = attacker.has_keyword(&Keyword::DoubleStrike);
     let attacker_strikes_first = has_double_strike || attacker.has_keyword(&Keyword::FirstStrike);
@@ -1497,15 +1758,8 @@ pub fn combat_damage_to_defender(
     // `resolve_combat_damage` does (`double_strike_deals_damage_twice`: an unblocked
     // 3/3 double striker deals 6). Plain first strike assigns in one step only.
     if blockers.is_empty() {
-        return if has_double_strike { power * 2 } else { power };
+        return if has_double_strike { power * 2 } else { power } as i32;
     }
-
-    // Remaining lethal per blocker, in the order the attacker would exhaust them.
-    let mut remaining: Vec<i32> = blockers
-        .iter()
-        .map(|&bid| lethal_damage_needed(state, bid, has_deathtouch) as i32)
-        .collect();
-    remaining.sort_unstable();
 
     // CR 702.7b: which blockers assign their damage in the first-strike step.
     let first_strike_blockers: Vec<&GameObject> = blockers
@@ -1515,42 +1769,176 @@ pub fn combat_damage_to_defender(
         .collect();
 
     let mut to_player = 0;
-    let mut attacker_alive = true;
+    // CR 510.2: the damage marked during the first-strike step carries into the
+    // regular step (CR 120.6), after state-based actions remove any destroyed creatures.
+    let mut first_step_hits = Vec::new();
+    let mut departed: Vec<ObjectId> = Vec::new();
+    let mut preview = None;
 
     // CR 702.4b: the first combat damage step exists at all only if some
     // participant has first or double strike.
     if attacker_strikes_first || !first_strike_blockers.is_empty() {
+        let mut assignments = Vec::new();
         if attacker_strikes_first {
-            to_player += assign_step_to_defender(&mut remaining, power, has_trample);
+            // A hypothetical single-attacker exchange: no other attacker has committed damage.
+            let slots = owed_slots(blockers.iter().map(|&bid| {
+                (
+                    bid,
+                    lethal_damage::combat_lethal_damage_remaining(
+                        state,
+                        bid,
+                        has_deathtouch,
+                        AssignedThisStep::default(),
+                    ),
+                )
+            }));
+            let step = assign_step_to_defender(&slots, power, trample.is_some());
+            assignments.extend(step.to_blockers.into_iter().map(|(id, amount)| {
+                (
+                    attacker_id,
+                    DamageAssignment {
+                        target: DamageTarget::Object(id),
+                        amount,
+                    },
+                )
+            }));
+            if let Some(trample_kind) = trample.filter(|_| step.to_player > 0) {
+                let declared_attack = state.combat.as_ref().and_then(|combat| {
+                    combat
+                        .attackers
+                        .iter()
+                        .find(|info| info.object_id == attacker_id)
+                });
+                let excess_assignments = match declared_attack {
+                    Some(info) => assign_trample_excess(state, info, trample_kind, step.to_player),
+                    // Assume a defending player only before the attack is declared.
+                    None => vec![DamageAssignment {
+                        target: DamageTarget::Player(forecast_defending_player(
+                            state, attacker, blockers,
+                        )),
+                        amount: step.to_player,
+                    }],
+                };
+                to_player += excess_assignments
+                    .iter()
+                    .map(|assignment| assignment.amount)
+                    .sum::<u32>();
+                assignments.extend(
+                    excess_assignments
+                        .into_iter()
+                        .map(|assignment| (attacker_id, assignment)),
+                );
+            }
         }
         // CR 702.7b: first-striking blockers assign now, and can kill the attacker
         // before it ever reaches the regular step.
-        let attacker_lethal = lethal_damage_needed(
-            state,
-            attacker_id,
-            first_strike_blockers
-                .iter()
-                .any(|b| b.has_keyword(&Keyword::Deathtouch)),
-        ) as i32;
         // CR 510.1a + CR 613.11: same authority for the blockers — a first-striking
         // Doran-style blocker kills the attacker with its toughness, and one that
         // assigns no combat damage cannot kill it at all.
-        let first_strike_damage: i32 = first_strike_blockers
-            .iter()
-            .map(|b| combat_damage_amount(b) as i32)
-            .sum();
-        if first_strike_damage >= attacker_lethal {
-            attacker_alive = false;
+        assignments.extend(first_strike_blockers.iter().map(|blocker| {
+            (
+                blocker.id,
+                DamageAssignment {
+                    target: DamageTarget::Object(attacker_id),
+                    amount: combat_damage_amount(blocker),
+                },
+            )
+        }));
+        preview = preview_first_step(state, attacker, blockers, &assignments);
+        if preview.is_none() {
+            // The creatures this step can damage: the blockers when the attacker strikes
+            // first, and the attacker itself.
+            let struck = if attacker_strikes_first {
+                blockers
+            } else {
+                &[]
+            };
+            first_step_hits = struck
+                .iter()
+                .copied()
+                .chain(std::iter::once(attacker_id))
+                .map(|id| PredictedHit {
+                    id,
+                    amount: 0,
+                    deathtouch: false,
+                })
+                .collect();
+            forecast_assigned_hits(state, &assignments, &mut first_step_hits);
+            departed = first_step_departures(state, &first_step_hits);
         }
     }
 
-    // CR 702.4b: the attacker assigns in the regular step if it has double strike,
-    // or if it never had first strike and so has not assigned at all yet.
-    if attacker_alive && (has_double_strike || !attacker_strikes_first) {
-        to_player += assign_step_to_defender(&mut remaining, power, has_trample);
+    let preview_combat = preview.as_ref().map(|(preview, before)| {
+        (
+            preview,
+            before,
+            CombatParticipation::capture(preview, attacker_id),
+        )
+    });
+    let has_departed = |id| match &preview_combat {
+        Some((preview, before, after)) => {
+            // CR 701.19a + CR 506.4: regeneration removes a creature from combat without a
+            // zone change. Compare against the roles the preview started with.
+            let left_combat = if id == attacker_id {
+                before.attacking.is_some() && after.attacking.is_none()
+            } else {
+                before.blocked_by.contains(&id) && !after.blocked_by.contains(&id)
+            };
+            left_combat
+                || state
+                    .objects
+                    .get(&id)
+                    .is_some_and(|obj| !ObjectIncarnationRef::from_object(obj).is_current(preview))
+        }
+        None => departed.contains(&id),
+    };
+    let regular_state = preview.as_ref().map_or(state, |(preview, _)| preview);
+    if !has_departed(attacker_id) {
+        let Some(attacker) = regular_state.objects.get(&attacker_id) else {
+            return to_player as i32;
+        };
+        // CR 510.4: a first-step participant must still have double strike to assign again.
+        if attacker_strikes_first && !attacker.has_keyword(&Keyword::DoubleStrike) {
+            return to_player as i32;
+        }
+        // CR 510.1a + CR 613.11: the regular step assigns from the attacker as the first
+        // step left it (an umbra armor Aura it lost no longer pumps it); 0 assigns nothing.
+        let power = combat_damage_amount(attacker);
+        if power == 0 {
+            return to_player as i32;
+        }
+        let has_trample = combat_trample_kind(attacker).is_some();
+        let has_deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
+        // CR 506.4: a blocker removed from combat is no longer owed lethal damage. Each
+        // remaining blocker is owed it counting what the first step marked on it
+        // (CR 702.19b), measured on the battlefield
+        // the first step left: a departed creature's static no longer sets the basis
+        // (CR 611.3b). With no first-strike step this is the live remainder.
+        let slots = owed_slots(
+            blockers
+                .iter()
+                .filter(|&&bid| !has_departed(bid))
+                .map(|&bid| {
+                    let first_step = first_step_hits
+                        .iter()
+                        .find(|hit| hit.id == bid)
+                        .map_or(0, |hit| hit.amount);
+                    let owed = regular_state.objects.get(&bid).map_or(1, |obj| {
+                        lethal_damage::lethal_damage_still_owed(
+                            regular_state,
+                            obj,
+                            obj.damage_marked.saturating_add(first_step),
+                            has_deathtouch,
+                            &departed,
+                        )
+                    });
+                    (bid, owed)
+                }),
+        );
+        to_player += assign_step_to_defender(&slots, power, has_trample).to_player;
     }
 
-    to_player
+    to_player as i32
 }
 
 /// CR 510.2 + CR 120.3b + CR 120.3g + CR 702.70a: the board after each unblocked attacker deals one step of combat damage to its player and the selected triggers that damage fires resolve, on a copy; None when either stops for a choice.
@@ -1597,23 +1985,239 @@ pub fn preview_unblocked_combat_damage(
     Some(preview)
 }
 
-/// One combat damage step's worth of assignment from a single attacker, returning
-/// the damage that reaches the defending player and consuming the blockers it
-/// kills. See `combat_damage_to_defender` for the governing rules.
-fn assign_step_to_defender(remaining: &mut Vec<i32>, power: i32, has_trample: bool) -> i32 {
-    if remaining.is_empty() {
-        // CR 702.19d: blocked, but nothing is blocking it now — a trampler assigns
-        // everything to the player. CR 510.1c: without trample it assigns nothing.
-        return if has_trample { power } else { 0 };
+/// One combat damage step's worth of assignment from a single attacker: the damage that
+/// reaches the defending player, and the damage assigned to each blocker.
+struct StepAssignment {
+    to_player: u32,
+    to_blockers: Vec<(ObjectId, u32)>,
+}
+
+/// Damage a forecast combat damage step deals one creature: `amount`, and whether its source
+/// has deathtouch (CR 702.2b: only nonzero damage counts).
+struct PredictedHit {
+    id: ObjectId,
+    amount: u32,
+    deathtouch: bool,
+}
+
+/// CR 510.2 + CR 615.5 + CR 614.6: run first-strike damage and its state-based actions on a
+/// copy when damage or destruction can change, or when a double striker's lifelink can change
+/// the board it reads for its next assignment (CR 702.15b).
+/// Return the resulting state and the attacker's starting combat participation.
+/// If no preview is needed or play pauses for a choice, estimate from the assigned amounts.
+fn preview_first_step(
+    state: &GameState,
+    attacker: &GameObject,
+    blockers: &[ObjectId],
+    assignments: &[(ObjectId, DamageAssignment)],
+) -> Option<(GameState, CombatParticipation)> {
+    let needs_preview = assignments.iter().any(|(source, assignment)| {
+        if assignment.amount == 0 {
+            return false;
+        }
+        let target = match assignment.target {
+            DamageTarget::Object(id) => TargetRef::Object(id),
+            DamageTarget::Player(id) => TargetRef::Player(id),
+        };
+        let damage_can_change = DamageContext::from_source(state, *source).is_some_and(|context| {
+            damage_is_not_fixed(state, &context, &target, assignment.amount)
+                // CR 702.15b: a double striker's own lifelink gain, from damage to a blocker
+                // or the attack target, can change what it assigns in the regular step.
+                || (*source == attacker.id
+                    && context.has_lifelink
+                    && attacker.has_keyword(&Keyword::DoubleStrike))
+        });
+        // CR 704.5g + CR 704.5h: only a creature is destroyed by lethal damage; an attacked
+        // planeswalker loses loyalty instead (CR 120.3c).
+        let destruction_can_change = matches!(assignment.target, DamageTarget::Object(id)
+            if state.objects.get(&id).is_some_and(|object| {
+                object
+                    .card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Creature)
+            }) && lethal_destruction_is_not_fixed(state, id));
+        damage_can_change || destruction_can_change
+    });
+    if !needs_preview {
+        return None;
+    }
+    let mut preview = state.clone();
+    seed_forecast_combat(&mut preview, attacker, blockers);
+    let before = CombatParticipation::capture(&preview, attacker.id);
+    if let CombatDamageBatch::Paused { .. } =
+        apply_combat_damage(&mut preview, assignments, CombatDamageSubStep::FirstStrike)
+    {
+        return None;
     }
 
-    let total_lethal: i32 = remaining.iter().sum();
+    // CR 704.3 + CR 704.5f + CR 704.5g + CR 704.5h: check for zero toughness and
+    // lethal damage on the battlefield left by first strike, repeating after departures.
+    let waiting_for = preview.waiting_for.clone();
+    sba::check_state_based_actions(&mut preview, &mut Vec::new());
+    // CR 616.1: a new choice can leave destruction unresolved on the copy.
+    if preview.waiting_for != waiting_for
+        && !matches!(
+            preview.waiting_for,
+            WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
+        )
+    {
+        return None;
+    }
+    // CR 613.1: settle continuous effects on the board the step left (an Aura destroyed by
+    // umbra armor stops pumping its creature) before the regular step reads it.
+    crate::game::layers::flush_layers(&mut preview);
+    Some((preview, before))
+}
+
+/// The player a forecast attacker damages: its declared defending player, else the blockers'
+/// controller, else the next player for an attack not yet declared.
+fn forecast_defending_player(
+    state: &GameState,
+    attacker: &GameObject,
+    blockers: &[ObjectId],
+) -> PlayerId {
+    crate::game::combat::defending_player_for_attacker(state, attacker.id)
+        .or_else(|| {
+            blockers
+                .iter()
+                .find_map(|id| state.objects.get(id).map(|blocker| blocker.controller))
+        })
+        .unwrap_or_else(|| crate::game::players::next_player(state, attacker.controller))
+}
+
+/// Records on the preview copy the attack and blocks the forecast was asked about, where the
+/// live combat doesn't already hold them, so first-step effects that end a combat role
+/// (regeneration, CR 701.19a) act on hypothetical blocks as they would on declared ones.
+/// Records roles only: no declaration triggers, costs or requirements run.
+fn seed_forecast_combat(state: &mut GameState, attacker: &GameObject, blockers: &[ObjectId]) {
+    let defending_player = forecast_defending_player(state, attacker, blockers);
+    let combat = state.combat.get_or_insert_with(CombatState::default);
+    // CR 508.1k: give a hypothetical attacker an attacking role. Keep any
+    // declared attack's destination.
+    if !combat
+        .attackers
+        .iter()
+        .any(|info| info.object_id == attacker.id)
+    {
+        combat.attackers.push(AttackerInfo::attacking_player(
+            attacker.id,
+            defending_player,
+        ));
+        state.layers_dirty.mark_full();
+    }
+    for &blocker in blockers {
+        if combat
+            .blocker_to_attacker
+            .get(&blocker)
+            .is_some_and(|attackers| attackers.contains(&attacker.id))
+        {
+            continue;
+        }
+        record_block_edge(combat, blocker, attacker.id);
+        state.layers_dirty.mark_full();
+    }
+    // CR 509.1h: a creature with a blocker is blocked.
+    if let Some(info) = combat
+        .attackers
+        .iter_mut()
+        .find(|info| info.object_id == attacker.id)
+    {
+        info.blocked |= !blockers.is_empty();
+    }
+}
+
+/// Fills `hits` with the first-step damage as assigned, for a step whose damage is fixed (no
+/// prevention or replacement applies) or whose preview paused for a player's choice; a source
+/// with deathtouch marks nonzero damage as deathtouch damage (CR 702.2b).
+fn forecast_assigned_hits(
+    state: &GameState,
+    assignments: &[(ObjectId, DamageAssignment)],
+    hits: &mut [PredictedHit],
+) {
+    for (source, assignment) in assignments {
+        let DamageTarget::Object(target) = assignment.target else {
+            continue;
+        };
+        if let Some(hit) = hits.iter_mut().find(|hit| hit.id == target) {
+            hit.amount = hit.amount.saturating_add(assignment.amount);
+            hit.deathtouch |= assignment.amount > 0
+                && state
+                    .objects
+                    .get(source)
+                    .is_some_and(|object| object.has_keyword(&Keyword::Deathtouch));
+        }
+    }
+}
+
+/// The blockers with the lethal damage owed to each, cheapest kill first. The sort is stable,
+/// so equally cheap blockers keep their block order.
+fn owed_slots(slots: impl Iterator<Item = (ObjectId, u32)>) -> Vec<(ObjectId, u32)> {
+    let mut slots: Vec<(ObjectId, u32)> = slots.collect();
+    slots.sort_by_key(|&(_, owed)| owed);
+    slots
+}
+
+/// CR 704.3 + CR 704.5g + CR 704.5h + CR 611.3b: the creatures the state-based actions after a
+/// forecast combat damage step destroy, given the damage that step deals (`hits`).
+///
+/// The check repeats while it destroys something (CR 704.3). A destroyed creature's static
+/// stops applying once it leaves the battlefield (CR 611.3b), so when it was the one making
+/// lethal damage be measured by power (Zilortha, Strength Incarnate), damage that was not
+/// lethal against a survivor's power can be lethal against its toughness at the next check.
+/// `lethal_damage::is_destroyed_by_lethal_damage` answers each check, on the battlefield the
+/// earlier checks left.
+fn first_step_departures(state: &GameState, hits: &[PredictedHit]) -> Vec<ObjectId> {
+    let mut departed: Vec<ObjectId> = Vec::new();
+    loop {
+        let destroyed: Vec<ObjectId> = hits
+            .iter()
+            .filter(|hit| !departed.contains(&hit.id))
+            .filter(|hit| {
+                state.objects.get(&hit.id).is_some_and(|obj| {
+                    lethal_damage::is_destroyed_by_lethal_damage(
+                        state,
+                        obj,
+                        obj.damage_marked.saturating_add(hit.amount),
+                        obj.dealt_deathtouch_damage || hit.deathtouch,
+                        &departed,
+                    )
+                })
+            })
+            .map(|hit| hit.id)
+            .collect();
+        if destroyed.is_empty() {
+            return departed;
+        }
+        departed.extend(destroyed);
+    }
+}
+
+/// One combat damage step's worth of assignment from a single attacker against `slots`, the
+/// blockers in the order `owed_slots` gives. See `combat_damage_to_defender` for the governing
+/// rules.
+fn assign_step_to_defender(
+    slots: &[(ObjectId, u32)],
+    power: u32,
+    has_trample: bool,
+) -> StepAssignment {
+    if slots.is_empty() {
+        // CR 702.19d: blocked, but nothing is blocking it now — a trampler assigns
+        // everything to the player. CR 510.1c: without trample it assigns nothing.
+        return StepAssignment {
+            to_player: if has_trample { power } else { 0 },
+            to_blockers: Vec::new(),
+        };
+    }
+
+    let total_lethal: u32 = slots.iter().map(|&(_, owed)| owed).sum();
 
     // CR 702.19b: excess reaches the player only once EVERY blocker has been
     // assigned lethal damage.
     if has_trample && power > total_lethal {
-        remaining.clear();
-        return power - total_lethal;
+        return StepAssignment {
+            to_player: power - total_lethal,
+            to_blockers: slots.to_vec(),
+        };
     }
 
     // Otherwise every point is spent on blockers. Kill the cheapest first — the
@@ -1625,43 +2229,50 @@ fn assign_step_to_defender(remaining: &mut Vec<i32>, power: i32, has_trample: bo
     // the leftover budget instead understated the defender's exposure: a 5-power
     // double-strike trampler against one 0/6 was read as 0 through, when the first
     // step marks 5 and the regular step then needs only 1 more before trampling 4.
-    // `remaining` is sorted ascending, so the front is always the cheapest kill.
     let mut budget = power;
-    while let Some(&lethal) = remaining.first() {
-        if budget >= lethal {
-            budget -= lethal;
-            remaining.remove(0);
-        } else {
-            remaining[0] -= budget;
-            break;
-        }
+    let to_blockers = slots
+        .iter()
+        .map(|&(id, owed)| {
+            let amount = budget.min(owed);
+            budget -= amount;
+            (id, amount)
+        })
+        .collect();
+    StepAssignment {
+        to_player: 0,
+        to_blockers,
     }
-    0
 }
 
-/// How much damage is needed to kill this creature.
-/// CR 702.2c: Deathtouch — any amount of damage from a deathtouch source is lethal.
+/// CR 120.4a + CR 120.10: the excess-damage reading — how much of a hit on this creature is
+/// not excess.
 ///
-/// Public because this is the single authority for "how much does this blocker
-/// absorb": CR 702.19b requires a trampling attacker to assign this much to each
-/// blocker before any excess is assigned to the player, so a consumer estimating
-/// trample absorption must read the same number this resolver assigns rather than
-/// re-deriving it from raw toughness and silently ignoring damage already marked.
+/// Without deathtouch it is lethal damage less damage already marked, with no other combat
+/// damage in flight. With a deathtouch source it is 1: "Any amount of damage greater than 1
+/// is excess damage if the source dealing that damage to a creature has deathtouch" (CR
+/// 120.4a). Public so consumers estimating how much a creature absorbs read the same number
+/// the resolver uses rather than re-deriving it from raw toughness.
+///
+/// This is not the combat assignment minimum. Assignment reads
+/// `lethal_damage::combat_lethal_damage_remaining` (CR 702.19b), which also counts damage
+/// other attackers committed earlier in the step and never asks a deathtouch attacker for
+/// more than the ordinary remainder. It owes 0 to a blocker that already has lethal damage,
+/// or whose lethal damage is 0, where this reading is 1.
 pub fn lethal_damage_needed(
     state: &GameState,
     object_id: ObjectId,
     source_has_deathtouch: bool,
 ) -> u32 {
     if source_has_deathtouch {
-        // CR 702.2c + CR 702.19b: With deathtouch, 1 damage is lethal.
+        // CR 120.4a: from a deathtouch source, any amount greater than 1 is excess.
         return 1;
     }
     state
         .objects
         .get(&object_id)
         .map(|obj| {
-            let toughness = obj.toughness.unwrap_or(0).max(0) as u32;
-            toughness.saturating_sub(obj.damage_marked)
+            // CR 120.6: lethal damage counts the damage already marked.
+            lethal_damage::lethal_damage_threshold(state, obj).saturating_sub(obj.damage_marked)
         })
         .unwrap_or(1)
 }
@@ -1704,7 +2315,7 @@ pub(crate) enum CombatDamageBatch {
     Complete(Vec<GameEvent>),
     /// CR 616.1 + CR 616.1g: the batch parked on a choice made while one of its
     /// events is applied, and the unfinished rest is in
-    /// `state.pending_combat_lifelink`. Three park points:
+    /// `state.pending_combat_lifelink`. Five park points:
     /// * Phase B (`PendingCombatLifelink::replacement` is `Some`): a damage
     ///   event met two or more co-applicable replacements and the affected
     ///   player orders them (`state.pending_replacement` holds that event), or
@@ -1712,10 +2323,18 @@ pub(crate) enum CombatDamageBatch {
     ///   No damage has been dealt yet.
     /// * Phase C (`phase_c_remnant` is `Some`): a leg's life loss paused (Horde
     ///   damage->mill redirect, loss replacements); the unapplied legs ride the
-    ///   remnant and `state.pending_replacement` holds the paused event.
+    ///   remnant. A gain staged ahead of a leg can also park there, on its own
+    ///   ordering choice or its substitute's prompt.
     /// * The lifelink tail: a lifelink life-gain event met two or more
     ///   co-applicable replacement effects. All damage is already dealt;
     ///   `state.pending_replacement` holds the paused source's own `LifeGain`.
+    /// * The lifelink tail's substitute (CR 614.6 + CR 616.2): a gain's
+    ///   substitute asked a choice of its own (Nefarious Lich's draws meeting
+    ///   Abundance). The gain itself is settled; `remaining` holds the later
+    ///   gains.
+    /// * Phase D (CR 615.5 + CR 608.2d): a prevention rider asked its player a
+    ///   choice (Channel Harm's "may"). `prevention_tally` holds the shields not
+    ///   yet published.
     Paused {
         events: Vec<GameEvent>,
         /// Boxed: `WaitingFor` is ~1720 bytes against `Complete`'s 24, so an
@@ -1762,12 +2381,12 @@ enum PhaseCRunOutcome {
     /// CR 616.1 + CR 101.4: a lifelink gain staged ahead of `legs[index]`
     /// (an earlier-APNAP player's choice-capable gain before a leg whose
     /// result can open a later player's choice, or a gain of the player the
-    /// leg damages) paused on its own replacement choice before that leg
-    /// applied. The tail to park is `legs[index..]`; the paused gain is owned
-    /// by `state.pending_replacement` and its legs' markers are already
-    /// cleared.
+    /// leg damages) paused on its own replacement choice or its substitute
+    /// before that leg applied. The tail to park is `legs[index..]`; the
+    /// paused gain's legs already have their lifelink markers cleared.
     PausedOnGain {
         index: usize,
+        pause: GainStagePause,
     },
     /// CR 120.3d + CR 616.1: leg `index` paused on its `-1/-1` counter
     /// replacements (a combat-flagged counter stash is parked). Same folding
@@ -1783,8 +2402,7 @@ enum PhaseCRunOutcome {
 /// CR 510.2 + CR 616.1: outcome of completing a parked Phase C tail.
 enum RemnantOutcome {
     Complete,
-    /// `on_gain`: the re-pause is a lifelink gain being staged (the record's
-    /// `awaiting_staged_gain`), not a leg's result.
+    /// `on_gain` marks a pause awaiting the staged gain's own replacement answer.
     Repaused {
         remnant: PendingCombatPhaseCRemnant,
         on_gain: bool,
@@ -1944,13 +2562,22 @@ fn reorder_ranked_slots<T: Clone>(items: &mut [T], rank: impl Fn(&T) -> Option<u
 }
 
 /// CR 616.1 + CR 101.4 + CR 702.15b: the APNAP rank of a lifelink gain's
-/// choice owner (the gaining player, the source's controller) when the gain's
-/// own replacement pipeline can open a choice; `None` for a gain that cannot
-/// (it keeps its slot and is staged ahead of a leg only when its owner is the
-/// player that leg damages).
+/// first prompt. A gain's replacement order belongs to the gaining player.
+/// A substitute can address another player when the gain itself has no prompt.
+/// A gain with no rank keeps its slot and is staged ahead of a leg only when
+/// its owner is the player that leg damages.
 fn lifelink_gain_rank(state: &GameState, controller: PlayerId, amount: u32) -> Option<usize> {
-    crate::game::effects::life::life_gain_may_prompt(state, controller, amount)
-        .then(|| crate::game::topology::apnap_team_rank(state, controller))
+    use crate::game::effects::life;
+    use crate::game::topology::apnap_team_rank;
+    let event = life::proposed_life_gain(state, controller, amount)?;
+    let mut first = None;
+    replacement::visit_proposed_event_choosers(state, &event, &mut |player| {
+        first = Some(apnap_team_rank(state, player));
+    });
+    first.or_else(|| {
+        life::life_gain_may_prompt(state, controller, amount)
+            .then(|| apnap_team_rank(state, controller))
+    })
 }
 
 /// CR 120.4b: what a not-yet-applied leg will deal: its survivor's amount, or
@@ -2001,16 +2628,20 @@ enum GainStageOutcome {
     /// Nothing is owed: the gain never reached the pipeline, was fully
     /// replaced, or settled inline with its substitute (Lich class).
     Done,
-    /// The gain parked a CR 616.1 choice (owned by `state.pending_replacement`).
-    Paused,
+    Paused(GainStagePause),
+    GameOver,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GainStagePause {
+    ReplacementChoice,
+    SubstitutionContinuation,
 }
 
 /// CR 616.1 + CR 702.15e + CR 101.4: stage one source's combat lifelink gain
-/// as its own life-gain event: run its replacement pipeline WITHOUT writing
-/// the board (`effects::life::stage_life_gain`), so every gain of the batch is
-/// checked against the same pre-settlement board. The single staging
-/// authority shared by `drain_combat_lifelink` and the staging ahead of a
-/// leg in Phase C.
+/// as its own life-gain event. Hold final gains for simultaneous settlement
+/// while any cross-event substitute runs through its own continuation. Both
+/// `drain_combat_lifelink` and the staging ahead of a Phase C leg use this authority.
 ///
 /// On a CR 616.1 choice NOTHING was staged; `state.pending_replacement` is
 /// left populated ON PURPOSE: it is the resume's authority (the answered final
@@ -2021,13 +2652,18 @@ fn stage_combat_lifelink_gain(
     gain: PendingLifelinkGain,
     batch_events: &mut Vec<GameEvent>,
 ) -> GainStageOutcome {
-    let waiting_before = state.waiting_for.clone();
-    match crate::game::effects::life::stage_life_gain(
+    let outcome = crate::game::effects::life::stage_life_gain(
         state,
         gain.controller,
         gain.amount,
         batch_events,
-    ) {
+    );
+    // CR 104.1: a substitute can end the game (Laboratory Maniac's win).
+    if state.game_end.is_some() {
+        crate::game::elimination::ensure_game_over_if_terminal(state, batch_events);
+        return GainStageOutcome::GameOver;
+    }
+    match outcome {
         Ok(StagedLifeGain::Final(ProposedEvent::LifeGain {
             player_id, amount, ..
         })) => GainStageOutcome::Staged(PendingLifelinkGain {
@@ -2042,32 +2678,19 @@ fn stage_combat_lifelink_gain(
             GainStageOutcome::Done
         }
         Ok(StagedLifeGain::Settled(_)) => GainStageOutcome::Done,
-        Err(ReplacementDeferred::ReplacementChoice) => GainStageOutcome::Paused,
+        Err(ReplacementDeferred::ReplacementChoice) => {
+            GainStageOutcome::Paused(GainStagePause::ReplacementChoice)
+        }
         // CR 614.6 + CR 614.1: a cross-event substitute (Lich class) already
         // ran its replacing action. On Execute the gain was APPLIED before
         // `drain_substitution_continuation` ran, and on Prevented nothing was
-        // owed — so NO lifelink gain is outstanding on this arm and nothing
-        // needs parking.
+        // owed — so this source's gain is not re-queued.
         //
-        // strict-failure: restoring `waiting_for` here preserves the existing
-        // behavior byte-for-byte, and that behavior orphans the substitute's
-        // own interactive prompt. That is a PRE-EXISTING defect on the
-        // substitution-continuation seam, which this change neither owns nor
-        // worsens. The codebase distinguishes the two deferral kinds elsewhere
-        // for exactly this reason (`turns.rs` calls
-        // `mark_phase_transition_awaiting_post_replacement` only for the
-        // substitution variant), so the divergence here is deliberate, not an
-        // oversight.
-        //
-        // CR 104.1: a substitute that ended the game (Laboratory Maniac's win)
-        // left `GameOver`; the earlier wait is never restored over it.
+        // CR 614.6 + CR 616.2: the substitute's own action stopped at a choice
+        // (Nefarious Lich's draws meeting Abundance's "may"). Park the rest of
+        // the batch beneath that prompt and let the player's answer resume it.
         Err(ReplacementDeferred::SubstitutionContinuation { .. }) => {
-            if state.game_end.is_some() {
-                crate::game::elimination::ensure_game_over_if_terminal(state, batch_events);
-            } else {
-                state.waiting_for = waiting_before;
-            }
-            GainStageOutcome::Done
+            GainStageOutcome::Paused(GainStagePause::SubstitutionContinuation)
         }
     }
 }
@@ -2079,20 +2702,20 @@ fn stage_combat_lifelink_gain(
 ///   only when the leg's result can open a choice (`combat_leg_may_prompt`):
 ///   the damage and its lifelink gain are simultaneous results of the batch
 ///   (CR 510.2, CR 120.3f), so their choices are made in APNAP order;
-/// - EVERY gain (choice-capable or not) owned by an equal-rank player (the
-///   damaged player, or one shared-turn team, CR 805.6). CR 101.4c leaves the
-///   order of one player's own simultaneous choices to that player; staging
-///   the gain before the leg writes the board makes both read the pre-batch
-///   board, so the fixed order cannot change either result.
+/// - Gains of an equal-rank player (the damaged player or a shared-turn
+///   teammate, CR 805.6) whose chooser has the same or an earlier rank, plus
+///   choice-free gains. Staging the gain before the leg writes the board
+///   makes both read the pre-batch board. A
+///   gain's substitute runs during staging (CR 614.6), so it can end the game
+///   before the leg is applied (CR 104.1).
 ///
-/// Staging writes nothing: the staged gains settle with the batch's other
-/// gains (`drain_combat_lifelink`). Totals per source are the gains folded so
-/// far plus the planned amounts of `legs[index..]` (the per-source sum the
-/// fold produces, in first-seen order: aggregation is unchanged). A staged
+/// Final gains settle with the batch's other gains (`drain_combat_lifelink`).
+/// Totals per source are the gains folded so far plus the planned amounts of
+/// `legs[index..]` (the per-source sum the fold produces, in first-seen
+/// order: aggregation is unchanged). A staged
 /// source is removed from the sums and its remaining legs'
 /// `lifelink_controller` markers are cleared, so the later fold cannot gain it
-/// again. Returns true when a gain paused (owned by
-/// `state.pending_replacement`, never re-queued).
+/// again. A pause carries the kind of answer the batch is awaiting.
 fn stage_earlier_apnap_lifelink(
     state: &mut GameState,
     legs: &mut [PendingCombatLeg],
@@ -2100,7 +2723,7 @@ fn stage_earlier_apnap_lifelink(
     rank: usize,
     accums: &mut PhaseCAccumulators,
     events: &mut Vec<GameEvent>,
-) -> bool {
+) -> Option<GainStagePause> {
     let leg_may_prompt = combat_leg_may_prompt(state, &legs[index]);
     let mut totals = accums.lifelink_by_source.clone();
     for leg in &legs[index..] {
@@ -2123,10 +2746,11 @@ fn stage_earlier_apnap_lifelink(
         .into_iter()
         .filter_map(|(source_id, controller, amount)| {
             let gain_rank = crate::game::topology::apnap_team_rank(state, controller);
-            let earlier = leg_may_prompt
-                && lifelink_gain_rank(state, controller, amount)
-                    .is_some_and(|capable_rank| capable_rank < rank);
-            (earlier || gain_rank == rank).then_some((gain_rank, source_id, controller, amount))
+            let chooser_rank = lifelink_gain_rank(state, controller, amount);
+            let earlier = leg_may_prompt && chooser_rank.is_some_and(|chooser| chooser < rank);
+            let scheduled_rank = chooser_rank.unwrap_or(gain_rank);
+            let same_team = gain_rank == rank && scheduled_rank <= rank;
+            (earlier || same_team).then_some((scheduled_rank, source_id, controller, amount))
         })
         .collect();
     due.sort_by_key(|&(gain_rank, ..)| gain_rank);
@@ -2143,10 +2767,11 @@ fn stage_earlier_apnap_lifelink(
         {
             GainStageOutcome::Staged(staged) => accums.staged_gains.push(staged),
             GainStageOutcome::Done => {}
-            GainStageOutcome::Paused => return true,
+            GainStageOutcome::Paused(pause) => return Some(pause),
+            GainStageOutcome::GameOver => break,
         }
     }
-    false
+    None
 }
 
 /// CR 616.1 + CR 101.4 + CR 702.15e: the tail gain queue, one gain per
@@ -2190,8 +2815,13 @@ fn run_phase_c_legs(
         // player; an earlier-APNAP player's choice-capable gain (when the leg
         // can prompt) and that player's own gains are staged first.
         if let Some(rank) = survivor_player_rank(state, &legs[index]) {
-            if stage_earlier_apnap_lifelink(state, legs, index, rank, accums, events) {
-                return PhaseCRunOutcome::PausedOnGain { index };
+            if let Some(pause) =
+                stage_earlier_apnap_lifelink(state, legs, index, rank, accums, events)
+            {
+                return PhaseCRunOutcome::PausedOnGain { index, pause };
+            }
+            if state.game_end.is_some() {
+                break;
             }
         }
         let leg = &legs[index];
@@ -2389,7 +3019,7 @@ fn complete_combat_phase_c_remnant(
             record.staged_gains.append(&mut accums.staged_gains);
             RemnantOutcome::Complete
         }
-        PhaseCRunOutcome::PausedOnGain { index } => RemnantOutcome::Repaused {
+        PhaseCRunOutcome::PausedOnGain { index, pause } => RemnantOutcome::Repaused {
             remnant: PendingCombatPhaseCRemnant {
                 remaining: remaining[index..].to_vec(),
                 lifelink_by_source: accums.lifelink_by_source,
@@ -2397,7 +3027,7 @@ fn complete_combat_phase_c_remnant(
                 source_incarnations: accums.source_incarnations,
                 staged_gains: accums.staged_gains,
             },
-            on_gain: true,
+            on_gain: pause == GainStagePause::ReplacementChoice,
         },
         PhaseCRunOutcome::PausedOnReplacement { index } => RemnantOutcome::Repaused {
             remnant: PendingCombatPhaseCRemnant {
@@ -2733,7 +3363,9 @@ fn apply_combat_damage_survivors(
         // exactly like the loss pause (the paused leg's post-counter work
         // rides its combat-flagged counter stash).
         PhaseCRunOutcome::PausedOnCounter { index } => Some((index + 1, false)),
-        PhaseCRunOutcome::PausedOnGain { index } => Some((index, true)),
+        PhaseCRunOutcome::PausedOnGain { index, pause } => {
+            Some((index, pause == GainStagePause::ReplacementChoice))
+        }
     };
     if let Some((park_from, on_gain)) = park {
         // CR 510.2 + CR 616.1: a leg's result (or a gain staged ahead of a
@@ -2793,6 +3425,11 @@ fn apply_combat_damage_survivors(
 /// NOTHING. The rest of the batch is parked here so the resume can finish it;
 /// dropping it loses 100% of that source's gain, not a portion, plus every
 /// later source in the batch.
+///
+/// Two more choices park the batch here, and the same resume finishes it:
+/// a gain's substitute that asks a choice of its own (CR 614.6 + CR 616.2),
+/// and a Phase D rider that asks one (CR 615.5 + CR 608.2d). Neither is
+/// answered in the player's place.
 fn drain_combat_lifelink(
     state: &mut GameState,
     mut record: PendingCombatLifelink,
@@ -2804,23 +3441,26 @@ fn drain_combat_lifelink(
         let Some(gain) = record.remaining.pop_front() else {
             break;
         };
-        // CR 616.1: the gaining player must choose which replacement applies
-        // first. Nothing was staged for this source, and it is deliberately
-        // NOT re-queued into `remaining` (see `stage_combat_lifelink_gain`).
-        let outcome = stage_combat_lifelink_gain(state, gain, &mut record.batch_events);
-        if let GainStageOutcome::Staged(staged) = outcome {
-            record.staged_gains.push(staged);
+        match stage_combat_lifelink_gain(state, gain, &mut record.batch_events) {
+            GainStageOutcome::Staged(staged) => record.staged_gains.push(staged),
+            GainStageOutcome::Done => {}
+            GainStageOutcome::Paused(pause) => {
+                record.awaiting_staged_gain = pause == GainStagePause::ReplacementChoice;
+                let waiting_for = state.waiting_for.clone();
+                let events = record.batch_events.clone();
+                state.pending_combat_lifelink = Some(Box::new(record));
+                return CombatDamageBatch::Paused {
+                    events,
+                    waiting_for: Box::new(waiting_for),
+                };
+            }
+            GainStageOutcome::GameOver => break,
         }
-        if outcome == GainStageOutcome::Paused {
-            record.awaiting_staged_gain = true;
-            let waiting_for = state.waiting_for.clone();
-            let events = record.batch_events.clone();
-            state.pending_combat_lifelink = Some(Box::new(record));
-            return CombatDamageBatch::Paused {
-                events,
-                waiting_for: Box::new(waiting_for),
-            };
-        }
+    }
+    if state.game_end.is_some() {
+        // Damage already dealt still belongs in the event log.
+        record.batch_events.append(&mut record.damage_to_players);
+        return CombatDamageBatch::Complete(record.batch_events);
     }
     // CR 101.4 + CR 702.15b: every choice of the batch is made; the staged
     // gains now happen simultaneously, settled in stage order before the
@@ -2848,21 +3488,68 @@ fn drain_combat_lifelink(
     }
     // CR 510.2: the per-player aggregate, emitted after the gains exactly as it
     // is on a batch that never paused. It records damage already dealt in Phase
-    // C, before any gain could end the game, so it is kept on a terminal batch.
+    // C. The terminal path above also retains damage already dealt.
     record.batch_events.append(&mut record.damage_to_players);
     // CR 615.5 + CR 615.13: Phase D fires once per shield, and only here — after
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
-    // Fire-all: combat keeps its standing shape (see the `stop_on_fresh_choice`
-    // contract on `fire_batch_prevention_riders`).
     // CR 104.1: a gain that ended the game ends the batch; no rider runs after it.
     if state.game_end.is_none() {
-        let _ = fire_batch_prevention_riders(
-            state,
-            &record.prevention_tally,
-            &mut record.batch_events,
-            false,
-        );
+        let prevention_tally = std::mem::take(&mut record.prevention_tally);
+        // CR 101.4 + CR 616.1: rank whole shields by who can be asked,
+        // preserving registry and recipient order for ties.
+        let rank = apnap_ranker(state);
+        let mut groups: Vec<_> = prevention_tally.chunk_by(|a, b| a.key == b.key).collect();
+        groups.sort_by_cached_key(|group| {
+            if matches!(group[0].key, AppliedReplacementKey::Protection { .. }) {
+                return usize::MAX;
+            }
+            let rid = group[0].key.as_replacement_id();
+            let Some(def) = aggregate_prevention_definition(state, rid) else {
+                return usize::MAX;
+            };
+            let Some(rider) = state.replacement_rider(def) else {
+                return usize::MAX;
+            };
+            // A rider whose chooser the scan cannot name keeps its own
+            // controller's rank, as before the scan existed.
+            match crate::game::resolution_prompt::prevention_rider_choice_rank(
+                state,
+                rider,
+                group.iter().map(|entry| entry.amount).sum(),
+                def.damage_source_filter
+                    .as_ref()
+                    .and_then(shield_specific_source),
+                &rank,
+            ) {
+                usize::MAX => rank(rider.controller),
+                chooser_rank => chooser_rank,
+            }
+        });
+        let prevention_tally: Vec<_> = groups.into_iter().flatten().cloned().collect();
+        // CR 608.2c + CR 608.2d: a rider that asks its player a choice (Channel
+        // Harm's "you may have Channel Harm deal that much damage") stops Phase D:
+        // the later shields wait beneath the prompt as the unpublished remainder,
+        // and the answer's resume fires them (`resume_combat_damage_replacements`,
+        // whose `replacement` is `None` here, re-enters this drain with nothing
+        // else owed).
+        if let BatchRiderDrainOutcome::Paused { published_entries } =
+            fire_batch_prevention_riders(state, &prevention_tally, &mut record.batch_events)
+        {
+            if state.game_end.is_none() {
+                record.prevention_tally = prevention_tally
+                    .into_iter()
+                    .skip(published_entries)
+                    .collect();
+                let waiting_for = state.waiting_for.clone();
+                let events = record.batch_events.clone();
+                state.pending_combat_lifelink = Some(Box::new(record));
+                return CombatDamageBatch::Paused {
+                    events,
+                    waiting_for: Box::new(waiting_for),
+                };
+            }
+        }
     }
     CombatDamageBatch::Complete(record.batch_events)
 }
@@ -2925,6 +3612,22 @@ pub(crate) enum BatchRiderDrainOutcome {
     Paused { published_entries: usize },
 }
 
+fn aggregate_prevention_definition(
+    state: &GameState,
+    rid: ReplacementId,
+) -> Option<&crate::types::ability::ReplacementDefinition> {
+    // Floating shields have no host permanent and use the sentinel ObjectId(0).
+    if rid.source == ObjectId(0) {
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
+    }
+}
+
 /// CR 615.5 + CR 615.13: After a simultaneous damage batch (combat or
 /// noncombat), fire each `Prevention::All` shield's `runtime_execute` rider
 /// exactly once against the aggregate prevented amount.
@@ -2944,16 +3647,14 @@ pub(crate) enum BatchRiderDrainOutcome {
 /// "for each 1 damage prevented this way") resolves against the whole batch
 /// total.
 ///
-/// `stop_on_fresh_choice` (Matt C2, the noncombat batch's Phase D): stop after
-/// the first rider that leaves its prompt standing and report it, so later
-/// groups do not execute ahead of the pending prompt; the batch parks the
-/// unpublished remainder. Combat passes `false` and settles every rider pause
-/// in the batch (`replacement::drain_combat_damage_rider`).
+/// CR 615.5 + CR 608.2c (Matt C2): the drain stops after the first rider that
+/// leaves its prompt standing and reports it, so later groups do not execute
+/// ahead of the pending prompt; both callers (the combat batch and the
+/// noncombat two-phase batch) park the unpublished remainder beneath it.
 pub(crate) fn fire_batch_prevention_riders(
     state: &mut GameState,
     prevention_tally: &[PreventedDamageEntry],
     events: &mut Vec<GameEvent>,
-    stop_on_fresh_choice: bool,
 ) -> BatchRiderDrainOutcome {
     // CR 615.13 + CR 120.3: the tally arrives sorted with each shield's entries
     // contiguous, so one chunk IS one prevention application over the CR 510.2
@@ -2967,8 +3668,7 @@ pub(crate) fn fire_batch_prevention_riders(
     // must read for its "that many" to be right.
     let mut published_entries = 0usize;
     for group in prevention_tally.chunk_by(|a, b| a.key == b.key) {
-        // CR 104.1: a rider that ended the game (New Way Forward's damage meeting an empty
-        // Nefarious Lich graveyard) ends the batch; no later shield's rider runs.
+        // CR 104.1: a rider that ended the game ends the batch.
         if state.game_end.is_some() {
             break;
         }
@@ -2996,20 +3696,7 @@ pub(crate) fn fire_batch_prevention_riders(
             continue;
         }
 
-        // Pending (resolution-created) shields are stored in
-        // `pending_damage_replacements` under the sentinel ObjectId(0) because
-        // they have no host permanent; object-hosted shields are found in the
-        // host's `replacement_definitions`.
-        let repl_def = if rid.source == ObjectId(0) {
-            rid.index_as_usize()
-                .and_then(|i| state.pending_damage_replacements.get(i))
-        } else {
-            state
-                .objects
-                .get(&rid.source)
-                .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
-        };
-        let Some(repl_def) = repl_def else {
+        let Some(repl_def) = aggregate_prevention_definition(state, rid) else {
             continue;
         };
 
@@ -3028,8 +3715,8 @@ pub(crate) fn fire_batch_prevention_riders(
                         | crate::types::ability::PreventionAmount::AllBut(_)
                 }
             );
-        // CR 615.5 + CR 609.7: A rider referencing the prevented damage's source
-        // ("that source's controller" — New Way Forward) resolves
+        // CR 609.7: A rider referencing the prevented damage's source
+        // ("that source's controller" — Deflecting Palm) resolves
         // `PostReplacementSourceController` against the drain's event source. The
         // per-event `execute` path receives it from the Prevented-arm stash; the
         // aggregate path derives it here from the shield's resolved single-object
@@ -3069,25 +3756,30 @@ pub(crate) fn fire_batch_prevention_riders(
         state.install_ready_continuation(
             crate::types::ability::PostReplacementContinuation::Resolved(Box::new(runtime)),
         );
-        if let Some(source) = event_source {
-            if let Some(drain) = state
-                .active_post_replacement_drains_mut()
-                .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
-            {
+        // CR 615.5 + CR 614.6: the rider's "that much" is the amount this application
+        // prevented, latched on its drain as a per-event prevention latches it
+        // (`replacement::replaced_event_amount`), so a rider that asks a choice first
+        // (Channel Harm's "may") still reads it when the answer comes in a later action,
+        // after `last_effect_count` has been cleared.
+        if let Some(drain) = state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+        {
+            drain.event_amount = u32::try_from(total_prevented).ok();
+            if let Some(source) = event_source {
                 drain.event_source = Some(source);
             }
         }
-        // CR 510.2: in fire-all mode (combat Phase D) every pause the rider
-        // raises is settled, as the per-portion drain does.
-        if !stop_on_fresh_choice {
-            replacement::drain_combat_damage_rider(state, events);
-            continue;
-        }
-        replacement::drain_damage_rider(state, events);
-        // CR 608.2c (Matt C2): in stop mode a rider that left its prompt standing
-        // ends the drain here — later groups must not execute ahead of it.
-        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            return BatchRiderDrainOutcome::Paused { published_entries };
+        // CR 608.2c (Matt C2): a rider that left its prompt standing ends the
+        // drain here — later groups must not execute ahead of it. The pause is
+        // read from the drain's own result, never from `state.waiting_for`: at
+        // combat Phase D that still holds the caller's earlier wait (an
+        // `AssignCombatDamage` answer, a blocker declaration), not a rider's.
+        match replacement::drain_damage_rider(state, events) {
+            replacement::DamageRiderDrain::Completed => {}
+            replacement::DamageRiderDrain::Paused { .. } => {
+                return BatchRiderDrainOutcome::Paused { published_entries };
+            }
         }
     }
     BatchRiderDrainOutcome::Completed
@@ -3476,14 +4168,10 @@ mod tests {
         accums.lifelink_by_source.push((ObjectId(10), P0, 1));
         let mut events = Vec::new();
         let rank2 = crate::game::topology::apnap_team_rank(state, PlayerId(2));
-        assert!(stage_earlier_apnap_lifelink(
-            state,
-            &mut legs,
-            0,
-            rank2,
-            &mut accums,
-            &mut events
-        ));
+        assert!(
+            stage_earlier_apnap_lifelink(state, &mut legs, 0, rank2, &mut accums, &mut events)
+                .is_some()
+        );
         assert_eq!(
             paused_gain(state),
             Some((P0, 3)),
@@ -3517,14 +4205,10 @@ mod tests {
         let mut accums = empty_accums();
         let mut events = Vec::new();
         let rank2 = crate::game::topology::apnap_team_rank(state, PlayerId(2));
-        assert!(!stage_earlier_apnap_lifelink(
-            state,
-            &mut legs,
-            0,
-            rank2,
-            &mut accums,
-            &mut events
-        ));
+        assert!(
+            stage_earlier_apnap_lifelink(state, &mut legs, 0, rank2, &mut accums, &mut events)
+                .is_none()
+        );
         assert_eq!(paused_gain(state), None, "(b)");
         assert_eq!(legs[1].lifelink_controller, Some(P0));
         assert_eq!(legs[2].lifelink_controller, Some(P0));
@@ -3557,7 +4241,7 @@ mod tests {
             let rank2 = crate::game::topology::apnap_team_rank(state, PlayerId(2));
             let paused =
                 stage_earlier_apnap_lifelink(state, &mut legs, 0, rank2, &mut accums, &mut events);
-            assert_eq!(paused, !eliminated, "(d) eliminated={eliminated}");
+            assert_eq!(paused.is_some(), !eliminated, "(d) eliminated={eliminated}");
             assert_eq!(
                 legs[1].lifelink_controller,
                 (eliminated).then_some(P1),
@@ -3616,7 +4300,7 @@ mod tests {
                 &mut accums,
                 &mut events,
             );
-            assert_eq!(paused, expect_settled, "(c) leg at P{leg_player}");
+            assert_eq!(paused.is_some(), expect_settled, "(c) leg at P{leg_player}");
             assert_eq!(
                 paused_gain(&state),
                 expect_settled.then_some((PlayerId(mate), 2)),
@@ -3659,14 +4343,10 @@ mod tests {
         let mut accums = empty_accums();
         let mut events = Vec::new();
         let rank1 = crate::game::topology::apnap_team_rank(state, P1);
-        assert!(!stage_earlier_apnap_lifelink(
-            state,
-            &mut legs,
-            0,
-            rank1,
-            &mut accums,
-            &mut events
-        ));
+        assert!(
+            stage_earlier_apnap_lifelink(state, &mut legs, 0, rank1, &mut accums, &mut events)
+                .is_none()
+        );
         assert_eq!(
             accums.staged_gains,
             vec![PendingLifelinkGain {
@@ -3763,7 +4443,7 @@ mod tests {
         let mut events = Vec::new();
         let outcome = run_phase_c_legs(&mut state, &mut legs, &mut accums, &mut events);
         assert!(
-            matches!(outcome, PhaseCRunOutcome::PausedOnGain { index: 0 }),
+            matches!(outcome, PhaseCRunOutcome::PausedOnGain { index: 0, .. }),
             "(a) staged gain pause before the leg"
         );
         assert_eq!(paused_gain(&state), Some((PlayerId(mate), 2)), "(a)");
@@ -3778,7 +4458,7 @@ mod tests {
         let mut events = Vec::new();
         let outcome = run_phase_c_legs(&mut state, &mut legs, &mut accums, &mut events);
         assert!(
-            matches!(outcome, PhaseCRunOutcome::PausedOnGain { index: 0 }),
+            matches!(outcome, PhaseCRunOutcome::PausedOnGain { index: 0, .. }),
             "(b) the equal-rank gain is staged before the leg"
         );
         assert_eq!(paused_gain(&state), Some((PlayerId(mate), 2)), "(b)");
@@ -4030,6 +4710,52 @@ mod tests {
             index_before,
             "assessment must not prepare or rebuild the replacement index"
         );
+    }
+
+    /// CR 120.6 + CR 613.11: the survival estimate reads the lethal-damage basis. With a
+    /// "lethal damage dealt to creatures you control is determined by their power" static on
+    /// P1's side, P1's 3/1 blocker survives the 1/1's 1 damage (power 3); without it, it dies.
+    #[test]
+    fn assess_combat_impact_reads_the_lethal_damage_basis() {
+        for (with_static, blocker_survives) in [(true, true), (false, false)] {
+            let mut state = setup();
+            let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 1, 1);
+            let blocker = create_creature(&mut state, PlayerId(1), "Blocker", 3, 1);
+            if with_static {
+                let carrier = create_creature(
+                    &mut state,
+                    PlayerId(1),
+                    "Zilortha, Strength Incarnate",
+                    7,
+                    3,
+                );
+                let def = StaticDefinition::new(
+                    crate::types::statics::StaticMode::LethalDamageDeterminedByPower,
+                )
+                .affected(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .into(),
+                );
+                let obj = state.objects.get_mut(&carrier).unwrap();
+                obj.static_definitions.push(def.clone());
+                Arc::make_mut(&mut obj.base_static_definitions).push(def);
+            }
+            setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+            let attacker_ref = current_incarnation(&state, attacker);
+            let blocker_ref = current_incarnation(&state, blocker);
+
+            let CombatImpact::Fixed { survival, .. } =
+                assess_combat_impact(&state, attacker_ref, blocker_ref)
+            else {
+                panic!("a plain one-on-one exchange is fixed (with_static: {with_static})");
+            };
+            assert_eq!(
+                survival.blocker_survives, blocker_survives,
+                "with_static: {with_static}"
+            );
+            assert!(!survival.attacker_survives, "3 damage kills the 1/1");
+        }
     }
 
     #[test]
@@ -4297,7 +5023,6 @@ mod tests {
             return;
         }
         while let WaitingFor::AssignCombatDamage {
-            attacker_id,
             total_damage,
             ref blockers,
             ref trample,
@@ -4306,30 +5031,22 @@ mod tests {
             ..
         } = state.waiting_for
         {
-            let _ = attacker_id;
-            let mut remaining = total_damage;
-            let mut assignments: Vec<(ObjectId, u32)> = Vec::new();
-            for slot in blockers {
-                let assign = remaining.min(slot.lethal_minimum);
-                assignments.push((slot.blocker_id, assign));
-                remaining = remaining.saturating_sub(assign);
-            }
-            if trample.is_none() && remaining > 0 {
-                if let Some(last) = assignments.last_mut() {
-                    last.1 += remaining;
-                    remaining = 0;
+            let route = match (trample, attack_target) {
+                (None, _) => ExcessRoute::ToBlockers,
+                (Some(TrampleKind::OverPlaneswalkers), AttackTarget::Planeswalker(_)) => {
+                    ExcessRoute::OverPlaneswalker {
+                        loyalty: pw_loyalty.unwrap_or(0),
+                    }
                 }
-            }
-            let (trample_damage, controller_damage) = if *trample
-                == Some(TrampleKind::OverPlaneswalkers)
-                && matches!(attack_target, AttackTarget::Planeswalker(_))
-            {
-                let loyalty = pw_loyalty.unwrap_or(0);
-                let to_pw = remaining.min(loyalty);
-                (to_pw, remaining.saturating_sub(to_pw))
-            } else {
-                (if trample.is_some() { remaining } else { 0 }, 0)
+                (Some(TrampleKind::Standard | TrampleKind::OverPlaneswalkers), _) => {
+                    ExcessRoute::Trample
+                }
             };
+            let CombatDamageSplit {
+                assignments,
+                trample_damage,
+                controller_damage,
+            } = lethal_first_split(total_damage, blockers, route);
             // The answering apply runs the damage batch inline, so its events
             // (damage, lifelink gains, `DamagePrevented` aggregates, rider
             // follow-ups) would be dropped with the `ActionResult`. Collect
@@ -7699,6 +8416,111 @@ mod tests {
         kw(&mut state, a, vec![Keyword::DoubleStrike, Keyword::Trample]);
         let b = create_creature(&mut state, PlayerId(1), "B", 0, 6);
         assert_eq!(combat_damage_to_defender(&state, a, &[b]), 4);
+    }
+
+    // ── First-striking blockers destroy the attacker only through damage they assign ──
+    //
+    // CR 702.7b + CR 704.5g + CR 704.5h + CR 702.12b: whether the attacker survives to the
+    // regular step depends on the damage the first-striking blockers actually assign, not on
+    // the assignment minimum a deathtouch source would need.
+
+    /// The attacker already has lethal damage marked but is indestructible; the 0-power
+    /// deathtouch blocker assigns nothing (CR 510.1a). First step: 2 to the blocker, 1 through;
+    /// regular step: no blockers left, all 3 through (CR 702.19d).
+    #[test]
+    fn already_lethal_indestructible_double_striker_survives_a_zero_power_deathtouch_blocker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 3, 3);
+        kw(
+            &mut state,
+            a,
+            vec![
+                Keyword::DoubleStrike,
+                Keyword::Trample,
+                Keyword::Indestructible,
+            ],
+        );
+        state.objects.get_mut(&a).unwrap().damage_marked = 3;
+        let b = create_creature(&mut state, PlayerId(1), "B", 0, 2);
+        kw(
+            &mut state,
+            b,
+            vec![Keyword::FirstStrike, Keyword::Deathtouch],
+        );
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 4);
+    }
+
+    /// CR 702.12b: deathtouch damage does not destroy an indestructible attacker, so it strikes
+    /// again: 1 lethal and 2 through, then 3 through.
+    #[test]
+    fn indestructible_double_striker_survives_a_first_strike_deathtouch_blocker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 3, 3);
+        kw(
+            &mut state,
+            a,
+            vec![
+                Keyword::DoubleStrike,
+                Keyword::Trample,
+                Keyword::Indestructible,
+            ],
+        );
+        let b = create_creature(&mut state, PlayerId(1), "B", 1, 1);
+        kw(
+            &mut state,
+            b,
+            vec![Keyword::FirstStrike, Keyword::Deathtouch],
+        );
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 5);
+    }
+
+    /// CR 704.5g: a first-striking blocker whose damage is lethal still kills the attacker
+    /// before the regular step (2 to the 2/3, nothing through; the 2/2 dies).
+    #[test]
+    fn lethal_first_strike_blocker_still_kills_a_double_striker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 2, 2);
+        kw(&mut state, a, vec![Keyword::DoubleStrike, Keyword::Trample]);
+        let b = create_creature(&mut state, PlayerId(1), "B", 2, 3);
+        kw(&mut state, b, vec![Keyword::FirstStrike]);
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 0);
+    }
+
+    /// CR 702.2b + CR 510.1a: deathtouch destroys only through damage its holder assigns. The
+    /// deathtouch blocker has 0 power and the 1-power blocker has no deathtouch, so the 5/5
+    /// survives the first step (2 lethal, 3 through) and tramples all 5 in the regular step.
+    #[test]
+    fn deathtouch_on_a_zero_power_first_striker_does_not_kill_the_attacker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 5, 5);
+        kw(&mut state, a, vec![Keyword::DoubleStrike, Keyword::Trample]);
+        let b1 = create_creature(&mut state, PlayerId(1), "B1", 0, 1);
+        kw(
+            &mut state,
+            b1,
+            vec![Keyword::FirstStrike, Keyword::Deathtouch],
+        );
+        let b2 = create_creature(&mut state, PlayerId(1), "B2", 1, 1);
+        kw(&mut state, b2, vec![Keyword::FirstStrike]);
+        assert_eq!(combat_damage_to_defender(&state, a, &[b1, b2]), 8);
+    }
+
+    /// CR 702.2b + CR 704.5h: the control for the case above — deathtouch on the blocker that
+    /// assigns 1 damage destroys the 5/5 after the first step's 3 through.
+    #[test]
+    fn deathtouch_on_a_damaging_first_striker_kills_the_attacker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 5, 5);
+        kw(&mut state, a, vec![Keyword::DoubleStrike, Keyword::Trample]);
+        let b1 = create_creature(&mut state, PlayerId(1), "B1", 0, 1);
+        kw(&mut state, b1, vec![Keyword::FirstStrike]);
+        let b2 = create_creature(&mut state, PlayerId(1), "B2", 1, 1);
+        kw(
+            &mut state,
+            b2,
+            vec![Keyword::FirstStrike, Keyword::Deathtouch],
+        );
+        assert_eq!(combat_damage_to_defender(&state, a, &[b1, b2]), 3);
     }
 
     #[test]

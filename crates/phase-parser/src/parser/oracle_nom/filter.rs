@@ -299,6 +299,34 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
     Ok((rest, prop))
 }
 
+/// CR 208.1: Parse the source-relative lesser-power/toughness suffix shape
+/// without choosing its referent. The enclosing target parser owns that
+/// context-sensitive binding; keeping the grammar separate prevents a bare
+/// suffix from silently becoming a trigger-source or prior-target reference.
+pub fn parse_relative_pt_comparison(input: &str) -> OracleResult<'_, (PtStat, Comparator)> {
+    let (input, _) = tag("with").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, inclusive) = opt(terminated(tag("equal or"), space1)).parse(input)?;
+    let (input, _) = tag("lesser").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, stat) = alt((
+        value(PtStat::Power, tag("power")),
+        value(PtStat::Toughness, tag("toughness")),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        (
+            stat,
+            if inclusive.is_some() {
+                Comparator::LE
+            } else {
+                Comparator::LT
+            },
+        ),
+    ))
+}
+
 /// CR 202.3: Parse the numeric mana-value comparison tail after the shared
 /// `mana value ` / `converted mana cost ` head. This is deliberately limited to
 /// literal/X numeric grammar; contextual and superlative mana-value phrases
@@ -362,8 +390,37 @@ pub(crate) fn parse_superlative_property_head(
 /// CR 208.1: Possessive phrase introducing a creature's *own* stat in a
 /// self-referential P/T comparison — "its", "their", or "that creature's".
 /// All refer to the candidate object itself, not the ability source.
-fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
+pub(crate) fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
     alt((tag("its "), tag("their "), tag("that creature's "))).parse(input)
+}
+
+/// Peel a trailing spell P/T qualifier from a cost-modifier subject.
+/// A recognized stat with an invalid comparison is an error.
+pub fn split_spell_pt_qualifier(
+    subject: &str,
+) -> Result<(&str, Option<FilterProp>), nom::Err<super::error::OracleError<'_>>> {
+    use super::primitives::split_once_on;
+    use nom::combinator::{all_consuming, eof, peek};
+
+    let Ok((_, (prefix, tail))) = split_once_on(subject, " with ") else {
+        return Ok((subject, None));
+    };
+    if peek((
+        opt(tag::<_, _, super::error::OracleError<'_>>("base ")),
+        alt((
+            tag("power"),
+            tag("toughness"),
+            tag("total power and toughness"),
+        )),
+        alt((space1, eof)),
+    ))
+    .parse(tail)
+    .is_err()
+    {
+        return Ok((subject, None));
+    }
+    let (_, prop) = all_consuming(parse_pt_comparison).parse(tail)?;
+    Ok((prefix, Some(prop)))
 }
 
 /// CR 208.1: "toughness greater than <poss> power" → [`FilterProp::ToughnessGTPower`]
@@ -732,6 +789,18 @@ pub fn parse_controlled_permanents_conjunct(
 mod tests {
     use super::*;
     use crate::types::mana::ManaColor;
+
+    #[test]
+    fn parse_relative_pt_comparison_lesser_and_equal() {
+        assert_eq!(
+            parse_relative_pt_comparison("with lesser power, return it"),
+            Ok((", return it", (PtStat::Power, Comparator::LT),))
+        );
+        assert_eq!(
+            parse_relative_pt_comparison("with equal or lesser toughness."),
+            Ok((".", (PtStat::Toughness, Comparator::LE)))
+        );
+    }
 
     /// CR 614.1a + CR 109.1: the single authority must cover every plural noun
     /// BOTH former copies knew, and must carry the "other" article rather than

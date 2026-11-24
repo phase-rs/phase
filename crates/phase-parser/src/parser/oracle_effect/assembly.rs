@@ -2310,6 +2310,84 @@ fn boundary_continues_sentence(prev_boundary: Option<ClauseBoundary>) -> bool {
     )
 }
 
+/// CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: retain a delayed source-zone
+/// intervening-if on the delayed payload only when every leaf in its Boolean
+/// tree is the source-zone predicate. Mixed trees must remain on the ordinary
+/// wrapper path, where the exhaustive condition bridge rejects unsupported
+/// source-zone semantics instead of checking them at the wrong time.
+fn is_delayed_source_zone_condition(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::SourceInZone { .. } => true,
+        StaticCondition::Not { condition } => is_delayed_source_zone_condition(condition),
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            !conditions.is_empty() && conditions.iter().all(is_delayed_source_zone_condition)
+        }
+        StaticCondition::DevotionGE { .. }
+        | StaticCondition::IsPresent { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::QuantityQuality { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
+        | StaticCondition::IsInitiative
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::PlayerIsPoisoned { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::Unrecognized { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage { .. }
+        | StaticCondition::SourceExertedThisTurn
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::IsTapped { .. }
+        | StaticCondition::SourceIsFaceUp
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::None => false,
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     assemble_effect_chain_with_provenance(ir).value
@@ -3580,8 +3658,10 @@ pub(crate) fn assemble_effect_chain_with_provenance(
             if matches!(*def.effect, Effect::TargetOnly { .. }) {
                 if let Some(sub) = def.sub_ability.as_mut() {
                     sub.repeat_for = Some(qty.clone());
+                    sub.repeat_timing = clause_ir.repeat_timing;
                 } else {
                     def.repeat_for = Some(qty.clone());
+                    def.repeat_timing = clause_ir.repeat_timing;
                 }
             } else if ir.clauses.len() == 1
                 && clause_ir.parsed.sub_ability.is_none()
@@ -3602,6 +3682,7 @@ pub(crate) fn assemble_effect_chain_with_provenance(
             } else {
                 release_iteration_destination(def.effect.as_mut(), qty);
                 def.repeat_for = Some(qty.clone());
+                def.repeat_timing = clause_ir.repeat_timing;
             }
         }
         if let Some(scope) = clause_ir.player_scope.clone() {
@@ -3994,7 +4075,21 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                     std::mem::take(&mut inner.optional_for)
                 };
                 let lifted_repeat_for = std::mem::take(&mut inner.repeat_for);
+                let lifted_repeat_timing = std::mem::take(&mut inner.repeat_timing);
                 let lifted_player_scope = std::mem::take(&mut inner.player_scope);
+                // CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: a source-zone
+                // intervening-if names the delayed source at fire and resolution
+                // time. Keep only
+                // the exact `SourceMatchesFilter { Typed([InZone]) }` bridge
+                // on the delayed payload; every other condition retains the
+                // established outer-wrapper lift above.
+                let keep_source_zone_condition_on_payload = lifted_condition
+                    .as_ref()
+                    .and_then(ability_condition_to_static_condition)
+                    .is_some_and(|condition| is_delayed_source_zone_condition(&condition));
+                if keep_source_zone_condition_on_payload {
+                    inner.condition = lifted_condition.clone();
+                }
                 // CR 608.2c: The `CreateDelayedTrigger` wrapper — not its payload —
                 // is the node that occupies this clause's slot in the parent's
                 // `sub_ability` chain, so it must carry the clause's `sub_link`
@@ -4020,10 +4115,13 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                     },
                 );
                 current.reads_return_result = delayed_return_reader;
-                current.condition = lifted_condition;
+                current.condition = (!keep_source_zone_condition_on_payload)
+                    .then_some(lifted_condition)
+                    .flatten();
                 current.optional = lifted_optional;
                 current.optional_for = lifted_optional_for;
                 current.repeat_for = lifted_repeat_for;
+                current.repeat_timing = lifted_repeat_timing;
                 current.player_scope = lifted_player_scope;
                 current.sub_link = lifted_sub_link;
                 current.sibling_condition = lifted_sibling_condition;
@@ -5358,7 +5456,9 @@ mod arena_tests {
     use super::*;
     use crate::parser::oracle_effect::parse_effect_chain_ir;
     use crate::parser::oracle_ir::ast::parsed_clause;
-    use crate::parser::oracle_ir::effect_chain::{ClauseIr, ClauseIrBuilder, InjectedColorChoice};
+    use crate::parser::oracle_ir::effect_chain::{
+        ClauseIr, ClauseIrBuilder, InjectedColorChoice, RepeatCount,
+    };
     use crate::parser::oracle_nom::context::ParseContext;
     #[cfg(feature = "cli")]
     use crate::types::ability::OpponentMayScope;
@@ -5369,6 +5469,69 @@ mod arena_tests {
     use crate::types::phase::Phase;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::EtbTapState;
+
+    /// CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: the production assembly
+    /// path keeps a pure source-zone Boolean tree on the delayed payload, while
+    /// adding a static-only leaf keeps the whole tree on the strict wrapper path.
+    #[test]
+    fn delayed_source_zone_boolean_tree_assembly_is_payload_scoped() {
+        let source_filter = TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }],
+            ..Default::default()
+        });
+        let source_condition = AbilityCondition::SourceMatchesFilter {
+            filter: source_filter,
+        };
+        let pure_tree = AbilityCondition::And {
+            conditions: vec![
+                source_condition.clone(),
+                AbilityCondition::Not {
+                    condition: Box::new(source_condition.clone()),
+                },
+            ],
+        };
+        let mixed_tree = AbilityCondition::And {
+            conditions: vec![
+                source_condition,
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Fixed { value: 2 },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+            ],
+        };
+
+        let assemble = |condition: AbilityCondition| {
+            let mut chain = EffectChainIr::single_clause(
+                "synthetic delayed condition",
+                AbilityKind::Spell,
+                parsed_clause(shuffle_effect()),
+                None,
+                None,
+                false,
+            );
+            chain.clauses[0].condition = Some(condition);
+            chain.clauses[0].delayed_condition =
+                Some(DelayedTriggerCondition::AtNextPhase { phase: Phase::End });
+            assemble_effect_chain(&chain)
+        };
+
+        let pure = assemble(pure_tree.clone());
+        let Effect::CreateDelayedTrigger { effect, .. } = pure.effect.as_ref() else {
+            panic!("pure delayed condition must assemble a delayed trigger");
+        };
+        assert_eq!(effect.condition, Some(pure_tree));
+        assert_eq!(pure.condition, None);
+
+        let mixed = assemble(mixed_tree.clone());
+        let Effect::CreateDelayedTrigger { effect, .. } = mixed.effect.as_ref() else {
+            panic!("mixed delayed condition must assemble a delayed trigger");
+        };
+        assert_eq!(effect.condition, None);
+        assert_eq!(mixed.condition, Some(mixed_tree));
+    }
 
     #[cfg(feature = "cli")]
     #[derive(Clone)]
@@ -5895,7 +6058,7 @@ mod arena_tests {
                     intrinsic: None,
                 },
             )
-            .repeat_for(repeat_for)
+            .repeat_for(repeat_for.map(RepeatCount::sequential))
             .delayed_condition(delayed)
             .prefix_delayed_condition(prefix_delayed)
             .push();

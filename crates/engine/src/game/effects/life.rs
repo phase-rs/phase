@@ -228,7 +228,7 @@ pub fn resolve_gain(
 
 /// The proposed `LifeGain` event for an entry, or `None` when the change is
 /// vacuous or suppressed before the replacement pipeline.
-fn proposed_life_gain(
+pub(crate) fn proposed_life_gain(
     state: &GameState,
     player_id: PlayerId,
     amount: u32,
@@ -249,18 +249,25 @@ fn proposed_life_gain(
     })
 }
 
-/// CR 616.1: can the replacement pipeline open a player choice on this life
-/// gain? Read-only. False when the gain never reaches the pipeline ("can't gain
-/// life", CR 119.7; amount 0) and for a lone mandatory modifier; true for an
-/// optional candidate or two or more competing candidates whose order is
-/// material (`ReplacementPromptCauses::may_open_player_choice`).
+/// CR 616.1: can this gain's replacement pipeline open a choice? CR 614.6 +
+/// CR 616.2: also check whether a substitute's action opens a choice on this
+/// board using the read-only replacement candidate scan.
+/// A zero or prohibited gain (CR 119.7) never reaches the pipeline.
 pub(crate) fn life_gain_may_prompt(state: &GameState, player_id: PlayerId, amount: u32) -> bool {
-    proposed_life_gain(state, player_id, amount)
-        .is_some_and(|event| proposed_event_may_prompt(state, &event))
+    let Some(event) = proposed_life_gain(state, player_id, amount) else {
+        return false;
+    };
+    let causes = replacement::proposed_event_prompt_cause(
+        state,
+        &event,
+        replacement::replacement_registry(),
+    );
+    causes.may_open_player_choice()
+        || causes.contains(replacement::ReplacementPromptCause::LifeGainSubstituteMayPrompt)
 }
 
-/// CR 616.1: the life-loss twin of [`life_gain_may_prompt`] (CR 119.8: a
-/// player who can't lose life never reaches the pipeline).
+/// CR 616.1: can the life-loss event itself open a replacement choice?
+/// CR 119.8: a player who can't lose life never reaches the pipeline.
 pub(crate) fn life_loss_may_prompt(state: &GameState, player_id: PlayerId, amount: u32) -> bool {
     proposed_life_loss(state, player_id, amount)
         .is_some_and(|event| proposed_event_may_prompt(state, &event))
@@ -273,7 +280,7 @@ fn proposed_event_may_prompt(state: &GameState, event: &ProposedEvent) -> bool {
 
 /// The proposed `LifeLoss` event for an entry, or `None` when the change is
 /// vacuous or suppressed before the replacement pipeline.
-fn proposed_life_loss(
+pub(crate) fn proposed_life_loss(
     state: &GameState,
     player_id: PlayerId,
     amount: u32,
@@ -439,7 +446,12 @@ pub fn apply_life_gain(
 }
 
 /// What staging one life gain produced (see [`stage_life_gain`]).
+///
+/// `Final` carries the event inline: every caller matches the result
+/// immediately, so boxing it would add an allocation per staged gain without
+/// saving retained state.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum StagedLifeGain {
     /// The final post-replacement `ProposedEvent::LifeGain`, NOT yet applied:
     /// the caller settles it later through [`apply_life_gain_after_replacement`].
@@ -1393,7 +1405,7 @@ pub fn resolve_lose(
     Ok(())
 }
 
-pub(super) fn resolve_life_loss_target(
+pub(crate) fn resolve_life_loss_target(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: Option<&TargetFilter>,

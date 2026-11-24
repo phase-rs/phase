@@ -260,6 +260,7 @@ pub(crate) fn put_sideboard_entry_into_game(
         let printing = deck_loading::outside_game_copy_printing(
             pool,
             &state.outside_game_cards_brought_in,
+            crate::game::match_flow::game_on_board(state),
             DeckSection::Sideboard,
             &entry.card,
         );

@@ -871,7 +871,14 @@
     "lethalBadge": "致死",
     "planeswalkerLoyalty": "プレインズウォーカー（忠誠度: {{loyalty}}）",
     "defendingPlayerTrample": "防御プレイヤー（トランプル）",
+    "attackTargetTrample": "{{name}}（トランプル）",
     "pwControllerTrample": "PWコントローラー（PW越しのトランプル）",
+    "lethalButton": "致死",
+    "clearButton": "クリア",
+    "assignLethalTo": "{{target}}に致死ダメージを割り振る",
+    "clearDamageFor": "{{target}}へのダメージの割り振りをクリア",
+    "lethalFirstButton": "致死ダメージを優先",
+    "lethalFirstTitle": "各ブロック・クリーチャーに順番に致死ダメージを割り振り、その後で残りを割り振る",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "残り{{count}}点のダメージを{{target}}に割り振る",
     "assignRemainingTo_many": "残り{{count}}点のダメージを{{target}}に割り振る",
@@ -2197,6 +2204,13 @@
     "title": "戦場に出る際のコントローラーを選択",
     "subtitle": "このパーマネントが戦場に出る際にコントロールする対戦相手を選択"
   },
+  "replacementDecisionOrder": {
+    "title": "先に行う選択を選ぶ",
+    "subtitle": "これらの置換の選択は同時に行われます。先に行う選択を選んでください。",
+    "unknownObject": "不明なオブジェクト",
+    "attachedTo": "{{host}}についている",
+    "attachments": "{{names}}がついている"
+  },
   "optionalCost": {
     "gift": {
       "title": "贈り物を約束しますか？",
@@ -2363,6 +2377,13 @@
     "creatureFallback": "クリーチャー{{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "残りの{{count}}を{{target}}に割り振る",
+    "assignRemainingTo_many": "残りの{{count}}を{{target}}に割り振る",
+    "assignRemainingTo_one": "残りの{{count}}を{{target}}に割り振る",
+    "assignRemainingTo_other": "残りの{{count}}を{{target}}に割り振る",
+    "clearButton": "クリア",
+    "clearTarget": "{{target}}への割り振りをクリア",
     "unitCounter": "{{counter}}カウンター",
     "unitDamage": "ダメージ",
     "unitLife": "ライフ",

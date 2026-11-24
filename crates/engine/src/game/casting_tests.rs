@@ -5339,6 +5339,7 @@ fn granted_freerunning_static_surfaces_freerunning_variant() {
             ],
         };
         let def = StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::CastWithKeyword {
                 keyword: granted_kw,
             },
@@ -14617,6 +14618,7 @@ fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
                 properties: vec![],
             });
             obj.static_definitions = vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::CastWithKeyword { keyword: granted },
                 affected: Some(affected),
                 modifications: vec![],
@@ -17465,6 +17467,7 @@ fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
             properties: vec![],
         });
         let def = StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::CastWithKeyword {
                 keyword: granted_kw,
             },
@@ -17569,6 +17572,7 @@ fn add_witherbloom_affinity_source(state: &mut GameState, player: PlayerId) -> O
         obj.card_types.core_types.push(CoreType::Creature);
         obj.card_types.supertypes.push(Supertype::Legendary);
         obj.static_definitions = vec![StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::CastWithKeyword {
                 keyword: Keyword::Affinity(TypedFilter {
                     type_filters: vec![TypeFilter::Creature],
@@ -44953,7 +44957,7 @@ fn animate_dead_aura_spell_resolves_and_attaches_to_graveyard_creature() {
 }
 
 /// Verbatim Animate Dead Oracle text (matches `crates/engine/tests/fixtures/
-/// integration_cards.json.gz` — the repo's canonical corpus form, which uses the
+/// integration_cards/` — the repo's canonical corpus form, which uses the
 /// self-reference "this Aura"). Reused across the end-to-end reanimation tests.
 const ANIMATE_DEAD_ORACLE_FULL: &str = "Enchant creature card in a graveyard\nWhen this Aura enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with this Aura.\" Return enchanted creature card to the battlefield under your control and attach this Aura to it. When this Aura leaves the battlefield, that creature's controller sacrifices it.\nEnchanted creature gets -1/-0.";
 

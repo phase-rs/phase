@@ -71,8 +71,8 @@ use super::oracle_target::{
 };
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
-    normalize_card_name_refs, parse_number, parse_ordinal, parse_subtype, strip_after,
-    strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
+    normalize_card_name_refs, parse_number, parse_ordinal, parse_ordinal_list, parse_subtype,
+    strip_after, strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
@@ -94,9 +94,10 @@ use crate::types::ability::{
     ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope, ProhibitedActivity,
     PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     RestrictionExpiry, RestrictionPlayerScope, SacrificeAggregateStat, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SpentColor, StaticCondition, TapCreaturesRequirement,
-    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TriggerLimitSpend, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause, ZoneRef,
+    SacrificeRequirement, SharedQuality, SourceExclusion, SpentColor, StaticCondition,
+    TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TriggerLimitSpend, TypeFilter, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause, ZoneRef,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -8698,6 +8699,45 @@ impl IfExtraction {
     }
 }
 
+/// CR 508.1a + CR 508.4: These conditions refer to declared attackers in the
+/// current combat, including creatures subsequently removed from combat.
+fn parse_attacked_this_combat_condition(input: &str) -> OracleResult<'_, TriggerCondition> {
+    use super::oracle_nom::condition::parse_ge_threshold;
+
+    let source = map(
+        preceded(
+            tag("~"),
+            opt(preceded(
+                tag(" and "),
+                terminated(parse_ge_threshold, tag("other creatures")),
+            )),
+        ),
+        |count| match count {
+            None => TriggerCondition::SourceAttackedThisCombat,
+            Some(count) => TriggerCondition::And {
+                conditions: vec![
+                    TriggerCondition::SourceAttackedThisCombat,
+                    TriggerCondition::AttackersDeclaredCount {
+                        subject: AttackersDeclaredCountSubject::CurrentCombat {
+                            exclude_source: SourceExclusion::Exclude,
+                        },
+                        comparator: Comparator::GE,
+                        count,
+                    },
+                ],
+            },
+        },
+    );
+    preceded(
+        tag("if "),
+        terminated(
+            source,
+            pair(tag(" attacked this combat"), peek(alt((tag(","), eof)))),
+        ),
+    )
+    .parse(input)
+}
+
 fn extract_if_condition_with_card_name(
     text: &str,
     card_name: &str,
@@ -8706,12 +8746,35 @@ fn extract_if_condition_with_card_name(
     head_enters_battlefield: bool,
     attack_scope: Option<&AttackHeadScope>,
 ) -> IfExtraction {
+    use super::oracle_nom::condition::parse_ge_threshold;
+
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     // Only a proven self-trigger may use the source-bound "it's on the
     // battlefield" shorthand. On a non-self zone-change trigger, "it" is
     // the event object, so the simple source-condition table must not steal it.
     let source_is_self = matches!(dying_subject, Some(TargetFilter::SelfRef));
+
+    // CR 606.4 + CR 603.4: bind the payment-specific threshold to the
+    // activation event. Reuse the shared grammar for both threshold forms;
+    // the clause itself is consumed completely before it is hoisted.
+    let leading_if_start = lower.len() - lower.trim_start().len();
+    let loyalty_threshold = map(
+        delimited(
+            tag("if you removed "),
+            verify(parse_ge_threshold, |minimum| *minimum > 0),
+            (tag("loyalty counters to activate it"), peek(tag(", "))),
+        ),
+        |minimum| TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum },
+    )
+    .parse(&lower[leading_if_start..]);
+    if let Ok((rest, condition)) = loyalty_threshold {
+        let consumed = lower.len() - leading_if_start - rest.len();
+        return IfExtraction::hoisted(
+            strip_condition_clause(text, leading_if_start, consumed),
+            condition,
+        );
+    }
 
     // CR 603.4: Only a true intervening-if is hoisted to the trigger-level condition.
     // A trigger-level `if` is one that IMMEDIATELY follows the trigger condition
@@ -9120,17 +9183,11 @@ fn extract_if_condition_with_card_name(
         );
     }
 
-    // CR 400.7 + CR 508.1 + CR 603.4: source-combat history is a distinct
-    // grammar production, not a card-text table entry. The scanner applies the
-    // nom production at word boundaries so a leading intervening-if is retained
-    // while later sentence-local conditionals remain outside this function.
-    if let Some((prefix, _, rest)) = scan_preceded(&lower, |i| {
-        tag::<_, _, OracleError<'_>>("if ~ attacked this combat").parse(i)
-    }) {
-        let clause_len = lower.len() - prefix.len() - rest.len();
+    // CR 603.4: Only a leading if-clause gates the trigger and its resolution.
+    if let Ok((rest, condition)) = parse_attacked_this_combat_condition(&lower) {
         return IfExtraction::hoisted(
-            strip_condition_clause(text, prefix.len(), clause_len),
-            TriggerCondition::SourceAttackedThisCombat,
+            strip_condition_clause(text, 0, lower.len() - rest.len()),
+            condition,
         );
     }
 
@@ -14674,6 +14731,10 @@ fn extract_trigger_subject_for_context(
     ctx: &mut ParseContext,
 ) -> TargetFilter {
     let lower = condition_text.to_lowercase();
+    // CR 608.2k: "On it" refers to the source of this mana ability.
+    if parse_self_mana_ability_resolves_trigger(&lower).is_ok() {
+        return TargetFilter::SelfRef;
+    }
     let after_keyword = alt((
         value((), tag::<_, _, OracleError<'_>>("whenever ")),
         value((), tag("when ")),
@@ -15024,11 +15085,43 @@ fn parse_object_head_noun(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 702.29c + CR 113.6k: the zones a "when you discard this card" trigger, and a "when you
+/// cycle this card" trigger (CR 702.29c: the same discard, made to pay a cycling cost),
+/// functions in. Neither can trigger from the battlefield, so each functions in the zones it
+/// can trigger from: its owner's graveyard, where a discard puts the card (CR 701.9a), or
+/// exile, where a replacement effect such as Leyline of the Void or Rest in Peace puts it
+/// instead (CR 614.6).
+///
+/// CR 400.2 + CR 603.2f: the hidden zones are not listed. Whether such a trigger fires from a
+/// library depends on the card having been visible to all players, and the trigger collector
+/// has no library or hand source, so a discard redirected to a library (Wheel of Sun and Moon)
+/// is not delivered.
+const DISCARDED_SELF_TRIGGER_ZONES: [Zone; 2] = [Zone::Graveyard, Zone::Exile];
+
+fn parse_self_cycle_trigger_head(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        terminated(
+            preceded(
+                pair(alt((tag("when "), tag("whenever "))), tag("you cycle ")),
+                alt((tag("this card"), tag("~"))),
+            ),
+            eof,
+        ),
+    )
+    .parse(input)
+}
+
 fn trigger_object_pronoun_ref_for_condition(
     condition_text: &str,
     trigger_subject: &TargetFilter,
 ) -> Option<TargetFilter> {
     let lower = condition_text.to_lowercase();
+    // CR 608.2k + CR 702.29c: "it" refers to the card named by the cycle trigger.
+    if parse_self_cycle_trigger_head(&lower).is_ok() {
+        return Some(TargetFilter::SelfRef);
+    }
+
     let after_keyword = alt((
         value((), tag::<_, _, OracleError<'_>>("whenever ")),
         value((), tag("when ")),
@@ -16665,6 +16758,21 @@ fn parse_passive_taps_for_mana_line(i: &str) -> OracleResult<'_, String> {
     )
     .parse(rest)?;
     Ok((rest, subject.to_string()))
+}
+
+/// CR 608.2p + CR 106.12: Matches resolution of a source's mana ability,
+/// including a mana ability without a tap cost.
+fn parse_self_mana_ability_resolves_trigger(i: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        all_consuming((
+            alt((tag("whenever "), tag("when "))),
+            tag("a mana ability of "),
+            parse_self_reference_subject,
+            tag(" resolves"),
+        )),
+    )
+    .parse(i)
 }
 
 /// CR 605.1b: Recognizes the aggregate mana-ability condition whose produced
@@ -22162,6 +22270,12 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
     }
 
+    if parse_self_mana_ability_resolves_trigger(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::ManaAbilityProduced;
+        return Some((TriggerMode::ManaAbilityProduced, def));
+    }
+
     if parse_land_ability_adds_chosen_color(lower).is_ok() {
         let mut def = make_base();
         def.mode = TriggerMode::ManaAbilityProduced;
@@ -22791,13 +22905,15 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::SpellCast, def));
     }
 
-    // "when you cycle this card" / "when you cycle ~" — cycling self-trigger
-    // The card is in the graveyard by the time this trigger is checked.
-    if scan_contains(lower, "you cycle this card") || scan_contains(lower, "you cycle ~") {
+    if parse_self_cycle_trigger_head(lower).is_ok() {
         let mut def = make_base();
         def.mode = TriggerMode::Cycled;
         def.valid_card = Some(TargetFilter::SelfRef);
-        def.trigger_zones = vec![Zone::Graveyard];
+        // CR 702.29c: "When you cycle this card" means "When you discard this card to pay an
+        // activation cost of a cycling ability", and the ability triggers from whatever zone the
+        // card winds up in after it's cycled. Lowering still narrows a body that moves the card
+        // out of a named zone to that zone (Yidaro, Wandering Monster: "from your graveyard").
+        def.trigger_zones = DISCARDED_SELF_TRIGGER_ZONES.to_vec();
         return Some((TriggerMode::Cycled, def));
     }
 
@@ -24019,6 +24135,20 @@ fn try_parse_nth_draw_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
     None
 }
 
+fn parse_nth_draw_ordinal(after: &str) -> Option<(u32, Comparator, &str)> {
+    let (ordinals, rest) = parse_ordinal_list(after)?;
+    match ordinals.as_slice() {
+        [single] => Some((*single, Comparator::EQ, rest)),
+        [first, .., last] => {
+            let contiguous = ordinals
+                .windows(2)
+                .all(|pair| pair[0].checked_add(1) == Some(pair[1]));
+            (contiguous && *first == 1).then_some((*last, Comparator::LE, rest))
+        }
+        [] => None,
+    }
+}
+
 /// "you draw your <ordinal> card each turn"
 ///
 /// CR 121.2 + CR 603.2: The "you" subject restricts the trigger to the
@@ -24028,14 +24158,14 @@ fn try_parse_nth_draw_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
 fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "you draw your ";
     let after = strip_after(lower, prefix)?;
-    let (n, rest) = parse_ordinal(after)?;
+    let (n, comparator, rest) = parse_nth_draw_ordinal(after)?;
     let timing = classify_nth_draw_timing(rest)?;
     let mut def = make_base();
     def.mode = TriggerMode::Drawn;
     def.valid_target = Some(TargetFilter::Typed(
         TypedFilter::default().controller(ControllerRef::You),
     ));
-    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
+    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n, comparator });
     def.condition = timing_condition(timing);
     Some((TriggerMode::Drawn, def))
 }
@@ -24044,14 +24174,14 @@ fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition
 fn try_parse_nth_draw_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "an opponent draws their ";
     let after = strip_after(lower, prefix)?;
-    let (n, rest) = parse_ordinal(after)?;
+    let (n, comparator, rest) = parse_nth_draw_ordinal(after)?;
     let timing = classify_nth_draw_timing(rest)?;
     let mut def = make_base();
     def.mode = TriggerMode::Drawn;
     def.valid_target = Some(TargetFilter::Typed(
         TypedFilter::default().controller(ControllerRef::Opponent),
     ));
-    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
+    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n, comparator });
     def.condition = timing_condition(timing);
     Some((TriggerMode::Drawn, def))
 }
@@ -24061,11 +24191,11 @@ fn try_parse_nth_draw_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefin
 fn try_parse_nth_draw_any_player(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "a player draws their ";
     let after = strip_after(lower, prefix)?;
-    let (n, rest) = parse_ordinal(after)?;
+    let (n, comparator, rest) = parse_nth_draw_ordinal(after)?;
     let timing = classify_nth_draw_timing(rest)?;
     let mut def = make_base();
     def.mode = TriggerMode::Drawn;
-    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
+    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n, comparator });
     def.condition = timing_condition(timing);
     Some((TriggerMode::Drawn, def))
 }
@@ -25664,9 +25794,8 @@ fn try_parse_discard_trigger(
         // process_triggers scans the Discarded event, complete_discard_to_graveyard has
         // already moved the card hand->graveyard (CR 701.9a), so the trigger must
         // function from the graveyard it lands in (the same off-zone seam Necropotence-
-        // style self-discard triggers use). Exile keeps it live under a madness/RIP-class
-        // redirect (a redirected discard is still a discard).
-        def.trigger_zones = vec![Zone::Graveyard, Zone::Exile];
+        // style self-discard triggers use).
+        def.trigger_zones = DISCARDED_SELF_TRIGGER_ZONES.to_vec();
         return Some((TriggerMode::Discarded, def));
     }
 
@@ -25694,7 +25823,7 @@ fn try_parse_discard_trigger(
     if is_discarded_self_reference(after_verb) {
         def.mode = TriggerMode::Discarded;
         def.valid_card = Some(TargetFilter::SelfRef);
-        def.trigger_zones = vec![Zone::Graveyard, Zone::Exile];
+        def.trigger_zones = DISCARDED_SELF_TRIGGER_ZONES.to_vec();
         return Some((TriggerMode::Discarded, def));
     }
 

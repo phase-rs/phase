@@ -5,9 +5,11 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::bytes::complete::take_until;
+use nom::bytes::complete::{take_until, take_while1};
 use nom::character::complete::{multispace1, satisfy};
-use nom::combinator::{cut, eof, map, map_opt, not, opt, peek, recognize, value, verify};
+use nom::combinator::{
+    all_consuming, cut, eof, map, map_opt, not, opt, peek, recognize, value, verify,
+};
 use nom::multi::many0;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -32,14 +34,14 @@ use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     is_any_target_filter, AbilityCondition, AggregateFunction, AttachmentReferent,
     AttackedYouScope, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
-    CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel, DamageGroupKey,
-    DamageKindFilter, FilterProp, NumberQuality, ObjectProperty, ObjectScope, Parity, PlayerFilter,
-    PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter,
-    TypedFilter, ZoneRef,
+    CommanderOwnership, Comparator, ControllerRef, CountScope, CyclingHistoryWindow, DamageChannel,
+    DamageGroupKey, DamageKindFilter, FilterProp, NumberQuality, ObjectProperty, ObjectScope,
+    Parity, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr,
+    QuantityRef, SharedQuality, SharedQualityRelation, StaticCondition, TargetFilter,
+    TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
-use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::counter::CounterMatch;
 use crate::types::event_kinds::PlayerActionKind;
 use crate::types::game_state_kinds::DayNight;
 use crate::types::keywords::Keyword;
@@ -195,7 +197,86 @@ pub fn parse_condition(input: &str) -> OracleResult<'_, StaticCondition> {
 ///
 /// Useful when the prefix has already been consumed by the caller.
 pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    alt((parse_condition_connective, parse_single_inner_condition)).parse(input)
+    alt((
+        parse_named_game_cycling_condition,
+        parse_current_turn_cycling_condition,
+        parse_condition_connective,
+        parse_single_inner_condition,
+    ))
+    .parse(input)
+}
+
+fn parse_cycling_history_prefix(input: &str) -> OracleResult<'_, &str> {
+    preceded(parse_controller_action_history_subject, tag("cycled ")).parse(input)
+}
+
+pub(crate) fn parse_named_cycling_head(input: &str) -> OracleResult<'_, &str> {
+    preceded(parse_cycling_history_prefix, tag("a card named ")).parse(input)
+}
+
+/// CR 109.5 + CR 702.29a + CR 702.29f: Count the controller's completed
+/// cycling activations, including typecycling, in the current turn.
+fn parse_current_turn_cycling_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, (threshold, comparator)) = terminated(
+        preceded(
+            parse_cycling_history_prefix,
+            verify(parse_numeric_threshold_suffix, |(_, cmp)| {
+                *cmp == Comparator::GE
+            }),
+        ),
+        (tag(" cards "), tag("this turn"), peek(alt((tag(","), eof)))),
+    )
+    .parse(input)?;
+    let value = i32::try_from(threshold).map_err(|_| oracle_err(input))?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CardsCycled {
+                    scope: CountScope::Controller,
+                    window: CyclingHistoryWindow::ThisTurn,
+                    name: None,
+                },
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value },
+        },
+    ))
+}
+
+/// CR 109.5 + CR 608.2h: the trigger controller's history is read at resolution.
+pub(crate) fn parse_named_game_cycling_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (name_input, _) = parse_named_cycling_head(input)?;
+    let Some((candidate, rest, threshold, comparator, window)) =
+        scan_at_word_boundaries(name_input, |candidate| {
+            let (rest, (threshold, comparator)) = parse_numeric_threshold_suffix(candidate)?;
+            let (rest, window) =
+                preceded(tag(" times this "), take_while1(char::is_alphabetic)).parse(rest)?;
+            Ok((rest, (candidate, rest, threshold, comparator, window)))
+        })
+    else {
+        return Err(oracle_err(name_input));
+    };
+    if comparator != Comparator::GE
+        || all_consuming(tag::<_, _, OracleError<'_>>("game"))
+            .parse(window)
+            .is_err()
+    {
+        return Err(oracle_err(candidate));
+    }
+    peek(alt((tag(","), eof))).parse(rest)?;
+    let name_end = name_input.len() - candidate.len();
+    let lhs = nom_quantity::named_game_cycling_quantity(&name_input[..name_end])
+        .ok_or_else(|| oracle_err(name_input))?;
+    let value = i32::try_from(threshold).map_err(|_| oracle_err(candidate))?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs: QuantityExpr::Fixed { value },
+        },
+    ))
 }
 
 /// CR 608.2c: the logical connective axis of a game-state condition —
@@ -5039,7 +5120,7 @@ fn type_filter_every_branch_matches(
 
 /// CR 110.4: a typed axis is permanent when its core type is one of the six
 /// permanent types; `TypeFilter::Permanent` is the direct spelling.
-fn type_filter_is_permanent(type_filter: &TypeFilter) -> bool {
+pub(crate) fn type_filter_is_permanent(type_filter: &TypeFilter) -> bool {
     matches!(type_filter, TypeFilter::Permanent)
         || type_filter_to_core_type(type_filter).is_some_and(CoreType::is_permanent_type)
 }
@@ -5426,7 +5507,7 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
 ///
 /// CR 603.4: Intervening-if conditions are evaluated as written — both
 /// idioms are grammatically equivalent `>= N` thresholds.
-fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
+pub(crate) fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
     alt((
         // "N or more "
         |i| {
@@ -7013,7 +7094,7 @@ pub(crate) fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
 
 /// CR 102.2 + CR 102.3: Recognize opponent possessive prefixes. Shared
 /// combinator used by zone-count parsing and life-total condition parsing.
-fn parse_opponent_possessive(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_opponent_possessive(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((
@@ -7424,6 +7505,11 @@ fn parse_source_in_zone_condition(input: &str) -> OracleResult<'_, StaticConditi
         value(false, tag(" is")),
     ))
     .parse(rest)?;
+    // CR 113.6b + CR 603.4: "still" is a temporal qualifier on the same
+    // source-zone predicate, not a new subject or event anaphor. Keep it in
+    // this shared production so every supported zone and polarity accepts the
+    // same grammar without widening the source token set.
+    let (rest, _) = opt(tag(" still")).parse(rest)?;
     // CR 701.13a + CR 113.6b: passive "is exiled" is equivalent to "is in
     // exile" for source-referential intervening-if gates (Cosima, God of the
     // Voyage's granted landfall trigger: "if ~ is exiled"). Match the leading
@@ -7469,19 +7555,13 @@ fn parse_zone_list_separator(input: &str) -> OracleResult<'_, ()> {
 /// any pair of those zones ("~ is in the command zone or on the battlefield").
 fn parse_zone_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
-        // CR 702.62b: A card is suspended while it is in exile with a time
-        // counter on it. The "has suspend" component is guaranteed by cards
-        // that print this source-referential condition. Tried first so the
-        // generic zone-phrase parser does not misclassify "~ is suspended"
-        // as an unanchored "is" + zone match.
+        // CR 702.62b: state the functional zone and test the full live predicate.
         value(
             StaticCondition::And {
                 conditions: vec![
                     StaticCondition::SourceInZone { zone: Zone::Exile },
-                    StaticCondition::HasCounters {
-                        counters: CounterMatch::OfType(CounterType::Time),
-                        minimum: 1,
-                        maximum: None,
+                    StaticCondition::SourceMatchesFilter {
+                        filter: TargetFilter::suspended_card(None),
                     },
                 ],
             },
@@ -8875,14 +8955,18 @@ fn parse_player_action_this_turn_body(
 fn parse_player_action_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_opponent_action_this_turn,
-        preceded(
-            alt((
-                value((), (parse_youve, tag(" "))),
-                value((), tag("you have ")),
-                value((), tag("you ")),
-            )),
-            |i| parse_player_action_this_turn_body(i, PlayerScope::Controller),
-        ),
+        preceded(parse_controller_action_history_subject, |i| {
+            parse_player_action_this_turn_body(i, PlayerScope::Controller)
+        }),
+    ))
+    .parse(input)
+}
+
+fn parse_controller_action_history_subject(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), (parse_youve, tag(" "))),
+        value((), tag("you have ")),
+        value((), tag("you ")),
     ))
     .parse(input)
 }
@@ -9065,19 +9149,20 @@ fn parse_amount_threshold(input: &str) -> OracleResult<'_, (u32, Comparator)> {
             let (rest, n) = parse_number(rest)?;
             Ok((rest, (n, Comparator::GE)))
         },
-        // "N or more/less/fewer"
-        |i| {
-            let (rest, n) = parse_number(i)?;
-            let (rest, cmp) = alt((
-                value(Comparator::GE, tag(" or more")),
-                value(Comparator::LE, tag(" or fewer")),
-                value(Comparator::LE, tag(" or less")),
-            ))
-            .parse(rest)?;
-            Ok((rest, (n, cmp)))
-        },
+        parse_numeric_threshold_suffix,
     ))
     .parse(input)
+}
+
+fn parse_numeric_threshold_suffix(input: &str) -> OracleResult<'_, (u32, Comparator)> {
+    let (rest, n) = parse_number(input)?;
+    let (rest, cmp) = alt((
+        value(Comparator::GE, tag(" or more")),
+        value(Comparator::LE, tag(" or fewer")),
+        value(Comparator::LE, tag(" or less")),
+    ))
+    .parse(rest)?;
+    Ok((rest, (n, cmp)))
 }
 
 /// CR 106.3 + CR 601.2h + CR 603.4: Parse
@@ -14498,6 +14583,71 @@ mod tests {
                 }),
             },
         );
+    }
+
+    /// CR 113.6b + CR 603.4: the optional "still" qualifier belongs to the
+    /// shared source-zone production. The matrix keeps the zone vocabulary and
+    /// qualifier rules composable rather than adding a battlefield-only arm.
+    #[test]
+    fn source_zone_still_matrix_preserves_all_supported_zones() {
+        let cases = [
+            ("~ is still on the battlefield", Zone::Battlefield),
+            ("~ is still in your graveyard", Zone::Graveyard),
+            ("~ is still in exile", Zone::Exile),
+            ("~ is still in your hand", Zone::Hand),
+            ("~ is still in your library", Zone::Library),
+            ("~ is still in the command zone", Zone::Command),
+        ];
+        for (text, zone) in cases {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "remainder for {text:?}");
+            assert_eq!(
+                condition,
+                StaticCondition::SourceInZone { zone },
+                "condition for {text:?}"
+            );
+        }
+    }
+
+    /// CR 113.6c: negated source-zone forms retain their polarity while using
+    /// the same optional qualifier and zone matrix as affirmative forms.
+    #[test]
+    fn negated_source_zone_still_matrix_wraps_in_not() {
+        let cases = [
+            ("~ isn't still on the battlefield", Zone::Battlefield),
+            ("~ isn't still in your graveyard", Zone::Graveyard),
+            ("~ isn't still in exile", Zone::Exile),
+            ("~ isn't still in your hand", Zone::Hand),
+            ("~ isn't still in your library", Zone::Library),
+            ("~ isn't still in the command zone", Zone::Command),
+        ];
+        for (text, zone) in cases {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "remainder for {text:?}");
+            assert_eq!(
+                condition,
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::SourceInZone { zone }),
+                },
+                "condition for {text:?}"
+            );
+        }
+    }
+
+    /// CR 608.2c: source-zone grammar is source-referential only; target and
+    /// event anaphors must not be accepted by the shared production.
+    #[test]
+    fn source_zone_still_rejects_target_and_event_anaphors() {
+        for text in [
+            "target creature is still on the battlefield",
+            "that creature is still on the battlefield",
+            "this spell is still in your graveyard",
+        ] {
+            assert!(
+                parse_source_in_zone_condition(text).is_err(),
+                "non-source anaphor must be rejected: {text:?}"
+            );
+        }
     }
 
     // --- parse_reflexive_conditional_connector (CR 603.12 / 608.2c) ---
@@ -29148,5 +29298,102 @@ mod intervening_if_state_condition_tests {
             ObjectReferentNoun::Creature,
             &TargetFilter::Typed(TypedFilter::creature())
         ));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn named_cycling_guard_requires_a_complete_whole_game_minimum() {
+    use crate::types::ability::CyclingHistoryWindow;
+
+    for (guard, name, minimum) in [
+        (
+            "you've cycled a card named Yidaro, Wandering Monster four or more times this game",
+            "yidaro, wandering monster",
+            4,
+        ),
+        // No printed card has this wording. Yidaro, Wandering Monster is the nearest printed case.
+        (
+            "you have cycled a card named Street Wraith seven or more times this game",
+            "street wraith",
+            7,
+        ),
+    ] {
+        let lower = guard.to_lowercase();
+        let (rest, parsed) = parse_inner_condition(&lower).expect(guard);
+        assert!(rest.is_empty(), "{guard}");
+        assert_eq!(
+            parsed,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CardsCycled {
+                        scope: CountScope::Controller,
+                        window: CyclingHistoryWindow::ThisGame,
+                        name: Some(name.into()),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: minimum },
+            },
+            "{guard}"
+        );
+    }
+    // No printed card has these adversarial shapes. Yidaro, Wandering Monster
+    // is the nearest printed case.
+    for malformed in [
+        "you cycled a card named four or more times this game",
+        "you cycled a card named ~ four or more times this game",
+        "you cycled a card named Street Wraith in your graveyard four or more times this game",
+        "you cycled a card named Street Wraith many or more times this game",
+        "you cycled a card named Street Wraith four or more times this gameplay",
+        "you cycled a card named Street Wraith four or more times this game during your turn",
+    ] {
+        assert!(parse_inner_condition(malformed).is_err(), "{malformed}");
+    }
+}
+
+#[test]
+fn unrestricted_cycling_guard_requires_a_complete_current_turn_minimum() {
+    // No printed card has the altered threshold, truncated return instruction, or
+    // malformed guard shapes below. Spellpyre Phoenix is the nearest printed card
+    // (CR 603.4 intervening-if).
+    for (input, rest, value) in [
+        (
+            "you cycled two or more cards this turn, return this card from your graveyard to your hand.",
+            ", return this card from your graveyard to your hand.",
+            2,
+        ),
+        (
+            "you cycled two or more cards this turn, return this card",
+            ", return this card",
+            2,
+        ),
+        ("you cycled three or more cards this turn", "", 3),
+    ] {
+        assert_eq!(
+            parse_inner_condition(input),
+            Ok((
+                rest,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::CardsCycled {
+                            scope: CountScope::Controller,
+                            window: CyclingHistoryWindow::ThisTurn,
+                            name: None,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value },
+                }
+            )),
+        );
+    }
+    for guard in [
+        "you cycled two or more cards this turnip",
+        "you cycled two or more cards this game",
+        "you cycled two or more cards this turn with flying",
+        "you cycled two or fewer cards this turn",
+    ] {
+        assert!(parse_inner_condition(guard).is_err(), "{guard}");
     }
 }

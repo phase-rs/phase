@@ -856,6 +856,14 @@ pub struct ParseContext {
     /// printed abilities (CR 607.2d). Mirrors `chosen_player_count` as a
     /// parse-time accumulator (not serialized).
     pub pending_choice_type: Option<crate::types::ability::ChoiceType>,
+    /// CR 201.4a + CR 608.2c: the characteristic printed on the most recent
+    /// "choose a <characteristic> card name" instruction of this effect chain
+    /// ("nonland" → `TypeFilter::Non(Land)`), which `ChoiceType::CardName`
+    /// cannot carry. A later "… with that name" consumer that would let an
+    /// answer outside the characteristic act fails closed while this is
+    /// `Some`. Threaded across chunks beside `pending_choice_type`; parse-time
+    /// accumulator, never serialized.
+    pub pending_card_name_characteristic: Option<crate::types::ability::TypeFilter>,
     /// CR 105.4: gate for the printed chosen-colour object-filter qualifier.
     /// See `ChosenColorQualifierScope`, including its clone-inheritance rule.
     pub chosen_color_qualifier: ChosenColorQualifierScope,
@@ -1417,6 +1425,7 @@ impl ParseContext {
             relative_player_scope: self.relative_player_scope.clone(),
             declared_player_scope: self.declared_player_scope.clone(),
             prior_player_declaration: self.prior_player_declaration,
+            trigger_condition_scope: self.trigger_condition_scope,
             ..Self::default()
         }
     }

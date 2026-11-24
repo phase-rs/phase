@@ -5294,14 +5294,7 @@ mod oversized_publication {
     }
 
     fn card_db() -> engine::database::card_db::CardDatabase {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../engine/tests/fixtures/integration_cards.json.gz"
-        );
-        engine::database::card_db::CardDatabase::from_export_reader(flate2::read::GzDecoder::new(
-            std::io::BufReader::new(std::fs::File::open(path).unwrap()),
-        ))
-        .unwrap()
+        engine::database::card_db::CardDatabase::from_integration_fixture().unwrap()
     }
 
     /// Smaug + Mayhem Devil with Treasure mana: each Treasure sacrificed for

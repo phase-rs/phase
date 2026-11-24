@@ -494,6 +494,20 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 101.4c: choose which of this player's simultaneous replacement
+        // decisions to make first; each object is one decision.
+        WaitingFor::ReplacementDecisionOrder { player, objects } => objects
+            .iter()
+            .map(|&object| {
+                candidate(
+                    GameAction::SelectCards {
+                        cards: vec![object],
+                    },
+                    TacticalClass::Replacement,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::MoveCountersDistribution {
             player,
             available,
@@ -987,6 +1001,7 @@ fn exact_owns_candidate_domain(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::MeldAttackTargetChoice { .. }
             | WaitingFor::EntryAttackTargetChoice { .. }
             | WaitingFor::EntryControllerChoice { .. }
+            | WaitingFor::ReplacementDecisionOrder { .. }
             | WaitingFor::ChooseAnnouncingOpponent { .. }
             | WaitingFor::ChooseGiftRecipient { .. }
             | WaitingFor::MoveCountersDistribution { .. }
@@ -1015,6 +1030,7 @@ pub fn candidate_actions_broad_with_probe(
         | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::EntryControllerChoice { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::MoveCountersDistribution { .. }
@@ -3533,13 +3549,10 @@ pub fn candidate_actions_broad_with_probe(
             attack_target,
             ..
         } => {
-            let mut remaining = *total_damage;
-            let mut assignments = Vec::new();
-            for slot in blockers {
-                let assign = remaining.min(slot.lethal_minimum);
-                assignments.push((slot.blocker_id, assign));
-                remaining = remaining.saturating_sub(assign);
-            }
+            use crate::game::combat::TrampleKind;
+            use crate::game::combat_damage::{lethal_first_split, ExcessRoute};
+            use crate::types::game_state::CombatDamageSplit;
+
             let has_recipient = state
                 .combat
                 .as_ref()
@@ -3552,39 +3565,37 @@ pub fn candidate_actions_broad_with_probe(
                 .and_then(|info| {
                     info.resolve_damage_target(
                         state,
-                        *trample == Some(crate::game::combat::TrampleKind::OverPlaneswalkers),
+                        *trample == Some(TrampleKind::OverPlaneswalkers),
                     )
                 })
                 .is_some();
-            // CR 506.4c + CR 702.19b: without a current excess recipient,
-            // ordinary trample still permits all damage to the blockers.
-            if (trample.is_none() || !has_recipient) && remaining > 0 {
-                if let Some(last) = assignments.last_mut() {
-                    last.1 += remaining;
-                    remaining = 0;
+            let route = match (trample, attack_target) {
+                (None, _) => ExcessRoute::ToBlockers,
+                (Some(TrampleKind::Standard | TrampleKind::OverPlaneswalkers), _)
+                    if !has_recipient =>
+                {
+                    ExcessRoute::ToBlockers
                 }
-            }
-            // CR 702.19c: For trample-over-PW attacking a PW, split excess:
-            // loyalty-worth to PW, remainder to controller.
-            let (trample_dmg, ctrl_dmg) = if *trample
-                == Some(crate::game::combat::TrampleKind::OverPlaneswalkers)
-                && matches!(
-                    attack_target,
-                    crate::game::combat::AttackTarget::Planeswalker(_)
-                ) {
-                let loyalty = pw_loyalty.unwrap_or(0);
-                let to_pw = remaining.min(loyalty);
-                let to_ctrl = remaining.saturating_sub(to_pw);
-                (to_pw, to_ctrl)
-            } else {
-                (if trample.is_some() { remaining } else { 0 }, 0)
+                (Some(TrampleKind::OverPlaneswalkers), AttackTarget::Planeswalker(_)) => {
+                    ExcessRoute::OverPlaneswalker {
+                        loyalty: pw_loyalty.unwrap_or(0),
+                    }
+                }
+                (Some(TrampleKind::Standard | TrampleKind::OverPlaneswalkers), _) => {
+                    ExcessRoute::Trample
+                }
             };
+            let CombatDamageSplit {
+                assignments,
+                trample_damage,
+                controller_damage,
+            } = lethal_first_split(*total_damage, blockers, route);
             let mut candidates = vec![candidate(
                 GameAction::AssignCombatDamage {
                     mode: crate::types::game_state::CombatDamageAssignmentMode::Normal,
                     assignments,
-                    trample_damage: trample_dmg,
-                    controller_damage: ctrl_dmg,
+                    trample_damage,
+                    controller_damage,
                 },
                 TacticalClass::Selection,
                 Some(*player),
@@ -3711,6 +3722,7 @@ pub fn candidate_actions_broad_with_probe(
         WaitingFor::RetargetChoice {
             player,
             stack_entry_index,
+            stack_entry_id: _,
             scope,
             current_targets,
             slots,
@@ -4361,6 +4373,9 @@ fn retarget_proposals(
             entry,
             stack_ability,
             &bindings,
+            Some(crate::game::targeting::StackTriggerContext::for_entry(
+                state, entry,
+            )),
         );
         // CR 115.7a + INVARIANT SC (phase-rs/phase#8355 round-8 review finding
         // H1, second pass): mirrors `engine::apply_retarget`'s same guard — a
@@ -4549,6 +4564,7 @@ pub fn retarget_actions(
             state,
             &crate::game::engine::RetargetProposal {
                 stack_entry_index,
+                stack_entry_id: state.stack.get(stack_entry_index).map(|entry| entry.id),
                 scope,
                 current_targets,
                 slots,
@@ -4591,6 +4607,7 @@ pub(crate) fn retarget_response_exists(
             state,
             &crate::game::engine::RetargetProposal {
                 stack_entry_index,
+                stack_entry_id: state.stack.get(stack_entry_index).map(|entry| entry.id),
                 scope,
                 current_targets,
                 slots,
@@ -4925,97 +4942,24 @@ pub(crate) fn priority_actions_with_probe(
             }
         }
 
-        // CR 602.1: Hand-activated abilities (Cycling per CR 702.29a, etc.)
-        for &obj_id in &state.players[player.0 as usize].hand {
-            if let Some(obj) = state.objects.get(&obj_id) {
-                // CR 108.4 + CR 108.4a: a card in a hand represents neither a
-                // permanent nor a spell, so it has no controller — "if anything
-                // asks for the controller of a card that doesn't have one, use
-                // its owner instead". `obj.controller` is NOT cleared by every
-                // zone change (only a battlefield exit reverts it), so scoping a
-                // hand scan by `controller` asks for a value the rules say does
-                // not exist. Owner is the rule and it is also what this
-                // owner-keyed hand list already means.
-                if obj.owner == player {
-                    for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
-                        if ability_def.kind != crate::types::ability::AbilityKind::Activated
-                            || ability_def.activation_zone != Some(crate::types::zones::Zone::Hand)
-                            || crate::game::mana_abilities::is_mana_ability(&ability_def)
-                        {
-                            continue;
-                        }
-                        // CR 602.2b + CR 601.2g: the payment mode the reducer
-                        // honours, as for the battlefield loop above.
-                        if let Some(payment_mode) = casting::activation_offer_payment_mode(
-                            state,
-                            player,
-                            obj_id,
-                            i,
-                            &activation_restriction_gates,
-                        ) {
-                            actions.push(candidate(
-                                GameAction::ActivateAbility {
-                                    source_id: obj_id,
-                                    ability_index: i,
-                                    payment_mode,
-                                },
-                                TacticalClass::Ability,
-                                Some(player),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-
-        // CR 113.6b + CR 602.2: Graveyard-activated abilities (Teacher's Pest,
-        // Bloodsoaked Champion, Dread Wanderer, etc.). CR 113.6b: an ability
-        // whose text states it functions from the graveyard can be activated
-        // from there. CR 602.2: to activate an ability is to put it onto the
-        // stack and pay its costs. Non-mana graveyard activations are
-        // suppressed by split second, mirroring the hand-zone loop above.
-        for &obj_id in state.graveyard_of(player) {
-            if let Some(obj) = state.objects.get(&obj_id) {
-                // CR 602.2: "Only an object's controller (or its owner, if it
-                // doesn't have a controller) can activate its activated ability
-                // unless the object specifically says otherwise." Nothing in a
-                // graveyard says otherwise here, so the restriction stands;
-                // `analysis/resource.rs` is where that exception is honored, via
-                // `activator_filter`. Restrict candidates to the acting player.
-                // CR 108.4 +
-                // CR 108.4a supply that owner fallback: a card in a graveyard is
-                // not a permanent or spell, so it has no controller, and CR 404.1
-                // puts it into its OWNER's graveyard. Owner is therefore the
-                // rules-correct scope for the flashback / unearth / escape class.
-                if obj.owner == player {
-                    for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
-                        if ability_def.kind != crate::types::ability::AbilityKind::Activated
-                            || ability_def.activation_zone
-                                != Some(crate::types::zones::Zone::Graveyard)
-                            || crate::game::mana_abilities::is_mana_ability(&ability_def)
-                        {
-                            continue;
-                        }
-                        // CR 602.2b + CR 601.2g: the payment mode the reducer
-                        // honours, as for the battlefield loop above.
-                        if let Some(payment_mode) = casting::activation_offer_payment_mode(
-                            state,
-                            player,
-                            obj_id,
-                            i,
-                            &activation_restriction_gates,
-                        ) {
-                            actions.push(candidate(
-                                GameAction::ActivateAbility {
-                                    source_id: obj_id,
-                                    ability_index: i,
-                                    payment_mode,
-                                },
-                                TacticalClass::Ability,
-                                Some(player),
-                            ));
-                        }
-                    }
+        for obj_id in super::off_battlefield_activation_sources(state, player) {
+            for i in super::ordinary_activation_indices(state, player, obj_id, None) {
+                if let Some(payment_mode) = casting::activation_offer_payment_mode(
+                    state,
+                    player,
+                    obj_id,
+                    i,
+                    &activation_restriction_gates,
+                ) {
+                    actions.push(candidate(
+                        GameAction::ActivateAbility {
+                            source_id: obj_id,
+                            ability_index: i,
+                            payment_mode,
+                        },
+                        TacticalClass::Ability,
+                        Some(player),
+                    ));
                 }
             }
         }
@@ -11078,6 +11022,7 @@ mod tests {
                         incarnation: 0,
                     },
                     origin: Zone::Library,
+                    departing_permanent: None,
                 },
                 MassLibraryOrderMember {
                     identity: ObjectIncarnationRef {
@@ -11085,6 +11030,7 @@ mod tests {
                         incarnation: 0,
                     },
                     origin: Zone::Library,
+                    departing_permanent: None,
                 },
             ],
         };

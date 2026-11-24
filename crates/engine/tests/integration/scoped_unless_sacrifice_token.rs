@@ -347,6 +347,10 @@ fn scoped_unless_sacrifice_resumes_after_a_graveyard_replacement_choice() {
 /// paused on P1's CR 616.1 ordering when the source's controller leaves. The
 /// resolution continues fully: P1's question stands and their sacrifice
 /// completes, but no token is created for the departed controller.
+///
+/// Rest in Peace is P2's, so the departure leaves both of P1's options in the
+/// game: had it left with P0, only Darksteel Colossus's replacement would
+/// remain and there would be no choice to make (CR 616.1, CR 800.4a).
 #[test]
 fn scoped_unless_sacrifice_finishes_a_payers_replacement_choice_after_controller_leaves() {
     let mut scenario = GameScenario::new_n_player(3, 42);
@@ -354,7 +358,7 @@ fn scoped_unless_sacrifice_finishes_a_payers_replacement_choice_after_controller
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
-    scenario.add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE);
+    scenario.add_enchantment_from_oracle(P2, "Rest in Peace", REST_IN_PEACE);
     let colossus = scenario
         .add_creature_from_oracle(P1, "Darksteel Colossus", 11, 11, DARKSTEEL_COLOSSUS)
         .id();

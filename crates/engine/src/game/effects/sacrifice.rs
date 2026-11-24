@@ -379,9 +379,9 @@ pub fn resolve(
         // CR 603.2 + CR 608.2k: An untargeted object anaphor on a triggered ability
         // (e.g. Slow Motion's "that player sacrifices that creature") names an object
         // carried by event context or attached host, not a target the controller chose,
-        // so `ability.targets` is empty. Resolve through `resolve_event_context_target`
-        // without falling back to `source_id` for unresolved ParentTarget.
-        crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+        // so `ability.targets` is empty. Resolve through the event-referent identity gate
+        // (CR 400.7) without falling back to `source_id` for unresolved ParentTarget.
+        crate::game::targeting::affected_event_context_target(state, ability, filter)
             .into_iter()
             .filter_map(|t| match t {
                 TargetRef::Object(id) => Some(id),
@@ -2306,6 +2306,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         }
     }

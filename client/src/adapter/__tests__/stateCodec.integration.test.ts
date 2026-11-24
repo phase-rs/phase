@@ -9,13 +9,12 @@
  *   src/adapter/__tests__/stateCodec.integration.test.ts
  * STATE_CODEC_CORPUS must be absolute. Unset visibly skips; configured missing
  * inputs fail. Requires generated engine_wasm.js/engine_wasm_bg.wasm and the
- * committed integration_cards.json.gz. No generated card data or mocks.
+ * committed integration_cards/. No generated card data or mocks.
  * Limits: 64 MiB corpus, 64 accepted actions, five checkpoints/four audiences.
  */
 import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
-import { gunzipSync } from "node:zlib";
 
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -26,6 +25,7 @@ import { readGameStartedFullCredentials } from "../../services/stateCodecSocket"
 import { PROTOCOL_VERSION, WebSocketAdapter } from "../ws-adapter";
 import { ServerDraftAdapter } from "../server-draft-adapter";
 import { AdapterError, type GameState } from "../types";
+import { integrationCardsExist, readIntegrationCardsJson } from "../../test/helpers/integrationCards";
 
 type ExactRow = { json: string; hash: string; revision?: string };
 type Checkpoint = {
@@ -54,10 +54,6 @@ const ENABLED = CORPUS_PATH !== undefined;
 const MAX_BYTES = 64 * 1024 * 1024;
 const WASM_JS = resolve(__dirname, "../../wasm/engine_wasm.js");
 const WASM_BINARY = resolve(__dirname, "../../wasm/engine_wasm_bg.wasm");
-const FIXTURE = resolve(
-  __dirname,
-  "../../../../crates/engine/tests/fixtures/integration_cards.json.gz",
-);
 const MILESTONES = [
   "initial",
   "post_mulligan",
@@ -107,10 +103,11 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
     if (!CORPUS_PATH || !isAbsolute(CORPUS_PATH)) {
       throw new Error("STATE_CODEC_CORPUS must be a nonempty absolute path");
     }
-    for (const path of [CORPUS_PATH, WASM_JS, WASM_BINARY, FIXTURE]) {
+    for (const path of [CORPUS_PATH, WASM_JS, WASM_BINARY]) {
       if (!existsSync(path)) throw new Error(`Required portability input missing: ${path}`);
       if (!statSync(path).isFile()) throw new Error(`Required portability input is not a file: ${path}`);
     }
+    if (!integrationCardsExist()) throw new Error("Required portability input missing: the integration card fixture");
     expect(statSync(CORPUS_PATH).size, "corpus byte cap").toBeLessThanOrEqual(MAX_BYTES);
     corpus = JSON.parse(await readFile(CORPUS_PATH, "utf8")) as Corpus;
     expect(corpus.schema_version).toBe(1);
@@ -137,7 +134,7 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
     wasm = await import("@wasm/engine");
     const module = await WebAssembly.compile(await readFile(WASM_BINARY));
     await wasm.default({ module_or_path: module });
-    expect(wasm.load_card_database(gunzipSync(await readFile(FIXTURE)).toString("utf8"))).toBeGreaterThan(0);
+    expect(wasm.load_card_database(await readIntegrationCardsJson())).toBeGreaterThan(0);
   }, 300_000);
 
   it("independently replays accepted actions across every milestone and audience", () => {

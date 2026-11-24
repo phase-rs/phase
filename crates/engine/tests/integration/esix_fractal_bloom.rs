@@ -50,11 +50,14 @@ use engine::types::card::CardFace;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{
+    GameState, PendingTokenSubstitute, TokenSubstituteChoice, WaitingFor,
+};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::proposed_event::ProposedEvent;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
@@ -780,14 +783,13 @@ fn an_opponents_esix_token_copy_is_a_legal_choice() {
 // V8 — the "that many" count survives the interactive round-trip
 // ---------------------------------------------------------------------------
 
-/// V8 — the replaced event's `count` is latched at the stamp site and is still
-/// live when the copy tail resolves, ACROSS the `CopyTargetChoice` round-trip.
+/// V8 — "that many" is the parked event's own `count`, kept on the batch the
+/// substitute rewrites, ACROSS the `CopyTargetChoice` round-trip.
 ///
-/// The mid-prompt assertion is a direct probe: with the `CopyTargetChoice` still
-/// up, `post_replacement_token_substitution_count` must already read `Some(3)`.
-/// Revert the `is_copy_token_substitution` widening and Esix's
-/// `ChoosePermanent`-rooted tree stops matching at the stamp site, so the count
-/// is never written, the mid-prompt read is `None`, and the copy count collapses.
+/// The mid-prompt assertion is a direct probe: with the `CopyTargetChoice`
+/// still up, the parked replacement names the copy-source substitute and its
+/// event still counts 3. Revert the in-event rewrite and there is no parked
+/// substitute at this prompt at all.
 ///
 /// Three tokens, not one, so `count == 1` cannot pass vacuously.
 #[test]
@@ -810,11 +812,31 @@ fn that_many_count_survives_the_copy_source_round_trip() {
 
     // MID-PROMPT: taken before the handler retires anything.
     let _ = copy_token_source_targets(&runner);
+    let pending = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("the accept parks the copy-source substitute");
+    assert!(
+        matches!(
+            pending.token_substitute,
+            Some(PendingTokenSubstitute {
+                awaits: TokenSubstituteChoice::CopySource,
+                ..
+            })
+        ),
+        "the parked record names the copy-source substitute, got {:?}",
+        pending.token_substitute
+    );
+    let ProposedEvent::CreateToken { count, .. } = &pending.proposed else {
+        panic!(
+            "the parked event is the creation the substitute rewrites, got {:?}",
+            pending.proposed
+        );
+    };
     assert_eq!(
-        runner.state().post_replacement_token_substitution_count,
-        Some(3),
-        "the replaced event's count must be latched and still live while the \
-         copy-source prompt is up — this is the seam the widening feeds"
+        *count, 3,
+        "the parked event's count is still live while the copy-source prompt is up"
     );
 
     runner
@@ -827,7 +849,7 @@ fn that_many_count_survives_the_copy_source_round_trip() {
     assert_eq!(
         tokens_named(&runner, "Decoy Ox", P0).len(),
         3,
-        "the latched count drives the copy count after the round-trip"
+        "the event's own count drives the copy count after the round-trip"
     );
 }
 
@@ -965,9 +987,9 @@ fn window_resets_on_the_controllers_next_turn_only() {
 /// engine must not strand.
 ///
 /// CR 609.3: an effect does as much as possible. `find_copy_targets` comes back
-/// empty, so `apply_post_replacement_effect` returns `None` and NO
-/// `CopyTargetChoice` is raised — the empty-pool early return is the seam. The
-/// game must settle rather than park on a prompt nobody can answer.
+/// empty, so the substitute is decided at the accept (`Nothing`: it creates no
+/// tokens) and NO `CopyTargetChoice` is raised — the empty-pool decision is the
+/// seam. The game must settle rather than park on a prompt nobody can answer.
 ///
 /// This is the empty / no-legal-choice hostile row.
 #[test]
@@ -1114,13 +1136,9 @@ fn install_doubling_season(state: &mut GameState, controller: PlayerId) -> Objec
 /// gets only one opportunity to affect an event or any modified events that may
 /// replace that event."
 ///
-/// The substitute copies are themselves a token creation, so without the
-/// inherited applied set Esix would see them as a fresh `CreateToken` and
-/// re-prompt — compounding the copies. That applied set reaches the substitute
-/// batch through `state.post_replacement_token_choice_applied`: written by
-/// `continue_replacement_impl`'s copy-substitution branch, read by
-/// `token_copy::drain_copy_token_resolution` when it builds each batch's
-/// `ProposedEvent::CreateToken`.
+/// The substitute copies rewrite the event Esix modifies, and Esix is marked
+/// on that event as it applies — so there is no second event for it to see as
+/// a fresh `CreateToken`, and it cannot re-prompt and compound the copies.
 ///
 /// Multi-authority hostile fixture: Doubling Season is a DIFFERENT source's
 /// mandatory doubler. CR 614.5 suppresses only Esix's own re-entry, so Doubling

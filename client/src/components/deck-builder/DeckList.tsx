@@ -18,14 +18,14 @@ import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 
 interface DeckListProps {
   deck: ParsedDeck;
-  onRemoveCard: (name: string, section: "main" | "sideboard") => void;
+  onRemoveCard: (entry: DeckEntry, section: "main" | "sideboard") => void;
   /** Adds one more copy of an existing entry, in place. See
    *  `CardEntryRowProps.onIncrement`. */
-  onIncrementCard: (name: string, section: "main" | "sideboard") => void;
+  onIncrementCard: (entry: DeckEntry, section: "main" | "sideboard") => void;
   /** CR 100.2a: engine-resolved copy-limit predicate paired with
    *  `onIncrementCard`. See `CardEntryRowProps.canIncrement`. */
   canIncrementCard: (name: string) => boolean;
-  onMoveCard: (name: string, from: "main" | "sideboard") => void;
+  onMoveCard: (entry: DeckEntry, from: "main" | "sideboard") => void;
   onImport: (deck: ParsedDeck) => void;
   onCardHover?: CardHoverHandler;
   format?: string;
@@ -34,7 +34,7 @@ interface DeckListProps {
   /** When provided, each main-deck row of a commander-eligible card renders a
    *  crown button that promotes the card to commander. Format-gated by the
    *  parent (DeckBuilder); MoveList/CardEntryRow stay format-agnostic. */
-  onSetAsCommander?: (name: string) => void;
+  onSetAsCommander?: (entry: DeckEntry) => void;
   isCommanderEligible?: (name: string) => boolean;
   /** Touch path for art selection — forwarded to each row's ✦ badge. */
   onOpenArtPicker?: (name: string, launcher: HTMLButtonElement) => void;
