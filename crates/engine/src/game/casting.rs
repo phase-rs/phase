@@ -5964,9 +5964,10 @@ struct ExilePermissionSource<'a> {
     own_exiles_of: Option<PlayerId>,
 }
 
-/// CR 113.6b + CR 406.6 + CR 406.2: Hot-path fast-exit predicate for every
-/// `ExileCastPermission` reader (cast discovery, cast admission ×2, land
-/// authorization). True only when NO pool scope can offer a card: both tracked
+/// CR 113.6b + CR 406.6 + CR 406.2: Hot-path fast-exit predicate for
+/// `ExileCastPermission` cast discovery (the per-card admission gates use the
+/// card-scoped `exile_permission_pools_cannot_offer` instead). True only when
+/// NO pool scope can offer a card: both tracked
 /// pools (`ThisTurn`, `Persistent`) are empty AND no exiled card carries any
 /// counters. The counter clause is sound for every `CounterLinked` matcher
 /// (`OfType` and `Any` alike): `count_in` sums the card's counter map, so zero
