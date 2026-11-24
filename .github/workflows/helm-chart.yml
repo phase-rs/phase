@@ -11,16 +11,17 @@ name: Helm chart
 # router-only change is exactly the case that assertion exists to catch, so
 # without this path the check would not run when it matters most. The script
 # asserts its own inputs are listed here, so the two cannot drift apart.
-# `client/deploy/phase-web/**` is here for the same reason: it holds the web
-# image's own nginx.conf and config.js renderer, which
-# tests/assert-web-image-defaults.sh holds to the chart's, and it asserts that
-# path is listed.
+# `client/deploy/phase-web/**` and `deploy/phase-web.Dockerfile` are here for the
+# same reason: they hold the web image's own nginx.conf and config.js renderer
+# and install them, which tests/assert-web-image-defaults.sh holds to the
+# chart's, and it asserts both paths are listed.
 on:
   pull_request:
     paths:
       - 'deploy/helm/**'
       - 'crates/phase-server/src/main.rs'
       - 'client/deploy/phase-web/**'
+      - 'deploy/phase-web.Dockerfile'
       - '.github/workflows/helm-chart.yml'
   push:
     branches: [main]
@@ -28,6 +29,7 @@ on:
       - 'deploy/helm/**'
       - 'crates/phase-server/src/main.rs'
       - 'client/deploy/phase-web/**'
+      - 'deploy/phase-web.Dockerfile'
       - '.github/workflows/helm-chart.yml'
 
 permissions:

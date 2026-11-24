@@ -66,6 +66,21 @@ image_root='root /tmp/phase-web;'
 [ "$(grep -cF "$image_root" "$image_dir/nginx.conf")" -eq 1 ] ||
   fail "client/deploy/phase-web/nginx.conf must serve /config.js from /tmp/phase-web, where 40-phase-web-config.sh writes it"
 
+# ── The image actually uses these files, and they agree on the path ─────────
+# Everything below checks files; these lines check that the Dockerfile installs
+# them where nginx and its entrypoint look, and that the script writes config.js
+# where the nginx.conf serves it from. Either one moving alone would ship an
+# image that answers /config.js with a 404 while every other check passed.
+dockerfile="$repo_root/deploy/phase-web.Dockerfile"
+for copy in \
+  "COPY --chmod=0644 deploy/phase-web/nginx.conf /etc/nginx/nginx.conf" \
+  "COPY --chmod=0755 deploy/phase-web/40-phase-web-config.sh /docker-entrypoint.d/"; do
+  grep -qxF "$copy" "$dockerfile" ||
+    fail "deploy/phase-web.Dockerfile no longer has '$copy', so the image would not use the file this test checks"
+done
+grep -qxF 'out_dir=${PHASE_WEB_CONFIG_DIR:-/tmp/phase-web}' "$image_dir/40-phase-web-config.sh" ||
+  fail "40-phase-web-config.sh must write to /tmp/phase-web by default, where the image's nginx.conf serves /config.js from ($image_root)"
+
 directives "$work_dir/chart-nginx.conf" | sed "s|$chart_root|$image_root|" >"$work_dir/chart.directives"
 directives "$image_dir/nginx.conf" >"$work_dir/image.directives"
 if ! diff -u "$work_dir/chart.directives" "$work_dir/image.directives" >"$work_dir/nginx.diff"; then
@@ -147,8 +162,10 @@ x" "PHASE_PREVIEW_SITE_URL=$preview_url")" = "{\"previewSiteUrl\":\"$preview_url
 # ── This test must actually run when its inputs change ──────────────────────
 workflow="$repo_root/.github/workflows/helm-chart.yml"
 if [ -f "$workflow" ]; then
-  [ "$(grep -cxF "      - 'client/deploy/phase-web/**'" "$workflow")" -eq 2 ] ||
-    fail "${workflow#"$repo_root/"} must list 'client/deploy/phase-web/**' under both pull_request and push paths, or a change there skips this check"
+  for input in 'client/deploy/phase-web/**' 'deploy/phase-web.Dockerfile'; do
+    [ "$(grep -cxF "      - '$input'" "$workflow")" -eq 2 ] ||
+      fail "${workflow#"$repo_root/"} must list '$input' under both pull_request and push paths, or a change there skips this check"
+  done
 fi
 
 echo "assert-web-image-defaults: PASS"

@@ -69,5 +69,5 @@ mv "$tmp" "$out_dir/config.js"
 if [ -n "$set_keys" ]; then
   entrypoint_log "wrote $out_dir/config.js, setting:$set_keys"
 else
-  entrypoint_log "wrote $out_dir/config.js with no overrides: the client keeps its build-time defaults"
+  entrypoint_log "wrote $out_dir/config.js with no keys: no PHASE_* variable is set"
 fi
