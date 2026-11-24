@@ -616,15 +616,15 @@ fn declaration_offerable_reserving(
     if !payable(&[]) {
         return Ok(false);
     }
-    // CR 601.2f-h + CR 118.3: the additional cost's objects and the mana
-    // abilities' costs are paid from the same finite pool; CR 601.2g: mana
-    // abilities are activated before costs are paid, so the held objects must
-    // survive them. The mana is judged again with each assignment of the
-    // declared cost's objects held, where a mana ability could spend them.
+    // CR 601.2f-h + CR 118.3: the additional cost's hand and graveyard cards
+    // and the mana abilities' costs are paid from the same finite pool; CR
+    // 601.2g: mana abilities are activated before costs are paid, so the held
+    // cards must survive them. The mana is judged again with each assignment
+    // of the declared cost's cards held, where a mana ability could spend them.
     let Some(residual) = split.residual.as_ref() else {
         return Ok(true);
     };
-    let Some((legs, contended)) =
+    let Some((legs, fodder)) =
         contended_declaration_legs(state, player, pending.object_id, residual)
     else {
         return Ok(true);
@@ -635,67 +635,16 @@ fn declaration_offerable_reserving(
     // search does; the real payment decides.
     Ok(assign_reserved_legs(
         &legs,
-        &|id| !contended.contains(&id),
+        &|id| !fodder.contains(&id),
         &mut held,
         &mut explored,
         &payable,
     ) != Some(false))
 }
 
-/// CR 118.3 + CR 601.2h: the legs of a declared additional cost whose objects
-/// must still be there beside the mana payment: its counted sacrifice, exile
-/// and return legs over battlefield objects, and its hand and graveyard legs
-/// over cards in `fodder`. A tap leg isn't reserved here (the cast's
-/// `deferred_tapped_permanents` already publish it).
-fn declaration_reserved_legs(
-    state: &GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    cost: &AbilityCost,
-    fodder: &HashSet<ObjectId>,
-) -> Vec<super::cost_payability::ReservableLeg> {
-    let legs = match cost {
-        AbilityCost::Composite { costs } => costs.as_slice(),
-        leaf => std::slice::from_ref(leaf),
-    };
-    let mut reserved: Vec<_> =
-        super::cost_payability::reservable_battlefield_legs(state, player, object_id, legs)
-            .into_iter()
-            .filter(|leg| leg.reserved_use == super::casting::ReservedUse::Present)
-            .collect();
-    reserved.extend(super::cost_payability::reservable_card_legs(
-        state, player, object_id, legs, fodder,
-    ));
-    reserved
-}
-
-/// CR 118.3 + CR 605.1a: the battlefield objects whose holding for another leg
-/// of a cost can change what `player`'s mana abilities make: every permanent
-/// when some mana ability uses another object, reads the board or a tap-payment
-/// mode applies (or the layers are unsettled), else the mana sources themselves.
-fn mana_contended_battlefield(
-    state: &GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-) -> HashSet<ObjectId> {
-    let reach = super::mana_sources::player_mana_ability_reach(state, player);
-    if reach.other_objects != super::mana_sources::OtherObjectUse::None
-        || reach.production == super::mana_sources::ProductionAmount::BoardDependent
-        || state.layers_dirty.is_dirty()
-        || super::casting::spell_tap_payment_mode(state, player, object_id).is_some()
-    {
-        state.battlefield.iter().copied().collect()
-    } else {
-        super::mana_sources::activatable_mana_source_selections(state, player)
-            .iter()
-            .map(|selection| selection.source.object_id)
-            .collect()
-    }
-}
-
-/// CR 118.3 + CR 601.2g-h: whether some object `cost`, an additional cost of
-/// the spell `object_id`, would be paid with is one a mana ability of `player`
-/// could also use, so the two must be judged together
+/// CR 118.3 + CR 601.2g-h: whether some hand or graveyard card `cost`, an
+/// additional cost of the spell `object_id`, would be paid with is one a mana
+/// ability of `player` could also spend, so the two must be judged together
 /// ([`required_declaration_offerable`]).
 pub(super) fn cost_contends_with_mana_abilities(
     state: &GameState,
@@ -706,10 +655,16 @@ pub(super) fn cost_contends_with_mana_abilities(
     contended_declaration_legs(state, player, object_id, cost).is_some()
 }
 
-/// CR 118.3 + CR 601.2g-h: the reserved legs of `cost`, an additional cost of
-/// the spell `object_id`, beside the objects a mana ability of `player` could
-/// also use (the contended battlefield objects and the card fodder). `None`
-/// when the cost has no such leg or none of its candidates is contended.
+/// CR 118.3 + CR 601.2g-h: the hand and graveyard legs of `cost`, an additional
+/// cost of the spell `object_id`, that share a card with the cost of a mana
+/// ability of `player`, beside those shared cards (the card fodder). `None`
+/// when the cost has no such leg.
+///
+/// Battlefield legs aren't held here. CR 601.2g-h: the engine lets a cast with
+/// a sacrifice leg reach its mana-ability window before the sacrifice is paid,
+/// and `mana_abilities::deferred_spell_sacrifice_reserved` refuses a mana
+/// ability that would use up the reserved permanent there; a tap leg is
+/// published by the cast's `deferred_tapped_permanents`.
 fn contended_declaration_legs(
     state: &GameState,
     player: PlayerId,
@@ -720,16 +675,13 @@ fn contended_declaration_legs(
     HashSet<ObjectId>,
 )> {
     let fodder = mana_sources::mana_ability_card_fodder(state, player);
-    let legs = declaration_reserved_legs(state, player, object_id, cost, &fodder);
-    if legs.is_empty() {
-        return None;
-    }
-    let mut contended = mana_contended_battlefield(state, player, object_id);
-    contended.extend(fodder);
-    legs.iter()
-        .flat_map(|leg| &leg.candidates)
-        .any(|id| contended.contains(id))
-        .then_some((legs, contended))
+    let legs = match cost {
+        AbilityCost::Composite { costs } => costs.as_slice(),
+        leaf => std::slice::from_ref(leaf),
+    };
+    let legs =
+        super::cost_payability::reservable_card_legs(state, player, object_id, legs, &fodder);
+    (!legs.is_empty()).then_some((legs, fodder))
 }
 
 fn continue_after_declared_mana_split(
@@ -2140,6 +2092,7 @@ fn reserved_alternative_verdict(
     pricing: &super::casting::CastPricing<'_>,
     legs: &[super::cost_payability::ReservableLeg],
 ) -> ReservationVerdict {
+    let reach = super::mana_sources::player_mana_ability_reach(state, player);
     let totals = super::casting::cast_mana_totals(
         state,
         player,
@@ -2165,7 +2118,19 @@ fn reserved_alternative_verdict(
     if legs.is_empty() {
         return ReservationVerdict::Witness;
     }
-    let mana_sources = mana_contended_battlefield(state, player, object_id);
+    let mana_sources: HashSet<ObjectId> = if reach.other_objects
+        != super::mana_sources::OtherObjectUse::None
+        || reach.production == super::mana_sources::ProductionAmount::BoardDependent
+        || state.layers_dirty.is_dirty()
+        || super::casting::spell_tap_payment_mode(state, player, object_id).is_some()
+    {
+        state.battlefield.iter().copied().collect()
+    } else {
+        super::mana_sources::activatable_mana_source_selections(state, player)
+            .iter()
+            .map(|selection| selection.source.object_id)
+            .collect()
+    };
     let mut held = Vec::new();
     let mut explored = 0;
     match assign_reserved_legs(

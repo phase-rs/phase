@@ -23406,10 +23406,11 @@ fn can_cast_prepared_now_with_probe(
             return false;
         }
         // CR 601.2f-h + CR 118.3 + CR 118.10: when a mana ability's cost could
-        // use up an object this cost is paid with (Rubble Rouser's graveyard
-        // exile beside Abhorrent Oculus, Blood Pet beside Village Rites), the
-        // two are judged together by the declaration-time authority. The
-        // contention gate keeps every other spell on the checks above.
+        // use up a hand or graveyard card this cost is paid with (Rubble
+        // Rouser's graveyard exile beside Abhorrent Oculus, Skirge Familiar's
+        // discard beside Thrill of Possibility), the two are judged together
+        // by the declaration-time authority. The contention gate keeps every
+        // other spell, and every battlefield leg, on the checks above.
         if casting_costs::cost_contends_with_mana_abilities(state, player, prepared.object_id, cost)
             && !casting_costs::required_declaration_offerable(
                 state,

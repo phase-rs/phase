@@ -1,15 +1,19 @@
 //! CR 601.2f-h + CR 118.3 + CR 118.10: a spell's additional cost and the costs
-//! of the mana abilities that pay for it draw on the same finite objects. A
-//! card exiled, discarded or sacrificed for the additional cost can't also pay
+//! of the mana abilities that pay for it draw on the same finite cards. A hand
+//! or graveyard card exiled or discarded for the additional cost can't also pay
 //! a mana ability's cost, so a cast whose mana is only reachable by spending
-//! those same objects isn't offered, and one that leaves enough of them is.
+//! those same cards isn't offered, and one that leaves enough of them is.
+//!
+//! Covered class: hand and graveyard legs. Battlefield legs (a sacrifice beside
+//! a self-sacrifice mana source) follow the deferred-sacrifice model and are
+//! pinned by `issue_5252_additional_sacrifice_after_mana_abilities.rs`.
 //!
 //! Oracle text below is verbatim from MTGJSON `AtomicCards.json`.
 
 use engine::ai_support::{legal_actions, legal_actions_full};
 use engine::game::casting::can_cast_object_now;
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{AdditionalCost, TargetRef};
+use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::types::ability::AdditionalCost;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -23,10 +27,7 @@ const ABHORRENT_OCULUS: &str = "As an additional cost to cast this spell, exile 
 const THRILL_OF_POSSIBILITY: &str =
     "As an additional cost to cast this spell, discard a card.\nDraw two cards.";
 const SKIRGE_FAMILIAR: &str = "Flying\nDiscard a card: Add {B}.";
-const VILLAGE_RITES: &str =
-    "As an additional cost to cast this spell, sacrifice a creature.\nDraw two cards.";
-const BLOOD_PET: &str = "Sacrifice this creature: Add {B}.";
-const VICIOUS_OFFERING: &str = "Kicker\u{2014}Sacrifice a creature. (You may sacrifice a creature in addition to any other costs as you cast this spell.)\nTarget creature gets -2/-2 until end of turn. If this spell was kicked, that creature gets -5/-5 until end of turn instead.";
+const REDEMPTOR_DREADNOUGHT: &str = "Fallen Warrior \u{2014} As an additional cost to cast this spell, you may exile a creature card from your graveyard.\nTrample\nPlasma Incinerator \u{2014} Whenever this creature attacks, if a card is exiled with it, it gets +X/+X until end of turn, where X is the power of the exiled card.";
 const STITCHED_DRAKE: &str =
     "As an additional cost to cast this spell, exile a creature card from your graveyard.\nFlying";
 
@@ -40,7 +41,7 @@ fn cost(generic: u32, shards: &[ManaCostShard]) -> ManaCost {
 fn scenario() -> GameScenario {
     let mut sc = GameScenario::new();
     sc.at_phase(Phase::PreCombatMain);
-    // Village Rites and Thrill of Possibility draw on resolution; the casts
+    // Thrill of Possibility draws on resolution; the casts
     // below stop on the stack, but a library keeps the board ordinary.
     sc.with_library_top(P0, &["Card A", "Card B"]);
     sc
@@ -49,12 +50,6 @@ fn scenario() -> GameScenario {
 fn add_rubble_rouser(sc: &mut GameScenario) -> ObjectId {
     sc.add_creature_from_oracle(P0, "Rubble Rouser", 1, 4, RUBBLE_ROUSER)
         .with_mana_cost(cost(2, &[ManaCostShard::Red]))
-        .id()
-}
-
-fn add_blood_pet(sc: &mut GameScenario) -> ObjectId {
-    sc.add_creature_from_oracle(P0, "Blood Pet", 1, 1, BLOOD_PET)
-        .with_mana_cost(cost(0, &[ManaCostShard::Black]))
         .id()
 }
 
@@ -99,12 +94,11 @@ fn castable(runner: &GameRunner, spell: ObjectId) -> bool {
 /// How a cast's prompts are answered.
 #[derive(Default)]
 struct Answers {
-    /// Whether an optional additional cost (kicker) is paid. A Choice always
+    /// Whether an optional additional cost is paid. A Choice always
     /// takes its first branch, the object leg.
     optional: bool,
     /// Objects preferred when a cost asks for a selection.
     picks: Vec<ObjectId>,
-    target: Option<ObjectId>,
 }
 
 struct Trail {
@@ -136,12 +130,6 @@ fn drive(runner: &mut GameRunner, spell: ObjectId, answers: &Answers) -> Trail {
                     index: if pay { 0 } else { 1 },
                 }
             }
-            WaitingFor::TargetSelection { selection, .. } => GameAction::ChooseTarget {
-                target: answers
-                    .target
-                    .map(TargetRef::Object)
-                    .or_else(|| selection.current_legal_targets.first().cloned()),
-            },
             WaitingFor::PayCost { choices, count, .. } => {
                 let mut cards: Vec<ObjectId> = answers
                     .picks
@@ -448,134 +436,86 @@ fn thrill_needs_a_second_card_for_the_familiar() {
     );
 }
 
-/// P0: Village Rites in hand, no lands, Blood Pet, and a vanilla creature when
-/// `other_creature`.
-fn rites_board(other_creature: bool) -> (Board, ObjectId, Option<ObjectId>) {
+/// P0: Redemptor Dreadnought in hand, four Mountains, Rubble Rouser, a creature
+/// card in the graveyard, and a noncreature card there when `spare`.
+fn dreadnought_board(spare: bool) -> (Board, ObjectId, Option<ObjectId>) {
     let mut sc = scenario();
     let spell = sc
-        .add_spell_to_hand_from_oracle(P0, "Village Rites", true, VILLAGE_RITES)
-        .with_mana_cost(cost(0, &[ManaCostShard::Black]))
+        .add_creature_to_hand_from_oracle(P0, "Redemptor Dreadnought", 4, 4, REDEMPTOR_DREADNOUGHT)
+        .with_mana_cost(cost(5, &[]))
         .id();
-    let pet = add_blood_pet(&mut sc);
-    let other = other_creature.then(|| sc.add_vanilla(P0, 2, 2));
+    add_rubble_rouser(&mut sc);
+    for _ in 0..4 {
+        sc.add_basic_land(P0, ManaColor::Red);
+    }
+    let creature = sc
+        .add_creature_to_graveyard(P0, "Graveyard Creature", 1, 1)
+        .id();
+    let other = spare.then(|| add_graveyard_cards(&mut sc, 1)[0]);
     (
         Board {
             runner: sc.build(),
             spell,
         },
-        pet,
+        creature,
         other,
     )
 }
 
-/// T6. The battlefield sibling: Blood Pet can't be sacrificed both for Village
-/// Rites and for its own {B} (CR 118.10). With another creature to sacrifice,
-/// Blood Pet makes the mana.
+/// T8. An optional graveyard-exile cost: paying it would exile the one card
+/// Rubble Rouser needs for the fifth mana of {5}, so the option isn't offered
+/// and the cast completes without it. With a second graveyard card the option
+/// is offered and paid.
 #[test]
-fn village_rites_needs_a_creature_besides_blood_pet() {
-    let (mut alone, _, _) = rites_board(false);
-    assert!(
-        !castable(&alone.runner, alone.spell),
-        "Blood Pet is the only creature and the only mana"
-    );
-    assert_not_castable(&mut alone.runner, alone.spell, "Blood Pet alone");
-
-    let (mut with_other, pet, other) = rites_board(true);
-    let other = other.unwrap();
-    assert!(castable(&with_other.runner, with_other.spell));
-    assert!(offered(&with_other.runner, with_other.spell));
-    let trail = drive(
-        &mut with_other.runner,
-        with_other.spell,
-        &Answers {
-            picks: vec![other],
-            ..Answers::default()
-        },
-    );
-    assert_cast_completes(
-        &with_other.runner,
-        with_other.spell,
-        &trail,
-        "Blood Pet and another creature",
-    );
-    assert_eq!(
-        zone(&with_other.runner, other),
-        Zone::Graveyard,
-        "the other creature is sacrificed for the cost"
-    );
-    assert_eq!(
-        zone(&with_other.runner, pet),
-        Zone::Graveyard,
-        "Blood Pet is sacrificed for {{B}}"
-    );
-}
-
-/// P0: Vicious Offering in hand, a Swamp, Blood Pet, and a vanilla creature
-/// when `other_creature`. P1 controls the target.
-fn offering_board(other_creature: bool) -> (Board, ObjectId, Option<ObjectId>) {
-    let mut sc = scenario();
-    let spell = sc
-        .add_spell_to_hand_from_oracle(P0, "Vicious Offering", true, VICIOUS_OFFERING)
-        .with_mana_cost(cost(1, &[ManaCostShard::Black]))
-        .id();
-    add_blood_pet(&mut sc);
-    sc.add_basic_land(P0, ManaColor::Black);
-    let other = other_creature.then(|| sc.add_vanilla(P0, 2, 2));
-    let victim = sc.add_creature(P1, "Victim", 3, 3).id();
-    (
-        Board {
-            runner: sc.build(),
-            spell,
-        },
-        victim,
-        other,
-    )
-}
-
-/// T8. An optional sacrifice cost (kicker): kicking would sacrifice Blood Pet,
-/// the second mana of {1}{B}, so the kick isn't offered and the unkicked cast
-/// completes. With another creature to sacrifice the kick is offered and paid.
-#[test]
-fn vicious_offering_kick_is_offered_only_with_a_creature_to_spare() {
-    let (mut bare, victim, _) = offering_board(false);
+fn redemptor_dreadnought_exile_is_offered_only_with_a_card_to_spare() {
+    let (mut bare, creature, _) = dreadnought_board(false);
     assert!(offered(&bare.runner, bare.spell));
     let trail = drive(
         &mut bare.runner,
         bare.spell,
         &Answers {
             optional: true,
-            target: Some(victim),
             ..Answers::default()
         },
     );
     assert!(
         !trail.prompts.contains(&"OptionalCostChoice"),
-        "the kick can't be paid beside the mana, so it isn't offered: {:?}",
+        "the exile can't be paid beside the mana, so it isn't offered: {:?}",
         trail.prompts
     );
-    assert_cast_completes(&bare.runner, bare.spell, &trail, "unkicked");
+    assert_cast_completes(&bare.runner, bare.spell, &trail, "cost not paid");
+    assert_eq!(
+        zone(&bare.runner, creature),
+        Zone::Exile,
+        "the creature card is exiled for Rubble Rouser's mana"
+    );
 
-    let (mut spare, victim, other) = offering_board(true);
+    let (mut spare, creature, other) = dreadnought_board(true);
     let other = other.unwrap();
     let trail = drive(
         &mut spare.runner,
         spare.spell,
         &Answers {
             optional: true,
-            target: Some(victim),
+            // The mana ability's exile takes the noncreature card if asked first.
             picks: vec![other],
         },
     );
     assert!(
         trail.prompts.contains(&"OptionalCostChoice"),
-        "reach: with a creature to spare the kick is offered: {:?}",
+        "reach: with a card to spare the exile is offered: {:?}",
         trail.prompts
     );
-    assert_cast_completes(&spare.runner, spare.spell, &trail, "kicked");
+    assert_cast_completes(&spare.runner, spare.spell, &trail, "cost paid");
+    assert_eq!(
+        zone(&spare.runner, creature),
+        Zone::Exile,
+        "the creature card is exiled for the cost"
+    );
     assert_eq!(
         zone(&spare.runner, other),
-        Zone::Graveyard,
-        "the spare creature is sacrificed for the kick"
+        Zone::Exile,
+        "the other card is exiled for Rubble Rouser's mana"
     );
 }
 
