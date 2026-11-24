@@ -1,0 +1,24 @@
+# Fork-only workflow: keeps JacobWoodson/phase `main` fast-forwarded to
+# phase-rs/phase `main`. Upstream merges dozens of times a day; without this,
+# any checkout or worktree cloned from the fork starts stale.
+#
+# This file intentionally exists only in the fork. Do not upstream it.
+name: Sync fork with upstream
+
+on:
+  schedule:
+    # Hourly, off the top of the hour to avoid cron spikes.
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fast-forward fork main from upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api repos/${{ github.repository }}/merge-upstream -f branch=main
