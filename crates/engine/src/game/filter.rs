@@ -3566,6 +3566,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -7573,8 +7574,7 @@ fn filter_inner_for_object(
         TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false, // Controller is a player, not an object
         TargetFilter::SourceController => false, // SourceController is a player, not an object
-        // CR 102.3: Opponent is a player reference (used only as a slot announcer),
-        // never an object.
+        // CR 102.3: Opponent is a player reference, never an object.
         TargetFilter::Opponent => false,
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
@@ -7637,20 +7637,15 @@ fn filter_inner_for_object(
                         }
                     }
                     ControllerRef::Opponent => {
-                        if source_controller == Some(obj_ctrl) {
+                        // CR 102.2 / CR 102.3: Use the opponent relationship of
+                        // the source controller, including in team games.
+                        if source_controller.is_some_and(|controller| {
+                            !super::players::is_opponent(state, controller, obj_ctrl)
+                        }) {
                             return false;
                         }
-                        // Two claims, two authorities — kept apart deliberately.
-                        // SEAT: CR 800.4 + CR 102.1 — a player who has left the game is
-                        // no longer one of the people in the game, so they are not an
-                        // opponent. (CR 102.3 is scoped to games BETWEEN TEAMS and does
-                        // not define "opponent" in a free-for-all, which is the board
-                        // this seam serves; the engine's free-for-all authority is
-                        // `topology::is_opponent`.)
-                        // OBJECTS: CR 800.4a — "all objects owned by that player leave
-                        // the game" — so cards in their zones are not legal targets
-                        // (Captain N'ghathrod class). This is the half CR 800.4a really
-                        // governs.
+                        // CR 800.4 + CR 102.1: A player who has left the game is
+                        // no longer one of the people in the game.
                         if !super::players::is_alive(state, obj_ctrl) {
                             return false;
                         }
@@ -8320,6 +8315,9 @@ fn filter_inner_for_object(
         // Needle's activation-prohibition leg or Brain Pry's discard would
         // silently miss names that differ only by casing ("éowyn" / "Éowyn")
         // from the player's typed input.
+        // CR 709.4a + CR 709.4d: an object has the chosen name if one of its
+        // names is the chosen name; a fused split spell on the stack has both
+        // halves' names, so its right half's name counts.
         TargetFilter::HasChosenName => {
             let source_ctx = source_context_from_filter(
                 state,
@@ -8332,7 +8330,7 @@ fn filter_inner_for_object(
                 granting_object,
             );
             source_ctx.chosen_attributes.iter().any(|a| match a {
-                ChosenAttribute::CardName(n) => card_names_match(&obj.name, n),
+                ChosenAttribute::CardName(n) => source_has_chosen_name(Some(obj), None, n),
                 _ => false,
             })
         }
@@ -12379,6 +12377,29 @@ pub(crate) fn stack_entry_targets_satisfy(
     entry_targets_satisfy(state, entry, &ctx, filter, require_all)
 }
 
+/// CR 109.2 + CR 115.9b: Match a spell or ability's object target in its current
+/// zone. Evaluate each alternative's zone independently so a permanent
+/// description requires the battlefield and an explicitly scoped one can match
+/// in its own zone.
+pub(crate) fn matches_stack_entry_object_target(
+    state: &GameState,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if let TargetFilter::Or { filters } = filter {
+        return filters
+            .iter()
+            .any(|filter| matches_stack_entry_object_target(state, object_id, filter, ctx));
+    }
+    let on_battlefield = state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.zone == Zone::Battlefield);
+    (on_battlefield || !filter_denotes_battlefield_permanent(filter))
+        && matches_target_filter(state, object_id, filter, ctx)
+}
+
 /// CR 115.9b/115.9c: [`stack_entry_targets_satisfy`] for a given entry, with
 /// "you" read from `ctx` — the looking ability's controller (CR 109.5), not
 /// its source's current controller.
@@ -12391,7 +12412,7 @@ pub(crate) fn entry_targets_satisfy(
 ) -> bool {
     let slots = stack_entry_counted_targets(state, entry);
     let check = |t: &TargetRef| match t {
-        TargetRef::Object(id) => matches_target_filter(state, *id, filter, ctx),
+        TargetRef::Object(id) => matches_stack_entry_object_target(state, *id, filter, ctx),
         TargetRef::Player(pid) => player_matches_target_filter_in_state(
             state,
             filter,
@@ -12474,6 +12495,13 @@ pub(crate) fn card_names_match(a: &str, b: &str) -> bool {
     }
 }
 
+/// CR 709.4a: the right half's name is a split card's second name.
+fn right_half_has_name(obj: &GameObject, chosen: &str) -> bool {
+    obj.back_face
+        .as_ref()
+        .is_some_and(|back| card_names_match(&back.name, chosen))
+}
+
 /// CR 709.4a + CR 709.4d: An object has the chosen name if one of its names is the
 /// chosen name; a fused split spell on the stack has both halves' names.
 /// `source_name` is a last-known-information name for a departed source and takes
@@ -12485,12 +12513,15 @@ pub(crate) fn source_has_chosen_name(
 ) -> bool {
     let front_name = source_name.or_else(|| source.map(|o| o.name.as_str()));
     front_name.is_some_and(|name| card_names_match(name, chosen))
-        || source.is_some_and(|o| {
-            o.fused_split_spell
-                && o.back_face
-                    .as_ref()
-                    .is_some_and(|back| card_names_match(&back.name, chosen))
-        })
+        || source.is_some_and(|o| o.fused_split_spell && right_half_has_name(o, chosen))
+}
+
+/// CR 709.4a + CR 709.4d + CR 702.102a: a spell as it is being cast has the chosen name if its own name is it, or if it
+/// is cast fused (both halves, CR 702.102b) and its right half's name is. `fused` is the caller's variant-derived
+/// determination (`CastingVariant::Fuse`), deliberately NOT the persisted `fused_split_spell` marker, which is never
+/// cleared when a fused spell resolves or a fused cast is cancelled and so can be stale on a card cast unfused later.
+pub(crate) fn spell_has_chosen_name(spell: &GameObject, fused: bool, chosen: &str) -> bool {
+    card_names_match(&spell.name, chosen) || (fused && right_half_has_name(spell, chosen))
 }
 
 /// CR 603.10: Evaluate a `FilterProp` against a zone-change event snapshot.
@@ -14188,6 +14219,10 @@ fn player_matches_target_filter_with(
 ) -> bool {
     match filter {
         TargetFilter::Any | TargetFilter::Player => true,
+        // CR 102.2 / CR 102.3: Match players opposing the source controller.
+        TargetFilter::Opponent => {
+            source_controller.is_some_and(|controller| is_opponent(controller, player_id))
+        }
         TargetFilter::SelfRef => false, // SelfRef refers to objects, not players
         TargetFilter::Controller => source_controller == Some(player_id),
         // CR 109.5: Without ability context, OriginalController is indistinguishable
@@ -17543,6 +17578,29 @@ mod tests {
         let state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         let opponent_filter =
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+        let bare_opponent_filter = TargetFilter::Opponent;
+
+        assert!(!player_matches_target_filter_in_state(
+            &state,
+            &bare_opponent_filter,
+            PlayerId(0),
+            Some(PlayerId(0)),
+            None,
+        ));
+        assert!(!player_matches_target_filter_in_state(
+            &state,
+            &bare_opponent_filter,
+            PlayerId(1),
+            Some(PlayerId(0)),
+            None,
+        ));
+        assert!(player_matches_target_filter_in_state(
+            &state,
+            &bare_opponent_filter,
+            PlayerId(2),
+            Some(PlayerId(0)),
+            None,
+        ));
 
         assert!(!player_matches_target_filter_in_state(
             &state,
@@ -24423,6 +24481,160 @@ mod tests {
             bolt,
             &TargetFilter::HasChosenName,
             source,
+        ));
+    }
+
+    /// CR 709.4a + CR 709.4d: a fused split spell on the stack has both halves'
+    /// names, so `HasChosenName` matches its right half's name; an unfused split
+    /// spell has only the cast half's name (CR 709.3b).
+    #[test]
+    fn has_chosen_name_matches_a_fused_split_spells_right_half() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        let source = sc.add_real_card(P0, "Gideon's Intervention", Zone::Battlefield, db);
+        let toil = sc.add_real_card(P0, "Toil", Zone::Stack, db);
+
+        // Reach: the split back half exists from `add_real_card`.
+        assert_eq!(
+            sc.state.objects[&toil]
+                .back_face
+                .as_ref()
+                .map(|back| back.name.as_str()),
+            Some("Trouble")
+        );
+
+        fn set_chosen(state: &mut GameState, source: ObjectId, name: &str) {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.chosen_attributes.clear();
+            obj.chosen_attributes
+                .push(ChosenAttribute::CardName(name.to_string()));
+        }
+
+        // Chosen "Trouble", marker unset: only the cast half exists (CR 709.3b).
+        set_chosen(&mut sc.state, source, "Trouble");
+        assert!(
+            !matches_target_filter(&sc.state, toil, &TargetFilter::HasChosenName, source),
+            "an unfused split spell must not carry its other half's name"
+        );
+
+        // Marker set (fused, CR 709.4d): both names count.
+        sc.state.objects.get_mut(&toil).unwrap().fused_split_spell = true;
+        assert!(matches_target_filter(
+            &sc.state,
+            toil,
+            &TargetFilter::HasChosenName,
+            source
+        ));
+
+        // Casing parity through the same comparison the cast prohibition uses.
+        set_chosen(&mut sc.state, source, "trouble");
+        assert!(matches_target_filter(
+            &sc.state,
+            toil,
+            &TargetFilter::HasChosenName,
+            source
+        ));
+
+        // The front name still matches while fused.
+        set_chosen(&mut sc.state, source, "Toil");
+        assert!(matches_target_filter(
+            &sc.state,
+            toil,
+            &TargetFilter::HasChosenName,
+            source
+        ));
+
+        // An unrelated chosen name never matches.
+        set_chosen(&mut sc.state, source, "Grizzly Bears");
+        assert!(!matches_target_filter(
+            &sc.state,
+            toil,
+            &TargetFilter::HasChosenName,
+            source
+        ));
+
+        // Marker set but no back face: no second name to match.
+        set_chosen(&mut sc.state, source, "Trouble");
+        sc.state.objects.get_mut(&toil).unwrap().back_face = None;
+        assert!(!matches_target_filter(
+            &sc.state,
+            toil,
+            &TargetFilter::HasChosenName,
+            source
+        ));
+    }
+
+    /// CR 709.4a + CR 709.4d + CR 702.102a: the cast-time chosen-name match
+    /// follows the caller's fuse hint, never the persisted `fused_split_spell`
+    /// marker — the marker survives resolution and cancellation, so a card cast
+    /// unfused later must not inherit the fused names.
+    #[test]
+    fn spell_has_chosen_name_follows_the_fuse_hint_not_the_marker() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        let toil = sc.add_real_card(P0, "Toil", Zone::Hand, db);
+
+        // Marker unset, hint false: only the front name (CR 709.3b).
+        assert!(spell_has_chosen_name(
+            &sc.state.objects[&toil],
+            false,
+            "Toil"
+        ));
+        assert!(!spell_has_chosen_name(
+            &sc.state.objects[&toil],
+            false,
+            "Trouble"
+        ));
+
+        // Marker unset, hint true (fused, CR 709.4d): both names.
+        assert!(spell_has_chosen_name(
+            &sc.state.objects[&toil],
+            true,
+            "Trouble"
+        ));
+        assert!(spell_has_chosen_name(
+            &sc.state.objects[&toil],
+            true,
+            "trouble"
+        ));
+        assert!(spell_has_chosen_name(
+            &sc.state.objects[&toil],
+            true,
+            "Toil"
+        ));
+        assert!(!spell_has_chosen_name(
+            &sc.state.objects[&toil],
+            true,
+            "Grizzly Bears"
+        ));
+
+        // Stale marker (a resolved fused cast returned by Regrowth, or a
+        // cancelled fused cast), hint false: the unfused cast keeps only
+        // Toil's name.
+        sc.state.objects.get_mut(&toil).unwrap().fused_split_spell = true;
+        assert!(!spell_has_chosen_name(
+            &sc.state.objects[&toil],
+            false,
+            "Trouble"
+        ));
+        assert!(spell_has_chosen_name(
+            &sc.state.objects[&toil],
+            false,
+            "Toil"
+        ));
+
+        // Hint true with no back face: no second name to match.
+        sc.state.objects.get_mut(&toil).unwrap().back_face = None;
+        assert!(!spell_has_chosen_name(
+            &sc.state.objects[&toil],
+            true,
+            "Trouble"
         ));
     }
 

@@ -345,7 +345,7 @@ fn two_accepts_one_phase_one_batched_one_performed_at_the_take() {
 /// [`cast_trigger_board_routes_to_replay_untouched_board_stays_batched`].
 #[test]
 fn mana_engine_with_cast_trigger_registers_nothing() {
-    // DORMANT in a normal checkout (`integration_cards.json.gz` is tracked); it only fires in a
+    // DORMANT in a normal checkout (`integration_cards/` is tracked); it only fires in a
     // checkout without the card-data pipeline.
     let Some(db) = shared_card_db() else { return };
     // The mana rig is built on `game::scenario::P0`; this file's `P0` must be the same seat for

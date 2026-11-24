@@ -1146,6 +1146,7 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
     match c {
         ParsedCondition::QuantityComparison { .. }
         | ParsedCondition::QuantityVsEachOpponent { .. }
+        | ParsedCondition::SourceMatchesFilter { .. }
         | ParsedCondition::SpellTargetsFilter { .. } => false,
 
         // Combinators read the union of their children: SAFE iff all children SAFE.

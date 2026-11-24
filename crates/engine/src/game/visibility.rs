@@ -5428,9 +5428,10 @@ fn redact_spell_cast_record(record: &mut crate::types::game_state::SpellCastReco
 /// The entry ledger's id is a non-optional key, so the record keeps its id and controller
 /// (the count is preserved) and loses every characteristic that identifies the card.
 /// Status is not a characteristic (CR 110.5a), and a permanent's face-up/face-down
-/// status is public (CR 110.5), so the redacted record keeps its face state.
+/// status is public (CR 110.5), so redaction preserves face state and token identity.
 fn redact_battlefield_entry_record(record: &mut crate::types::game_state::BattlefieldEntryRecord) {
     let crate::types::game_state::BattlefieldEntryRecord {
+        token_status: _,
         object_id: _,
         name,
         core_types,
@@ -6181,6 +6182,7 @@ mod tests {
         state
             .battlefield_entries_this_turn
             .push_back(BattlefieldEntryRecord {
+                token_status: Some(crate::types::game_state::EntryTokenStatus::Nontoken),
                 object_id: secret,
                 name: "Ledger Sentinel".to_string(),
                 core_types: vec![CoreType::Creature],
@@ -6315,6 +6317,10 @@ mod tests {
             opponent.battlefield_entries_this_turn[0].face_state,
             crate::types::game_state::FaceState::FaceDown,
             "CR 110.5: face-up/face-down status is public and survives redaction"
+        );
+        assert_eq!(
+            opponent.battlefield_entries_this_turn[0].token_status,
+            Some(crate::types::game_state::EntryTokenStatus::Nontoken)
         );
         assert_eq!(opponent.sacrificed_permanents_this_turn.len(), 1);
         assert_eq!(

@@ -617,6 +617,12 @@ fn runtime_granted_top_of_library_plot_abilities(
     )]
 }
 
+/// CR 406.3a: a face-down card in exile has no printed characteristics.
+/// Abilities granted independently to that object retain their own provenance.
+fn printed_activation_is_hidden(obj: &GameObject, ability: &AbilityDefinition) -> bool {
+    obj.zone == Zone::Exile && obj.face_down && ability.granting_object.is_none()
+}
+
 pub fn activated_ability_definitions(
     state: &GameState,
     source_id: ObjectId,
@@ -625,8 +631,13 @@ pub fn activated_ability_definitions(
         return Vec::new();
     };
     let printed_len = obj.abilities.len();
-    let mut abilities: Vec<(usize, AbilityDefinition)> =
-        obj.abilities.iter().cloned().enumerate().collect();
+    let mut abilities: Vec<(usize, AbilityDefinition)> = obj
+        .abilities
+        .iter()
+        .enumerate()
+        .filter(|(_, ability)| !printed_activation_is_hidden(obj, ability))
+        .map(|(index, ability)| (index, ability.clone()))
+        .collect();
     abilities.extend(
         runtime_granted_cycling_abilities(state, source_id)
             .into_iter()
@@ -657,6 +668,9 @@ pub(crate) fn activation_ability_definition(
 ) -> Option<AbilityDefinition> {
     let obj = state.objects.get(&source_id)?;
     let mut ability = if let Some(ability) = obj.abilities.get(ability_index) {
+        if printed_activation_is_hidden(obj, ability) {
+            return None;
+        }
         ability.clone()
     } else {
         let offset = ability_index.checked_sub(obj.abilities.len())?;
@@ -30725,6 +30739,12 @@ fn manual_activation_life_retry_possible(
         .any(|route| activation_cost_pays_life(route, life_colors))
 }
 
+/// CR 702.61a: split second bars non-mana activations while the spell is on the stack.
+fn split_second_prevents_activation(state: &GameState, ability: &AbilityDefinition) -> bool {
+    super::keywords::stack_has_split_second(state)
+        && !super::mana_abilities::is_mana_ability(ability)
+}
+
 /// CR 602.5 + CR 118.3: the one activation-legality evaluation, shared by
 /// enforcement (`ActivationQuery::Legality`) and the display read-out
 /// (`ActivationQuery::BlockReason`). See [`ActivationQuery`] for what the two
@@ -30764,11 +30784,7 @@ pub(crate) fn activation_verdict(
         return ActivationVerdict::Illegal;
     }
 
-    // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
-    // players can't activate abilities that aren't mana abilities.
-    if super::keywords::stack_has_split_second(state)
-        && !super::mana_abilities::is_mana_ability(&ability_def)
-    {
+    if split_second_prevents_activation(state, &ability_def) {
         return ActivationVerdict::Illegal;
     }
 
@@ -32300,6 +32316,12 @@ fn activate_with_cost_carrier(
         }
     }
 
+    if split_second_prevents_activation(state, &ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "Split second prevents activating a non-mana ability".into(),
+        ));
+    }
+
     // CR 702.170b + CR 116.2k + CR 602.1c: Plot is a SPECIAL ACTION, not the
     // activation of an ability. CR 602.5/603.2a prohibitions ("can't activate
     // abilities") are typed to activated abilities only, so none of the three gates
@@ -33818,6 +33840,12 @@ pub(crate) fn record_activated_ability_placed(
     };
     let announced_zone = record.source_zone;
     let activation_cost = record.activation_cost.clone();
+    // CR 602.2a + CR 702.29a + CR 702.29f: Keep the announced cycling tag
+    // even when the discard takes the source out of the zone of its grant.
+    let ability_tag = record.ability_tag;
+    // CR 201.2: Use the English card name bound before the discard cost.
+    let cycle = (ability_tag == Some(AbilityTag::Cycling))
+        .then(|| (record.activator, record.source_lki.name.clone()));
     // CR 602.2a + CR 602.5b: the announced activation consumes its own key,
     // read off the placed entry's ability — never re-derived from
     // `(source_id, ability_index)`. Re-deriving post-payment would mis-record
@@ -33866,14 +33894,31 @@ pub(crate) fn record_activated_ability_placed(
         announced_zone,
         events,
     );
-    // CR 702.142b: Emit additional event when a boast ability is activated.
-    super::casting_targets::emit_keyword_ability_event_if_tagged(
-        state,
-        source_id,
-        ability_index,
-        player,
-        events,
-    );
+    // CR 602.2b + CR 601.2h + CR 601.2i: Publish after payment at engine stack
+    // placement. CR 702.29c + CR 702.29e + CR 702.29f: The discard cost of
+    // either cycling or typecycling makes this the activator's cycled card.
+    if let Some((activator, name)) = cycle {
+        let record = crate::types::game_state::CyclingRecord {
+            name,
+            turn: state.turn_number,
+        };
+        let occurrence =
+            super::ledger::record_completed_cycle(state, activator, record, placed_entry);
+        super::stack::finalize_completed_cycle(state, placed_entry, occurrence);
+        events.push(GameEvent::Cycled {
+            player_id: player,
+            object_id: source_id,
+        });
+    } else {
+        // CR 702.142b + CR 702.177a: Publish other keyword activations.
+        super::casting_targets::emit_keyword_ability_event_if_tagged(
+            state,
+            source_id,
+            ability_index,
+            player,
+            events,
+        );
+    }
 }
 
 /// CR 602.2 + CR 601.2c: capture an activation's journal facts while they are
@@ -34786,6 +34831,9 @@ impl TargetRead {
 fn parsed_condition_reads_targets(condition: &ParsedCondition, read: TargetRead) -> bool {
     match condition {
         // CR 115.1: the condition is ABOUT the chosen targets.
+        ParsedCondition::SourceMatchesFilter { filter } => {
+            target_filter_reads_chosen_target(filter, read)
+        }
         ParsedCondition::SpellTargetsFilter { .. } => read.includes_bindable(),
         ParsedCondition::QuantityComparison { lhs, rhs, .. } => {
             quantity_expr_reads_target_object(lhs, read)
@@ -35021,6 +35069,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::ChosenNumber
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::DungeonsCompleted
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount
@@ -38300,7 +38349,9 @@ fn is_blocked_by_cant_be_cast_with(
 /// per-property matcher here.
 /// `fused` requests the COMBINED-characteristics projection (CR 702.102b) for a
 /// pre-payment fused split spell; payment-time callers pass `false` and rely on
-/// the `fused_split_spell` marker OR-gate inside `spell_cast_record_for`.
+/// the `fused_split_spell` marker OR-gate inside `spell_cast_record_for`. The
+/// `HasChosenName` arm reads only the caller's `fused` hint (never the persisted
+/// marker, which can be stale).
 /// `announced_x: Some(x)` reads the spell's mana value with X announced as `x`
 /// (CR 202.3e); `None` reads the object as it currently presents itself.
 fn cant_cast_filter_matches_for(
@@ -38315,12 +38366,12 @@ fn cant_cast_filter_matches_for(
     use crate::types::ability::ChosenAttribute;
 
     match filter {
-        // CR 201.2: "spells with the chosen name" — the shared spell-filter path
-        // has no top-level chosen-name variant, so match the spell name against
-        // the source's chosen name here.
+        // CR 201.2a + CR 709.4a + CR 709.4d: "spells with the chosen name" —
+        // the shared spell-filter path has no top-level chosen-name variant,
+        // so match the spell's names against the source's chosen name here.
         TargetFilter::HasChosenName => source_obj.chosen_attributes.iter().any(|a| match a {
             ChosenAttribute::CardName(n) => {
-                crate::game::filter::card_names_match(n, &spell_obj.name)
+                crate::game::filter::spell_has_chosen_name(spell_obj, fused, n)
             }
             ChosenAttribute::Color(_)
             | ChosenAttribute::CreatureType(_)

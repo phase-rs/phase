@@ -180,7 +180,7 @@ fn resolution_probe_verdict(
 /// arm's resolver has been fixed yet. It is fail-closed — it can only turn a
 /// verdict into `MayPrompt`, never the reverse — so a resolver gaining a real
 /// prompt never invalidates it.
-pub(crate) fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
+fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
     match q {
         QuantityExpr::UpTo { .. } => true,
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
@@ -575,6 +575,152 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         || a.else_ability.as_deref().is_some_and(chain_offers_choice)
 }
 
+/// CR 101.4 + CR 616.1f: rank a prevention continuation by its first prompt.
+/// The rider's own choice gates its event, and that event gates the chain.
+/// This reads the current board before dispatch, including live event recipients.
+pub(crate) fn prevention_rider_choice_rank(
+    state: &GameState,
+    rider: &ResolvedAbility,
+    amount: i32,
+    event_source: Option<crate::types::identifiers::ObjectId>,
+    rank: &impl Fn(crate::types::player::PlayerId) -> usize,
+) -> usize {
+    use crate::types::ability::TargetFilter;
+    use crate::types::game_state::PendingCounterAddition;
+    use crate::types::proposed_event::CounterPlacement;
+
+    if rider.optional || rider.optional_for.is_some() {
+        if let Some(player) = effects::optional_rider_chooser(state, rider) {
+            return rank(player);
+        }
+    } else if node_modifiers_offer_choice(rider) || effect_offers_choice(&rider.effect) {
+        return rank(rider.controller);
+    }
+
+    let mut earliest = usize::MAX;
+    let mut consider = |player| earliest = earliest.min(rank(player));
+    let quantity = |expr| {
+        crate::game::quantity::resolve_quantity_with_targets(state, expr, rider).max(0) as u32
+    };
+    crate::game::quantity::with_replacement_action_scope(Some(amount), || match &rider.effect {
+        Effect::PutCounter { .. } => {
+            for addition in effects::counters::resolved_counter_additions(state, rider) {
+                let PendingCounterAddition::Object {
+                    actor,
+                    object_id,
+                    counter_type,
+                    count,
+                    cause,
+                } = addition
+                else {
+                    continue;
+                };
+                if count > 0 {
+                    replacement::visit_proposed_event_choosers(
+                        state,
+                        &ProposedEvent::AddCounter {
+                            placement: CounterPlacement::Object {
+                                actor,
+                                object_id,
+                                counter_type,
+                                cause,
+                            },
+                            count,
+                            applied: Default::default(),
+                        },
+                        &mut consider,
+                    );
+                }
+            }
+        }
+        Effect::Draw { target, count } => {
+            let drawer = if *target == TargetFilter::PostReplacementSourceController {
+                event_source
+                    .and_then(|id| state.objects.get(&id))
+                    .map(|obj| obj.controller)
+            } else {
+                effects::resolve_player_for_context_ref(state, rider, target)
+            };
+            if let Some(player_id) = drawer {
+                let count = quantity(count);
+                if count > 0 {
+                    replacement::visit_draw_event_choosers(state, player_id, count, &mut consider);
+                }
+            }
+        }
+        Effect::GainLife { player, amount } => {
+            if let Some(event) = effects::life::resolve_life_loss_target(state, rider, Some(player))
+                .and_then(|player| {
+                    effects::life::proposed_life_gain(state, player, quantity(amount))
+                })
+            {
+                replacement::visit_proposed_event_choosers(state, &event, &mut consider);
+            }
+        }
+        Effect::LoseLife { target, amount } => {
+            if let Some(event) =
+                effects::life::resolve_life_loss_target(state, rider, target.as_ref()).and_then(
+                    |player| effects::life::proposed_life_loss(state, player, quantity(amount)),
+                )
+            {
+                replacement::visit_proposed_event_choosers(state, &event, &mut consider);
+            }
+        }
+        Effect::Token { .. } => {
+            if let Some((spec, owner, enter_tapped, count)) =
+                effects::token::resolve_token_spec(state, rider)
+                    .filter(|(_, _, _, count)| *count > 0)
+            {
+                replacement::visit_proposed_event_choosers(
+                    state,
+                    &ProposedEvent::CreateToken {
+                        redirected_to: None,
+                        owner,
+                        spec: Box::new(spec),
+                        copy: None,
+                        enter_tapped,
+                        count,
+                        appended: Vec::new(),
+                        applied: Default::default(),
+                    },
+                    &mut consider,
+                );
+            }
+        }
+        Effect::DealDamage {
+            amount,
+            damage_source: None,
+            ..
+        } => {
+            use effects::deal_damage as damage;
+            let ctx = damage::damage_context_from_ability(state, rider);
+            let recipients = rider.distribution.clone().unwrap_or_else(|| {
+                damage::damage_recipients(state, rider)
+                    .into_iter()
+                    .map(|target| (target, quantity(amount)))
+                    .collect()
+            });
+            for (target, amount) in recipients {
+                if let damage::DamageGateOutcome::Proposed(event) =
+                    damage::pre_replacement_damage_gate(state, &ctx, &target, amount, false)
+                {
+                    replacement::visit_proposed_event_choosers(state, &event, &mut consider);
+                }
+            }
+        }
+        _ => {}
+    });
+
+    if earliest != usize::MAX {
+        return earliest;
+    }
+    rider
+        .child_links()
+        .map(|(_, child)| prevention_rider_choice_rank(state, child, amount, event_source, rank))
+        .min()
+        .unwrap_or(usize::MAX)
+}
+
 /// CR 608.2d + CR 118.12: can this one node's executable modifiers (its
 /// optional / unless-pay / chooser / timing / modal / repeat fields) enter a
 /// resolution-time player choice, independent of what its effect does? The
@@ -620,6 +766,7 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         reads_return_result: _, // consumes a settled value without a prompt
         source_id: _, // object id
         cast_occurrence: _, // finalized-cast provenance, no resolution-time choice
+        cycling_occurrence: _,
         source_incarnation: _, // self-transform epoch latch, no resolution-time choice
         announced_source_incarnation: _, // announcement-time source epoch, no resolution-time choice
         noted_mana_payment: _, // concrete activation-payment snapshot, no resolution-time choice

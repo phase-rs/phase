@@ -4437,18 +4437,23 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 None,
                 events,
             ) {
-                // `Priority` is the resume's "nothing further is owed" sentinel and
-                // is always addressed to `state.active_player` — the seat that just
-                // left. Fall through to the turn's step rather than surfacing it.
+                // `Priority` is the resume's "nothing further is owed" sentinel,
+                // addressed to `living_priority_seat` (CR 800.4j), never to the seat
+                // that just left. Fall through to the turn's step rather than
+                // surfacing it.
                 //
-                // CR 800.4a: everything else is a real prompt, but this is the one
-                // call site of `resume_pending_combat_lifelink` reached while the
-                // active player is NOT in the game (the other two run with a living
-                // active player by construction), so a wait it produces can name a
+                // CR 800.4a: everything else is a real prompt, but this call site of
+                // `resume_pending_combat_lifelink` is reached while the
+                // active player is NOT in the game (`handle_replacement_choice`
+                // remaps its own `Priority` with `living_priority_seat`;
+                // `resolve_combat_damage`'s re-entry guard can also be reached after
+                // a departure, from priority.rs's completeness gate; the
+                // action-boundary convergence applies this same test to the wait it
+                // surfaces), so a wait it produces can name a
                 // seat that cannot answer. `elimination` already enforces exactly
                 // this invariant once, at elimination time, with the same accessor
-                // and the same aliveness test; re-apply it here because this is the
-                // only place a NEW wait can be installed after that reconcile has
+                // and the same aliveness test; re-apply it here because a NEW wait
+                // can be installed here after that reconcile has
                 // run. `acting_player()` is `None` for `GameOver`, which is terminal
                 // and must still be surfaced — hence `is_some_and`, not a check that
                 // an acting player exists and is alive.

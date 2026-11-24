@@ -362,6 +362,7 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(100),
             cast_occurrence: None,
+            cycling_occurrence: None,
             source_incarnation: None,
             announced_source_incarnation: None,
             trigger_source: None,

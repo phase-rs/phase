@@ -18349,6 +18349,88 @@ fn persistent_exile_play_permission_evendo_sacrificed_permanent_gate() {
     );
 }
 
+/// CR 508.1a + CR 611.3a: Pick Up the Pace's persistent play permission keeps
+/// its source-linked exile pool and gates the permission on the controller
+/// having attacked this turn.
+#[test]
+fn persistent_exile_play_permission_pick_up_the_pace_attack_gate() {
+    let card_text = "Whenever a creature you control that entered this turn attacks, exile the top card of your library.\nYou may play cards exiled with this enchantment as long as you attacked this turn.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        card_text,
+        "Pick Up the Pace",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let permission = parsed
+        .statics
+        .iter()
+        .find(|def| {
+            matches!(
+                def.mode,
+                StaticMode::ExileCastPermission {
+                    pool: ExileCardPool::Persistent,
+                    play_mode: CardPlayMode::Play,
+                    ..
+                }
+            )
+        })
+        .expect("Pick Up the Pace must lower its play-from-exile line as a static");
+    assert!(matches!(
+        permission.condition,
+        Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::AttackedThisTurn {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        })
+    ));
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .all(|ability| !matches!(ability.effect.as_ref(), Effect::CastFromZone { .. })),
+        "the permission must not fall through to a one-shot CastFromZone effect"
+    );
+    fn walk<'a>(ability: &'a AbilityDefinition, effects: &mut Vec<&'a Effect>) {
+        effects.push(&ability.effect);
+        if let Some(sub) = &ability.sub_ability {
+            walk(sub, effects);
+        }
+    }
+    let mut effects = Vec::new();
+    for ability in &parsed.abilities {
+        walk(ability, &mut effects);
+    }
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::Unimplemented { .. })),
+        "Pick Up the Pace must not emit Effect::Unimplemented: {effects:?}"
+    );
+    let swallowed_condition: Vec<_> = parsed
+        .parse_warnings
+        .iter()
+        .filter(|warning| {
+            matches!(
+                warning,
+                crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
+                    detector,
+                    ..
+                } if detector == "Condition_AsLongAs"
+            )
+        })
+        .collect();
+    assert!(
+        swallowed_condition.is_empty(),
+        "the condition must not be reported as swallowed: {swallowed_condition:?}"
+    );
+}
+
 /// CR 607.2a + CR 609.4b: "the exiled card" names the pool the card's own
 /// trigger exiled into (Null Summoner), the same pool as "cards exiled with ~".
 /// The threshold gate and the any-type concession ride the permission.
@@ -44857,6 +44939,53 @@ fn edgar_exile_permission_tapped_rider_declines() {
         "no exile permission may drop the tapped rider, got {:?}",
         parsed.statics
     );
+}
+
+// ── CR 120.6 + CR 704.5g: LethalDamageDeterminedByPower (Zilortha) ─────────────
+
+/// Verbatim static line of Zilortha, Strength Incarnate (MTGJSON).
+const ZILORTHA_LETHAL_LINE: &str =
+    "Lethal damage dealt to creatures you control is determined by their power rather than their toughness.";
+
+#[test]
+fn lethal_damage_determined_by_power_parses_the_subject_filter() {
+    let def = parse_static_line(ZILORTHA_LETHAL_LINE).expect("Zilortha's static parses");
+    assert_eq!(def.mode, StaticMode::LethalDamageDeterminedByPower);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+    );
+    assert_eq!(def.description.as_deref(), Some(ZILORTHA_LETHAL_LINE));
+
+    // Hostile grammar: only the power-for-toughness substitution, anchored to the sentence end.
+    for hostile in [
+        "Lethal damage dealt to creatures you control is determined by their toughness rather than their power.",
+        "Lethal damage dealt to creatures you control is determined by their power rather than their toughness and they have trample.",
+    ] {
+        let mode = parse_static_line(hostile).map(|d| d.mode);
+        assert_ne!(
+            mode,
+            Some(StaticMode::LethalDamageDeterminedByPower),
+            "{hostile}"
+        );
+    }
+    // The CR 510.1a Doran line is a different rule and keeps its own parse.
+    let doran = parse_static_line(
+        "Each creature assigns combat damage equal to its toughness rather than its power.",
+    )
+    .expect("Doran's static parses");
+    assert!(doran
+        .modifications
+        .contains(&ContinuousModification::AssignDamageFromToughness));
+}
+
+#[test]
+fn lethal_damage_determined_by_power_routes_as_a_static_line() {
+    assert!(crate::parser::oracle_classifier::is_static_pattern(
+        &ZILORTHA_LETHAL_LINE.to_lowercase()
+    ));
 }
 
 #[test]

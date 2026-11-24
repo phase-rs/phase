@@ -1989,6 +1989,20 @@ pub struct CastOccurrence {
     pub turn_journal_index: u32,
 }
 
+/// One completed cycling activation, retained for the rest of the game.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CyclingRecord {
+    pub name: String,
+    pub turn: u32,
+}
+
+/// Coordinate of a completed cycle in the activator's game-long history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CyclingOccurrence {
+    pub activator: PlayerId,
+    pub journal_index: usize,
+}
+
 /// CR 602.2 + CR 601.2c: one NON-MANA activated ability that was activated this
 /// turn, with the facts a "the first activated ability you activate each turn
 /// that …" modifier (Professor Hojo) needs, captured when the ability was
@@ -2909,6 +2923,39 @@ impl GameState {
     }
 }
 
+/// Settled entry snapshots indexed by their turn ledger position.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BattlefieldEntryObservations(im::OrdMap<usize, Arc<TriggerSourceContext>>);
+
+impl BattlefieldEntryObservations {
+    pub(crate) fn get(&self, index: &usize) -> Option<&TriggerSourceContext> {
+        self.0.get(index).map(Arc::as_ref)
+    }
+
+    pub(crate) fn insert(&mut self, index: usize, observation: TriggerSourceContext) {
+        // OrdMap insertion moves whole nodes through recursive stack frames.
+        // Keep those nodes small when a batch settles many entries.
+        self.0.insert(index, Arc::new(observation));
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &TriggerSourceContext> {
+        self.0.values().map(Arc::as_ref)
+    }
+}
+
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
 /// object leaving its current zone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3098,6 +3145,9 @@ impl ZoneChangeRecord {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(not(feature = "test-support"), derive(Clone))]
 pub struct BattlefieldEntryRecord {
+    /// CR 111.1: token identity at entry. Older snapshots may lack this information.
+    #[serde(default)]
+    pub token_status: Option<EntryTokenStatus>,
     pub object_id: ObjectId,
     pub name: String,
     pub core_types: Vec<CoreType>,
@@ -3130,6 +3180,12 @@ pub struct BattlefieldEntryRecord {
     /// `true` = FaceDown.
     #[serde(default)]
     pub face_state: FaceState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EntryTokenStatus {
+    Token,
+    Nontoken,
 }
 
 /// CR 110.5 + CR 708.2: Face state of a permanent at battlefield entry time.
@@ -3179,6 +3235,7 @@ impl Clone for BattlefieldEntryRecord {
             keywords,
             controller,
             face_state,
+            token_status,
         } = self;
         Self {
             object_id: *object_id,
@@ -3190,6 +3247,7 @@ impl Clone for BattlefieldEntryRecord {
             keywords: keywords.clone(),
             controller: *controller,
             face_state: *face_state,
+            token_status: *token_status,
         }
     }
 }
@@ -21440,6 +21498,8 @@ pub enum PersistedRestoreError {
     PrioritySettlementFailed(String),
     #[error("persisted per-player choice cannot be restored: {0}")]
     InvalidPerPlayerChoice(String),
+    #[error("persisted battlefield entry for {object_id:?} has no token status and cannot be aligned with a zone change from the same turn")]
+    UnrecoverableBattlefieldEntryTokenStatus { object_id: ObjectId },
     /// CR 707.10c / CR 601.2c: a parked copy target walk is structurally
     /// malformed (its mode, decided picks, cursor or copy disagree).
     #[error("persisted copy target walk cannot be restored: {0}")]
@@ -21828,6 +21888,18 @@ impl PersistedGameState {
         state
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
+        state.restore_legacy_battlefield_entry_token_status()?;
+        // The recovery checkpoint becomes the game when its payment settles,
+        // so it must pass the same repair or refusal.
+        if let Some(checkpoint) = state
+            .payment_transaction
+            .as_deref_mut()
+            .and_then(|transaction| transaction.recovered.as_deref_mut())
+        {
+            checkpoint
+                .state
+                .restore_legacy_battlefield_entry_token_status()?;
+        }
         state.rehydrate_recovered_checkpoint_rng();
         crate::game::engine_casting::restore_legacy_cast_timing_routes(&mut state)?;
         crate::game::engine_casting::restore_legacy_pitch_cost_resume(&mut state);
@@ -25350,6 +25422,10 @@ pub struct PendingCombatLifelink {
     /// `ProposedEvent::LifeGain` is owned by `state.pending_replacement` and is
     /// recorded by `engine_replacement`'s LifeGain arm (`take_staged_answer`). Re-queueing
     /// it here would gain the life twice.
+    ///
+    /// CR 614.6 + CR 616.2: the batch can also park on a lifelink gain's
+    /// substitute, whose own action asks a choice (Nefarious Lich's "draw that
+    /// many cards instead" meeting Abundance); the gains after it stay here.
     pub remaining: VecDeque<PendingLifelinkGain>,
     /// CR 101.4 + CR 616.1 + CR 702.15b: gains already staged (their
     /// replacement choices made, their final post-replacement amounts
@@ -25370,6 +25446,10 @@ pub struct PendingCombatLifelink {
     /// `process_combat_damage_triggers` as ONE batch — CR 702.15b makes the gain
     /// simultaneous with the damage, and no player received priority for the
     /// CR 616.1 choice.
+    ///
+    /// It also holds the events of an answer that left the batch parked
+    /// (`combat_damage::hold_parked_combat_damage_answer_events`), so their
+    /// triggers join the batch's one placement too (CR 510.3a).
     pub batch_events: Vec<GameEvent>,
     /// CR 510.2: the per-player `CombatDamageDealtToPlayer` aggregate, built in
     /// Phase C and emitted AFTER the lifelink gains — the position it occupies
@@ -25383,6 +25463,10 @@ pub struct PendingCombatLifelink {
     /// predicate over recipients and a single batch routinely prevents damage for
     /// several of them; the entries are sorted so each shield's recipients stay
     /// contiguous and the CR 615.5 rider can still fire once per shield.
+    ///
+    /// Once Phase D has begun, it holds the shields not yet published: a rider
+    /// that left its prompt standing parks the batch with the later shields
+    /// here (CR 608.2c).
     #[serde(deserialize_with = "deserialize_prevention_tally_with_legacy_reject")]
     pub prevention_tally: Vec<PreventedDamageEntry>,
     /// CR 510.4: which sub-step owns this batch. Snapshotted because
@@ -25397,11 +25481,11 @@ pub struct PendingCombatLifelink {
     /// written before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement: Option<PendingCombatDamageReplacement>,
-    /// CR 510.2 + CR 616.1: the unfinished Phase C tail, present only when
-    /// the batch parked on a LEG's life-loss pause or poison-counter result
-    /// pause (infect/toxic; no stash — the damage fact was recorded at the
-    /// pause) rather than a lifelink gain's. The resume completes it before
-    /// draining `remaining`.
+    /// CR 510.2 + CR 616.1: the unfinished Phase C tail, present when the batch
+    /// parked on a LEG's result pause (its life-loss or `-1/-1` counter
+    /// replacements, each with a combat-flagged stash, or its poison-counter
+    /// result with nothing left owed and no stash) or on a pause while staging a
+    /// gain ahead of a leg. The resume completes it before draining `remaining`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_c_remnant: Option<PendingCombatPhaseCRemnant>,
 }
@@ -30689,6 +30773,10 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub spells_cast_this_game_by_player: HashMap<PlayerId, im::Vector<SpellCastRecord>>,
+    /// Completed cycling activations in placement order, keyed by activator.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
+    pub cycles_completed_this_game_by_player: HashMap<PlayerId, im::Vector<CyclingRecord>>,
     /// Per-player spell cast history this turn.
     /// Each entry records the spell's relevant characteristics at cast time,
     /// enabling data-driven filtered counting at resolution.
@@ -30835,8 +30923,8 @@ declare_game_state! {
     /// through `GameState::battlefield_entry_observation`. An entry with no row was never settled,
     /// and enter observers read the live entrant (or its record). Engine-internal: stripped from
     /// every viewer projection.
-    #[serde(default, skip_serializing_if = "im::OrdMap::is_empty")]
-    pub battlefield_entry_observations: im::OrdMap<usize, TriggerSourceContext>,
+    #[serde(default, skip_serializing_if = "BattlefieldEntryObservations::is_empty")]
+    pub battlefield_entry_observations: BattlefieldEntryObservations,
     /// CR 608.2c + CR 603.6a: the length of `zone_changes_this_turn` at each instruction boundary
     /// (`effects::settle_entries_before_instruction` past its pending-choice guard, whether or
     /// not that boundary deferred the entry observations), strictly increasing and never zero.
@@ -32278,12 +32366,6 @@ declare_game_state! {
     /// clippy's `type_complexity` lint demands one — `replace_combat_damage_batch`'s
     /// return type.
     pub combat_prevention_tally: Option<HashMap<(AppliedReplacementKey, TargetRef), i32>>,
-    /// CR 510.2 + CR 615.13: which simultaneous batch opened `combat_prevention_tally`: a combat
-    /// damage step's (CR 510.2), whose rider pauses settle inside the batch, or a noncombat
-    /// instruction's, whose riders wait for its damage. Opened and restored with the tally, so
-    /// execution-local and excluded from serialization and equality like it.
-    #[serde(skip)]
-    pub(crate) prevention_tally_batch: Option<DamageBatchKind>,
     /// CR 510.2 + CR 700.1 + CR 615.8 + CR 611.3a: what one simultaneous damage batch has
     /// settled. Only this ledger is suspended during independent follow-ups, then restored
     /// before the next portion; the prevention tally remains active. Restored to its prior
@@ -32310,13 +32392,6 @@ declare_game_state! {
 pub(crate) enum EventLosses {
     Recording(crate::types::ability::EventOutcomes),
     Immediate,
-}
-
-/// CR 510.2 + CR 615.13: the kind of simultaneous damage batch whose prevention tally is open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DamageBatchKind {
-    Combat,
-    Noncombat,
 }
 
 /// The map-backed history entries `copy` does not share with `original`, a nested causes map
@@ -36100,12 +36175,12 @@ pub(crate) struct DamageBatchLedger {
     /// A printed guard reads once for the whole batch (Undergrowth Champion ruling: "its
     /// prevention effect will apply once to all that damage").
     pub(crate) settled_guards: Vec<crate::types::ability::SettledDamageGuard>,
-    /// CR 615.5 + CR 608.2c: the frame of the first noncombat rider in this batch that left its
-    /// prompt standing. The batch's later riders queue behind it
-    /// (`replacement::damage_rider_placement`). In combat a settled leg's own continuation parks
-    /// the pass (`replacement::drain_combat_damage_continuation`), and only the in-leg
-    /// earlier-rider and aggregate drains settle their pauses (`drain_combat_damage_rider`), so
-    /// it is never set there.
+    /// CR 615.5 + CR 608.2c: the frame of the first rider in this batch that left its prompt
+    /// standing (`replacement::drain_damage_rider`). A noncombat batch's later riders queue
+    /// behind it (`replacement::damage_rider_placement`). In combat it is a leg's: a damage
+    /// substitution's action that ran ahead of an earlier rider and paused (Dralnu, Lich Lord's
+    /// sacrifice before Test of Faith's counters); `replacement::settle_combat_damage_replacement`
+    /// takes it and parks the pass on that prompt, so it never outlives the leg.
     pub(crate) paused_rider: Option<PostReplacementFrameId>,
     /// CR 614.6 + CR 615.5 + CR 616.1: `Some` while a two-phase noncombat batch is settling its
     /// original replacement choices. A damage replacement's action or rider is held here
@@ -36793,6 +36868,18 @@ impl GameState {
             || self.pending_discard_for_cost.is_some()
             || self.waiting_for.is_mana_ability_continuation()
             || self.pending_triggered_mana_resume.is_some()
+    }
+
+    /// CR 510.2: a combat damage batch is parked on a choice; until it completes, no player has
+    /// priority, the deferred queue is not placed, and the batch takes custody of its answers'
+    /// events that no other owner collects (`combat_damage::take_answer_events_into_batch`)
+    /// (CR 510.3a + CR 603.3b).
+    ///
+    /// Deliberately not part of [`Self::withholds_priority`]: that predicate also reads "a play
+    /// is in progress" (`play_trace::play_in_progress`), and a combat damage batch is a
+    /// turn-based action, not a play.
+    pub(crate) fn combat_damage_batch_parked(&self) -> bool {
+        self.pending_combat_lifelink.is_some()
     }
 
     /// CR 601.2: The cast or activation announcement currently in flight, if
@@ -38929,6 +39016,69 @@ impl GameState {
         })
     }
 
+    /// The battlefield-entry ledger is appended in the same order as the
+    /// battlefield subset of the zone-change ledger.
+    pub(crate) fn battlefield_entry_zone_changes(&self) -> impl Iterator<Item = &ZoneChangeRecord> {
+        self.zone_changes_this_turn
+            .iter()
+            .filter(|record| record.to_zone == Zone::Battlefield)
+    }
+
+    fn restore_legacy_battlefield_entry_token_status(
+        &mut self,
+    ) -> Result<(), PersistedRestoreError> {
+        if self
+            .battlefield_entries_this_turn
+            .iter()
+            .all(|entry| entry.token_status.is_some())
+        {
+            return Ok(());
+        }
+        // CR 111.1 + CR 730.2d: the entry's zone-change record preserves token status at
+        // arrival. The live object answers only when its status cannot have changed since
+        // entry; a merged permanent's follows its topmost component.
+        let mut unmatched_changes: Vec<&ZoneChangeRecord> =
+            self.battlefield_entry_zone_changes().collect();
+        let mut repairs = Vec::new();
+        for (index, entry) in self.battlefield_entries_this_turn.iter().enumerate() {
+            if entry.token_status.is_some() {
+                continue;
+            }
+            let is_token = match unmatched_changes
+                .iter()
+                .position(|change| change.object_id == entry.object_id)
+            {
+                Some(position) => unmatched_changes.remove(position).is_token,
+                None => self
+                    .objects
+                    .get(&entry.object_id)
+                    .filter(|object| {
+                        object.merged_components.is_empty()
+                            && object.merge_kind.is_none()
+                            && object.pre_merge_is_token.is_none()
+                    })
+                    .map(|object| object.is_token)
+                    .ok_or(
+                        PersistedRestoreError::UnrecoverableBattlefieldEntryTokenStatus {
+                            object_id: entry.object_id,
+                        },
+                    )?,
+            };
+            repairs.push((
+                index,
+                if is_token {
+                    EntryTokenStatus::Token
+                } else {
+                    EntryTokenStatus::Nontoken
+                },
+            ));
+        }
+        for (index, status) in repairs {
+            self.battlefield_entries_this_turn[index].token_status = Some(status);
+        }
+        Ok(())
+    }
+
     /// CR 400.7 + CR 603.6a: the zone change that put the exact object `identity` onto the
     /// battlefield this turn (its `entered_incarnation`). An incarnation enters at most once.
     /// `None` when it has not entered this turn (the ledger is per-turn).
@@ -41031,6 +41181,7 @@ impl GameState {
             pending_paradigm_remaining_offers: None,
             spells_cast_this_game: HashMap::new(),
             spells_cast_this_game_by_player: HashMap::new(),
+            cycles_completed_this_game_by_player: HashMap::new(),
             spells_cast_this_turn_by_player: HashMap::new(),
             lands_played_this_turn_by_player: HashMap::new(),
             players_who_searched_library_this_turn: HashSet::new(),
@@ -41056,7 +41207,7 @@ impl GameState {
             players_who_sacrificed_artifact_this_turn: HashSet::new(),
             sacrificed_permanents_this_turn: im::Vector::new(),
             zone_changes_this_turn: im::Vector::new(),
-            battlefield_entry_observations: im::OrdMap::new(),
+            battlefield_entry_observations: BattlefieldEntryObservations::default(),
             instruction_boundary_marks: Vec::new(),
             batched_zone_change_trigger_fired: im::HashSet::new(),
             battlefield_entries_this_turn: im::Vector::new(),
@@ -41226,7 +41377,6 @@ impl GameState {
             combat_prevention_tally: None,
             damage_batch_ledger: None,
             damage_event_losses: None,
-            prevention_tally_batch: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
@@ -44995,6 +45145,7 @@ impl GameState {
             pending_paradigm_remaining_offers: _,
             spells_cast_this_game: _,
             spells_cast_this_game_by_player: _,
+            cycles_completed_this_game_by_player: _,
             spells_cast_this_turn_by_player: _,
             lands_played_this_turn_by_player: _,
             players_who_searched_library_this_turn: _,
@@ -45143,7 +45294,6 @@ impl GameState {
             combat_prevention_tally: _,
             damage_batch_ledger: _,
             damage_event_losses: _,
-            prevention_tally_batch: _,
             liminal_entries: _,
             pending_liminal_entry_resume: _,
             entering_aura_authority: _,
@@ -46629,6 +46779,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_paradigm_remaining_offers: _,
         spells_cast_this_game: _,
         spells_cast_this_game_by_player: _,
+        cycles_completed_this_game_by_player: _,
         spells_cast_this_turn_by_player: _,
         lands_played_this_turn_by_player: _,
         players_who_searched_library_this_turn: _,
@@ -46825,7 +46976,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         combat_prevention_tally: _,
         damage_batch_ledger: _,
         damage_event_losses: _,
-        prevention_tally_batch: _,
         // Post-rebase upstream additions (v0.21.x: #5515 discover + liminal mechanic).
         // Strict-compared by eq_except_growable's GameState PartialEq reuse (fail-safe:
         // a differing value is correctly not a fixed-point repeat); object-growth loops
@@ -47347,6 +47497,7 @@ impl PartialEq for GameState {
             && self.pending_paradigm_remaining_offers == other.pending_paradigm_remaining_offers
             && self.spells_cast_this_game == other.spells_cast_this_game
             && self.spells_cast_this_game_by_player == other.spells_cast_this_game_by_player
+            && self.cycles_completed_this_game_by_player == other.cycles_completed_this_game_by_player
             && self.spells_cast_this_turn_by_player == other.spells_cast_this_turn_by_player
             && self.lands_played_this_turn_by_player == other.lands_played_this_turn_by_player
             && self.players_who_searched_library_this_turn

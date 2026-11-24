@@ -22,9 +22,9 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CombatPreventionTally, DamageBatchKind, DamageBatchLedger, DamageRecord, DistributionScope,
-    EventLosses, GameState, HeldBatchRider, PendingContinuation, PendingDamagePostCounter,
-    PreventedDamageEntry, ResidentDrainPolicy, RiderTiming, TriggerSourceRead, WaitingFor,
+    CombatPreventionTally, DamageBatchLedger, DamageRecord, DistributionScope, EventLosses,
+    GameState, HeldBatchRider, PendingContinuation, PendingDamagePostCounter, PreventedDamageEntry,
+    ResidentDrainPolicy, RiderTiming, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, KeywordKind, MatchedProtectionQuality};
@@ -1081,13 +1081,15 @@ pub(crate) fn apply_damage_after_replacement(
         }
     }
 
+    // CR 120.4a + CR 120.8: the permanent leg is the post-redirect `primary_amount`;
+    // a redirect that took the whole hit dealt the permanent nothing, so it raises no
+    // event and leaves no record.
     emit_damage_dealt_and_record(
         state,
         ctx.source_id,
         ctx.source_incarnation,
         ctx.controller,
         t,
-        actual_amount,
         primary_amount,
         primary_excess,
         is_combat,
@@ -1204,7 +1206,6 @@ fn record_player_damage_at_counter_pause(
         ctx.source_incarnation,
         ctx.controller,
         &TargetRef::Player(target),
-        actual_amount,
         actual_amount,
         0,
         is_combat,
@@ -1367,7 +1368,6 @@ fn emit_parked_player_damage(
         stashed.controller,
         &TargetRef::Player(stashed.target),
         stashed.actual_amount,
-        stashed.actual_amount,
         0,
         stashed.is_combat,
         events,
@@ -1375,9 +1375,9 @@ fn emit_parked_player_damage(
 }
 
 /// CR 120.1: push the `DamageDealt` event and record the damage for "was
-/// dealt damage by" condition queries. `dealt_amount` gates recording (a
-/// nonzero amount actually dealt per CR 120.3 / CR 120.4b); `record_amount` /
-/// `record_excess` are the lethal-split figures the record carries. Shared by
+/// dealt damage by" condition queries. `dealt_amount` is the damage this leg
+/// actually dealt to `target` (after any CR 120.4a excess redirect) and gates
+/// both (CR 120.8); `dealt_excess` is the excess the record carries. Shared by
 /// the synchronous path, the post-loss resume drain, and the combat batch
 /// remnant resume so a paused-then-resumed leg emits and records exactly what
 /// the never-paused leg would. This is the single damage-history authority:
@@ -1394,19 +1394,20 @@ pub(crate) fn emit_damage_dealt_and_record(
     controller: PlayerId,
     target: &TargetRef,
     dealt_amount: u32,
-    record_amount: u32,
-    record_excess: u32,
+    dealt_excess: u32,
     is_combat: bool,
     events: &mut Vec<GameEvent>,
 ) {
-    // CR 120.8: damage reduced to 0 is not dealt, so it raises no event and leaves no record.
+    // CR 120.8: damage reduced to 0 is not dealt, so it raises no event and leaves no
+    // record. That includes a permanent whose whole hit an excess redirect sent to its
+    // controller instead (CR 120.4a).
     if dealt_amount > 0 {
         events.push(GameEvent::DamageDealt {
             source_id,
             target: target.clone(),
-            amount: record_amount,
+            amount: dealt_amount,
             is_combat,
-            excess: record_excess,
+            excess: dealt_excess,
             // CR 400.7: the incarnation captured with the damage context, as the
             // damage record below uses.
             source_incarnation,
@@ -1448,14 +1449,14 @@ pub(crate) fn emit_damage_dealt_and_record(
             source_incarnation,
             // CR 120.4a: the permanent was dealt only the lethal portion; the
             // excess is recorded against the controller by the redirect below.
-            amount: record_amount,
+            amount: dealt_amount,
             is_combat,
             // CR 120.10: Record excess so "was dealt excess damage this turn"
             // intervening-if conditions can query without re-computing lethal.
             // Redirected excess is recorded against the controller by the redirect
             // leg below, so the creature's record reports `primary_excess` (zero
             // when the rider redirected it).
-            excess: record_excess,
+            excess: dealt_excess,
             // CR 608.2i + CR 608.2h: the obj-derived source snapshot below
             // overwrites these when the source still exists; the empty/default
             // tail (Default::default()) covers the source-already-gone case.
@@ -1855,13 +1856,14 @@ pub(crate) fn wither_infect_post_counter_core(
     // normal computed `excess` (e.g. plain overkill still reports its excess).
     let primary_excess = excess.saturating_sub(redirect_excess);
 
+    // CR 120.4a + CR 120.8: as in `apply_damage_after_replacement`, the creature leg
+    // is the post-redirect `primary_amount`.
     emit_damage_dealt_and_record(
         state,
         ctx.source_id,
         ctx.source_incarnation,
         ctx.controller,
         target,
-        actual_amount,
         primary_amount,
         primary_excess,
         is_combat,
@@ -2244,10 +2246,8 @@ fn run_damage_batch(
     // CR 615.13: so does its prevention tally (opened in Phase B); a batch nested in this one
     // (a rider's damage) aggregates on its own, and the enclosing tally is restored.
     let enclosing_tally = state.combat_prevention_tally.take();
-    let enclosing_tally_batch = state.prevention_tally_batch.take();
     let result = run_damage_batch_phases(state, ability, kind, replaced, portions, parked, events);
     state.combat_prevention_tally = enclosing_tally;
-    state.prevention_tally_batch = enclosing_tally_batch;
     state.damage_event_losses = enclosing;
     result
 }
@@ -2255,13 +2255,11 @@ fn run_damage_batch(
 /// CR 615.13: open a noncombat batch's prevention tally on what it has prevented so far.
 fn open_batch_prevention_tally(state: &mut GameState, entries: &[PreventedDamageEntry]) {
     state.combat_prevention_tally = Some(tally_map_from_record_entries(entries));
-    state.prevention_tally_batch = Some(DamageBatchKind::Noncombat);
 }
 
 /// CR 615.13: close the batch's prevention tally, as the entries a park carries or the
 /// publication fires.
 fn take_batch_prevention_tally(state: &mut GameState) -> Vec<PreventedDamageEntry> {
-    state.prevention_tally_batch = None;
     state
         .combat_prevention_tally
         .take()
@@ -2574,12 +2572,8 @@ fn run_damage_batch_phases(
     // `DamagePrevented` per (shield, recipient), and each shield's rider once, against what it
     // prevented across the batch.
     if !prevention.is_empty() {
-        let outcome = crate::game::combat_damage::fire_batch_prevention_riders(
-            state,
-            &prevention,
-            events,
-            true,
-        );
+        let outcome =
+            crate::game::combat_damage::fire_batch_prevention_riders(state, &prevention, events);
         // CR 104.1: a rider that ended the game ends the batch.
         if state.game_end.is_some() {
             return Ok(DamageTail::Caller);
@@ -3110,13 +3104,9 @@ pub(crate) fn hold_riders_for_awaited_portion<T>(
         .map(|parked| tally_map_from_record_entries(&parked.prevention_tally))
         .unwrap_or_default();
     let enclosing_tally = state.combat_prevention_tally.replace(parked_tally);
-    let enclosing_tally_batch = state
-        .prevention_tally_batch
-        .replace(DamageBatchKind::Noncombat);
     let result = answer(state);
     let prevention_tally = take_batch_prevention_tally(state);
     state.combat_prevention_tally = enclosing_tally;
-    state.prevention_tally_batch = enclosing_tally_batch;
     let held = take_held_riders(state);
     // CR 614.9: a capped redirect the answer applied splits a portion off into the batch too.
     let split = take_split_portions(state);
@@ -3893,7 +3883,10 @@ pub fn resolve_post_replacement(
 /// When absent (e.g. activated abilities), the ability's own source is read through
 /// its pinned announcement epoch: the live object only while it is still that
 /// incarnation, else that incarnation's exit LKI.
-fn damage_context_from_ability(state: &GameState, ability: &ResolvedAbility) -> DamageContext {
+pub(crate) fn damage_context_from_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> DamageContext {
     damage_context_for_subject(
         state,
         ability.source_id,
@@ -4177,7 +4170,7 @@ pub(super) fn damage_sources(state: &GameState, ability: &ResolvedAbility) -> Ve
 
 /// CR 120.3: the recipients of a `DealDamage` node. Shared by `resolve` and
 /// `stack_reach`, so a pending node is read with the resolver's own binding.
-pub(super) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
+pub(crate) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
     let Effect::DealDamage {
         damage_source,
         target: target_filter,
@@ -7532,7 +7525,6 @@ mod tests {
             PlayerId(1),
             &target,
             2,
-            2,
             0,
             true,
             &mut events,
@@ -7552,7 +7544,6 @@ mod tests {
             None,
             PlayerId(1),
             &target,
-            1,
             1,
             0,
             false,
@@ -7582,7 +7573,6 @@ mod tests {
                 &target,
                 0,
                 0,
-                0,
                 is_combat,
                 &mut events,
             );
@@ -7604,7 +7594,6 @@ mod tests {
             None,
             PlayerId(1),
             &target,
-            2,
             2,
             0,
             true,
@@ -7643,7 +7632,6 @@ mod tests {
             PlayerId(1),
             &target,
             2,
-            2,
             0,
             true,
             &mut events,
@@ -7663,7 +7651,6 @@ mod tests {
             None,
             PlayerId(1),
             &target,
-            1,
             1,
             0,
             true,
@@ -7691,7 +7678,6 @@ mod tests {
             None,
             PlayerId(1),
             &target,
-            1,
             1,
             0,
             false,

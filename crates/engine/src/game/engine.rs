@@ -1618,6 +1618,10 @@ fn apply_action_boundary_core(
         && action.is_submitter_scoped()
         && !matches!(action, GameAction::Concede { .. } | GameAction::Debug(_)))
     .then(|| (action.clone(), authenticated_actor));
+    // CR 510.2: whether this action answers a parked combat damage batch's choice.
+    // The reducer fills a fresh `ActionResult`, so its events begin at index 0.
+    let parked_combat_damage_answer =
+        super::combat_damage::ParkedCombatDamageAnswer::begin(state, 0);
     let mut result = match if payment_transaction::owns_action(state, &action) {
         // All staged-payment actions enter through this admission point. The
         // authenticated actor is recorded for deterministic replay; the
@@ -1763,9 +1767,13 @@ fn apply_action_boundary_core(
     // `run_post_action_pipeline` — one of the reducer arms that builds an `ActionResult` straight
     // out of the match. Converge those onto the same
     // pipeline the rest of the reducer uses, scanning ONLY the slice this realization appended, so
-    // a handler that already settled its own events (`handle_opponent_may_choice`, which collects
-    // into `deferred_triggers` without recording them in `consumed_before_priority_trigger_events`)
-    // cannot have them collected a second time. Inert on every other route: the flush returns
+    // a handler that already settled its own events (`handle_opponent_may_choice`, whose settled
+    // branch collects into `deferred_triggers` without recording them in
+    // `consumed_before_priority_trigger_events`) cannot have them collected a second time. While a
+    // combat damage batch is parked that handler collects nothing inline
+    // (`announcement_triggers::take_inline_trigger_span`) and drains nothing
+    // (`triggers::can_drain_deferred_triggers`); the convergence first in the block below folds its
+    // events into the batch instead (CR 510.2). Inert on every other route: the flush returns
     // `false` when nothing was parked or an earlier convergence point already consumed it
     // (`Option::take_if`).
     // CR 104.3a: a concession's follow-up that fails stops here; finalization
@@ -1773,6 +1781,34 @@ fn apply_action_boundary_core(
     let follow_up_failure =
         'follow_up: {
             let scan_from = result.events.len();
+            // CR 510.2 + CR 510.3a + CR 603.3b: a direct-return answer to a parked
+            // combat damage batch's choice (`handle_opponent_may_choice`, a
+            // concession) finishes the batch here, or hands it its events; when the
+            // batch completed under a priority window, its events join the
+            // convergence pass below. Inert when the reducer already converged it.
+            let resumed_combat_damage = match resume_parked_combat_damage_at_action_boundary(
+                state,
+                parked_combat_damage_answer,
+                &result.waiting_for,
+                &mut result.events,
+            ) {
+                Ok(Some(waiting_for)) => {
+                    result.waiting_for = waiting_for;
+                    true
+                }
+                Ok(None) => false,
+                Err(err) => {
+                    if committed_departure.is_some() {
+                        break 'follow_up Some(err);
+                    }
+                    let failure = boundary_life_change_failure(state);
+                    lifecycle.discard();
+                    *state = cast_undo_boundary.restore(boundary_snapshot);
+                    return Err(failure.map_or(err, |player| {
+                        EngineError::LifeChangeUnrepresentable { player }
+                    }));
+                }
+            };
             // CR 601.2h + CR 602.2b + CR 605.3b: a parked counter-cost root's subtree is
             // finished and the root resumed before the action returns; when that made
             // progress, its events join the convergence pass below.
@@ -1833,7 +1869,7 @@ fn apply_action_boundary_core(
             let settled_entry_continuation_is_parked =
                 matches!(result.waiting_for, WaitingFor::Priority { .. })
                     && !state.deferred_entry_events.is_empty();
-            if ((resumed_parked_root || reconciled_unless_payment)
+            if ((resumed_combat_damage || resumed_parked_root || reconciled_unless_payment)
                 && matches!(result.waiting_for, WaitingFor::Priority { .. }))
                 || realized_token_entry
                 || settled_entry_batch
@@ -1964,6 +2000,95 @@ fn resume_parked_counter_cost_root_at_action_boundary(
         );
     }
     Ok(progressed.then(|| state.waiting_for.clone()))
+}
+
+/// CR 510.2 + CR 510.3a + CR 603.3b: the action-boundary convergence for a
+/// combat damage batch parked on a choice. No player has the chance to cast
+/// spells or activate abilities between the time combat damage is assigned and
+/// the time it's dealt, so an answer that settles to a priority window does not
+/// hand anyone priority: the batch finishes in the answering action, whichever
+/// handler took the answer (a zone choice, an optional effect, an opponent's
+/// "may", a concession). An answer that leaves the batch parked on its next
+/// choice hands the batch its events instead (fold-only), so their triggers join
+/// the combat damage step's one placement.
+///
+/// `answer` is `Some` only when the batch was parked as the action began
+/// ([`super::combat_damage::ParkedCombatDamageAnswer::begin`]). `Some` is returned when
+/// the batch moved (it completed, or its answer's wait changed); the caller then
+/// adopts that wait. Inert with nothing parked, so a boundary reached after
+/// `handle_replacement_choice`'s own resume, or a second boundary over the same
+/// action, changes nothing (the fold-only claims what it folds).
+///
+/// CR 800.4j: the same holds after the active player left the game (a surviving
+/// chooser answers after that player's concession): the batch finishes in the
+/// answering action, and its completed batch's priority window goes to the next
+/// player in turn order still in the game (`living_priority_seat`, from
+/// `combat_damage::resume_pending_combat_lifelink`). CR 800.4a: a next prompt the
+/// batch's resume raises is surfaced only when its acting player is still in the
+/// game, the test `turns::auto_advance_once` applies to the same resume.
+fn resume_parked_combat_damage_at_action_boundary(
+    state: &mut GameState,
+    answer: Option<super::combat_damage::ParkedCombatDamageAnswer>,
+    waiting_for: &WaitingFor,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let Some(answer) = answer else {
+        return Ok(None);
+    };
+    if !state.combat_damage_batch_parked() {
+        return Ok(None);
+    }
+    let returned_priority = matches!(waiting_for, WaitingFor::Priority { .. });
+    if returned_priority && state.game_end.is_none() {
+        sync_waiting_for(state, waiting_for);
+        resume_pending_continuation_if_priority(state, events)?;
+    }
+    // CR 104.1 + CR 510.2: a game that ends during an answer ends the entire
+    // combat damage batch immediately. Keep the answer's events in its buffer.
+    if state.game_end.is_some() {
+        state.pending_combat_lifelink = None;
+        state
+            .pending_damage_post_loss
+            .take_if(|stashed| stashed.is_combat);
+        state
+            .pending_damage_post_counter
+            .take_if(|stashed| stashed.is_combat);
+        super::elimination::ensure_game_over_if_terminal(state, events);
+        return Ok(Some(state.waiting_for.clone()));
+    }
+    if !state.combat_damage_batch_parked() {
+        // The continuation's own drain finished the batch.
+        return Ok(Some(state.waiting_for.clone()));
+    }
+    if !returned_priority || !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        // The answer or continuation stopped at its next choice.
+        super::combat_damage::hold_parked_combat_damage_answer_events(state, answer, events);
+        return Ok(returned_priority.then(|| state.waiting_for.clone()));
+    }
+    let resumed = super::combat_damage::resume_pending_combat_lifelink(
+        state,
+        answer.action_event_start(),
+        None,
+        events,
+    )
+    .unwrap_or_else(|| state.waiting_for.clone());
+    // CR 800.4a: a prompt naming a seat that left the game cannot be answered, so
+    // it is not surfaced; the priority window goes to the next player in turn
+    // order still in the game (CR 800.4j), and `resolve_combat_damage`'s re-entry
+    // guard finishes the batch from priority.rs's completeness gate.
+    // `acting_player()` is `None` for `GameOver`, which is terminal and surfaced.
+    let resumed = if resumed
+        .acting_player()
+        .is_some_and(|player| !super::players::is_alive(state, player))
+    {
+        WaitingFor::Priority {
+            player: living_priority_seat(state),
+        }
+    } else {
+        resumed
+    };
+    state.waiting_for = resumed.clone();
+    Ok(Some(resumed))
 }
 
 /// CR 800.4a + CR 616.1 + CR 117.2e: the concession-boundary reconciliation of
@@ -3088,9 +3213,13 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     // owned by a resolution keep the net. CR 117.2e + CR 121.4: one exception is
     // a parked unless payment of draws: a draw from an empty library loses at the
     // next priority, after the payment's later replacement prompts.
+    // CR 510.2 + CR 704.3: a parked combat damage batch is not a point where a
+    // player would receive priority; its state-based actions are checked once it
+    // completes.
     if sba::has_pending_player_loss_sba(state)
         && !state.withholds_priority()
         && !engine_payment_choices::draw_payment_is_parked(state)
+        && !state.combat_damage_batch_parked()
     {
         // CR 117.2e: the loss may cancel the current pause of a resolution
         // that is still under way (its chooser left). This net applies the
@@ -12301,6 +12430,10 @@ fn apply_non_priority_pass_action(
     // `PendingCast` exists.
     let answers_a_cast_step = state.waiting_for.has_pending_cast()
         || matches!(state.waiting_for, WaitingFor::ModalFaceChoice { .. });
+    // CR 510.2: whether this action answers a parked combat damage batch's choice,
+    // and where its events begin — see the convergence below the match.
+    let parked_combat_damage_answer =
+        super::combat_damage::ParkedCombatDamageAnswer::begin(state, events.len());
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
         (
@@ -17220,6 +17353,18 @@ fn apply_non_priority_pass_action(
         &action_for_divergence,
     );
 
+    // CR 510.2 + CR 510.3a + CR 603.3b: an answer to a parked combat damage batch's
+    // choice finishes the batch here, before the pipeline below, so no player
+    // receives priority inside it; an answer that leaves it parked hands it its
+    // events. Direct-return arms converge at `apply_action_boundary_core`.
+    let waiting_for = resume_parked_combat_damage_at_action_boundary(
+        state,
+        parked_combat_damage_answer,
+        &waiting_for,
+        &mut events,
+    )?
+    .unwrap_or(waiting_for);
+
     // CR 704.3 + CR 117.5 + CR 117.3c: a parked counter-cost root's subtree is
     // finished and the root resumed before the pipeline below, so the activation
     // is on the stack before the game checks state-based actions — no player
@@ -18969,6 +19114,7 @@ fn handle_play_land(
         Zone::Library
     };
 
+    let event_start = events.len();
     match commit_land_play(
         state,
         player,
@@ -18979,8 +19125,19 @@ fn handle_play_land(
         library_permission_src,
         events,
     ) {
-        // Player retains priority after playing a land
-        LandPlayCommit::Entered => Ok(WaitingFor::Priority { player }),
+        LandPlayCommit::Entered => {
+            // CR 116.2a + CR 611.3c: a completed special-action land play
+            // sees the continuous effects applying to the land as it enters.
+            let land_entries = events.iter().skip(event_start).filter(|event| {
+                matches!(event, GameEvent::ZoneChanged {
+                    object_id: entrant,
+                    to: Zone::Battlefield,
+                    ..
+                } if *entrant == object_id)
+            });
+            super::zones::settle_battlefield_entry_observations(state, land_entries);
+            Ok(WaitingFor::Priority { player })
+        }
         LandPlayCommit::AwaitingEntryChoice(waiting_for) => Ok(*waiting_for),
         LandPlayCommit::Prevented => Ok(WaitingFor::Priority {
             player: state.priority_player,
@@ -23613,9 +23770,11 @@ mod stage2_injector_tests {
             .filter(|l| l.contains(&authority))
             .count();
         assert_eq!(
-            authority_code_hits, 3,
-            "one definition + two calls — the CR 603.5 gate's `let prompt_player = ..` and the \
-             repeated-payment offer, which asks the named player per iteration. A third call \
+            authority_code_hits, 4,
+            "one definition + three calls — the CR 603.5 gate's `let prompt_player = ..`, the \
+             repeated-payment offer, which asks the named player per iteration, and \
+             `optional_rider_chooser`, which only names who a combat prevention rider's \
+             \"may\" would ask so Phase D orders the choices in APNAP order. A fourth call \
              inside `effects/mod.rs` means another producer started consulting the authority \
              and this row's partition needs re-deriving"
         );
@@ -24714,7 +24873,7 @@ mod bounded_offer_conjunct_tests {
                 3,
             ),
             (format!("is_repeated_optional{}payment(", '_'), 2),
-            (format!("optional_prompt{}player(", '_'), 2),
+            (format!("optional_prompt{}player(", '_'), 3),
             // The boolean wrapper and the reason-returning authority are ONE gate
             // family, counted in the same census: the wrapper is the authority's
             // `.is_some()`, and the decline route in `resolve_chain_body` reads the
@@ -24798,7 +24957,10 @@ mod bounded_offer_conjunct_tests {
              driver dispatch, and \
              `resolve_chain_body`'s `CastFromZone` decline probe — every one of them selects a \
              DRIVER rather than opening an up-front window — plus `offer_repeated_payment`, \
-             which only names who is asked a driver's per-iteration offer, so a NEW site is a \
+             which only names who is asked a driver's per-iteration offer, and \
+             `optional_rider_chooser`, which only names who a combat prevention rider's \
+             \"may\" would ask so Phase D orders the choices in APNAP order (CR 101.4), so a \
+             NEW site is a \
              decision to adjudicate here and not a number to move. Within the gate family \
              itself, moving a site between the wrapper spelling (`optional_effect_is_infeasible`) \
              and the reason spelling (`optional_effect_infeasibility`) is not a count change.\

@@ -31619,11 +31619,7 @@ fn trigger_intervening_if_this_card_is_suspended() {
             )));
             assert!(conditions.iter().any(|condition| matches!(
                 condition,
-                TriggerCondition::HasCounters {
-                    counters: CounterMatch::OfType(CounterType::Time),
-                    minimum: 1,
-                    maximum: None,
-                }
+                TriggerCondition::SourceMatchesFilter { filter } if *filter == TargetFilter::suspended_card(None)
             )));
         }
         other => panic!("expected suspended And condition, got {other:?}"),
