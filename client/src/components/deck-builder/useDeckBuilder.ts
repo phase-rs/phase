@@ -147,7 +147,7 @@ export function useDeckBuilder({
   }, []);
   // Bumped whenever the editor switches to another deck: a Load, or a Clone that opens its copy.
   const deckIdentityRevision = useRef(0);
-  // Bumped whenever a Load starts so a newer selection supersedes an in-flight Load.
+  // Bumped when a saved deck has been found or a bundled precon lookup starts.
   const loadGeneration = useRef(0);
   interface EditorCapture {
     identity: number;
@@ -693,7 +693,6 @@ export function useDeckBuilder({
   // Load ignore it; resolveSaveConflict's "load" case uses it to tell a genuine load from a bail
   // so it knows whether to continue a pending action.
   const handleLoad = useCallback(async (name: string): Promise<boolean> => {
-    const generation = ++loadGeneration.current;
     // Captured before the resolveCommander await below: a committed Load/Clone (reloaded) or any edit
     // that marks the deck dirty, including an Import (edited), must win over this Load.
     const captured = captureEditor();
@@ -701,6 +700,7 @@ export function useDeckBuilder({
     const stored = captureSavedDeck(name);
     if (!parsed || stored.raw === null) {
       if (!name.startsWith(PRECON_PREFIX)) return false;
+      const generation = ++loadGeneration.current;
       const decks = await loadPreconDeckMap();
       const found = Object.entries(decks ?? {}).find(([, entry]) => PRECON_PREFIX + `${entry.name} (${entry.code})` === name);
       if (!found) return false;
@@ -720,6 +720,7 @@ export function useDeckBuilder({
       setComboDeclaration(UNDECLARED_COMBO);
       return true;
     }
+    const generation = ++loadGeneration.current;
     const persisted = JSON.parse(stored.raw) as ParsedDeck & { format?: string };
     // A rewrite that lands while resolveCommander runs is missed by the hook-level
     // subscription, which follows savedDeckRef and not this Load.

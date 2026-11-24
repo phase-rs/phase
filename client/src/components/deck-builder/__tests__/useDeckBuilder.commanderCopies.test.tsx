@@ -577,6 +577,25 @@ describe("useDeckBuilder — counted Commander inference", () => {
     expect(result.current.deckName).toBe(forestName);
   });
 
+  it("keeps a valid Load pending when a missing saved deck is selected", async () => {
+    const name = "Loaded Plains";
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(unmarked));
+    const { result } = openBuilder();
+    const plainsAnswer = deferred<string | null>();
+    inference.mockReturnValueOnce(plainsAnswer.promise);
+
+    const plainsLoad = result.current.handleLoad(name);
+    expect(await result.current.handleLoad("Deleted Deck")).toBe(false);
+    expect(inference.mock.calls).toEqual([[plains]]);
+
+    await act(async () => {
+      plainsAnswer.resolve(null);
+      expect(await plainsLoad).toBe(true);
+    });
+    expect(result.current.deck.main).toEqual(plains);
+    expect(result.current.deckName).toBe(name);
+  });
+
   it("discards a stale inference answer and commits a current Load", async () => {
     const name = "Unmarked Commander";
     const commander = "Isamaru, Hound of Konda";
