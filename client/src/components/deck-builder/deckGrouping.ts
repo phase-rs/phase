@@ -1,3 +1,4 @@
+import type { DeckEntry } from "../../services/deckParser";
 import type { ScryfallCard } from "../../services/scryfall";
 
 /** How the main deck is sub-grouped: by card type or by color. Lands stay
@@ -124,4 +125,20 @@ const NEUTRAL_ACCENT: GroupAccent = { bar: "bg-white/15", text: "text-slate-400"
 export function groupAccent(key: string): GroupAccent {
   const raw = key.includes(".") ? key.slice(key.lastIndexOf(".") + 1) : key;
   return GROUP_ACCENTS[raw] ?? NEUTRAL_ACCENT;
+}
+
+export function repeatedEntryNames(entries: DeckEntry[]): Set<string> {
+  const seen = new Set<string>();
+  const repeated = new Set<string>();
+  for (const { name } of entries) {
+    if (seen.has(name)) repeated.add(name);
+    seen.add(name);
+  }
+  return repeated;
+}
+
+export function printingLabel(entry: DeckEntry, repeatedNames: ReadonlySet<string>): string | undefined {
+  if (!entry.sourcePrinting || !repeatedNames.has(entry.name)) return undefined;
+  const { setCode, collectorNumber } = entry.sourcePrinting;
+  return `${setCode.toUpperCase()} ${collectorNumber}`;
 }

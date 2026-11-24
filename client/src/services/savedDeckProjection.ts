@@ -1,16 +1,7 @@
 import type { GameFormat } from "../adapter/types";
 import type { CommanderBracket, ComboDeclaration } from "../types/bracket";
 import { formatMetadata } from "../data/formatRegistry";
-import type { ParsedDeck } from "./deckParser";
-
-function removeOneCopy(entries: ParsedDeck["sideboard"], name: string): ParsedDeck["sideboard"] {
-  let removed = false;
-  return entries.flatMap((entry) => {
-    if (removed || entry.name !== name) return [entry];
-    removed = true;
-    return entry.count > 1 ? [{ ...entry, count: entry.count - 1 }] : [];
-  });
-}
+import { removeOneCopy, type ParsedDeck } from "./deckParser";
 
 /**
  * Persisted marker: this record's commander-family companion is not also listed

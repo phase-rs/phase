@@ -448,6 +448,7 @@ mod new_master_of_arms_tapped_blocker_prevention;
 mod niko_light_of_hope;
 mod ninjutsu_cluster;
 mod nissa_ascended_animist_loyalty_token_6012;
+mod niv_mizzet_ghost_counsel;
 mod nix_counter_no_mana_spent;
 mod no_top_level_test_binaries;
 mod no_witnesses_most_creatures_investigate;

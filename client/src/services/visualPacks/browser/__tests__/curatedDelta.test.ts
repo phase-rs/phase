@@ -1248,6 +1248,36 @@ describe("curated delta install", () => {
       expect(exactKeys(withDeck)).toHaveLength(exactKeys(withoutDeck).length + exactKeys(lea).length);
     });
 
+    it("plans three different printings of one card from a single saved deck", async () => {
+      const forest = "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6";
+      const sources = [
+        { ...printing("3279314f-d639-4489-b2ab-3621bb3ca64b", "one", "2023-02-10"), collector_number: "276" },
+        { ...printing("69557258-2441-4ca5-993a-8d7afb51ad3d", "dmu", "2022-09-09"), collector_number: "277" },
+        { ...printing("9adadff6-a73a-4f4d-a33a-eda89c5cabe2", "neo", "2022-02-18"), collector_number: "292" },
+      ];
+      const [cards, printings] = await Promise.all([loadScryfallData(), loadPrintingsData()]);
+      if (!cards || !printings) throw new Error("card or printing data unavailable");
+      cards.forest = cardEntry(forest, "Forest", "forest");
+      printings[forest] = sources;
+
+      try {
+        const deckName = "Split Forests";
+        saveDeck(deckName, sources.map((source) => ({
+          count: 1, name: "Forest",
+          sourcePrinting: { setCode: source.set, collectorNumber: source.collector_number },
+        })));
+        usePreferencesStore.setState({ artChain: SOURCE_THEN_NEWEST(), artOverrides: {} });
+        const keys = exactKeys(await planCuratedPack());
+        for (const source of sources) {
+          expect(keys).toContain(`asset:v1:exact_printing:${source.id}-0-full_card-normal`);
+        }
+      } finally {
+        delete cards.forest;
+        delete printings[forest];
+        localStorage.removeItem(STORAGE_KEY_PREFIX + "Split Forests");
+      }
+    });
+
     it("resolves an accented deck name through the app's folded-name index", async () => {
       usePreferencesStore.setState({ artChain: SOURCE_THEN_NEWEST(), artOverrides: {} });
       const withoutDeck = await planCuratedPack();
