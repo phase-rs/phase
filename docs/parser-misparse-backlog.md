@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4466
-- **Total card appearances across root causes:** 4499 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4465
+- **Total card appearances across root causes:** 4498 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > **Staleness warning.** This list is pruned one card at a time and has not been
 > regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
@@ -76,7 +76,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 18 | Subtype / type-change modification malformed or dropped | 78 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
 | 20 | Damage subject/recipient set incomplete | 70 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
 | 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 55 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
-| 21 | Token entry flags / keyword / attachment clause dropped | 52 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
+| 21 | Token entry flags / keyword / attachment clause dropped | 51 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
 | 23 | Effect modeled with structurally wrong variant / ability class | 49 | add-engine-effect: select the correct Effect/ability variant for the clause class |
 | 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 35 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
 | 25 | Wrong / dropped effect duration | 19 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
@@ -86,7 +86,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2376/4499 ≈ 52.8% of all misparse appearances; the top 10 cover 3350/4499 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
+> The top **5** root causes cover 2376/4498 ≈ 52.8% of all misparse appearances; the top 10 cover 3350/4498 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
 
 ## Full card lists per root cause
 
@@ -4629,7 +4629,7 @@ are outside the detector's class.
 
 </details>
 
-### 21. Token entry flags / keyword / attachment clause dropped  (52 cards)
+### 21. Token entry flags / keyword / attachment clause dropped  (51 cards)
 
 **Signature.** Token creation drops tapped/enters_attacking flags, a 'with <keyword>' grant, color/name, or an attach-to-target clause (terminator misses a trailing relative phrase).
 
@@ -4656,7 +4656,6 @@ are outside the detector's class.
 - Godsire
 - Goldmeadow Lookout
 - Ignacio of Myra's Marvels
-- Immortal Obligation
 - Imperious Mindbreaker
 - Impetuous Lootmonger
 - In Too Deep

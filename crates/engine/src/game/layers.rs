@@ -11711,12 +11711,16 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 /// than the carrier's controller, so the graft has to snapshot
 /// `effect.controller` as the definition's anchor.
 ///
-/// Two member classes today:
+/// Three member classes today:
 /// - `MustBeBlockedByAll` / `MustBeBlocked` carrying a controller-relative
 ///   blocker filter (`ControllerRef::You`/`Opponent`/… — "your opponents", "you
 ///   control"). Grafted onto a TARGET permanent by a one-shot effect (You Look
 ///   Upon the Tarrasque), CR 109.5 would otherwise evaluate the filter relative
 ///   to the target's controller.
+/// - `BlockRestriction` carrying a controller-relative attacker filter ("can't
+///   block creatures you control"), grafted onto another player's creature by a
+///   resolving spell (Immortal Obligation). Both consumers read the anchor
+///   through `combat::blocker_filter_context`.
 /// - `MustAttackAwayFromSource`, whose avoided player is the granting effect's
 ///   controller (CR 701.15b).
 ///
@@ -11735,7 +11739,136 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
         // (Maximum Carnage chapter I), so re-deriving it from the carrier would
         // avoid the wrong player.
         StaticMode::MustAttackAwayFromSource => true,
-        _ => false,
+        // CR 109.5 + CR 509.1b + CR 608.2c: a "can't block <object>" whitelist
+        // grafted by a resolving spell onto another player's creature reads
+        // "you" as that spell's controller (Immortal Obligation: "can't block
+        // creatures you control").
+        StaticMode::BlockRestriction { filter } => target_filter_controller_is_relative(filter),
+        // Exhaustive: each new StaticMode must decide here whether its "you"
+        // refers to the installing player (CR 109.5).
+        StaticMode::Continuous
+        | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::LethalDamageDeterminedByPower
+        | StaticMode::CantAttack
+        | StaticMode::CantBlock
+        | StaticMode::CantAttackOrBlock
+        | StaticMode::AttackOnlyNeighbor
+        | StaticMode::CantBecomeSuspected
+        | StaticMode::MaxAttackersEachCombat { .. }
+        | StaticMode::MaxBlockersEachCombat { .. }
+        | StaticMode::CantBeTargeted { .. }
+        | StaticMode::CantBeCast { .. }
+        | StaticMode::CantBeActivated { .. }
+        | StaticMode::CantSearchLibrary { .. }
+        | StaticMode::RestrictLibrarySearchToTop { .. }
+        | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
+        | StaticMode::CantCauseSacrificeOrExile { .. }
+        | StaticMode::CantCauseForcedAction { .. }
+        | StaticMode::CastWithFlash
+        | StaticMode::GrantsExtraVote
+        | StaticMode::GrantsExtraVillainousChoice
+        | StaticMode::CastWithKeyword { .. }
+        | StaticMode::CastWithAlternativeCost { .. }
+        | StaticMode::AlternativeKeywordCost { .. }
+        | StaticMode::ModifyCost { .. }
+        | StaticMode::ImposeAdditionalCost { .. }
+        | StaticMode::ReduceAbilityCost { .. }
+        | StaticMode::ReduceActionCost { .. }
+        | StaticMode::ModifyActivationLimit { .. }
+        | StaticMode::ActivateAsInstant { .. }
+        | StaticMode::CantPayCost { .. }
+        | StaticMode::CantGainLife
+        | StaticMode::CantLoseLife
+        | StaticMode::PlayerProtection(..)
+        | StaticMode::MustAttack
+        | StaticMode::MustAttackDefender { .. }
+        | StaticMode::MustBlock
+        | StaticMode::MustBlockAttacker { .. }
+        | StaticMode::CantDraw { .. }
+        | StaticMode::DrawFromBottom { .. }
+        | StaticMode::DoubleTriggers { .. }
+        | StaticMode::IgnoreHexproof
+        | StaticMode::ExtraBlockers { .. }
+        | StaticMode::RevealTopOfLibrary { .. }
+        | StaticMode::RevealHand { .. }
+        | StaticMode::GraveyardCastPermission { .. }
+        | StaticMode::TopOfLibraryCastPermission { .. }
+        | StaticMode::TopOfLibraryHasPlot
+        | StaticMode::TopOfLibraryPlotPermission
+        | StaticMode::CastFromHandFree { .. }
+        | StaticMode::ExileCastPermission { .. }
+        | StaticMode::LinkedCollectionCounterPlayPermission
+        | StaticMode::CountersPersistAcrossZones { .. }
+        | StaticMode::CantBeCountered
+        | StaticMode::CantBeCopied
+        | StaticMode::CantEnterBattlefieldFrom
+        | StaticMode::CantCastFrom { .. }
+        | StaticMode::CantCastDuring { .. }
+        | StaticMode::CantActivateDuring { .. }
+        | StaticMode::PerTurnCastLimit { .. }
+        | StaticMode::PerTurnDrawLimit { .. }
+        | StaticMode::SuppressTriggers { .. }
+        | StaticMode::CantBeBlocked
+        | StaticMode::CantBeBlockedExceptBy { .. }
+        | StaticMode::CantBeBlockedBy { .. }
+        | StaticMode::CantBeBlockedByMoreThan { .. }
+        | StaticMode::CantBeBlockedUnlessAllBlock
+        | StaticMode::AttachmentRestriction { .. }
+        | StaticMode::Protection
+        | StaticMode::Indestructible
+        | StaticMode::CantBeDestroyed
+        | StaticMode::CantBeRegenerated
+        | StaticMode::FlashBack
+        | StaticMode::Shroud
+        | StaticMode::Hexproof
+        | StaticMode::Vigilance
+        | StaticMode::Menace
+        | StaticMode::Reach
+        | StaticMode::Flying
+        | StaticMode::Trample
+        | StaticMode::Deathtouch
+        | StaticMode::Lifelink
+        | StaticMode::CantTap
+        | StaticMode::CantUntap
+        | StaticMode::MustBeBlocked { by: None }
+        | StaticMode::MustBeBlockedByAll { blockers: None }
+        | StaticMode::Goaded
+        | StaticMode::CombatAlone { .. }
+        | StaticMode::CantCrew
+        | StaticMode::CantPhaseIn
+        | StaticMode::CrewContribution { .. }
+        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtFaceDown
+        | StaticMode::CantBeTurnedFaceUp
+        | StaticMode::MayChooseNotToUntap
+        | StaticMode::AdditionalLandDrop { .. }
+        | StaticMode::EmblemStatic
+        | StaticMode::NoMaximumHandSize
+        | StaticMode::MaximumHandSize { .. }
+        | StaticMode::MayPlayAdditionalLand
+        | StaticMode::CantHaveKeyword { .. }
+        | StaticMode::CantWinTheGame
+        | StaticMode::CantLoseTheGame
+        | StaticMode::LegendRuleDoesntApply
+        | StaticMode::SpeedCanIncreaseBeyondFour
+        | StaticMode::DefilerCostReduction { .. }
+        | StaticMode::SkipStep { .. }
+        | StaticMode::SpendManaAsAnyColor { .. }
+        | StaticMode::PayLifeAsColoredMana { .. }
+        | StaticMode::StepEndUnspentMana { .. }
+        | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
+        | StaticMode::CanAttackWithDefender
+        | StaticMode::IgnoreLandwalkForBlocking { .. }
+        | StaticMode::CanActivateAbilitiesAsThoughHaste
+        | StaticMode::CanBlockShadow
+        | StaticMode::AssignNoCombatDamage
+        | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+        | StaticMode::MaxUntapPerType { .. }
+        | StaticMode::EntersWithAdditionalCounters { .. }
+        | StaticMode::CountersCantBeRemoved { .. }
+        | StaticMode::CountsAsNamed { .. }
+        | StaticMode::Other(..) => false,
     }
 }
 
