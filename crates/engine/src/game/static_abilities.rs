@@ -2657,8 +2657,8 @@ pub(crate) fn object_cant_be_sacrificed_by(
     object_id: ObjectId,
 ) -> bool {
     let mode = StaticMode::Other("CantBeSacrificed".to_string());
-    // Shared resolution-grant bar predicate (pin + gates + mode),
-    // actor-agnostic: the caller pairs it with the stored binding below.
+    // The live grant can already bar payment before the layer pass installs
+    // the recipient's functioning definition.
     let tce_bars = |tce: &crate::types::game_state::TransientContinuousEffect| -> bool {
         let pins_object = matches!(
             &tce.affected,
@@ -2678,9 +2678,12 @@ pub(crate) fn object_cant_be_sacrificed_by(
         tce.modifications.iter().any(|modification| {
             matches!(
                 modification,
-                ContinuousModification::AddStaticMode {
-                    mode: StaticMode::Other(name),
-                } if name == "CantBeSacrificed"
+                ContinuousModification::AddStaticMode { mode: granted }
+                    if *granted == mode && tce.bound_actor.is_none_or(|bound| bound == actor)
+            ) || matches!(
+                modification,
+                ContinuousModification::GrantStaticAbility { definition }
+                    if definition.has_legacy_static_mode_shape() && definition.mode == mode
             )
         })
     };
@@ -2690,7 +2693,7 @@ pub(crate) fn object_cant_be_sacrificed_by(
     // installer-scoping here never frees a legal sacrifice — it only frees
     // players the prohibition never named.
     for tce in state.transient_continuous_effects.iter() {
-        if tce_bars(tce) && tce.bound_actor.is_none_or(|bound| bound == actor) {
+        if tce_bars(tce) {
             return true;
         }
     }

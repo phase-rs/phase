@@ -66,8 +66,7 @@ function listContexts(deck: SubmissionDeck): EntryContext[] {
 /**
  * Preserve parser name projection, but own every section and entry source before
  * awaiting metadata. String-only sections deliberately have no imported source.
- * Import normalization can merge same-name entries and retain only the first
- * source (d-15-10); submission cannot recover sources absent from ParsedDeck.
+ * Each parsed entry supplies its own count and optional printing to submission.
  */
 export function submitParsedDeck(
   deck: ParsedDeck,
