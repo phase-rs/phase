@@ -391,6 +391,7 @@ mod modal_saga_chapter_runtime;
 mod modal_spell_without_legal_mode;
 mod modal_trigger_zero_modes;
 mod modal_x_activation_payment_exact;
+mod modified_creature_leaves_battlefield;
 mod mogg_fanatic_target_before_cost;
 mod mogg_war_marshal_echo_dies_trigger;
 mod mold_folk_sacrifice_type_union;

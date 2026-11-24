@@ -20,9 +20,9 @@ use super::counter::{
     try_parse_remove_counter,
 };
 use super::lower::{
-    parse_multi_target_count_expr, parse_where_x_quantity_expression,
-    parse_where_x_quantity_expression_with_owner, rebind_pt_scope_to_target,
-    strip_leading_quantifier, strip_terminal_where_x, strip_trailing_where_x, WhereXBinding,
+    parse_multi_target_count_expr, parse_where_x_quantity_expression_with_owner,
+    rebind_pt_scope_to_target, strip_leading_quantifier, strip_terminal_where_x,
+    strip_trailing_where_x, WhereXBinding,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
@@ -787,6 +787,7 @@ pub(super) fn parse_earthbend_params(text: &str, lower_rest: &str) -> (TargetFil
 pub(super) fn parse_earthbend_count_expr(
     text: &str,
     lower_rest: &str,
+    ctx: &ParseContext,
 ) -> Option<(TargetFilter, QuantityExpr)> {
     if let Ok((rem, n)) = nom_primitives::parse_number.parse(lower_rest) {
         let target_text = rem.trim_start();
@@ -826,8 +827,13 @@ pub(super) fn parse_earthbend_count_expr(
         // `Effect::unimplemented` gap so coverage counts the card as unsupported.
         // (matthewevans review, PR #5881.)
         if let Ok((where_body, _)) = tag::<_, _, OracleError<'_>>(", where x is ").parse(rem) {
-            let count = crate::parser::oracle_quantity::parse_quantity_ref(where_body)
-                .map(|qty| QuantityExpr::Ref { qty })
+            let antecedents = ctx.player_antecedents();
+            let count = WhereXBinding::new(Some(where_body), &antecedents)
+                .resolve_trigger_event_stat()
+                .or_else(|| {
+                    crate::parser::oracle_quantity::parse_quantity_ref(where_body)
+                        .map(|qty| QuantityExpr::Ref { qty })
+                })
                 .or_else(|| {
                     crate::parser::oracle_quantity::parse_event_context_quantity(where_body)
                 })?;
@@ -16411,7 +16417,8 @@ pub(super) fn parse_imperative_family_ast(
                 .map(|(r, _)| r)
                 .unwrap_or("");
             let amount = if let Some(expr) = where_x {
-                parse_where_x_quantity_expression(&expr)
+                let antecedents = ctx.player_antecedents();
+                WhereXBinding::new(Some(&expr), &antecedents).resolve_quantity(&expr)
                     .unwrap_or(QuantityExpr::Fixed { value: 0 })
             } else {
                 // CR 107.3a + CR 701.63a: Endure X uses the activation's
@@ -24163,8 +24170,8 @@ mod tests {
     /// CR 122.1: literal-N earthbend keeps the `Fixed` count path intact.
     #[test]
     fn earthbend_count_expr_literal_n() {
-        let (target, count) =
-            parse_earthbend_count_expr("2", "2").expect("literal-N earthbend parses");
+        let (target, count) = parse_earthbend_count_expr("2", "2", &ParseContext::default())
+            .expect("literal-N earthbend parses");
         assert_eq!(count, QuantityExpr::Fixed { value: 2 });
         assert_eq!(target, default_earthbend_target());
     }
@@ -24174,8 +24181,8 @@ mod tests {
     #[test]
     fn earthbend_count_expr_x_with_player_counter_tail() {
         let tail = "x, where x is the number of experience counters you have";
-        let (_, count) =
-            parse_earthbend_count_expr(tail, tail).expect("player-counter where-clause parses");
+        let (_, count) = parse_earthbend_count_expr(tail, tail, &ParseContext::default())
+            .expect("player-counter where-clause parses");
         assert_eq!(
             count,
             QuantityExpr::Ref {
@@ -24191,7 +24198,8 @@ mod tests {
     /// to the spell-cost X resolution path (Variable("X")), not Fixed 0.
     #[test]
     fn earthbend_count_expr_bare_x_falls_through_to_variable() {
-        let (_, count) = parse_earthbend_count_expr("x", "x").expect("bare earthbend X parses");
+        let (_, count) = parse_earthbend_count_expr("x", "x", &ParseContext::default())
+            .expect("bare earthbend X parses");
         assert_eq!(
             count,
             QuantityExpr::Ref {
@@ -24215,8 +24223,8 @@ mod tests {
             Comparator, ControllerRef, FilterProp, PtStat, TargetFilter, TypeFilter,
         };
         let tail = "x, where x is the number of creatures you control with power 4 or greater";
-        let (target, count) =
-            parse_earthbend_count_expr(tail, tail).expect("object-count where-clause parses");
+        let (target, count) = parse_earthbend_count_expr(tail, tail, &ParseContext::default())
+            .expect("object-count where-clause parses");
         assert_eq!(
             target,
             default_earthbend_target(),
@@ -24255,8 +24263,8 @@ mod tests {
     fn earthbend_count_expr_object_count_subtype() {
         use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter};
         let tail = "x, where x is the number of forests you control";
-        let (target, count) =
-            parse_earthbend_count_expr(tail, tail).expect("subtype-count where-clause parses");
+        let (target, count) = parse_earthbend_count_expr(tail, tail, &ParseContext::default())
+            .expect("subtype-count where-clause parses");
         assert_eq!(target, default_earthbend_target());
         let QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
@@ -24283,8 +24291,8 @@ mod tests {
     #[test]
     fn earthbend_count_expr_mana_spent_to_cast() {
         let tail = "x, where x is the amount of mana spent to cast her";
-        let (target, count) =
-            parse_earthbend_count_expr(tail, tail).expect("mana-spent where-clause parses");
+        let (target, count) = parse_earthbend_count_expr(tail, tail, &ParseContext::default())
+            .expect("mana-spent where-clause parses");
         assert_eq!(target, default_earthbend_target());
         assert!(
             matches!(
@@ -24309,7 +24317,7 @@ mod tests {
     fn earthbend_count_expr_unrecognized_where_clause_is_strict_failure() {
         let tail = "x, where x is the number of glorbs you frobnicate";
         assert_eq!(
-            parse_earthbend_count_expr(tail, tail),
+            parse_earthbend_count_expr(tail, tail, &ParseContext::default()),
             None,
             "an unrecognized where-clause quantity must fail strictly, not bind a fake Variable{{X}}"
         );
