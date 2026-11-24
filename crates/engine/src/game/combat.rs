@@ -1470,6 +1470,25 @@ pub fn choose_entry_attack_target_or_enter(
     }
 }
 
+/// CR 509.1g + CR 509.1h: Record both directions of a block edge.
+/// The caller handles the attacker's sticky blocked flag and any events.
+pub(crate) fn record_block_edge(
+    combat: &mut CombatState,
+    blocker_id: ObjectId,
+    attacker_id: ObjectId,
+) {
+    combat
+        .blocker_to_attacker
+        .entry(blocker_id)
+        .or_default()
+        .push(attacker_id);
+    combat
+        .blocker_assignments
+        .entry(attacker_id)
+        .or_default()
+        .push(blocker_id);
+}
+
 /// CR 509.4 + CR 506.3e + CR 509.1g + CR 509.1h: Put a permanent onto the
 /// battlefield as a blocking creature for `attacker_id`. Used by effects that
 /// create or place a creature already "blocking that creature" (Mirror Match's
@@ -1526,16 +1545,7 @@ pub fn place_blocking(
     let expected_attacker_blocked = info.blocked;
     info.blocked = true;
     // CR 509.1g: the creature becomes a blocking creature for the chosen attacker.
-    combat
-        .blocker_to_attacker
-        .entry(blocker_id)
-        .or_default()
-        .push(attacker_id);
-    combat
-        .blocker_assignments
-        .entry(attacker_id)
-        .or_default()
-        .push(blocker_id);
+    record_block_edge(combat, blocker_id, attacker_id);
     // CR 509.4: put onto the battlefield blocking, this creature is "blocking" but
     // never "blocked", so neither the per-turn blocked set nor the block history
     // records it. Declaration is the only writer of those ledgers.
@@ -1732,16 +1742,7 @@ pub fn apply_resolved_combat_membership(
             // CR 509.1h then CR 509.1g: the same writes the live authority
             // performed, in the same order.
             info.blocked = true;
-            combat
-                .blocker_to_attacker
-                .entry(object_id)
-                .or_default()
-                .push(*resulting_attacker);
-            combat
-                .blocker_assignments
-                .entry(*resulting_attacker)
-                .or_default()
-                .push(object_id);
+            record_block_edge(combat, object_id, *resulting_attacker);
         }
         ResolvedCombatMembershipEdit::MarkBlocked => {
             let combat = state
@@ -2782,6 +2783,12 @@ fn must_be_blocked_by_all_requirements_for_attacker<'a>(
 /// materialization), evaluate "your opponents" relative to the SPELL
 /// controller. Otherwise (`None` anchor — permanent-static lures) resolve the
 /// controller from the carrier object, unchanged.
+///
+/// The same anchor serves the blocker-side `BlockRestriction` consumers
+/// (`validate_blockers_core` and `can_block_pair_with_precomputed`): a
+/// controller-relative "can't block creatures you control" grafted onto
+/// another player's creature by a resolving spell (Immortal Obligation) reads
+/// "you" as that spell's controller (CR 509.1b + CR 608.2c).
 fn blocker_filter_context(
     state: &GameState,
     src_id: ObjectId,
@@ -3885,11 +3892,15 @@ fn validate_blockers_core(
             let StaticMode::BlockRestriction { filter } = &def.mode else {
                 continue;
             };
+            // CR 109.5 + CR 608.2c: a restriction grafted by a resolving
+            // effect reads "you" as its installing player (the graft's
+            // source_controller); a printed one has none and reads its
+            // source's controller.
             if !matches_target_filter(
                 state,
                 attacker_id,
                 filter,
-                &FilterContext::from_source(state, src_id),
+                &blocker_filter_context(state, src_id, def.source_controller),
             ) {
                 return Err(format!(
                     "{blocker_id:?} can block only creatures matching the block restriction"
@@ -8438,11 +8449,14 @@ pub fn can_block_pair_with_precomputed(
         let StaticMode::BlockRestriction { filter } = &def.mode else {
             continue;
         };
+        // CR 109.5 + CR 608.2c: a restriction grafted by a resolving effect
+        // reads "you" as its installing player (the graft's source_controller);
+        // a printed one has none and reads its source's controller.
         if !matches_target_filter(
             state,
             attacker_id,
             filter,
-            &FilterContext::from_source(state, src_id),
+            &blocker_filter_context(state, src_id, def.source_controller),
         ) {
             return false;
         }

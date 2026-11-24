@@ -1773,12 +1773,20 @@ fn temporary_cant_be_blocked_source(
             .find(|effect| effect.id == *id)?;
         (effect.duration == Duration::UntilEndOfTurn
             && crate::game::layers::transient_effect_is_live(state, effect)
-            && matches!(
-                effect.modifications.get(*mod_index),
-                Some(ContinuousModification::AddStaticMode {
-                    mode: StaticMode::CantBeBlocked
-                })
-            ))
+            && {
+                let modification = effect.modifications.get(*mod_index);
+                matches!(
+                    modification,
+                    Some(ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantBeBlocked,
+                    })
+                ) || matches!(
+                    modification,
+                    Some(ContinuousModification::GrantStaticAbility { definition })
+                        if definition.has_legacy_static_mode_shape()
+                            && definition.mode == StaticMode::CantBeBlocked
+                )
+            })
         .then(|| {
             state
                 .objects
@@ -8211,6 +8219,7 @@ mod tests {
             let obj = state.objects.get_mut(&omniscience).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.static_definitions = vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::CastFromHandFree {
                     frequency: CastFrequency::Unlimited,
                     origin: CastFreeOrigin::Hand,

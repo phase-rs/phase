@@ -2309,14 +2309,20 @@ pub struct SpellContext {
     /// `ResolvedAbility::record_prior_player_choice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_choice_member: Option<ObjectId>,
-    /// CR 603.2b + CR 102.1: the turn player a phase trigger bound its chain's `scoped_player` to
-    /// ("that player" anaphors to the player whose phase it is). Stamped only by
-    /// `ResolvedAbility::set_phase_turn_player_recursive`; cleared by every other binding
+    /// CR 603.2b + CR 102.1 / CR 506.2: the player a trigger itself bound its chain's
+    /// `scoped_player` to: the turn player for a phase trigger ("that player" anaphors to the
+    /// player whose phase it is), the attacking player for an attack trigger. Stamped only by
+    /// `ResolvedAbility::set_trigger_bound_player_recursive`; cleared by every other binding
     /// (`set_scoped_player_recursive`, the `player_scope` fan-out's seat binding). A node whose
-    /// `scoped_player` equals this is bound by its phase, not by an unfinished simultaneous
+    /// `scoped_player` equals this is bound by its trigger, not by an unfinished simultaneous
     /// player-scope leg (CR 101.4), which is the distinction `entry_observation_deferred` reads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase_turn_player: Option<crate::types::player::PlayerId>,
+    /// Serialized as `phase_turn_player`, the key saved states already carry.
+    #[serde(
+        default,
+        rename = "phase_turn_player",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub trigger_bound_player: Option<crate::types::player::PlayerId>,
 }
 
 /// CR 608.2c + CR 608.2d: one entry of a per-object player assignment — the
@@ -6549,32 +6555,33 @@ impl ResolvedAbility {
     /// local ability chain. This intentionally does not change `controller`.
     pub fn set_scoped_player_recursive(&mut self, player: PlayerId) {
         self.scoped_player = Some(player);
-        self.context.phase_turn_player = None;
+        self.context.trigger_bound_player = None;
         for (_, child) in self.child_links_mut() {
             child.set_scoped_player_recursive(player);
         }
     }
 
-    /// CR 603.2b + CR 102.1: bind a phase trigger's chain to the turn player whose phase it is.
-    /// Resolves exactly as `set_scoped_player_recursive` does, and additionally records that the
-    /// binding is the phase's, not a `player_scope` seat leg's (`SpellContext::phase_turn_player`).
-    pub fn set_phase_turn_player_recursive(&mut self, player: PlayerId) {
+    /// CR 603.2b + CR 102.1 / CR 506.2: bind a trigger's chain to the player the trigger itself
+    /// names: the turn player whose phase it is, or the attacking player. Resolves exactly as
+    /// `set_scoped_player_recursive` does, and additionally records that the binding is the
+    /// trigger's, not a `player_scope` seat leg's (`SpellContext::trigger_bound_player`).
+    pub fn set_trigger_bound_player_recursive(&mut self, player: PlayerId) {
         self.scoped_player = Some(player);
-        self.context.phase_turn_player = Some(player);
+        self.context.trigger_bound_player = Some(player);
         for (_, child) in self.child_links_mut() {
-            child.set_phase_turn_player_recursive(player);
+            child.set_trigger_bound_player_recursive(player);
         }
     }
 
     /// CR 603.3c: carry `source`'s player binding onto this chain as the same kind of binding: a
-    /// phase trigger's turn-player binding stays one (`SpellContext::phase_turn_player`), any
-    /// other stays an instruction's.
+    /// trigger binding keeps its marker (`SpellContext::trigger_bound_player`), and an
+    /// instruction binding stays an instruction binding.
     pub fn carry_player_binding_recursive(&mut self, source: &ResolvedAbility) {
         let Some(player) = source.scoped_player else {
             return;
         };
-        if source.context.phase_turn_player == Some(player) {
-            self.set_phase_turn_player_recursive(player);
+        if source.context.trigger_bound_player == Some(player) {
+            self.set_trigger_bound_player_recursive(player);
         } else {
             self.set_scoped_player_recursive(player);
         }
@@ -6959,6 +6966,30 @@ mod tests {
             pinned,
             "the pinned shape round-trips"
         );
+    }
+
+    /// Saved states carry the marker as `phase_turn_player`: the field's rename keeps that key,
+    /// and a state written without the key still decodes to no marker.
+    #[test]
+    fn trigger_bound_player_keeps_the_phase_turn_player_wire_key() {
+        let player = PlayerId(0);
+        let context = SpellContext {
+            trigger_bound_player: Some(player),
+            ..SpellContext::default()
+        };
+        let encoded = serde_json::to_value(context).unwrap();
+        assert_eq!(
+            encoded.get("phase_turn_player"),
+            Some(&serde_json::json!(player))
+        );
+        assert!(encoded.get("trigger_bound_player").is_none());
+        let mut legacy = serde_json::to_value(SpellContext::default()).unwrap();
+        assert!(legacy.get("phase_turn_player").is_none());
+        let absent: SpellContext = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(absent.trigger_bound_player, None);
+        legacy["phase_turn_player"] = serde_json::json!(player);
+        let present: SpellContext = serde_json::from_value(legacy).unwrap();
+        assert_eq!(present.trigger_bound_player, Some(player));
     }
 
     /// V12 — CR 400.7e: the zone-change record successor authority. The live

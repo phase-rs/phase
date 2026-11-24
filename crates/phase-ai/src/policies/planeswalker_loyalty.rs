@@ -193,6 +193,7 @@ mod tests {
     fn grant_effect(affected: Option<TargetFilter>, keyword: Keyword) -> Effect {
         Effect::GenericEffect {
             static_abilities: vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::Continuous,
                 affected,
                 modifications: vec![ContinuousModification::AddKeyword { keyword }],

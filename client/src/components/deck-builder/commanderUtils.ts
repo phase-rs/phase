@@ -1,5 +1,5 @@
 import type { ScryfallCard } from "../../services/scryfall";
-import type { DeckEntry } from "../../services/deckParser";
+import { countDeckEntriesByName, type DeckEntry } from "../../services/deckParser";
 import { BASIC_LAND_NAMES } from "../../constants/game";
 
 const WUBRG_COLORS = ["W", "U", "B", "R", "G"] as const;
@@ -37,14 +37,14 @@ export function getColorIdentityViolations(
 ): string[] {
   if (commanders.length === 0) return [];
   const identity = getCombinedColorIdentity(commanders, cardDataCache);
-  const violations: string[] = [];
+  const violations = new Set<string>();
   for (const entry of deck) {
     const card = cardDataCache.get(entry.name);
     if (card && !isInColorIdentity(card, identity)) {
-      violations.push(entry.name);
+      violations.add(entry.name);
     }
   }
-  return violations;
+  return [...violations];
 }
 
 /**
@@ -58,7 +58,7 @@ export function getSingletonViolations(
   _cardDataCache: Map<string, ScryfallCard>,
   getEffectiveCap: (name: string) => number,
 ): string[] {
-  return deck
-    .filter((e) => e.count > getEffectiveCap(e.name) && !BASIC_LAND_NAMES.has(e.name))
-    .map((e) => e.name);
+  return [...countDeckEntriesByName(deck)]
+    .filter(([name, count]) => count > getEffectiveCap(name) && !BASIC_LAND_NAMES.has(name))
+    .map(([name]) => name);
 }

@@ -4018,6 +4018,11 @@ pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent)
         GameEvent::CounterAdded { count, .. } | GameEvent::CounterRemoved { count, .. } => {
             Some(crate::game::arithmetic::u32_to_i32_saturating(*count))
         }
+        // CR 106.4 + CR 608.2i: Use the mana actually added in this resolution.
+        GameEvent::ManaAbilityProduced {
+            resolution: crate::types::events::ManaResolutionShare::WholeResolution { total },
+            ..
+        } => Some(crate::game::arithmetic::u32_to_i32_saturating(*total)),
         GameEvent::Discarded { .. } => Some(1),
         // CR 603.2c: one milled card per event.
         GameEvent::Milled { .. } => Some(1),
