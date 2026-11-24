@@ -3,6 +3,11 @@
 # any checkout or worktree cloned from the fork starts stale.
 #
 # This file intentionally exists only in the fork. Do not upstream it.
+#
+# Self-lockdown: every sync also disables any workflow except this one, so
+# upstream's scheduled jobs (ai-gate, releases, refreshers, ...) can never
+# burn runners in the fork — including ones upstream adds in the future.
+# Workflow disabled-state is repo-level and survives the sync merges.
 name: Sync fork with upstream
 
 on:
@@ -13,6 +18,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   sync:
@@ -22,3 +28,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh api repos/${{ github.repository }}/merge-upstream -f branch=main
+
+      - name: Keep every other fork workflow disabled
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/actions/workflows?per_page=100" \
+            --jq '.workflows[] | select(.path != ".github/workflows/sync-fork.yml") | select(.state == "active") | .id' |
+          while read -r id; do
+            gh api "repos/${{ github.repository }}/actions/workflows/$id/disable" -X PUT
+          done
