@@ -6685,7 +6685,7 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
                 .modifications(vec![ContinuousModification::GrantStaticAbility {
-                    definition: Box::new(static_def),
+                    definition: Box::new(static_def.resolution_installed()),
                 }])],
             duration: Some(Duration::UntilEndOfTurn),
             target: Some(TargetFilter::SelfRef),
@@ -6738,7 +6738,7 @@ fn try_parse_temporary_attack_only_neighbor(tp: TextPair<'_>) -> Option<ParsedEf
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
                 .modifications(vec![ContinuousModification::GrantStaticAbility {
-                    definition: Box::new(static_def),
+                    definition: Box::new(static_def.resolution_installed()),
                 }])],
             duration: Some(duration.clone()),
             target: Some(TargetFilter::SelfRef),
@@ -6811,7 +6811,9 @@ fn try_parse_temporary_cant_become_tapped(tp: TextPair<'_>) -> Option<ParsedEffe
                 .affected(TargetFilter::ParentTarget)
                 .modifications(vec![ContinuousModification::GrantStaticAbility {
                     definition: Box::new(
-                        StaticDefinition::new(StaticMode::CantTap).affected(TargetFilter::SelfRef),
+                        StaticDefinition::new(StaticMode::CantTap)
+                            .affected(TargetFilter::SelfRef)
+                            .resolution_installed(),
                     ),
                 }])],
             duration: Some(duration.clone()),
@@ -28932,7 +28934,7 @@ pub(crate) fn graveyard_permission_grant(
         static_abilities: vec![StaticDefinition::continuous()
             .affected(TargetFilter::Controller)
             .modifications(vec![ContinuousModification::GrantStaticAbility {
-                definition: Box::new(permission),
+                definition: Box::new(permission.resolution_installed()),
             }])],
         // CR 611.2a + CR 514.2: `layers::prune_end_of_turn_effects` ends an
         // `UntilEndOfTurn` window at cleanup.
@@ -38975,7 +38977,7 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
     Some(parsed_clause(Effect::GenericEffect {
         static_abilities: vec![StaticDefinition::continuous().modifications(vec![
             ContinuousModification::GrantStaticAbility {
-                definition: Box::new(granted_static),
+                definition: Box::new(granted_static.resolution_installed()),
             },
         ])],
         duration: Some(flash_duration),

@@ -42,8 +42,7 @@ const SINGLE_COMBAT: &str = "Each player chooses a creature or planeswalker they
 /// Planetary Annihilation, verbatim.
 const PLANETARY_ANNIHILATION: &str = "Each player chooses six lands they control, then sacrifices the rest. Planetary Annihilation deals 6 damage to each creature.";
 /// Limited Resources' enters-the-battlefield trigger, verbatim.
-const LIMITED_RESOURCES: &str =
-    "When this enchantment enters, each player chooses five lands they control and sacrifices the rest.";
+const LIMITED_RESOURCES: &str = "When this enchantment enters, each player chooses five lands they control and sacrifices the rest.";
 /// Winding Constrictor, verbatim. Regenerate with
 /// `jq -r '.["winding constrictor"].oracle_text' client/public/card-data.json`.
 /// A real counter-doubling multiplier, controlled by the same player as the
@@ -99,19 +98,22 @@ fn vow_counters(runner: &GameRunner, id: ObjectId) -> u32 {
         .unwrap_or(0)
 }
 
-/// Drive the game to `player`'s declare-attackers step (CR 508.1), passing
-/// every window in between. `GameRunner::advance_to_phase` cannot do this on
-/// its own: it stops at the first non-`Priority` window, which is the CASTER's
-/// own declare-attackers step, so a test using it would silently assert about
-/// the wrong seat's combat.
 fn advance_to_declare_attackers_for(runner: &mut GameRunner, player: PlayerId) {
+    advance_promise_turn_to(runner, player, Phase::DeclareAttackers, |state| {
+        matches!(state.waiting_for, WaitingFor::DeclareAttackers { .. })
+    });
+}
+
+// Check after each action so a priority pass cannot skip the desired window.
+fn advance_promise_turn_to(
+    runner: &mut GameRunner,
+    player: PlayerId,
+    phase: Phase,
+    ready: impl Fn(&GameState) -> bool,
+) {
     for _ in 0..256 {
-        if runner.state().active_player == player
-            && matches!(
-                runner.state().waiting_for,
-                WaitingFor::DeclareAttackers { .. }
-            )
-        {
+        let state = runner.state();
+        if state.active_player == player && state.phase == phase && ready(state) {
             return;
         }
         let stepped = match runner.state().waiting_for.clone() {
@@ -138,10 +140,11 @@ fn advance_to_declare_attackers_for(runner: &mut GameRunner, player: PlayerId) {
         }
     }
     panic!(
-        "could not reach {player:?}'s declare-attackers step: phase {:?}, active {:?}, waiting {:?}",
+        "could not reach {player:?}'s {phase:?} window: phase {:?}, active {:?}, waiting {:?}, stack {:?}",
         runner.state().phase,
         runner.state().active_player,
-        runner.state().waiting_for
+        runner.state().waiting_for,
+        runner.state().stack
     );
 }
 
@@ -1567,4 +1570,304 @@ fn promise_of_loyalty_adds_no_extra_effect_resolved_on_any_pause_path() {
              two-push baseline"
         );
     }
+}
+
+struct HumilityPromiseBoard {
+    runner: GameRunner,
+    humility: ObjectId,
+    drake: ObjectId,
+    hex: ObjectId,
+    third_seat: Option<(ObjectId, ObjectId)>,
+}
+
+fn promise_before_humility(seats: u8) -> HumilityPromiseBoard {
+    use crate::support::shared_card_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor};
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new_n_player(seats, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario, &[P0, P1, P2][..usize::from(seats)]);
+    let drake = scenario.add_real_card(P1, "Wind Drake", Zone::Battlefield, db);
+    let humility = scenario.add_real_card(P0, "Humility", Zone::Hand, db);
+    scenario.add_real_card(P0, "Vedalken Orrery", Zone::Battlefield, db);
+    let hex = scenario
+        .add_creature_to_hand(P0, "Hex Parasite", 1, 1)
+        .as_artifact_creature()
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}"))
+        .from_oracle_text("{X}{B/P}: Remove up to X counters from target permanent. For each counter removed this way, this creature gets +1/+0 until end of turn. ({B/P} can be paid with either {B} or 2 life.)")
+        .id();
+    let third_seat = (seats == 3).then(|| {
+        let keeper = scenario.add_vanilla(P2, 2, 2);
+        let doomed = scenario.add_vanilla(P2, 2, 2);
+        for _ in 0..3 {
+            scenario.add_basic_land(P2, ManaColor::Red);
+        }
+        let treason = scenario.add_real_card(P2, "Act of Treason", Zone::Hand, db);
+        (keeper, doomed, treason)
+    });
+    for _ in 0..10 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let promise = scenario
+        .add_spell_to_hand_from_oracle(P0, "Promise of Loyalty", false, PROMISE_OF_LOYALTY)
+        .with_mana_cost(parse_mtgjson_mana_cost("{4}{W}"))
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(promise).resolve();
+    if let Some((keeper, doomed, _)) = third_seat {
+        assert!(matches!(
+            &runner.state().waiting_for,
+            WaitingFor::KeepExactPermanentsChoice {
+                player: P2,
+                target_player: P2,
+                eligible,
+                required_count: 1,
+                ..
+            } if eligible.contains(&keeper) && eligible.contains(&doomed)
+        ));
+        runner
+            .act(GameAction::ChooseKeptPermanents { kept: vec![keeper] })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&doomed].zone, Zone::Graveyard);
+        assert_eq!(vow_counters(&runner, keeper), 1);
+    }
+    assert_promise_priority(&runner, P0);
+    assert_eq!(runner.state().objects[&promise].zone, Zone::Graveyard);
+    assert_eq!(vow_counters(&runner, drake), 1);
+    runner
+        .cast(hex)
+        .resolve()
+        .assert_zone(&[hex], Zone::Battlefield);
+    assert_promise_priority(&runner, P0);
+    HumilityPromiseBoard {
+        runner,
+        humility,
+        drake,
+        hex,
+        third_seat: third_seat.map(|(keeper, _, treason)| (keeper, treason)),
+    }
+}
+
+fn assert_promise_priority(runner: &GameRunner, expected: PlayerId) {
+    let state = runner.state();
+    assert!(
+        state.stack.is_empty()
+            && matches!(state.waiting_for, WaitingFor::Priority { player } if player == expected),
+        "expected empty stack and priority for {expected:?}, waiting {:?}, stack {:?}",
+        state.waiting_for,
+        state.stack
+    );
+}
+
+fn assert_vow_refuses_attack(runner: &mut GameRunner, keeper: ObjectId) {
+    // CR 508.1c: Require the defended-target prohibition to reject the declaration.
+    let refusal = runner
+        .declare_attackers(&[(keeper, AttackTarget::Player(P0))])
+        .expect_err("the vow still protects the caster");
+    assert!(
+        format!("{refusal:?}").contains("CR 508.1c/d attack restriction"),
+        "{refusal:?}"
+    );
+}
+
+fn declare_promise_board_attack(runner: &mut GameRunner, attacker: ObjectId, defender: PlayerId) {
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(defender))])
+        .unwrap();
+    assert_promise_priority(runner, runner.state().active_player);
+    assert_eq!(
+        runner.state().combat.as_ref().unwrap().attackers[0].object_id,
+        attacker
+    );
+}
+
+fn cast_humility_and_verify(runner: &mut GameRunner, humility: ObjectId, drake: ObjectId) {
+    use engine::game::keywords::has_keyword;
+    use engine::types::keywords::Keyword;
+
+    assert!(has_keyword(
+        &runner.state().objects[&drake],
+        &Keyword::Flying
+    ));
+    runner
+        .cast(humility)
+        .resolve()
+        .assert_zone(&[humility], Zone::Battlefield);
+    assert_promise_priority(runner, P0);
+    // CR 613.1f: Humility removes the Drake's printed flying.
+    assert!(!has_keyword(
+        &runner.state().objects[&drake],
+        &Keyword::Flying
+    ));
+    assert_eq!(vow_counters(runner, drake), 1);
+}
+
+fn resolve_hex_removal_under_humility(
+    runner: &mut GameRunner,
+    hex: ObjectId,
+    humility: ObjectId,
+    keeper: ObjectId,
+) {
+    use engine::types::game_state::{CastPaymentMode, CounterRemoveChoice, ShardChoice};
+    use engine::types::mana::{ManaType, ManaUnit};
+
+    let pool = &mut runner.state_mut().players[0].mana_pool;
+    for mana_type in [ManaType::White, ManaType::Black] {
+        pool.add(ManaUnit::new(mana_type, ObjectId(0), false, Vec::new()));
+    }
+
+    // CR 117.7 + CR 613.1f: Put the activation on the stack while Hex Parasite
+    // still has it. Vedalken Orrery lets Humility resolve above the activation.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: hex,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseXValue { player: P0, .. }
+    ));
+    runner.act(GameAction::ChooseX { value: 1 }).unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PhyrexianPayment { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayMana],
+        })
+        .unwrap();
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::TargetSelection { player: P0, target_slots, .. }
+        if target_slots[0].legal_targets.contains(&engine::types::ability::TargetRef::Object(keeper)))
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(engine::types::ability::TargetRef::Object(keeper)),
+        })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    runner.act(GameAction::PassPriority).unwrap();
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack.back().unwrap().source_id, hex);
+
+    runner.cast(humility).commit();
+    assert_eq!(runner.state().stack.len(), 2);
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&humility].zone, Zone::Battlefield);
+    assert_eq!(runner.state().stack.len(), 1);
+    runner.resolve_top();
+
+    // CR 608.2d: X = 1 limits the choice to the keeper's single vow counter.
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::RemoveCountersChoice {
+        player: P0, source_id, max_total: Some(1), available, ..
+    } if *source_id == keeper && available.as_slice() == [(VOW(), 1)])
+    );
+    runner
+        .act(GameAction::ChooseCountersToRemove {
+            selections: vec![CounterRemoveChoice {
+                counter_type: VOW(),
+                count: 1,
+            }],
+        })
+        .unwrap();
+    assert_promise_priority(runner, P0);
+    assert_eq!(vow_counters(runner, keeper), 0);
+    assert_eq!(runner.state().objects[&humility].zone, Zone::Battlefield);
+}
+
+#[test]
+fn promise_vow_restricts_the_keeper_through_humility() {
+    let HumilityPromiseBoard {
+        mut runner,
+        humility,
+        drake,
+        ..
+    } = promise_before_humility(2);
+    cast_humility_and_verify(&mut runner, humility, drake);
+    let newcomer = spawn_creature(runner.state_mut(), P1, "Post-Promise creature");
+    advance_to_declare_attackers_for(&mut runner, P1);
+    assert_vow_refuses_attack(&mut runner, drake);
+    declare_promise_board_attack(&mut runner, newcomer, P0);
+}
+
+#[test]
+fn removing_the_last_vow_counter_under_humility_releases_the_keeper() {
+    let HumilityPromiseBoard {
+        mut runner,
+        humility,
+        drake,
+        hex,
+        ..
+    } = promise_before_humility(2);
+    let mut restricted = GameRunner::from_state(runner.state().clone());
+    cast_humility_and_verify(&mut restricted, humility, drake);
+    advance_to_declare_attackers_for(&mut restricted, P1);
+    assert_vow_refuses_attack(&mut restricted, drake);
+
+    resolve_hex_removal_under_humility(&mut runner, hex, humility, drake);
+    advance_to_declare_attackers_for(&mut runner, P1);
+    // CR 611.2b: The duration ends when the keeper loses its last vow counter.
+    declare_promise_board_attack(&mut runner, drake, P0);
+}
+
+#[test]
+fn promise_under_humility_tracks_each_keeper_and_the_original_caster() {
+    let HumilityPromiseBoard {
+        mut runner,
+        humility,
+        drake,
+        hex,
+        third_seat,
+    } = promise_before_humility(3);
+    let (other_keeper, treason) = third_seat.expect("third-seat keeper and Act of Treason");
+    let mut changed_control = GameRunner::from_state(runner.state().clone());
+    let mut both_bound = GameRunner::from_state(runner.state().clone());
+    cast_humility_and_verify(&mut both_bound, humility, drake);
+    advance_to_declare_attackers_for(&mut both_bound, P2);
+    assert_vow_refuses_attack(&mut both_bound, other_keeper);
+    declare_promise_board_attack(&mut both_bound, other_keeper, P1);
+    cast_humility_and_verify(&mut changed_control, humility, drake);
+    advance_to_declare_attackers_for(&mut changed_control, P1);
+    assert_vow_refuses_attack(&mut changed_control, drake);
+    changed_control.declare_attackers(&[]).unwrap();
+
+    advance_promise_turn_to(&mut changed_control, P2, Phase::PreCombatMain, |state| {
+        state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { player: P2 })
+    });
+    assert_eq!(changed_control.state().active_player, P2);
+    assert_eq!(changed_control.state().phase, Phase::PreCombatMain);
+    assert_promise_priority(&changed_control, P2);
+    changed_control
+        .cast(treason)
+        .target_object(drake)
+        .resolve()
+        .assert_zone(&[treason], Zone::Graveyard);
+    assert_promise_priority(&changed_control, P2);
+    assert_eq!(changed_control.state().objects[&drake].controller, P2);
+    assert_eq!(vow_counters(&changed_control, drake), 1);
+    advance_to_declare_attackers_for(&mut changed_control, P2);
+    // CR 109.5: The controller changing does not change whom Promise protects.
+    assert_vow_refuses_attack(&mut changed_control, drake);
+    declare_promise_board_attack(&mut changed_control, drake, P1);
+
+    resolve_hex_removal_under_humility(&mut runner, hex, humility, drake);
+    assert_eq!(vow_counters(&runner, other_keeper), 1);
+    let mut still_restricted = GameRunner::from_state(runner.state().clone());
+    advance_to_declare_attackers_for(&mut still_restricted, P2);
+    // CR 611.2b: Only the keeper whose last counter was removed is released.
+    assert_vow_refuses_attack(&mut still_restricted, other_keeper);
+    declare_promise_board_attack(&mut still_restricted, other_keeper, P1);
+    advance_to_declare_attackers_for(&mut runner, P1);
+    declare_promise_board_attack(&mut runner, drake, P0);
 }

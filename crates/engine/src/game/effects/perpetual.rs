@@ -1002,7 +1002,7 @@ mod tests {
         // Worship's own quoted body), through the REAL parser -- this is what
         // exercises Blocker 2's fix (bare "it" binds to the chain's most
         // recently CREATED object) and `classify_quoted_inner`'s static-line
-        // classification of the cost body into `AddStaticMode`. The leading
+        // classification of the cost body and conversion to a perpetual mode. The leading
         // "Conjure ..." clause is included so the SAME parse call seeds
         // `ctx.token_created_in_chain`, matching how a real two-clause
         // Oracle-text ability is parsed as one chain.

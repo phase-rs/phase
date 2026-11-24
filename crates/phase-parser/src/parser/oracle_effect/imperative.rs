@@ -13665,6 +13665,28 @@ fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
         });
     }
 
+    // CR 608.2c + CR 119.4: "pay that much life" — the payment amount is the
+    // triggering event's amount ("that much" names the life just gained for a
+    // LifeGained trigger), read at resolution through the shared
+    // `EventContextAmount` cascade. FULL-CONSUMPTION (an optional trailing
+    // period only): a rider the cost grammar cannot read makes the whole cost
+    // decline, so Verrak, Warped Sengir's "pay that much life again" stays
+    // honestly `Unimplemented` — its repeat-payment adverb plus the "if life
+    // was paid to activate it" condition need their own feature (issue
+    // #11295) — instead of silently dropping "again" and flipping green with
+    // a mis-bound amount.
+    if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>("that much life").parse(rest) {
+        if terminated(opt(tag::<_, _, OracleError<'_>>(".")), eof)
+            .parse(tail.trim())
+            .is_ok()
+        {
+            return Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            });
+        }
+        return None;
+    }
+
     // CR 118.8: "pay half your life[, rounded up]" — delegate the life-fraction
     // phrase to the shared quantity expression parser (`DivideRounded` over the
     // controller's `LifeTotal`), so the rounding mode and life-total wording

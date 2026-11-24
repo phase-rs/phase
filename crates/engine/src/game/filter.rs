@@ -12478,7 +12478,10 @@ pub(crate) fn object_has_no_abilities(obj: &GameObject) -> bool {
         && obj.abilities.is_empty()
         && obj.trigger_definitions.is_empty()
         && obj.replacement_definitions.is_empty()
-        && obj.static_definitions.is_empty()
+        // CR 109.3 + CR 611.2c: Installed rule effects do not count as abilities.
+        && obj.static_definitions.iter_all().all(
+            crate::types::ability::StaticDefinition::is_resolution_installed,
+        )
 }
 
 /// CR 201.2a: objects with a common name have the same name. The Oracle parser

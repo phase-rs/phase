@@ -88,7 +88,6 @@ export function DeckBuilder({
     handleSearchResults,
     handleSearchTrigger,
     handleAddCard,
-    handleAddCardByName,
     handleRemoveCard,
     handleIncrementCard,
     canIncrement,
@@ -524,7 +523,7 @@ export function DeckBuilder({
                       commanders={commanders}
                       cardDataCache={cardDataCache}
                       groupMode={groupMode}
-                      onAddCard={handleAddCardByName}
+                      onAddCard={(entry) => handleIncrementCard(entry, "main")}
                       canAddCard={canIncrement}
                       onRemoveCard={handleRemoveCard}
                       onMoveCard={handleMoveCard}

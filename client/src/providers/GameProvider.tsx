@@ -35,6 +35,7 @@ import {
   buildLegalAiDeckCatalog,
   candidateDeclarations,
   candidateSeatDeck,
+  type AiDeckCandidate,
   type SeatDeclarations,
 } from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
@@ -53,7 +54,7 @@ import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
 import { loadP2PTerminalResult, type P2PTerminalResult } from "../services/p2pTerminalResult";
-import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "../services/deckParser";
+import type { ExpandedDeck, ParsedDeck } from "../services/deckParser";
 import {
   captureSubmissionArtPreferences,
   submitDeckList,
@@ -582,10 +583,10 @@ export async function buildLocalAiDeckList(
     const hordeSeatCount =
       1 + (formatConfig.horde_ruleset?.co_horde_decks?.length ?? 0);
     const takenDeckIds = new Set<string>();
-    const aiDecks: ExpandedDeckWithTier[] = [];
+    const hordePicks: (AiDeckCandidate | null)[] = [];
     for (let i = 0; i < opponentCount - 1; i++) {
       if (i < hordeSeatCount - 1) {
-        aiDecks.push(emptySeat());
+        hordePicks.push(null);
         continue;
       }
       const pick = pickRandomDeckCandidate(survivorCatalog.candidates, {
@@ -595,14 +596,23 @@ export async function buildLocalAiDeckList(
         throw new Error(t("gameProvider.noLegalAiDecks.generic"));
       }
       takenDeckIds.add(pick.id);
-      aiDecks.push(candidateSeatDeck(pick, expandParsedDeck(pick.deck)));
+      hordePicks.push(pick);
     }
     const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
       effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
     );
+    const snapshot = captureSubmissionArtPreferences();
+    const [playerSubmitted, aiDecks] = await Promise.all([
+      submitParsedDeck(hordePlayerDeck, snapshot),
+      Promise.all(hordePicks.map(async (pick) => {
+        if (!pick) return emptySeat();
+        const submitted = await submitParsedDeck(pick.deck, snapshot);
+        return candidateSeatDeck(pick, submitted);
+      })),
+    ]);
     return {
       player: {
-        ...expandParsedDeck(hordePlayerDeck),
+        ...playerSubmitted,
         ...hordePlayerDeclarations,
       },
       opponent: emptySeat(),

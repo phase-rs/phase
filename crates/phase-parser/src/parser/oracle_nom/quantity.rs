@@ -7204,6 +7204,22 @@ pub(crate) fn parse_using_mana_produced_by_self(input: &str) -> OracleResult<'_,
     .parse(input)
 }
 
+/// CR 106.4 + CR 608.2i: Read the amount this source produced from the
+/// mana ability resolution that triggered the effect.
+pub(crate) fn parse_event_context_mana_produced_by_self(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::EventContextAmount,
+        all_consuming((
+            tag("the amount of mana "),
+            super::duration::parse_self_reference_subject,
+            tag(" produced"),
+        )),
+    )
+    .parse(input)
+}
+
 pub(crate) fn parse_mana_source_filter(input: &str) -> OracleResult<'_, TargetFilter> {
     let (source_filter, rest) = parse_type_phrase_folding(input);
     if rest.len() == input.len() {
@@ -8991,6 +9007,25 @@ mod tests {
         TypedFilter,
     };
     use crate::types::mana::ManaColor;
+
+    #[test]
+    fn event_context_mana_produced_by_self_requires_self_and_full_consumption() {
+        for phrase in [
+            "the amount of mana ~ produced",
+            "the amount of mana this creature produced",
+        ] {
+            assert_eq!(
+                parse_event_context_mana_produced_by_self(phrase).unwrap(),
+                ("", QuantityRef::EventContextAmount)
+            );
+        }
+        for phrase in [
+            "the amount of mana another creature produced",
+            "the amount of mana this creature produced last turn",
+        ] {
+            assert!(parse_event_context_mana_produced_by_self(phrase).is_err());
+        }
+    }
 
     fn fixed_legs(values: &[i32]) -> Vec<QuantityExpr> {
         values

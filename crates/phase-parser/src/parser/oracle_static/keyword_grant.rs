@@ -2081,7 +2081,7 @@ pub(crate) fn strip_enclosing_sentence_comma(text: &str) -> &str {
 ///      `ContinuousModification::AddKeyword`.
 ///   3. CR 113.3d + CR 604.1: static-line text ("enchanted creature gets +N/+M",
 ///      "creatures you control have ...") → one or more
-///      `ContinuousModification::GrantStaticAbility` / `AddStaticMode`.
+///      `ContinuousModification::GrantStaticAbility`.
 ///   4. Fallback (no static/trigger/keyword/replacement shape matched):
 ///      parse the remaining text as an ability body → `GrantAbility`
 ///      wrapping the parsed `AbilityDefinition`.
@@ -2158,7 +2158,7 @@ pub fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModification> 
         return vec![ContinuousModification::AddKeyword { keyword }];
     }
 
-    // CR 113.3d + CR 604.1: Static-line text → GrantStaticAbility / AddStaticMode.
+    // CR 113.3d + CR 604.1: Static-line text → GrantStaticAbility.
     if let Some(static_modifications) = parse_quoted_rule_static_modifications(&ability_text) {
         return static_modifications;
     }
