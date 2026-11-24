@@ -15,7 +15,7 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::keywords::HeldObject;
 use crate::game::quantity::{
     counter_count_from_map, quantity_expr_characteristic_reads_at, resolve_quantity,
-    resolve_quantity_with_ctx, resolve_quantity_with_targets, QuantityContext,
+    resolve_quantity_with_ctx, QuantityContext,
 };
 use crate::game::targeting::{DeclaredSlotBinding, SlotReferent};
 use crate::types::ability::{
@@ -1577,6 +1577,10 @@ pub struct FilterContext<'a> {
     /// source-relative filter fact must read through it rather than rebinding
     /// `source_id` to whichever object currently owns that storage slot.
     pub trigger_source: Option<&'a TriggerSourceContext>,
+    /// CR 603.2 + CR 400.7: selected stack-entry trigger provenance for a
+    /// retarget legality call. This is absent for ordinary callers, which keep
+    /// their existing ambient fallback.
+    pub stack_trigger_context: Option<crate::game::targeting::StackTriggerContext<'a>>,
     /// CR 613.4c: Per-recipient binding for dynamic P/T statics whose quantity
     /// is relative to the affected object ("attached to it", "other", "shares a
     /// type with it"). The pronoun "it" refers to the per-id recipient in
@@ -1590,12 +1594,13 @@ pub struct FilterContext<'a> {
     /// trigger whose intervening-`if` is being evaluated — the referent of
     /// "another" in a trigger-anaphoric filter ("another creature you control",
     /// where "another" means "other than the creature that just entered", not
-    /// "other than the ability source"). Bound only inside
-    /// `matches_zone_change_event_object_filter`, which is the one place holding
-    /// the `GameEvent::ZoneChanged` both CR 603.4 legs are handed; `None`
-    /// everywhere else, where `FilterProp::OtherThanTriggerObject` keeps its
-    /// transparent pass-through and the `ObjectCount` / `PropertyAggregate`
-    /// resolvers apply the exclusion at the set level instead.
+    /// "other than the ability source"). Bound inside
+    /// `matches_zone_change_event_object_filter` for trigger condition checks
+    /// and by triggered-ability target enumeration while the current event is
+    /// pushed; `None` everywhere else, where
+    /// `FilterProp::OtherThanTriggerObject` keeps its transparent pass-through
+    /// and the `ObjectCount` / `PropertyAggregate` resolvers apply the
+    /// exclusion at the set level instead.
     ///
     /// CR 400.7: carried as a `TriggeringObjectRef` (id + the incarnation the
     /// event proves) rather than a bare `ObjectId`, so a leave-and-re-enter at
@@ -1633,6 +1638,7 @@ impl<'a> FilterContext<'a> {
             source_controller: source.controller,
             ability: source.ability,
             trigger_source: source.trigger_source,
+            stack_trigger_context: source.stack_trigger_context,
             recipient_id: source.recipient_id,
             scoped_iteration_player: None,
             triggering_object: source.triggering_object,
@@ -1652,6 +1658,17 @@ impl<'a> FilterContext<'a> {
     ) -> FilterContext<'a> {
         FilterContext {
             declared_slot_view: Some(view),
+            ..*self
+        }
+    }
+
+    /// CR 603.2: bind the selected stack entry's event for one legality call.
+    pub(crate) fn with_stack_trigger_context(
+        &self,
+        context: crate::game::targeting::StackTriggerContext<'a>,
+    ) -> FilterContext<'a> {
+        FilterContext {
+            stack_trigger_context: Some(context),
             ..*self
         }
     }
@@ -1743,6 +1760,7 @@ impl<'a> FilterContext<'a> {
             ability: None,
             ability_targets: None,
             trigger_source: None,
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1766,6 +1784,7 @@ impl<'a> FilterContext<'a> {
             ability: None,
             ability_targets: None,
             trigger_source: None,
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1785,6 +1804,7 @@ impl<'a> FilterContext<'a> {
             ability: None,
             ability_targets: None,
             trigger_source: None,
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1804,6 +1824,7 @@ impl<'a> FilterContext<'a> {
             ability: None,
             ability_targets: None,
             trigger_source: Some(source),
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1826,6 +1847,7 @@ impl<'a> FilterContext<'a> {
             ability: None,
             ability_targets: None,
             trigger_source: Some(source),
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1850,6 +1872,7 @@ impl<'a> FilterContext<'a> {
             ability: None,
             ability_targets: None,
             trigger_source: None,
+            stack_trigger_context: None,
             recipient_id: Some(recipient_id),
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1869,6 +1892,7 @@ impl<'a> FilterContext<'a> {
             ability: Some(ability),
             ability_targets: None,
             trigger_source: ability.trigger_source.as_ref(),
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1890,6 +1914,7 @@ impl<'a> FilterContext<'a> {
             ability: Some(ability),
             ability_targets: None,
             trigger_source: ability.trigger_source.as_ref(),
+            stack_trigger_context: None,
             recipient_id: Some(recipient_id),
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1914,6 +1939,7 @@ impl<'a> FilterContext<'a> {
             ability: Some(ability),
             ability_targets: None,
             trigger_source: ability.trigger_source.as_ref(),
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -4793,6 +4819,7 @@ pub(crate) fn matches_target_filter_on_entry_observation(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
@@ -5083,6 +5110,7 @@ pub fn matches_target_filter_including_phased_out(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOnly,
@@ -5424,6 +5452,7 @@ pub fn matches_target_filter_in_owner_zone(
             ctx.recipient_id,
             ctx.scoped_iteration_player,
             ctx.triggering_object,
+            ctx.stack_trigger_context,
             ctx.declared_slot_view,
             ctx.granting_object,
             ControllerLookup::OwnerZone,
@@ -5446,6 +5475,7 @@ pub fn matches_target_filter_in_owner_zone(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::OwnerZone,
@@ -6499,6 +6529,7 @@ pub(crate) fn matches_target_filter_on_object(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
@@ -6544,6 +6575,7 @@ fn entry_filter_matches_staged(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
@@ -6669,6 +6701,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.recipient_id,
                     ctx.scoped_iteration_player,
                     ctx.triggering_object,
+                    ctx.stack_trigger_context,
                     ctx.declared_slot_view,
                     ctx.granting_object,
                     ControllerLookup::LiveOrLki,
@@ -6741,6 +6774,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.recipient_id,
                     ctx.scoped_iteration_player,
                     ctx.triggering_object,
+                    ctx.stack_trigger_context,
                     ctx.declared_slot_view,
                     ctx.granting_object,
                     ControllerLookup::LiveOrLki,
@@ -6768,6 +6802,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 ctx.recipient_id,
                 ctx.scoped_iteration_player,
                 ctx.triggering_object,
+                ctx.stack_trigger_context,
                 ctx.declared_slot_view,
                 ctx.granting_object,
                 ControllerLookup::LiveOrLki,
@@ -6846,6 +6881,7 @@ pub fn matches_target_filter_on_counter_added_record(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
@@ -6896,6 +6932,7 @@ pub fn matches_target_filter_on_attack_declaration_record(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
@@ -6979,6 +7016,7 @@ pub fn matches_target_filter_on_damage_record_source(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
@@ -7351,6 +7389,7 @@ pub(crate) fn matches_target_filter_on_event_snapshot(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOnly,
@@ -7536,6 +7575,7 @@ fn filter_inner_with_lookup(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         controller_lookup,
@@ -7557,6 +7597,7 @@ fn filter_inner_for_object(
     recipient_id: Option<ObjectId>,
     scoped_iteration_player: Option<PlayerId>,
     triggering_object: Option<TriggeringObjectRef>,
+    stack_trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
     declared_slot_view: Option<&[Option<crate::game::targeting::DeclaredSlotBinding>]>,
     granting_object: Option<ObjectIncarnationRef>,
     controller_lookup: ControllerLookup,
@@ -7850,6 +7891,7 @@ fn filter_inner_for_object(
             );
             source_ctx.declared_slot_view = declared_slot_view;
             source_ctx.ability_targets = ability_targets;
+            source_ctx.stack_trigger_context = stack_trigger_context;
             properties.iter().all(|p| match p {
                 FilterProp::Owned { controller } => {
                     zone_axis_admits(state, licensed, obj.owner, |owner| {
@@ -7871,6 +7913,7 @@ fn filter_inner_for_object(
             recipient_id,
             scoped_iteration_player,
             triggering_object,
+            stack_trigger_context,
             declared_slot_view,
             granting_object,
             controller_lookup,
@@ -7890,6 +7933,7 @@ fn filter_inner_for_object(
                 recipient_id,
                 scoped_iteration_player,
                 triggering_object,
+                stack_trigger_context,
                 declared_slot_view,
                 granting_object,
                 controller_lookup,
@@ -7910,6 +7954,7 @@ fn filter_inner_for_object(
                 recipient_id,
                 scoped_iteration_player,
                 triggering_object,
+                stack_trigger_context,
                 declared_slot_view,
                 granting_object,
                 controller_lookup,
@@ -7933,6 +7978,7 @@ fn filter_inner_for_object(
                     recipient_id,
                     scoped_iteration_player,
                     triggering_object,
+                    stack_trigger_context,
                     declared_slot_view,
                     granting_object,
                     pre_entry_battlefield: None,
@@ -8157,6 +8203,7 @@ fn filter_inner_for_object(
                     recipient_id,
                     scoped_iteration_player,
                     triggering_object,
+                    stack_trigger_context,
                     declared_slot_view,
                     granting_object,
                     controller_lookup,
@@ -8347,6 +8394,7 @@ fn filter_inner_for_object(
                 recipient_id,
                 scoped_iteration_player,
                 triggering_object,
+                stack_trigger_context,
                 declared_slot_view,
                 granting_object,
                 pre_entry_battlefield: None,
@@ -10274,6 +10322,9 @@ pub(crate) struct SourceContext<'a> {
     /// projection so nested filter evaluation cannot rebind a recycled id.
     pub(crate) lki: LKISnapshot,
     pub(crate) trigger_source: Option<&'a TriggerSourceContext>,
+    /// CR 603.2 + CR 400.7: selected stack-entry trigger provenance carried
+    /// into dynamic quantity thresholds.
+    pub(crate) stack_trigger_context: Option<crate::game::targeting::StackTriggerContext<'a>>,
     /// CR 303.4 + CR 301.5: Resolved host of the source's attachment, if any.
     /// Widened to `AttachTarget` so attachment-aware filter properties
     /// (`EnchantedBy`, `EquippedBy`) can route on Object vs Player. The
@@ -10341,6 +10392,7 @@ impl<'a> SourceContext<'a> {
                 intensity: 0,
             },
             trigger_source: None,
+            stack_trigger_context: None,
             attached_to: None,
             source_is_aura: false,
             source_is_equipment: false,
@@ -10601,6 +10653,7 @@ fn source_context_from_filter<'a>(
         declared_slot_view: None,
         lki: lki.clone(),
         trigger_source,
+        stack_trigger_context: None,
         attached_to,
         source_is_aura,
         source_is_equipment,
@@ -11096,6 +11149,7 @@ fn aura_can_enchant_referenced_target(
                 triggering_object: source.triggering_object,
                 declared_slot_view: source.declared_slot_view,
                 granting_object: source.granting_object,
+                stack_trigger_context: source.stack_trigger_context,
                 pre_entry_battlefield: None,
             };
             filter_inner(state, *target_id, enchant_filter, &ctx)
@@ -11121,12 +11175,18 @@ fn resolve_filter_threshold(
     source: &SourceContext<'_>,
 ) -> i32 {
     match source.ability {
-        Some(ability) => resolve_quantity_with_targets(state, expr, ability),
+        Some(ability) => crate::game::quantity::resolve_quantity_with_targets_and_trigger_context(
+            state,
+            expr,
+            ability,
+            source.stack_trigger_context,
+        ),
         None => resolve_quantity_with_ctx(
             state,
             expr,
             source.controller.unwrap_or(PlayerId(0)),
             QuantityContext {
+                stack_trigger_context: source.stack_trigger_context,
                 granting_object: source.granting_object,
                 ..QuantityContext::new(source.id)
             },
@@ -13621,6 +13681,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
         triggering_object: None,
         declared_slot_view: None,
         trigger_source: None,
+        stack_trigger_context: None,
         attached_to: source_obj.and_then(|o| o.attached_to),
         source_is_aura: source_obj
             .is_some_and(|o| source_is_aura_or_bestow(&o.card_types.subtypes, &o.keywords)),
@@ -13815,6 +13876,7 @@ fn object_shares_quality_with_reference_filter(
         triggering_object: source.triggering_object,
         declared_slot_view: source.declared_slot_view,
         granting_object: source.granting_object,
+        stack_trigger_context: source.stack_trigger_context,
         pre_entry_battlefield: None,
     };
     // CR 109.2 + CR 205.3m: resolve a bare descriptive reference such as "a

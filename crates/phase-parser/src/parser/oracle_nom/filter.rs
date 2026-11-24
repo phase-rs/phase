@@ -299,6 +299,34 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
     Ok((rest, prop))
 }
 
+/// CR 208.1: Parse the source-relative lesser-power/toughness suffix shape
+/// without choosing its referent. The enclosing target parser owns that
+/// context-sensitive binding; keeping the grammar separate prevents a bare
+/// suffix from silently becoming a trigger-source or prior-target reference.
+pub fn parse_relative_pt_comparison(input: &str) -> OracleResult<'_, (PtStat, Comparator)> {
+    let (input, _) = tag("with").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, inclusive) = opt(terminated(tag("equal or"), space1)).parse(input)?;
+    let (input, _) = tag("lesser").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, stat) = alt((
+        value(PtStat::Power, tag("power")),
+        value(PtStat::Toughness, tag("toughness")),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        (
+            stat,
+            if inclusive.is_some() {
+                Comparator::LE
+            } else {
+                Comparator::LT
+            },
+        ),
+    ))
+}
+
 /// CR 202.3: Parse the numeric mana-value comparison tail after the shared
 /// `mana value ` / `converted mana cost ` head. This is deliberately limited to
 /// literal/X numeric grammar; contextual and superlative mana-value phrases
@@ -761,6 +789,18 @@ pub fn parse_controlled_permanents_conjunct(
 mod tests {
     use super::*;
     use crate::types::mana::ManaColor;
+
+    #[test]
+    fn parse_relative_pt_comparison_lesser_and_equal() {
+        assert_eq!(
+            parse_relative_pt_comparison("with lesser power, return it"),
+            Ok((", return it", (PtStat::Power, Comparator::LT),))
+        );
+        assert_eq!(
+            parse_relative_pt_comparison("with equal or lesser toughness."),
+            Ok((".", (PtStat::Toughness, Comparator::LE)))
+        );
+    }
 
     /// CR 614.1a + CR 109.1: the single authority must cover every plural noun
     /// BOTH former copies knew, and must carry the "other" article rather than

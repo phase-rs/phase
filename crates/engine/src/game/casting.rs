@@ -1416,6 +1416,7 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         triggering_object: None,
                         declared_slot_view: None,
                         granting_object: None,
+                        stack_trigger_context: None,
                         pre_entry_battlefield: None,
                     };
                     // CR 712.12 + CR 101.2: a spell//land modal card is played
@@ -27705,6 +27706,7 @@ fn apply_mana_spell_grants(
                 triggering_object: None,
                 declared_slot_view: None,
                 granting_object: None,
+                stack_trigger_context: None,
                 pre_entry_battlefield: None,
             };
             if !crate::game::filter::matches_target_filter(

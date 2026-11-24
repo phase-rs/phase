@@ -25243,6 +25243,11 @@ pub enum WaitingFor {
     RetargetChoice {
         player: PlayerId,
         stack_entry_index: usize,
+        /// CR 115.7d + CR 400.7: identity of the stack entry that produced
+        /// this prompt. `None` preserves compatibility with older snapshots;
+        /// prompts created by the current engine always carry the fence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stack_entry_id: Option<ObjectId>,
         scope: RetargetScope,
         /// CR 115.7d: the chain's currently declared targets, flat, in
         /// `chain_retarget_slots` order and positionally aligned with `slots`
