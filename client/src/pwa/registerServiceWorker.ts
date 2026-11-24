@@ -413,6 +413,25 @@ function settleAttempt(candidate: Lifecycle, attempt: RegistrationAttempt, succe
   }
 }
 
+/**
+ * Gives the worker's NetworkFirst rule for `/config.js` (see vite.config.ts) a
+ * copy to serve on an offline start. On the visit that installs the worker,
+ * the page's own `<script src="/config.js">` ran before any worker controlled
+ * the page, so nothing cached it, and an offline start before the next online
+ * load would lose the deployment's settings. One fetch through the worker once
+ * it takes control caches it. A page loaded under a worker already did.
+ */
+function primeDeploymentConfigCache(): void {
+  const container = navigator.serviceWorker;
+  if (container.controller) return;
+  container.addEventListener("controllerchange", () => {
+    if (getEffectiveOffline()) return;
+    void fetch("/config.js").catch(() => {
+      // Best effort: the next load under the worker caches it.
+    });
+  }, { once: true });
+}
+
 function startRegistration(candidate: Lifecycle): void {
   if (!isCurrent(candidate) || getEffectiveOffline() || candidate.registration || candidate.attempt) return;
   const attempt: RegistrationAttempt = { token: ++attemptToken, terminal: false };
@@ -436,6 +455,7 @@ function startRegistration(candidate: Lifecycle): void {
       settleAttempt(candidate, attempt, true);
       pushUpdateDebug(`Service worker registered: ${swUrl}`);
       installWorkerProgress(candidate, registration);
+      primeDeploymentConfigCache();
       if (!getEffectiveOffline()) installScheduler(candidate);
     },
     onRegisterError(error) {

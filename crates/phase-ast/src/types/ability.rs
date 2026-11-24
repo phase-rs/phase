@@ -40977,6 +40977,9 @@ pub enum TriggerCondition {
     /// CR 605.1a + CR 603.4: Event qualifier for "that isn't a mana ability"
     /// on activated-ability trigger events.
     ActivatedAbilityIsNonMana,
+    /// CR 606.4 + CR 603.4: "if you removed N or more loyalty counters to activate it".
+    /// Reads the actual loyalty-only removal from that activation's event snapshot.
+    LoyaltyCountersRemovedAtLeast { minimum: u32 },
 
     /// CR 700.4 + CR 120.1: "a creature dealt damage by ~ this turn dies" — death trigger
     /// gated on the dying creature having been dealt damage by the trigger source this turn.
@@ -41395,21 +41398,15 @@ pub enum TriggerConditionAnchor<'a> {
     Player(&'a PlayerScope),
     /// CR 607.1c + CR 113.2c: the exact trigger occurrence the leaf is linked to.
     OwnTriggerDefinition,
+    /// CR 603.4: the exact loyalty activation event and its completed payment result.
+    LoyaltyActivationEvent,
 }
 
 impl TriggerCondition {
     /// CR 603.4: the anchor this leaf needs resolved before it is answerable,
     /// when it needs one at all.
     ///
-    /// Two anchor kinds exist. A designation leaf (CR 109.4) tests a player's
-    /// designation, so it needs its [`PlayerScope`] resolved. A self-linked leaf
-    /// (CR 607.1c) reads this triggered ability's own history, so it needs the
-    /// identity of the trigger occurrence it gates.
-    ///
-    /// Exhaustive by design — there is deliberately no wildcard arm. This is
-    /// the guard that makes the polarity boundary gate in `game::triggers`
-    /// total: adding a future anchored leaf of either kind is a COMPILE ERROR
-    /// here, not a latent fail-open under [`TriggerCondition::Not`].
+    /// Three anchor kinds exist: designation leaves (CR 109.4) require a resolved `PlayerScope`; self-linked leaves (CR 607.1c) require the trigger occurrence identity; loyalty-removal threshold leaves (CR 603.4) require the exact loyalty activation event and its completed payment result.
     ///
     /// Boolean combinators return `None`; the gate recurses them itself.
     /// `QuantityComparison` returns `None` BY DEFINITION — it tests a quantity,
@@ -41424,6 +41421,9 @@ impl TriggerCondition {
             TriggerCondition::IsPoisoned { player } => Some(TriggerConditionAnchor::Player(player)),
             TriggerCondition::AddedManaWithThisAbilityThisTurn => {
                 Some(TriggerConditionAnchor::OwnTriggerDefinition)
+            }
+            TriggerCondition::LoyaltyCountersRemovedAtLeast { .. } => {
+                Some(TriggerConditionAnchor::LoyaltyActivationEvent)
             }
             TriggerCondition::GainedLife { .. }
             | TriggerCondition::LostLife

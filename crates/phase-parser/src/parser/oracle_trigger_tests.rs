@@ -26685,6 +26685,134 @@ fn unmodeled_ward_discard_line_fails_closed_through_parse_oracle_text() {
 
 // --- CR 606.2: "Whenever you activate a loyalty ability of [pw]" ---
 
+#[test]
+fn way_of_the_mind_sculptor_parses_loyalty_removal_intervening_if() {
+    let face = parse_oracle_text(
+        "When Way of the Mind Sculptor enters, empower Jace 5. (Put five loyalty counters on a Jace token you control. If you don't control one, first create a blue Jace planeswalker token with \"[−1]: Surveil 1\" and \"[−3]: Draw a card.\")\nWhenever you activate a loyalty ability, if you removed two or more loyalty counters to activate it, draw a card.",
+        "Way of the Mind Sculptor",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let [enters, way] = face.triggers.as_slice() else {
+        panic!(
+            "expected both printed Way triggers, got {:?}",
+            face.triggers
+        );
+    };
+    assert_eq!(enters.mode, TriggerMode::ChangesZone);
+    assert!(matches!(
+        *enters.execute.as_ref().expect("empower body").effect,
+        Effect::EmpowerJace {
+            count: QuantityExpr::Fixed { value: 5 }
+        }
+    ));
+    assert_eq!(way.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(
+        way.condition,
+        Some(TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum: 2 })
+    );
+    let body = way.execute.as_ref().expect("draw body");
+    assert!(matches!(
+        *body.effect,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    ));
+    assert!(
+        !face
+            .abilities
+            .iter()
+            .chain(
+                face.triggers
+                    .iter()
+                    .filter_map(|trigger| trigger.execute.as_deref())
+            )
+            .any(has_unimplemented),
+        "the complete Way face must contain zero Unimplemented effects"
+    );
+
+    let paradox = parse_trigger_line(
+        "Whenever you activate a loyalty ability, you gain 1 life. You may play an additional land this turn.",
+        "Way of the Paradox",
+    );
+    assert_eq!(paradox.condition, None);
+    assert!(paradox.execute.is_some());
+}
+
+// Synthetic grammar probe: no printed card carries a later `then if you removed
+// ... loyalty counters` clause. The nearest printed card is Way of the Mind
+// Sculptor, whose condition is the leading intervening-if "if you removed two
+// or more loyalty counters to activate it".
+#[test]
+fn loyalty_removal_condition_in_later_then_clause_is_not_hoisted() {
+    let later = parse_trigger_line(
+        "Whenever you activate a loyalty ability, draw a card, then if you removed two or more loyalty counters to activate it, draw a card.",
+        "Way of the Mind Sculptor",
+    );
+    assert_eq!(later.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(later.condition, None);
+    assert!(
+        later
+            .execute
+            .as_ref()
+            .and_then(|body| body.sub_ability.as_ref())
+            .is_some(),
+        "the later `then if` remains attached to the resolution effect chain"
+    );
+}
+
+#[test]
+fn loyalty_removal_threshold_requires_the_complete_loyalty_clause() {
+    use crate::types::ability_visit::{
+        granter_symbols, granter_symbols_mut, DefinitionNode, DefinitionNodeMut,
+    };
+
+    let digits = parse_trigger_line(
+        "Whenever you activate a loyalty ability, if you removed 4 or more loyalty counters to activate it, draw a card.",
+        "Way of the Mind Sculptor",
+    );
+    let expected = Some(TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum: 4 });
+    assert_eq!(digits.condition, expected);
+    let at_least = parse_trigger_line(
+        "Whenever you activate a loyalty ability, if you removed at least four loyalty counters to activate it, draw a card.",
+        "Way of the Mind Sculptor",
+    );
+    assert_eq!(at_least.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(at_least.condition, expected);
+    assert!(matches!(
+        at_least.execute.as_deref().map(|body| body.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+    let saved = serde_json::to_string(&digits).expect("serialize the alternate threshold");
+    let mut restored: TriggerDefinition = serde_json::from_str(&saved).expect("restore trigger");
+    assert_eq!(restored.condition, expected);
+    granter_symbols::node_fields(DefinitionNode::Trigger(&restored), &mut |_| {
+        panic!("the loyalty threshold has no granter symbol")
+    });
+    granter_symbols_mut::node_fields(DefinitionNodeMut::Trigger(&mut restored), &mut |_| {
+        panic!("the loyalty threshold has no symbol to rewrite")
+    });
+    assert_eq!(restored.condition, expected);
+
+    // Way is the only printed instance of this threshold in the pinned card census.
+    // These synthetic grammar probes each change one part of the printed condition.
+    for malformed in [
+        "Whenever you activate a loyalty ability, if you removed twelvish or more loyalty counters to activate it, draw a card.",
+        "Whenever you activate a loyalty ability, if you removed two or fewer loyalty counters to activate it, draw a card.",
+        "Whenever you activate a loyalty ability, if you removed two or more charge counters to activate it, draw a card.",
+        "Whenever you activate a loyalty ability, if you removed two or more loyalty counters to activate it somehow, draw a card.",
+    ] {
+        let parsed = parse_trigger_line(malformed, "Way of the Mind Sculptor");
+        assert_eq!(parsed.mode, TriggerMode::LoyaltyAbilityActivated);
+        assert!(
+            !matches!(parsed.condition, Some(TriggerCondition::LoyaltyCountersRemovedAtLeast { .. })),
+            "malformed or neighboring counter clause must not become the loyalty predicate: {malformed}"
+        );
+    }
+}
+
 /// CR 606.2: Ajani Unrelenting's unqualified form accepts every loyalty
 /// ability activated by the source controller, so it carries no card filter.
 #[test]
