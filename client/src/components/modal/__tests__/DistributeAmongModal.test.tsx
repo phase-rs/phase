@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WaitingFor } from "../../../adapter/types.ts";
+import { useUiStore } from "../../../stores/uiStore.ts";
 import { DistributeAmongModal } from "../DistributeAmongModal.tsx";
 
 const { dispatchMock } = vi.hoisted(() => ({ dispatchMock: vi.fn() }));
@@ -95,5 +96,72 @@ describe("DistributeAmongModal", () => {
     expect(confirm).toBeDisabled();
     fireEvent.click(confirm);
     expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it("assigns the remainder on resolution and omits untouched candidates", () => {
+    render(
+      <DistributeAmongModal
+        data={distributeAmongData(
+          { type: "Life" },
+          { type: "ResolutionCandidates", data: { pending_effect: {} } },
+        )}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Assign the remaining 2 to Object 102" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(dispatchMock).toHaveBeenCalledExactlyOnceWith({
+      type: "DistributeAmong",
+      data: { distribution: [[{ Object: 102 }, 2]] },
+    });
+  });
+
+  it("requires an announced share on every target after assigning the remainder", () => {
+    render(<DistributeAmongModal data={distributeAmongData({ type: "Damage" })} />);
+
+    const confirm = screen.getByRole("button", { name: "Confirm" });
+    const [firstMinus] = screen.getAllByRole("button", { name: "−" });
+    fireEvent.click(screen.getByRole("button", { name: "Assign the remaining 2 to Object 101" }));
+    expect(confirm).toBeDisabled();
+    fireEvent.click(firstMinus);
+    fireEvent.click(screen.getByRole("button", { name: "Assign the remaining 1 to Object 102" }));
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    expect(dispatchMock).toHaveBeenCalledExactlyOnceWith({
+      type: "DistributeAmong",
+      data: { distribution: [[{ Object: 101 }, 1], [{ Object: 102 }, 1]] },
+    });
+  });
+
+  it("clears a share and forwards object hover on the row", () => {
+    const inspect = vi.spyOn(useUiStore.getState(), "inspectObject").mockImplementation(() => {});
+    try {
+      render(
+        <DistributeAmongModal
+          data={distributeAmongData(
+            { type: "Counters", data: "P1P1" },
+            { type: "ResolutionCandidates", data: { pending_effect: {} } },
+          )}
+        />,
+      );
+
+      const clear = screen.getByRole("button", { name: "Clear Object 101" });
+      expect(clear.closest("[data-card-hover]")).not.toBeNull();
+      fireEvent.pointerOver(clear);
+      expect(inspect).toHaveBeenCalledWith(101, undefined, "hover", "side");
+
+      expect(clear).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: "Assign the remaining 2 to Object 101" }));
+      fireEvent.click(clear);
+      expect(clear).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: "Assign the remaining 2 to Object 102" }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+      expect(dispatchMock).toHaveBeenCalledExactlyOnceWith({
+        type: "DistributeAmong",
+        data: { distribution: [[{ Object: 102 }, 2]] },
+      });
+    } finally {
+      inspect.mockRestore();
+    }
   });
 });

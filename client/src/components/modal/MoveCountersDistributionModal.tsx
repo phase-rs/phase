@@ -13,7 +13,7 @@ import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
-import { gameButtonClass } from "../ui/buttonStyles.ts";
+import { StepperRow } from "./StepperRow.tsx";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 
 type MoveCountersDistribution = Extract<WaitingFor, { type: "MoveCountersDistribution" }>;
@@ -197,36 +197,23 @@ export function MoveCountersDistributionModal({
               {destinations.map((destinationId) => {
                 const amount = amounts[key]?.[destinationId] ?? 0;
                 return (
-                  <div
+                  <StepperRow
                     key={`${key}-${destinationId}`}
-                    {...hoverProps(destinationId)}
-                    className="flex items-center justify-between gap-3 rounded-lg bg-gray-800/60 p-3"
+                    hoverProps={hoverProps(destinationId)}
+                    value={amount}
+                    decrementLabel="-"
+                    incrementLabel="+"
+                    onDecrement={() => setAmount(counterType, destinationId, amount - 1)}
+                    onIncrement={() => setAmount(counterType, destinationId, amount + 1)}
+                    decrementDisabled={amount <= 0}
+                    incrementDisabled={remainingForType <= 0 || remaining <= 0}
                   >
                     <span className="text-sm font-medium text-gray-200">
                       {isRemoval
                         ? t("counterRemoval.removeLabel")
                         : objectLabel(destinationId, objects)}
                     </span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        className={gameButtonClass({ tone: "neutral", size: "xs" })}
-                        onClick={() => setAmount(counterType, destinationId, amount - 1)}
-                        disabled={amount <= 0}
-                      >
-                        -
-                      </button>
-                      <span className="w-8 text-center text-sm font-bold text-white">
-                        {amount}
-                      </span>
-                      <button
-                        className={gameButtonClass({ tone: "neutral", size: "xs" })}
-                        onClick={() => setAmount(counterType, destinationId, amount + 1)}
-                        disabled={remainingForType <= 0 || remaining <= 0}
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
+                  </StepperRow>
                 );
               })}
             </div>
