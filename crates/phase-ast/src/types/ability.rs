@@ -19360,7 +19360,7 @@ pub enum ParsedCondition {
     /// addressed to whoever is activating ("if you're"). CR 602.2 lets an
     /// `activator_filter` of `PlayerFilter::All` make the activator someone
     /// other than the source's controller, and the designation read must follow
-    /// that player. CR 725.5: a vacant designation makes the leaf false.
+    /// that player. The leaf is false when no player is the monarch.
     IsMonarch,
     /// CR 702.178a: True when the SOURCE's player has max speed — its
     /// controller on the battlefield, its owner anywhere else, per the "Max

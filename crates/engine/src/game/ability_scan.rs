@@ -4844,7 +4844,7 @@ fn scan_parsed_condition(x: &ParsedCondition, mode: ScanMode) -> Axes<'_> {
         ParsedCondition::PlayerCountAtLeast { filter, minimum: _ } => {
             scan_player_filter(filter, mode)
         }
-        ParsedCondition::IsOpponentsTurn => Axes::NONE,
+        ParsedCondition::IsOpponentsTurn | ParsedCondition::IsMonarch => Axes::NONE,
         // CR 601.2c: the targets the spell being cast has chosen.
         ParsedCondition::SourceMatchesFilter { filter }
         | ParsedCondition::SpellTargetsFilter { filter } => {

@@ -101,9 +101,10 @@ fn activate_and_resolve_equip(runner: &mut GameRunner, crown: ObjectId, host: Ob
         "the equipped creature carries the Equipment"
     );
     assert!(outcome.state().stack.is_empty());
+    // CR 117.3b: The active player receives priority after the ability resolves.
     assert!(matches!(
         outcome.final_waiting_for(),
-        WaitingFor::Priority { .. }
+        WaitingFor::Priority { player: P0 }
     ));
 }
 
