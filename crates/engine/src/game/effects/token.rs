@@ -849,11 +849,12 @@ pub(crate) fn resolve_with_host_override(
     // means the tokens enter unblocking — the creation is the instruction's
     // core, the block its rider.
     let blocking_attacker = enters_blocking_filter.and_then(|filter| {
-        crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
-            .and_then(|target_ref| match target_ref {
+        crate::game::targeting::affected_event_context_target(state, ability, filter).and_then(
+            |target_ref| match target_ref {
                 crate::types::ability::TargetRef::Object(id) => Some(id),
                 crate::types::ability::TargetRef::Player(_) => None,
-            })
+            },
+        )
     });
 
     // CR 111.1 + CR 111.4: Resolve the token's characteristics into a
@@ -4545,11 +4546,12 @@ pub(crate) fn resolve_token_spec(
     // propose time — the same resolution the `resolve` path performs, so the
     // spec-preview spec carries the identical `blocking_attacker`.
     let blocking_attacker = enters_blocking.as_ref().and_then(|filter| {
-        crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
-            .and_then(|target_ref| match target_ref {
+        crate::game::targeting::affected_event_context_target(state, ability, filter).and_then(
+            |target_ref| match target_ref {
                 crate::types::ability::TargetRef::Object(id) => Some(id),
                 crate::types::ability::TargetRef::Player(_) => None,
-            })
+            },
+        )
     });
 
     let parsed = parse_token_script(name).or_else(|| {

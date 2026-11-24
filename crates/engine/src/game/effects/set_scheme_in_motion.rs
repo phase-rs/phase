@@ -7,15 +7,15 @@
 //! again").
 
 use crate::game::archenemy;
-use crate::game::targeting::resolve_event_context_target;
+use crate::game::targeting::affected_event_context_target;
 use crate::types::ability::{Effect, EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 /// CR 701.32b / CR 904.9: resolve a re-fire effect — emit a fresh
 /// `SchemeSetInMotion` event for the event-context scheme ("that scheme" is
-/// the scheme the triggering event set in motion, read via
-/// `resolve_event_context_target`). No-op when the event names no scheme or
+/// the scheme the triggering event set in motion, bound via
+/// `affected_event_context_target`). No-op when the event names no scheme or
 /// the scheme is no longer face up in the command zone.
 pub fn resolve(
     state: &mut GameState,
@@ -28,12 +28,12 @@ pub fn resolve(
         ));
     };
     let scheme_id =
-        resolve_event_context_target(state, target, ability.source_id).and_then(|target_ref| {
-            match target_ref {
+        affected_event_context_target(state, ability, target).and_then(
+            |target_ref| match target_ref {
                 TargetRef::Object(id) => Some(id),
                 TargetRef::Player(_) => None,
-            }
-        });
+            },
+        );
     let Some(scheme_id) = scheme_id else {
         return Ok(());
     };
