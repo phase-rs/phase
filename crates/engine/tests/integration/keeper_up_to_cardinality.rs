@@ -20,14 +20,15 @@
 //! Creatures are textless vanilla fillers.
 
 use engine::ai_support::legal_actions;
-use engine::game::interaction::derive_viewer_interaction;
+use engine::game::interaction::{bind_interaction_authority, derive_viewer_interaction};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::filter_state_for_viewer;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
-    InteractionOpportunityResponse, InteractionResponseSpec, SelectionConstraint,
+    InteractionOpportunityResponse, InteractionResponseSpec, InteractionSessionId,
+    SelectionConstraint,
 };
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -107,8 +108,11 @@ fn count_in(runner: &GameRunner, ids: &[ObjectId], wanted: Zone) -> usize {
 
 /// The `Select` constraint the viewer's projection publishes.
 fn select_constraint(state: &GameState, viewer: PlayerId) -> SelectionConstraint {
-    let filtered = filter_state_for_viewer(state, viewer);
-    let view = derive_viewer_interaction(state, &filtered, viewer);
+    let mut state = state.clone();
+    bind_interaction_authority(&mut state, InteractionSessionId("keeper-up-to".to_string()))
+        .expect("valid interaction authority binding");
+    let filtered = filter_state_for_viewer(&state, viewer);
+    let view = derive_viewer_interaction(&state, &filtered, viewer);
     assert!(
         !view.opportunities.is_empty(),
         "reach guard: the keep prompt publishes an opportunity"
