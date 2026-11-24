@@ -26611,6 +26611,10 @@ fn way_of_the_mind_sculptor_parses_loyalty_removal_intervening_if() {
     assert!(paradox.execute.is_some());
 }
 
+// Synthetic grammar probe: no printed card carries a later `then if you removed
+// ... loyalty counters` clause. The nearest printed card is Way of the Mind
+// Sculptor, whose condition is the leading intervening-if "if you removed two
+// or more loyalty counters to activate it".
 #[test]
 fn loyalty_removal_condition_in_later_then_clause_is_not_hoisted() {
     let later = parse_trigger_line(

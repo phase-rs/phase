@@ -7778,6 +7778,10 @@ mod loyalty_cost_magnitude_tests {
     use crate::game::scenario::{GameScenario, P0};
     use crate::types::counter::CounterType;
 
+    // Synthetic arithmetic probe: no printed planeswalker has a [−2147483648]
+    // loyalty ability. It pins the tally's magnitude conversion at the i32
+    // boundary; the nearest printed shape is the Jace token Way of the Mind
+    // Sculptor empowers ("[−3]: Draw a card.").
     #[test]
     fn negative_loyalty_payment_magnitude_handles_i32_min() {
         let magnitude = 1_u32 << 31;
