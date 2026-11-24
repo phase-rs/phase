@@ -55,6 +55,29 @@ function damageShortcuts(
   ];
 }
 
+/** The modal's Confirm gate: mirrors the validator's checks, which stay authoritative. */
+function draftIsConfirmable(
+  data: AssignCombatDamage["data"],
+  amounts: readonly number[],
+  trampleDamage: number,
+  controllerDamage: number,
+): boolean {
+  const isOverPw = data.trample === "OverPlaneswalkers" && data.pw_controller != null;
+  const blockerTotal = amounts.reduce((acc, n) => acc + n, 0);
+  const total = blockerTotal + trampleDamage + controllerDamage;
+  // CR 702.19b: Lethal-to-all-blockers is a precondition only for assigning
+  // excess to the defending player/planeswalker, not an unconditional constraint.
+  // When trampleDamage and controllerDamage are both 0 the player is freely
+  // dividing all damage among blockers, so any split is legal.
+  const trampleLethalMet = data.trample == null ||
+    (trampleDamage === 0 && controllerDamage === 0) ||
+    data.blockers.every((b, i) => amounts[i] >= b.lethal_minimum);
+  // CR 702.19c: Must assign at least PW loyalty before controller spillover.
+  const loyaltyMet = !isOverPw || controllerDamage === 0 ||
+    trampleDamage >= (data.pw_loyalty ?? 0);
+  return total === data.total_damage && trampleLethalMet && loyaltyMet;
+}
+
 export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
@@ -81,17 +104,17 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
   const blockerTotal = amounts.reduce((acc, n) => acc + n, 0);
   const total = blockerTotal + trampleDamage + controllerDamage;
   const remaining = data.total_damage - total;
-  // CR 702.19b: Lethal-to-all-blockers is a precondition only for assigning
-  // excess to the defending player/planeswalker, not an unconditional constraint.
-  // When trampleDamage and controllerDamage are both 0 the player is freely
-  // dividing all damage among blockers, so any split is legal.
-  const trampleLethalMet = data.trample == null ||
-    (trampleDamage === 0 && controllerDamage === 0) ||
-    data.blockers.every((b, i) => amounts[i] >= b.lethal_minimum);
-  // CR 702.19c: Must assign at least PW loyalty before controller spillover.
-  const loyaltyMet = !isOverPw || controllerDamage === 0 ||
-    trampleDamage >= (data.pw_loyalty ?? 0);
-  const isValid = total === data.total_damage && trampleLethalMet && loyaltyMet;
+  const isValid = draftIsConfirmable(data, amounts, trampleDamage, controllerDamage);
+  // The engine's suggestion as a draft, offered only when the Confirm gate accepts it. The gate
+  // cannot yet accept the empty split of an "as though unblocked" prompt (#10770) or a split
+  // made after a departure left the prompt's loyalty stale, so no fill is offered there.
+  const suggestedAmounts = suggestion &&
+    data.blockers.map(({ blocker_id }) =>
+      suggestion.assignments.find(([id]) => id === blocker_id)?.[1] ?? 0);
+  const suggestedDraft = suggestion && suggestedAmounts &&
+    draftIsConfirmable(data, suggestedAmounts, suggestion.trample_damage, suggestion.controller_damage)
+    ? { amounts: suggestedAmounts, trample: suggestion.trample_damage, controller: suggestion.controller_damage }
+    : undefined;
   // CR 702.19b: ordinary trample's excess goes to whatever the creature is
   // attacking, so the row names the engine-reported planeswalker or battle.
   const trampleLabel = isOverPw
@@ -132,7 +155,7 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
       footer={<ConfirmButton onClick={handleConfirm} disabled={!isValid} label={t("combat.assignDamageButton")} />}
     >
       <div className="mb-4 space-y-3">
-        {suggestion && (
+        {suggestedDraft && (
           <button
             className={gameButtonClass({
               tone: "neutral",
@@ -142,10 +165,9 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
             aria-label={lethalFirstTitle}
             title={lethalFirstTitle}
             onClick={() => {
-              const assignments = new Map(suggestion.assignments);
-              setAmounts(data.blockers.map(({ blocker_id }) => assignments.get(blocker_id) ?? 0));
-              setTrampleDamage(suggestion.trample_damage);
-              setControllerDamage(suggestion.controller_damage);
+              setAmounts(suggestedDraft.amounts);
+              setTrampleDamage(suggestedDraft.trample);
+              setControllerDamage(suggestedDraft.controller);
             }}
           >
             {t("combat.lethalFirstButton")}

@@ -229,6 +229,29 @@ describe("DamageAssignmentModal", () => {
       expect(fill).toHaveClass("!min-h-11", "min-w-11");
     });
 
+    it("hides an empty suggestion for a zero-blocker prompt without trample", () => {
+      renderDamagePrompt({ blockers: [], trample: null, total_damage: 3 }, {
+        assignments: [],
+        trample_damage: 0,
+        controller_damage: 0,
+      });
+      expect(screen.queryByRole("button", { name: lethalFirstTitle })).not.toBeInTheDocument();
+    });
+
+    it("hides controller spillover when the prompt still requires planeswalker loyalty", () => {
+      renderDamagePrompt({
+        attack_target: planeswalkerTarget,
+        trample: "OverPlaneswalkers",
+        pw_loyalty: 3,
+        pw_controller: 1,
+      }, {
+        assignments: [[20, 2], [21, 3]],
+        trample_damage: 0,
+        controller_damage: 5,
+      });
+      expect(screen.queryByRole("button", { name: lethalFirstTitle })).not.toBeInTheDocument();
+    });
+
     it("hides the shortcut when the engine sends no suggestion", () => {
       renderDamagePrompt();
       expect(screen.queryByText("Lethal first")).not.toBeInTheDocument();
