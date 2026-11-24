@@ -5694,9 +5694,9 @@ pub fn parse_that_much_or_many(input: &str) -> OracleResult<'_, QuantityRef> {
 ///
 /// Two referent kinds under two different rules. CR 608.2h governs the VALUE forms
 /// ("that much", "the damage dealt"): information from the game is determined once, when the
-/// effect applies. CR 608.2k governs the OBJECT forms ("that creature's power"): a specific
-/// untargeted object previously referred to by the trigger condition. The source-object
-/// variants resolve via `extract_source_from_event` → live object or LKI cache.
+/// effect applies. CR 608.2k governs the OBJECT forms ("that creature's power").
+/// Without clause antecedents, the bare P/T forms provisionally use CostPaidObject.
+/// Where-X lowering binds a known trigger object directly to EventSource.
 fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         // CR 608.2h: bare demonstrative amount — delegate to the shared

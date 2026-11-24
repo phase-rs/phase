@@ -8873,8 +8873,8 @@ where
     read_object_pt_by_id_for_incarnation(state, id, None, obj_extract, lki_extract)
 }
 
-/// CR 400.7 + CR 608.2h: read P/T for one exact incarnation when the triggering
-/// zone-change record identifies it. A leave and re-entry can reuse the same
+/// CR 400.7 + CR 608.2h: read a characteristic (power, toughness, mana value)
+/// for one exact incarnation when the triggering zone-change record identifies it. A leave and re-entry can reuse the same
 /// `ObjectId`, but the re-entered permanent is a new object; it must not replace
 /// the original entrant's LKI for an already-pending trigger.
 fn read_object_pt_by_id_for_incarnation<T, F, G>(
@@ -8969,16 +8969,17 @@ fn trigger_event_source_identity(
     Some((object_id, expected_incarnation))
 }
 
-/// CR 608.2h + CR 603.10a + CR 400.7: power/toughness of the trigger-event
+/// CR 608.2h + CR 603.10a + CR 400.7: characteristics of the trigger-event
 /// source. A battlefield departure answers from its record-owned last-known
 /// information, which is exact after the step's `lki_cache` is cleared and
-/// after a same-id object has returned; other events use the guarded
-/// identity read.
-fn read_trigger_event_source_pt<F, G>(
+/// after a same-id object has returned. Other zone-change events read their
+/// pinned incarnation. Unpinned events use the characteristic's usual reader.
+fn read_trigger_event_source_characteristic<F, G>(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
     obj_extract: &F,
     lki_extract: &G,
+    read_unpinned: impl FnOnce(ObjectId) -> Option<i32>,
 ) -> Option<i32>
 where
     F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
@@ -8989,7 +8990,8 @@ where
         DepartureLookback::Malformed => return None,
         DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {}
     }
-    trigger_event_source_identity(state, ability).and_then(|(id, expected_incarnation)| {
+    let (id, expected_incarnation) = trigger_event_source_identity(state, ability)?;
+    if expected_incarnation.is_some() {
         read_object_pt_by_id_for_incarnation(
             state,
             id,
@@ -8997,6 +8999,23 @@ where
             obj_extract,
             lki_extract,
         )
+    } else {
+        read_unpinned(id)
+    }
+}
+
+fn read_trigger_event_source_pt<F, G>(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+    obj_extract: &F,
+    lki_extract: &G,
+) -> Option<i32>
+where
+    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+{
+    read_trigger_event_source_characteristic(state, ability, obj_extract, lki_extract, |id| {
+        read_object_pt_by_id(state, id, obj_extract, lki_extract)
     })
 }
 
@@ -9152,8 +9171,9 @@ where
         // mid-resolution (Fire Lord Ozai, The Meep, Venom, Broadside
         // Bombardiers).
         //   3. trigger-event source — the object named by this ability's
-        // trigger condition (Hamletback Goliath, Conclave Mentor), live
-        // object then LKI for dies/leaves-battlefield triggers.
+        // trigger condition in context-free references such as Yorvo's "that
+        // creature's power", with live and last-known information as applicable.
+        // Where-X bindings to the trigger event use EventSource directly.
         // CR 608.2k pins true cost/trigger referents; CR 608.2c makes a
         // same-resolution effect referent more specific than the trigger source
         // once the first slot is absent. Exact parity with the
@@ -9434,33 +9454,32 @@ fn resolve_object_mana_value(
     targets: &[TargetRef],
     ability: Option<&ResolvedAbility>,
 ) -> i32 {
-    // CR 608.2h + CR 603.10a + CR 400.7 + CR 708.2a: the trigger-event source's
-    // mana value. A battlefield departure answers from its record-owned
-    // last-known information (0 for a face-down permanent), never from a live
-    // same-id object that has since returned; other events keep the id-keyed
-    // live-then-LKI read.
-    let event_source_mana_value = || -> Option<i32> {
-        match departure_lookback(state, ability) {
-            DepartureLookback::Present(context) => {
-                return Some(u32_to_i32_saturating(context.lki.mana_value));
-            }
-            DepartureLookback::Malformed => return Some(0),
-            DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {}
-        }
-        let id = object_lookback_event(state, ability)
-            .and_then(|e| crate::game::targeting::extract_source_from_event(&e))?;
+    // CR 202.3d + CR 709.4b: combined MV for a split card off the stack;
+    // CR 202.3e: chosen X for an on-stack source.
+    let live = |object: &crate::game::game_object::GameObject| {
+        Some(u32_to_i32_saturating(object.effective_mana_value()))
+    };
+    let last_known =
+        |lki: &crate::types::game_state::LKISnapshot| Some(u32_to_i32_saturating(lki.mana_value));
+    let live_then_lki = |id| {
         state
             .objects
             .get(&id)
-            // CR 202.3d + CR 709.4b: combined MV for a split card off the
-            // stack; CR 202.3e: chosen X for an on-stack source.
-            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
-            .or_else(|| {
-                state
-                    .lki_cache
-                    .get(&id)
-                    .map(|lki| u32_to_i32_saturating(lki.mana_value))
-            })
+            .and_then(live)
+            .or_else(|| state.lki_cache.get(&id).and_then(last_known))
+    };
+    // CR 608.2h + CR 603.10a + CR 400.7 + CR 708.2a: the trigger-event source's
+    // mana value as the fallback slot of the cost-paid and demonstrative
+    // scopes. A battlefield departure answers from its record-owned last-known
+    // information (0 for a face-down permanent), never from a live same-id
+    // object that has since returned; other events keep the id-keyed
+    // live-then-LKI read.
+    let event_source_mana_value = || match departure_lookback(state, ability) {
+        DepartureLookback::Present(context) => last_known(&context.lki),
+        DepartureLookback::Malformed => Some(0),
+        DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {
+            trigger_event_source_identity(state, ability).and_then(|(id, _)| live_then_lki(id))
+        }
     };
     match scope {
         // CR 202.3e: include cost_x_paid so on-stack spells report X's chosen value.
@@ -9485,16 +9504,25 @@ fn resolve_object_mana_value(
             .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .unwrap_or(0),
         ObjectScope::EventSource => {
-            // CR 400.7 + CR 202.3: an event that pins its own subject incarnation
-            // answers for that incarnation directly. Reading live state (or the
-            // id-keyed LKI cache) would let a re-entered permanent at the same
-            // storage id supply the value instead — Narci draining for the NEW
-            // Saga's mana value after a blink. Checked first, so the id-based
-            // fallback below only runs for events with no pinned subject.
+            // CR 400.7 + CR 202.3: an event that pins its own subject answers
+            // for that subject, never for a re-entered permanent at the same
+            // storage id. A Saga event carries the mana value itself (Narci
+            // draining for the NEW Saga's mana value after a blink); a
+            // battlefield entry carries the entrant's incarnation (Radagast the
+            // Brown reading a face-down entrant that was blinked face up while
+            // the trigger waited, CR 708.2a). An event that pins nothing reads
+            // the live object first, which includes a spell on the stack.
             if let Some(mana_value) = event_source_mana_value_override(state) {
                 return mana_value;
             }
-            event_source_mana_value().unwrap_or(0)
+            read_trigger_event_source_characteristic(
+                state,
+                ability,
+                &live,
+                &last_known,
+                live_then_lki,
+            )
+            .unwrap_or(0)
         }
         // CR 603.2 + CR 202.3: mana value of the object that received the
         // triggering damage. Same live-then-LKI resolution as `EventSource`.

@@ -7890,7 +7890,9 @@ fn trigger_pantlaza_etb_discover_x_is_entering_creature_toughness() {
                 matches!(
                     mana_value_limit,
                     QuantityExpr::Ref {
-                        qty: crate::types::ability::QuantityRef::Toughness { .. }
+                        qty: crate::types::ability::QuantityRef::Toughness {
+                            scope: crate::types::ability::ObjectScope::EventSource,
+                        }
                     }
                 ),
                 "discover X must bind to the entering creature's toughness, \

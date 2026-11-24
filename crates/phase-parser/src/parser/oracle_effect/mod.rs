@@ -8018,7 +8018,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     })
 }
 
-fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+fn try_parse_earthbend_clause(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     // CR 608.2c: the optional leading "you " subject ("you earthbend 4" — Fatal
     // Fissure's delayed trigger) names the controller performing the keyword
     // action. Earthbend is a player action with no extra targeting, so the
@@ -8039,7 +8039,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     // coverage counts the card as unsupported until the quantity is handled.
     // (matthewevans review, PR #5881.)
     let Some((target, counter_count)) =
-        imperative::parse_earthbend_count_expr(tp.original, &lower_rest)
+        imperative::parse_earthbend_count_expr(tp.original, &lower_rest, ctx)
     else {
         return Some(parsed_clause(Effect::unimplemented(
             "where_x_binding",
@@ -13580,7 +13580,7 @@ fn parse_effect_clause_inner_with_damage_context(
         return clause;
     }
 
-    if let Some(clause) = try_parse_earthbend_clause(tp) {
+    if let Some(clause) = try_parse_earthbend_clause(tp, ctx) {
         return clause;
     }
 
@@ -53650,15 +53650,44 @@ fn parse_effect_chain_ir_body(
         // compound-owner seed are nearer and keep precedence; when the pronoun
         // already binds the source the seed is a no-op so the `ParentTarget`
         // self-recall authority (assembly) keeps its chains.
-        let previous_instruction_named_source = builder
-            .clauses()
-            .last()
-            .is_some_and(|previous| parsed_clause_targets_self_ref(&previous.parsed));
+        let previous = builder.clauses().last();
+        let previous_instruction_named_source =
+            previous.is_some_and(|previous| parsed_clause_targets_self_ref(&previous.parsed));
         let outer_antecedent_is_another_object = chunk_object_referent.is_none()
             && inherited_compound_owner_seed.is_none()
             && !matches!(resolve_it_pronoun(ctx), TargetFilter::SelfRef);
+        // CR 608.2c + CR 608.2k: sacrificing the source of a noncreature
+        // permanent ability does not introduce a new creature antecedent.
+        // A typed demonstrative where-X tail can still name the trigger's creature.
+        let where_x_names_trigger_creature = previous.is_some_and(|previous| {
+            matches!(
+                previous.parsed.effect,
+                Effect::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            )
+        }) && resolve_it_pronoun(ctx)
+            == TargetFilter::TriggeringSource
+            && !ctx.source_core_types.is_empty()
+            && ctx
+                .source_core_types
+                .iter()
+                .all(|kind| *kind != CoreType::Creature)
+            && local_where_x_expression
+                .as_deref()
+                .is_some_and(|expression| {
+                    matches!(
+                        lower::parse_demonstrative_object_stat(
+                            expression,
+                            ObjectScope::EventSource
+                        ),
+                        Some((TypeFilter::Creature, _))
+                    )
+                });
         if previous_instruction_named_source
             && (inherited_player_subject.is_some() || outer_antecedent_is_another_object)
+            && !where_x_names_trigger_creature
         {
             ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
         }
