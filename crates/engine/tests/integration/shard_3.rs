@@ -68,6 +68,7 @@ mod diligent_farmhand_counts_as_named;
 mod diluvian_primordial_6754;
 mod dina_noff_turn5_loader;
 mod dionus_constrained_echo_observer;
+mod discard_all_matching_cards;
 mod discard_your_hand_empty_hand;
 mod disjunctive_state_change_head_coverage_honesty;
 mod dismantle;
