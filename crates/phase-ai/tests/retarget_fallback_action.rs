@@ -126,6 +126,7 @@ fn fallback_retarget_action_is_legal() {
         keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
+        stack_entry_id: None,
         scope: RetargetScope::Single,
         current_targets: vec![TargetRef::Object(victim)],
         slots: vec![RetargetSlotAddress {
@@ -287,6 +288,7 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
         keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
+        stack_entry_id: None,
         scope: RetargetScope::Single,
         current_targets,
         slots: vec![
@@ -446,6 +448,7 @@ fn park_multi_role_retarget(
         keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
+        stack_entry_id: None,
         scope: RetargetScope::Single,
         current_targets,
         slots: vec![

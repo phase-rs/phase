@@ -1,5 +1,4 @@
-const SUPABASE_URL =
-  typeof __SUPABASE_URL__ !== "undefined" ? __SUPABASE_URL__ : "";
+import { SUPABASE_CONFIG } from "./supabaseConfig";
 
 /** Derive Supabase's default localStorage key from a configured project URL. */
 export function supabaseSessionKeyFromUrl(url: string): string | null {
@@ -13,5 +12,5 @@ export function supabaseSessionKeyFromUrl(url: string): string | null {
 
 /** The localStorage key supabase-js uses for this deployment's auth session. */
 export function getSupabaseSessionKey(): string | null {
-  return supabaseSessionKeyFromUrl(SUPABASE_URL);
+  return supabaseSessionKeyFromUrl(SUPABASE_CONFIG.url);
 }

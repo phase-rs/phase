@@ -13529,35 +13529,7 @@ pub(crate) fn seed_event_context_parent_targets(
 /// Never consult live state here: trigger placement can be deferred until after
 /// the same storage id has already left and returned as a different object.
 pub(crate) fn zone_change_parent_target_pin(event: &GameEvent) -> Option<ObjectIncarnationRef> {
-    let GameEvent::ZoneChanged {
-        object_id,
-        from,
-        to,
-        record,
-    } = event
-    else {
-        return None;
-    };
-    if record.object_id != *object_id || record.from_zone != *from || record.to_zone != *to {
-        return None;
-    }
-
-    let incarnation = if *to == Zone::Battlefield {
-        record.entered_incarnation?
-    } else {
-        let source = record.trigger_source_context()?;
-        if source.identity.reference.object_id != *object_id
-            || from.is_some_and(|zone| source.identity.expected_zone != zone)
-        {
-            return None;
-        }
-        if from.is_some_and(|zone| zone != *to) {
-            source.identity.reference.incarnation.checked_add(1)?
-        } else {
-            source.identity.reference.incarnation
-        }
-    };
-    Some(ObjectIncarnationRef::of(*object_id, incarnation))
+    crate::game::targeting::zone_change_parent_target_pin(event)
 }
 
 fn effect_uses_parent_target(effect: &Effect) -> bool {
@@ -22183,7 +22155,7 @@ pub(crate) fn check_trigger_condition_with_source(
 /// designation leaf's player question is delegated to
 /// `quantity::resolve_player_scope_for_trigger_check`, the same single authority
 /// the leaves use; a self-linked leaf needs only the gated ability's identity.
-/// Both kinds are reported by the compiler-forced
+/// All anchor kinds are reported by the compiler-forced
 /// [`TriggerCondition::evaluation_anchor`] accessor. The `_ => true` leaf arm is
 /// safe precisely because that accessor is exhaustive: a future anchored leaf is
 /// a compile error there, not a silent fail-open here.
@@ -22216,6 +22188,16 @@ fn trigger_condition_anchors_resolvable(
         // trigger's identity.
         Some(TriggerConditionAnchor::OwnTriggerDefinition) => {
             return trigger_definition.is_some();
+        }
+        Some(TriggerConditionAnchor::LoyaltyActivationEvent) => {
+            return matches!(
+                trigger_event,
+                Some(GameEvent::AbilityActivated {
+                    kind: crate::types::events::ActivatedAbilityKind::Loyalty,
+                    loyalty_counters_removed: Some(_),
+                    ..
+                })
+            );
         }
         None => {}
     }
@@ -22571,6 +22553,16 @@ fn evaluate_trigger_condition_with_source(
             }
             _ => false,
         },
+        // CR 606.4 + CR 603.4: use the completed payment result attached to
+        // this exact activation event at both the trigger and resolution checks.
+        TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum } => matches!(
+            trigger_event,
+            Some(GameEvent::AbilityActivated {
+                kind: crate::types::events::ActivatedAbilityKind::Loyalty,
+                loyalty_counters_removed: Some(removed),
+                ..
+            }) if removed >= minimum
+        ),
         // CR 700.4 + CR 120.1: True when the dying creature was dealt damage by the
         // trigger source this turn.
         TriggerCondition::DealtDamageBySourceThisTurn => {
@@ -27308,6 +27300,7 @@ pub mod tests {
             trigger_state: ActivationTriggerState::Pending,
             stack_entry: None,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         let seed = |effect: Effect| {
             let mut ability = ResolvedAbility::new(effect, vec![], source, PlayerId(0));
@@ -29436,6 +29429,7 @@ pub mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         assert!(check_trigger_condition(
             &state,
@@ -29452,6 +29446,7 @@ pub mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -64747,6 +64742,108 @@ pub mod tests {
             None,
             Some(&event),
         ));
+    }
+
+    /// CR 603.4: an unanswerable loyalty-event anchor fails closed before
+    /// `Not` can invert it; the exact positive event remains evaluable.
+    #[test]
+    fn loyalty_removal_anchor_is_bound_to_the_exact_event_under_not() {
+        let mut state = setup();
+        let threshold = TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum: 2 };
+        let negated = TriggerCondition::Not {
+            condition: Box::new(threshold.clone()),
+        };
+        let event = |kind, loyalty_counters_removed| GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: ObjectId(91),
+            kind,
+            departed_source_lki: None,
+            trigger_state: ActivationTriggerState::Pending,
+            stack_entry: Some(ObjectId(92)),
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed,
+        };
+        let positive = event(ActivatedAbilityKind::Loyalty, Some(3));
+        assert!(
+            check_trigger_condition_with_source(
+                &state,
+                &threshold,
+                PlayerId(0),
+                None,
+                None,
+                Some(&positive),
+            ),
+            "reach guard: the exact event carries qualifying Some(3)"
+        );
+        assert!(
+            !check_trigger_condition_with_source(
+                &state,
+                &negated,
+                PlayerId(0),
+                None,
+                None,
+                Some(&positive),
+            ),
+            "known true threshold remains false under Not"
+        );
+
+        for unanswerable in [
+            event(ActivatedAbilityKind::Loyalty, None),
+            event(ActivatedAbilityKind::Normal, Some(3)),
+        ] {
+            assert!(
+                !check_trigger_condition_with_source(
+                    &state,
+                    &negated,
+                    PlayerId(0),
+                    None,
+                    None,
+                    Some(&unanswerable),
+                ),
+                "an unknown count or wrong event kind cannot become true under Not"
+            );
+        }
+
+        let below_threshold = event(ActivatedAbilityKind::Loyalty, Some(1));
+        state.current_trigger_event = Some(below_threshold.clone());
+        assert!(
+            !check_trigger_condition_with_source(&state, &negated, PlayerId(0), None, None, None,),
+            "a missing supplied event fails closed even when the ambient event would satisfy Not"
+        );
+        assert!(
+            check_trigger_condition_with_source(
+                &state,
+                &threshold,
+                PlayerId(0),
+                None,
+                None,
+                Some(&positive),
+            ),
+            "the exact supplied activation event wins over the conflicting ambient event"
+        );
+        state.current_trigger_event = Some(positive);
+        assert!(
+            !check_trigger_condition_with_source(
+                &state,
+                &threshold,
+                PlayerId(0),
+                None,
+                None,
+                Some(&below_threshold),
+            ),
+            "the conflicting low-count event does not borrow the positive receipt"
+        );
+        assert!(
+            check_trigger_condition_with_source(
+                &state,
+                &negated,
+                PlayerId(0),
+                None,
+                None,
+                Some(&below_threshold),
+            ),
+            "Not inverts the supplied known Some(1) even when the ambient event qualifies"
+        );
     }
 
     /// CR 701.54a: "you choose a creature as your Ring-bearer" — fires only
