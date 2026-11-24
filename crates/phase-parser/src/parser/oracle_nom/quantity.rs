@@ -908,9 +908,10 @@ fn parse_number_of_cards_discarded_this_turn(input: &str) -> OracleResult<'_, Qu
 /// discard cards this way won't draw any cards"): the count reads the
 /// resolution's tracked set filtered to members the SEAT owns
 /// (`Owned{ScopedPlayer}` — each player discards their own hand) and stamped
-/// with the discard cause, so replacement-diverted cards (CR 614.6, e.g.
-/// Madness) and other seats' discards never count. "that player" binds the
-/// live per-recipient seat, mirroring "that player has drawn this turn".
+/// with the discard cause, so other seats' discards never count. Cards
+/// discarded through madness still count even though they are exiled
+/// (CR 702.35a). "that player" binds the live per-recipient seat, mirroring
+/// "that player has drawn this turn".
 fn parse_number_of_cards_that_player_discarded(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("card").parse(input)?;
     let (rest, _) = opt(tag("s")).parse(rest)?;
