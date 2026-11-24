@@ -591,11 +591,23 @@ struct PrintingSpan<'a> {
     printing: &'a CardPrinting,
 }
 
+/// One face's printings for a continuation, indexed like `PLAYABLE_PRINTING_SECTIONS`.
+struct PlayablePrintingAllocation<'a> {
+    /// What each section's copies bind, up to that section's capacity.
+    streams: [Vec<PrintingSpan<'a>>; 2],
+    /// The registered rows of each section that no copy bound this game, in row order.
+    /// Disjoint from `streams`, so reading on into them never repeats a printing.
+    unabsorbed: [Vec<PrintingSpan<'a>>; 2],
+}
+
 /// CR 100.4 + CR 203.1 + CR 206.1: `face`'s printing stream for each playable section,
 /// given the copies each holds this game (`capacities`, indexed like
 /// `PLAYABLE_PRINTING_SECTIONS`). A section binds its own registered rows first, in row
 /// order, up to its capacity. The rows that clamp cuts off then fill the other section's
-/// remaining copies, in the donor's row order. Admissible rows from unambiguous streams
+/// remaining copies, in the donor's row order. The unabsorbed suffixes stay in their
+/// original section and row order. The continuation sideboard reader appends the
+/// sideboard suffix first, then the main-deck suffix, for copies released into the
+/// ordinary sideboard after deck loading. Admissible rows from unambiguous streams
 /// bind when they fit the effective capacity and the destination key can be emitted.
 /// Returning to the original partition restores local bindings when each stream fits
 /// its section. A key shared by distinct faces contributes no local or overflow rows.
@@ -604,7 +616,7 @@ fn allocate_playable_printings<'a>(
     record: &'a DeckPrintingRecord,
     face: &CardFace,
     capacities: [u64; 2],
-) -> [Vec<PrintingSpan<'a>>; 2] {
+) -> PlayablePrintingAllocation<'a> {
     let mut vacancies = capacities;
     let mut streams: [_; 2] = std::array::from_fn(|_| Vec::new());
     let mut overflow: [_; 2] = std::array::from_fn(|_| Vec::new());
@@ -633,17 +645,22 @@ fn allocate_playable_printings<'a>(
         }
     }
     // Reversed, each section meets the other's overflow: main takes the sideboard's.
-    for (index, donor) in overflow.into_iter().rev().enumerate() {
-        for span in donor {
+    for (index, donor) in overflow.iter_mut().rev().enumerate() {
+        for span in donor.iter_mut() {
             if vacancies[index] == 0 {
                 break;
             }
             let count = vacancies[index].min(u64::from(span.count)) as u32;
-            streams[index].push(PrintingSpan { count, ..span });
+            streams[index].push(PrintingSpan { count, ..*span });
             vacancies[index] -= u64::from(count);
+            span.count -= count;
         }
+        donor.retain(|span| span.count > 0);
     }
-    streams
+    PlayablePrintingAllocation {
+        streams,
+        unabsorbed: overflow,
+    }
 }
 
 /// The copies of `face` in `entries`, by face identity (never by raw name).
@@ -705,10 +722,10 @@ fn bind_continuation_printings(
             let Some(entry_indexes) = indexes[index].remove(&identity) else {
                 continue;
             };
-            let streams = allocations.entry(identity).or_insert_with(|| {
+            let allocation = allocations.entry(identity).or_insert_with(|| {
                 allocate_playable_printings(record, &entry.card, capacities[&identity])
             });
-            let stream = std::mem::take(&mut streams[index]);
+            let stream = std::mem::take(&mut allocation.streams[index]);
             if stream.is_empty() {
                 continue;
             }
@@ -2824,13 +2841,16 @@ pub(crate) fn outside_game_copy_printing(
     let mut taken = capacity.saturating_sub(face_capacity(current, face)) + brought;
     if section == DeckSection::Sideboard && game > 1 {
         // Restore uses the saved game-start lists and ordinal. Existing objects keep
-        // their stamps, and a released Limited designation adds no ordinary capacity.
-        let [_, stream] = allocate_playable_printings(
+        // their stamps. A released Limited designation can use the unabsorbed tail.
+        let PlayablePrintingAllocation {
+            streams: [_, stream],
+            unabsorbed: [main, sideboard],
+        } = allocate_playable_printings(
             record,
             face,
             [face_capacity(&pool.registered_main, face), capacity],
         );
-        for span in stream {
+        for span in stream.into_iter().chain(sideboard).chain(main) {
             if taken < u64::from(span.count) {
                 let mut printing = span.printing.clone();
                 printing.automatic_art_catalog_version = None;
@@ -5203,6 +5223,23 @@ mod tests {
             }
             validate_printing_bindings(&original);
             let record = retained_printing_record(&original);
+            let allocation = allocate_playable_printings(
+                record.get().as_deref().expect("retained rows"),
+                &face_a,
+                [0, 0],
+            );
+            let [main_tail, sideboard_tail] = allocation.unabsorbed;
+            let (valid_tail, ambiguous_tail) = if donor == main {
+                (main_tail, sideboard_tail)
+            } else {
+                (sideboard_tail, main_tail)
+            };
+            assert!(ambiguous_tail.is_empty());
+            let [span] = valid_tail.as_slice() else {
+                panic!("expected the sole admissible donor row in the tail");
+            };
+            assert_eq!(span.printing, &CardPrinting::owner("carried", "1"));
+            assert_eq!(span.count, 1);
             let (main_deck, sideboard) = if destination == main {
                 (vec![entry(&face_a, 2)], vec![entry(&face_b, 1)])
             } else {
@@ -5275,6 +5312,12 @@ mod tests {
         }
         validate_printing_bindings(&unchanged);
         let record = retained_printing_record(&unchanged);
+        let allocation = allocate_playable_printings(
+            record.get().as_deref().expect("retained rows"),
+            &face_b,
+            [0, 0],
+        );
+        assert!(allocation.unabsorbed.iter().all(Vec::is_empty));
         bind_continuation_printings(
             &mut unchanged,
             record.get().as_deref(),
@@ -5318,7 +5361,11 @@ mod tests {
                 twin_row("Twin", 2, "main-last"),
                 DeckPrinting {
                     section: side,
-                    ..twin_row("Twin", 2, "side")
+                    ..twin_row("Twin", 1, "side-first")
+                },
+                DeckPrinting {
+                    section: side,
+                    ..twin_row("Twin", 1, "side-last")
                 },
             ],
             [main, side]
@@ -5327,19 +5374,38 @@ mod tests {
         );
         let original = [
             vec!["main-first", "main-last", "main-last"],
-            vec!["side", "side"],
+            vec!["side-first", "side-last"],
         ];
-        for main_count in 0..=6 {
-            let capacities = [main_count, 6 - main_count];
-            let [main_rows, side_rows] =
+        fn expand(rows: Vec<PrintingSpan<'_>>) -> Vec<&str> {
+            rows.into_iter()
+                .flat_map(|span| {
+                    std::iter::repeat_n(span.printing.set_code.as_str(), span.count as usize)
+                })
+                .collect::<Vec<_>>()
+        }
+        for capacities in
+            (0usize..=6).flat_map(|total| (0..=total).map(move |main| [main, total - main]))
+        {
+            let allocation =
                 allocate_playable_printings(&record, face, capacities.map(|count| count as u64));
-            let expanded = [main_rows, side_rows].map(|rows| {
-                rows.into_iter()
-                    .flat_map(|span| {
-                        std::iter::repeat_n(span.printing.set_code.as_str(), span.count as usize)
-                    })
-                    .collect::<Vec<_>>()
-            });
+            let expanded = allocation.streams.map(expand);
+            let [main_tail, sideboard_tail] = allocation.unabsorbed;
+            let tail = expand(sideboard_tail)
+                .into_iter()
+                .chain(expand(main_tail))
+                .collect::<Vec<_>>();
+            let expected_tail = [1, 0]
+                .into_iter()
+                .flat_map(|index| {
+                    let other = 1 - index;
+                    let carried = capacities[other].saturating_sub(original[other].len());
+                    original[index]
+                        .iter()
+                        .copied()
+                        .skip(capacities[index] + carried)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(tail, expected_tail, "capacities {capacities:?}");
             for index in 0..2 {
                 let local = &original[index];
                 let donor = &original[1 - index];
@@ -5358,11 +5424,17 @@ mod tests {
                     .collect();
                 assert_eq!(expanded[index], expected, "capacities {capacities:?}");
             }
-            let mut combined: Vec<_> = expanded.into_iter().flatten().collect();
+            let mut combined: Vec<_> = expanded.into_iter().flatten().chain(tail).collect();
             combined.sort_unstable();
             assert_eq!(
                 combined,
-                ["main-first", "main-last", "main-last", "side", "side"]
+                [
+                    "main-first",
+                    "main-last",
+                    "main-last",
+                    "side-first",
+                    "side-last"
+                ]
             );
         }
     }

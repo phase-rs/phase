@@ -3224,11 +3224,10 @@ mod post_load_creators {
         assert_exact_stamp(runner, id, Some(&CardPrinting::owner(expected, "1")));
     }
 
-    #[test]
-    fn limited_designation_netting_carries_gyruda_before_reveal_or_decline() {
-        let mut runner = printing_match(PlayerDeckList {
+    fn gyruda_printing_match(sideboard_count: usize) -> GameRunner {
+        printing_match(PlayerDeckList {
             main_deck: names(&[("Forest", 38), (WISH, 2)]),
-            sideboard: names(&[(GYRUDA, 3)]),
+            sideboard: names(&[(GYRUDA, sideboard_count)]),
             companion: names(&[(GYRUDA, 1)]),
             printings: vec![
                 choice(DeckSection::Sideboard, GYRUDA, 1, "g-side-a"),
@@ -3236,7 +3235,12 @@ mod post_load_creators {
                 choice(DeckSection::Companion, GYRUDA, 1, "g-slot"),
             ],
             ..Default::default()
-        });
+        })
+    }
+
+    #[test]
+    fn limited_designation_netting_carries_gyruda_before_reveal_or_decline() {
+        let mut runner = gyruda_printing_match(3);
         let dedicated = offer(GYRUDA, CompanionChoiceSource::Dedicated);
         assert_eq!(
             runner.state().deck_pools[0].registered_sideboard[0].count,
@@ -3296,6 +3300,47 @@ mod post_load_creators {
             Some(CardPrinting::owner("g-side-a", "1")),
         );
         wish_for(&mut declined, GYRUDA, 1, None);
+    }
+
+    #[test]
+    fn limited_declined_designation_uses_unabsorbed_printing_across_restore() {
+        let mut runner = gyruda_printing_match(2);
+        let dedicated = offer(GYRUDA, CompanionChoiceSource::Dedicated);
+        assert_offer(&runner, P0, std::slice::from_ref(&dedicated));
+        reveal(&mut runner, dedicated.clone());
+        concede(&mut runner, P1);
+        game_two(&mut runner, &[("Forest", 38), (WISH, 2)], &[(GYRUDA, 2)]);
+
+        let pool = &runner.state().deck_pools[0];
+        assert!(pool
+            .registered_main
+            .iter()
+            .all(|entry| entry.card.name != GYRUDA));
+        // CR 100.4b + CR 702.139a: the dedicated copy rejoins the ordinary pool on decline.
+        assert_eq!(pool.registered_sideboard[0].count, 1);
+        assert_eq!(pool.registered_companion[0].count, 1);
+        assert_offer(&runner, P0, std::slice::from_ref(&dedicated));
+        decline_companion(&mut runner);
+        assert_eq!(
+            runner.state().deck_pools[0].registered_sideboard[0].count,
+            1
+        );
+        assert_eq!(runner.state().deck_pools[0].current_sideboard[0].count, 2);
+        assert!(runner.state().deck_pools[0].current_companion.is_empty());
+        play_to_main(&mut runner);
+        let first_printing = CardPrinting::owner("g-side-a", "1");
+        let first = wish_for(&mut runner, GYRUDA, 2, Some(first_printing.clone()));
+
+        let mut restored = restore_runner(runner.state().clone());
+        for branch in [&mut runner, &mut restored] {
+            assert_exact_stamp(branch, first, Some(&first_printing));
+            wish_for(
+                branch,
+                GYRUDA,
+                1,
+                Some(CardPrinting::owner("g-side-b", "1")),
+            );
+        }
     }
 
     #[test]
@@ -3369,21 +3414,12 @@ mod post_load_creators {
             2,
             Some(CardPrinting::owner("old-a", "1")),
         );
-        let restore = |state: GameState| {
-            let persisted = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
-            GameRunner::from_state(
-                serde_json::from_value::<PersistedGameState>(persisted)
-                    .unwrap()
-                    .into_game_state()
-                    .expect("restore is valid"),
-            )
-        };
-        let mut restored = restore(runner.state().clone());
+        let mut restored = restore_runner(runner.state().clone());
         let mut old = runner.state().clone();
         let object = old.objects.get_mut(&main).expect("the game-two main copy");
         object.printing = DisplayOnly::default();
         object.base_printing = DisplayOnly::default();
-        let mut old = restore(old);
+        let mut old = restore_runner(old);
         for (branch, expected) in [
             (&mut runner, Some(&main_printing)),
             (&mut restored, Some(&main_printing)),
@@ -3393,6 +3429,16 @@ mod post_load_creators {
             wish_for(branch, LURRUS, 1, Some(CardPrinting::owner("old-b", "1")));
             assert_exact_stamp(branch, main, expected);
         }
+    }
+
+    fn restore_runner(state: GameState) -> GameRunner {
+        let persisted = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
+        GameRunner::from_state(
+            serde_json::from_value::<PersistedGameState>(persisted)
+                .unwrap()
+                .into_game_state()
+                .expect("restore is valid"),
+        )
     }
 
     #[test]
