@@ -893,6 +893,7 @@ pub(crate) fn propose_token_batch(
     // token substitute's branch tokens are rewritten into the event they
     // modify, so a fresh proposal carries an empty applied set.
     TokenBatchProposal::Ready(ProposedEvent::CreateToken {
+        redirected_to: None,
         owner: token_owner,
         spec: Box::new(spec),
         copy: None,
@@ -1640,6 +1641,7 @@ fn deliver_token_event_positions(
                     batch.spec.enter_with_counters,
                     batch.count,
                     initial.clone(),
+                    batch.redirected_to,
                     events,
                 );
                 let held: HashSet<ObjectId> = initial.iter().copied().collect();
@@ -1827,6 +1829,7 @@ fn apply_create_token_batch(
         copy,
         enter_tapped,
         count: final_count,
+        redirected_to,
         ..
     } = event
     else {
@@ -1845,13 +1848,15 @@ fn apply_create_token_batch(
         // adoption (`OfferedBatchCustody`), not through this re-park.
         let held = detach_active_copy_token_frame(state);
         let status = deliver_with_held_copy_owner(state, held.as_ref(), |state| {
-            super::token_copy::apply_copy_token_after_replacement(
+            super::token_copy::apply_copy_token_after_replacement_with_created_ids(
                 state,
                 owner,
                 *copy,
                 enter_tapped,
                 spec.enter_with_counters.clone(),
                 final_count,
+                Vec::new(),
+                redirected_to,
                 events,
             )
         });
@@ -1896,7 +1901,9 @@ fn apply_create_token_batch(
             CardId(0),
             owner,
             ch.display_name.clone(),
-            Zone::Battlefield,
+            // CR 614.6: a token whose entry was replaced is created in the
+            // replacement's zone, never on the battlefield.
+            redirected_to.unwrap_or(Zone::Battlefield),
         );
 
         // CR 613.7d: a token enters the battlefield, so it receives a timestamp.
@@ -1936,7 +1943,7 @@ fn apply_create_token_batch(
         // publishes only the tokens that were actually created, so a later
         // `TargetFilter::LastCreated` cannot read a denied one — or, when the
         // whole batch is denied, an earlier unrelated batch.
-        if aura_token_entry_denied(state, obj_id, spec.attach_to) {
+        if redirected_to.is_none() && aura_token_entry_denied(state, obj_id, spec.attach_to) {
             uncreate_unentered_aura_token(state, obj_id, owner);
             continue;
         }
@@ -1960,12 +1967,30 @@ fn apply_create_token_batch(
                 // choices, so an ordinary Spec birth carries no entry answers.
                 entry_choices: Vec::new(),
                 resulting_next_object_id: state.next_object_id,
+                entry_zone: redirected_to,
                 cause,
             };
             state
                 .resolved_rules_journal
                 .record_token_creation(command)
                 .expect("resolved token creation must have a live journal cause");
+        }
+
+        // CR 614.6 + CR 111.1: the entry was replaced, so the token never
+        // reaches the battlefield — none of the battlefield-entry work below
+        // (attacking, entry counters, ETB abilities, attachment, delayed
+        // sacrifice) applies. The creation itself is still published.
+        if let Some(zone) = redirected_to {
+            created_ids.push(obj_id);
+            publish_redirected_token_creation(
+                state,
+                obj_id,
+                zone,
+                spec.characteristics.display_name.clone(),
+                spec.source_id,
+                events,
+            );
+            continue;
         }
 
         // CR 508.4: Token enters attacking — not declared as attacker.
@@ -2144,6 +2169,29 @@ fn apply_create_token_batch(
     CreateTokenDelivery::Completed { primary_ids }
 }
 
+/// CR 614.6 + CR 111.1: publish the creation of a token whose battlefield entry
+/// a replacement sent to `zone` instead (Hallowed Moonlight: "exile it
+/// instead"). The creation observers see exactly what an ordinary creation
+/// shows them — the first-creation set, the turn's created-token ledger and
+/// `TokenCreated` (Mirkwood Bats) — and the token is placed in `zone` from no
+/// zone, not onto the battlefield, so no enters-the-battlefield event exists.
+/// The token then ceases to exist as a state-based action (CR 111.7, CR 704.5d).
+///
+/// The caller owns the `last_created_token_ids` row, exactly as for a
+/// battlefield entry.
+pub(crate) fn publish_redirected_token_creation(
+    state: &mut GameState,
+    object_id: ObjectId,
+    zone: Zone,
+    name: String,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    crate::game::restrictions::record_token_created_into(state, object_id, zone);
+    // The single emitter reads the zone the token was created in off the object.
+    push_committed_token_entry_events(state, object_id, name, source_id, events);
+}
+
 /// Materializes one already-resolved CR 111.1 token creation verbatim.
 ///
 /// Unlike every other resolved-command applier, this one CREATES its subject
@@ -2205,7 +2253,10 @@ pub fn apply_resolved_token_creation(
         ResolvedTokenBody::Spec { spec, .. } => spec.characteristics.display_name.clone(),
         ResolvedTokenBody::Copy { copy, .. } => copy.values.name.clone(),
     };
-    let mut object = GameObject::new(object_id, CardId(0), command.owner, name, Zone::Battlefield);
+    // CR 614.6: a birth whose entry a replacement redirected happened in that
+    // zone, not on the battlefield.
+    let birth_zone = command.entry_zone.unwrap_or(Zone::Battlefield);
+    let mut object = GameObject::new(object_id, CardId(0), command.owner, name, birth_zone);
     match &command.body {
         ResolvedTokenBody::Spec {
             spec,
@@ -2233,7 +2284,7 @@ pub fn apply_resolved_token_creation(
 
     state.objects.insert(object_id, object);
     // allow-raw-zone: replay materializes a token birth, which has no from-zone move (CR 111.1 + CR 614.12).
-    zones::add_to_zone(state, object_id, Zone::Battlefield, command.owner);
+    zones::add_to_zone(state, object_id, birth_zone, command.owner);
     // CR 614.12a + CR 400.7: install the recorded as-enters answers onto the
     // materialized object, mirroring the live fold. Placed before the
     // entry-record snapshot below: the live fold precedes the live snapshot,
@@ -2248,7 +2299,9 @@ pub fn apply_resolved_token_creation(
         .expect("the token was materialized above")
         .chosen_attributes
         .extend(command.entry_choices.iter().cloned());
-    crate::game::layers::mark_layers_entered(state, object_id);
+    if command.entry_zone.is_none() {
+        crate::game::layers::mark_layers_entered(state, object_id);
+    }
     // CR 111.3 + CR 111.10: a token's abilities come from the creating effect
     // and the predefined/catalog tables, NOT from the body the command carries,
     // so the body alone materializes a Treasure with no "{T}, Sacrifice this
@@ -2262,12 +2315,16 @@ pub fn apply_resolved_token_creation(
     // `inject_resolved_token_abilities` would be wrong for the Copy body, whose
     // live authority uses the predefined-only injector after
     // `finalize_copied_token`'s CR 707.2 cast-only strip.
-    match &command.body {
-        ResolvedTokenBody::Copy { copy, .. } => {
-            super::token_copy::finalize_copied_token(state, copy.source_id, object_id);
-            inject_predefined_token_abilities(state, object_id);
+    // CR 614.6: a token whose entry was redirected never reaches the battlefield,
+    // so the live path injects no abilities into it; replay mirrors that.
+    if command.entry_zone.is_none() {
+        match &command.body {
+            ResolvedTokenBody::Copy { copy, .. } => {
+                super::token_copy::finalize_copied_token(state, copy.source_id, object_id);
+                inject_predefined_token_abilities(state, object_id);
+            }
+            ResolvedTokenBody::Spec { .. } => inject_resolved_token_abilities(state, object_id),
         }
-        ResolvedTokenBody::Spec { .. } => inject_resolved_token_abilities(state, object_id),
     }
     // CR 400.7 + CR 608.2i: the resolve path records the birth through
     // `restrictions::record_zone_change` (`push_committed_token_entry_events`),
@@ -2301,7 +2358,7 @@ pub fn apply_resolved_token_creation(
         .objects
         .get(&object_id)
         .expect("the token was materialized above")
-        .snapshot_for_zone_change(object_id, None, Zone::Battlefield);
+        .snapshot_for_zone_change(object_id, None, birth_zone);
     // CR 400.7: mirror the live birth authority
     // (`zones::record_and_emit_entry_from_no_zone`), which fills the entered
     // incarnation from the birth occurrence — replay's reconstructed record
@@ -2601,18 +2658,38 @@ pub(crate) fn commit_liminal_copy_token_entry(
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let continuation = liminal_copy_token_continuation_for_event(state, &event);
-    commit_liminal_copy_token_entry_with_continuation(state, event, continuation, events)
+    let continuation = match &event {
+        ProposedEvent::TokenEntry { entry_ref, .. } => {
+            liminal_copy_token_continuation(state, *entry_ref)
+        }
+        _ => None,
+    };
+    commit_liminal_copy_token_entry_with_continuation(state, event, continuation, false, events)
 }
 
 fn commit_liminal_copy_token_entry_with_continuation(
     state: &mut GameState,
     event: ProposedEvent,
     continuation: Option<LiminalCopyTokenContinuation>,
+    rediscover: bool,
     events: &mut Vec<GameEvent>,
 ) -> bool {
+    let entry_ref = match &event {
+        ProposedEvent::TokenEntry { entry_ref, .. } => *entry_ref,
+        _ => return true,
+    };
+    let event = match crate::game::engine_replacement::settle_liminal_token_entry_replacements(
+        state, event, rediscover, events,
+    ) {
+        crate::game::replacement::ReplacementResult::Execute(event) => event,
+        crate::game::replacement::ReplacementResult::NeedsChoice(_) => return false,
+        crate::game::replacement::ReplacementResult::Prevented => {
+            state.liminal_entries.remove(&entry_ref);
+            return true;
+        }
+    };
     let post_actions = continuation
-        .map(liminal_copy_token_continuation_post_action)
+        .map(|continuation| liminal_copy_token_continuation_post_action(continuation, 0))
         .into_iter()
         .collect();
     commit_liminal_token_entry_with_post_actions(
@@ -2629,11 +2706,35 @@ pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let continuation = liminal_copy_token_continuation_for_event(state, &event);
+    complete_liminal_token_entry_and_continue_copy_batch(state, event, false, events)
+}
+
+/// Resume after the selected entry replacement's paused work has finished.
+pub(crate) fn resume_liminal_token_entry_and_continue_copy_batch(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    complete_liminal_token_entry_and_continue_copy_batch(state, event, true, events)
+}
+
+fn complete_liminal_token_entry_and_continue_copy_batch(
+    state: &mut GameState,
+    event: ProposedEvent,
+    rediscover: bool,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let continuation = match &event {
+        ProposedEvent::TokenEntry { entry_ref, .. } => {
+            liminal_copy_token_continuation(state, *entry_ref)
+        }
+        _ => None,
+    };
     if !commit_liminal_copy_token_entry_with_continuation(
         state,
         event,
         continuation.clone(),
+        rediscover,
         events,
     ) {
         return false;
@@ -2642,31 +2743,30 @@ pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
 }
 
 #[derive(Clone)]
-struct LiminalCopyTokenContinuation {
+pub(crate) struct LiminalCopyTokenContinuation {
     owner: PlayerId,
     copy: Box<CopyTokenSpec>,
     enter_tapped: EtbTapState,
+    enter_with_counters: Vec<(CounterType, u32)>,
     remaining_count: u32,
 }
 
-fn liminal_copy_token_continuation_for_event(
+pub(crate) fn liminal_copy_token_continuation(
     state: &GameState,
-    event: &ProposedEvent,
+    entry_ref: ObjectId,
 ) -> Option<LiminalCopyTokenContinuation> {
-    let ProposedEvent::TokenEntry { entry_ref, .. } = event else {
-        return None;
-    };
-    let entry = state.liminal_entries.get(entry_ref)?;
+    let entry = state.liminal_entries.get(&entry_ref)?;
     let copy = entry.copy_resume.clone()?;
     Some(LiminalCopyTokenContinuation {
         owner: entry.object.projected().owner,
         copy,
         enter_tapped: entry.enter_tapped,
+        enter_with_counters: entry.enter_with_counters.clone(),
         remaining_count: entry.remaining_count,
     })
 }
 
-fn continue_liminal_copy_token_batch(
+pub(crate) fn continue_liminal_copy_token_batch(
     state: &mut GameState,
     continuation: Option<LiminalCopyTokenContinuation>,
     events: &mut Vec<GameEvent>,
@@ -2684,17 +2784,17 @@ fn continue_liminal_copy_token_batch(
         // handoff publishes the ledger and advances or consumes the owner.
         let copy_owner = state.active_copy_token().cloned();
         let initial_created_ids = state.last_created_token_ids.clone();
-        // CR 122.6a + CR 614.1c: a liminal batch is created with no creation
-        // counters, and a committed entrant's own scheduled counters (its roll,
-        // its tribute) were its alone, so the next token starts with none.
+        // CR 122.6a + CR 614.1c: carry only the reusable batch seed.
+        // Counters earned by an entrant's roll or Tribute belong to that entry event.
         let status = super::token_copy::apply_copy_token_after_replacement_with_created_ids(
             state,
             continuation.owner,
             *continuation.copy,
             continuation.enter_tapped,
-            Vec::new(),
+            continuation.enter_with_counters,
             continuation.remaining_count,
             initial_created_ids,
+            None,
             events,
         );
         state.last_created_token_ids = status.created_ids;
@@ -2793,13 +2893,19 @@ pub(crate) fn finish_liminal_copy_token_batch(
     !state.active_copy_token().is_some() || matches!(state.waiting_for, WaitingFor::Priority { .. })
 }
 
-fn liminal_copy_token_continuation_post_action(
-    continuation: LiminalCopyTokenContinuation,
+pub(crate) fn liminal_copy_token_continuation_post_action(
+    mut continuation: LiminalCopyTokenContinuation,
+    entrants_to_skip: usize,
 ) -> PendingCounterPostAction {
+    continuation.copy.attack_request = continuation
+        .copy
+        .attack_request
+        .after_entrants(entrants_to_skip);
     PendingCounterPostAction::ContinueLiminalCopyTokenBatch {
         owner: continuation.owner,
         copy: continuation.copy,
         enter_tapped: continuation.enter_tapped,
+        enter_with_counters: continuation.enter_with_counters,
         remaining_count: continuation.remaining_count,
     }
 }
@@ -2809,6 +2915,7 @@ pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
     owner: PlayerId,
     copy: Box<CopyTokenSpec>,
     enter_tapped: EtbTapState,
+    enter_with_counters: Vec<(CounterType, u32)>,
     remaining_count: u32,
     events: &mut Vec<GameEvent>,
 ) -> bool {
@@ -2818,6 +2925,7 @@ pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
             owner,
             copy,
             enter_tapped,
+            enter_with_counters,
             remaining_count,
         }),
         events,
@@ -2901,10 +3009,24 @@ pub(crate) fn place_liminal_token_on_battlefield(
     entry_ref: ObjectId,
     object: GameObject,
 ) {
+    place_liminal_token_in_zone(state, entry_ref, object, Zone::Battlefield);
+}
+
+/// CR 614.6: [`place_liminal_token_on_battlefield`] for a liminal token whose
+/// entry a replacement sent to `zone` instead; the token is born there, with no
+/// from-zone move.
+pub(crate) fn place_liminal_token_in_zone(
+    state: &mut GameState,
+    entry_ref: ObjectId,
+    mut object: GameObject,
+    zone: Zone,
+) {
     let owner = object.owner;
+    // allow-raw-zone: liminal token birth has no from-zone move; the projection is born in the replacement's zone (CR 111.1 + CR 614.6).
+    object.zone = zone;
     state.objects.insert(entry_ref, object);
     // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
-    zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
+    zones::add_to_zone(state, entry_ref, zone, owner);
 }
 
 /// The production entry: a token entry whose proposal already cleared the
@@ -2936,6 +3058,7 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
 ) -> bool {
     let ProposedEvent::TokenEntry {
         entry_ref,
+        redirected_to,
         enter_tapped,
         enter_with_counters,
         enter_with_choices,
@@ -3038,9 +3161,39 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
             // `reserve_liminal_token_object` advanced the allocator to exactly
             // one past this id when it drew it, however many were drawn since.
             resulting_next_object_id: entry_ref.0 + 1,
+            entry_zone: redirected_to,
             cause: state.current_or_begin_rules_execution_node(),
         }
     });
+
+    // CR 614.6 + CR 111.1: an applied replacement sent this entrant to another
+    // zone instead of the battlefield (Hallowed Moonlight: "exile it instead").
+    // The token is created there and its creation published; none of the
+    // battlefield-entry work below runs (as-enters host choice, entry counters,
+    // ETB abilities, attacking, attachment), and the token ceases to exist at the
+    // next state-based action check (CR 111.7, CR 704.5d). The tail mirrors the
+    // `last_created_token_ids` publication `finalize_committed_liminal_token_
+    // entry_from_action` ends with.
+    if let Some(zone) = redirected_to {
+        if let Some(command) = birth_command {
+            state
+                .resolved_rules_journal
+                .record_token_creation(command)
+                .expect("resolved copy-token creation must have a live journal cause");
+        }
+        place_liminal_token_in_zone(state, entry_ref, entry.object.into_projected(), zone);
+        publish_redirected_token_creation(
+            state,
+            entry_ref,
+            zone,
+            entry.name.clone(),
+            entry.source_id,
+            events,
+        );
+        state.last_created_token_ids = entry.created_ids.clone();
+        record_last_created_token(state, entry_ref);
+        return true;
+    }
 
     place_liminal_token_on_battlefield(state, entry_ref, entry.object.into_projected());
 
@@ -3826,6 +3979,7 @@ fn token_creation_needs_choice(
 ) -> bool {
     let registry = replacement::replacement_registry();
     let proposed = ProposedEvent::CreateToken {
+        redirected_to: None,
         owner,
         spec: Box::new(spec.clone()),
         copy: None,
@@ -3843,9 +3997,7 @@ fn token_creation_needs_choice(
     // can set a non-priority `waiting_for`, so taking it would be a real
     // token-batching change; it is left to its own change rather than smuggled
     // into this delegation.
-    let causes = replacement::proposed_event_prompt_cause(state, &proposed, registry);
-    causes.contains(replacement::ReplacementPromptCause::OptionalCandidate)
-        || causes.contains(replacement::ReplacementPromptCause::OrderingMaterial)
+    replacement::proposed_event_prompt_cause(state, &proposed, registry).may_open_player_choice()
 }
 
 /// CR 205: Extract the concrete `CoreType` set a `TypeFilter` counts, for the
@@ -4248,16 +4400,13 @@ fn try_resolve_copy_batch(
     let Some(owner) = resolve_token_owner(state, ability, &TargetFilter::Controller) else {
         return false;
     };
-    if token_creation_needs_choice(
+    !token_creation_needs_choice(
         state,
         &probe_spec,
         owner,
         crate::types::proposed_event::EtbTapState::from_seeded_tapped(false),
         1,
-    ) {
-        return false;
-    }
-    true
+    )
 }
 
 /// CR 306.5b + CR 614.1c + CR 707.2: `CopyTokenOf` seeds intrinsic counters
@@ -4599,9 +4748,9 @@ fn resolve_attach_host(
             .copied()
             .map(AttachTarget::Player),
         // Event-context hosts ("attached to the triggering creature") resolve the
-        // triggering event's subject via the shared event-context resolver.
+        // triggering event's subject through the event-referent identity gate (CR 400.7).
         AttachHostAuthority::EventContext => {
-            crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+            crate::game::targeting::affected_event_context_target(state, ability, filter)
                 .map(target_ref_to_attach_target)
         }
         // The bare-pronoun host ("attached to it"). It normally reads the chosen
@@ -6278,6 +6427,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -6371,7 +6521,7 @@ mod tests {
         assert_eq!(a.display_name, "Angel");
         assert!(a.keywords.contains(&Keyword::Flying));
         assert!(a.keywords.contains(&Keyword::Vigilance));
-        assert!(!a.subtypes.contains(&"Flying".to_string()));
+        assert!(!a.subtypes.iter().any(|i| i == "Flying"));
     }
 
     #[test]
@@ -7041,7 +7191,7 @@ mod tests {
         let obj = &state.objects[&state.battlefield[0]];
         assert_eq!(obj.name, "Treasure");
         assert!(obj.card_types.core_types.contains(&CoreType::Artifact));
-        assert!(obj.card_types.subtypes.contains(&"Treasure".to_string()));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Treasure"));
         assert_eq!(obj.power, None);
         assert_eq!(obj.toughness, None);
     }
@@ -8736,6 +8886,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -8838,6 +8989,7 @@ mod tests {
                 remaining: vec![PositionedTokenBatch {
                     position: 0,
                     batch: TokenBatch {
+                        redirected_to: None,
                         owner: PlayerId(0),
                         spec: Box::new(spec),
                         copy: Some(Box::new(copy)),
@@ -8939,12 +9091,14 @@ mod tests {
             attach_to: TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(creature_spec("Plant")),
             copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count: 2,
             appended: vec![TokenBatch {
+                redirected_to: None,
                 owner: PlayerId(0),
                 spec: Box::new(creature_spec("Squirrel")),
                 copy: None,
@@ -9020,6 +9174,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -9092,6 +9247,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -9173,6 +9329,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -9368,6 +9525,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -9933,6 +10091,7 @@ mod tests {
         };
 
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -10001,6 +10160,7 @@ mod tests {
         };
 
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -10059,6 +10219,7 @@ mod tests {
             attach_to: host,
         };
         ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -10213,6 +10374,7 @@ mod tests {
         };
 
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -10291,6 +10453,7 @@ mod tests {
         };
 
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -10348,6 +10511,7 @@ mod tests {
         };
 
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -10530,6 +10694,7 @@ mod tests {
         source_id: ObjectId,
     ) -> crate::types::game_state::LiminalEntry {
         crate::types::game_state::LiminalEntry {
+            copy_settlement: None,
             object,
             name: "Unhosted Aura".to_string(),
             source_id,
@@ -10591,6 +10756,7 @@ mod tests {
             commit_liminal_token_entry_with_post_actions(
                 &mut state,
                 ProposedEvent::TokenEntry {
+                    redirected_to: None,
                     entry_ref,
                     enter_tapped: EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
@@ -10700,6 +10866,7 @@ mod tests {
             commit_liminal_token_entry_with_post_actions(
                 &mut state,
                 ProposedEvent::TokenEntry {
+                    redirected_to: None,
                     entry_ref,
                     enter_tapped: EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
@@ -10796,6 +10963,7 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
+                copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(token),
                 ),
@@ -10836,6 +11004,7 @@ mod tests {
         );
 
         let event = ProposedEvent::TokenEntry {
+            redirected_to: None,
             entry_ref,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: vec![(CounterType::Plus1Plus1, 1)],

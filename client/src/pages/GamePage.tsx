@@ -136,6 +136,7 @@ import { PileOpponentModal } from "../components/modal/PileOpponentModal.tsx";
 import { AnnouncingOpponentModal } from "../components/modal/AnnouncingOpponentModal.tsx";
 import { GiftRecipientModal } from "../components/modal/GiftRecipientModal.tsx";
 import { EntryControllerModal } from "../components/modal/EntryControllerModal.tsx";
+import { ReplacementDecisionOrderModal } from "../components/modal/ReplacementDecisionOrderModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
@@ -2140,6 +2141,7 @@ function GamePageContent({
             <AnnouncingOpponentModal />
             <GiftRecipientModal />
             <EntryControllerModal />
+            <ReplacementDecisionOrderModal />
             <TributeModal />
             <CombatTaxModal />
             <AlternativeCostModal />
@@ -4077,6 +4079,43 @@ function SayPhrasePanel({ phrase, effect }: { phrase: string; effect?: string })
   );
 }
 
+function PriorUnlessPollChoices() {
+  const { t } = useTranslation("game");
+  const poll = useGameStore((s) => s.gameState?.pending_player_scope_unless_punishment);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (!poll || (poll.payments.length === 0 && poll.declining_players.length === 0)) {
+    return null;
+  }
+
+  return (
+    <div className="mb-3 space-y-1 rounded-lg border border-white/10 bg-black/25 px-3 py-2 text-xs text-gray-300">
+      {poll.payments.map((payment) => {
+        const choice =
+          payment.action === "Sacrifice"
+            ? payment.objects
+                .map((pin) => objects?.[pin.object_id]?.name)
+                .filter((name): name is string => Boolean(name))
+                .join(", ") || t("gamePage.cost.sacrifice_one")
+            : t("gamePage.cost.discardCard");
+        return (
+          <div key={`pay-${payment.player}`}>
+            {t("gamePage.unlessPayment.priorChoice", { id: payment.player + 1, choice })}
+          </div>
+        );
+      })}
+      {poll.declining_players.map((playerId) => (
+        <div key={`decline-${playerId}`}>
+          {t("gamePage.unlessPayment.priorChoice", {
+            id: playerId + 1,
+            choice: t("gamePage.unlessPayment.dontPay"),
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
@@ -4130,6 +4169,7 @@ function UnlessPaymentPanel() {
               {affectedObject.name}
             </p>
           )}
+          <PriorUnlessPollChoices />
           <div className="flex justify-center gap-3">
             <button
               onClick={() =>
@@ -4198,6 +4238,7 @@ function UnlessPaymentChooseCostModal() {
         ...branchOptions,
         { id: "decline", label: t("gamePage.unlessPayment.takeEffect") },
       ]}
+      footer={<PriorUnlessPollChoices />}
       onChoose={(id) => {
         // CR 118.12a: Typed `UnlessCostBranch` discriminant — `Decline`
         // falls through to the effect, `Pay { index }` selects the

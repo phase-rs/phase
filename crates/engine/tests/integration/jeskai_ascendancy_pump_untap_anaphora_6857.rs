@@ -342,6 +342,7 @@ fn motivated_pony_untaps_only_the_attacking_creatures_it_pumped() {
         .state_mut()
         .battlefield_entries_this_turn
         .push_back(BattlefieldEntryRecord {
+            token_status: Some(engine::types::game_state::EntryTokenStatus::Nontoken),
             object_id: ObjectId(9_999),
             name: "Food".to_string(),
             core_types: vec![CoreType::Artifact],

@@ -22,7 +22,7 @@ use crate::types::game_state::{GameState, StackEntryKind};
 
 /// CR 702.184a/702.122/702.171: object referent for Stationed/VehicleCrewed/Saddled
 /// trigger anaphora while a triggered ability is resolving.
-fn parent_object_from_trigger_event(
+pub(in crate::game) fn parent_object_from_trigger_event(
     event: Option<&GameEvent>,
 ) -> Option<crate::types::identifiers::ObjectId> {
     match event? {
@@ -41,15 +41,24 @@ fn parent_object_from_trigger_event(
     }
 }
 
+fn named_parent_object(
+    event: &GameEvent,
+) -> Option<(&GameEvent, crate::types::identifiers::ObjectId)> {
+    parent_object_from_trigger_event(Some(event)).map(|id| (event, id))
+}
+
 fn parent_object_from_resolution_trigger_context(
     state: &GameState,
-) -> Option<crate::types::identifiers::ObjectId> {
-    parent_object_from_trigger_event(state.current_trigger_event.as_ref())
+) -> Option<(&GameEvent, crate::types::identifiers::ObjectId)> {
+    state
+        .current_trigger_event
+        .as_ref()
+        .and_then(named_parent_object)
         .or_else(|| {
             state
                 .current_trigger_events
                 .iter()
-                .find_map(|event| parent_object_from_trigger_event(Some(event)))
+                .find_map(named_parent_object)
         })
         .or_else(|| {
             state
@@ -59,10 +68,31 @@ fn parent_object_from_resolution_trigger_context(
                     StackEntryKind::TriggeredAbility {
                         trigger_event: Some(te),
                         ..
-                    } => parent_object_from_trigger_event(Some(te)),
+                    } => named_parent_object(te),
                     _ => None,
                 })
         })
+}
+
+/// CR 400.7 + CR 608.2k: the perpetual-local event referent, bound only while
+/// the ability can still find the object the event named.
+fn bound_parent_object(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<Vec<crate::types::identifiers::ObjectId>> {
+    let (event, id) = parent_object_from_resolution_trigger_context(state)?;
+    Some(
+        crate::game::targeting::event_referent_is_findable(
+            state,
+            Some(ability),
+            &TargetFilter::ParentTarget,
+            event,
+            id,
+        )
+        .then_some(id)
+        .into_iter()
+        .collect(),
+    )
 }
 
 fn perpetual_target_object_ids(
@@ -74,8 +104,8 @@ fn perpetual_target_object_ids(
     // binds before propagated chain targets — a stale source-only fallback in
     // `ability.targets` must not beat the live trigger event.
     if matches!(target, TargetFilter::ParentTarget) {
-        if let Some(id) = parent_object_from_resolution_trigger_context(state) {
-            return vec![id];
+        if let Some(ids) = bound_parent_object(state, ability) {
+            return ids;
         }
     }
 
@@ -94,12 +124,18 @@ fn perpetual_target_object_ids(
     // every member of the set the preceding instruction published (Circadian
     // Struggle's sought cards), not the first one the singular
     // `resolved_targets` path would pick.
+    // CR 730.3c: "those cards perpetually ..." acts upon every object the set finds.
     if let TargetFilter::TrackedSet { id } = target {
-        return crate::game::quantity::tracked_set_object_ids(state, *id);
+        return crate::game::quantity::tracked_set_found_object_ids(state, *id, Some(ability));
     }
 
     if !ability.targets.is_empty() {
-        let propagated = super::effect_object_targets(target, &ability.targets);
+        // CR 400.7 + CR 603.7c: a propagated event referent keeps its captured pin.
+        let propagated = if matches!(target, TargetFilter::ParentTarget) {
+            super::effect_object_targets(target, &ability.live_object_targets(state))
+        } else {
+            super::effect_object_targets(target, &ability.targets)
+        };
         if !propagated.is_empty()
             && !(matches!(target, TargetFilter::ParentTarget) && propagated == [ability.source_id])
         {
@@ -128,8 +164,8 @@ fn perpetual_target_object_ids(
     let mut ids = super::resolved_effect_object_ids(state, ability, target);
 
     if matches!(target, TargetFilter::ParentTarget) && ids == [ability.source_id] {
-        if let Some(id) = parent_object_from_resolution_trigger_context(state) {
-            return vec![id];
+        if let Some(ids) = bound_parent_object(state, ability) {
+            return ids;
         }
     }
 

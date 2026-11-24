@@ -3131,9 +3131,9 @@ mod llm_draft_resolution_tests {
             .clone();
         apply_human_pick_and_resolve_bots(&mut session, human_card_2).unwrap();
 
-        for seat in 0..8 {
+        for (seat, pool) in session.pools.iter().enumerate().take(8) {
             assert_eq!(
-                session.pools[seat].len(),
+                pool.len(),
                 3,
                 "seat {seat} took 2 cards from pack 0 and 1 from pack 1"
             );
@@ -6651,8 +6651,8 @@ mod create_multiplayer_draft_tests {
         });
 
         let deck = get_bot_deck_inner(1).expect("the legal land fills the proposal");
-        assert!(deck.main_deck.contains(&"Alpha".to_string()));
-        assert!(!deck.main_deck.contains(&"Contract from Below".to_string()));
+        assert!(deck.main_deck.iter().any(|i| i == "Alpha"));
+        assert!(!deck.main_deck.iter().any(|i| i == "Contract from Below"));
         assert_eq!(deck.lands.get("Forest"), Some(&36));
         assert_eq!(
             deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>(),

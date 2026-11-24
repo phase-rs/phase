@@ -790,7 +790,7 @@ fn replacement_prompt_signature(state: &GameState) -> Option<(String, Vec<String
             state
                 .objects
                 .get(&rid.source)
-                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                .and_then(|obj| obj.replacement_definitions.get_by_rid(*rid))
                 .map_or_else(|| format!("{rid:?}"), |def| format!("{def:?}"))
         })
         .collect();
@@ -3766,6 +3766,13 @@ fn pay_selected_mana_ability_sacrifice_cost(
             events,
         )? {
             sacrifice::SacrificeOutcome::Complete => {}
+            // CR 118.3: a mid-payment bar fails the cost instead of recording
+            // an unsacrificed permanent as paid.
+            sacrifice::SacrificeOutcome::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                 pause_mana_ability_cost_payment(
                     state,
@@ -3858,6 +3865,10 @@ fn pay_mana_ability_cost_component(
                 state,
                 pending.player,
                 pending.source_id,
+            ) || super::static_abilities::object_cant_be_sacrificed_by(
+                state,
+                pending.player,
+                pending.source_id,
             ) {
                 return Err(EngineError::ActionNotAllowed(
                     "Cannot sacrifice this permanent as a cost".to_string(),
@@ -3866,6 +3877,11 @@ fn pay_mana_ability_cost_component(
             match sacrifice::sacrifice_permanent(state, pending.source_id, pending.player, events)?
             {
                 sacrifice::SacrificeOutcome::Complete => Ok(ManaAbilityPaymentProgress::Complete),
+                // CR 118.3: a mid-payment bar fails the cost, mirroring the
+                // pre-check above.
+                sacrifice::SacrificeOutcome::Prohibited => Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                )),
                 sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                     pause_mana_ability_cost_payment(
                         state,
@@ -4747,7 +4763,7 @@ fn resume_mana_ability_root_payment(
             events,
         )? {
             super::costs::PaymentOutcome::Paid => {
-                super::effects::resolve_effect_pay_cost_rider(state, ability.as_ref(), events)
+                super::effects::resolve_rider_with_parent_context(state, ability.as_ref(), events)
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     Ok(WaitingFor::Priority { player: return_to })
@@ -4758,7 +4774,7 @@ fn resume_mana_ability_root_payment(
             super::costs::PaymentOutcome::Paused { .. } => Ok(state.waiting_for.clone()),
             super::costs::PaymentOutcome::Failed { .. } => {
                 state.cost_payment_failed_flag = true;
-                super::effects::resolve_effect_pay_cost_rider(state, ability.as_ref(), events)
+                super::effects::resolve_rider_with_parent_context(state, ability.as_ref(), events)
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     Ok(WaitingFor::Priority { player: return_to })
@@ -4960,7 +4976,7 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
                 );
                 Ok(WaitingFor::Priority { player: return_to })
             } else {
-                super::effects::resolve_effect_pay_cost_rider(state, ability.as_ref(), events)
+                super::effects::resolve_rider_with_parent_context(state, ability.as_ref(), events)
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     Ok(WaitingFor::Priority { player: return_to })
@@ -5414,19 +5430,26 @@ where
                     "This permanent is already committed to a spell sacrifice cost".to_string(),
                 ));
             }
-            if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id) {
+            if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id)
+                || super::static_abilities::object_cant_be_sacrificed_by(state, player, source_id)
+            {
                 return Err(EngineError::ActionNotAllowed(
                     "Cannot sacrifice this permanent as a cost".to_string(),
                 ));
             }
-            if matches!(
-                sacrifice::sacrifice_permanent(state, source_id, player, events)?,
-                sacrifice::SacrificeOutcome::NeedsReplacementChoice(_)
-            ) {
-                return Err(EngineError::InvalidAction(
-                    "Mana ability sacrifice replacement pause must be owned by the activation cursor"
-                        .to_string(),
-                ));
+            match sacrifice::sacrifice_permanent(state, source_id, player, events)? {
+                sacrifice::SacrificeOutcome::Complete => {}
+                sacrifice::SacrificeOutcome::Prohibited => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot sacrifice this permanent as a cost".to_string(),
+                    ));
+                }
+                sacrifice::SacrificeOutcome::NeedsReplacementChoice(_) => {
+                    return Err(EngineError::InvalidAction(
+                        "Mana ability sacrifice replacement pause must be owned by the activation cursor"
+                            .to_string(),
+                    ));
+                }
             }
         }
         // CR 117.1 + CR 118.3 + CR 605.3b: Non-self sacrifice-from-battlefield
@@ -6782,7 +6805,9 @@ fn sacrifice_selected_permanent_for_mana_cost(
             "Selected permanent does not match the sacrifice cost filter".to_string(),
         ));
     }
-    if super::static_abilities::player_cant_sacrifice_as_cost(state, player, chosen_id) {
+    if super::static_abilities::player_cant_sacrifice_as_cost(state, player, chosen_id)
+        || super::static_abilities::object_cant_be_sacrificed_by(state, player, chosen_id)
+    {
         return Err(EngineError::ActionNotAllowed(
             "Selected permanent cannot be sacrificed as a cost".to_string(),
         ));
@@ -7184,6 +7209,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,

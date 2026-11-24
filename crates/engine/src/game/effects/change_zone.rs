@@ -2,7 +2,7 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::game_state::RandomDraw;
 use rand::Rng;
 
-use crate::game::game_object::AttachTarget;
+use crate::game::game_object::{AttachTarget, GameObject};
 #[cfg(test)]
 use crate::game::zones;
 use crate::types::ability::{
@@ -15,10 +15,10 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ChangeZoneMemberEntry, GameState, MassLibraryOrderBatch, MassLibraryOrderMember,
-    PendingContinuation, PendingCounterPostAction, PendingMassLibraryOrderBatches,
-    PendingMassLibraryOrderChoice, PendingZoneChangeDelivery, WaitingFor, ZoneChangeAnnouncement,
-    ZoneOpponentChooserPurpose,
+    ChangeZoneArrangementPlan, ChangeZoneMemberEntry, GameState, MassLibraryOrderBatch,
+    MassLibraryOrderMember, PendingContinuation, PendingCounterPostAction,
+    PendingMassLibraryOrderBatches, PendingMassLibraryOrderChoice, PendingZoneChangeDelivery,
+    WaitingFor, ZoneChangeAnnouncement, ZoneDeliveryExileTracking, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -82,6 +82,18 @@ fn resolve_forward_result_search_attach_host(
         {
             None
         }
+        // CR 400.7: an event-subject host that became a new object names no host;
+        // the source's prior host must not stand in for it (CR 301.5e).
+        TargetFilter::ParentTarget
+            if targets.is_empty()
+                && crate::game::targeting::resolve_event_referent(
+                    state,
+                    ability,
+                    &TargetFilter::ParentTarget,
+                ) == crate::game::targeting::EventReferentBinding::Unfindable =>
+        {
+            None
+        }
         TargetFilter::ParentTarget => targets
             .first()
             .map(|target| match target {
@@ -93,10 +105,10 @@ fn resolve_forward_result_search_attach_host(
                 // ("return this … attached to that creature" — Dragon Breath,
                 // Smoke Shroud) bind ParentTarget to the trigger-event referent
                 // (entering creature), not the Aura's prior host.
-                crate::game::targeting::resolve_event_context_target(
+                crate::game::targeting::affected_event_context_target(
                     state,
+                    ability,
                     &TargetFilter::ParentTarget,
-                    ability.source_id,
                 )
                 .map(|target| match target {
                     TargetRef::Object(id) => AttachTarget::Object(id),
@@ -131,11 +143,12 @@ fn resolve_forward_result_search_attach_host(
             }
         }
         TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
-            crate::game::targeting::resolve_event_context_target(state, target, ability.source_id)
-                .map(|target| match target {
+            crate::game::targeting::affected_event_context_target(state, ability, target).map(
+                |target| match target {
                     TargetRef::Object(id) => AttachTarget::Object(id),
                     TargetRef::Player(id) => AttachTarget::Player(id),
-                })
+                },
+            )
         }
         TargetFilter::Player => targets
             .iter()
@@ -199,18 +212,26 @@ pub fn shuffle_library(state: &mut GameState, player: PlayerId, events: &mut Vec
 /// — so a `ChangeZone` selecting "from among" such a set must scan the
 /// members' actual zones, not the battlefield default.
 ///
+/// CR 730.3c: the reader scans the zones of what its membership predicate
+/// accepts, so the components of a merged permanent the producer moved are
+/// scanned too ([`crate::game::merge::tracked_set_found_objects`]); `reader`
+/// carries the D7 provenance. A `None` reader scans raw members only.
+///
 /// The `TrackedSetId(0)` sentinel resolves through the same chain-first binding
 /// authority as `matches_target_filter`. Returns `None` when the filter is not
 /// tracked-set-backed or the set is empty/unbound.
-fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<Vec<Zone>> {
+fn tracked_set_member_zones(
+    state: &GameState,
+    filter: &TargetFilter,
+    reader: Option<&ResolvedAbility>,
+) -> Option<Vec<Zone>> {
     let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter.clone());
-    let id = match &filter {
-        TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => *id,
+    let (id, caused_by) = match &filter {
+        TargetFilter::TrackedSet { id } => (*id, None),
+        TargetFilter::TrackedSetFiltered { id, caused_by, .. } => (*id, caused_by.as_ref()),
         _ => return None,
     };
-    let zones = state
-        .tracked_object_sets
-        .get(&id)?
+    let zones = crate::game::merge::tracked_set_found_objects(state, id, reader, caused_by)
         .iter()
         .filter_map(|obj_id| state.objects.get(obj_id).map(|obj| obj.zone))
         .fold(Vec::new(), |mut zones, zone| {
@@ -225,17 +246,31 @@ fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<
 /// Returns the zones scanned by a `ChangeZoneAll` before its target is resolved.
 /// Kept shared with compatibility validation so an archived mass-order prompt
 /// cannot admit cards from a zone the original producer would not have scanned.
+///
+/// No reader: no D7 provenance, so raw members (E3). The compatibility
+/// validator is that caller.
 pub(crate) fn change_zone_all_origin_zones(
     state: &GameState,
     origin: Option<Zone>,
     target: &TargetFilter,
+) -> Vec<Zone> {
+    change_zone_all_origin_zones_for_reader(state, origin, target, None)
+}
+
+/// [`change_zone_all_origin_zones`] for the resolving `reader`, which carries the
+/// CR 730.3c provenance that lets a merged permanent's components be scanned.
+pub(crate) fn change_zone_all_origin_zones_for_reader(
+    state: &GameState,
+    origin: Option<Zone>,
+    target: &TargetFilter,
+    reader: Option<&ResolvedAbility>,
 ) -> Vec<Zone> {
     let extracted = target.extract_zones();
     if !extracted.is_empty() {
         extracted
     } else if let Some(origin) = origin {
         vec![origin]
-    } else if let Some(zones) = tracked_set_member_zones(state, target) {
+    } else if let Some(zones) = tracked_set_member_zones(state, target, reader) {
         zones
     } else {
         vec![Zone::Battlefield]
@@ -846,6 +881,9 @@ pub(crate) fn until_event_already_occurred(
         })
 }
 
+/// CR 400.7 + CR 603.2: the zone a move expects its object to be in — the
+/// effect's origin, or for an event referent the zone the trigger event put it
+/// in.
 fn expected_move_origin(
     state: &GameState,
     origin: Option<Zone>,
@@ -898,7 +936,7 @@ pub(crate) fn bound_move_members(
 /// The single per-member test for "this object can no longer undergo the
 /// move": [`process_one_zone_move_with_terminal`] leaves such a member where it
 /// is, and the optional-move feasibility predicates below read the same test.
-fn zone_move_member_cannot_move(
+pub(crate) fn zone_move_member_cannot_move(
     state: &GameState,
     obj_id: ObjectId,
     expected_origin: Option<Zone>,
@@ -971,20 +1009,37 @@ pub(crate) fn optional_self_move_is_infeasible(
 /// explicit origin), ceased to exist (CR 111.7), or is an emblem (CR 114.5).
 /// Declining keeps an "If you do" rider (Academy Rector's search) from running:
 /// that clause checks whether the player chose the move (CR 118.12), and an
-/// impossible move can't be chosen (CR 608.2d). An empty binding stays feasible:
-/// `resolve` then reaches its untargeted zone-scan path, which this predicate
-/// does not model.
+/// impossible move can't be chosen (CR 608.2d). So is a referent that became a
+/// new object (CR 400.7). Any other empty binding stays feasible: `resolve` then
+/// reaches its untargeted zone-scan path, which this predicate does not model.
 pub(crate) fn optional_triggering_source_move_is_infeasible(
     state: &GameState,
     ability: &ResolvedAbility,
     origin: Option<Zone>,
 ) -> bool {
+    if event_referent_unfindable(state, ability, &TargetFilter::TriggeringSource) {
+        return true;
+    }
     let (members, expected_origin) =
         referent_move_members(state, ability, origin, &TargetFilter::TriggeringSource);
     !members.is_empty()
         && members
             .into_iter()
             .all(|id| zone_move_member_cannot_move(state, id, expected_origin))
+}
+
+/// CR 400.7: the event names an object for this event-subject filter, and it has
+/// since become a new object (or phased out).
+fn event_referent_unfindable(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> bool {
+    matches!(
+        filter,
+        TargetFilter::TriggeringSource | TargetFilter::EventTarget
+    ) && crate::game::targeting::resolve_event_referent(state, ability, filter)
+        == crate::game::targeting::EventReferentBinding::Unfindable
 }
 
 /// The zones an untargeted resolution-time move chooses from, and its eligible
@@ -1022,7 +1077,7 @@ fn untargeted_zone_pool(
             extracted
         } else if let Some(zone) = target_filter.extract_in_zone() {
             vec![zone]
-        } else if let Some(zones) = tracked_set_member_zones(state, target_filter) {
+        } else if let Some(zones) = tracked_set_member_zones(state, target_filter, Some(ability)) {
             zones
         } else {
             vec![Zone::Battlefield]
@@ -1433,8 +1488,9 @@ pub fn resolve(
                     // "exile that card" also binds ParentTarget in hand but has
                     // no library members in the tracked set and must exile the
                     // chosen hand card directly.
-                    let has_library_member = tracked_set_member_zones(state, &tracked_filter)
-                        .is_some_and(|zones| zones.contains(&Zone::Library));
+                    let has_library_member =
+                        tracked_set_member_zones(state, &tracked_filter, Some(ability))
+                            .is_some_and(|zones| zones.contains(&Zone::Library));
                     if has_library_member {
                         exile_tracked_set_library_only = true;
                         effective_target_filter = tracked_filter;
@@ -1548,6 +1604,18 @@ pub fn resolve(
         // remains (for example, a Warp delayed exile after a blink), the zone-scan
         // fallback must not rediscover a same-id return by raw equality.
         if matches!(target_filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
+            state.last_effect_count = Some(0);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(completed_result(0));
+        }
+
+        // CR 400.7: an event referent that became a new object names nothing; the
+        // zone scan below must not rediscover it by raw id.
+        if event_referent_unfindable(state, ability, target_filter) {
             state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
@@ -1711,7 +1779,7 @@ pub fn resolve(
                 .draw(RandomDraw::Outcome)
                 .random_range(0..eligible.len());
             let chosen = eligible[index];
-            // CR 400.3 + CR 608.2c: a zone-union choice moves from the
+            // CR 400.6 + CR 608.2c: a zone-union choice moves from the
             // selected object's zone, not the prompt's default scan zone.
             let chosen_origin = state.objects[&chosen].zone;
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
@@ -1785,7 +1853,7 @@ pub fn resolve(
             // pause arm above returned before reaching here.
             if state
                 .active_change_zone_frame()
-                .is_some_and(|frame| frame.pending.is_none())
+                .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
             {
                 let _ = state
                     .take_active_change_zone_frame()
@@ -1805,7 +1873,7 @@ pub fn resolve(
 
         if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
             let chosen = eligible[0];
-            // CR 400.3 + CR 608.2c: the singleton can occupy any member
+            // CR 400.6 + CR 608.2c: the singleton can occupy any member
             // zone of the selection filter's union.
             let chosen_origin = state.objects[&chosen].zone;
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
@@ -1879,7 +1947,7 @@ pub fn resolve(
             // pause arm above returned before reaching here.
             if state
                 .active_change_zone_frame()
-                .is_some_and(|frame| frame.pending.is_none())
+                .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
             {
                 let _ = state
                     .take_active_change_zone_frame()
@@ -1897,6 +1965,14 @@ pub fn resolve(
             )));
         }
 
+        // CR 402.3: carry the producer's scan scope on the prompt only when it
+        // reaches a private zone. The scope is part of `waiting_for`, so it is
+        // retired atomically when an accepted answer replaces the prompt and
+        // cannot ride into a later prompt that never declared its own scope.
+        let privacy_zones = scan_zones
+            .iter()
+            .any(|zone| !zone.is_public())
+            .then_some(scan_zones.clone());
         state.waiting_for = WaitingFor::EffectZoneChoice {
             player: filter_controller,
             cards: eligible,
@@ -1905,7 +1981,14 @@ pub fn resolve(
             up_to: choice_up_to,
             source_id: ability.source_id,
             effect_kind: EffectKind::ChangeZone,
-            zone: scan_zone,
+            // A mixed scope with a private leg must report the private zone so
+            // visibility redaction can key on the choice's scope, not on which
+            // candidates happen to be eligible right now (CR 402.3).
+            zone: scan_zones
+                .iter()
+                .copied()
+                .find(|zone| !zone.is_public())
+                .unwrap_or(scan_zone),
             destination: Some(dest_zone),
             enter_tapped: effect_enter_tapped,
             enter_transformed: effect_enter_transformed,
@@ -1941,6 +2024,7 @@ pub fn resolve(
             // CR 608.2c: the selection credits the instruction's performer, as
             // the single-candidate and random shortcuts above do.
             performed_by: Some(performer),
+            privacy_zones,
         };
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
         // (matching the DiscardChoice pattern — single authority for the event).
@@ -1949,6 +2033,19 @@ pub fn resolve(
 
     let ctx = ChangeZoneIterationCtx {
         source_id: ability.source_id,
+        // CR 601.2c + CR 608.2c: announced targets are moved by the controller
+        // who announced them (Froghemoth: "exile up to that many target cards
+        // from their graveyard" is your exile, not theirs). Known limits, both
+        // the same without this change: (1) this path also moves bound
+        // referents that were not announced as targets, and a referent move
+        // with a named subject still records the controller — Ghastlord of
+        // Fugue's "That player exiles that card." and Knowledge Pool's "that
+        // player exiles it" lower to `ChangeZone { target: ParentTarget |
+        // TriggeringSource }`, which carries no actor; (2) under a
+        // `player_scope` fan-out `ability.controller` is the seat
+        // (`bind_scoped_seat`), so Battle at the Helvault's "For each player,
+        // exile up to one target … that player controls" records each seat
+        // rather than the Saga's controller (CR 608.2c).
         controller: ability.controller,
         performed_by: performer,
         origin,
@@ -2054,6 +2151,104 @@ pub fn resolve(
     let mut entrants =
         crate::game::zone_pipeline::SimultaneousEntrants::of(&logical_zone_change_group);
     let logical_group_event_start = events.len();
+    // CR 608.2c: two or more determined members are one announced
+    // simultaneous ChangeZone population. The producer transfers its exact
+    // requests and allocated group to the staged owner; a pause retains the
+    // unresolved member context instead of dropping the suffix.
+    let staged_members: Vec<ChangeZoneMemberEntry> = members
+        .iter()
+        .filter(|member| {
+            if dest_zone != Zone::Exile {
+                return true;
+            }
+            let acting_player = state
+                .objects
+                .get(&member.object_id)
+                .map(|obj| obj.controller)
+                .unwrap_or(ability.controller);
+            !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+                state,
+                ability,
+                member.object_id,
+                acting_player,
+            )
+        })
+        .cloned()
+        .collect();
+    if staged_members.len() >= 2
+        && !population_reorders_the_library(
+            state,
+            staged_members.iter().map(|member| member.object_id),
+            dest_zone,
+        )
+    {
+        for muzzled in members.iter().filter(|member| {
+            !staged_members
+                .iter()
+                .any(|m| m.object_id == member.object_id)
+        }) {
+            logical_zone_change_group
+                .record_delivery_completion(
+                    muzzled.object_id,
+                    crate::types::game_state::ZoneMoveCompletion::Remained,
+                )
+                .expect("muzzled ChangeZone member remains in its original zone");
+        }
+        let requests = change_zone_member_requests(&ctx, &staged_members);
+        let selected: Vec<ObjectId> = staged_members
+            .iter()
+            .map(|member| member.object_id)
+            .collect();
+        let tail = crate::types::game_state::ChangeZoneBatchTail {
+            group_id: logical_zone_change_group.logical_group_id,
+            effect_kind: EffectKind::from(&ability.effect),
+            source_id: ctx.source_id,
+            controller: ctx.controller,
+            destination: dest_zone,
+            count: crate::types::game_state::ChangeZoneCountPolicy::TargetedArrivals {
+                selected: selected.clone(),
+            },
+            pending_return_result_producer: None,
+            own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
+            arrangement: ChangeZoneArrangementPlan::OrdinaryDelivery,
+            // CR 603.10 + CR 611.2e: a later "is/has" instruction of this resolution that applies
+            // with the entry takes the population's entry occurrences to the post-action collector.
+            entry_collector: crate::game::effects::entry_occurrence_collector(state, Some(ability)),
+        };
+        match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
+            state,
+            requests,
+            logical_zone_change_group,
+            tail,
+            ctx.origin,
+            events,
+        ) {
+            crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => return Ok(None),
+            crate::game::zone_pipeline::StagedChangeZoneOutcome::Settled { group, members } => {
+                let settled = crate::types::game_state::change_zone_settled_facts(
+                    &group,
+                    &members,
+                    &crate::types::game_state::ChangeZoneCountPolicy::TargetedArrivals { selected },
+                    dest_zone,
+                );
+                state.last_effect_count = Some(settled.policy_count);
+                if state
+                    .active_change_zone_frame()
+                    .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
+                {
+                    let _ = state
+                        .take_active_change_zone_frame()
+                        .expect("completed ChangeZone owns the active frame");
+                }
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::from(&ability.effect),
+                    source_id: ability.source_id,
+                    subject: None,
+                });
+                return Ok(completed_result(settled.arrival_count));
+            }
+        }
+    }
     for (i, member) in members.iter().enumerate() {
         let obj_id = &member.object_id;
         if dest_zone == Zone::Exile {
@@ -2235,7 +2430,7 @@ pub fn resolve(
     // clear the pre-entry Devour snapshot (its lifetime = this entry event).
     if state
         .active_change_zone_frame()
-        .is_some_and(|frame| frame.pending.is_none())
+        .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
     {
         let _ = state
             .take_active_change_zone_frame()
@@ -2631,6 +2826,9 @@ pub(crate) fn change_zone_member_owner(
         group,
         member: boundary.member,
         expected_event: None,
+        population_devour_snapshot: None,
+        approved_post_replacement: None,
+        inherited_arrangements: Vec::new(),
     })
 }
 
@@ -2739,6 +2937,76 @@ fn process_one_zone_move_with_attack_seat(
     result
 }
 
+/// CR 701.20b + CR 701.20d: a population that puts a card already in the library at another
+/// library position reorders the library; it is not a zone change and consults no replacement.
+/// Such a population keeps the per-member delivery that settles the instruction's whole-library
+/// reorder (`library_reorder`), so it is not staged.
+pub(crate) fn population_reorders_the_library(
+    state: &GameState,
+    members: impl IntoIterator<Item = ObjectId>,
+    destination: Zone,
+) -> bool {
+    destination == Zone::Library
+        && members.into_iter().any(|id| {
+            state
+                .objects
+                .get(&id)
+                .is_some_and(|object| object.zone == Zone::Library)
+        })
+}
+
+/// CR 608.2c + CR 614.12: build the exact per-member requests for one staged
+/// ChangeZone population from the iteration context and the resolved member
+/// entries. The request is the delivery authority; the producer's context is
+/// only its source.
+pub(crate) fn change_zone_member_requests(
+    ctx: &ChangeZoneIterationCtx,
+    members: &[ChangeZoneMemberEntry],
+) -> Vec<crate::game::zone_pipeline::ZoneMoveRequest> {
+    members
+        .iter()
+        .map(|member| {
+            let mut request = crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                member.object_id,
+                ctx.destination,
+                ctx.source_id,
+            );
+            request.mods.enter_tapped = member.enter_tapped;
+            request.mods.enters_attacking = member.enters_attacking;
+            request.mods.enter_with_counters = member.enter_with_counters.clone();
+            request.mods.enter_transformed = ctx.enter_transformed;
+            request.mods.controller_override = ctx.enters_under_player;
+            request.mods.face_down_profile = ctx.face_down_profile.clone();
+            // The legacy mover passes `Silent` for this constructor.
+            request.mods.chain_referent = crate::types::zones::ChainReferentIntent::Silent;
+            request.mods.attach_to = ctx.enter_attached_to;
+            // CR 611.2e + CR 614.12: the resolution's with-entry effect rides each request.
+            request.mods.with_entry_effect = ctx.with_entry_effect.clone();
+            // CR 608.2c: attribution follows the captured instruction performer;
+            // entry ownership (`EntryOwnership::ActorOwns`) keeps reading the
+            // family controller, as the direct, mass and single-member paths do.
+            request = request.actors(crate::game::zone_pipeline::MoveActors {
+                performed_by: Some(ctx.performed_by),
+                ownership_actor: Some(ctx.controller),
+            });
+            request.placement = ctx.library_placement.clone();
+            // CR 701.24a: a terminal-shuffle move keeps its mode on every member.
+            request.library_shuffle = ctx.library_shuffle;
+            request.exile_links = crate::game::zone_pipeline::ExileLinkSpec {
+                duration: ctx.duration.clone(),
+                controller: Some(ctx.controller),
+                tracking: if ctx.track_exiled_by_source {
+                    ZoneDeliveryExileTracking::TrackBySource
+                } else {
+                    ZoneDeliveryExileTracking::None
+                },
+            };
+            request.face_down_in_exile = ctx.face_down_in_exile;
+            request
+        })
+        .collect()
+}
+
 /// CR 401.4: Group object ids by owner in APNAP order for per-owner library
 /// arrangement prompts.
 pub(crate) fn group_object_ids_by_owner_apnap(
@@ -2804,7 +3072,24 @@ fn mass_library_order_effect_zone_choice(
         is_cost_payment: false,
         enters_modified_if: None,
         duration,
+        privacy_zones: None,
     }
+}
+
+/// CR 730.2: a merged permanent is represented by its nonempty physical pile.
+fn merged_components_of(object: &GameObject) -> Option<&[ObjectId]> {
+    (!object.merged_components.is_empty()).then_some(object.merged_components.as_slice())
+}
+
+/// CR 730.2 + CR 730.3a: all physical components share the permanent's
+/// pre-departure identity, regardless of which card represents it.
+fn merged_departure_of(state: &GameState, id: ObjectId) -> Option<ObjectIncarnationRef> {
+    state.battlefield.iter().find_map(|permanent_id| {
+        let permanent = state.objects.get(permanent_id)?;
+        let components = merged_components_of(permanent)?;
+        (*permanent_id == id || components.contains(&id))
+            .then(|| ObjectIncarnationRef::from_object(permanent))
+    })
 }
 
 /// Freeze the exact object incarnation and origin that a
@@ -2827,6 +3112,7 @@ fn snapshot_mass_library_order_batch(
                 MassLibraryOrderMember {
                     identity: ObjectIncarnationRef::from_object(object),
                     origin: object.zone,
+                    departing_permanent: merged_departure_of(state, object_id),
                 }
             })
             .collect(),
@@ -2904,7 +3190,7 @@ pub(crate) enum OwnerLibraryOrderProgress {
     NextOwner(PlayerId),
     /// Every owner has chosen: the complete arrangement, as APNAP owner
     /// segments each in that owner's order, to be moved as one batch.
-    Complete(Vec<ObjectId>),
+    Complete(Vec<MassLibraryOrderBatch>),
 }
 
 /// CR 101.4 + CR 401.4: record one owner's arrangement. Owners choose in APNAP
@@ -2920,33 +3206,161 @@ pub(crate) fn submit_owner_library_order(
     instruction: &OwnerArrangementInstruction,
     chosen: &[ObjectId],
 ) -> OwnerLibraryOrderProgress {
+    // Keep the answered prompt's frozen identities and departure references;
+    // resnapshotting a logical selection must not manufacture component ranks.
+    let submitted = match &state.waiting_for {
+        WaitingFor::EffectZoneChoice {
+            mass_library_order: Some(batch),
+            source_id,
+            library_position: Some(position),
+            track_exiled_by_source,
+            duration,
+            ..
+        } if batch.owner == owner
+            && batch.arranger == arranger
+            && *source_id == instruction.source_id
+            && position == instruction.library_position
+            && *track_exiled_by_source == instruction.track_exiled_by_source
+            && duration.as_ref() == instruction.duration =>
+        {
+            MassLibraryOrderBatch {
+                owner,
+                arranger,
+                members: chosen
+                    .iter()
+                    .map(|id| {
+                        batch
+                            .members
+                            .iter()
+                            .find(|member| member.identity.object_id == *id)
+                            .expect("validated owner order selects only frozen members")
+                            .clone()
+                    })
+                    .collect(),
+            }
+        }
+        _ => snapshot_mass_library_order_batch(state, owner, arranger, chosen.to_vec()),
+    };
     let carrier = state.pending_mass_library_order_choice.take();
     // CR 608.2c: a carrier of another instruction or resolution is discarded, never merged.
     let Some(mut pending) =
         carrier.filter(|pending| owner_arrangement_carrier_binds(state, pending, instruction))
     else {
-        return OwnerLibraryOrderProgress::Complete(chosen.to_vec());
+        return OwnerLibraryOrderProgress::Complete(vec![submitted]);
     };
     if pending.remaining_batches.is_empty() {
         // CR 400.7: a collected member that changed zones is a new object the instruction no longer finds.
-        let mut arranged: Vec<ObjectId> = pending
+        let mut arranged: Vec<MassLibraryOrderBatch> = pending
             .arranged_batches
             .iter()
-            .flat_map(|batch| live_mass_library_order_batch(state, batch).members)
-            .map(|member| member.identity.object_id)
+            .map(|batch| live_mass_library_order_batch(state, batch))
             .collect();
-        arranged.extend_from_slice(chosen);
+        arranged.push(submitted);
         return OwnerLibraryOrderProgress::Complete(arranged);
     }
-    pending
-        .arranged_batches
-        .push(snapshot_mass_library_order_batch(
-            state,
-            owner,
-            arranger,
-            chosen.to_vec(),
-        ));
+    pending.arranged_batches.push(submitted);
     OwnerLibraryOrderProgress::NextOwner(open_next_owner_library_order(state, pending))
+}
+
+/// CR 730.3a: order departures by the first occurrence of each represented
+/// permanent, before applying the instruction's insertion-direction reversal.
+pub(crate) fn fold_physical_order_to_departures(
+    batches: &[MassLibraryOrderBatch],
+) -> Vec<ObjectId> {
+    let mut departures = Vec::new();
+    for member in batches.iter().flat_map(|batch| &batch.members) {
+        let id = member
+            .departing_permanent
+            .unwrap_or(member.identity)
+            .object_id;
+        if !departures.contains(&id) {
+            departures.push(id);
+        }
+    }
+    departures
+}
+
+/// CR 400.7 + CR 730.3a: only a complete, still-current physical population
+/// supplies component ranks. A logical permanent selection does not rank its
+/// unselected components, and must not be expanded after submission.
+pub(crate) fn submitted_owner_order_is_physical(
+    state: &GameState,
+    batches: &[MassLibraryOrderBatch],
+) -> bool {
+    batches.iter().all(|batch| {
+        batch.members.iter().all(|member| {
+            if !mass_library_order_member_is_current(state, batch.owner, member)
+                || merged_departure_of(state, member.identity.object_id)
+                    != member.departing_permanent
+            {
+                return false;
+            }
+            let Some(departure) = member.departing_permanent else {
+                return true;
+            };
+            let Some(permanent) = state.objects.get(&departure.object_id) else {
+                return false;
+            };
+            ObjectIncarnationRef::from_object(permanent) == departure
+                && permanent.merged_components.iter().all(|component| {
+                    let Some(object) = state.objects.get(component) else {
+                        return false;
+                    };
+                    batches
+                        .iter()
+                        .filter(|submitted| submitted.owner == object.owner)
+                        .flat_map(|submitted| &submitted.members)
+                        .filter(|submitted| {
+                            submitted.identity == ObjectIncarnationRef::from_object(object)
+                                && submitted.origin == object.zone
+                                && submitted.departing_permanent == Some(departure)
+                        })
+                        .count()
+                        == 1
+                })
+        })
+    })
+}
+
+/// CR 401.4 + CR 730.3a: the submitted physical order remains the one order
+/// authority while the folded permanent and its component child are delivered.
+pub(crate) fn submitted_owner_arrangements(
+    batches: Vec<MassLibraryOrderBatch>,
+    position: &LibraryPosition,
+) -> Vec<crate::types::game_state::StagedLibraryArrangement> {
+    match position {
+        LibraryPosition::Top | LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => {}
+        LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
+            return Vec::new();
+        }
+    }
+    batches
+        .into_iter()
+        .filter_map(|mut batch| {
+            batch.arranger = None;
+            batch
+                .members
+                .retain(|member| member.origin != Zone::Library);
+            // CR 401.4: ordinary numbered prompts retain their established
+            // repeated-insertion mapping through the derived group. Only a
+            // physical-component order must override that mapping with a seed.
+            if matches!(position, LibraryPosition::NthFromTop { .. })
+                && batch
+                    .members
+                    .iter()
+                    .all(|member| member.departing_permanent.is_none())
+            {
+                return None;
+            }
+            (!batch.members.is_empty()).then(|| {
+                crate::types::game_state::StagedLibraryArrangement {
+                    position: position.clone(),
+                    batch,
+                    status: crate::types::game_state::StagedArrangementStatus::Submitted,
+                }
+            })
+        })
+        .collect()
 }
 
 /// CR 401.4 + CR 101.4: open the owners' arrangement of cards an effect puts
@@ -2969,6 +3383,23 @@ pub(crate) fn open_owner_library_arrangement(
     track_exiled_by_source: bool,
     duration: Option<Duration>,
 ) {
+    // CR 401.4 + CR 730.3a: owners arrange physical cards, not the
+    // permanents that represented them on the battlefield.
+    let owner_batches = if library_position.is_owner_arrangeable() {
+        let physical: Vec<ObjectId> = owner_batches
+            .into_iter()
+            .flat_map(|(_, ids)| ids)
+            .flat_map(|id| {
+                let components = merged_components_of(&state.objects[&id]);
+                std::iter::once(id)
+                    .filter(move |_| components.is_none())
+                    .chain(components.into_iter().flatten().copied())
+            })
+            .collect();
+        group_object_ids_by_owner_apnap(state, &physical)
+    } else {
+        owner_batches
+    };
     let (first_owner, first_cards) = owner_batches
         .first()
         .expect("an owner library arrangement requires at least one owner batch")
@@ -3539,7 +3970,8 @@ pub fn resolve_all(
             library_shuffle,
             random_order,
         } => {
-            let scan_zones = change_zone_all_origin_zones(state, *origin, target);
+            let scan_zones =
+                change_zone_all_origin_zones_for_reader(state, *origin, target, Some(ability));
             // CR 122.1 + CR 122.1h: Resolve each `QuantityExpr` counter count
             // to a concrete u32 once, mirroring the single-object `ChangeZone`
             // arm. Every entering object receives these counters (e.g. a
@@ -3633,9 +4065,9 @@ pub fn resolve_all(
     // battlefield before `chain_tracked_set_id` was populated (Zimone's
     // Experiment: kept cards live in the library until routed by type).
     let origin_zones = if matches!(&ability.effect, Effect::ChangeZoneAll { origin: None, .. }) {
-        if let Some(zones) = tracked_set_member_zones(state, &effective_filter) {
+        if let Some(zones) = tracked_set_member_zones(state, &effective_filter, Some(ability)) {
             zones
-        } else if let Some(zones) = tracked_set_member_zones(state, &target_filter) {
+        } else if let Some(zones) = tracked_set_member_zones(state, &target_filter, Some(ability)) {
             zones
         } else {
             origin_zones
@@ -3677,7 +4109,7 @@ pub fn resolve_all(
         ability,
         filter_controller,
     );
-    let matching: Vec<_> = if let Some(objects) = selected_objects {
+    let mut matching: Vec<_> = if let Some(objects) = selected_objects {
         objects
     } else if let Some(player) = player_scope {
         // Player-scoped mass move: select every card in any of the origin zones
@@ -3745,14 +4177,23 @@ pub fn resolve_all(
             .map(|(id, _)| *id)
             .collect()
     };
-    // CR 607.2a + CR 730.3c: the linked return finds every object an exiled merged permanent became.
+    // CR 730.2: absorbed cards represent one permanent, not additional
+    // permanents that a battlefield-origin mass instruction can select.
+    matching.retain(|id| !state.is_absorbed_merge_component(*id));
+    // CR 607.2a + CR 603.7c + CR 730.3c: a linked return, or a delayed return of
+    // the set an earlier instruction moved ("exile ~ … return it"), finds every
+    // object an exiled merged permanent became.
     let matching = match &target_filter {
-        TargetFilter::ExiledBySource => crate::game::merge::expand_returned_merge_components(
-            state,
-            ability,
-            matching,
-            &target_filter,
-        ),
+        TargetFilter::ExiledBySource
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. } => {
+            crate::game::merge::expand_returned_merge_components(
+                state,
+                ability,
+                matching,
+                &target_filter,
+            )
+        }
         _ => matching,
     };
     let matching: Vec<_> = if dest_zone == Zone::Exile {
@@ -3811,16 +4252,28 @@ pub fn resolve_all(
         dest_zone,
     );
 
-    // CR 401.4: When multiple objects are placed at the same library position
-    // simultaneously and `random_order` is false, the owner arranges their
-    // relative order ("in any order" restates this default). Route through the
-    // shared `EffectZoneChoice` + `PutAtLibraryPosition` production path instead
-    // of silently picking an engine-default batch order.
-    if dest_zone == Zone::Library
+    // CR 401.4 + CR 614.6: mixed merged cohorts need their physical arrivals
+    // approved before ordering. Other mass-order producers keep their existing
+    // EffectZoneChoice path, including in-library reorders.
+    let owner_orders = dest_zone == Zone::Library
         && effect_library_position.is_some()
         && !random_order
-        && matching.len() > 1
+        && matching.len() > 1;
+    let arrangement = if owner_orders
+        && library_shuffle == LibraryShuffleMode::PerObject
+        && effect_library_position
+            .as_ref()
+            .is_some_and(LibraryPosition::is_owner_arrangeable)
+        && matching
+            .iter()
+            .any(|id| merged_components_of(&state.objects[id]).is_some())
+        && !population_reorders_the_library(state, matching.iter().copied(), dest_zone)
     {
+        ChangeZoneArrangementPlan::ArrangePhysicalLibraryArrivals
+    } else {
+        ChangeZoneArrangementPlan::OrdinaryDelivery
+    };
+    if owner_orders && arrangement == ChangeZoneArrangementPlan::OrdinaryDelivery {
         // `matching.len() > 1` guarantees at least one owner batch.
         let owner_batches = group_object_ids_by_owner_apnap(state, &matching);
         // CR 401.4: a mass move names no arranger; each owner orders their own.
@@ -3863,6 +4316,96 @@ pub fn resolve_all(
     let mut entrants =
         crate::game::zone_pipeline::SimultaneousEntrants::of(&logical_zone_change_group);
     let logical_group_event_start = events.len();
+    // CR 608.2c + CR 730.3a: multiple objects, or the physical components of
+    // one merged permanent, need staged ownership through a component pause.
+    if (matching.len() >= 2
+        || matching.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .and_then(merged_components_of)
+                .is_some()
+        }))
+        && !population_reorders_the_library(state, matching.iter().copied(), dest_zone)
+    {
+        let ctx = ChangeZoneIterationCtx {
+            source_id: ability.source_id,
+            controller: ability.controller,
+            performed_by: performer,
+            origin: None,
+            destination: dest_zone,
+            enter_transformed: false,
+            enters_under_player,
+            duration: ability.duration.clone(),
+            track_exiled_by_source,
+            face_down_in_exile: ability.context.face_down_in_exile,
+            face_down_profile: face_down_profile.clone(),
+            library_placement: member_library_placement.clone(),
+            library_shuffle,
+            enter_attached_to: None,
+            with_entry_effect: with_entry_effect.clone(),
+        };
+        let member_entries: Vec<ChangeZoneMemberEntry> = matching
+            .iter()
+            .map(|&object_id| ChangeZoneMemberEntry {
+                object_id,
+                enter_with_counters: enter_with_counters.clone(),
+                enter_tapped,
+                enters_attacking,
+            })
+            .collect();
+        let requests = change_zone_member_requests(&ctx, &member_entries);
+        let tail = crate::types::game_state::ChangeZoneBatchTail {
+            group_id: logical_zone_change_group.logical_group_id,
+            effect_kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            controller: ability.controller,
+            destination: dest_zone,
+            count: crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers,
+            arrangement,
+            pending_return_result_producer: None,
+            own_exile_links: if matches!(effective_filter, TargetFilter::ExiledBySource) {
+                crate::types::game_state::OwnExileLinkSettlement::Consume
+            } else {
+                crate::types::game_state::OwnExileLinkSettlement::Retain
+            },
+            // CR 603.10 + CR 611.2e: see the targeted population above.
+            entry_collector: crate::game::effects::entry_occurrence_collector(state, Some(ability)),
+        };
+        match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
+            state,
+            requests,
+            logical_zone_change_group,
+            tail,
+            ctx.origin,
+            events,
+        ) {
+            crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => return Ok(()),
+            crate::game::zone_pipeline::StagedChangeZoneOutcome::Settled { group, members } => {
+                let settled = crate::types::game_state::change_zone_settled_facts(
+                    &group,
+                    &members,
+                    &crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers,
+                    dest_zone,
+                );
+                state.last_effect_count = Some(settled.policy_count);
+                if state
+                    .active_change_zone_frame()
+                    .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
+                {
+                    let _ = state
+                        .take_active_change_zone_frame()
+                        .expect("completed ChangeZone owns the active frame");
+                }
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::from(&ability.effect),
+                    source_id: ability.source_id,
+                    subject: None,
+                });
+                return Ok(());
+            }
+        }
+    }
     for (i, obj_id) in matching.iter().enumerate() {
         let obj_id = *obj_id;
         // CR 400.3: Each object's actual current zone is the source zone for the
@@ -4111,7 +4654,7 @@ pub fn resolve_all(
     // sacrifice + remaining co-entering members still need it).
     if state
         .active_change_zone_frame()
-        .is_some_and(|frame| frame.pending.is_none())
+        .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
     {
         let _ = state
             .take_active_change_zone_frame()
@@ -4267,6 +4810,7 @@ mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
+    use crate::types::ability::EffectResolutionResult;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, AttachSelection, ControllerRef, FilterProp,
         LibraryInstructionActor, MultiTargetSpec, ParentTargetMissingReason, PlayerFilter, PtValue,
@@ -4278,11 +4822,16 @@ mod tests {
     use crate::types::card::PrintedLoyalty;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
+    use crate::types::game_state::{
+        BatchCompletion, ChangeZoneBatchTail, ChangeZoneCountPolicy, ChangeZoneSettled,
+        PendingContinuation, StagedBatchMemberState,
+    };
     use crate::types::game_state::{ExileLinkKind, StackEntry, StackEntryKind, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::resolution::AbilityContinuationFrame;
     use crate::types::statics::{ProhibitionScope, StaticMode};
     use std::sync::Arc;
 
@@ -5472,9 +6021,9 @@ mod tests {
             state.waiting_for,
             WaitingFor::ReturnAsAuraTarget { .. }
         ));
-        assert!(state
-            .active_change_zone_frame()
-            .is_some_and(|frame| frame.pending.is_some()));
+        // R4c: the remaining members ride the staged batch owner (marker below
+        // the BatchDelivery) rather than a legacy `pending` carrier.
+        assert!(staged_change_zone(&state).is_some());
         assert_eq!(state.objects[&other_card].zone, Zone::Graveyard);
 
         let result = apply_as_current(
@@ -5515,6 +6064,31 @@ mod tests {
             })
             .count();
         assert_eq!(change_zone_resolutions, 1);
+        // R4c residual R-c13 discriminator: exactly one ChangeZone resolution
+        // event — the `ReturnAsAuraTarget` resume handler's premature copy is
+        // absorbed — and it sits at the canonical completion position, after
+        // the remaining member's delivery (legacy order).
+        let resolved_at = result.events.iter().position(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ChangeZone,
+                    source_id: ObjectId(100),
+                    ..
+                }
+            )
+        });
+        let last_zone_changed = result
+            .events
+            .iter()
+            .rposition(|event| matches!(event, GameEvent::ZoneChanged { .. }));
+        assert!(
+            matches!(
+                (resolved_at, last_zone_changed),
+                (Some(resolved), Some(changed)) if resolved > changed
+            ),
+            "the single ChangeZone EffectResolved must follow every remaining delivery"
+        );
     }
 
     /// Issue #2858 (Archangel Elspeth −6): "Return all nonland permanent cards …
@@ -5610,9 +6184,7 @@ mod tests {
             WaitingFor::ReturnAsAuraTarget { .. }
         ));
         assert!(
-            state
-                .active_change_zone_frame()
-                .is_some_and(|frame| frame.pending.is_some()),
+            staged_change_zone(&state).is_some(),
             "remaining members must be stashed so the mass move can resume"
         );
 
@@ -5887,6 +6459,58 @@ mod tests {
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
+        let WaitingFor::EffectZoneChoice {
+            privacy_zones: prompt_scope,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("the mixed choice must be open");
+        };
+        assert_eq!(
+            prompt_scope.as_deref(),
+            Some([Zone::Hand, Zone::Graveyard].as_slice()),
+            "the producer must carry the mixed scan scope on the prompt"
+        );
+        let observer = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let WaitingFor::EffectZoneChoice {
+            cards: observer_cards,
+            count: observer_count,
+            min_count: observer_min_count,
+            up_to: observer_up_to,
+            ..
+        } = &observer.waiting_for
+        else {
+            panic!("observer must retain the mixed-scope prompt");
+        };
+        assert!(
+            observer_cards.is_empty(),
+            "a mixed private/public scope must not expose ids; got {observer_cards:?}"
+        );
+        assert_eq!(
+            (*observer_count, *observer_min_count, *observer_up_to),
+            (0, 0, true),
+            "the full observer envelope must be normalized"
+        );
+
+        // A rejected answer leaves the prompt (and its scope) pending.
+        assert!(
+            apply_as_current(
+                &mut state,
+                GameAction::SelectCards {
+                    cards: vec![opposing_land],
+                },
+            )
+            .is_err(),
+            "an ineligible pick must be rejected"
+        );
+        let WaitingFor::EffectZoneChoice { privacy_zones, .. } = &state.waiting_for else {
+            panic!("a rejected answer must keep the mixed choice open");
+        };
+        assert!(
+            privacy_zones.is_some(),
+            "a rejected answer must preserve the prompt's privacy scope"
+        );
+
         apply_as_current(
             &mut state,
             GameAction::SelectCards {
@@ -5895,11 +6519,113 @@ mod tests {
         )
         .expect("one resolution-time choice must be able to select both source zones");
 
+        assert!(
+            !matches!(
+                &state.waiting_for,
+                WaitingFor::EffectZoneChoice {
+                    privacy_zones: Some(_),
+                    ..
+                }
+            ),
+            "the answered prompt must retire its carried privacy scope"
+        );
+
         for id in [hand_land, graveyard_land] {
             assert_eq!(state.objects[&id].zone, Zone::Battlefield);
             assert!(state.objects[&id].tapped);
         }
         assert_eq!(state.objects[&opposing_land].zone, Zone::Graveyard);
+
+        // CR 402.3: a following public-only producer carries no scope; its
+        // chooser and observer envelopes must stay exact rather than inherit
+        // the answered prompt's private classification.
+        let second_grave = create_object(
+            &mut state,
+            CardId(14),
+            PlayerId(0),
+            "Second Graveyard Forest".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&second_grave)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let mut second = ResolvedAbility::new(
+            Effect::ChangeZone {
+                actor: LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Land],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(101),
+            PlayerId(0),
+        );
+        second.multi_target = Some(crate::types::ability::MultiTargetSpec::up_to(
+            QuantityExpr::Fixed { value: 1 },
+        ));
+        second.target_choice_timing = crate::types::ability::TargetChoiceTiming::Resolution;
+        resolve(&mut state, &second, &mut events).unwrap();
+
+        let WaitingFor::EffectZoneChoice { privacy_zones, .. } = &state.waiting_for else {
+            panic!("the following public choice must be open");
+        };
+        assert!(
+            privacy_zones.is_none(),
+            "a public-only prompt must not carry a privacy scope"
+        );
+        let observer = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let WaitingFor::EffectZoneChoice {
+            cards: observer_cards,
+            count: observer_count,
+            min_count: observer_min_count,
+            up_to: observer_up_to,
+            ..
+        } = &observer.waiting_for
+        else {
+            panic!("observer must retain the following public prompt");
+        };
+        assert_eq!(
+            observer_cards,
+            &vec![second_grave],
+            "public graveyard candidates stay visible to the observer"
+        );
+        assert_eq!(
+            (*observer_count, *observer_min_count, *observer_up_to),
+            (1, 0, true)
+        );
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![second_grave],
+            },
+        )
+        .expect("the chooser retains a legal answer for the next prompt");
+        assert_eq!(
+            state.objects[&second_grave].zone,
+            Zone::Hand,
+            "the next prompt's accepted answer must still resolve"
+        );
     }
 
     /// CR 608.2c: supplemental authority coverage for Unification's zone
@@ -6001,6 +6727,26 @@ mod tests {
             }
             other => panic!("expected graveyard EffectZoneChoice, got {other:?}"),
         }
+        let WaitingFor::EffectZoneChoice { privacy_zones, .. } = &choice_state.waiting_for else {
+            panic!("the public graveyard choice must be open");
+        };
+        assert!(
+            privacy_zones.is_none(),
+            "a public-only graveyard scope must not be carried on the prompt"
+        );
+        let observer = crate::game::visibility::filter_state_for_viewer(&choice_state, PlayerId(1));
+        let WaitingFor::EffectZoneChoice {
+            cards: observer_cards,
+            ..
+        } = &observer.waiting_for
+        else {
+            panic!("observer must retain the public graveyard prompt");
+        };
+        assert_eq!(
+            observer_cards,
+            &vec![graveyard_card],
+            "public graveyard candidates stay visible to the observer"
+        );
 
         let mut all_state = GameState::new_two_player(42);
         let all_graveyard_card = create_object(
@@ -6568,6 +7314,142 @@ mod tests {
             .contains(&CoreType::Creature)
     }
 
+    /// R4c: the staged ChangeZone family owner wherever it sits on the stack
+    /// (the ChangeZone marker is below the `BatchDelivery`, which may itself
+    /// sit below a live delivery child). The batch is the delivery authority;
+    /// the legacy `pending` carrier is absent from this shape.
+    fn staged_change_zone(
+        state: &GameState,
+    ) -> Option<&crate::types::game_state::PendingBatchDeliveries> {
+        state.resolution_stack.iter().find_map(|frame| match frame {
+            crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                if batch.is_change_zone_population() =>
+            {
+                Some(&**batch)
+            }
+            _ => None,
+        })
+    }
+
+    /// CR 101.4c + CR 616.1: the staged population's sweep consulted every
+    /// member, and `player` holds the decisions about `objects` (announcement
+    /// order). Pin that prompt exactly, then make the decision about `first`
+    /// first, which publishes it.
+    fn answer_decision_order(
+        state: &mut GameState,
+        player: PlayerId,
+        objects: &[ObjectId],
+        first: ObjectId,
+    ) {
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::ReplacementDecisionOrder {
+                player,
+                objects: objects.to_vec(),
+            },
+            "the chooser holds one decision per listed member"
+        );
+        apply_as_current(state, GameAction::SelectCards { cards: vec![first] })
+            .expect("the chooser picks which held decision to make first");
+    }
+
+    /// CR 101.4c + CR 616.1: publish the next of `held` (the members whose
+    /// decisions `player` still holds, in announcement order), making them in
+    /// announcement order. With two or more held, `player` first chooses which
+    /// to make (and chooses again after every answer);
+    /// the last one is published without a selection. Either way the
+    /// published choice is about that member.
+    fn publish_next_held_decision(
+        state: &mut GameState,
+        player: PlayerId,
+        held: &mut Vec<ObjectId>,
+    ) {
+        let next = held[0];
+        if held.len() >= 2 {
+            answer_decision_order(state, player, held, next);
+        }
+        held.remove(0);
+        assert_eq!(
+            state
+                .pending_replacement
+                .as_ref()
+                .and_then(|pending| pending.proposed.affected_object_id()),
+            Some(next),
+            "the published choice is about the selected member"
+        );
+    }
+
+    /// R4c: the staged member requests still awaiting consultation, projected
+    /// into the legacy `ChangeZoneMemberEntry` shape for the readers below.
+    /// Each value is the same one the legacy carrier held (the request IS the
+    /// pre-event entry the staged producer resolved).
+    fn staged_unconsulted_member_entries(state: &GameState) -> Option<Vec<ChangeZoneMemberEntry>> {
+        let batch = staged_change_zone(state)?;
+        Some(
+            batch
+                .requests
+                .iter()
+                .map(|request| ChangeZoneMemberEntry {
+                    object_id: request.object_id,
+                    enter_with_counters: request.enter_with_counters.clone(),
+                    enter_tapped: request.enter_tapped,
+                    enters_attacking: request.enters_attacking,
+                })
+                .collect(),
+        )
+    }
+
+    /// CR 616.1 + CR 101.4: the members the staged sweep approved, each
+    /// approved event's pre-event entry projected into the legacy
+    /// `ChangeZoneMemberEntry` shape. Since the live scheduler consults every
+    /// member before any decision is asked, a member needing no choice carries
+    /// its pre-event entry on its approved event, not on an unconsulted request.
+    fn staged_approved_member_entries(state: &GameState) -> Option<Vec<ChangeZoneMemberEntry>> {
+        let staged = staged_change_zone(state)?.staged.as_ref()?;
+        Some(
+            staged
+                .members
+                .iter()
+                .filter(|member| {
+                    member.state == crate::types::game_state::StagedBatchMemberState::Approved
+                })
+                .map(|member| match &member.approved_event {
+                    Some(ProposedEvent::ZoneChange {
+                        object_id,
+                        enter_with_counters,
+                        enter_tapped,
+                        enters_attacking,
+                        ..
+                    }) => ChangeZoneMemberEntry {
+                        object_id: *object_id,
+                        enter_with_counters: enter_with_counters.clone(),
+                        enter_tapped: *enter_tapped,
+                        enters_attacking: *enters_attacking,
+                    },
+                    other => panic!("an approved member carries its zone change, got {other:?}"),
+                })
+                .collect(),
+        )
+    }
+
+    /// R4c: the asking member's request (the member whose delivery authority
+    /// carries the pause context). CR 616.1: since the live scheduler, the
+    /// member being asked is `StagedBatchDelivery::asking`, an identity; the
+    /// cursor is only the sweep position, past every member once the sweep
+    /// has consulted them all.
+    fn staged_current_member_request(
+        state: &GameState,
+    ) -> Option<&crate::types::game_state::PendingBatchZoneMoveRequest> {
+        let batch = staged_change_zone(state)?;
+        let staged = batch.staged.as_ref()?;
+        let asking = staged.asking?;
+        staged
+            .members
+            .iter()
+            .find(|member| member.identity == asking)
+            .map(|member| &member.request)
+    }
+
     /// The parked `ChangeZone` iteration wherever it sits on the resolution
     /// stack (a replacement pause may park it below a child frame).
     fn parked_change_zone_iteration(
@@ -6940,7 +7822,11 @@ mod tests {
     /// move parks on the first member's shock replacement and resumes through
     /// `drain_pending_change_zone_iteration`, under a non-move (`Draw`) root.
     /// Row (a): two other artifacts; the parked carrier holds each remaining
-    /// member's pre-event entry (Relic none, Ornithopter the counter), and after
+    /// member's pre-event entry (Relic none, Ornithopter the counter). Since the
+    /// live scheduler (CR 616.1 + CR 101.4) consults every member before the
+    /// shock's choice is asked, those entries ride the other members' approved
+    /// events instead of unconsulted requests; the property is the same: they
+    /// were fixed before the event, not recomputed by the drain. After
     /// the decline the drain applies them: the shock artifact land, now on the
     /// battlefield, does not count toward the Relic's metalcraft. Row (b): with
     /// March on the battlefield, the remaining noncreature artifact keeps the
@@ -7018,8 +7904,16 @@ mod tests {
             } else {
                 vec![unconditional(rest[0], vec![(CounterType::Plus1Plus1, 1)])]
             };
+            // CR 616.1 + CR 101.4: the sweep consulted every member before the
+            // shock's choice was asked, so no request is left unconsulted and
+            // each remaining member's pre-event entry rides its approved event.
             assert_eq!(
-                parked_change_zone_iteration(state).map(|pending| pending.remaining.clone()),
+                staged_unconsulted_member_entries(state),
+                Some(Vec::new()),
+                "row_a={row_a}: the sweep leaves no member unconsulted"
+            );
+            assert_eq!(
+                staged_approved_member_entries(state),
                 Some(expected_remaining),
                 "row_a={row_a}: the parked carrier holds each member's pre-event entry"
             );
@@ -7142,6 +8036,19 @@ mod tests {
             "premise: the shock member parks the loop, got {:?}",
             commit.state().waiting_for
         );
+        // R4c addendum (c): the legacy wire/migration rows need an EXPLICIT
+        // legacy `PendingChangeZoneIteration.pending` carrier, not the staged
+        // producer's batch shape. Convert the parked staged owner into the
+        // legacy carrier for this fixture only; production never does this.
+        assert!(
+            commit.state().resolution_stack.iter().any(|frame| matches!(
+                frame,
+                crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                    if batch.is_change_zone_population()
+            )),
+            "premise: the production producer parks the staged ChangeZone owner"
+        );
+        downgrade_staged_change_zone_to_legacy(commit.state_mut());
         assert_eq!(
             commit
                 .state()
@@ -7153,6 +8060,79 @@ mod tests {
             "premise: the parked ChangeZone owns the only resolution frame"
         );
         (commit.state().clone(), shock, relic, orni)
+    }
+
+    /// R4c addendum (c): test-only conversion of one parked staged ChangeZone
+    /// owner into the legacy `PendingChangeZoneIteration` carrier, so the
+    /// old-save wire/migration rows keep testing the legacy shape.
+    ///
+    /// The legacy carrier paused on one member and left every LATER member
+    /// unprocessed. Since the live scheduler (CR 616.1 + CR 101.4) the staged
+    /// sweep has already consulted those later members, so a member needing no
+    /// choice is `Approved` rather than `Unconsulted`; the legacy `remaining`
+    /// is therefore every undelivered member after the asking one, whatever
+    /// its staged state, carrying its own request exactly as before.
+    fn downgrade_staged_change_zone_to_legacy(state: &mut GameState) {
+        let owner = state
+            .resolution_stack
+            .take_active_batch_delivery()
+            .expect("staged frame")
+            .expect("staged owner");
+        let _ = state
+            .take_active_change_zone_frame()
+            .expect("the ChangeZone marker is exposed below the batch");
+        let staged = owner.staged.as_ref().expect("staged payload");
+        let asking = staged
+            .asking
+            .expect("the legacy pause is the asking member's");
+        let paused = staged
+            .members
+            .iter()
+            .position(|member| member.identity == asking)
+            .expect("the asking member is in the cohort");
+        let remaining = staged.members[paused + 1..]
+            .iter()
+            .filter(|member| {
+                matches!(
+                    member.state,
+                    StagedBatchMemberState::Unconsulted | StagedBatchMemberState::Approved
+                )
+            })
+            .map(|member| ChangeZoneMemberEntry {
+                object_id: member.identity.object_id,
+                enter_with_counters: member.request.enter_with_counters.clone(),
+                enter_tapped: member.request.enter_tapped,
+                enters_attacking: member.request.enters_attacking,
+            })
+            .collect();
+        state.push_change_zone_frame(crate::types::resolution::ChangeZoneFrame {
+            pending: Some(crate::types::game_state::PendingChangeZoneIteration {
+                library_reorder: None,
+                pending_return_result_producer: None,
+                logical_zone_change_group: owner.logical_zone_change_group,
+                paused_current: owner.paused_current,
+                remaining,
+                source_id: owner.source_id.unwrap_or(ObjectId(0)),
+                controller: PlayerId(0),
+                performed_by: PlayerId(0),
+                origin: None,
+                destination: owner.destination,
+                enter_transformed: false,
+                enters_under_player: None,
+                duration: None,
+                track_exiled_by_source: false,
+                face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+                moved_count: None,
+                face_down_profile: None,
+                with_entry_effect: None,
+                library_placement: owner.library_placement,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
+                enter_attached_to: None,
+                effect_kind: EffectKind::ChangeZone,
+            }),
+            devour_eligible_snapshot: None,
+            awaiting_batch: None,
+        });
     }
 
     /// Restores `wire` through the public persisted-state reader exactly as a
@@ -7220,6 +8200,10 @@ mod tests {
     /// bool, `enters_attacking` always present, the other entry fields only when
     /// non-default).
     fn legacy_change_zone_carrier(carrier: &mut serde_json::Value, legacy: &serde_json::Value) {
+        carrier
+            .as_object_mut()
+            .expect("legacy carrier is an object")
+            .remove("performed_by");
         let ids = carrier["remaining"]
             .as_array()
             .expect("premise: the carrier lists its members")
@@ -7262,6 +8246,50 @@ mod tests {
             }
         }
         wire
+    }
+
+    /// Typed save-layout fixture, not a printed support claim. The nearest
+    /// printed mass return is Brilliant Restoration: "Return all artifact and
+    /// enchantment cards from your graveyard to the battlefield." This fixture
+    /// adds the existing synthetic replacement pause to expose saved members.
+    #[test]
+    fn legacy_v11_parked_change_zone_restores_its_actor_and_resumes() {
+        let (paused, shock, relic, orni) = paused_mass_return(|_| {}, true);
+        for (label, mut wire) in both_wires(&paused) {
+            let state = wire_state_mut(&mut wire);
+            state["resolution_state_version"] = serde_json::Value::from(11_u64);
+            change_zone_carrier_mut(state, "resolution_frames")
+                .as_object_mut()
+                .expect("the legacy carrier is an object")
+                .remove("performed_by");
+            let mut restored = restore_persisted(wire)
+                .unwrap_or_else(|error| panic!("{label}: v11 actor restore: {error}"));
+            let pending = parked_change_zone_iteration(&restored)
+                .expect("the restored save still owns its interrupted members");
+            assert_eq!(pending.performed_by, PlayerId(0));
+            apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 1 })
+                .expect("the restored game accepts the actual replacement answer");
+            for card in [shock, relic, orni] {
+                assert_eq!(restored.objects[&card].zone, Zone::Battlefield);
+            }
+            assert!(parked_change_zone_iteration(&restored).is_none());
+        }
+    }
+
+    #[test]
+    fn current_parked_change_zone_without_actor_is_not_migrated() {
+        let (paused, ..) = paused_mass_return(|_| {}, true);
+        for (label, mut current) in both_wires(&paused) {
+            restore_persisted(current.clone())
+                .unwrap_or_else(|error| panic!("{label}: current save reach guard: {error}"));
+            change_zone_carrier_mut(wire_state_mut(&mut current), "resolution_frames")
+                .as_object_mut()
+                .expect("the current carrier is an object")
+                .remove("performed_by");
+            let error = restore_persisted(current)
+                .expect_err("a current save must provide its actor, not use historical migration");
+            assert!(error.contains("performed_by"), "{label}: {error}");
+        }
     }
 
     /// CR 603.6a + CR 614.12 (persisted-version boundary): a v1–v6 save paused
@@ -10480,10 +11508,10 @@ mod tests {
                 ),
                 arranged_batches: vec![MassLibraryOrderBatch {
                     owner: PlayerId(0),
-                    members: vec![MassLibraryOrderMember {
-                        identity: ObjectIncarnationRef::from_object(&state.objects[&p0_card]),
-                        origin: Zone::Library,
-                    }],
+                    members: vec![MassLibraryOrderMember::card(
+                        ObjectIncarnationRef::from_object(&state.objects[&p0_card]),
+                        Zone::Library,
+                    )],
                     arranger: None,
                 }],
                 resolving_entry,
@@ -13562,7 +14590,10 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        // First NeedsChoice fires for shock_a; the engine must be parked.
+        // CR 101.4c: both targets were consulted and P0 holds both decisions;
+        // P0 makes shock_a's first (announcement order), so the engine is
+        // parked on shock_a's choice as before.
+        answer_decision_order(&mut state, PlayerId(0), &[shock_a, shock_b], shock_a);
         assert!(
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
             "expected first ReplacementChoice, got {:?}",
@@ -13713,6 +14744,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 crate::types::resolution::FrameKind::ChangeZone,
+                crate::types::resolution::FrameKind::BatchDelivery,
                 crate::types::resolution::FrameKind::CounterAdditions,
             ],
             "the complete ChangeZone owner must remain below its ETB-counter child"
@@ -13869,6 +14901,9 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
+        // CR 101.4c: the sweep consulted both targets and P0 holds both
+        // decisions; P0 makes shock_a's first (announcement order).
+        answer_decision_order(&mut state, PlayerId(0), &[shock_a, shock_b], shock_a);
         // First target pauses on its replacement choice; the stash must carry the
         // face-down profile.
         assert!(
@@ -13876,9 +14911,10 @@ mod tests {
             "expected first ReplacementChoice, got {:?}",
             state.waiting_for
         );
-        let pending = state
-            .active_change_zone_frame()
-            .and_then(|frame| frame.pending.as_ref())
+        // R4c: the staged batch's asking member request is the delivery
+        // authority and carries the same face-down profile the legacy carrier
+        // held; the behavior assertions below are unchanged.
+        let pending = staged_current_member_request(&state)
             .expect("a paused targeted ChangeZone must stash the iteration");
         assert_eq!(
             pending.face_down_profile.as_ref(),
@@ -13985,16 +15021,18 @@ mod tests {
         let mut events = Vec::new();
         resolve_all(&mut state, &ability, &mut events).unwrap();
 
+        // CR 101.4c: the sweep consulted both matches, so P0 holds both
+        // decisions and chooses the order; announcement order (shock_b is on
+        // top of the library) keeps the original sequence.
+        assert!(
+            staged_change_zone(&state).is_some(),
+            "resolve_all must stash remaining library matches on NeedsChoice"
+        );
+        answer_decision_order(&mut state, PlayerId(0), &[shock_b, shock_a], shock_b);
         assert!(
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
             "expected first ReplacementChoice, got {:?}",
             state.waiting_for
-        );
-        assert!(
-            state
-                .active_change_zone_frame()
-                .is_some_and(|frame| frame.pending.is_some()),
-            "resolve_all must stash remaining library matches on NeedsChoice"
         );
 
         let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
@@ -14085,6 +15123,10 @@ mod tests {
         ability.duration = Some(Duration::UntilOpponentBecomesMonarch);
         resolve_all(&mut state, &ability, &mut Vec::new()).expect("typed mass exile resolves");
         if paused {
+            // CR 101.4c + CR 616.1 (this PR's staged population): the
+            // sweep consulted both P1-owned cards, so P1 holds both decisions and
+            // first chooses which to make.
+            answer_decision_order(&mut state, PlayerId(1), &cards, cards[0]);
             for _ in 0..2 {
                 assert!(matches!(
                     state.waiting_for,
@@ -14538,12 +15580,6 @@ mod tests {
     /// retains its terminal-shuffle placement through every resume. The member
     /// moves must not auto-shuffle, leaving exactly the one terminal Shuffle.
     fn paused_terminal_mass_library_shuffle_events(cant_shuffle: bool) -> Vec<GameEvent> {
-        use crate::types::ability::{
-            AbilityDefinition, AbilityKind, LibraryShuffleMode, ReplacementDefinition,
-            ReplacementMode,
-        };
-        use crate::types::replacements::ReplacementEvent;
-
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
@@ -14632,15 +15668,16 @@ mod tests {
         );
         let mut events = Vec::new();
         resolve_all(&mut state, &mass_move, &mut events).expect("first member pauses");
+        // CR 101.4c: the sweep consulted both members and P0 holds both
+        // decisions; P0 makes the first member's first (announcement order).
+        answer_decision_order(&mut state, PlayerId(0), &[first, second], first);
         assert!(matches!(
             state.waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ));
         assert_eq!(
-            state
-                .active_change_zone_frame()
-                .and_then(|frame| frame.pending.as_ref())
-                .and_then(|pending| pending.library_placement.clone()),
+            staged_current_member_request(&state)
+                .and_then(|request| request.library_placement.clone()),
             Some(LibraryPosition::Bottom),
             "the first replacement pause must retain terminal-shuffle suppression"
         );
@@ -14653,10 +15690,8 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         assert_eq!(
-            state
-                .active_change_zone_frame()
-                .and_then(|frame| frame.pending.as_ref())
-                .and_then(|pending| pending.library_placement.clone()),
+            staged_current_member_request(&state)
+                .and_then(|request| request.library_placement.clone()),
             Some(LibraryPosition::Bottom),
             "the second replacement pause must retain terminal-shuffle suppression"
         );
@@ -15032,6 +16067,9 @@ mod tests {
         let mut events = Vec::new();
         super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0)
             .expect("owner shuffle reaches its first replacement pause");
+        // CR 101.4c: the sweep consulted both permanents and P0 holds both
+        // decisions; P0 makes the first permanent's first (announcement order).
+        answer_decision_order(&mut state, PlayerId(0), &[first, second], first);
         assert!(matches!(
             state.waiting_for,
             WaitingFor::ReplacementChoice { .. }
@@ -15200,6 +16238,9 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
+        // CR 101.4c: the sweep consulted both shocks and P0 holds both
+        // decisions; P0 makes shock_a's first (announcement order).
+        answer_decision_order(&mut state, PlayerId(0), &[shock_a, shock_b], shock_a);
         // First shock: pay (index 0).
         let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("pay first shock");
@@ -15267,20 +16308,28 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        for expected_retained_occurrences in 0..3 {
+        // CR 101.4c: the sweep consulted all three shocks; P0 holds
+        // every decision and orders them (announcement order) before each
+        // answer while two or more remain.
+        let mut held = vec![s1, s2, s3];
+        for _ in 0..3 {
+            publish_next_held_decision(&mut state, PlayerId(0), &mut held);
             assert!(
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "expected ReplacementChoice at each iteration"
             );
-            let group = &state
-                .active_change_zone_frame()
-                .and_then(|frame| frame.pending.as_ref())
+            // R4c: the staged ChangeZone owner IS the logical owner; all three
+            // members are consulted before any delivery, so the group is
+            // retained with its announced members and no delivery occurrence
+            // yet. The retained-owner property (not the legacy delivery-drain
+            // occurrence count) is what this row guards.
+            let group = &staged_change_zone(&state)
                 .expect("each pending replacement choice retains the logical owner")
                 .logical_zone_change_group;
             assert_eq!(
                 group.all_origin_occurrences.len(),
-                expected_retained_occurrences,
-                "each re-pause must retain exactly the completed delivery segments"
+                0,
+                "consultation pauses precede every delivery"
             );
             let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
                 .expect("decline shock");
@@ -15351,7 +16400,11 @@ mod tests {
 
         // Each shock pauses on its `Moved` replacement; decline (index 1) so it
         // still enters the battlefield (tapped) — i.e. it reaches the destination.
+        // CR 101.4c: the sweep consulted all three, and P0 orders
+        // its held decisions (announcement order) while two or more remain.
+        let mut held = vec![s1, s2, s3];
         for _ in 0..3 {
+            publish_next_held_decision(&mut state, PlayerId(0), &mut held);
             assert!(
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "expected a ReplacementChoice pause for each member"
@@ -15450,46 +16503,28 @@ mod tests {
         );
         ability.sub_ability = Some(Box::new(create_tokens));
 
-        // Pause the ChangeZone on the first returned card's replacement through
-        // the production chain resolver. It places the chained token instruction
-        // beneath the active ChangeZone frame, so the ChangeZone owns every
-        // replacement resume before its "that many" consumer can run.
+        // Resolve the production chain. The "that many" consumer must wait
+        // until the staged returns finish, including across a save.
         let mut events = Vec::new();
         crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        // CR 101.4c: the sweep consulted all three returns and P0
+        // holds every decision; P0 makes them in announcement order, choosing
+        // the order while two or more remain.
+        let mut held = vec![s1, s2, s3];
+        publish_next_held_decision(&mut state, PlayerId(0), &mut held);
         assert!(
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
             "first returned card must pause on its replacement"
         );
-        assert_eq!(
-            state
-                .resolution_stack
-                .iter()
-                .map(crate::types::resolution::ResolutionFrame::kind)
-                .collect::<Vec<_>>(),
-            vec![
-                crate::types::resolution::FrameKind::AbilityContinuation,
-                crate::types::resolution::FrameKind::ChangeZone,
-            ],
-            "the continuation must remain the ChangeZone frame's immediate parent"
-        );
 
         // Persist the real prompt boundary through the v2 frames-only wire.
-        // Both the complete ChangeZone owner and its immediate parent
-        // continuation must survive without reintroducing either legacy runtime
-        // field onto `GameState`.
+        // The wire must carry the paused chain without reintroducing legacy
+        // ChangeZone runtime fields onto `GameState`.
         let wire = crate::types::resolution::ResolutionStateWire::from_game_state(state);
         let v2 = serde_json::to_value(&wire).expect("ChangeZone prompt serializes as v2");
         assert!(v2.get("resolution_stack").is_none());
         assert!(v2.get("pending_change_zone_iteration").is_none());
         assert!(v2.get("devour_eligible_snapshot").is_none());
-        assert_eq!(
-            v2["resolution_frames"]["frames"]
-                .as_array()
-                .expect("v2 resolution stack exposes its frames array")
-                .len(),
-            2,
-            "the real prompt retains exactly its parent continuation and ChangeZone owner"
-        );
         let wire: crate::types::resolution::ResolutionStateWire =
             serde_json::from_value(v2).expect("v2 ChangeZone prompt deserializes");
         state = wire.into_game_state();
@@ -15497,24 +16532,28 @@ mod tests {
             state.waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ));
-        assert_eq!(
+        let plant_count = |state: &GameState| {
             state
-                .resolution_stack
-                .iter()
-                .map(crate::types::resolution::ResolutionFrame::kind)
-                .collect::<Vec<_>>(),
-            vec![
-                crate::types::resolution::FrameKind::AbilityContinuation,
-                crate::types::resolution::FrameKind::ChangeZone,
-            ],
-            "v2 restore preserves the exact continuation/ChangeZone frame nesting"
-        );
+                .objects
+                .values()
+                .filter(|o| o.name == "Plant" && o.zone == Zone::Battlefield)
+                .count()
+        };
 
         // Decline each replacement; each returned card still enters (tapped).
-        for _ in 0..3 {
+        // The first decision was published before the save.
+        for answered in 0..3 {
+            if answered > 0 {
+                publish_next_held_decision(&mut state, PlayerId(0), &mut held);
+            }
             assert!(
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "expected a ReplacementChoice pause per returned member"
+            );
+            assert_eq!(
+                plant_count(&state),
+                0,
+                "the batch still has a pending return"
             );
             let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
                 .expect("decline shock");
@@ -15524,11 +16563,7 @@ mod tests {
         // iteration completed and stamped the count, so it created one token per
         // returned card. Pre-fix (continuation drained before the iteration) it
         // would have read a stale count and created the wrong number.
-        let plant_tokens = state
-            .objects
-            .values()
-            .filter(|o| o.name == "Plant" && o.zone == Zone::Battlefield)
-            .count();
+        let plant_tokens = plant_count(&state);
         assert_eq!(
             plant_tokens, 3,
             "create-that-many must see the full post-resume moved count (3), not the stale pre-pause count"
@@ -15540,6 +16575,13 @@ mod tests {
     /// for untargeted "put X cards from your hand onto the battlefield"
     /// patterns must also resume after a per-permanent replacement choice
     /// pauses the loop.
+    ///
+    /// R4c C6b/C6c: with the producing ability's continuation parked (as a
+    /// real prompt always has one), the selection publishes the tracked set
+    /// before the pause without writing the moved-object ledger, and the
+    /// paused `ChoiceSelected` completion counts arrivals (2 of 3 chosen; the
+    /// third is redirected to exile) and stamps that arrival count onto the
+    /// chained consumer.
     #[test]
     fn effect_zone_choice_multi_card_with_replacement_choice_processes_all_chosen() {
         use crate::game::engine::apply_as_current;
@@ -15631,6 +16673,41 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Land);
+        // C6c discriminator: the third chosen card is chosen but never arrives.
+        // A mandatory `Moved` replacement redirects its battlefield entry to
+        // exile, so `ChoiceSelected` must count the two arrivals and NOT
+        // `chosen.len()` (3).
+        state
+            .objects
+            .get_mut(&graveyard_land)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .mode(ReplacementMode::Mandatory)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::SelfRef,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    )),
+            );
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
 
@@ -15666,7 +16743,34 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
+
+        // A real `EffectZoneChoice` prompt is raised while the producing
+        // ability's continuation is parked, and the selection publishes the
+        // tracked set only for an active continuation
+        // (`engine_resolution_choices.rs:9274`). Park the directly constructed
+        // tracked-set consumer from the plan's C6b row so the publication path
+        // runs and the completed choice can stamp its arrival count onto it.
+        state.push_ability_continuation(crate::types::resolution::AbilityContinuationFrame {
+            pending: crate::types::game_state::PendingContinuation::new(
+                Box::new(ResolvedAbility::new(
+                    Effect::CompletePlayerAction {
+                        parent_kind: EffectKind::PutCounter,
+                        action: crate::types::events::PlayerActionKind::AcceptedOptionalEffect,
+                        required_result: crate::types::ability::EffectResolutionResult {
+                            cause: ThisWayCause::Returned,
+                            count: 2,
+                        },
+                    },
+                    Vec::new(),
+                    ObjectId(100),
+                    PlayerId(0),
+                )),
+                &state,
+            ),
+            choose_zone_trigger_context: None,
+        });
 
         let _ = apply_as_current(
             &mut state,
@@ -15676,6 +16780,29 @@ mod tests {
         )
         .expect("select all three cards");
 
+        // C6b: the pre-pause tracked set is published at selection and the
+        // moved-object ledger is NOT written from the selected ids.
+        let tracked = state
+            .chain_tracked_set_id
+            .expect("selection publishes the tracked set before the pause");
+        let published = state
+            .tracked_object_sets
+            .get(&tracked)
+            .expect("the published set is retained");
+        for chosen in [shock_a, shock_b, graveyard_land] {
+            assert!(
+                published.contains(&chosen),
+                "the pre-pause tracked set holds every chosen card"
+            );
+            assert!(
+                !state.last_zone_changed_ids.contains(&chosen),
+                "the moved ledger is not written from the selection"
+            );
+        }
+        // CR 101.4c: the sweep consulted all three chosen cards (the land's
+        // mandatory redirect needs no choice); P0 holds both shocks' decisions
+        // and makes shock_a's first (announcement order).
+        answer_decision_order(&mut state, PlayerId(0), &[shock_a, shock_b], shock_a);
         // First shock prompts; decline it (index 1 → tap).
         assert!(
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
@@ -15692,13 +16819,130 @@ mod tests {
             "second shock must prompt via resume, got {:?}",
             state.waiting_for
         );
-        let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+        let resumed = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
             .expect("decline second hand shock");
 
         assert_eq!(state.objects[&shock_a].zone, Zone::Battlefield);
         assert_eq!(state.objects[&shock_b].zone, Zone::Battlefield);
-        assert_eq!(state.objects[&graveyard_land].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&graveyard_land].zone,
+            Zone::Exile,
+            "the redirecting replacement keeps the chosen land out of the destination"
+        );
         assert!(state.active_change_zone_frame().is_none());
+        // C6c: the paused `ChoiceSelected` completion counts arrivals among the
+        // chosen cards, so the redirected land is excluded: 2, not
+        // `chosen.len()` (3).
+        assert_eq!(
+            state.last_effect_count,
+            Some(2),
+            "the paused ChoiceSelected policy counts arrivals among the chosen"
+        );
+        // The completion's this-way stamp uses that same arrival count: the
+        // chained consumer requires `{Returned, 2}`, so it publishes exactly
+        // once. A `chosen.len()` stamp (3) would satisfy nothing and drop it.
+        assert_eq!(
+            resumed
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    crate::types::events::GameEvent::PlayerPerformedAction {
+                        action: crate::types::events::PlayerActionKind::AcceptedOptionalEffect,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "the chained consumer fires once from the arrival-count stamp"
+        );
+        assert_eq!(
+            resumed
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    crate::types::events::GameEvent::EffectResolved {
+                        kind: EffectKind::ChangeZone,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "the staged choice family emits one ChangeZone resolution"
+        );
+    }
+
+    /// C10 (this-way stamp): the staged `ChangeZonePopulationSettled` completion
+    /// stamps the arrival count onto an active `CompletePlayerAction`
+    /// continuation. This is a bounded structural unit: the Vengeful
+    /// Regrowth/Rise fixtures carry no such continuation, so
+    /// `stamp_active_player_action_completion` is a production no-op there.
+    #[test]
+    fn staged_change_zone_completion_stamps_the_complete_player_action_arrival_count() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(9_900);
+        let required = EffectResolutionResult {
+            cause: ThisWayCause::Returned,
+            count: 3,
+        };
+        let chain = ResolvedAbility::new(
+            Effect::CompletePlayerAction {
+                parent_kind: EffectKind::ChangeZone,
+                action: crate::types::events::PlayerActionKind::AcceptedOptionalEffect,
+                required_result: required,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        state.push_ability_continuation(AbilityContinuationFrame {
+            pending: PendingContinuation::new(Box::new(chain), &state),
+            choose_zone_trigger_context: None,
+        });
+
+        let completion = BatchCompletion::ChangeZonePopulationSettled {
+            tail: Box::new(ChangeZoneBatchTail {
+                group_id: crate::types::identifiers::LogicalZoneChangeGroupId(1),
+                effect_kind: EffectKind::ChangeZone,
+                source_id: source,
+                controller: PlayerId(0),
+                destination: Zone::Battlefield,
+                count: ChangeZoneCountPolicy::MassAllMembers,
+                pending_return_result_producer: None,
+                own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
+                entry_collector: Default::default(),
+                arrangement: ChangeZoneArrangementPlan::OrdinaryDelivery,
+            }),
+            settled: Some(ChangeZoneSettled {
+                policy_count: 3,
+                arrival_count: 3,
+                records: vec![],
+            }),
+        };
+        let mut events = Vec::new();
+        let _ = crate::game::engine_resolution_choices::run_batch_completion(
+            &mut state,
+            completion,
+            &mut events,
+        );
+
+        assert_eq!(
+            state
+                .active_ability_continuation()
+                .expect("the completion leaves the continuation active")
+                .chain
+                .context
+                .prior_effect_result,
+            Some(required),
+            "the settled arrival count is stamped onto the CompletePlayerAction node"
+        );
+        assert!(
+            crate::game::effects::complete_player_action::succeeded(
+                &state.active_ability_continuation().unwrap().chain
+            ),
+            "the stamped result satisfies the continuation's requirement"
+        );
     }
 
     /// CR 110.2a: Only `ControllerRef::You` is supported at runtime today.
@@ -16682,5 +17926,91 @@ mod exile_card_population_tests {
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
+    }
+
+    /// CR 730.2: the origin scan selects the merged permanent once, not the
+    /// absorbed rider as another creature.
+    #[test]
+    fn resolve_all_scan_skips_absorbed_merge_components() {
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        let host = scenario.add_creature(P0, "Host", 2, 2).id();
+        let rider = scenario.add_creature_to_hand(P0, "Rider", 3, 3).id();
+        let mut runner = scenario.build();
+        crate::game::merge::merge_object_onto(
+            runner.state_mut(),
+            rider,
+            host,
+            crate::game::merge::MergeSide::Bottom,
+            &mut Vec::new(),
+        );
+        let mut ability = change_zone_all(
+            Zone::Battlefield,
+            Zone::Library,
+            TargetFilter::Typed(TypedFilter::creature()),
+        );
+        if let Effect::ChangeZoneAll {
+            library_position, ..
+        } = &mut ability.effect
+        {
+            *library_position = Some(LibraryPosition::Bottom);
+        }
+        resolve_all(runner.state_mut(), &ability, &mut Vec::new()).unwrap();
+        assert!(
+            matches!(
+                &runner.state().waiting_for,
+                WaitingFor::DigRestSplitChoice { cards, .. } if cards.len() == 2
+                    && cards.contains(&host) && cards.contains(&rider)
+            ),
+            "a lone merged permanent uses its component prompt, never the mass owner prompt"
+        );
+    }
+
+    /// CR 730.3c + CR 111.8 + CR 704.5d (U3, the B3 routed-zone row): the zone
+    /// projection scans the zones of what the reader's predicate accepts. The
+    /// token-topped survivor was sacrificed and ceased (state-based action), so
+    /// the one member of the set no longer exists; its component sits in the
+    /// graveyard. With the resolution's provenance the reader finds the
+    /// component and routes to `[Graveyard]`; with no reader (E3), or without a
+    /// finding, no member is live and there is nothing to route.
+    ///
+    /// Nearest printed card: Worlds Within Worlds ("Exile all creatures. Each
+    /// player may put any number of creature cards from their hand onto the
+    /// battlefield. Then put all cards exiled this way into their owners' hands.
+    /// Exile Worlds Within Worlds."), whose own cause-bound read cannot show the
+    /// finding. SYNTHETIC: the merge, the sacrifice and the carrier are staged by
+    /// hand.
+    #[test]
+    fn tracked_set_member_zones_routes_to_the_component_of_a_ceased_token_survivor() {
+        use crate::game::merge_tests::finding::{
+            departed_merged, install_chain, reader_effect, sacrifice_effect,
+        };
+        use crate::types::identifiers::TrackedSetId;
+        let mut d = departed_merged(true);
+        let mut events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut d.state, &mut events);
+        assert!(
+            !d.state.objects.contains_key(&d.host),
+            "reach guard: the token survivor ceased to exist"
+        );
+        assert_eq!(
+            d.state.objects[&d.rider].zone,
+            Zone::Graveyard,
+            "reach guard: the component is in the graveyard"
+        );
+        let reader = install_chain(&mut d.state, vec![sacrifice_effect(), reader_effect()]);
+        let filter = TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        };
+
+        assert_eq!(
+            tracked_set_member_zones(&d.state, &filter, None),
+            None,
+            "E3: no reader, no live member, nothing to route"
+        );
+        assert_eq!(
+            tracked_set_member_zones(&d.state, &filter, Some(&reader)),
+            Some(vec![Zone::Graveyard]),
+            "the reader finds the component and routes to its zone"
+        );
     }
 }

@@ -250,12 +250,20 @@ pub fn resolve(
         let effective_filter =
             crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
         let ctx = crate::game::filter::FilterContext::from_ability(ability);
+        // CR 730.3c: the members, then the components this reader finds (D2, D7, D4);
+        // the library retain below keeps the reader's own zone scope.
         let candidate_ids: Vec<ObjectId> = match &effective_filter {
-            TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => state
-                .tracked_object_sets
-                .get(id)
-                .cloned()
-                .unwrap_or_default(),
+            TargetFilter::TrackedSet { id } => {
+                crate::game::merge::tracked_set_found_objects(state, *id, Some(ability), None)
+            }
+            TargetFilter::TrackedSetFiltered { id, caused_by, .. } => {
+                crate::game::merge::tracked_set_found_objects(
+                    state,
+                    *id,
+                    Some(ability),
+                    caused_by.as_ref(),
+                )
+            }
             _ => state.objects.keys().copied().collect(),
         };
         collected_targets = candidate_ids
@@ -416,6 +424,7 @@ pub fn resolve(
                 is_cost_payment: false,
                 enters_modified_if: None,
                 duration: None,
+                privacy_zones: None,
             };
             return Ok(());
         }
@@ -504,6 +513,7 @@ pub fn resolve(
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         return Ok(());
     }

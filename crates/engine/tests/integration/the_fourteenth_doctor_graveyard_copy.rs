@@ -28,12 +28,7 @@ fn cluster_100_db() -> &'static engine::database::card_db::CardDatabase {
     static DB: std::sync::OnceLock<engine::database::card_db::CardDatabase> =
         std::sync::OnceLock::new();
     DB.get_or_init(|| {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/integration_cards.json.gz");
-        let file = std::fs::File::open(path).expect("fixture must open");
-        let reader = std::io::BufReader::new(file);
-        let decoder = flate2::read::GzDecoder::new(reader);
-        engine::database::card_db::CardDatabase::from_export_reader(decoder)
+        engine::database::card_db::CardDatabase::from_integration_fixture()
             .expect("fixture must load")
     })
 }

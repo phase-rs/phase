@@ -1621,6 +1621,10 @@ fn apply_action_boundary_core(
     // The paused token clause this action begins with (if any): it is fed this
     // action's whole buffer at the end of the core, after the follow-up below.
     let token_clause_at_start = super::engine_replacement::paused_token_clause_source(state);
+    // CR 510.2: whether this action answers a parked combat damage batch's choice.
+    // The reducer fills a fresh `ActionResult`, so its events begin at index 0.
+    let parked_combat_damage_answer =
+        super::combat_damage::ParkedCombatDamageAnswer::begin(state, 0);
     let mut result = match if payment_transaction::owns_action(state, &action) {
         // All staged-payment actions enter through this admission point. The
         // authenticated actor is recorded for deterministic replay; the
@@ -1766,20 +1770,52 @@ fn apply_action_boundary_core(
     // `run_post_action_pipeline` — one of the reducer arms that builds an `ActionResult` straight
     // out of the match. Converge those onto the same
     // pipeline the rest of the reducer uses, scanning ONLY the slice this realization appended, so
-    // a handler that already settled its own events (`handle_opponent_may_choice`, which collects
-    // into `deferred_triggers` without recording them in `consumed_before_priority_trigger_events`)
-    // cannot have them collected a second time. Inert on every other route: the flush returns
+    // a handler that already settled its own events (`handle_opponent_may_choice`, whose settled
+    // branch collects into `deferred_triggers` without recording them in
+    // `consumed_before_priority_trigger_events`) cannot have them collected a second time. While a
+    // combat damage batch is parked that handler collects nothing inline
+    // (`announcement_triggers::take_inline_trigger_span`) and drains nothing
+    // (`triggers::can_drain_deferred_triggers`); the convergence first in the block below folds its
+    // events into the batch instead (CR 510.2). Inert on every other route: the flush returns
     // `false` when nothing was parked or an earlier convergence point already consumed it
     // (`Option::take_if`).
     // CR 104.3a: a concession's follow-up that fails stops here; finalization
     // publishes the committed departure (`reject_or_publish_departure`).
-    let follow_up_failure = 'follow_up: {
-        let scan_from = result.events.len();
-        // CR 601.2h + CR 602.2b + CR 605.3b: a parked counter-cost root's subtree is
-        // finished and the root resumed before the action returns; when that made
-        // progress, its events join the convergence pass below.
-        let resumed_parked_root =
-            match resume_parked_counter_cost_root_at_action_boundary(
+    let follow_up_failure =
+        'follow_up: {
+            let scan_from = result.events.len();
+            // CR 510.2 + CR 510.3a + CR 603.3b: a direct-return answer to a parked
+            // combat damage batch's choice (`handle_opponent_may_choice`, a
+            // concession) finishes the batch here, or hands it its events; when the
+            // batch completed under a priority window, its events join the
+            // convergence pass below. Inert when the reducer already converged it.
+            let resumed_combat_damage = match resume_parked_combat_damage_at_action_boundary(
+                state,
+                parked_combat_damage_answer,
+                &result.waiting_for,
+                &mut result.events,
+            ) {
+                Ok(Some(waiting_for)) => {
+                    result.waiting_for = waiting_for;
+                    true
+                }
+                Ok(None) => false,
+                Err(err) => {
+                    if committed_departure.is_some() {
+                        break 'follow_up Some(err);
+                    }
+                    let failure = boundary_life_change_failure(state);
+                    lifecycle.discard();
+                    *state = cast_undo_boundary.restore(boundary_snapshot);
+                    return Err(failure.map_or(err, |player| {
+                        EngineError::LifeChangeUnrepresentable { player }
+                    }));
+                }
+            };
+            // CR 601.2h + CR 602.2b + CR 605.3b: a parked counter-cost root's subtree is
+            // finished and the root resumed before the action returns; when that made
+            // progress, its events join the convergence pass below.
+            let resumed_parked_root = match resume_parked_counter_cost_root_at_action_boundary(
                 state,
                 &result.waiting_for,
                 &mut result.events,
@@ -1801,96 +1837,99 @@ fn apply_action_boundary_core(
                     }));
                 }
             };
-        // CR 800.4a + CR 616.1 + CR 117.2e: a concession that left a parked unless
-        // payment without its prompt, or with a prompt that no longer describes its
-        // event, is reconciled before the action returns. A payment that ended joins
-        // the convergence pass below.
-        let reconciled_unless_payment = match reconcile_parked_unless_payment_after_departure(
-            state,
-            committed_departure.as_ref(),
-            &mut result,
-            scan_from,
-        ) {
-            Ok(moved) => moved,
-            Err(err) => break 'follow_up Some(err),
-        };
-        // CR 800.4b + CR 608.2f + CR 616.1: a concession that left a parked
-        // token-creation replacement without its chooser or substitute
-        // decider is reconciled before the action returns. A park that
-        // re-proposed to a survivor prompt stands; one that settled joins
-        // the convergence pass below.
-        let reconciled_token_replacement = match reconcile_parked_token_replacement_after_departure(
-            state,
-            committed_departure.as_ref(),
-            &mut result,
-            scan_from,
-        ) {
-            Ok(moved) => moved,
-            Err(err) => break 'follow_up Some(err),
-        };
-        let realized_token_entry =
-            effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
-        // CR 603.6a + CR 603.3b: the same convergence for entries of a completed
-        // entering instruction still held by `triggers::settle_entry_batch_scan`:
-        // a handler that settled without reaching the pipeline has not had them
-        // checked, and they are checked before any player receives priority.
-        let settled_entry_batch = settled_entry_batch_is_due(state, &result);
-        // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
-        // completed on a route that never reached the pipeline (a spell cast during
-        // a resolution, CR 608.2g, finishes its announcement here): the resolving
-        // instant or sorcery still owes its final part — leaving the stack — and the
-        // pipeline's top runs it (`run_spell_final_part_if_due`) and collects its
-        // triggers. A token realization and an owed final part on the same action
-        // share one pass.
-        let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
-        // CR 603.3 + CR 603.6d: a direct-return handler (`handle_tribute_choice`) that
-        // settled an as-enters continuation runs no pipeline of its own, so the parked
-        // entry is released by this convergence pass, the action's first, ahead of its
-        // SBA check.
-        let settled_entry_continuation_is_parked =
-            matches!(result.waiting_for, WaitingFor::Priority { .. })
-                && !state.deferred_entry_events.is_empty();
-        if ((resumed_parked_root || reconciled_unless_payment || reconciled_token_replacement)
-            && matches!(result.waiting_for, WaitingFor::Priority { .. }))
-            || realized_token_entry
-            || settled_entry_batch
-            || owed_spell_final_part_is_due
-            || settled_entry_continuation_is_parked
-        {
-            if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
-                if committed_departure.is_some() {
-                    break 'follow_up Some(err);
+            // CR 800.4a + CR 616.1 + CR 117.2e: a concession that left a parked unless
+            // payment without its prompt, or with a prompt that no longer describes its
+            // event, is reconciled before the action returns. A payment that ended joins
+            // the convergence pass below.
+            let reconciled_unless_payment = match reconcile_parked_unless_payment_after_departure(
+                state,
+                committed_departure.as_ref(),
+                &mut result,
+                scan_from,
+            ) {
+                Ok(moved) => moved,
+                Err(err) => break 'follow_up Some(err),
+            };
+            // CR 800.4b + CR 608.2f + CR 616.1: a concession that left a parked
+            // token-creation replacement without its chooser or substitute
+            // decider is reconciled before the action returns. A park that
+            // re-proposed to a survivor prompt stands; one that settled joins
+            // the convergence pass below.
+            let reconciled_token_replacement =
+                match reconcile_parked_token_replacement_after_departure(
+                    state,
+                    committed_departure.as_ref(),
+                    &mut result,
+                    scan_from,
+                ) {
+                    Ok(moved) => moved,
+                    Err(err) => break 'follow_up Some(err),
+                };
+            let realized_token_entry =
+                effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
+            // CR 603.6a + CR 603.3b: the same convergence for entries of a completed
+            // entering instruction still held by `triggers::settle_entry_batch_scan`:
+            // a handler that settled without reaching the pipeline has not had them
+            // checked, and they are checked before any player receives priority.
+            let settled_entry_batch = settled_entry_batch_is_due(state, &result);
+            // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
+            // completed on a route that never reached the pipeline (a spell cast during
+            // a resolution, CR 608.2g, finishes its announcement here): the resolving
+            // instant or sorcery still owes its final part — leaving the stack — and the
+            // pipeline's top runs it (`run_spell_final_part_if_due`) and collects its
+            // triggers. A token realization and an owed final part on the same action
+            // share one pass.
+            let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
+            // CR 603.3 + CR 603.6d: a direct-return handler (`handle_tribute_choice`) that
+            // settled an as-enters continuation runs no pipeline of its own, so the parked
+            // entry is released by this convergence pass, the action's first, ahead of its
+            // SBA check.
+            let settled_entry_continuation_is_parked =
+                matches!(result.waiting_for, WaitingFor::Priority { .. })
+                    && !state.deferred_entry_events.is_empty();
+            if ((resumed_combat_damage
+                || resumed_parked_root
+                || reconciled_unless_payment
+                || reconciled_token_replacement)
+                && matches!(result.waiting_for, WaitingFor::Priority { .. }))
+                || realized_token_entry
+                || settled_entry_batch
+                || owed_spell_final_part_is_due
+                || settled_entry_continuation_is_parked
+            {
+                if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
+                    if committed_departure.is_some() {
+                        break 'follow_up Some(err);
+                    }
+                    let failure = boundary_life_change_failure(state);
+                    lifecycle.discard();
+                    *state = cast_undo_boundary.restore(boundary_snapshot);
+                    return Err(failure.map_or(err, |player| {
+                        EngineError::LifeChangeUnrepresentable { player }
+                    }));
                 }
-                let failure = boundary_life_change_failure(state);
+            }
+            // CR 603.2 + CR 603.3: events this action emitted while the announcement
+            // stays paused are staged into its carrier; a spell's carrier returns to
+            // whichever owner now holds the announcement. A reducer arm can return a
+            // prompt carrying the announcement without having written it to the state
+            // yet, so the result's wait is the one the custody authority inspects; the
+            // state's own wait is left exactly as the reducer left it.
+            let reducer_wait =
+                std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
+            super::announcement_triggers::end_action(state, &result.events);
+            result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
+            if let Some(player) = boundary_life_change_failure(state) {
+                let error = EngineError::LifeChangeUnrepresentable { player };
+                if committed_departure.is_some() {
+                    break 'follow_up Some(error);
+                }
                 lifecycle.discard();
                 *state = cast_undo_boundary.restore(boundary_snapshot);
-                return Err(
-                    failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                        player,
-                    }),
-                );
+                return Err(error);
             }
-        }
-        // CR 603.2 + CR 603.3: events this action emitted while the announcement
-        // stays paused are staged into its carrier; a spell's carrier returns to
-        // whichever owner now holds the announcement. A reducer arm can return a
-        // prompt carrying the announcement without having written it to the state
-        // yet, so the result's wait is the one the custody authority inspects; the
-        // state's own wait is left exactly as the reducer left it.
-        let reducer_wait = std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
-        super::announcement_triggers::end_action(state, &result.events);
-        result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
-        if let Some(player) = boundary_life_change_failure(state) {
-            let error = EngineError::LifeChangeUnrepresentable { player };
-            if committed_departure.is_some() {
-                break 'follow_up Some(error);
-            }
-            lifecycle.discard();
-            *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(error);
-        }
-        None
-    };
+            None
+        };
     // A paused simultaneous token clause owns every later action's events until
     // it finishes, whatever the action answered; the follow-up above can still
     // realize its token entries, so this runs after it.
@@ -1990,6 +2029,95 @@ fn resume_parked_counter_cost_root_at_action_boundary(
         );
     }
     Ok(progressed.then(|| state.waiting_for.clone()))
+}
+
+/// CR 510.2 + CR 510.3a + CR 603.3b: the action-boundary convergence for a
+/// combat damage batch parked on a choice. No player has the chance to cast
+/// spells or activate abilities between the time combat damage is assigned and
+/// the time it's dealt, so an answer that settles to a priority window does not
+/// hand anyone priority: the batch finishes in the answering action, whichever
+/// handler took the answer (a zone choice, an optional effect, an opponent's
+/// "may", a concession). An answer that leaves the batch parked on its next
+/// choice hands the batch its events instead (fold-only), so their triggers join
+/// the combat damage step's one placement.
+///
+/// `answer` is `Some` only when the batch was parked as the action began
+/// ([`super::combat_damage::ParkedCombatDamageAnswer::begin`]). `Some` is returned when
+/// the batch moved (it completed, or its answer's wait changed); the caller then
+/// adopts that wait. Inert with nothing parked, so a boundary reached after
+/// `handle_replacement_choice`'s own resume, or a second boundary over the same
+/// action, changes nothing (the fold-only claims what it folds).
+///
+/// CR 800.4j: the same holds after the active player left the game (a surviving
+/// chooser answers after that player's concession): the batch finishes in the
+/// answering action, and its completed batch's priority window goes to the next
+/// player in turn order still in the game (`living_priority_seat`, from
+/// `combat_damage::resume_pending_combat_lifelink`). CR 800.4a: a next prompt the
+/// batch's resume raises is surfaced only when its acting player is still in the
+/// game, the test `turns::auto_advance_once` applies to the same resume.
+fn resume_parked_combat_damage_at_action_boundary(
+    state: &mut GameState,
+    answer: Option<super::combat_damage::ParkedCombatDamageAnswer>,
+    waiting_for: &WaitingFor,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let Some(answer) = answer else {
+        return Ok(None);
+    };
+    if !state.combat_damage_batch_parked() {
+        return Ok(None);
+    }
+    let returned_priority = matches!(waiting_for, WaitingFor::Priority { .. });
+    if returned_priority && state.game_end.is_none() {
+        sync_waiting_for(state, waiting_for);
+        resume_pending_continuation_if_priority(state, events)?;
+    }
+    // CR 104.1 + CR 510.2: a game that ends during an answer ends the entire
+    // combat damage batch immediately. Keep the answer's events in its buffer.
+    if state.game_end.is_some() {
+        state.pending_combat_lifelink = None;
+        state
+            .pending_damage_post_loss
+            .take_if(|stashed| stashed.is_combat);
+        state
+            .pending_damage_post_counter
+            .take_if(|stashed| stashed.is_combat);
+        super::elimination::ensure_game_over_if_terminal(state, events);
+        return Ok(Some(state.waiting_for.clone()));
+    }
+    if !state.combat_damage_batch_parked() {
+        // The continuation's own drain finished the batch.
+        return Ok(Some(state.waiting_for.clone()));
+    }
+    if !returned_priority || !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        // The answer or continuation stopped at its next choice.
+        super::combat_damage::hold_parked_combat_damage_answer_events(state, answer, events);
+        return Ok(returned_priority.then(|| state.waiting_for.clone()));
+    }
+    let resumed = super::combat_damage::resume_pending_combat_lifelink(
+        state,
+        answer.action_event_start(),
+        None,
+        events,
+    )
+    .unwrap_or_else(|| state.waiting_for.clone());
+    // CR 800.4a: a prompt naming a seat that left the game cannot be answered, so
+    // it is not surfaced; the priority window goes to the next player in turn
+    // order still in the game (CR 800.4j), and `resolve_combat_damage`'s re-entry
+    // guard finishes the batch from priority.rs's completeness gate.
+    // `acting_player()` is `None` for `GameOver`, which is terminal and surfaced.
+    let resumed = if resumed
+        .acting_player()
+        .is_some_and(|player| !super::players::is_alive(state, player))
+    {
+        WaitingFor::Priority {
+            player: living_priority_seat(state),
+        }
+    } else {
+        resumed
+    };
+    state.waiting_for = resumed.clone();
+    Ok(Some(resumed))
 }
 
 /// CR 800.4a + CR 616.1 + CR 117.2e: the concession-boundary reconciliation of
@@ -3071,6 +3199,13 @@ fn finish_action_boundary_with_lifecycle(
             EngineError::LifeChangeUnrepresentable { player },
         );
     }
+    // This transient, nonserialized producer-tail anchor expires at the first
+    // action boundary at the latest; depth-zero ability-chain exit retires it
+    // earlier for direct chains. Clearing here is retirement, not leak detection.
+    // In-action behavior is covered by devour_co_entry_regression's
+    // twilights_call_two_devourers_one_fodder_keeps_producer_tail_below_batch
+    // and twilights_call_two_devourers_under_censor_each_order_then_devour.
+    state.staged_population_parent = None;
     #[cfg(debug_assertions)]
     super::perf_counters::outside_take_cost(|| debug_assert_runtime_resolution_invariants(state));
     let lifecycle_facts = if reversed {
@@ -3141,9 +3276,9 @@ fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
     }
 }
 
-/// CR 117.2e + CR 608.2c + CR 117.5: finish a resolution whose current pause a
-/// player's departure canceled (`elimination::DepartureResume`), then settle it
-/// as any action that completed one: the owed final part (CR 608.2n),
+/// CR 117.2e + CR 608.2c + CR 117.5: finish a resolution that a player's
+/// departure left unsettled (`elimination::DepartureResume::ResolutionTail`),
+/// then settle it as any action that completed one: the owed final part (CR 608.2n),
 /// state-based actions (CR 704.3), then the queued triggered abilities. The
 /// pipeline scans `events[scan_from..]` and skips every occurrence the departure
 /// already claimed (the departure collects its own triggers once, against the
@@ -3208,9 +3343,13 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     // owned by a resolution keep the net. CR 117.2e + CR 121.4: one exception is
     // a parked unless payment of draws: a draw from an empty library loses at the
     // next priority, after the payment's later replacement prompts.
+    // CR 510.2 + CR 704.3: a parked combat damage batch is not a point where a
+    // player would receive priority; its state-based actions are checked once it
+    // completes.
     if sba::has_pending_player_loss_sba(state)
         && !state.withholds_priority()
         && !engine_payment_choices::draw_payment_is_parked(state)
+        && !state.combat_damage_batch_parked()
     {
         // CR 117.2e: the loss may cancel the current pause of a resolution
         // that is still under way (its chooser left). This net applies the
@@ -3221,7 +3360,7 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
         // `departure_start` takes only what happened after it.
         let departure_start = result.events.len();
         match sba::check_state_based_actions_reporting_departure(state, &mut result.events) {
-            super::elimination::DepartureResume::ParkedZoneChangeTail => {
+            super::elimination::DepartureResume::ResolutionTail => {
                 settle_resolution_resumed_after_departure(
                     state,
                     &mut result.events,
@@ -7359,8 +7498,11 @@ fn materialize_object_growth_shortcut(
     result.waiting_for = state.waiting_for.clone();
 }
 
-/// Appends one committed repetition of a taken shortcut, opened by its marker.
+/// Appends one committed repetition of a taken shortcut, opened by its marker, and retires the
+/// action-scoped journal entries it recorded from `journal_start` on (CR 732.1b).
 fn commit_repetition(
+    state: &mut GameState,
+    journal_start: usize,
     events: &mut Vec<GameEvent>,
     controller: PlayerId,
     repetition: u32,
@@ -7371,6 +7513,7 @@ fn commit_repetition(
         repetition,
     });
     events.append(cycle);
+    state.retire_repetition_journal(journal_start);
 }
 
 /// CR 732.1b: the shortcut's result is the board; the record keeps the first and last repetition,
@@ -7452,6 +7595,7 @@ pub(crate) fn drive_persistent_axis_collapse(
         take_cost.begin_cycle();
         reseed(state);
         let before = predicted.map(|_| state.clone());
+        let journal_start = state.resolved_rules_journal.entries().len();
         let mut cycle_events = Vec::new();
         let ended = super::period_confirm::perform_cycle(
             state,
@@ -7475,7 +7619,14 @@ pub(crate) fn drive_persistent_axis_collapse(
         let verdict = repetition_verdict(&ended, departure);
         if predicted.is_some() && verdict == RepetitionVerdict::Ended {
             delivered += 1;
-            commit_repetition(events, controller, delivered, &mut cycle_events);
+            commit_repetition(
+                state,
+                journal_start,
+                events,
+                controller,
+                delivered,
+                &mut cycle_events,
+            );
             #[cfg(feature = "test-support")]
             take_cost.end_cycle();
             break;
@@ -7492,6 +7643,7 @@ pub(crate) fn drive_persistent_axis_collapse(
             delivered = 0;
             for k in 0..prefix {
                 reseed(state);
+                let journal_start = state.resolved_rules_journal.entries().len();
                 let mut cycle_events = Vec::new();
                 match super::period_confirm::perform_cycle(
                     state,
@@ -7502,7 +7654,14 @@ pub(crate) fn drive_persistent_axis_collapse(
                 ) {
                     CycleEnd::CameRound => {
                         delivered += 1;
-                        commit_repetition(events, controller, delivered, &mut cycle_events);
+                        commit_repetition(
+                            state,
+                            journal_start,
+                            events,
+                            controller,
+                            delivered,
+                            &mut cycle_events,
+                        );
                     }
                     CycleEnd::Refused(OfferRefusal::LifeChangeUnrepresentable { player }) => {
                         *state = snapshot;
@@ -7518,7 +7677,14 @@ pub(crate) fn drive_persistent_axis_collapse(
             break;
         }
         delivered += 1;
-        commit_repetition(events, controller, delivered, &mut cycle_events);
+        commit_repetition(
+            state,
+            journal_start,
+            events,
+            controller,
+            delivered,
+            &mut cycle_events,
+        );
         #[cfg(feature = "test-support")]
         take_cost.end_cycle();
     }
@@ -8833,6 +8999,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
                     | PendingCostMoveResume::TurnFaceUpCostMove { .. }
             )
         ),
@@ -8865,6 +9032,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
                     | PendingCostMoveResume::TurnFaceUpCostMove { .. }
             )
         ),
@@ -8911,6 +9079,14 @@ pub(crate) fn drain_pending_cost_move_resume(
         Some(PendingCostMoveResume::WardSacrificePayment { .. })
     ) {
         engine_payment_choices::resume_ward_sacrifice_payment(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::PlayerScopeUnlessSettlement(..))
+    ) {
+        // CR 118.12 + CR 101.4: a settled poll's discard paused on a CR 616.1
+        // choice; the payer already chose to pay, so the settlement continues
+        // whether the move was delivered or prevented.
+        super::scoped_unless_poll::resume_settlement(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::ReplacementMayCost { .. })
@@ -9144,6 +9320,13 @@ fn resume_pending_continuation_pass(
             super::life_safety::observe_boundary_carrier(state);
             effects::resume_resolution_frames(state, events);
             effects::counters::resume_copy_target_entry_completions(state, events)?;
+            // CR 101.4 + CR 608.2c: a frame that retired in
+            // `resume_resolution_frames` (a post-replacement drain) may have
+            // been the last gate on a parked delivery; re-enter the drain so
+            // the delivery and then the later instructions resume.
+            if effects::simultaneous_unless::delivery_may_resume(state) {
+                effects::drain_pending_continuation(state, events);
+            }
         }
         resume_due_counter_cost_root(state, events)?;
         let mut drained_deferred_life = false;
@@ -10976,9 +11159,12 @@ fn complete_copy_walk_effect(
     });
     // CR 707.10c + CR 603.2: Copy observers (Magecraft) must drain only after
     // the copy's targets are finalized, not while `CopyRetarget` is still open.
-    if let Some(wf) =
-        triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
-    {
+    // CR 603.2c: the drain's windows run on the action buffer; claim them.
+    if let Some(wf) = triggers::drain_on_action_buffer(
+        state,
+        events,
+        triggers::drain_deferred_triggers_after_stack_object_announcement,
+    ) {
         if let Some(remaining) = paradigm_remaining_offers.filter(|offers| !offers.is_empty()) {
             effects::paradigm::stash_pending_remaining_offers(state, player, remaining);
         }
@@ -11741,6 +11927,10 @@ pub(super) fn transient_reveal_outlives_action_boundary(state: &GameState) -> bo
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
         | WaitingFor::RevealUntilKeptChoice { .. }
+        // CR 701.20a + CR 101.4c: choosing which of a staged population's
+        // replacement decisions to make first answers none of them, so cards
+        // revealed before the selection stay public across it.
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::DigBottomOrder { .. } => true,
         // CR 701.20a + CR 701.20d + CR 401.4: "Put the revealed cards on the
         // bottom of your library in any order" pauses for the pile's owner to
@@ -11980,9 +12170,10 @@ fn apply_action(
     // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
     // owned it (see `elimination::concede`), and queues what the departure triggered
     // (CR 603.6c), since no pipeline scans the departure's own events. When the
-    // departure canceled the current pause of a resolution still under way, the
-    // resolution is finished and the action settled through the post-action
-    // pipeline (`settle_resolution_resumed_after_departure`).
+    // departure left a resolution still under way unsettled (see
+    // `elimination::DepartureResume::ResolutionTail`), the resolution is finished
+    // and the action settled through the post-action pipeline
+    // (`settle_resolution_resumed_after_departure`).
     if let GameAction::Concede { player_id } = action {
         // CR 614.17a + CR 118.12: keep the pre-departure base so a staged
         // payment's already-accepted prefix (including a synchronous leg that
@@ -11991,13 +12182,13 @@ fn apply_action(
         let pre_action = state.payment_transaction.as_ref().map(|_| state.clone());
         let mut events = Vec::new();
         let departure = super::elimination::concede(state, player_id, &mut events);
-        // CR 117.2e + CR 608.2c + CR 117.5: the concession canceled the
-        // current pause of a parked zone-change owner while its resolution
-        // still owes a surviving tail. Finish that resolution, then settle
+        // CR 117.2e + CR 608.2c + CR 117.5: the concession left a resolution
+        // still under way unsettled (`DepartureResume::ResolutionTail`).
+        // Finish that resolution, then settle
         // the action as any action that completed one: the owed final part
         // (CR 608.2n), state-based actions (CR 704.3), then the triggered
         // abilities the departure queued together with the resumed ones.
-        if departure.resume == super::elimination::DepartureResume::ParkedZoneChangeTail {
+        if departure.resume == super::elimination::DepartureResume::ResolutionTail {
             let scan_from = events.len();
             settle_resolution_resumed_after_departure(state, &mut events, scan_from);
         }
@@ -12410,6 +12601,10 @@ fn apply_non_priority_pass_action(
     // `PendingCast` exists.
     let answers_a_cast_step = state.waiting_for.has_pending_cast()
         || matches!(state.waiting_for, WaitingFor::ModalFaceChoice { .. });
+    // CR 510.2: whether this action answers a parked combat damage batch's choice,
+    // and where its events begin — see the convergence below the match.
+    let parked_combat_damage_answer =
+        super::combat_damage::ParkedCombatDamageAnswer::begin(state, events.len());
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
         (
@@ -15703,7 +15898,15 @@ fn apply_non_priority_pass_action(
                     let resumes_change_zone_iteration = state
                         .active_change_zone_frame()
                         .is_some_and(|frame| frame.pending.is_some());
-                    if !resumes_change_zone_iteration {
+                    // CR 608.2c: a staged ChangeZone batch owns the completion
+                    // event; its `ChangeZonePopulationSettled` tail emits the
+                    // single canonical `EffectResolved` after delivery.
+                    let staged_change_zone_owns_completion = state
+                        .active_batch_delivery()
+                        .is_some_and(
+                        crate::types::game_state::PendingBatchDeliveries::is_change_zone_population,
+                    );
+                    if !resumes_change_zone_iteration && !staged_change_zone_owns_completion {
                         events.push(crate::types::events::GameEvent::EffectResolved {
                             kind: crate::types::ability::EffectKind::ChangeZone,
                             source_id: pending.source_id,
@@ -17125,9 +17328,13 @@ fn apply_non_priority_pass_action(
                                 !triggers::is_pending_trigger_construction_active(state),
                                 "deferred-trigger drain entered with construction still active",
                             );
-                            if let Some(waiting_for) =
-                                triggers::drain_deferred_trigger_queue(state, &mut events)
-                            {
+                            // CR 603.2c: the drain's windows run on the action
+                            // buffer, so their collected ranges are claimed.
+                            if let Some(waiting_for) = triggers::drain_on_action_buffer(
+                                state,
+                                &mut events,
+                                triggers::drain_deferred_trigger_queue,
+                            ) {
                                 waiting_for
                             } else {
                                 WaitingFor::Priority { player: p }
@@ -17316,6 +17523,18 @@ fn apply_non_priority_pass_action(
         semantic_actor,
         &action_for_divergence,
     );
+
+    // CR 510.2 + CR 510.3a + CR 603.3b: an answer to a parked combat damage batch's
+    // choice finishes the batch here, before the pipeline below, so no player
+    // receives priority inside it; an answer that leaves it parked hands it its
+    // events. Direct-return arms converge at `apply_action_boundary_core`.
+    let waiting_for = resume_parked_combat_damage_at_action_boundary(
+        state,
+        parked_combat_damage_answer,
+        &waiting_for,
+        &mut events,
+    )?
+    .unwrap_or(waiting_for);
 
     // CR 704.3 + CR 117.5 + CR 117.3c: a parked counter-cost root's subtree is
     // finished and the root resumed before the pipeline below, so the activation
@@ -18651,6 +18870,42 @@ pub(crate) fn modal_land_face_election_available(
     })
 }
 
+/// CR 712.12 + CR 712.8a: whether playing `obj` as a land puts its modal land
+/// BACK face onto the battlefield without a further choice — a spell//land
+/// modal double-faced card whose face election is still open. A land//land card
+/// is not covered: its played face is chosen at `ModalFaceChoice`. The single
+/// predicate shared by the special action's auto-election in `handle_play_land`
+/// and by [`land_face_played`], so the face a land play commits and the face its
+/// restrictions are read against cannot drift apart.
+pub(crate) fn land_play_elects_back_face(obj: &crate::game::game_object::GameObject) -> bool {
+    !obj.cast_face_committed
+        && modal_land_face_election_available(obj)
+        && !obj
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Land)
+}
+
+/// CR 712.12 + CR 101.2 + CR 201.4d: the face a land play of `obj` would
+/// present once elected, as a detached clone, or `None` when the play uses the
+/// object as it stands. CR 712.12 has the player choose the land face before
+/// putting it onto the battlefield, and the Bala Ged Recovery ruling says only
+/// the characteristics of the face being played count — so a "lands with the
+/// chosen name can't be played" prohibition (Conjurer's Ban) is judged on the
+/// land face's name, not on the front face the object presents in hand or exile
+/// (CR 712.8a). The clone shares the real object's zone, owner and links; the
+/// real object is never mutated, so a refused play leaves the state untouched.
+pub(crate) fn land_face_played(
+    obj: &crate::game::game_object::GameObject,
+) -> Option<crate::game::game_object::GameObject> {
+    if !land_play_elects_back_face(obj) {
+        return None;
+    }
+    let mut projected = obj.clone();
+    elect_modal_land_back_face(&mut projected);
+    Some(projected)
+}
+
 /// CR 305.2a + CR 305.2b + CR 305.3 + CR 305.9 + CR 805.4c: whether an effect
 /// that instructs `player` to play `object_id` as it resolves can be followed:
 /// the object is a land card outside the battlefield and stack, it is that
@@ -19012,7 +19267,7 @@ fn handle_play_land(
             });
         }
 
-        if land_face_election && !front_is_land {
+        if land_play_elects_back_face(obj) {
             // CR 712.12: Only back face is a land — auto-swap (player already chose "play as land")
             elect_modal_land_back_face(state.objects.get_mut(&object_id).unwrap());
         }
@@ -19030,6 +19285,7 @@ fn handle_play_land(
         Zone::Library
     };
 
+    let event_start = events.len();
     match commit_land_play(
         state,
         player,
@@ -19040,8 +19296,19 @@ fn handle_play_land(
         library_permission_src,
         events,
     ) {
-        // Player retains priority after playing a land
-        LandPlayCommit::Entered => Ok(WaitingFor::Priority { player }),
+        LandPlayCommit::Entered => {
+            // CR 116.2a + CR 611.3c: a completed special-action land play
+            // sees the continuous effects applying to the land as it enters.
+            let land_entries = events.iter().skip(event_start).filter(|event| {
+                matches!(event, GameEvent::ZoneChanged {
+                    object_id: entrant,
+                    to: Zone::Battlefield,
+                    ..
+                } if *entrant == object_id)
+            });
+            super::zones::settle_battlefield_entry_observations(state, land_entries);
+            Ok(WaitingFor::Priority { player })
+        }
         LandPlayCommit::AwaitingEntryChoice(waiting_for) => Ok(*waiting_for),
         LandPlayCommit::Prevented => Ok(WaitingFor::Priority {
             player: state.priority_player,
@@ -19661,7 +19928,12 @@ fn handle_equip_activation(
             "You don't control this equipment".to_string(),
         ));
     }
-    if !obj.card_types.subtypes.contains(&"Equipment".to_string()) {
+    if !obj
+        .card_types
+        .subtypes
+        .iter()
+        .any(|i: &String| i == "Equipment")
+    {
         return Err(EngineError::InvalidAction(
             "Object is not an equipment".to_string(),
         ));
@@ -19883,7 +20155,12 @@ fn handle_crew_activation(
             "You don't control this Vehicle".to_string(),
         ));
     }
-    if !obj.card_types.subtypes.contains(&"Vehicle".to_string()) {
+    if !obj
+        .card_types
+        .subtypes
+        .iter()
+        .any(|i: &String| i == "Vehicle")
+    {
         return Err(EngineError::InvalidAction(
             "Object is not a Vehicle".to_string(),
         ));
@@ -23664,9 +23941,11 @@ mod stage2_injector_tests {
             .filter(|l| l.contains(&authority))
             .count();
         assert_eq!(
-            authority_code_hits, 3,
-            "one definition + two calls — the CR 603.5 gate's `let prompt_player = ..` and the \
-             repeated-payment offer, which asks the named player per iteration. A third call \
+            authority_code_hits, 4,
+            "one definition + three calls — the CR 603.5 gate's `let prompt_player = ..`, the \
+             repeated-payment offer, which asks the named player per iteration, and \
+             `optional_rider_chooser`, which only names who a combat prevention rider's \
+             \"may\" would ask so Phase D orders the choices in APNAP order. A fourth call \
              inside `effects/mod.rs` means another producer started consulting the authority \
              and this row's partition needs re-deriving"
         );
@@ -24668,8 +24947,9 @@ mod kilo_interruptibility_tests {
 /// Census rows for the CR 603.5 conjunct set.
 #[cfg(test)]
 mod bounded_offer_conjunct_tests {
-    /// F2c — **NO FOURTH COPY OF THE CR 603.5 CONJUNCT SET IS BUILT OUT OF THESE FIVE
-    /// PREDICATES, AND EVERY SURVIVING PRODUCTION CALLER IS INSIDE `game/effects/`.**
+    /// F2c — **NO FOURTH COPY OF THE CR 603.5 CONJUNCT SET IS BUILT OUT OF THESE
+    /// PREDICATES (the gate family's two spellings counted as one row pair), AND EVERY
+    /// SURVIVING PRODUCTION CALLER IS INSIDE `game/effects/`.**
     ///
     /// CR 603.5 + CR 608.2c + CR 608.2d + CR 603.12a. Three places used to answer *"does this
     /// ability open ONE up-front optional gate?"* — production's own branch, the mint's guard
@@ -24678,8 +24958,10 @@ mod bounded_offer_conjunct_tests {
     /// place the set is assembled, and the census is what keeps it that way.
     ///
     /// MEASURED counts, not derived ones. The plan's derivation predicted `2 / 2 / 2 / 1 / 2`
-    /// and the tree measures `2 / 2 / 2 / 1 / 2`; if these ever disagree the MEASURED value is
-    /// what belongs here.
+    /// and the tree measured `2 / 2 / 2 / 1 / 2`; the gate family's decline route then moved
+    /// from the wrapper spelling to the reason spelling, and the tree measures
+    /// `2 / 2 / 2 / 1 / 1 / 2`. If these ever disagree the MEASURED value is what belongs
+    /// here.
     ///
     /// | predicate | production sites | where |
     /// |---|---|---|
@@ -24687,7 +24969,8 @@ mod bounded_offer_conjunct_tests {
     /// | `has_member_driven_repeat_after_hydration` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s driver guard |
     /// | `is_repeated_optional_payment` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s driver dispatch |
     /// | `optional_prompt_player` | 2 | `upfront_optional_gate` + `offer_repeated_payment` (names who is asked each CR 603.12a payment offer; opens no up-front window) |
-    /// | `optional_effect_is_infeasible` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s `CastFromZone` decline |
+    /// | `optional_effect_is_infeasible` | 1 | `upfront_optional_gate`'s probe arm (the decline route moved to the reason authority below) |
+    /// | `optional_effect_infeasibility` | 2 | the boolean wrapper's own body (`.is_some()`) + `resolve_chain_body`'s decline route, which needs the `Conjunction`/`Instruction` reason |
     ///
     /// **THE NON-AUTHORITY SITES ARE NOT COPIES, AND FOLDING THEM IN WOULD BE WRONG.**
     /// They consume these predicates to decide WHICH DRIVER RUNS — whether a counted repeat
@@ -24696,10 +24979,10 @@ mod bounded_offer_conjunct_tests {
     /// gate suppressed itself. That is a different question from "does one up-front window
     /// open", and it is asked after the gate has already declined.
     ///
-    /// **HONEST GUARANTEE.** This enforces that no fourth copy is built OUT OF THESE FIVE
+    /// **HONEST GUARANTEE.** This enforces that no fourth copy is built OUT OF THESE
     /// PREDICATES. A copy that re-derives the same conjunct from `ability.repeat_for` (or from
     /// `optional_for`, or from the effect discriminant) inline is NOT caught, and no census
-    /// over these five tokens can catch it — `has_kind_driven_repeat` is itself exactly such a
+    /// over these tokens can catch it — `has_kind_driven_repeat` is itself exactly such a
     /// re-derivation.
     ///
     /// The zero-outside-`game/effects/` assertion carries its own POSITIVE CONTROL, because a
@@ -24754,15 +25037,22 @@ mod bounded_offer_conjunct_tests {
         }
 
         // ASSEMBLED needles, so this row's own source cannot be counted by its own instrument.
-        let predicates: [(String, usize); 5] = [
+        let predicates: [(String, usize); 6] = [
             (format!("has_kind_driven{}repeat(", '_'), 2),
             (
                 format!("has_member_driven_repeat_after{}hydration(", '_'),
                 3,
             ),
             (format!("is_repeated_optional{}payment(", '_'), 2),
-            (format!("optional_prompt{}player(", '_'), 2),
-            (format!("optional_effect_is{}infeasible(", '_'), 2),
+            (format!("optional_prompt{}player(", '_'), 3),
+            // The boolean wrapper and the reason-returning authority are ONE gate
+            // family, counted in the same census: the wrapper is the authority's
+            // `.is_some()`, and the decline route in `resolve_chain_body` reads the
+            // reason so an impossible CONJUNCTION declines like an impossible
+            // instruction without re-probing.
+            (format!("optional_effect_is{}infeasible(", '_'), 1),
+            // ASSEMBLED from two literals, so this row's line cannot contain it.
+            (format!("{}_infeasibility(", "optional_effect"), 2),
         ];
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -24838,8 +25128,14 @@ mod bounded_offer_conjunct_tests {
              driver dispatch, and \
              `resolve_chain_body`'s `CastFromZone` decline probe — every one of them selects a \
              DRIVER rather than opening an up-front window — plus `offer_repeated_payment`, \
-             which only names who is asked a driver's per-iteration offer, so a NEW site is a \
-             decision to adjudicate here and not a number to move.\nsites={sites:#?}"
+             which only names who is asked a driver's per-iteration offer, and \
+             `optional_rider_chooser`, which only names who a combat prevention rider's \
+             \"may\" would ask so Phase D orders the choices in APNAP order (CR 101.4), so a \
+             NEW site is a \
+             decision to adjudicate here and not a number to move. Within the gate family \
+             itself, moving a site between the wrapper spelling (`optional_effect_is_infeasible`) \
+             and the reason spelling (`optional_effect_infeasibility`) is not a count change.\
+             \nsites={sites:#?}"
         );
 
         let outside: Vec<&String> = sites
@@ -24849,7 +25145,7 @@ mod bounded_offer_conjunct_tests {
             .collect();
         assert!(
             outside.is_empty(),
-            "SINGLE ASSEMBLER: every production consumer of these five predicates lives in \
+            "SINGLE ASSEMBLER: every production consumer of these predicates lives in \
              `game/effects/`, next to the authority that assembles them. A caller in another \
              module is by construction re-deriving the gate's conjunct set from outside it — \
              which is exactly what `analysis::resource::auto_may_answer_for` and \

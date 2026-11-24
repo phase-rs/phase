@@ -304,7 +304,7 @@ impl CardDatabase {
     }
 
     #[cfg(feature = "test-support")]
-    fn from_export_text_typing_faces_on_read(
+    pub(crate) fn from_export_text_typing_faces_on_read(
         json: String,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let text = Arc::new(json);
@@ -1289,14 +1289,15 @@ mod tests {
 
     #[test]
     fn export_reader_matches_the_streaming_parse_on_the_committed_fixture() {
-        use crate::test_support::{assert_same_database, fixture_path};
-        use flate2::read::GzDecoder;
+        use crate::database::integration_fixture;
+        use crate::test_support::assert_same_database;
 
-        let open = || GzDecoder::new(BufReader::new(std::fs::File::open(fixture_path()).unwrap()));
         let streamed = CardDatabase::from_export_entries(
-            serde_json::from_reader(BufReader::new(open())).expect("streaming parse"),
+            serde_json::from_reader(integration_fixture::reader().unwrap())
+                .expect("streaming parse"),
         );
-        let buffered = CardDatabase::from_export_reader(open()).expect("buffered parse");
+        let buffered = CardDatabase::from_export_reader(integration_fixture::reader().unwrap())
+            .expect("buffered parse");
         assert_same_database(&streamed, &buffered);
     }
 
@@ -1304,14 +1305,10 @@ mod tests {
     fn lazy_and_cached_fixture_loads_are_observably_identical_to_the_eager_load() {
         use super::fixture_cache::{self, Key};
         use crate::database::search::CardSearchQuery;
-        use crate::test_support::{assert_same_database, fixture_path, load_fixture};
-        use flate2::read::GzDecoder;
+        use crate::test_support::{assert_same_database, load_fixture};
 
-        let eager = CardDatabase::from_export_reader(GzDecoder::new(BufReader::new(
-            std::fs::File::open(fixture_path()).unwrap(),
-        )))
-        .unwrap();
-        let lazy = load_fixture(&fixture_path());
+        let eager = CardDatabase::from_integration_fixture().unwrap();
+        let lazy = load_fixture();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fixture-cache");
         let key = Key {
@@ -1373,9 +1370,9 @@ mod tests {
 
     #[test]
     fn lazy_fixture_types_every_face() {
-        use crate::test_support::{fixture_path, load_fixture};
+        use crate::test_support::load_fixture;
 
-        let db = load_fixture(&fixture_path());
+        let db = load_fixture();
         assert_eq!(db.face_index.typed_face_count(), 0);
         assert_eq!(db.face_iter().count(), db.face_index.len());
         assert_eq!(db.face_index.typed_face_count(), db.face_index.len());
@@ -1579,6 +1576,86 @@ mod tests {
         assert!(
             ok_db.export_integrity_errors().is_empty(),
             "a nested payment gate on a combat-taxed mode is enforceable and must pass: {:?}",
+            ok_db.export_integrity_errors()
+        );
+    }
+
+    /// CR 109.4 (Matt R2-F4): the corpus-wide export gate refuses a typed
+    /// Continuous static gated on a `PlayerAttackedPlayer` with a
+    /// resolution-scoped `ChosenPlayer` endpoint — bare or nested under
+    /// `Not` — because the layer pipeline has no resolving ability to
+    /// answer it. CR 109.4 + CR 115.1 (Matt R7-F2): the same refusal
+    /// covers the target-relative endpoints (`TargetPlayer`/`TargetOpponent`).
+    /// The same gate with bindable endpoints ships clean.
+    /// Pre-fix the target-relative shapes pass the export.
+    #[test]
+    fn export_integrity_refuses_unanswerable_attack_gate() {
+        use crate::types::ability::{ControllerRef, StaticCondition, StaticDefinition};
+
+        let gate = |attacker: ControllerRef| StaticCondition::Not {
+            condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                attacker,
+                defender: ControllerRef::You,
+            }),
+        };
+        let face_with = |name: &str, condition: StaticCondition| {
+            let mut face = test_face(name);
+            let mut def = StaticDefinition::continuous();
+            def.condition = Some(condition);
+            face.static_abilities = vec![def];
+            face
+        };
+
+        // REJECT: bare and nested-Not unanswerable gates fail the export no
+        // matter which parser route built them.
+        for (key, name, condition) in [
+            (
+                "chosen probe",
+                "Chosen Probe",
+                StaticCondition::PlayerAttackedPlayer {
+                    attacker: ControllerRef::ChosenPlayer { index: 0 },
+                    defender: ControllerRef::You,
+                },
+            ),
+            (
+                "nested chosen probe",
+                "Nested Chosen Probe",
+                gate(ControllerRef::ChosenPlayer { index: 0 }),
+            ),
+            (
+                "target probe",
+                "Target Probe",
+                gate(ControllerRef::TargetPlayer),
+            ),
+            (
+                "target opponent probe",
+                "Target Opponent Probe",
+                gate(ControllerRef::TargetOpponent),
+            ),
+        ] {
+            let mut faces = HashMap::new();
+            faces.insert(key.to_string(), face_with(name, condition));
+            let db = CardDatabase::from_json_str(&serde_json::to_string(&faces).unwrap())
+                .expect("parses");
+            let errors = db.export_integrity_errors();
+            assert!(
+                errors.iter().any(|e| e.contains(name)),
+                "an unanswerable attack gate must fail the export, got {errors:?}"
+            );
+        }
+
+        // ACCEPT: the same gate with bindable endpoints ships clean.
+        // `ActivePlayer` reads live game state with no ability context.
+        let mut ok_faces = HashMap::new();
+        ok_faces.insert(
+            "bound probe".to_string(),
+            face_with("Bound Probe", gate(ControllerRef::ActivePlayer)),
+        );
+        let ok_db = CardDatabase::from_json_str(&serde_json::to_string(&ok_faces).unwrap())
+            .expect("parses");
+        assert!(
+            ok_db.export_integrity_errors().is_empty(),
+            "a bindable attack gate must pass the export: {:?}",
             ok_db.export_integrity_errors()
         );
     }
@@ -2350,14 +2427,14 @@ mod tests {
         let vocab = db.creature_type_vocabulary();
 
         assert!(
-            vocab.contains(&"Saproling".to_string()),
+            vocab.iter().any(|i| i == "Saproling"),
             "Saproling must appear (token-only creature type)"
         );
         assert!(
-            vocab.contains(&"Golem".to_string()),
+            vocab.iter().any(|i| i == "Golem"),
             "Golem must appear (multi-core-type creature)"
         );
-        assert!(vocab.contains(&"Bear".to_string()));
+        assert!(vocab.iter().any(|i| i == "Bear"));
         // Sorted.
         let mut sorted = vocab.to_vec();
         sorted.sort();
@@ -2411,11 +2488,11 @@ mod tests {
         let db = CardDatabase::from_json_str(&json).unwrap();
         let vocab = db.creature_type_vocabulary();
         assert!(
-            vocab.contains(&"Faerie".to_string()),
+            vocab.iter().any(|i| i == "Faerie"),
             "Faerie must appear from a Tribal-only face (no Creature core type)"
         );
         assert!(
-            vocab.contains(&"Elf".to_string()),
+            vocab.iter().any(|i| i == "Elf"),
             "Elf must appear from a Kindred-only face (no Creature core type)"
         );
     }
@@ -2474,19 +2551,19 @@ mod tests {
         let db = CardDatabase::from_json_str(&json).unwrap();
         let vocab = db.creature_type_vocabulary();
         assert!(
-            vocab.contains(&"Dryad".to_string()),
+            vocab.iter().any(|i| i == "Dryad"),
             "Dryad is a creature type and must survive, got {vocab:?}"
         );
         assert!(
-            vocab.contains(&"Construct".to_string()),
+            vocab.iter().any(|i| i == "Construct"),
             "Construct is a creature type and must survive, got {vocab:?}"
         );
         assert!(
-            !vocab.contains(&"Forest".to_string()),
+            !vocab.iter().any(|i| i == "Forest"),
             "Forest is a land type (appears on a pure Land face) — must not leak, got {vocab:?}"
         );
         assert!(
-            !vocab.contains(&"Equipment".to_string()),
+            !vocab.iter().any(|i| i == "Equipment"),
             "Equipment is an artifact type (appears on a pure Artifact face) — must not leak, got {vocab:?}"
         );
     }

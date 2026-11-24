@@ -146,6 +146,12 @@ jobs:
       - name: Localized card image fallback tests
         run: python3 scripts/lib/localized_image_fallback_tests.py
 
+      - name: Integration card fixture shard tests
+        # The committed shards must equal the writer's output (sorted, one record
+        # per line, each in its first-letter shard); needs no card-data export.
+        # Also runs scripts/reapply-fixture-entries.py over a throwaway repository.
+        run: python3 scripts/lib/fixture_shards_tests.py
+
       - name: Action pin checker unit tests
         # Exercises the checker against throwaway repositories only; it does
         # not walk this repository's own workflows. The gate over the real tree

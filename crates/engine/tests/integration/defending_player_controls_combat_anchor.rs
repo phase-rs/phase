@@ -909,7 +909,7 @@ fn sea_monster_attack_legality_follows_battle_protector_defending_player() {
         let siege_obj = &runner.state().objects[&siege];
         assert!(
             siege_obj.card_types.core_types.contains(&CoreType::Battle)
-                && siege_obj.card_types.subtypes.contains(&"Siege".to_string()),
+                && siege_obj.card_types.subtypes.iter().any(|i| i == "Siege"),
             "the siege fixture must actually be a [Battle, Siege] permanent; \
              got {:?} / {:?}",
             siege_obj.card_types.core_types,

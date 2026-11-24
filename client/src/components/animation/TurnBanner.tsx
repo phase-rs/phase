@@ -2,6 +2,10 @@ import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { useUiStore } from "../../stores/uiStore";
+import { BANNER_TITLE_GUTTERS, useBannerTitleFit } from "./bannerTitle";
+
+/** The smallest the 48px (`text-5xl`) title shrinks to before it wraps instead. */
+const TITLE_MINIMUM_REM = 1.75;
 
 /**
  * Cinematic turn banner — dramatic horizontal sweep with glowing text,
@@ -17,6 +21,7 @@ export function TurnBanner() {
   const turnBannerNumber = useUiStore((s) => s.turnBannerNumber);
   const isYourTurn = useUiStore((s) => s.turnBannerIsYours);
   const shouldReduceMotion = useReducedMotion();
+  const titleRef = useBannerTitleFit(turnBannerText, TITLE_MINIMUM_REM);
 
   const colors = isYourTurn
     ? {
@@ -52,7 +57,7 @@ export function TurnBanner() {
             transition={{ duration: 0.2 }}
           >
             <div className="absolute inset-0 bg-black/50" />
-            <div className="relative flex flex-col items-center select-none gap-8">
+            <div className={`relative flex w-full flex-col items-center select-none gap-8 ${BANNER_TITLE_GUTTERS}`}>
               {turnBannerNumber != null && (
                 <span
                   className="text-3xl font-bold tracking-[0.5em] uppercase"
@@ -62,7 +67,8 @@ export function TurnBanner() {
                 </span>
               )}
               <span
-                className="text-5xl font-extrabold tracking-wider"
+                ref={titleRef}
+                className="text-center text-balance text-5xl font-extrabold tracking-wider"
                 style={{ color: colors.primary }}
               >
                 {turnBannerText}
@@ -107,141 +113,145 @@ export function TurnBanner() {
             transition={{ duration: 0.6, ease: "easeOut" }}
           />
 
-          {/* Banner strip background — horizontal bar */}
-          <motion.div
-            className="absolute left-0 right-0 flex items-center justify-center"
-            style={{
-              height: 80,
-              top: "50%",
-              marginTop: -40,
-              background: `linear-gradient(180deg, transparent, ${colors.bg} 30%, ${colors.bg} 70%, transparent)`,
-            }}
-            initial={{ scaleX: 0, opacity: 0 }}
-            animate={{ scaleX: 1, opacity: 1 }}
-            exit={{ scaleX: 0, opacity: 0 }}
-            transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-          />
-
-          {/* Top decorative line */}
-          <motion.div
-            className="absolute left-0 right-0"
-            style={{
-              height: 2,
-              top: "calc(50% - 36px)",
-              background: `linear-gradient(90deg, ${colors.lineFade}, ${colors.line} 30%, ${colors.primary} 50%, ${colors.line} 70%, ${colors.lineFade})`,
-            }}
-            initial={{ scaleX: 0, opacity: 0 }}
-            animate={{ scaleX: 1, opacity: 1 }}
-            exit={{ scaleX: 0, opacity: 0 }}
-            transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: 0.05 }}
-          />
-
-          {/* Bottom decorative line */}
-          <motion.div
-            className="absolute left-0 right-0"
-            style={{
-              height: 2,
-              top: "calc(50% + 34px)",
-              background: `linear-gradient(90deg, ${colors.lineFade}, ${colors.line} 30%, ${colors.primary} 50%, ${colors.line} 70%, ${colors.lineFade})`,
-            }}
-            initial={{ scaleX: 0, opacity: 0 }}
-            animate={{ scaleX: 1, opacity: 1 }}
-            exit={{ scaleX: 0, opacity: 0 }}
-            transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: 0.05 }}
-          />
-
-          {/* Diamond accent — left */}
-          <motion.div
-            className="absolute"
-            style={{
-              width: 10,
-              height: 10,
-              top: "calc(50% - 5px)",
-              left: "calc(50% - 160px)",
-              background: colors.primary,
-              transform: "rotate(45deg)",
-              boxShadow: `0 0 12px ${colors.glow}`,
-            }}
-            initial={{ opacity: 0, scale: 0 }}
-            animate={{ opacity: [0, 1, 0.8], scale: [0, 1.2, 1] }}
-            exit={{ opacity: 0, scale: 0 }}
-            transition={{ duration: 0.3, delay: 0.2 }}
-          />
-
-          {/* Diamond accent — right */}
-          <motion.div
-            className="absolute"
-            style={{
-              width: 10,
-              height: 10,
-              top: "calc(50% - 5px)",
-              left: "calc(50% + 150px)",
-              background: colors.primary,
-              transform: "rotate(45deg)",
-              boxShadow: `0 0 12px ${colors.glow}`,
-            }}
-            initial={{ opacity: 0, scale: 0 }}
-            animate={{ opacity: [0, 1, 0.8], scale: [0, 1.2, 1] }}
-            exit={{ opacity: 0, scale: 0 }}
-            transition={{ duration: 0.3, delay: 0.2 }}
-          />
-
-          {/* Turn N subtitle — absolutely positioned well above the banner strip
-              so it stays clear of the decorative top line and doesn't push the
-              primary text off-center. */}
-          {turnBannerNumber != null && (
-            <motion.span
-              className="absolute text-3xl font-bold tracking-[0.5em] uppercase select-none"
+          {/* Banner band: spans the screen and is as tall as the title, so the
+              strip, lines and subtitle frame a long name that wraps instead of
+              cutting through it. One line keeps the original geometry: 12px of
+              padding around the 48px title puts each line 36px from the centre,
+              and the strip reaches 4px past them. */}
+          <div className={`relative w-full py-3 ${BANNER_TITLE_GUTTERS}`}>
+            {/* Banner strip background — horizontal bar */}
+            <motion.div
+              className="absolute left-0 right-0"
               style={{
-                top: "calc(50% - 110px)",
-                color: colors.primary,
-                textShadow: `0 0 16px ${colors.glow}, 0 0 32px ${colors.glowStrong}, 0 2px 4px rgba(0,0,0,0.6)`,
+                top: -4,
+                bottom: -4,
+                background: `linear-gradient(180deg, transparent, ${colors.bg} 30%, ${colors.bg} 70%, transparent)`,
               }}
-              initial={{ opacity: 0, y: -16, scale: 0.9 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -16, scale: 0.95 }}
-              transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: 0.18 }}
+              initial={{ scaleX: 0, opacity: 0 }}
+              animate={{ scaleX: 1, opacity: 1 }}
+              exit={{ scaleX: 0, opacity: 0 }}
+              transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+            />
+
+            {/* Top decorative line */}
+            <motion.div
+              className="absolute left-0 right-0 top-0"
+              style={{
+                height: 2,
+                background: `linear-gradient(90deg, ${colors.lineFade}, ${colors.line} 30%, ${colors.primary} 50%, ${colors.line} 70%, ${colors.lineFade})`,
+              }}
+              initial={{ scaleX: 0, opacity: 0 }}
+              animate={{ scaleX: 1, opacity: 1 }}
+              exit={{ scaleX: 0, opacity: 0 }}
+              transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: 0.05 }}
+            />
+
+            {/* Bottom decorative line */}
+            <motion.div
+              className="absolute left-0 right-0 bottom-0"
+              style={{
+                height: 2,
+                background: `linear-gradient(90deg, ${colors.lineFade}, ${colors.line} 30%, ${colors.primary} 50%, ${colors.line} 70%, ${colors.lineFade})`,
+              }}
+              initial={{ scaleX: 0, opacity: 0 }}
+              animate={{ scaleX: 1, opacity: 1 }}
+              exit={{ scaleX: 0, opacity: 0 }}
+              transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: 0.05 }}
+            />
+
+            {/* Diamond accent — left */}
+            <motion.div
+              className="absolute"
+              style={{
+                width: 10,
+                height: 10,
+                top: "calc(50% - 5px)",
+                left: "calc(50% - 160px)",
+                background: colors.primary,
+                transform: "rotate(45deg)",
+                boxShadow: `0 0 12px ${colors.glow}`,
+              }}
+              initial={{ opacity: 0, scale: 0 }}
+              animate={{ opacity: [0, 1, 0.8], scale: [0, 1.2, 1] }}
+              exit={{ opacity: 0, scale: 0 }}
+              transition={{ duration: 0.3, delay: 0.2 }}
+            />
+
+            {/* Diamond accent — right */}
+            <motion.div
+              className="absolute"
+              style={{
+                width: 10,
+                height: 10,
+                top: "calc(50% - 5px)",
+                left: "calc(50% + 150px)",
+                background: colors.primary,
+                transform: "rotate(45deg)",
+                boxShadow: `0 0 12px ${colors.glow}`,
+              }}
+              initial={{ opacity: 0, scale: 0 }}
+              animate={{ opacity: [0, 1, 0.8], scale: [0, 1.2, 1] }}
+              exit={{ opacity: 0, scale: 0 }}
+              transition={{ duration: 0.3, delay: 0.2 }}
+            />
+
+            {/* Turn N subtitle: rides 38px above the band, so it stays clear of
+                the top line however many lines the title takes, without pushing
+                the title off-centre. */}
+            {turnBannerNumber != null && (
+              <motion.span
+                className="absolute inset-x-0 bottom-full mb-[38px] text-center text-3xl font-bold tracking-[0.5em] uppercase select-none"
+                style={{
+                  color: colors.primary,
+                  textShadow: `0 0 16px ${colors.glow}, 0 0 32px ${colors.glowStrong}, 0 2px 4px rgba(0,0,0,0.6)`,
+                }}
+                initial={{ opacity: 0, y: -16, scale: 0.9 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -16, scale: 0.95 }}
+                transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: 0.18 }}
+              >
+                {t("turnBanner.turn", { number: turnBannerNumber })}
+              </motion.span>
+            )}
+
+            {/* Banner text — scales in with punch */}
+            <motion.span
+              ref={titleRef}
+              className="relative block text-center text-balance text-5xl font-extrabold tracking-[0.2em] uppercase select-none"
+              style={{
+                color: colors.primary,
+                textShadow: `0 0 20px ${colors.glow}, 0 0 40px ${colors.glow}, 0 0 60px ${colors.glowStrong}, 0 2px 4px rgba(0,0,0,0.5)`,
+              }}
+              initial={{ opacity: 0, scale: 1.6, y: 0 }}
+              animate={{ opacity: [0, 1, 1], scale: [1.6, 0.95, 1], y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 10 }}
+              transition={{
+                duration: 0.45,
+                ease: [0.22, 1, 0.36, 1],
+                delay: 0.08,
+              }}
             >
-              {t("turnBanner.turn", { number: turnBannerNumber })}
+              {turnBannerText}
             </motion.span>
-          )}
 
-          {/* Banner text — scales in with punch */}
-          <motion.span
-            className="relative text-5xl font-extrabold tracking-[0.2em] uppercase select-none"
-            style={{
-              color: colors.primary,
-              textShadow: `0 0 20px ${colors.glow}, 0 0 40px ${colors.glow}, 0 0 60px ${colors.glowStrong}, 0 2px 4px rgba(0,0,0,0.5)`,
-            }}
-            initial={{ opacity: 0, scale: 1.6, y: 0 }}
-            animate={{ opacity: [0, 1, 1], scale: [1.6, 0.95, 1], y: 0 }}
-            exit={{ opacity: 0, scale: 0.9, y: 10 }}
-            transition={{
-              duration: 0.45,
-              ease: [0.22, 1, 0.36, 1],
-              delay: 0.08,
-            }}
-          >
-            {turnBannerText}
-          </motion.span>
-
-          {/* Center glow pulse behind text */}
-          <motion.div
-            className="absolute"
-            style={{
-              width: 300,
-              height: 60,
-              top: "calc(50% - 30px)",
-              left: "calc(50% - 150px)",
-              borderRadius: "50%",
-              background: `radial-gradient(ellipse, ${colors.glow}, transparent 70%)`,
-              filter: "blur(8px)",
-            }}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: [0, 0.6, 0.3, 0.5] }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 1.2, ease: "easeOut" }}
-          />
+            {/* Center glow pulse behind text */}
+            <motion.div
+              className="absolute"
+              style={{
+                width: 300,
+                height: 60,
+                top: "calc(50% - 30px)",
+                left: "calc(50% - 150px)",
+                borderRadius: "50%",
+                background: `radial-gradient(ellipse, ${colors.glow}, transparent 70%)`,
+                filter: "blur(8px)",
+              }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: [0, 0.6, 0.3, 0.5] }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 1.2, ease: "easeOut" }}
+            />
+          </div>
         </motion.div>
       )}
     </AnimatePresence>

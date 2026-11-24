@@ -48,13 +48,15 @@ use super::oracle_nom::target::{
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::{
     parse_declared_damage_source_target, parse_target, parse_target_with_ctx,
-    parse_type_phrase_folding, parse_type_phrase_union,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, parse_type_phrase_union,
+    scope_target_spell_phrase, split_source_is_blocking_relative,
 };
 use super::oracle_trigger::self_recursion_trigger_zone;
 use super::oracle_util::{
     first_sentence, merge_or_filters, normalize_card_name_refs, parse_count_expr, parse_number,
     parse_ordinal, rewrite_quantity_expr_rounding, strip_after, strip_reminder_text, TextPair,
 };
+use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
@@ -256,6 +258,11 @@ fn parse_replacement_line_inner(
         return Some(def);
     }
 
+    // --- "As ~ enters, you may behold a [quality]. If you don't, ~ enters tapped." (Theorist's Sanctum) ---
+    if let Some(def) = parse_as_enters_behold_tapped(&norm_lower, &normalized, &text) {
+        return Some(def);
+    }
+
     // --- Shock lands: "As ~ enters, you may pay N life. If you don't, it enters tapped." ---
     // Must be checked BEFORE the generic "enters tapped" pattern.
     if let Some(def) = parse_shock_land(&norm_lower, &text) {
@@ -448,10 +455,14 @@ fn parse_replacement_line_inner(
     // that exiles creatures which enter without having been cast. E.g.
     // Containment Priest:
     //   "If a nontoken creature would enter and it wasn't cast, exile it instead."
-    // Only the clean, always-on static form is handled here; the duration-scoped
-    // variants ("Until end of turn, ...": Hallowed Moonlight, Mistcaller) and the
-    // self-referential form ("if this creature would enter ...": Primeval Spawn)
-    // are deliberately excluded (see the guards inside).
+    // Only the clean, always-on static form is handled here. The duration-scoped
+    // variants ("Until end of turn, ...": Hallowed Moonlight, Mistcaller) reach the
+    // same builder only through the resolution-install front door
+    // `parse_windowed_enter_wasnt_cast_exile_install`, with text the clause
+    // pipeline has already stripped of its window; a windowed line never matches
+    // here because the builder requires a leading "if ". The self-referential form
+    // ("if this creature would enter ...": Primeval Spawn) stays excluded (see the
+    // guards inside).
     if let Some(def) = parse_creature_enter_wasnt_cast_exile_replacement(&norm_lower, &normalized) {
         return Some(def);
     }
@@ -2244,6 +2255,64 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
         .destination_zone(Zone::Battlefield)
         .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.1c + CR 614.12a + CR 701.4a: parse a single-object Behold cost on an
+/// as-enters replacement. Paying the cost leaves the permanent untapped;
+/// declining applies the enters-tapped modifier.
+fn parse_as_enters_behold_tapped(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let ((), after_prefix) = nom_on_lower(normalized, norm_lower, |i| {
+        value((), preceded(parse_as_self_enters_frame, tag("you may "))).parse(i)
+    })?;
+
+    let after_prefix_lower = after_prefix.to_lowercase();
+    let (cost_text, decline_text) =
+        split_once_on_lower(after_prefix, &after_prefix_lower, ". if you don't, ")?;
+    let cost = crate::parser::oracle_cost::parse_single_cost(cost_text.trim());
+    if !matches!(
+        cost,
+        AbilityCost::Behold {
+            count: 1,
+            action: crate::types::ability::BeholdCostAction::ChooseOrReveal,
+            type_choice: None,
+            ..
+        }
+    ) {
+        return None;
+    }
+
+    let decline_lower = decline_text.to_lowercase();
+    let ((), decline_rest) = nom_on_lower(decline_text, &decline_lower, |i| {
+        value(
+            (),
+            terminated(
+                alt((
+                    tag("~ enters tapped"),
+                    tag("~ enters the battlefield tapped"),
+                )),
+                opt(char('.')),
+            ),
+        )
+        .parse(i)
+    })?;
+    if !decline_rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .mode(ReplacementMode::MayCost {
+                cost,
+                decline: Some(Box::new(unconditional_tap_self_ability())),
+            })
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string()),
     )
 }
 
@@ -5992,6 +6061,7 @@ fn quoted_rider_grant_is_unsupported(modification: &ContinuousModification) -> b
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::AddCounterOnEnter { .. }
@@ -8017,6 +8087,8 @@ fn replacement_condition_from_static(
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // Attack-ledger predicates have no replacement-condition carrier.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::UnlessPay { .. }
@@ -8024,7 +8096,7 @@ fn replacement_condition_from_static(
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -8425,17 +8497,28 @@ fn parse_creature_die_exile_replacement(
 }
 
 /// CR 614.1a + CR 614.1d + CR 614.12: "If a [filter] would enter and it wasn't
-/// cast, exile it instead." (Containment Priest). A static ETB replacement
-/// gated on the entering object not having been cast. Only the always-on,
-/// non-self form is recognized here — duration-scoped ("Until end of turn, ...")
-/// and self-referential ("if this creature would enter ...") variants return
-/// `None`.
+/// cast, exile it instead." (Containment Priest). An ETB replacement gated on
+/// the entering object not having been cast. The builder recognizes the
+/// un-windowed, non-self sentence: the static arm in `parse_replacement_line`
+/// hosts it as a printed static (CR 604.2), and
+/// [`parse_windowed_enter_wasnt_cast_exile_install`] installs it when a window
+/// was stated (CR 611.2a). Self-referential forms ("if this creature would
+/// enter ...") return `None`.
 ///
 /// The "wasn't cast" gate is expressed as `Not(WasPlayed)` on the valid-card
 /// filter: `WasPlayed` is `played_from_zone.is_some() || cast_from_zone.is_some()`
-/// (see `game/filter.rs`), and a nontoken creature only ever enters via casting
-/// or via an effect that puts it onto the battlefield, so `Not(WasPlayed)` is
-/// exactly "entered without being cast." Because a cast Containment Priest sets
+/// (see `game/filter.rs`). A creature reaches the battlefield by resolving as a
+/// cast spell (CR 601.2; `cast_from_zone` survives the stack→battlefield move),
+/// by an effect that puts it there, or — a land creature such as Dryad Arbor —
+/// by being played as a land, a special action that is never casting
+/// (CR 305.1 + CR 305.9). The land play reads not-cast here only because
+/// `played_from_zone` is stamped AFTER the land's entry is delivered
+/// (`engine.rs::handle_play_land` → `mark_land_played_from_zone`), so this
+/// replacement consults the land while it is still the hand object with
+/// `played_from_zone == None`. Moving that stamp before `replace_event` would
+/// let a played creature land escape this gate; the Dryad Arbor rows in
+/// `tests/integration/mistcaller_enter_wasnt_cast_exile.rs` pin the ordering.
+/// Because a cast Containment Priest sets
 /// `cast_from_zone`, this gate also stops the replacement from exiling the
 /// permanent's own casting — the reported bug in issue #4761.
 fn parse_creature_enter_wasnt_cast_exile_replacement(
@@ -8539,6 +8622,40 @@ fn parse_creature_enter_wasnt_cast_exile_replacement(
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )
+}
+
+/// CR 611.2a + CR 614.1a + CR 614.12: the RESOLUTION-INSTALL front door for the
+/// "if a [filter] would enter and it wasn't cast, exile it instead" family
+/// ("Until end of turn, ..." — Mistcaller, Hallowed Moonlight) — the mirror
+/// image of the printed-static arm in `parse_replacement_line`, as
+/// [`parse_windowed_graveyard_redirect_install`] is for the graveyard family.
+///
+/// `stated_window` is the window the clause pipeline peeled off this clause
+/// (`ParseContext::stated_clause_duration`). This parser front door supports only
+/// clauses with a stated duration; durationless clauses remain unsupported here
+/// (CR 611.2a permits resolution-generated continuous effects without a stated
+/// duration), so an un-windowed clause is declined and keeps its honest guard
+/// gap. The window itself is not mapped here: it travels on
+/// `AbilityDefinition.duration`, and the install resolver derives the lifetime
+/// through `expiry_from_duration` (refusing unenforceable windows through
+/// `replacement_install_is_refused`), so the definition's own `expiry` stays
+/// `None` — the same contract as the Don't Blink floating redirect.
+///
+/// The created effect is independent of its source (CR 113.7a — Mistcaller is
+/// sacrificed as a cost) and applies to every object that enters afterwards
+/// while it lasts (CR 611.2c), matched as the object would exist on the
+/// battlefield (CR 614.12).
+pub(crate) fn parse_windowed_enter_wasnt_cast_exile_install(
+    norm_lower: &str,
+    original_text: &str,
+    stated_window: Option<&Duration>,
+) -> Option<Effect> {
+    stated_window?;
+    let def = parse_creature_enter_wasnt_cast_exile_replacement(norm_lower, original_text)?;
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(def),
+        target: TargetFilter::None,
+    })
 }
 
 fn split_dealt_damage_subject_condition(
@@ -11368,7 +11485,22 @@ impl DamageSourceScope {
 }
 
 /// Three-state form of `finish_damage_source_subject` (see its doc comment).
+/// Reads the subject under a blank parse context — every caller that has no
+/// recipient to arm uses this entry.
 fn damage_source_subject_scope(subject: &str) -> DamageSourceScope {
+    damage_source_subject_scope_with_ctx(subject, &mut ParseContext::default())
+}
+
+/// CR 608.2c: `damage_source_subject_scope` for a caller that has armed the
+/// context with the clause's damage recipient — the prevention route, whose
+/// passive "dealt to <recipient> by <subject>" clause makes a bare "it" in
+/// the subject name that recipient (see
+/// `parse_damage_source_subject_filter_with_ctx`). The controlled-leg
+/// recursion passes the same context through.
+fn damage_source_subject_scope_with_ctx(
+    subject: &str,
+    ctx: &mut ParseContext,
+) -> DamageSourceScope {
     let subject = subject.trim();
 
     // Handle ability word prefixes ("Revolt — ..., if a source you control")
@@ -11424,8 +11556,8 @@ fn damage_source_subject_scope(subject: &str) -> DamageSourceScope {
         if nom_primitives::parse_article.parse(tail).is_ok() {
             let first_leg = &subject[..head.len() + " you control".len()];
             return match (
-                damage_source_subject_scope(first_leg),
-                damage_source_subject_scope(tail),
+                damage_source_subject_scope_with_ctx(first_leg, ctx),
+                damage_source_subject_scope_with_ctx(tail, ctx),
             ) {
                 (DamageSourceScope::Scoped(first), DamageSourceScope::Scoped(second)) => {
                     DamageSourceScope::Scoped(merge_or_filters(first, second))
@@ -11453,7 +11585,7 @@ fn damage_source_subject_scope(subject: &str) -> DamageSourceScope {
         return DamageSourceScope::AnySource;
     }
 
-    parse_damage_source_subject_filter(subject)
+    parse_damage_source_subject_filter_with_ctx(subject, ctx)
         .map_or(DamageSourceScope::Unrecognized, DamageSourceScope::Scoped)
 }
 
@@ -11518,9 +11650,22 @@ fn parse_damage_source_filter_passive(norm_lower: &str) -> Option<TargetFilter> 
 /// CR 615.1a: the passive-voice source axis of a damage clause. `None` when the
 /// text prints no passive "by <subject>" source clause; otherwise the subject's
 /// scope, read through `damage_source_subject_scope` — the same postprocessing
-/// authority the active-voice extraction uses.
+/// authority the active-voice extraction uses. Reads the subject under a blank
+/// parse context (a bare "it" stays unbound).
 fn parse_damage_source_scope_passive(norm_lower: &str) -> Option<DamageSourceScope> {
     passive_damage_source_subject(norm_lower).map(damage_source_subject_scope)
+}
+
+/// CR 615.1a + CR 608.2c: `parse_damage_source_scope_passive` with the caller's
+/// parse context armed for the clause's recipient, so a bare "it" inside the
+/// subject names the host only when the caller established it as the
+/// self-reference (the prevention route's "dealt to ~ by ..." shape).
+fn parse_damage_source_scope_passive_with_ctx(
+    norm_lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<DamageSourceScope> {
+    passive_damage_source_subject(norm_lower)
+        .map(|subject| damage_source_subject_scope_with_ctx(subject, ctx))
 }
 
 /// CR 615.1a: "dealt to <recipient> [<duration>] by <subject>" (Champion
@@ -11608,38 +11753,85 @@ fn parse_attached_host_subject(input: &str) -> OracleResult<'_, TargetFilter> {
 }
 
 pub(crate) fn parse_damage_source_subject_filter(subject: &str) -> Option<TargetFilter> {
-    // CR 608.2c + CR 615.2: source-scoped prevention can name its own source
-    // with a deictic object phrase (Barbed Wire: "by this artifact"). The
-    // vocabulary is the shared `parse_self_reference` authority
-    // (oracle_nom::target), which now also covers "this source"; composing it
-    // here keeps every subject grammar in sync instead of maintaining a second
-    // phrase list. `all_consuming` keeps the contract that the whole subject
-    // must be consumed.
+    damage_source_subject_deixis(subject)
+        .or_else(|| parse_damage_source_subject(subject))
+        .or_else(|| {
+            // Typed damage sources ("creature you control with a +1/+1 counter on it",
+            // "creatures you control with counters on them", ...) share the normal
+            // target grammar; damage replacement parsing should not maintain a parallel
+            // counter/property grammar.
+            let (filter, rest) = parse_type_phrase_folding(subject);
+            (rest.trim().is_empty() && !matches!(filter, TargetFilter::Any)).then_some(filter)
+        })
+}
+
+/// CR 608.2c + CR 615.1a: the recipient-aware variant the prevention route reads
+/// a passive "by <subject>" clause with. Two differences from the default
+/// variant, both required by the recipient being named in the SAME clause:
+///
+/// * the type phrase is folded under the caller's `ParseContext`, so a bare
+///   "it" inside the subject ("creatures blocking it", "spells that target
+///   it") binds to the host ONLY when the caller armed the context with the
+///   self-reference recipient — any other recipient leaves the pronoun
+///   unbound and the subject unrecognized (fail closed);
+/// * the folded filter is scoped by `scope_target_spell_phrase`, so a
+///   "spell"/"spells" head noun (CR 109.2) denotes a spell on the stack, never
+///   the default variant's over-broad bare `Card` reading.
+fn parse_damage_source_subject_filter_with_ctx(
+    subject: &str,
+    ctx: &mut ParseContext,
+) -> Option<TargetFilter> {
+    damage_source_subject_deixis(subject)
+        .or_else(|| parse_damage_source_subject(subject))
+        .or_else(|| {
+            // CR 509.1g: "creatures it's blocking" carries its relation after the
+            // head noun; the shared type-phrase grammar has no such suffix, so the
+            // clause is split off and added as the pairing prop below.
+            let (head, blocking_relation) = match split_source_is_blocking_relative(subject, ctx) {
+                Some((head, relation)) => (head, Some(relation)),
+                None => (subject, None),
+            };
+            let (mut filter, rest) = parse_type_phrase_folding_with_ctx(head, ctx);
+            if !rest.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+                return None;
+            }
+            if let Some(relation) = blocking_relation {
+                let TargetFilter::Typed(typed) = &mut filter else {
+                    return None;
+                };
+                typed.properties.push(relation);
+            }
+            // CR 109.2 + CR 115.9b: "spells that target it" names spells on the
+            // stack; the head noun "spells" alone folds to a bare `Card`, so the
+            // stack scoping is applied only to the targeting relative clause. Every
+            // other spell phrase keeps the reading the default variant always had.
+            let names_targeting_spell = filter_contains_filter_prop(&filter, &|prop| {
+                matches!(prop, FilterProp::Targets { filter: _ })
+            });
+            Some(if names_targeting_spell {
+                scope_target_spell_phrase(filter, subject)
+            } else {
+                filter
+            })
+        })
+}
+
+/// CR 608.2c + CR 615.2: deictic damage-source subjects that resolve before
+/// the typed-source grammar, shared by both context variants of the subject
+/// filter: the source itself ("~", "this artifact" — Barbed Wire) via the
+/// shared `parse_self_reference` authority, and the attached host ("equipped
+/// creature" / "enchanted creature", CR 301.5 + CR 702.6) via
+/// `parse_attached_host_subject`.
+fn damage_source_subject_deixis(subject: &str) -> Option<TargetFilter> {
+    // `all_consuming` keeps the contract that the whole subject must be consumed.
     if all_consuming(parse_self_reference).parse(subject).is_ok() {
         return Some(TargetFilter::SelfRef);
     }
-
-    // CR 301.5 + CR 702.6: host-relative subjects ("equipped creature",
-    // "enchanted creature") resolve to the attached object before the generic
-    // typed-source grammar, which would otherwise treat "creature" as a type.
     if let Ok((rest, filter)) = parse_attached_host_subject(subject) {
         if rest.trim().is_empty() {
             return Some(filter);
         }
     }
-    if let Some(filter) = parse_damage_source_subject(subject) {
-        return Some(filter);
-    }
-
-    // Typed damage sources ("creature you control with a +1/+1 counter on it",
-    // "creatures you control with counters on them", ...) share the normal
-    // target grammar; damage replacement parsing should not maintain a parallel
-    // counter/property grammar.
-    let (filter, rest) = parse_type_phrase_folding(subject);
-    if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-        return Some(filter);
-    }
-
     None
 }
 
@@ -11648,6 +11840,7 @@ pub(crate) fn parse_damage_source_subject_filter(subject: &str) -> Option<Target
 /// - "Giant source you control"
 /// - "Goblin sources you control"
 /// - "sources you control of the chosen type"
+/// - "sources with the chosen name" (Gideon's Intervention)
 fn parse_damage_source_subject(subject: &str) -> Option<TargetFilter> {
     let (qualifier, tail) = split_damage_source_noun(subject)?;
     if qualifier.trim().is_empty() && tail.trim().is_empty() {
@@ -11694,6 +11887,37 @@ fn parse_damage_source_subject(subject: &str) -> Option<TargetFilter> {
             return None;
         }
         props.push(prop);
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with the chosen name").parse(tail) {
+        // CR 201.2a + CR 201.4: "with the chosen name" restricts the source to
+        // objects whose name equals the card name the host's linked "choose a
+        // card name" ability recorded — the same `TargetFilter::HasChosenName`
+        // leg the target grammar's "<type-phrase> with the chosen name" arm
+        // composes. A bare "sources with the chosen name" carries no typed
+        // restriction, so the filter is the name predicate alone; a qualifier
+        // or a controller-axis restriction ANDs with it.
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        let mut scope = filter.clone();
+        scope.properties = props.clone();
+        if let Some(union) = parse_type_phrase_union(qualifier.trim(), &scope) {
+            return Some(TargetFilter::And {
+                filters: vec![union, TargetFilter::HasChosenName],
+            });
+        }
+        apply_damage_source_qualifier(&mut filter, &mut props, qualifier.trim());
+        if !props.is_empty() {
+            filter.properties = props;
+        }
+        if filter.type_filters.is_empty()
+            && filter.controller.is_none()
+            && filter.properties.is_empty()
+        {
+            return Some(TargetFilter::HasChosenName);
+        }
+        return Some(TargetFilter::And {
+            filters: vec![TargetFilter::Typed(filter), TargetFilter::HasChosenName],
+        });
     } else if !tail.is_empty() {
         return None;
     }
@@ -16164,8 +16388,7 @@ fn parse_damage_prevention_replacement_with_provenance(
     // anchor ("dealt to ", "would deal to ", "would deal damage to ",
     // "would deal combat damage to ", "deal damage to ") but neither
     // `damage_target_filter`, `valid_card_filter`, nor `parse_damage_recipient_scope`
-    // parsed it, the recipient qualification is unrecognized or incomplete (e.g.
-    // Light of Sanction's "to creatures you control by sources you control").
+    // parsed it, the recipient qualification is unrecognized or incomplete.
     // Fail closed (return None) rather than falling through to an un-scoped shield
     // that would wrongly prevent damage to all targets in the game.
     let has_recipient_clause = [
@@ -16190,16 +16413,30 @@ fn parse_damage_prevention_replacement_with_provenance(
     // same way the recipient clause does (mirror of the recipient guard above):
     // a subject the runtime cannot evaluate must not become an unscoped shield
     // that prevents damage from every source.
+    //
+    // CR 608.2c: in "dealt to <recipient> by <subject>", a bare "it" inside the
+    // source subject names the RECIPIENT — the host only when the recipient is
+    // the shield's own self-reference ("dealt to ~"). The passive subject is
+    // read under a context armed with that recipient, so the pronoun binds
+    // there and only there; every other recipient ("enchanted creature",
+    // "you") leaves a bare "it" unbound and the source fails closed instead of
+    // silently binding the host.
     let damage_source_filter = match parse_damage_source_filter_active(working_lower) {
         Some(filter) => Some(filter),
-        None => match parse_damage_source_scope_passive(working_lower) {
-            Some(DamageSourceScope::Unrecognized) => {
-                return Err(PreventionDecline::FailsClosed(
-                    PreventionFailClosed::SourceScope,
-                ));
+        None => {
+            let mut recipient_ctx = ParseContext::default();
+            if matches!(valid_card_filter, Some(TargetFilter::SelfRef)) {
+                recipient_ctx.subject = Some(TargetFilter::SelfRef);
             }
-            scope => scope.and_then(DamageSourceScope::into_filter),
-        },
+            match parse_damage_source_scope_passive_with_ctx(working_lower, &mut recipient_ctx) {
+                Some(DamageSourceScope::Unrecognized) => {
+                    return Err(PreventionDecline::FailsClosed(
+                        PreventionFailClosed::SourceScope,
+                    ));
+                }
+                scope => scope.and_then(DamageSourceScope::into_filter),
+            }
+        }
     };
 
     // --- 5. Build the replacement definition ---
@@ -16294,6 +16531,10 @@ fn parse_damage_prevention_replacement_with_provenance(
             crate::parser::oracle_static::parse_affected_scoped_static_condition(
                 clause,
                 valid_card_filter.as_ref(),
+                // A prevention shield's host line is not a static's printed
+                // subject; only the plural "they" rewrite needs the source
+                // named alone, and that arm does not apply here.
+                crate::parser::oracle_static::PrintedSubject::Other,
             )
             .and_then(|condition| {
                 replacement_condition_from_static(condition, GatePolarity::OnlyIf)
@@ -16469,10 +16710,12 @@ fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<Targe
 ///    or without an intervening duration window:
 ///    e.g. `, prevent that damage.` or `this turn, prevent that damage.` (Invulnerability),
 ///    or `, you may prevent...` (Battletide Alchemist).
+/// 3. A trailing passive source clause (`by <source>`), left unconsumed.
 ///
 /// The prevention imperative continuation is matched via `peek` without consuming it,
-/// preserving ownership for downstream replacement parsing. Unparsed trailing qualifiers
-/// (e.g. Light of Sanction's "...by sources you control") fail closed.
+/// preserving ownership for downstream replacement parsing. A trailing "by <source>" clause
+/// (Light of Sanction's "...by sources you control") also ends the recipient: the source
+/// extractor reads it and fails closed when it cannot.
 fn parse_damage_recipient_terminator(input: &str) -> OracleResult<'_, ()> {
     let (input, _) = multispace0.parse(input)?;
     let (input, _) = opt(alt((
@@ -16498,6 +16741,11 @@ fn parse_damage_recipient_terminator(input: &str) -> OracleResult<'_, ()> {
                 tag::<_, _, OracleError<'_>>(", you may prevent"),
             ))),
         ),
+        // CR 615.1a + CR 609.7c: a trailing passive source clause ("... by sources
+        // with the chosen name") ends the recipient phrase. It is matched via `peek`
+        // and left for the source extractor, which fails closed on a subject it
+        // cannot read, so no shield is ever installed unscoped.
+        value((), peek(tag::<_, _, OracleError<'_>>("by "))),
     ))
     .parse(input)
 }
@@ -17817,6 +18065,8 @@ mod tests {
     /// subject it cannot read apart from an unscoped "by sources".
     #[test]
     fn passive_source_scope_reads_recipient_then_by_subject() {
+        use crate::types::ability::{BlockPairDirection, CombatRelation, CombatRelationSubject};
+
         let typed = |type_filters: Vec<TypeFilter>, properties: Vec<FilterProp>| {
             DamageSourceScope::Scoped(TargetFilter::Typed(TypedFilter {
                 type_filters,
@@ -17879,7 +18129,9 @@ mod tests {
                 "prevent all damage that would be dealt to you by sources of the chosen color.",
                 typed(vec![], vec![FilterProp::IsChosenColor]),
             ),
-            // Subjects no filter expresses.
+            // Subjects no filter expresses under a BLANK context — a bare "it"
+            // stays unbound (CR 608.2c): these are the armed-context readings
+            // asserted after the loop.
             (
                 "prevent all damage that would be dealt to ~ by spells that target it.",
                 DamageSourceScope::Unrecognized,
@@ -17891,6 +18143,19 @@ mod tests {
             (
                 "prevent all combat damage that would be dealt to ~ by creatures blocking it.",
                 DamageSourceScope::Unrecognized,
+            ),
+            // CR 608.2c: a non-self recipient ("enchanted creature") leaves the
+            // source phrase's bare "it" unbound even though the grammar knows
+            // the clause — the pronoun must not silently bind the host.
+            (
+                "prevent all damage that would be dealt to enchanted creature by creatures blocking it.",
+                DamageSourceScope::Unrecognized,
+            ),
+            // A deictic "this creature" in the source phrase binds the source
+            // outright, with no context needed.
+            (
+                "prevent all combat damage that would be dealt to ~ by creatures blocking this creature.",
+                typed(vec![TypeFilter::Creature], vec![FilterProp::BlockingSource]),
             ),
             // "The last chosen color" (Chromatic Armor): re-choice persistence is unverified, so it fails closed.
             (
@@ -17905,6 +18170,59 @@ mod tests {
         ] {
             assert_eq!(
                 parse_damage_source_scope_passive(text),
+                Some(expected),
+                "{text}"
+            );
+        }
+        // CR 608.2c: the same subjects bind once the recipient is the
+        // self-reference and the context is armed with it — the prevention
+        // route's passive subject reader does exactly this (step 4).
+        let mut self_ref_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        for (text, expected) in [
+            // CR 509.1g: Armored Transport — the creatures blocking the host.
+            (
+                "prevent all combat damage that would be dealt to ~ by creatures blocking it.",
+                typed(vec![TypeFilter::Creature], vec![FilterProp::BlockingSource]),
+            ),
+            // CR 509.1g: Wall of Vapor — the active-voice pairing clause.
+            (
+                "prevent all damage that would be dealt to ~ by creatures it's blocking.",
+                typed(
+                    vec![TypeFilter::Creature],
+                    vec![FilterProp::CombatRelation {
+                        relation: CombatRelation::BlockPairing {
+                            direction: BlockPairDirection::SubjectIsBlocker,
+                            scope: None,
+                        },
+                        subject: CombatRelationSubject::Source,
+                    }],
+                ),
+            ),
+            // CR 115.9b + CR 109.2: Bronze Horse — a stack spell targeting the host.
+            (
+                "prevent all damage that would be dealt to ~ by spells that target it.",
+                DamageSourceScope::Scoped(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter::default().properties(vec![
+                            FilterProp::Targets {
+                                filter: Box::new(TargetFilter::SelfRef),
+                            },
+                        ])),
+                    ],
+                }),
+            ),
+            // CR 201.2a + CR 201.4: Gideon's Intervention — the chosen card name.
+            (
+                "prevent all damage that would be dealt to you by sources with the chosen name.",
+                DamageSourceScope::Scoped(TargetFilter::HasChosenName),
+            ),
+        ] {
+            assert_eq!(
+                parse_damage_source_scope_passive_with_ctx(text, &mut self_ref_ctx),
                 Some(expected),
                 "{text}"
             );
@@ -27106,7 +27424,8 @@ mod tests {
     fn enter_wasnt_cast_exile_excludes_duration_and_self_variants() {
         // Duration-scoped ("Until end of turn, ...") and self-referential
         // ("if this creature would enter ...") variants must NOT be captured by
-        // the Containment Priest static arm — they need separate handling.
+        // the Containment Priest static arm — windowed variants are installed by
+        // `parse_windowed_enter_wasnt_cast_exile_install` at the clause seam.
         assert!(
             parse_replacement_line(
                 "Until end of turn, if a creature would enter and it wasn't cast, exile it instead.",
@@ -34311,12 +34630,13 @@ mod tests {
         }
     }
 
-    /// CR 604.2 + CR 614.1d: Bronze Horse's "as long as you control another
-    /// creature" gate still bridges to an object-count gate; the line declines
-    /// only because its "by spells that target it" source scope does not parse
-    /// (CR 615.1a), so the route lands it instead of an unscoped shield.
+    /// CR 604.2 + CR 614.1d + CR 115.9b: Bronze Horse's "as long as you control
+    /// another creature" gate bridges to an object-count gate, and its
+    /// "by spells that target it" source scope reads as a stack-spell filter
+    /// targeting the host — the gated, source-scoped shield the printed line
+    /// states, never an unscoped one.
     #[test]
-    fn bronze_horse_gate_bridges_but_source_scope_fails_closed() {
+    fn bronze_horse_gate_bridges_and_source_scope_parses() {
         const LINE: &str = "As long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.";
         let norm_lower = replace_self_refs(LINE, "Bronze Horse").to_lowercase();
         let AsLongAsGate::Parsed { condition, .. } = strip_as_long_as_condition_prefix(&norm_lower)
@@ -34342,11 +34662,36 @@ mod tests {
         assert_eq!(tf.controller, Some(ControllerRef::You));
         assert!(tf.properties.contains(&FilterProp::Another));
 
-        assert!(parse_replacement_line(LINE, "Bronze Horse").is_none());
+        let def = parse_replacement_line(LINE, "Bronze Horse")
+            .expect("the gated, source-scoped shield must parse");
         assert_eq!(
-            damage_prevention_fails_closed(LINE, "Bronze Horse"),
-            Some(PreventionFailClosed::SourceScope)
+            def.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(tf.clone())
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+                active_player_req: None,
+            })
         );
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.damage_source_filter,
+            Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::Targets {
+                            filter: Box::new(TargetFilter::SelfRef),
+                        },
+                    ])),
+                ],
+            })
+        );
+        assert_eq!(damage_prevention_fails_closed(LINE, "Bronze Horse"), None);
     }
 
     /// CR 604.2 + CR 122.1: Woolly Razorback's "has an ice counter" gate still
@@ -34794,43 +35139,65 @@ mod tests {
         );
     }
 
-    /// CR 615.1a: an ungated prevention line whose "by <subject>" source scope
-    /// does not parse lands at the Priority-8 route as a line-owned
-    /// `Effect::unimplemented` — never an unscoped shield, and never a later
-    /// route's one-shot `PreventDamage` reading of a static shield.
+    /// CR 615.1a + CR 608.2c: an ungated prevention line whose "by <subject>"
+    /// source scope does not parse lands at the Priority-8 route as a
+    /// line-owned `Effect::unimplemented` — never an unscoped shield, and never
+    /// a later route's one-shot `PreventDamage` reading of a static shield. Two
+    /// fail-closed shapes: a subject no filter expresses at all, and — the
+    /// CR 608.2c anaphor rule — a bare "it" in the source subject when the
+    /// recipient is NOT the shield's own self-reference, so the pronoun must not
+    /// silently bind the host.
     #[test]
     fn prevention_source_scope_fails_closed_at_the_route() {
-        const LINE: &str =
-            "Prevent all damage that would be dealt to ~ by creatures it's blocking.";
-        let parsed = parse_oracle_text(
-            "Defender (This creature can't attack.)\nPrevent all damage that would be dealt to this creature by creatures it's blocking.\nThis creature can't be the target of spells that can target only Walls or of abilities that can target only Walls.",
-            "Wall of Shadows",
-            &["Defender".to_string()],
-            &["Creature".to_string()],
-            &["Wall".to_string()],
-        );
-        let line_abilities: Vec<_> = parsed
-            .abilities
-            .iter()
-            .filter(|a| a.description.as_deref() == Some(LINE))
-            .collect();
-        assert_eq!(line_abilities.len(), 1, "abilities: {:?}", parsed.abilities);
-        assert!(
-            matches!(
-                &*line_abilities[0].effect,
-                Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
+        for (line, full_text) in [
+            // An unrecognized source phrase.
+            (
+                "Prevent all damage that would be dealt to ~ by spells n.",
+                "Prevent all damage that would be dealt to this creature by spells n.",
             ),
-            "{:?}",
-            line_abilities[0].effect
-        );
-        assert!(
-            parsed
-                .replacements
+            // CR 608.2c: the recipient is the attached creature, not the host,
+            // so the source phrase's bare "it" stays unbound and the line
+            // fails closed rather than scoping the shield to the host.
+            (
+                "Prevent all damage that would be dealt to enchanted creature by creatures blocking it.",
+                "Prevent all damage that would be dealt to enchanted creature by creatures blocking it.",
+            ),
+        ] {
+            let parsed = parse_oracle_text(
+                full_text,
+                "Probe Card",
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            let line_abilities: Vec<_> = parsed
+                .abilities
                 .iter()
-                .all(|r| r.event != ReplacementEvent::DamageDone),
-            "no unscoped shield: {:?}",
-            parsed.replacements
-        );
+                .filter(|a| a.description.as_deref() == Some(line))
+                .collect();
+            assert_eq!(
+                line_abilities.len(),
+                1,
+                "{full_text}: abilities: {:?}",
+                parsed.abilities
+            );
+            assert!(
+                matches!(
+                    &*line_abilities[0].effect,
+                    Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
+                ),
+                "{full_text}: {:?}",
+                line_abilities[0].effect
+            );
+            assert!(
+                parsed
+                    .replacements
+                    .iter()
+                    .all(|r| r.event != ReplacementEvent::DamageDone),
+                "{full_text}: no unscoped shield: {:?}",
+                parsed.replacements
+            );
+        }
 
         // Reach-guard: a typed subject through the same entry is a scoped shield.
         let lancer = parse_oracle_text(
@@ -34848,6 +35215,161 @@ mod tests {
             }),
             "{:?}",
             lancer.replacements
+        );
+    }
+
+    /// CR 615.1a + CR 608.2c + CR 509.1g + CR 109.2 + CR 201.2a: the printed
+    /// prevention shields whose source scope names a combat pairing, a stack
+    /// spell, a tap status, or the host's chosen card name install with that
+    /// exact `damage_source_filter` — the five-card class the
+    /// `prevention_source_scope` gap used to swallow.
+    #[test]
+    fn prevention_source_scope_printed_cards_install_scoped_shields() {
+        use crate::types::ability::{BlockPairDirection, CombatRelation, CombatRelationSubject};
+
+        // CR 509.1g: Armored Transport — "creatures blocking it" with the
+        // recipient ("this creature") normalized to the host self-reference.
+        let transport = parse_oracle_text(
+            "Prevent all combat damage that would be dealt to this creature by creatures blocking it.",
+            "Armored Transport",
+            &[],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Construct".to_string()],
+        );
+        assert!(
+            transport.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.valid_card == Some(TargetFilter::SelfRef)
+                    && r.combat_scope == Some(CombatDamageScope::CombatOnly)
+                    && matches!(
+                        r.shield_kind,
+                        ShieldKind::Prevention {
+                            amount: PreventionAmount::All
+                        }
+                    )
+                    && r.damage_source_filter
+                        == Some(TargetFilter::Typed(
+                            TypedFilter::creature().properties(vec![FilterProp::BlockingSource]),
+                        ))
+            }),
+            "{:?}",
+            transport.replacements
+        );
+
+        // CR 509.1g: Wall of Vapor — "creatures it's blocking" is the active
+        // voice of the "blocked by <subject>" pairing.
+        let vapor = parse_oracle_text(
+            "Defender (This creature can't attack.)\nPrevent all damage that would be dealt to this creature by creatures it's blocking.",
+            "Wall of Vapor",
+            &["Defender".to_string()],
+            &["Creature".to_string()],
+            &["Wall".to_string()],
+        );
+        assert!(
+            vapor.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.valid_card == Some(TargetFilter::SelfRef)
+                    && r.combat_scope.is_none()
+                    && r.damage_source_filter
+                        == Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                            vec![FilterProp::CombatRelation {
+                                relation: CombatRelation::BlockPairing {
+                                    direction: BlockPairDirection::SubjectIsBlocker,
+                                    scope: None,
+                                },
+                                subject: CombatRelationSubject::Source,
+                            }],
+                        )))
+            }),
+            "{:?}",
+            vapor.replacements
+        );
+
+        // CR 115.9b + CR 109.2: Bronze Horse — the gate still bridges, and
+        // "spells that target it" is a stack spell that targets the host.
+        let horse = parse_oracle_text(
+            "Trample\nAs long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.",
+            "Bronze Horse",
+            &["Trample".to_string()],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Horse".to_string()],
+        );
+        assert!(
+            horse.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.valid_card == Some(TargetFilter::SelfRef)
+                    && r.condition.is_some()
+                    && r.damage_source_filter
+                        == Some(TargetFilter::And {
+                            filters: vec![
+                                TargetFilter::StackSpell,
+                                TargetFilter::Typed(TypedFilter::default().properties(vec![
+                                    FilterProp::Targets {
+                                        filter: Box::new(TargetFilter::SelfRef),
+                                    },
+                                ])),
+                            ],
+                        })
+            }),
+            "{:?}",
+            horse.replacements
+        );
+        assert!(
+            !horse.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
+            )),
+            "{:?}",
+            horse.abilities
+        );
+
+        // CR 509.1a + CR 110.5: New Master of Arms — "blocking creatures that
+        // are tapped" carries both status predicates on the source filter.
+        let master = parse_oracle_text(
+            "First strike\nPrevent all combat damage that would be dealt by blocking creatures that are tapped.",
+            "New Master of Arms",
+            &["First strike".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Soldier".to_string()],
+        );
+        assert!(
+            master.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.combat_scope == Some(CombatDamageScope::CombatOnly)
+                    && r.damage_source_filter
+                        == Some(TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .properties(vec![FilterProp::Blocking, FilterProp::Tapped]),
+                        ))
+            }),
+            "{:?}",
+            master.replacements
+        );
+
+        // CR 201.2a + CR 201.4: Gideon's Intervention — "sources with the chosen
+        // name" reads the host's chosen card name.
+        let intervention = parse_oracle_text(
+            "As this enchantment enters, choose a card name.\nYour opponents can't cast spells with the chosen name.\nPrevent all damage that would be dealt to you and permanents you control by sources with the chosen name.",
+            "Gideon's Intervention",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        assert!(
+            intervention.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.damage_source_filter == Some(TargetFilter::HasChosenName)
+                    && matches!(
+                        &r.damage_target_filter,
+                        Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                            player: DamageTargetPlayerScope::Controller,
+                            permanent_type: None,
+                            ..
+                        })
+                    )
+            }),
+            "{:?}",
+            intervention.replacements
         );
     }
 
@@ -39355,17 +39877,43 @@ mod opposition_agent_parser_tests {
             "CR 615.1a: recipient must include both creatures and planeswalkers you control"
         );
 
-        // CR 615.1a: Light of Sanction contains unsupported controller-relative
-        // constraints ("creatures you control by sources you control"). The unconsumed
-        // source-clause residue must cause the replacement to fail closed (None) rather
-        // than dropping the qualifiers and emitting an overly broad prevention shield.
+        // CR 615.1a + CR 609.7c: Light of Sanction's trailing "by sources you control"
+        // ends the recipient phrase and is read as the damage source, so the shield is
+        // scoped on BOTH axes (recipient: creatures you control; source: sources you
+        // control) instead of dropping either restriction.
         let ls = parse_replacement_line(
             "Prevent all damage that would be dealt to creatures you control by sources you control.",
             "Light of Sanction",
+        )
+        .expect("Light of Sanction's recipient and source clauses both parse");
+        assert_eq!(
+            ls.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            )),
+            "recipient: creatures you control"
         );
         assert_eq!(
-            ls, None,
-            "CR 615.1a: unsupported qualifiers must fail closed rather than dropping restrictions"
+            ls.damage_source_filter,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You)
+            )),
+            "source: sources you control"
+        );
+        assert_eq!(
+            ls.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+        // An unreadable trailing source clause still fails closed.
+        assert_eq!(
+            parse_replacement_line(
+                "Prevent all damage that would be dealt to creatures you control by sources named like this.",
+                "Fixture",
+            ),
+            None,
+            "CR 615.1a: an unrecognised source clause must not install an unscoped shield"
         );
     }
 
@@ -39689,6 +40237,42 @@ mod damage_source_union {
                 "{phrase}"
             );
         }
+    }
+
+    /// CR 201.2a + CR 201.4: "sources with the chosen name" reads the card name
+    /// the host's linked "choose a card name" ability recorded (Gideon's
+    /// Intervention); a typed qualifier or a controller axis ANDs with it.
+    #[test]
+    fn chosen_name_source_scopes_the_shield() {
+        assert_eq!(
+            parse_damage_source_subject("sources with the chosen name"),
+            Some(TargetFilter::HasChosenName)
+        );
+        // A card-type qualifier composes by AND, like the target grammar's
+        // "<type-phrase> with the chosen name" arm.
+        let qualified = parse_damage_source_subject("artifact sources with the chosen name")
+            .expect("the qualified chosen-name subject parses");
+        assert_eq!(
+            qualified,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    TargetFilter::HasChosenName,
+                ],
+            }
+        );
+        // A controller-axis tail composes the same way.
+        let controlled = parse_damage_source_subject("sources you control with the chosen name")
+            .expect("the controlled chosen-name subject parses");
+        assert_eq!(
+            controlled,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                    TargetFilter::HasChosenName,
+                ],
+            }
+        );
     }
 }
 
