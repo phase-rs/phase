@@ -19,8 +19,10 @@ use std::num::NonZeroUsize;
 
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::{declared_targets_in_chain, flatten_targets_in_chain};
-use crate::game::combat::{active_attack_target, AttackTarget};
-use crate::game::combat_damage::combat_damage_to_defender;
+use crate::game::combat::{active_attack_target, AttackTarget, TrampleKind};
+use crate::game::combat_damage::{
+    combat_damage_to_defender, compute_pw_loyalty_threshold, lethal_first_split, ExcessRoute,
+};
 use crate::game::effects::deal_damage::DamageContext;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource, GameObject};
@@ -43,8 +45,9 @@ use crate::types::display_only::{CanonicalDigest, DisplayOnly};
 use crate::types::events::GameEvent;
 use crate::types::format::{GameFormat, TurnStructure};
 use crate::types::game_state::{
-    CastingVariant, CombatDamageSubStep, GameState, PendingManaAbility, StackEntry, StackEntryKind,
-    StackPaidSnapshot, SyntheticTriggerProvenance, TriggerSourceRead, WaitingFor,
+    CastingVariant, CombatDamageSplit, CombatDamageSubStep, GameState, PendingManaAbility,
+    StackEntry, StackEntryKind, StackPaidSnapshot, SyntheticTriggerProvenance, TriggerSourceRead,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::InteractionId;
@@ -1154,6 +1157,15 @@ pub struct DerivedViews {
     /// is not attacking any player, planeswalker, or battle.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub attack_targets: HashMap<ObjectId, AttackTarget>,
+
+    /// CR 510.1c + CR 702.19b: the lethal-first default for the open
+    /// `WaitingFor::AssignCombatDamage` prompt — lethal damage to each blocker in order, then
+    /// the excess to whatever can currently receive it (CR 702.19c, CR 702.19e, CR 506.4c).
+    /// Derived from live combat state on every delivery, so it follows a recipient that leaves
+    /// while the prompt stays open. Advisory only: action validation never reads it. Absent
+    /// outside that prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combat_damage_suggestion: Option<CombatDamageSplit>,
 }
 
 /// Serialize-only wrapper. The wire shape is
@@ -1773,12 +1785,20 @@ fn temporary_cant_be_blocked_source(
             .find(|effect| effect.id == *id)?;
         (effect.duration == Duration::UntilEndOfTurn
             && crate::game::layers::transient_effect_is_live(state, effect)
-            && matches!(
-                effect.modifications.get(*mod_index),
-                Some(ContinuousModification::AddStaticMode {
-                    mode: StaticMode::CantBeBlocked
-                })
-            ))
+            && {
+                let modification = effect.modifications.get(*mod_index);
+                matches!(
+                    modification,
+                    Some(ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantBeBlocked,
+                    })
+                ) || matches!(
+                    modification,
+                    Some(ContinuousModification::GrantStaticAbility { definition })
+                        if definition.has_legacy_static_mode_shape()
+                            && definition.mode == StaticMode::CantBeBlocked
+                )
+            })
         .then(|| {
             state
                 .objects
@@ -1816,6 +1836,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         storm_count: storm_count(state),
         unblocked_attack_previews: unblocked_attack_previews(state),
         attack_targets: attack_targets(state),
+        combat_damage_suggestion: combat_damage_suggestion(state),
         ..DerivedViews::default()
     };
 
@@ -2574,6 +2595,47 @@ fn unblocked_attack_previews(state: &GameState) -> HashMap<ObjectId, UnblockedAt
             Some((id, UnblockedAttackPreview { damage, life_loss }))
         })
         .collect()
+}
+
+/// CR 510.1c + CR 702.19b: the excess route is read from live state exactly as the
+/// `AssignCombatDamage` validator reads it — the current excess recipient (CR 506.4c) and the
+/// planeswalker's effective loyalty (CR 702.19c, CR 702.19e) — so the published split is one
+/// the validator accepts. `None` once the prompted attacker is no longer in combat, where
+/// the validator rejects the action before looking at any split.
+fn combat_damage_suggestion(state: &GameState) -> Option<CombatDamageSplit> {
+    let WaitingFor::AssignCombatDamage {
+        attacker_id,
+        total_damage,
+        blockers,
+        trample,
+        ..
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    let info = state
+        .combat
+        .as_ref()?
+        .attackers
+        .iter()
+        .find(|info| info.object_id == *attacker_id)?;
+    let route = match (trample, info.attack_target) {
+        (None, _) => ExcessRoute::ToBlockers,
+        (Some(TrampleKind::OverPlaneswalkers), AttackTarget::Planeswalker(_)) => {
+            let (loyalty, _) = compute_pw_loyalty_threshold(state, info);
+            ExcessRoute::OverPlaneswalker {
+                loyalty: loyalty.unwrap_or(0),
+            }
+        }
+        (Some(TrampleKind::Standard | TrampleKind::OverPlaneswalkers), _) => {
+            if info.resolve_damage_target(state, false).is_some() {
+                ExcessRoute::Trample
+            } else {
+                ExcessRoute::ToBlockers
+            }
+        }
+    };
+    Some(lethal_first_split(*total_damage, blockers, route))
 }
 
 /// CR 400.7 + CR 506.4c: each attacker's relation read through the combat authority, which
@@ -3400,7 +3462,7 @@ fn combat_damage_label(sub_step: CombatDamageSubStep) -> String {
 
 fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTargetDisplay> {
     let targets = match &entry.kind {
-        StackEntryKind::KeywordAction { action } => keyword_action_targets(action),
+        StackEntryKind::KeywordAction { action } => action.targets(),
         _ => effective_stack_ability(state, entry)
             .ability
             .map(|ability| {
@@ -3421,17 +3483,6 @@ fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTarget
             target,
         })
         .collect()
-}
-
-fn keyword_action_targets(action: &KeywordAction) -> Vec<TargetRef> {
-    match action {
-        KeywordAction::Equip {
-            target_creature_id, ..
-        } => vec![TargetRef::Object(*target_creature_id)],
-        KeywordAction::Crew { .. }
-        | KeywordAction::Saddle { .. }
-        | KeywordAction::Station { .. } => Vec::new(),
-    }
 }
 
 fn target_label(state: &GameState, target: &TargetRef) -> String {
@@ -3688,10 +3739,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn emblem_printing(collector: &str) -> SharedPrinting {
-        SharedPrinting::new(CardPrinting {
-            set_code: "owner".into(),
-            collector_number: collector.into(),
-        })
+        SharedPrinting::new(CardPrinting::owner("owner", collector))
     }
 
     /// A synthetic emblem row fixture. No printed emblem carries an activated ability or empty
@@ -8231,6 +8279,7 @@ mod tests {
             let obj = state.objects.get_mut(&omniscience).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.static_definitions = vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::CastFromHandFree {
                     frequency: CastFrequency::Unlimited,
                     origin: CastFreeOrigin::Hand,
@@ -8251,6 +8300,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }]
             .into();
         }

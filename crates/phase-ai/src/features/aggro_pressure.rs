@@ -489,6 +489,7 @@ mod tests {
     #[test]
     fn detects_self_grant_haste_via_static() {
         let static_haste = StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::Continuous,
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![ContinuousModification::AddKeyword {
@@ -508,6 +509,7 @@ mod tests {
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         };
         let mut face = creature_face(2);
         face.static_abilities.push(static_haste);
@@ -587,6 +589,7 @@ mod tests {
             properties: vec![FilterProp::Attacking { defender: None }],
         });
         let static_anthem = StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::Continuous,
             affected: Some(attacking_filter),
             modifications: vec![ContinuousModification::AddPower { value: 1 }],
@@ -604,6 +607,7 @@ mod tests {
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         };
         let face = CardFace {
             mana_cost: ManaCost::generic(3),

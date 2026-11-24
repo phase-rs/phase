@@ -5,8 +5,6 @@ use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 #[cfg(test)]
 use std::fs::File;
-#[cfg(test)]
-use std::io::BufReader;
 
 use engine::ai_support::{
     build_decision_context, build_decision_context_for_semantic_owner, certify_fetch_then_cast,
@@ -434,7 +432,7 @@ fn choose_action_with_session_inner(
                 .into_iter()
                 .find(|action| matches!(action, GameAction::ChooseTarget { .. }))
                 .or_else(|| fallback_action(state, config, contract))
-                .and_then(&bind_specialist),
+                .and_then(bind_specialist),
         );
     }
 
@@ -442,7 +440,7 @@ fn choose_action_with_session_inner(
     // domain slice for a guess that cannot apply.
     if matches!(state.waiting_for, WaitingFor::NamedChoice { .. }) {
         if let Some(action) = random_card_predicate_guess(state, ai_player, &issued_domain(), rng)
-            .and_then(&bind_specialist)
+            .and_then(bind_specialist)
         {
             return direct(Some(action));
         }
@@ -456,7 +454,7 @@ fn choose_action_with_session_inner(
             .map(|decision| GameAction::DecideOptionalEffect {
                 accept: decision.accept(),
             })
-            .and_then(&bind_specialist)
+            .and_then(bind_specialist)
         {
             return direct(Some(action));
         }
@@ -467,7 +465,7 @@ fn choose_action_with_session_inner(
     {
         if *player == ai_player {
             if let Some(action) = shortcut_answer(state, ai_player, config, rng, &issued_domain())
-                .and_then(&bind_specialist)
+                .and_then(bind_specialist)
             {
                 return direct(Some(action));
             }
@@ -496,7 +494,7 @@ fn choose_action_with_session_inner(
             if let Some(prompt) = pending.remove(&ai_player) {
                 if let Some(action) = prompt
                     .action_for(state, ai_player)
-                    .and_then(&bind_specialist)
+                    .and_then(bind_specialist)
                 {
                     if let Ok(mut follow_ups) = session.prospective_fetch_follow_up.write() {
                         follow_ups.insert(ai_player, prompt.follow_up());
@@ -508,7 +506,7 @@ fn choose_action_with_session_inner(
         let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
         if let Some(action) =
             deterministic_choice(state, ai_player, config, &issued_domain(), Some(&context))
-                .and_then(&bind_specialist)
+                .and_then(bind_specialist)
         {
             return direct(Some(action));
         }
@@ -521,7 +519,7 @@ fn choose_action_with_session_inner(
         let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
         if let Some(action) =
             deterministic_choice(state, ai_player, config, &issued_domain(), Some(&context))
-                .and_then(&bind_specialist)
+                .and_then(bind_specialist)
         {
             return direct(Some(action));
         }
@@ -545,7 +543,7 @@ fn choose_action_with_session_inner(
             .into_iter()
             .filter(|action| matches!(action, GameAction::ChooseOption { .. }))
             .collect();
-        if let Some(action) = guesses.choose(rng).cloned().and_then(&bind_specialist) {
+        if let Some(action) = guesses.choose(rng).cloned().and_then(bind_specialist) {
             return direct(Some(action));
         }
     }
@@ -554,7 +552,7 @@ fn choose_action_with_session_inner(
         if let Some(follow_up) = follow_ups.remove(&ai_player) {
             if let Some(action) = follow_up
                 .action_for(state, ai_player)
-                .and_then(&bind_specialist)
+                .and_then(bind_specialist)
             {
                 return direct(Some(action));
             }
@@ -565,7 +563,7 @@ fn choose_action_with_session_inner(
     // Answer its finite engine-issued consent domain directly so tactical
     // scoring cannot randomly select Decline when Grant is available.
     if matches!(state.waiting_for, WaitingFor::ResolveAllConsent { .. }) {
-        return direct(fallback_action(state, config, contract).and_then(&bind_specialist));
+        return direct(fallback_action(state, config, contract).and_then(bind_specialist));
     }
 
     // One decision, one lethal-reach certification: decided here for the
@@ -667,7 +665,7 @@ fn choose_action_with_session_inner(
                 .filter(|action| {
                     durable_pact_routes || !is_certified_pact_root(state, ai_player, action)
                 })
-                .filter(&in_contract),
+                .filter(in_contract),
         );
     };
     let chosen = scored[index].0.clone();
@@ -677,7 +675,7 @@ fn choose_action_with_session_inner(
     }
     emit_decision_trace(state, ai_player, config, &chosen, session);
     let selected_index = Some(index);
-    let action = Some(chosen).filter(&in_contract);
+    let action = Some(chosen).filter(in_contract);
     AiDecisionSelection {
         receipt: diagnostics
             .then(|| {
@@ -2150,6 +2148,11 @@ pub fn fallback_action(
 
         // Replacement choice: pick the first option.
         WaitingFor::ReplacementChoice { .. } => Some(GameAction::ChooseReplacement { index: 0 }),
+        // CR 101.4c: which of the player's decisions to make first: the first
+        // engine-issued one.
+        WaitingFor::ReplacementDecisionOrder { .. } => {
+            issued(|action| matches!(action, GameAction::SelectCards { .. }))
+        }
         WaitingFor::EntryControllerChoice { candidates, .. } => candidates
             .first()
             .copied()
@@ -5969,11 +5972,7 @@ mod tests {
         "Counter target spell.\nAt the beginning of your next upkeep, pay {3}{U}{U}. If you don't, you lose the game.";
 
     fn integration_card_db() -> CardDatabase {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../engine/tests/fixtures/integration_cards.json.gz");
-        let file = File::open(path).expect("integration fixture should open");
-        let decoder = flate2::read::GzDecoder::new(BufReader::new(file));
-        CardDatabase::from_export_reader(decoder).expect("integration fixture should load")
+        CardDatabase::from_integration_fixture().expect("integration fixture should load")
     }
 
     /// `integration_card_db`, loaded once per test binary for read-only callers.
@@ -18882,6 +18881,7 @@ mod tests {
                 pending_effect: stub_pending_effect(source, PlayerId(1)),
                 remaining: 1,
                 min_total_power: None,
+                trigger_event: None,
             }
         });
         push("UnlessBounceChoice", &|state| {

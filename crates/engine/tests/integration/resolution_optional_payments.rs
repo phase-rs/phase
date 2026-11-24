@@ -1666,6 +1666,8 @@ fn eliminated_resolution_sacrifice_controller_terminates_real_stack_selection_as
     ));
 }
 
+// Synthetic payment shape: Prowling Pangolin offers another player two
+// sacrifices, but does not offer an alternate mana payment.
 #[test]
 fn eliminated_resolution_sacrifice_controller_terminates_real_stack_replacement_pause() {
     let mut scenario = GameScenario::new_n_player(3, 42);
@@ -1684,13 +1686,15 @@ fn eliminated_resolution_sacrifice_controller_terminates_real_stack_replacement_
         .add_creature(P1, "Second Foreign Fodder", 1, 1)
         .id();
     let p2 = PlayerId(2);
-    scenario.add_creature_from_oracle(
-        p2,
-        "Death Observer",
-        1,
-        1,
-        "Whenever another creature dies, you gain 1 life.",
-    );
+    let observer = scenario
+        .add_creature_from_oracle(
+            p2,
+            "Death Observer",
+            1,
+            1,
+            "Whenever another creature dies, you gain 1 life.",
+        )
+        .id();
     let mut runner = scenario.build();
     let life = runner.state().players[P0.0 as usize].life;
     move_to_zone(runner.state_mut(), warden, Zone::Exile, &mut Vec::new());
@@ -1749,12 +1753,25 @@ fn eliminated_resolution_sacrifice_controller_terminates_real_stack_replacement_
     assert_eq!(runner.state().objects[&first].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
 
-    let mut events = Vec::new();
-    eliminate_player(
+    apply(
         runner.state_mut(),
         P0,
-        engine::types::events::LossReason::Conceded,
-        &mut events,
+        GameAction::Concede { player_id: P0 },
+    )
+    .expect("concession settles the departed controller's resolution");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == observer)
+            .count(),
+        1,
+        "the completed cost prefix puts exactly one death trigger on the stack"
     );
     runner.advance_until_stack_empty();
 

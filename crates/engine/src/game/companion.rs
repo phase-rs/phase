@@ -476,6 +476,7 @@ pub fn handle_declare_companion(
             return Err("Companion was already revealed".to_string());
         }
 
+        let game = crate::game::match_flow::game_on_board(state);
         let pool = state
             .deck_pools
             .iter_mut()
@@ -508,6 +509,7 @@ pub fn handle_declare_companion(
                 let printing = deck_loading::outside_game_copy_printing(
                     pool,
                     &state.outside_game_cards_brought_in,
+                    game,
                     DeckSection::Sideboard,
                     &entry.card,
                 );
@@ -540,6 +542,7 @@ pub fn handle_declare_companion(
                 let printing = deck_loading::outside_game_copy_printing(
                     pool,
                     &state.outside_game_cards_brought_in,
+                    game,
                     DeckSection::Companion,
                     &entry.card,
                 );

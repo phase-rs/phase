@@ -9,14 +9,10 @@ use engine::game::coverage::{
     format_semantic_audit_markdown, CoverageSupport, ParseWarningPattern, WarningDrilldownCard,
 };
 use engine::game::gap_analysis::{gap_report_from_args, GapReport};
-use flate2::read::GzDecoder;
 use serde::Serialize;
 
 fn load() -> CardDatabase {
-    CardDatabase::from_export_reader(GzDecoder::new(
-        &include_bytes!("../fixtures/integration_cards.json.gz")[..],
-    ))
-    .expect("integration fixture loads")
+    CardDatabase::from_integration_fixture().expect("integration fixture loads")
 }
 
 fn json(value: &impl Serialize) -> String {

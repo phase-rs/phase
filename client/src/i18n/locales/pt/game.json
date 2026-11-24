@@ -838,7 +838,14 @@
     "lethalBadge": "Letal",
     "planeswalkerLoyalty": "Planeswalker (lealdade: {{loyalty}})",
     "defendingPlayerTrample": "Jogador Defensor (Atropelar)",
+    "attackTargetTrample": "{{name}} (Atropelar)",
     "pwControllerTrample": "Controlador do PW (Atropelar Sobre PW)",
+    "lethalButton": "Letal",
+    "clearButton": "Limpar",
+    "assignLethalTo": "Atribuir dano letal a {{target}}",
+    "clearDamageFor": "Limpar o dano atribuído a {{target}}",
+    "lethalFirstButton": "Dano letal primeiro",
+    "lethalFirstTitle": "Atribua dano letal a cada criatura bloqueadora na ordem e depois atribua o restante",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Atribuir os {{count}} de dano restantes a {{target}}",
     "assignRemainingTo_many": "Atribuir os {{count}} de dano restantes a {{target}}",
@@ -1351,7 +1358,8 @@
       "title": "{{effect}} a Menos Que Você Pague",
       "titleChooseOne": "{{effect}} a Menos Que Você Pague Um",
       "dontPay": "Não Pagar",
-      "takeEffect": "Aceitar o Efeito"
+      "takeEffect": "Aceitar o Efeito",
+      "priorChoice": "Jogador {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Unir com Arcano?",
@@ -2158,6 +2166,13 @@
     "title": "Escolher controlador ao entrar",
     "subtitle": "Escolha qual oponente controla esta permanente ao entrar."
   },
+  "replacementDecisionOrder": {
+    "title": "Escolha qual decisão tomar primeiro",
+    "subtitle": "Estas escolhas de substituição acontecem ao mesmo tempo. Escolha qual fazer primeiro.",
+    "unknownObject": "Objeto desconhecido",
+    "attachedTo": "Em {{host}}",
+    "attachments": "Com {{names}}"
+  },
   "optionalCost": {
     "gift": {
       "title": "Prometer um presente?",
@@ -2324,6 +2339,13 @@
     "creatureFallback": "Criatura {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Atribuir os {{count}} restantes a {{target}}",
+    "assignRemainingTo_many": "Atribuir os {{count}} restantes a {{target}}",
+    "assignRemainingTo_one": "Atribuir o {{count}} restante a {{target}}",
+    "assignRemainingTo_other": "Atribuir os {{count}} restantes a {{target}}",
+    "clearButton": "Limpar",
+    "clearTarget": "Limpar a atribuição a {{target}}",
     "unitCounter": "marcador {{counter}}",
     "unitDamage": "dano",
     "unitLife": "vida",

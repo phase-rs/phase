@@ -18,6 +18,7 @@ use nom::Parser;
 use super::context::ParseContext;
 use super::duration::parse_cast_snapshot_suffix;
 use super::error::{oracle_err, OracleResult};
+use super::filter as nom_filter;
 use super::primitives::{
     parse_article, parse_color, parse_core_type, parse_counter_type_typed, parse_keyword_name,
     parse_number, parse_or_closed_list, scan_at_word_boundaries, scan_preceded,
@@ -52,6 +53,32 @@ use crate::types::mana::ManaColor;
 use crate::types::player::PlayerCounterKind;
 use crate::types::text_grammar::parse_article_number;
 use crate::types::zones::Zone;
+
+/// CR 201.2 + CR 201.2a: use a single literal name to filter recorded cycles.
+pub(super) fn named_game_cycling_quantity(name: &str) -> Option<QuantityExpr> {
+    let name = name
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if name.is_empty()
+        || all_consuming(tag::<_, _, OracleError<'_>>("~"))
+            .parse(name.as_str())
+            .is_ok()
+    {
+        return None;
+    }
+    if crate::parser::oracle_target::named_filter_name_end(&name) != name.len() {
+        return None;
+    }
+    Some(QuantityExpr::Ref {
+        qty: QuantityRef::CardsCycled {
+            scope: CountScope::Controller,
+            window: crate::types::ability::CyclingHistoryWindow::ThisGame,
+            name: Some(name),
+        },
+    })
+}
 
 /// Parse a quantity expression: either a fractional expression, a dynamic reference,
 /// or a fixed number. Fractional forms ("half X, rounded up/down") compose over the
@@ -2532,6 +2559,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         alt((
             parse_entered_this_turn_ref,
             parse_number_of_creatures_died_this_turn,
+            parse_number_of_objects_exiled_under_controller_this_turn,
             parse_number_of_sacrificed_this_turn,
             parse_number_of_descended_this_turn,
             // CR 404.1 + CR 111.7 + CR 303.4b: "cards put into [possessive]
@@ -3387,13 +3415,223 @@ fn type_filters_are_juxtaposed_subtype_and_core(type_filters: &[TypeFilter]) -> 
 /// named card zone. The default is intentionally reject-by-default so a future
 /// property cannot widen this parser without an explicit admissibility decision.
 fn is_admissible_zone_card_count_property(property: &FilterProp) -> bool {
-    matches!(
-        property,
+    match property {
         FilterProp::Historic
-            | FilterProp::NotHistoric
-            | FilterProp::HasSupertype { .. }
-            | FilterProp::NotSupertype { .. }
-    )
+        | FilterProp::NotHistoric
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Cmc {
+            value: QuantityExpr::Fixed { .. },
+            ..
+        } => true,
+        FilterProp::AnyOf { props } => {
+            !props.is_empty() && props.iter().all(is_admissible_zone_card_count_property)
+        }
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::CanEnchant { .. }
+        | FilterProp::Counters { .. }
+        | FilterProp::Cmc { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo { .. }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::Prepared
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::PtComparison { .. }
+        | FilterProp::Not { .. }
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => false,
+    }
+}
+
+/// CR 202.3: A zone-card count's numeric mana-value qualifier is valid only
+/// for literal thresholds. X and contextual quantities belong to target
+/// filters, not this hand/graveyard/library census class.
+fn parse_zone_card_count_mana_value_suffix(input: &str) -> OracleResult<'_, Option<FilterProp>> {
+    let (rest, head) = opt(alt((
+        tag(" with mana value "),
+        tag(" with converted mana cost "),
+    )))
+    .parse(input)?;
+    let Some(_) = head else {
+        return Ok((rest, None));
+    };
+    let (rest, property) = nom_filter::parse_mana_value_comparison_tail(rest)?;
+    if is_admissible_zone_card_count_property(&property) {
+        Ok((rest, Some(property)))
+    } else {
+        Err(oracle_err(input))
+    }
+}
+
+fn add_zone_card_count_property(
+    filter: Option<TargetFilter>,
+    property: FilterProp,
+) -> TargetFilter {
+    match filter {
+        None => TargetFilter::Typed(TypedFilter::default().properties(vec![property])),
+        Some(TargetFilter::Typed(mut typed)) => {
+            typed.properties.push(property);
+            TargetFilter::Typed(typed)
+        }
+        Some(TargetFilter::Or { filters }) => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_zone_card_count_property(Some(filter), property.clone()))
+                .collect(),
+        },
+        Some(
+            filter @ (TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject { .. }
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Not { .. }
+            | TargetFilter::And { .. }
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::AttackedPlayerOrPlaneswalker
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::AffectedObjectOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers),
+        ) => TargetFilter::And {
+            filters: vec![
+                filter,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![property])),
+            ],
+        },
+    }
 }
 
 fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -3410,12 +3648,17 @@ fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
         {
             let (rest, _) = tag(" in ").parse(after_cards)?;
             let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
+            let (rest, mana_value_filter) = parse_zone_card_count_mana_value_suffix(rest)?;
+            let base_filter = filter;
+            let filter = mana_value_filter
+                .map(|property| add_zone_card_count_property(Some(base_filter.clone()), property))
+                .or(Some(base_filter));
             return Ok((
                 rest,
                 QuantityRef::ZoneCardCount {
                     zone,
                     card_types: Vec::new(),
-                    filter: Some(filter),
+                    filter,
                     scope,
                 },
             ));
@@ -3479,6 +3722,11 @@ fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
         )
     } else {
         (card_types, None)
+    };
+    let (rest, mana_value_filter) = parse_zone_card_count_mana_value_suffix(rest)?;
+    let filter = match mana_value_filter {
+        Some(property) => Some(add_zone_card_count_property(filter, property)),
+        None => filter,
     };
     Ok((
         rest,
@@ -5446,9 +5694,9 @@ pub fn parse_that_much_or_many(input: &str) -> OracleResult<'_, QuantityRef> {
 ///
 /// Two referent kinds under two different rules. CR 608.2h governs the VALUE forms
 /// ("that much", "the damage dealt"): information from the game is determined once, when the
-/// effect applies. CR 608.2k governs the OBJECT forms ("that creature's power"): a specific
-/// untargeted object previously referred to by the trigger condition. The source-object
-/// variants resolve via `extract_source_from_event` → live object or LKI cache.
+/// effect applies. CR 608.2k governs the OBJECT forms ("that creature's power").
+/// Without clause antecedents, the bare P/T forms provisionally use CostPaidObject.
+/// Where-X lowering binds a known trigger object directly to EventSource.
 fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         // CR 608.2h: bare demonstrative amount — delegate to the shared
@@ -5907,6 +6155,16 @@ pub fn parse_kicker_count_where_x_expression(input: &str) -> OracleResult<'_, Qu
     let (rest, _) = tag("the number of times ").parse(input)?;
     let (_, quantity) = parse_kicker_count_subject_was_kicked(rest)?;
     Ok(("", quantity))
+}
+
+/// Shared lowercased Oracle marker for "for each" and "for every" count clauses.
+/// Consumes the trailing space so the grouped quantity starts at the next word.
+pub(crate) fn parse_for_each_marker(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        preceded(tag("for "), alt((tag("each "), tag("every ")))),
+    )
+    .parse(input)
 }
 
 /// CR 107.1 + CR 608.2c: the group size N of "for each N <counted clause>"
@@ -6726,8 +6984,8 @@ enum EnteredControlBinding {
 }
 
 /// CR 608.2h + CR 608.2i: Parse "[type] that entered (the battlefield) [under
-/// <whose> control] this turn" into whichever of the two readings the grammar
-/// selects — see [`EnteredControlBinding`].
+/// <whose> control] this turn" or "[type] you had enter … under your control
+/// this turn". See [`EnteredControlBinding`] for how the controller binds.
 fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, (type_text, binding)) = parse_entered_this_turn_clause(input)?;
     let (filter, remainder) = parse_type_phrase_folding(type_text.trim());
@@ -6746,8 +7004,8 @@ fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // which likewise omits the controller injection.
         //
         // CR 608.2i: the look-back tally is only honest if the entry-record matcher can evaluate
-        // the filter. `battlefield_entry_matches_filter` fails closed on the 94 `FilterProp`s the
-        // entry snapshot cannot answer (game/restrictions.rs:517), which would resolve to a silent
+        // the filter. `battlefield_entry_matches_filter` fails closed on properties the
+        // entry snapshot cannot answer, which would resolve to a silent
         // constant 0 while `coverage.rs` reported the card supported. Refusing here is measurably
         // better on this path: a failed quantity clause becomes `Effect::Unimplemented`, so the
         // gap is visible to `cargo parser-gaps` instead of shipping a wrong number.
@@ -6776,19 +7034,31 @@ fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 }
 
 fn parse_entered_this_turn_clause(input: &str) -> OracleResult<'_, (&str, EnteredControlBinding)> {
-    pair(
-        take_until(" that entered"),
-        preceded(
-            pair(tag(" that entered"), opt(tag(" the battlefield"))),
-            alt((
+    alt((
+        pair(
+            take_until(" that entered"),
+            preceded(
+                pair(tag(" that entered"), opt(tag(" the battlefield"))),
+                alt((
+                    map(
+                        parse_entry_event_controller,
+                        EnteredControlBinding::EntryEvent,
+                    ),
+                    value(EnteredControlBinding::SubjectNoun, tag(" this turn")),
+                )),
+            ),
+        ),
+        pair(
+            take_until(" you had enter"),
+            preceded(
+                pair(tag(" you had enter"), opt(tag(" the battlefield"))),
                 map(
                     parse_entry_event_controller,
                     EnteredControlBinding::EntryEvent,
                 ),
-                value(EnteredControlBinding::SubjectNoun, tag(" this turn")),
-            )),
+            ),
         ),
-    )
+    ))
     .parse(input)
 }
 
@@ -6930,6 +7200,22 @@ pub(crate) fn parse_using_mana_produced_by_self(input: &str) -> OracleResult<'_,
     preceded(
         parse_using_mana_produced_by_head,
         super::duration::parse_self_reference_subject,
+    )
+    .parse(input)
+}
+
+/// CR 106.4 + CR 608.2i: Read the amount this source produced from the
+/// mana ability resolution that triggered the effect.
+pub(crate) fn parse_event_context_mana_produced_by_self(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::EventContextAmount,
+        all_consuming((
+            tag("the amount of mana "),
+            super::duration::parse_self_reference_subject,
+            tag(" produced"),
+        )),
     )
     .parse(input)
 }
@@ -7602,6 +7888,53 @@ fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, Quant
 fn parse_number_of_creatures_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, (controller, nontoken)) = parse_creatures_died_this_turn_tail(input)?;
     Ok((rest, creatures_died_this_turn_ref(controller, nontoken)))
+}
+
+/// CR 400.7 + CR 109.5: Count typed permanents exiled from the battlefield
+/// this turn under a specified controller's control, using each zone-change
+/// record's last-known characteristics.
+fn parse_number_of_objects_exiled_under_controller_this_turn(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (filter, rest) = parse_type_phrase_folding(input);
+    if !quantity_filter_has_meaningful_content(&filter) {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = alt((
+        tag(" that were exiled under "),
+        tag(" that was exiled under "),
+    ))
+    .parse(rest)?;
+    // CR 109.4 + CR 109.5: the possessor is a typed controller reference.
+    // `parse_opponent_possessive` is the shared opponent-possessive combinator
+    // (straight and curly apostrophes), also used by the "died under ... control"
+    // condition grammar.
+    let (rest, controller) = alt((
+        value(ControllerRef::You, tag("your control")),
+        value(
+            ControllerRef::Opponent,
+            preceded(
+                (
+                    opt(tag("your ")),
+                    super::condition::parse_opponent_possessive,
+                ),
+                tag("control"),
+            ),
+        ),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
+    // CR 109.4: shared controller injection (also adds the battlefield-presence
+    // property, matching `from_zone` on the zone-change record), as used by the
+    // sibling `parse_died_under_control_this_turn`.
+    Ok((
+        rest,
+        QuantityRef::ZoneChangeCountThisTurn {
+            from: Some(Zone::Battlefield),
+            to: Some(Zone::Exile),
+            filter: super::condition::inject_controller(filter, controller),
+        },
+    ))
 }
 
 /// CR 701.21a: Parse "[type] you['ve] sacrificed this turn" -> `TargetFilter`.
@@ -8675,6 +9008,25 @@ mod tests {
     };
     use crate::types::mana::ManaColor;
 
+    #[test]
+    fn event_context_mana_produced_by_self_requires_self_and_full_consumption() {
+        for phrase in [
+            "the amount of mana ~ produced",
+            "the amount of mana this creature produced",
+        ] {
+            assert_eq!(
+                parse_event_context_mana_produced_by_self(phrase).unwrap(),
+                ("", QuantityRef::EventContextAmount)
+            );
+        }
+        for phrase in [
+            "the amount of mana another creature produced",
+            "the amount of mana this creature produced last turn",
+        ] {
+            assert!(parse_event_context_mana_produced_by_self(phrase).is_err());
+        }
+    }
+
     fn fixed_legs(values: &[i32]) -> Vec<QuantityExpr> {
         values
             .iter()
@@ -9535,6 +9887,54 @@ mod tests {
             ("", None)
         );
         assert!(parse_died_this_turn_suffix("you control").is_err());
+    }
+
+    #[test]
+    fn zone_change_count_exiled_under_controller_supports_type_and_number_forms() {
+        // Only Vren, the Relentless prints this shape ("...the number of creatures that were exiled under your opponents' control this turn"); the singular, "your" and artifact rows exercise the combinator's axes, not printed cards.
+        for (phrase, filter, controller) in [
+            (
+                "creatures that were exiled under your opponents' control this turn",
+                TypedFilter::creature(),
+                ControllerRef::Opponent,
+            ),
+            (
+                "creature that was exiled under your opponent's control this turn",
+                TypedFilter::creature(),
+                ControllerRef::Opponent,
+            ),
+            (
+                "artifacts that were exiled under your control this turn",
+                TypedFilter::new(TypeFilter::Artifact),
+                ControllerRef::You,
+            ),
+            (
+                "creatures that were exiled under your opponents\u{2019} control this turn",
+                TypedFilter::creature(),
+                ControllerRef::Opponent,
+            ),
+        ] {
+            // CR 109.4: expectation built through the shared injector, which also
+            // adds `InZone { Battlefield }` (== the record's `from_zone`).
+            let expected_filter =
+                super::super::condition::inject_controller(TargetFilter::Typed(filter), controller);
+            assert!(
+                matches!(&expected_filter, TargetFilter::Typed(t) if t.properties.contains(&FilterProp::InZone { zone: Zone::Battlefield })),
+                "phrase {phrase:?}"
+            );
+            let expected = QuantityRef::ZoneChangeCountThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Exile),
+                filter: expected_filter,
+            };
+            let (rest, quantity) = parse_number_of_inner(phrase).expect("exiled object count");
+            assert_eq!(rest, "", "phrase {phrase:?}");
+            assert_eq!(quantity, expected, "phrase {phrase:?}");
+        }
+        assert!(parse_number_of_inner(
+            "creatures that were exiled under your opponents' control last turn"
+        )
+        .is_err());
     }
 
     /// CR 400.7d: each subject anaphora maps to the correct
@@ -12826,6 +13226,86 @@ mod tests {
         assert_eq!(rest, " and");
     }
 
+    /// CR 202.3 + CR 608.2h: a hand census keeps its dynamic count while
+    /// carrying the literal mana-value predicate on the counted cards.
+    #[test]
+    fn parse_zone_card_count_mana_value_filter() {
+        let (rest, q) =
+            parse_quantity_ref("cards in your hand with mana value 4 or greater").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Hand,
+                card_types: vec![],
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Typed(TypedFilter::default().properties(
+                    vec![FilterProp::Cmc {
+                        comparator: Comparator::GE,
+                        value: QuantityExpr::Fixed { value: 4 },
+                    }]
+                ),)),
+            }
+        );
+
+        let (rest, q) =
+            parse_quantity_ref("creature cards in your graveyard with mana value 4, 5, or 6")
+                .unwrap();
+        assert_eq!(rest, "");
+        let QuantityRef::ZoneCardCount { filter, .. } = q else {
+            panic!("typed zone count must remain a ZoneCardCount");
+        };
+        assert_eq!(
+            filter,
+            Some(TargetFilter::Typed(TypedFilter::default().properties(
+                vec![FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: QuantityExpr::Fixed { value: 4 },
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: QuantityExpr::Fixed { value: 5 },
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: QuantityExpr::Fixed { value: 6 },
+                        },
+                    ],
+                }]
+            ),))
+        );
+
+        assert!(
+            parse_quantity_ref("cards in your hand with mana value 4 or blue").is_err(),
+            "a present but malformed mana-value head must not fall back to an unfiltered count"
+        );
+    }
+
+    #[test]
+    fn parse_zone_card_count_keeps_unfiltered_and_object_boundaries() {
+        let (rest, unfiltered) = parse_quantity_ref("cards in your hand").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            unfiltered,
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Hand,
+                card_types: vec![],
+                scope: CountScope::Controller,
+                filter: None,
+            }
+        );
+
+        let (rest, object_count) =
+            parse_type_count_on_battlefield("creatures on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        assert!(
+            matches!(object_count, QuantityRef::ObjectCount { .. }),
+            "a battlefield object phrase must not be captured as a zone-card count: {object_count:?}"
+        );
+    }
+
     /// CR 404.1 + CR 102.2: the whole phrase reading of an opponents'-graveyard
     /// count — both possessives, the bare "cards in …" head, and an optional
     /// card-type list — is one shared grammar authority (`parse_zone_card_count`
@@ -13629,6 +14109,63 @@ mod tests {
         // filter must NOT carry a controller of its own.
         assert_eq!(controller, None);
         assert!(properties.is_empty());
+    }
+
+    #[test]
+    fn issue_634_causative_battlefield_entry_quantities() {
+        let (rest, quantity) = parse_quantity_ref(
+            "the number of nontoken creatures you had enter the battlefield under your control this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            assert_ledger_entries_this_turn_typed(quantity),
+            (
+                PlayerScope::Controller,
+                vec![TypeFilter::Creature],
+                None,
+                vec![FilterProp::NonToken]
+            )
+        );
+
+        for text in [
+            "land you had enter the battlefield under your control this turn",
+            "land you had enter under your control this turn",
+        ] {
+            let (rest, quantity) = parse_for_each_clause_ref(text).unwrap();
+            assert_eq!(rest, "");
+            assert_eq!(
+                assert_ledger_entries_this_turn_typed(quantity),
+                (
+                    PlayerScope::Controller,
+                    vec![TypeFilter::Land],
+                    None,
+                    vec![]
+                )
+            );
+        }
+
+        for text in [
+            "land you had enter this turn",
+            "land you had enter under your control",
+            "land you had enter under an opponent's control this turn",
+        ] {
+            assert!(parse_entered_this_turn_ref(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn issue_634_entry_quantity_refuses_tapped_snapshot_filter() {
+        let (filter, rest) = parse_type_phrase_folding("tapped creatures");
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Tapped]))
+        );
+        assert!(parse_entered_this_turn_ref(
+            "tapped creatures that entered the battlefield under your control this turn"
+        )
+        .is_err());
     }
 
     #[test]

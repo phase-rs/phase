@@ -1,3 +1,6 @@
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
+#![recursion_limit = "512"]
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::Read;
@@ -1469,7 +1472,7 @@ fn assert_no_fallback_cancel(run: &phase_ai::auto_play::AiActionsRun, what: &str
                 if matches!(**action, GameAction::CancelCast)
         ),
         "{what}: AI dead-ended on an unapplied fallback CancelCast ({:?})",
-        &run.stop,
+        run.stop,
     );
 }
 

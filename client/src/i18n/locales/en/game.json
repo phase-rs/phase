@@ -871,7 +871,14 @@
     "lethalBadge": "Lethal",
     "planeswalkerLoyalty": "Planeswalker (loyalty: {{loyalty}})",
     "defendingPlayerTrample": "Defending Player (Trample)",
+    "attackTargetTrample": "{{name}} (Trample)",
     "pwControllerTrample": "PW Controller (Trample Over PW)",
+    "lethalButton": "Lethal",
+    "clearButton": "Clear",
+    "assignLethalTo": "Assign lethal damage to {{target}}",
+    "clearDamageFor": "Clear damage assigned to {{target}}",
+    "lethalFirstButton": "Lethal first",
+    "lethalFirstTitle": "Assign lethal damage to each blocker in order, then the rest",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Assign the remaining {{count}} damage to {{target}}",
     "assignRemainingTo_many": "Assign the remaining {{count}} damage to {{target}}",
@@ -1384,7 +1391,8 @@
       "title": "{{effect}} Unless You Pay",
       "titleChooseOne": "{{effect}} Unless You Pay One",
       "dontPay": "Don’t Pay",
-      "takeEffect": "Take the Effect"
+      "takeEffect": "Take the Effect",
+      "priorChoice": "Player {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Splice onto Arcane?",
@@ -2196,6 +2204,13 @@
     "title": "Choose Entry Controller",
     "subtitle": "Choose which opponent controls this permanent as it enters."
   },
+  "replacementDecisionOrder": {
+    "title": "Choose Which Decision First",
+    "subtitle": "These replacement choices happen at the same time. Choose which one to make first.",
+    "unknownObject": "Unknown object",
+    "attachedTo": "On {{host}}",
+    "attachments": "With {{names}}"
+  },
   "optionalCost": {
     "gift": {
       "title": "Promise a gift?",
@@ -2362,6 +2377,13 @@
     "creatureFallback": "Creature {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Assign the remaining {{count}} to {{target}}",
+    "assignRemainingTo_many": "Assign the remaining {{count}} to {{target}}",
+    "assignRemainingTo_one": "Assign the remaining {{count}} to {{target}}",
+    "assignRemainingTo_other": "Assign the remaining {{count}} to {{target}}",
+    "clearButton": "Clear",
+    "clearTarget": "Clear {{target}}",
     "unitCounter": "{{counter}} counter",
     "unitDamage": "damage",
     "unitLife": "life",

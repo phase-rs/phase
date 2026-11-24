@@ -175,7 +175,9 @@ pub(crate) fn is_alternative_keyword_cost_pattern(lower: &str) -> bool {
     (lower_starts_with(lower, "you may ")
         || (lower_starts_with(lower, "as long as ") && scan_contains(lower, "you may ")))
         && scan_contains(lower, "rather than pay")
-        && (scan_contains(lower, "cycling cost") || scan_contains(lower, "crew cost"))
+        && (scan_contains(lower, "cycling cost")
+            || scan_contains(lower, "crew cost")
+            || scan_contains(lower, "equip cost"))
 }
 
 /// CR 118.9: Alternative-cost grant — "You may cast [filter] by paying {cost}
@@ -318,6 +320,11 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         || scan_contains(lower, "until end of turn")
         || scan_contains(lower, "until your next turn")
         || scan_contains(lower, "this turn")
+        // CR 611.2b: "for as long as …" is a duration given to a continuous
+        // effect the spell's resolution creates (Immortal Obligation, Soul
+        // Partition); an instant's or sorcery's own static abilities never carry
+        // one, so the line is the spell's effect chain.
+        || scan_contains(lower, "for as long as ")
 }
 
 /// CR 702.8a + CR 601.3d: "[~|this spell] has flash" prefix — see the call
@@ -592,6 +599,10 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
     "enchanted ",
     "equipped ",
     "you control enchanted ",
+    // CR 613.1b + CR 725.5: Fealty to the Realm — "The monarch controls
+    // enchanted creature." Routes the designation-anchored control static to
+    // `parse_static_line` (sibling of the Control Magic prefix above).
+    "the monarch controls enchanted ",
     "all creatures ",
     "all permanents ",
     "other ",
@@ -656,6 +667,12 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
     }
 
     if super::oracle_static::is_win_first_coin_flip_set_each_turn_static(lower) {
+        return true;
+    }
+
+    // CR 120.6 + CR 704.5g: "Lethal damage dealt to [subject] is determined by their power
+    // rather than their toughness." (Zilortha, Strength Incarnate).
+    if super::oracle_static::is_lethal_damage_determined_by_power_static(lower) {
         return true;
     }
 
@@ -1500,6 +1517,24 @@ mod tests {
             "if you weren't the starting player, this spell costs {1} less to cast.",
         ] {
             assert!(!should_defer_spell_to_effect(self_static), "{self_static}");
+        }
+    }
+
+    /// CR 611.2b: an instant/sorcery line stating a "for as long as" duration
+    /// is the spell's effect chain, whatever the duration's position in the
+    /// line (Immortal Obligation, Soul Partition: both were whole-line statics
+    /// at base because no other arm matches them).
+    #[test]
+    fn spell_for_as_long_as_line_defers_to_effect() {
+        for line in [
+            "return target creature card from an opponent's graveyard to the battlefield \
+             under their control with a duty counter on it. for as long as that creature \
+             has a duty counter on it, it is goaded, can't attack you or a permanent you \
+             control, and can't block creatures you control.",
+            "exile target nonland permanent. for as long as that card remains exiled, its \
+             owner may play it. a spell cast by an opponent this way costs {2} more to cast.",
+        ] {
+            assert!(should_defer_spell_to_effect(line), "{line}");
         }
     }
 

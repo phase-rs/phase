@@ -30,9 +30,10 @@
 //! deliberate, and it is why the module is `#![cfg(test)]` rather than `pub`: `cfg(test)` holds
 //! in both venues (an integration target is built with `--test`), so one source file serves both
 //! without shipping guard infrastructure in a release build. The repo's older answer to this
-//! problem is `test_support.rs`'s "TWIN-SYNC: keep the fixture path here in lockstep with
-//! `tests/integration/support.rs`" — two copies and a comment asking a human to keep them equal.
-//! This module is the shape that does not need the comment.
+//! problem was a pair of copies (the fixture path in `test_support.rs` and in
+//! `tests/integration/support.rs`) and a "TWIN-SYNC" comment asking a human to keep them equal;
+//! the fixture now has one reader, `database::integration_fixture`. This module is the shape that
+//! does not need the comment.
 //!
 //! Each venue compiles its own instance, so [`tests`] runs in both. That is a feature, not
 //! duplication to remove: the copy is validated where it is used.

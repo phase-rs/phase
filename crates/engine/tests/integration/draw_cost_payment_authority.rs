@@ -27,11 +27,11 @@ use engine::types::game_state::{
     PersistedGameState, PersistedRestoreError, StackEntry, StackEntryKind, UnpaidCostRemainder,
     UnpaidCostSuffix, WaitingFor,
 };
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::proposed_event::ReplacementId;
+use engine::types::proposed_event::{ProposedEvent, ReplacementId};
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
@@ -2564,6 +2564,41 @@ fn checked_restore_refuses_a_checkpoint_whose_parked_payment_names_no_seat() {
     );
 }
 
+/// CR 730.3c: a recovered payment is a second executable state. Its pinned
+/// boundary cannot supply a merge departure that its live proposal does not own.
+#[test]
+fn checked_restore_refuses_merge_authority_in_a_recovery_checkpoint() {
+    let runner = recovered_dredge_checkpoint();
+    checked_round_trip(runner.state()).expect("the original Dredge checkpoint restores");
+    let mut state = runner.state().clone();
+    let pending = state
+        .payment_transaction
+        .as_mut()
+        .and_then(|transaction| transaction.recovered.as_mut())
+        .and_then(|checkpoint| checkpoint.state.pending_replacement.as_mut())
+        .expect("the checkpoint is parked on Dredge");
+    assert!(matches!(pending.proposed, ProposedEvent::Draw { .. }));
+    let source = pending.candidates[0].source;
+    let mut boundary = ProposedEvent::zone_change(source, Zone::Battlefield, Zone::Library, None);
+    let ProposedEvent::ZoneChange {
+        merged_departure, ..
+    } = &mut boundary
+    else {
+        unreachable!()
+    };
+    *merged_departure = Some(ObjectIncarnationRef::of(source, 0));
+    pending.delivery_boundary = Some(Box::new(boundary));
+    let refusal = checked_round_trip(&state);
+    assert!(
+        matches!(
+            &refusal,
+            Err(PersistedRestoreError::InvalidPaymentTransaction(reason))
+                if reason.contains("recovery checkpoint: a physical merge proposal has no staged approval")
+        ),
+        "a checkpoint cannot manufacture a staged merge approval: {refusal:?}"
+    );
+}
+
 /// Notion Thief, verbatim Oracle text.
 const NOTION_THIEF_ORACLE: &str = "Flash\nIf an opponent would draw a card except the first one \
 they draw in each of their draw steps, instead that player skips that draw and you draw a card.";
@@ -3005,7 +3040,7 @@ fn checked_restore_refuses_a_used_floating_shield_candidate() {
     used.is_consumed = true;
     let candidate = ReplacementId {
         source: ObjectId(0),
-        index: floating.len(),
+        index: floating.len() as u64,
     };
     floating.push(used);
     // Listed beside the live Dredge candidate: no applicable effect is left

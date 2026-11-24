@@ -1136,6 +1136,12 @@
     "assignDamageButton": "分配伤害",
     "assignDamageSubtitle": "{{name}} —— 剩余：{{remaining}}",
     "assignDamageTitle": "分配{{amount}}点战斗伤害",
+    "lethalButton": "致命",
+    "clearButton": "清除",
+    "assignLethalTo": "向{{target}}分配致命伤害",
+    "clearDamageFor": "清除分配给{{target}}的伤害",
+    "lethalFirstButton": "优先分配致命伤害",
+    "lethalFirstTitle": "按顺序向每个阻挡生物分配致命伤害，再分配剩余伤害",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "将剩余的{{count}}点伤害分配给{{target}}",
     "assignRemainingTo_many": "将剩余的{{count}}点伤害分配给{{target}}",
@@ -1157,6 +1163,7 @@
     "confirmAttackers": "确认攻击者（{{count}}）",
     "confirmBlockers": "确认阻挡者（{{count}}）",
     "defendingPlayerTrample": "防御牌手（践踏）",
+    "attackTargetTrample": "{{name}}（践踏）",
     "lethalBadge": "致命",
     "lethalLabel": "致命：{{amount}}",
     "menaceRequirement": "必须被{{count}}个生物阻挡，否则不能被阻挡",
@@ -1408,6 +1415,13 @@
     "title": "{{name}}已断开连接"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "将剩余的{{count}}分配给{{target}}",
+    "assignRemainingTo_many": "将剩余的{{count}}分配给{{target}}",
+    "assignRemainingTo_one": "将剩余的{{count}}分配给{{target}}",
+    "assignRemainingTo_other": "将剩余的{{count}}分配给{{target}}",
+    "clearButton": "清除",
+    "clearTarget": "清除分配给{{target}}的数值",
     "subtitle": "每个目标至少分配1{{unit}}。剩余：{{remaining}}",
     "subtitleAnyNumber": "可选择任意数量，每个选中的对象至少分配1{{unit}}。剩余：{{remaining}}",
     "title": "分配{{total}}{{unit}}",
@@ -1454,6 +1468,13 @@
   "entryController": {
     "subtitle": "选择该永久物进场时由哪位对手操控。",
     "title": "选择进场时的操控者"
+  },
+  "replacementDecisionOrder": {
+    "title": "选择先做哪个决定",
+    "subtitle": "这些替代选择同时发生。请选择先做哪一个。",
+    "unknownObject": "未知对象",
+    "attachedTo": "结附于{{host}}",
+    "attachments": "带有{{names}}"
   },
   "freeCastWindow": {
     "castNamed": "施放{{name}}",
@@ -1690,6 +1711,7 @@
       "defaultEffect": "除非你支付，否则反击",
       "dontPay": "不支付",
       "takeEffect": "承受效应",
+      "priorChoice": "玩家{{id}}：{{choice}}",
       "title": "除非你支付，否则{{effect}}",
       "titleChooseOne": "除非你支付其中一项，否则{{effect}}"
     },

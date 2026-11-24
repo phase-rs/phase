@@ -838,7 +838,14 @@
     "lethalBadge": "Śmiertelne",
     "planeswalkerLoyalty": "Wędrowiec (lojalność: {{loyalty}})",
     "defendingPlayerTrample": "Broniący gracz (Tratowanie)",
+    "attackTargetTrample": "{{name}} (Tratowanie)",
     "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)",
+    "lethalButton": "Śmiertelne",
+    "clearButton": "Wyczyść",
+    "assignLethalTo": "Przydziel śmiertelne obrażenia celowi {{target}}",
+    "clearDamageFor": "Wyczyść obrażenia przydzielone celowi {{target}}",
+    "lethalFirstButton": "Najpierw śmiertelne obrażenia",
+    "lethalFirstTitle": "Przydziel po kolei śmiertelne obrażenia każdemu blokującemu, a potem przydziel resztę",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Przydziel pozostałe {{count}} obrażenia do: {{target}}",
     "assignRemainingTo_many": "Przydziel pozostałych {{count}} obrażeń do: {{target}}",
@@ -1351,7 +1358,8 @@
       "title": "{{effect}}, chyba że zapłacisz",
       "titleChooseOne": "{{effect}}, chyba że zapłacisz jeden",
       "dontPay": "Nie płać",
-      "takeEffect": "Przyjmij efekt"
+      "takeEffect": "Przyjmij efekt",
+      "priorChoice": "Gracz {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Połącz z Arcane?",
@@ -2158,6 +2166,13 @@
     "title": "Wybierz kontrolującego przy wejściu",
     "subtitle": "Wybierz przeciwnika, który kontroluje ten permanent, gdy wchodzi na pole bitwy."
   },
+  "replacementDecisionOrder": {
+    "title": "Wybierz, którą decyzję podjąć najpierw",
+    "subtitle": "Te wybory zastąpienia zachodzą jednocześnie. Wybierz, którego dokonasz najpierw.",
+    "unknownObject": "Nieznany obiekt",
+    "attachedTo": "Na: {{host}}",
+    "attachments": "Z: {{names}}"
+  },
   "optionalCost": {
     "gift": {
       "title": "Obiecać prezent?",
@@ -2324,6 +2339,13 @@
     "creatureFallback": "Stwór {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Przydziel pozostałe {{count}} punkty celowi {{target}}",
+    "assignRemainingTo_many": "Przydziel {{count}} pozostałych punktów celowi {{target}}",
+    "assignRemainingTo_one": "Przydziel pozostały {{count}} punkt celowi {{target}}",
+    "assignRemainingTo_other": "Przydziel {{count}} pozostałych punktów celowi {{target}}",
+    "clearButton": "Wyczyść",
+    "clearTarget": "Wyczyść przydział dla celu {{target}}",
     "unitCounter": "znacznik {{counter}}",
     "unitDamage": "obrażeń",
     "unitLife": "życia",

@@ -50,9 +50,9 @@
 # union-fold wrappers returning the same `(filter, remainder)` shape, so routing
 # a site through one must not quietly remove it from this ledger; the three rows
 # decremented below were re-measured with them counted.
-crates/phase-parser/src/parser/oracle_cost.rs 3
+crates/phase-parser/src/parser/oracle_cost.rs 2
 crates/phase-parser/src/parser/oracle_effect/counter.rs 3
-crates/phase-parser/src/parser/oracle_effect/imperative.rs 39
+crates/phase-parser/src/parser/oracle_effect/imperative.rs 38
 crates/phase-parser/src/parser/oracle_effect/lower.rs 4
 crates/phase-parser/src/parser/oracle_effect/mod.rs 19
 crates/phase-parser/src/parser/oracle_effect/search.rs 1

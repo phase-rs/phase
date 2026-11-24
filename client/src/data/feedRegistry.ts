@@ -46,6 +46,17 @@ export const FEED_REGISTRY: FeedSource[] = [
     url: "/feeds/mtggoldfish-commander.json",
   },
   {
+    id: "topdeck-cedh",
+    name: "cEDH Meta",
+    description: "Top finishes from recent cEDH tournaments",
+    icon: "T",
+    format: "commander",
+    type: "bundled",
+    url: "/feeds/topdeck-cedh.json",
+    // TopDeck.gg Developer Terms §6.1: a visible credit linking to TopDeck.gg.
+    attribution: { name: "TopDeck.gg", url: "https://topdeck.gg" },
+  },
+  {
     id: "mtggoldfish-legacy",
     name: "Legacy Meta",
     description: "Top Legacy metagame decks",
