@@ -5817,6 +5817,81 @@ pub(crate) fn apply_parent_chain_context(
     if let Some(snapshot) = effect_context_object {
         child.set_effect_context_object_recursive(snapshot.clone());
     }
+    // CR 701.44c: a departed event subject still explores through LKI - hand
+    // its pin to an otherwise empty Explore child (no-op for every other
+    // child shape; see the predicate inside).
+    carry_departed_event_explorer_pin(child, parent, state);
+}
+
+/// CR 701.44c: carry a departed event-subject explorer pin from a resolving
+/// parent onto its bare `Explore` child.
+///
+/// A slot-less event-bound head (`TargetOnly { TriggeringSource }`, Path of
+/// Discovery) reads its own subject through event-context hydration, but when
+/// the entrant left in response the hydration rejects it - mutation hydration
+/// keeps rejecting departed objects - and the child would fall back to the
+/// ability source, so Path explored itself. The parent still holds the
+/// subject's incarnation pin (seeded at trigger collection/push), so hand that
+/// one pin to the child: explore selection reads it as the explorer's identity
+/// and LKI answers the controller, while the counter is skipped off the
+/// battlefield. The pin travels on the existing `target_incarnations` field
+/// (already written by seeding; serialized with `skip_serializing_if`, so no
+/// new serialized surface) - never as a target, so
+/// `affected_event_context_target` and `resolve_event_referent` keep rejecting
+/// the departed object unchanged.
+///
+/// Fires only when ALL hold: the child is a bare `Explore` (not `ExploreAll`)
+/// with no targets and no pins (no-clobber); the parent names an
+/// object-subject event anaphor (`TriggeringSource`, `EventTarget`,
+/// `ParentTarget`); that referent is `Unfindable` (live subjects ride the
+/// hydrated-targets seam); and the parent holds a non-legacy pin for the raw
+/// subject id. Bare self-explore heads (Jadelight Ranger, Merfolk
+/// Branchwalker, Francisco - `Effect::Explore` surfaces no event filter) never
+/// satisfy the parent arm, so the carry can never fire for them; they resolve
+/// through explore's pin-less self path instead.
+pub(crate) fn carry_departed_event_explorer_pin(
+    child: &mut ResolvedAbility,
+    parent: &ResolvedAbility,
+    state: &GameState,
+) {
+    if !matches!(child.effect, Effect::Explore) {
+        return;
+    }
+    if !child.targets.is_empty() || !child.target_incarnations.is_empty() {
+        return;
+    }
+    let Some(filter) = extract_event_context_filter(&parent.effect) else {
+        return;
+    };
+    if !matches!(
+        filter,
+        TargetFilter::TriggeringSource | TargetFilter::EventTarget | TargetFilter::ParentTarget
+    ) {
+        return;
+    }
+    if !matches!(
+        crate::game::targeting::resolve_event_referent(state, parent, filter),
+        crate::game::targeting::EventReferentBinding::Unfindable
+    ) {
+        return;
+    }
+    // allow-raw-event-referent: names the event's object so its identity can be pinned
+    let raw = crate::game::targeting::resolve_event_context_target_for_event_or_state(
+        state,
+        filter,
+        parent.source_id,
+        state.current_trigger_event.as_ref(),
+    );
+    let Some(TargetRef::Object(subject_id)) = raw else {
+        return;
+    };
+    let Some(pin) = parent.target_incarnations.iter().find(|pin| {
+        pin.object_id == subject_id
+            && pin.incarnation != crate::types::identifiers::LEGACY_INCARNATION
+    }) else {
+        return;
+    };
+    child.target_incarnations.push(*pin);
 }
 
 /// CR 608.2d: whether `ability`'s already-chosen targets should propagate into

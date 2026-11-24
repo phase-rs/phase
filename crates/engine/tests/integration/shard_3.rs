@@ -176,6 +176,7 @@ mod exploit_ceased_exploiter_lki;
 mod exploit_object_filter;
 mod explore_all_doubler_ordering;
 mod explore_all_sub_runs_once;
+mod explore_departed_explorer;
 mod explore_spell_3315;
 mod export_runtime_canaries;
 mod exquisite_blood_routing;
