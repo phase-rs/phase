@@ -7,6 +7,8 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { OWNS_TAP_ATTRIBUTE } from "../../hooks/useLongPress.ts";
+
 /** What a touch tap on a tooltip's trigger does; see `GameplayTooltipProps.touch`. */
 export type TooltipTouch = "ignore" | "toggle";
 
@@ -101,10 +103,19 @@ export function GameplayTooltip({
 
   // A trigger that opts in with `touch="toggle"` opens on a touch tap and
   // closes on the next tap on it. Focus leaving it closes it too.
+  //
+  // Many of these triggers sit inside a card whose long press opens its
+  // preview (`useLongPress`), and that hook captures the pointer, which would
+  // send the tap's `click` to the card instead of here. Marking the trigger as
+  // owning its taps keeps the pointer uncaptured for a press that starts on
+  // it. The long press still works, and those hosts swallow the click that
+  // ends a long press before it reaches the trigger (`useInspectHoverProps`,
+  // `DialogAttachmentCard`), so that press only opens the preview.
   useEffect(() => {
     if (touch !== "toggle") return;
     const trigger = anchorRef.current?.closest<HTMLElement>(".group") ?? null;
     if (!trigger) return;
+    trigger.setAttribute(OWNS_TAP_ATTRIBUTE, "");
     // A tap's own `click` does not report its pointer type reliably across
     // browsers, so the `pointerdown` that starts the tap records it. A touch
     // that turns into a scroll ends in `pointercancel` with no `click`.
@@ -125,6 +136,7 @@ export function GameplayTooltip({
     trigger.addEventListener("click", toggleOnTap);
     trigger.addEventListener("focusout", closeTap);
     return () => {
+      trigger.removeAttribute(OWNS_TAP_ATTRIBUTE);
       trigger.removeEventListener("pointerdown", notePointerType);
       trigger.removeEventListener("pointercancel", forgetPointerType);
       trigger.removeEventListener("click", toggleOnTap);

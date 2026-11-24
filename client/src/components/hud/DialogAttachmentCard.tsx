@@ -183,6 +183,14 @@ export function DialogAttachmentCard({ objectId, widthPx, onDismiss }: Props) {
   return (
     <div
       {...handlers}
+      // A click that ends a long press belongs to the preview it opened, so it
+      // is swallowed in the capture phase before it reaches the card or a
+      // counter inside it that opens on a tap, as useInspectHoverProps does.
+      onClickCapture={(event) => {
+        if (!firedRef.current) return;
+        event.stopPropagation();
+        firedRef.current = false;
+      }}
       onClick={interactive ? onClick : undefined}
       role={interactive ? "button" : undefined}
       tabIndex={interactive ? 0 : undefined}

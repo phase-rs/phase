@@ -1,8 +1,9 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AttackTarget, GameAction, GameObject, WaitingFor } from "../../../adapter/types.ts";
 import { dispatchAction } from "../../../game/dispatch.ts";
+import { LONG_PRESS_DELAY_MS } from "../../../hooks/useLongPress.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
@@ -12,6 +13,7 @@ import {
   buildObjectMap,
 } from "../../../test/factories/gameObjectFactory.ts";
 import { buildGameState, buildPlayers, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory.ts";
+import { touchHold, touchTap } from "../../../test/helpers/touchGestures.ts";
 import { AttackTargetPicker } from "../../controls/AttackTargetPicker.tsx";
 import { DialogAttachmentCard } from "../../hud/DialogAttachmentCard.tsx";
 import { ZoneViewer } from "../../zone/ZoneViewer.tsx";
@@ -22,6 +24,13 @@ import { ZoneViewer } from "../../zone/ZoneViewer.tsx";
 // attachments dialog or the zone viewer while it is not interactive, and the
 // attack picker's counters in its table cell but not inside its phone layout's
 // expand button.
+//
+// Each of these hosts opens the card preview on a long press, through a hook
+// that captures the pointer on the host unless the press starts on a trigger
+// that owns its taps. A capture there would send the tap's `pointerup` and
+// `click` to the host instead of the counter. The taps below are routed by
+// pointer capture as a browser routes them (`touchTap`), so a counter that
+// loses its tap to the host fails here.
 
 vi.mock("../../../game/dispatch.ts", () => ({
   dispatchAction: vi.fn(),
@@ -39,27 +48,11 @@ vi.mock("../../../hooks/useEngineCardData.ts", () => ({
   useCardRulings: () => [],
 }));
 
-// A subset, in order, of the events a browser sends for a finger tapping an
-// element. These counters take no focus, so the tap gives none.
-function tap(element: Element) {
-  fireEvent.pointerEnter(element, { pointerType: "touch" });
-  fireEvent.pointerDown(element, { pointerType: "touch" });
-  fireEvent.pointerUp(element, { pointerType: "touch" });
-  fireEvent.pointerLeave(element, { pointerType: "touch" });
-  fireEvent.click(element);
-}
-
 // Only a visible tooltip is in the accessibility tree. GameplayTooltip portals
 // to document.body, so counting only those leaves out any inline
 // role="tooltip" span that only a Tailwind class hides.
 function visibleTooltips() {
   return screen.queryAllByRole("tooltip").filter((tooltip) => tooltip.parentElement === document.body);
-}
-
-function counterTrigger(counter: Element) {
-  const trigger = counter.closest(".group");
-  if (!trigger) throw new Error("the counter has no tooltip trigger");
-  return trigger;
 }
 
 const CURSE_ID = 408;
@@ -101,7 +94,7 @@ function renderAttachedCurse(waitingFor: WaitingFor, legalActionsByObject: Recor
     viewerInteraction: null,
   });
   render(<DialogAttachmentCard objectId={CURSE_ID} widthPx={200} onDismiss={vi.fn()} />);
-  return counterTrigger(screen.getByText("charge x2"));
+  return screen.getByText("charge x2");
 }
 
 const EXILED_ID = 7;
@@ -139,7 +132,7 @@ function renderExiledCard(legalActionsByObject: Record<string, GameAction[]>) {
     gameMode: "ai",
   });
   render(<ZoneViewer zone="exile" playerId={0} onClose={vi.fn()} />);
-  return { dispatch, counter: counterTrigger(screen.getByLabelText("3")) };
+  return { dispatch, counter: screen.getByLabelText("3") };
 }
 
 const TARGETS: AttackTarget[] = [
@@ -176,36 +169,43 @@ function renderAttackPicker() {
 describe("issue #11118: counters open their explanation on a tap only while their host does not act", () => {
   beforeEach(() => {
     useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false, playerNames: new Map() });
-    useUiStore.setState({ pendingAbilityChoice: null, inspectedObjectId: null, debugInteractionMode: false });
+    useUiStore.setState({
+      pendingAbilityChoice: null,
+      inspectedObjectId: null,
+      previewSticky: false,
+      debugInteractionMode: false,
+    });
   });
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     vi.clearAllMocks();
     useGameStore.setState(useGameStore.getInitialState(), true);
     useMultiplayerStore.setState(useMultiplayerStore.getInitialState(), true);
-    useUiStore.setState({ pendingAbilityChoice: null, inspectedObjectId: null });
+    useUiStore.setState({ pendingAbilityChoice: null, inspectedObjectId: null, previewSticky: false });
   });
 
+  const declareBlockers: WaitingFor = {
+    type: "DeclareBlockers",
+    data: { player: 0, valid_blocker_ids: [], valid_block_targets: {} },
+  };
+
   it("a counter on an inert attached card opens on a tap and closes on the next", () => {
-    const declareBlockers: WaitingFor = {
-      type: "DeclareBlockers",
-      data: { player: 0, valid_blocker_ids: [], valid_block_targets: {} },
-    };
     const counter = renderAttachedCurse(declareBlockers, { [String(CURSE_ID)]: [CURSE_TAP] });
     expect(screen.queryByRole("button")).toBeNull();
 
-    tap(counter);
+    touchTap(counter);
     expect(visibleTooltips()).toHaveLength(1);
 
-    tap(counter);
+    touchTap(counter);
     expect(visibleTooltips()).toHaveLength(0);
   });
 
   it("a counter on an activatable attached card activates it on a tap and shows nothing", () => {
     const counter = renderAttachedCurse(buildPriorityWaitingFor(), { [String(CURSE_ID)]: [CURSE_TAP] });
 
-    tap(counter);
+    touchTap(counter);
 
     expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith(CURSE_TAP);
     expect(visibleTooltips()).toHaveLength(0);
@@ -215,10 +215,10 @@ describe("issue #11118: counters open their explanation on a tap only while thei
     const { counter } = renderExiledCard({});
     expect(counter.closest("button")).toBeNull();
 
-    tap(counter);
+    touchTap(counter);
     expect(visibleTooltips()).toHaveLength(1);
 
-    tap(counter);
+    touchTap(counter);
     expect(visibleTooltips()).toHaveLength(0);
   });
 
@@ -226,7 +226,7 @@ describe("issue #11118: counters open their explanation on a tap only while thei
     const cast: GameAction = { type: "CastSpell", data: { object_id: EXILED_ID, card_id: 700, targets: [] } };
     const { counter, dispatch } = renderExiledCard({ [String(EXILED_ID)]: [cast] });
 
-    tap(counter);
+    touchTap(counter);
 
     expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "CastSpell" }));
     expect(visibleTooltips()).toHaveLength(0);
@@ -237,10 +237,10 @@ describe("issue #11118: counters open their explanation on a tap only while thei
     const inTable = screen.getAllByText("charge x4").find((counter) => counter.closest("td"));
     if (!inTable) throw new Error("the table shows no counter");
 
-    tap(counterTrigger(inTable));
+    touchTap(inTable);
     expect(visibleTooltips()).toHaveLength(1);
 
-    tap(counterTrigger(inTable));
+    touchTap(inTable);
     expect(visibleTooltips()).toHaveLength(0);
   });
 
@@ -251,9 +251,67 @@ describe("issue #11118: counters open their explanation on a tap only while thei
     const expand = inButton.closest("button");
     expect(expand).toHaveAttribute("aria-expanded", "false");
 
-    tap(counterTrigger(inButton));
+    touchTap(inButton);
 
     expect(expand).toHaveAttribute("aria-expanded", "true");
     expect(visibleTooltips()).toHaveLength(0);
+  });
+
+  describe("the long press on the host", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    it("still opens the card preview from an attached card's counter, without its explanation", () => {
+      const counter = renderAttachedCurse(declareBlockers, {});
+
+      touchHold(counter, LONG_PRESS_DELAY_MS);
+
+      expect(useUiStore.getState().inspectedObjectId).toBe(CURSE_ID);
+      expect(useUiStore.getState().previewSticky).toBe(true);
+      expect(visibleTooltips()).toHaveLength(0);
+    });
+
+    it("still opens the card preview from an exiled card's time counter, without its explanation", () => {
+      const { counter } = renderExiledCard({});
+
+      touchHold(counter, LONG_PRESS_DELAY_MS);
+
+      expect(useUiStore.getState().inspectedObjectId).toBe(EXILED_ID);
+      expect(useUiStore.getState().previewSticky).toBe(true);
+      expect(visibleTooltips()).toHaveLength(0);
+    });
+
+    it("leaves a press released before the long press fires to the counter, even when its click comes late", () => {
+      const counter = renderAttachedCurse(declareBlockers, {});
+      const finger = { pointerType: "touch", pointerId: 1, isPrimary: true, button: 0 } as const;
+
+      fireEvent.pointerDown(counter, finger);
+      act(() => {
+        vi.advanceTimersByTime(LONG_PRESS_DELAY_MS - 1);
+      });
+      fireEvent.pointerUp(counter, finger);
+      act(() => {
+        vi.advanceTimersByTime(2);
+      });
+      fireEvent.click(counter);
+
+      expect(useUiStore.getState().previewSticky).toBe(false);
+      expect(visibleTooltips()).toHaveLength(1);
+    });
+
+    it("is still cancelled when the finger moves off the counter", () => {
+      const { counter } = renderExiledCard({});
+      const finger = { pointerType: "touch", pointerId: 1, isPrimary: true, button: 0 } as const;
+
+      fireEvent.pointerDown(counter, { ...finger, clientX: 0, clientY: 0 });
+      fireEvent.pointerMove(counter, { ...finger, clientX: 40, clientY: 0 });
+      act(() => {
+        vi.advanceTimersByTime(LONG_PRESS_DELAY_MS * 2);
+      });
+
+      expect(useUiStore.getState().previewSticky).toBe(false);
+      expect(useUiStore.getState().inspectedObjectId).toBeNull();
+    });
   });
 });
