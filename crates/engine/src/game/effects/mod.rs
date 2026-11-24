@@ -4253,40 +4253,39 @@ fn damaged_object_context_from_events(
     damaged.next().is_none().then_some(first)
 }
 
-/// CR 608.2c + CR 614.6 + CR 614.9: the object a referent-less chain's damage
-/// rider names — the single object the immediately preceding damage instruction
-/// actually dealt damage to (`DamageInstructionResult::Dealt`). A
-/// redirected event never happened to the original recipient, so Marauding
-/// Raptor's "deals 2 damage to it. If a Dinosaur is dealt damage this way" reads
-/// the creature Harm's Way chose, not the entering creature. Damage that reached
-/// only players, or was fully prevented (CR 615.1a), records no object, so the
-/// result is `None` — the trigger subject is never borrowed in its place.
+/// CR 608.2c + CR 614.6 + CR 614.9: the actual outcome of the immediately
+/// preceding damage instruction for a chain with no declared referent.
+/// The outer `None` keeps the ordinary target and event-context readers. A
+/// completed result with no live singular object (`Some(None)`) names nothing,
+/// even when a propagated target still carries the original trigger subject.
 ///
-/// Only a damage instruction records this, for its direct child alone. Any other
-/// object an earlier instruction published — a land tapped for a resolution-time
-/// mana payment (CR 605.3a), a sacrificed or revealed card — is not a damage
-/// result and never replaces the trigger subject: Emiel the Blessed's "If it's a
-/// Unicorn" still reads the creature that entered.
-///
-/// `None` as well when the chain names a referent of its own
-/// (`parent_chain_referents` is `Some`: a declared slot, even one left empty),
-/// or when the recipient has since changed zones (CR 400.7).
-fn referentless_chain_damage_recipient(
+/// Read the root's lexical declarations, including declined choices (CR 115.6).
+/// A target hydrated from an event at the instruction handoff is not a
+/// declaration (CR 115.10a). Forwarded results and authoritative empty
+/// announcements retain their own binding.
+fn referentless_chain_damage_result(
     state: &GameState,
     ability: &ResolvedAbility,
-) -> Option<ObjectIncarnationRef> {
-    if crate::game::targeting::parent_chain_referents(state, ability).is_some() {
+) -> Option<Option<ObjectIncarnationRef>> {
+    let DamageInstructionResult::Dealt { recipient } =
+        ability.context.direct_damage_result.as_ref()?
+    else {
+        return None;
+    };
+    if ability.context.forwarded_result_context.is_some()
+        || ability.has_authoritative_empty_binding()
+        || !ability.chosen_target_slots.slots().is_empty()
+        || ability.multi_target.is_some()
+        || ability.optional_targeting
+        || super::ability_utils::node_has_stack_target_declaration(ability)
+    {
         return None;
     }
-    match ability.context.direct_damage_result.as_ref()? {
-        DamageInstructionResult::Dealt { recipient } => {
-            recipient.filter(|recipient| recipient.is_current(state))
-        }
-        // Published when the parked node begins to resolve
-        // (`publish_awaited_damage_result`), before any condition reads it.
-        DamageInstructionResult::AwaitingDelivery { .. }
-        | DamageInstructionResult::ContinuationPortion => None,
+    let root = super::targeting::resolving_root_ability(state, ability);
+    if super::ability_utils::lexical_parent_chain_referents(root).is_some() {
+        return None;
     }
+    Some(recipient.filter(|recipient| recipient.is_current(state)))
 }
 
 /// Captured snapshot of a single `GameEvent::DamageDealt` event, decoupling event
@@ -34158,10 +34157,9 @@ fn spell_event_incarnation(state: &GameState, id: ObjectId) -> Option<ObjectInca
 /// CR 608.2c + CR 603.2: resolve the referent of a `TargetMatchesFilter` condition.
 ///
 /// `ObjectScope::Target` (the default) is, in order: an explicit declared `subject_slot`;
-/// the node's own resolution-bound attachment-host recipient; the ability's first object
-/// target (with its announced pin); else, in a chain that declares no referent, the object
-/// the immediately preceding damage instruction actually dealt damage to
-/// (`referentless_chain_damage_recipient`); else, for subject-based triggers that carry no
+/// the node's own resolution-bound attachment-host recipient; the preceding damage
+/// instruction's completed result for a slotless chain; the ability's first object
+/// target (with its announced pin); else, for subject-based triggers that carry no
 /// chosen target, the triggering event's subject. `ObjectScope::EventSource` is the object the
 /// current trigger event names even when the node also declares a target. Every other
 /// scope has no referent here (the parser never writes one): the condition is false.
@@ -34249,6 +34247,16 @@ fn resolve_condition_referent(
                     [] | [_, _, ..] => None,
                 };
             }
+            // CR 608.2c + CR 614.9: Marauding Raptor's rider reads the actual
+            // damage recipient. A completed empty result cannot borrow the
+            // hydrated trigger subject that the damage was originally aimed at.
+            if let Some(recipient) = referentless_chain_damage_result(state, ability) {
+                return recipient.map(|pin| ConditionReferent {
+                    id: pin.object_id,
+                    pin: Some(pin),
+                    scope: ObjectScope::Target,
+                });
+            }
             // CR 400.7 + CR 608.2b: the first object target keeps its announced
             // incarnation, so a target that has since changed zones is recognised as
             // departed rather than read as the new object at the same storage id.
@@ -34260,17 +34268,6 @@ fn resolve_condition_referent(
                 return Some(ConditionReferent {
                     id,
                     pin: ability.target_pin_at(index),
-                    scope: ObjectScope::Target,
-                });
-            }
-            // CR 608.2c + CR 614.9: in a chain that declares no referent, the object
-            // the immediately preceding damage instruction dealt damage to — Marauding
-            // Raptor's damage recipient after any redirection, not the creature the
-            // damage was aimed at. No other instruction's object is read here.
-            if let Some(pin) = referentless_chain_damage_recipient(state, ability) {
-                return Some(ConditionReferent {
-                    id: pin.object_id,
-                    pin: Some(pin),
                     scope: ObjectScope::Target,
                 });
             }
@@ -35285,7 +35282,7 @@ pub(crate) fn evaluate_condition(
         // A chain that declares no target slots at all ("~ deals 2 damage to
         // it" on a subject-triggered rider) has the object its preceding
         // damage instruction actually dealt damage to as antecedent
-        // (`referentless_chain_damage_recipient`) — never the trigger
+        // (`referentless_chain_damage_result`) — never the trigger
         // subject merely because the instruction was aimed at it: a
         // redirection replaced that event, so the damage was dealt to the
         // other recipient instead (CR 614.6 + CR 614.9). A chain whose
@@ -35293,11 +35290,13 @@ pub(crate) fn evaluate_condition(
         // slot left with zero chosen (CR 115.6) keeps reading false (The
         // Black Arrow aimed at a player; Faller's Faithful).
         AbilityCondition::HasObjectTarget => {
+            if let Some(recipient) = referentless_chain_damage_result(state, ability) {
+                return recipient.is_some();
+            }
             ability
                 .targets
                 .iter()
                 .any(|t| matches!(t, TargetRef::Object(_)))
-                || referentless_chain_damage_recipient(state, ability).is_some()
         }
         // CR 608.2c: Compound condition — all inner conditions must be true.
         AbilityCondition::And { conditions } => conditions
