@@ -2030,8 +2030,9 @@ fn death_by_dragons_two_cutpurses_return_each_dragon_to_its_creator() {
 /// per creating seat) and Mystic Reflection, each owner applies every
 /// replacement that reaches their own tokens. Each seat: 1 x 2 (Primal Vigor)
 /// x 2 (its Doubling Season) = 4 tokens, each entering as a copy of Grizzly
-/// Bears (CR 608.2f: "they enter as copies"). No prompt: Primal Vigor and
-/// Doubling Season commute, and one Reflection is a mandatory singleton.
+/// Bears (Mystic Reflection: "they enter as copies"; CR 608.2f: simultaneous
+/// action). No prompt: Primal Vigor and Doubling Season commute, and one
+/// Reflection is a mandatory singleton.
 #[test]
 fn death_by_dragons_six_owners_each_get_every_replacement() {
     let mut scenario = GameScenario::new_n_player(7, 7);
