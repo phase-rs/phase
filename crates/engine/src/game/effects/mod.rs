@@ -33742,7 +33742,7 @@ fn resolve_condition_referent(
                 card_id: _,
                 controller: _,
                 object_id: _,
-                cast_mana_value: _,
+                ..
             } = event
             {
                 // CR 601.2i + CR 400.7: a cast trigger names the occurrence it was put on the
@@ -47584,6 +47584,8 @@ mod tests {
             controller: PlayerId(1),
             object_id: ObjectId(99),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let mut events = Vec::new();
@@ -72172,6 +72174,8 @@ mod tests {
             controller: PlayerId(1),
             object_id: ObjectId(9000),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         assert!(
@@ -72303,6 +72307,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: ObjectId(9000),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         // The caster (seat 0) and its teammate (seat 1) are NOT opponents.

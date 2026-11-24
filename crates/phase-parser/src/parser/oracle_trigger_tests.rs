@@ -41480,21 +41480,8 @@ fn tawnos_the_toymaker_copy_is_an_artifact() {
     assert_no_unimplemented(execute.as_ref());
 }
 
-// V10 — CR 121.1 + CR 603.4: the trigger-side "equal to the difference" rewrites
-// (`lower_trigger_ir`) discriminate on the gap node's recorded DESCRIPTION, never
-// on its name. Phase 1 names every fallback gap by the sub-grammar verdict that
-// refused it, so the pre-phase `name == "draw"` / `name == "lose"` guards can
-// never be true again — restoring either one makes the rewrite stop firing and
-// this test (and the `draw` arm's `parse_difference_draw_trigger_...` above) go
-// red.
-//
-// The `lose` arm additionally carries a DECLARED widening: the name compare was
-// the only thing refusing `"they lose life equal to the difference"` (a fallback
-// node whose first word was `they`). With the name gone, the exact-text compare is
-// the entire bound, so the negative half below pins it against a different
-// `Unimplemented` description that must NOT convert.
 #[test]
-fn difference_life_loss_rewrite_keys_on_the_description_not_the_gap_name() {
+fn difference_life_loss_binds_only_the_deferred_count() {
     const OTHER_REVEALED_CLASS: &str =
         "lose life equal to the mana value of the card revealed by the other player";
 
@@ -41522,10 +41509,6 @@ fn difference_life_loss_rewrite_keys_on_the_description_not_the_gap_name() {
         def
     }
 
-    // Positive: the migrated `lose` arm converts the anaphoric clause against the
-    // hoisted operands. This is the only test that reaches the arm at all — the two
-    // standing `parse_effect_chain` positives are satisfied by the effect layer and
-    // never enter `lower_trigger_ir`.
     let def = hosted_gate_trigger("lose life equal to the difference");
     let execute = def.execute.as_ref().expect("execute ability");
     let Effect::LoseLife { amount, target } = execute.effect.as_ref() else {
@@ -41535,9 +41518,8 @@ fn difference_life_loss_rewrite_keys_on_the_description_not_the_gap_name() {
         );
     };
     assert_eq!(
-        target,
-        &Some(TargetFilter::ParentTarget),
-        "the rewritten life loss is directed at the trigger's parent target"
+        target, &None,
+        "an imperative without an explicit subject defaults to the controller"
     );
     let QuantityExpr::Difference { left, right } = amount else {
         panic!("expected a Difference amount, got {amount:?}");
@@ -41553,12 +41535,6 @@ fn difference_life_loss_rewrite_keys_on_the_description_not_the_gap_name() {
     );
     assert_eq!(**right, QuantityExpr::Fixed { value: 7 });
 
-    // Negative (multi-authority): a DIFFERENT gap node reaching the same arm with
-    // `difference_count` bound must be refused by the exact-text compare. The
-    // OtherRevealedCard class node is the neighbouring `lose`-flavoured producer
-    // renamed by P1.5 (`other_revealed_card_quantity`); under either name it is only
-    // the description that refuses it. `hosted_gate_trigger` proves the arm was
-    // reachable, so this is not a vacuous negative.
     let def = hosted_gate_trigger(OTHER_REVEALED_CLASS);
     let execute = def.execute.as_ref().expect("execute ability");
     assert_eq!(

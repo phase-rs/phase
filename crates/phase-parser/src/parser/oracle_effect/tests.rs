@@ -28286,11 +28286,11 @@ fn effect_emblem_trigger_with_subject_predicate_text_stays_emblem() {
         Effect::LoseLife { amount, target } => {
             assert_eq!(
                 *target,
-                Some(TargetFilter::ParentTarget),
+                Some(TargetFilter::TriggeringPlayer),
                 "life loss must hit the damaged player"
             );
             assert!(
-                matches!(amount, QuantityExpr::Difference { .. }),
+                amount == &lolth_difference_amount(),
                 "loss amount must be Difference, got {amount:?}"
             );
         }
@@ -28301,12 +28301,17 @@ fn effect_emblem_trigger_with_subject_predicate_text_stays_emblem() {
 #[test]
 fn lose_life_equal_to_the_difference_from_life_lost_threshold() {
     let def = parse_effect_chain(
-        "If that player lost less than 8 life this turn, they lose life equal to the difference.",
+        "If that player lost less than 8 life this turn, target opponent loses life equal to the difference.",
         AbilityKind::Spell,
     );
     match &*def.effect {
         Effect::LoseLife { amount, target } => {
-            assert_eq!(*target, Some(TargetFilter::ParentTarget));
+            assert_eq!(
+                target,
+                &Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent)
+                ))
+            );
             assert!(matches!(amount, QuantityExpr::Difference { .. }));
         }
         other => panic!("expected LoseLife, got {other:?}"),
@@ -99246,9 +99251,19 @@ fn caller_bound_count_reaches_the_first_chunk_only() {
     );
 }
 
-/// CR 608.2c: "the difference" is accepted only by the carrier the
-/// difference binding rebinds (token creation); the draw / lose verbs keep the
-/// trigger-level rewrite.
+fn lolth_difference_amount() -> QuantityExpr {
+    QuantityExpr::Difference {
+        left: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::LifeLost {
+                player: PlayerScope::ScopedPlayer,
+                window: Default::default(),
+            },
+        }),
+        right: Box::new(QuantityExpr::Fixed { value: 8 }),
+    }
+}
+
+/// CR 608.2c: Draw retains its trigger-level difference rewrite.
 #[test]
 fn difference_draw_keeps_the_trigger_rewrite_contract() {
     let kozilek = parse_oracle_text(
@@ -99301,10 +99316,10 @@ fn difference_draw_keeps_the_trigger_rewrite_contract() {
     let lolth = to_json(&lolth);
     assert!(
         serialized_effects(&lolth, "LoseLife").iter().any(|effect| {
-            effect["amount"]["type"] == "Difference"
-                && effect["target"] == to_json(&TargetFilter::ParentTarget)
+            effect["amount"] == to_json(&lolth_difference_amount())
+                && effect["target"] == to_json(&TargetFilter::TriggeringPlayer)
         }),
-        "Lolth's emblem keeps the difference loss on its parent target: {lolth}"
+        "Lolth's emblem applies the difference to the triggering player: {lolth}"
     );
 }
 
@@ -108210,4 +108225,52 @@ fn assert_goaded_restriction_tail_declined(parsed: &ParsedAbilities) {
         parsed.abilities.first().map(|def| &*def.effect),
         Some(Effect::ChangeZone { .. })
     ));
+}
+
+#[test]
+fn ancient_cellarspawn_difference_keeps_the_stated_opponent() {
+    use crate::types::ability::{CastManaObjectScope, CastManaSpentMetric};
+
+    let parsed = parse_named_face(
+        "Each spell you cast that's a Demon, Horror, or Nightmare costs {1} less to cast.\nWhenever you cast a spell, if the amount of mana spent to cast it was less than its mana value, target opponent loses life equal to the difference.",
+        "Ancient Cellarspawn",
+        &["Enchantment", "Creature"],
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("cast trigger");
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::LoseLife {
+            target: Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            )),
+            amount: QuantityExpr::Difference {
+                left: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::TriggeringSpell,
+                        metric: CastManaSpentMetric::Total,
+                    },
+                }),
+                right: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::EventSource
+                    },
+                }),
+            },
+        }
+    );
+}
+
+#[test]
+fn unbound_life_loss_difference_is_an_explicit_gap() {
+    let parsed = parse_named_face(
+        "Target opponent loses life equal to the difference.",
+        "Unbound Difference",
+        &["Sorcery"],
+    );
+    let effect = &parsed.abilities[0].effect;
+    assert_eq!(
+        effect.unimplemented_description(),
+        Some("life equal to the difference"),
+        "{effect:?}"
+    );
 }

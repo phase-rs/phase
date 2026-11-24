@@ -7,7 +7,9 @@
 
 use engine::ai_support::legal_actions;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
@@ -323,34 +325,161 @@ fn the_locked_cost_survives_the_source_leaving_during_payment() {
     );
 }
 
-/// Ancient Cellarspawn's second ability ("… target opponent loses life equal to
-/// the difference.") lost its stated subject and made its CONTROLLER lose the
-/// life. Until that subject is threaded through, the clause fails closed: the
-/// trigger carries an `Unimplemented` effect and a discounted cast no longer
-/// costs its controller life.
+const P2: PlayerId = PlayerId(2);
+
+fn three_player_board() -> GameScenario {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Ancient Cellarspawn", 3, 3, ANCIENT_CELLARSPAWN)
+        .with_subtypes(vec!["Horror"]);
+    scenario
+}
+
+fn choose_second_opponent(runner: &mut GameRunner) {
+    let WaitingFor::TriggerTargetSelection {
+        player: P0,
+        target_slots,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected Cellarspawn's target announcement, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(target_slots.len(), 1);
+    assert_eq!(target_slots[0].legal_targets.len(), 2);
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Player(P1)));
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Player(P2)));
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P2)],
+        })
+        .expect("announce the second opponent");
+}
+
 #[test]
-fn the_second_ability_fails_closed_instead_of_hitting_its_controller() {
-    let (mut runner, demon) = board(P0, pool(1, 1), |s| {
-        creature_spell(s, P0, "Demon", vec!["Demon"], cost(2, 1))
-    });
-    let cellarspawn = runner
-        .state()
-        .objects
-        .values()
-        .find(|o| o.name == "Ancient Cellarspawn")
-        .expect("Cellarspawn");
-    let effects: Vec<_> = cellarspawn
-        .trigger_definitions
-        .iter_unchecked()
-        .filter_map(|entry| entry.definition().execute.as_deref())
-        .map(|execute| execute.effect.as_ref().clone())
-        .collect();
-    assert!(
-        matches!(effects.as_slice(), [Effect::Unimplemented { .. }]),
-        "{effects:?}"
-    );
-    let p0 = runner.life(P0);
-    runner.cast(demon).resolve();
+fn the_second_ability_hits_the_announced_opponent_on_discounted_casts_only() {
+    let mut scenario = three_player_board();
+    let demon = creature_spell(&mut scenario, P0, "Demon", vec!["Demon"], cost(2, 1));
+    let bear = creature_spell(&mut scenario, P0, "Bear", vec!["Bear"], cost(2, 1));
+    scenario.with_mana_pool(P0, pool(3, 2));
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&demon].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: demon,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast the discounted Demon");
+    choose_second_opponent(&mut runner);
+    assert_eq!(runner.state().stack.len(), 2);
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
     assert_eq!(runner.state().objects[&demon].zone, Zone::Battlefield);
-    assert_eq!(runner.life(P0), p0, "the controller loses nothing");
+    assert_eq!(
+        (runner.life(P0), runner.life(P1), runner.life(P2)),
+        (20, 20, 19)
+    );
+
+    drop(runner.cast(bear).commit());
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "full price produces no trigger"
+    );
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Battlefield);
+    assert_eq!(
+        (runner.life(P0), runner.life(P1), runner.life(P2)),
+        (20, 20, 19)
+    );
+}
+
+// CR 202.3e + CR 608.2a + CR 608.2h: The pending trigger uses the first
+// cast's payment and stack mana value after it is countered and even after
+// that same card has been cast again with different facts.
+#[test]
+fn countered_x_cast_keeps_its_original_difference_after_a_same_id_recast() {
+    for recast in [false, true] {
+        let mut scenario = three_player_board();
+        let spell = scenario
+            .add_creature_to_hand(P0, "Flash Horror", 3, 3)
+            .with_subtypes(vec!["Horror"])
+            .flash()
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Black],
+                generic: 0,
+            })
+            .id();
+        let counterspell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Test counterspell", true, "Counter target spell.")
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        let recover = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Recover Horror",
+                true,
+                "Return target creature card from your graveyard to your hand.",
+            )
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        scenario.with_mana_pool(P0, pool(4, 2));
+        let mut runner = scenario.build();
+        let original_incarnation = {
+            let cast = runner.cast(spell).x(3).target_player(P2).commit();
+            assert_eq!(cast.state().stack.len(), 2);
+            assert_eq!(cast.state().objects[&spell].spell_mana_value(), 4);
+            assert_eq!(cast.state().objects[&spell].mana_spent_to_cast_amount, 3);
+            cast.state().objects[&spell].incarnation
+        };
+
+        drop(runner.cast(counterspell).target_object(spell).commit());
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "original trigger is still pending"
+        );
+
+        if recast {
+            drop(runner.cast(recover).target_object(spell).commit());
+            runner.resolve_top();
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+            drop(runner.cast(spell).x(0).commit());
+            let spell = &runner.state().objects[&spell];
+            assert_eq!(spell.zone, Zone::Stack);
+            assert_ne!(spell.incarnation, original_incarnation);
+            assert_eq!(spell.spell_mana_value(), 1);
+            assert_eq!(spell.mana_spent_to_cast_amount, 1);
+            assert_eq!(
+                runner.state().stack.len(),
+                2,
+                "recast paid its full mana value"
+            );
+        }
+
+        assert_eq!(
+            runner.life(P2),
+            20,
+            "the original trigger has yet to resolve"
+        );
+        runner.advance_until_stack_empty();
+        assert!(runner.state().stack.is_empty());
+        assert_eq!(
+            (runner.life(P0), runner.life(P1), runner.life(P2)),
+            (20, 20, 19)
+        );
+    }
 }

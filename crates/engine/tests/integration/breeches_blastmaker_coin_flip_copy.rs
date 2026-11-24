@@ -299,6 +299,8 @@ fn setup_breeches_runtime(seed: u64) -> (GameState, ObjectId, ObjectId) {
         object_id: spell,
         card_id: CardId(3),
         cast_mana_value: None,
+        cast_mana_spent: None,
+        cast_incarnation: None,
     });
 
     let parsed = parse_breeches();

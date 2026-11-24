@@ -3989,6 +3989,8 @@ pub fn filter_events_for_viewer(
                     controller: *controller,
                     object_id: *object_id,
                     cast_mana_value: None,
+                    cast_mana_spent: None,
+                    cast_incarnation: None,
                 }
             }
             // CR 401.2: a revealed card that now sits in a library at a hidden
@@ -9756,18 +9758,24 @@ mod tests {
                 controller: PlayerId(1),
                 object_id: face_down_spell,
                 cast_mana_value: Some(4),
+                cast_mana_spent: None,
+                cast_incarnation: None,
             },
             GameEvent::SpellCast {
                 card_id: CardId(702),
                 controller: PlayerId(0),
                 object_id: own_spell,
                 cast_mana_value: Some(4),
+                cast_mana_spent: None,
+                cast_incarnation: None,
             },
             GameEvent::SpellCast {
                 card_id: CardId(703),
                 controller: PlayerId(1),
                 object_id: opponent_face_up_spell,
                 cast_mana_value: Some(4),
+                cast_mana_spent: None,
+                cast_incarnation: None,
             },
         ];
 
@@ -9780,18 +9788,24 @@ mod tests {
                     controller: PlayerId(1),
                     object_id,
                     cast_mana_value: None,
+                    cast_mana_spent: None,
+                    cast_incarnation: None,
                 },
                 GameEvent::SpellCast {
                     card_id: CardId(702),
                     controller: PlayerId(0),
                     object_id: own_object_id,
                     cast_mana_value: Some(4),
+                    cast_mana_spent: None,
+                    cast_incarnation: None,
                 },
                 GameEvent::SpellCast {
                     card_id: CardId(703),
                     controller: PlayerId(1),
                     object_id: face_up_object_id,
                     cast_mana_value: Some(4),
+                    cast_mana_spent: None,
+                    cast_incarnation: None,
                 },
             ] if *object_id == face_down_spell
                 && *own_object_id == own_spell

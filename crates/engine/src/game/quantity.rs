@@ -4058,14 +4058,14 @@ fn resolve_event_scoped_ref(
                     metric,
                 },
         } => {
+            if let Some(spent) = total_mana_spent_for_cast_event(state, event, metric) {
+                return Some(spent);
+            }
             let id = crate::game::targeting::extract_source_from_event(event)?;
-            // CR 106.3 + CR 201.5: the payment record is the spell's, but a source
-            // filter is relative to the ability that reads it. "~" names the
-            // listener, never the spell.
+            // The source filter belongs to the listener, while the payment
+            // record belongs to the triggering spell.
             let filter_source =
                 source_context.map_or(id, |source| source.identity.reference.object_id);
-            // No latch routing: the read subject is the triggering SPELL from
-            // the event, never the listener's own latched source.
             resolve_mana_spent_to_cast_metric(
                 state,
                 id,
@@ -4076,6 +4076,12 @@ fn resolve_event_scoped_ref(
         }
         QuantityExpr::Ref {
             qty:
+                QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::EventSource,
+                },
+        } => spell_cast_mana_value_for_event(state, event),
+        QuantityExpr::Ref {
+            qty:
                 QuantityRef::ManaSpentToCast {
                     scope: CastManaObjectScope::AbilityTarget,
                     metric: _,
@@ -4083,6 +4089,56 @@ fn resolve_event_scoped_ref(
         } => None,
         _ => None,
     }
+}
+
+/// CR 601.2h + CR 400.7: The total payment belongs to this cast occurrence.
+/// Legacy events may use the live stack object's stamp for an unambiguous cast.
+fn total_mana_spent_for_cast_event(
+    state: &GameState,
+    event: &GameEvent,
+    metric: &CastManaSpentMetric,
+) -> Option<i32> {
+    let GameEvent::SpellCast {
+        cast_mana_spent,
+        object_id,
+        controller,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if *metric != CastManaSpentMetric::Total {
+        return None;
+    }
+    if let Some(amount) = cast_mana_spent {
+        return Some(u32_to_i32_saturating(*amount));
+    }
+
+    let pin = crate::game::targeting::triggering_spell_identity_for_event(state, event);
+    let repeated_cast = pin.is_none()
+        && state
+            .spells_cast_this_turn_by_player
+            .get(controller)
+            .is_some_and(|records| {
+                records
+                    .iter()
+                    .filter(|record| record.spell_object_id == Some(*object_id))
+                    .nth(1)
+                    .is_some()
+            });
+    let amount = state
+        .objects
+        .get(object_id)
+        .filter(|object| {
+            !repeated_cast
+                && object.zone == Zone::Stack
+                && pin.map_or_else(
+                    || object.cast_controller.unwrap_or(object.controller) == *controller,
+                    |pin| object.incarnation == pin.incarnation,
+                )
+        })
+        .map_or(0, |object| object.mana_spent_to_cast_amount);
+    Some(u32_to_i32_saturating(amount))
 }
 
 pub(crate) fn resolve_mana_spent_to_cast_metric(
@@ -6381,6 +6437,15 @@ fn resolve_ref(
         // queries do not depend on the producing permanent still existing or
         // retaining the same type.
         QuantityRef::ManaSpentToCast { scope, metric } => {
+            if *scope == CastManaObjectScope::TriggeringSpell {
+                if let Some(spent) = state
+                    .current_trigger_event
+                    .as_ref()
+                    .and_then(|event| total_mana_spent_for_cast_event(state, event, metric))
+                {
+                    return spent;
+                }
+            }
             let cast_object = match scope {
                 CastManaObjectScope::SelfObject => Some(ctx.self_object()),
                 CastManaObjectScope::TriggeringSpell => state
@@ -9490,7 +9555,7 @@ fn spell_cast_mana_value_for_event(state: &GameState, event: &GameEvent) -> Opti
     // on the stack (X still counts, and reflects any change made on the stack,
     // CR 107.3c's note). The pinned lookup keeps a same-id recast from answering
     // for an earlier cast (CR 400.7).
-    match crate::game::targeting::triggering_spell(state) {
+    match crate::game::targeting::triggering_spell_for_event(state, event) {
         Some(TriggeringSpell::OnStack(entry)) if entry.id == *object_id => {
             if let Some(obj) = state.objects.get(object_id) {
                 return Some(u32_to_i32_saturating(obj.spell_mana_value()));
@@ -9621,6 +9686,12 @@ fn resolve_object_mana_value(
             // read the live object first, including a spell on the stack.
             if let Some(mana_value) =
                 event_source_mana_value_override(state, ctx.stack_trigger_context)
+            {
+                return mana_value;
+            }
+            if let Some(mana_value) = object_lookback_event(state, ability)
+                .as_ref()
+                .and_then(|event| spell_cast_mana_value_for_event(state, event))
             {
                 return mana_value;
             }
@@ -11703,6 +11774,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         let count_for = |source: ObjectId| {
             let context = crate::game::triggers::trigger_source_context_for_latch(
@@ -20554,6 +20627,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: triggering_spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let expr = QuantityExpr::Ref {
@@ -20993,6 +21068,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell_id,
             cast_mana_value: Some(6),
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         assert_eq!(
             resolve_quantity_with_targets(&state, &expr, &ability),
@@ -21005,6 +21082,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell_id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         assert_eq!(
             resolve_quantity_with_targets(&state, &expr, &ability),
@@ -21092,6 +21171,8 @@ mod tests {
                 Some(GameEvent::SpellCast {
                     object_id,
                     cast_mana_value: Some(2),
+                    cast_mana_spent: Some(2),
+                    cast_incarnation: Some(_),
                     ..
                 }) if *object_id == endless_one
             ),
@@ -21120,7 +21201,14 @@ mod tests {
             entry.ability_mut().unwrap().context.triggering_spell =
                 Some(ObjectIncarnationRef::of(endless_one, incarnation));
             state.resolving_stack_entry = Some(entry.clone());
-            state.current_trigger_event = trigger_event.clone();
+            let mut cast_event = trigger_event.clone();
+            if let Some(GameEvent::SpellCast {
+                cast_incarnation, ..
+            }) = &mut cast_event
+            {
+                *cast_incarnation = Some(incarnation);
+            }
+            state.current_trigger_event = cast_event;
             amounts
                 .iter()
                 .map(|expr| resolve_quantity_with_targets(state, expr, entry.ability().unwrap()))
@@ -21758,6 +21846,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: target,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         let event_source_expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectColorCount {
