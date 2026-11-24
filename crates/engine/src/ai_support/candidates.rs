@@ -4941,97 +4941,24 @@ pub(crate) fn priority_actions_with_probe(
             }
         }
 
-        // CR 602.1: Hand-activated abilities (Cycling per CR 702.29a, etc.)
-        for &obj_id in &state.players[player.0 as usize].hand {
-            if let Some(obj) = state.objects.get(&obj_id) {
-                // CR 108.4 + CR 108.4a: a card in a hand represents neither a
-                // permanent nor a spell, so it has no controller — "if anything
-                // asks for the controller of a card that doesn't have one, use
-                // its owner instead". `obj.controller` is NOT cleared by every
-                // zone change (only a battlefield exit reverts it), so scoping a
-                // hand scan by `controller` asks for a value the rules say does
-                // not exist. Owner is the rule and it is also what this
-                // owner-keyed hand list already means.
-                if obj.owner == player {
-                    for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
-                        if ability_def.kind != crate::types::ability::AbilityKind::Activated
-                            || ability_def.activation_zone != Some(crate::types::zones::Zone::Hand)
-                            || crate::game::mana_abilities::is_mana_ability(&ability_def)
-                        {
-                            continue;
-                        }
-                        // CR 602.2b + CR 601.2g: the payment mode the reducer
-                        // honours, as for the battlefield loop above.
-                        if let Some(payment_mode) = casting::activation_offer_payment_mode(
-                            state,
-                            player,
-                            obj_id,
-                            i,
-                            &activation_restriction_gates,
-                        ) {
-                            actions.push(candidate(
-                                GameAction::ActivateAbility {
-                                    source_id: obj_id,
-                                    ability_index: i,
-                                    payment_mode,
-                                },
-                                TacticalClass::Ability,
-                                Some(player),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-
-        // CR 113.6b + CR 602.2: Graveyard-activated abilities (Teacher's Pest,
-        // Bloodsoaked Champion, Dread Wanderer, etc.). CR 113.6b: an ability
-        // whose text states it functions from the graveyard can be activated
-        // from there. CR 602.2: to activate an ability is to put it onto the
-        // stack and pay its costs. Non-mana graveyard activations are
-        // suppressed by split second, mirroring the hand-zone loop above.
-        for &obj_id in state.graveyard_of(player) {
-            if let Some(obj) = state.objects.get(&obj_id) {
-                // CR 602.2: "Only an object's controller (or its owner, if it
-                // doesn't have a controller) can activate its activated ability
-                // unless the object specifically says otherwise." Nothing in a
-                // graveyard says otherwise here, so the restriction stands;
-                // `analysis/resource.rs` is where that exception is honored, via
-                // `activator_filter`. Restrict candidates to the acting player.
-                // CR 108.4 +
-                // CR 108.4a supply that owner fallback: a card in a graveyard is
-                // not a permanent or spell, so it has no controller, and CR 404.1
-                // puts it into its OWNER's graveyard. Owner is therefore the
-                // rules-correct scope for the flashback / unearth / escape class.
-                if obj.owner == player {
-                    for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
-                        if ability_def.kind != crate::types::ability::AbilityKind::Activated
-                            || ability_def.activation_zone
-                                != Some(crate::types::zones::Zone::Graveyard)
-                            || crate::game::mana_abilities::is_mana_ability(&ability_def)
-                        {
-                            continue;
-                        }
-                        // CR 602.2b + CR 601.2g: the payment mode the reducer
-                        // honours, as for the battlefield loop above.
-                        if let Some(payment_mode) = casting::activation_offer_payment_mode(
-                            state,
-                            player,
-                            obj_id,
-                            i,
-                            &activation_restriction_gates,
-                        ) {
-                            actions.push(candidate(
-                                GameAction::ActivateAbility {
-                                    source_id: obj_id,
-                                    ability_index: i,
-                                    payment_mode,
-                                },
-                                TacticalClass::Ability,
-                                Some(player),
-                            ));
-                        }
-                    }
+        for obj_id in super::off_battlefield_activation_sources(state, player) {
+            for i in super::ordinary_activation_indices(state, player, obj_id, None) {
+                if let Some(payment_mode) = casting::activation_offer_payment_mode(
+                    state,
+                    player,
+                    obj_id,
+                    i,
+                    &activation_restriction_gates,
+                ) {
+                    actions.push(candidate(
+                        GameAction::ActivateAbility {
+                            source_id: obj_id,
+                            ability_index: i,
+                            payment_mode,
+                        },
+                        TacticalClass::Ability,
+                        Some(player),
+                    ));
                 }
             }
         }

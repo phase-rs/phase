@@ -320,6 +320,11 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         || scan_contains(lower, "until end of turn")
         || scan_contains(lower, "until your next turn")
         || scan_contains(lower, "this turn")
+        // CR 611.2b: "for as long as …" is a duration given to a continuous
+        // effect the spell's resolution creates (Immortal Obligation, Soul
+        // Partition); an instant's or sorcery's own static abilities never carry
+        // one, so the line is the spell's effect chain.
+        || scan_contains(lower, "for as long as ")
 }
 
 /// CR 702.8a + CR 601.3d: "[~|this spell] has flash" prefix — see the call
@@ -1512,6 +1517,24 @@ mod tests {
             "if you weren't the starting player, this spell costs {1} less to cast.",
         ] {
             assert!(!should_defer_spell_to_effect(self_static), "{self_static}");
+        }
+    }
+
+    /// CR 611.2b: an instant/sorcery line stating a "for as long as" duration
+    /// is the spell's effect chain, whatever the duration's position in the
+    /// line (Immortal Obligation, Soul Partition: both were whole-line statics
+    /// at base because no other arm matches them).
+    #[test]
+    fn spell_for_as_long_as_line_defers_to_effect() {
+        for line in [
+            "return target creature card from an opponent's graveyard to the battlefield \
+             under their control with a duty counter on it. for as long as that creature \
+             has a duty counter on it, it is goaded, can't attack you or a permanent you \
+             control, and can't block creatures you control.",
+            "exile target nonland permanent. for as long as that card remains exiled, its \
+             owner may play it. a spell cast by an opponent this way costs {2} more to cast.",
+        ] {
+            assert!(should_defer_spell_to_effect(line), "{line}");
         }
     }
 

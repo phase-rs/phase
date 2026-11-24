@@ -299,9 +299,15 @@ fn resolve_duplicate_reference(
     ability: &ResolvedAbility,
     reference: &TargetFilter,
 ) -> Option<ObjectId> {
-    crate::game::effects::resolved_effect_object_ids(state, ability, reference)
-        .into_iter()
-        .next()
+    // CR 608.2h: only the referent's name is read.
+    crate::game::effects::resolved_effect_object_ids_with(
+        state,
+        ability,
+        reference,
+        crate::game::targeting::ReferentRead::Inform,
+    )
+    .into_iter()
+    .next()
 }
 
 /// Place every just-conjured copy for one recipient into `owner`'s library at the

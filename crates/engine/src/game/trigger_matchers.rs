@@ -3990,6 +3990,7 @@ pub(super) fn match_mana_ability_produced(
         player_id,
         source_id,
         produced,
+        resolution,
         ..
     } = event
     else {
@@ -4008,7 +4009,8 @@ pub(super) fn match_mana_ability_produced(
             .is_some_and(|color| {
                 produced.contains(&crate::game::mana_sources::mana_color_to_type(&color))
             }),
-        None => true,
+        // CR 603.2c + CR 608.2p: Observe each resolution once.
+        None => !resolution.is_recipient_only(),
     }
 }
 
@@ -6802,7 +6804,9 @@ fn stack_entry_targets_any(
     let source_controller = Some(source_context.source_read(state).controller());
     let ctx = super::filter::FilterContext::from_trigger_source(source_context);
     targets.iter().any(|t| match t {
-        TargetRef::Object(id) => super::filter::matches_target_filter(state, *id, constraint, &ctx),
+        TargetRef::Object(id) => {
+            super::filter::matches_stack_entry_object_target(state, *id, constraint, &ctx)
+        }
         TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
             state,
             constraint,

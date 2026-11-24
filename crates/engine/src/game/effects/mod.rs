@@ -324,6 +324,23 @@ pub(crate) fn resolved_effect_object_ids(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
+    resolved_effect_object_ids_with(
+        state,
+        ability,
+        target_filter,
+        crate::game::targeting::ReferentRead::Affect,
+    )
+}
+
+/// [`resolved_effect_object_ids`] with an explicit
+/// [`crate::game::targeting::ReferentRead`]; `Inform` is for CR 608.2h
+/// information readers (a copy source, a name to conjure).
+pub(crate) fn resolved_effect_object_ids_with(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    read: crate::game::targeting::ReferentRead,
+) -> Vec<ObjectId> {
     match target_filter {
         TargetFilter::ParentTargetSlot { .. } => {
             crate::game::targeting::resolved_object_ids_for_filter(state, ability, target_filter)
@@ -335,7 +352,7 @@ pub(crate) fn resolved_effect_object_ids(
         {
             let mut ids = effect_object_targets(
                 target_filter,
-                &crate::game::targeting::resolved_targets(ability, target_filter, state),
+                &crate::game::targeting::resolved_targets_with(ability, target_filter, state, read),
             );
             if ability.self_ref_is_current(state) && !ids.contains(&ability.source_id) {
                 ids.insert(0, ability.source_id);
@@ -344,7 +361,7 @@ pub(crate) fn resolved_effect_object_ids(
         }
         _ => effect_object_targets(
             target_filter,
-            &crate::game::targeting::resolved_targets(ability, target_filter, state),
+            &crate::game::targeting::resolved_targets_with(ability, target_filter, state, read),
         ),
     }
 }
@@ -965,6 +982,25 @@ pub(crate) fn settle_forwarded_zone_result(
     state: &mut GameState,
     group: &crate::types::game_state::LogicalZoneChangeGroup,
 ) {
+    // CR 400.7j: a paused move of this effect completed; its later instructions,
+    // parked in the active continuation, find what it moved.
+    let moved: Vec<GameEvent> = group
+        .all_origin_occurrences
+        .iter()
+        .map(|occurrence| occurrence.event.clone())
+        .collect();
+    if let Some(chain) = state.active_ability_continuation().and_then(|pending| {
+        let trigger_event = pending
+            .trigger_context
+            .as_ref()
+            .and_then(|context| context.event.as_ref())
+            .or(state.current_trigger_event.as_ref());
+        relatch_event_referent_pins(trigger_event, &pending.chain, &moved)
+    }) {
+        if let Some(frame) = state.resolution_stack.active_ability_continuation_mut() {
+            frame.pending.chain = chain;
+        }
+    }
     let Some(marker) = state
         .ability_continuation_at_top_or_parent()
         .and_then(|frame| {
@@ -6756,6 +6792,15 @@ fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool 
     }
 }
 
+/// CR 101.4: is `node` bound to a player by an instruction (a `player_scope` seat leg, or a
+/// "that player" bound at resolution) rather than by its own trigger? A phase trigger's turn
+/// player (CR 603.2b + CR 102.1) and an attack trigger's attacking player (CR 506.2) are
+/// recorded in `SpellContext::trigger_bound_player` and are no seat leg; the equality guards a
+/// node a later binding rewrote without clearing the trigger's.
+pub(crate) fn bound_to_a_player_by_an_instruction(node: &ResolvedAbility) -> bool {
+    node.scoped_player.is_some() && node.scoped_player != node.context.trigger_bound_player
+}
+
 /// The deferral predicate D: at this boundary, is settling the earlier instructions' entries
 /// unsafe because the remaining chain may still change what entered, as part of its entry?
 ///
@@ -6768,10 +6813,10 @@ fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool 
 /// - **D2 (CR 303.4f, conservative):** `next` is an `Attach` following a forwarded result, or
 ///   following no known completed instruction.
 /// - **D3 (CR 603.6a + CR 101.4):** `next` is bound to a player by an instruction — a
-///   `player_scope` seat leg; the seats may form one simultaneous entry event. A phase
-///   trigger's binding to its turn player (CR 603.2b + CR 102.1, `SpellContext::phase_turn_player`)
-///   is not a seat leg: the trigger's own instructions complete one after another, so they are
-///   boundaries like a spell's.
+///   `player_scope` seat leg; the seats may form one simultaneous entry event. A trigger's own
+///   binding (`SpellContext::trigger_bound_player`: a phase trigger's turn player, CR 603.2b +
+///   CR 102.1; an attack trigger's attacking player, CR 506.2) is not a seat leg: the trigger's
+///   instructions complete one after another, so they are boundaries like a spell's.
 ///
 /// Carriers held only in chain-driver locals are measured over the generated card data, not
 /// walked (every `WithEntry` stamp site lowers to an instruction of a kind that measurement
@@ -6780,14 +6825,6 @@ fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool 
 /// D3 (every seat leg carries `scoped_player`); a multi-target-player fan-out's `after_fanout`
 /// tail reaches no entering leg; and no entering `repeat_for` / nested driver carries a later
 /// candidate outside its iterated subtree.
-/// CR 101.4 + CR 603.2b: is `node` bound to a player by an instruction (a `player_scope` seat
-/// leg, or a "that player" bound at resolution) rather than by its phase trigger's turn player?
-/// A binding that is the phase's own is no seat leg; the equality guards a node a later binding
-/// rewrote without clearing the phase's.
-pub(crate) fn bound_to_a_player_by_an_instruction(node: &ResolvedAbility) -> bool {
-    node.scoped_player.is_some() && node.scoped_player != node.context.phase_turn_player
-}
-
 fn entry_observation_deferred(
     state: &GameState,
     next: &ResolvedAbility,
@@ -10607,6 +10644,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition, host_zones: &[Zone]) 
         room_door,
         granting_object,
         bound_actor,
+        origin: _,
     } = static_ability;
     condition.is_none()
         && per_player_condition.is_none()
@@ -12377,6 +12415,7 @@ fn static_definition_reads_filter_population(
         room_door: _,
         granting_object: _,
         bound_actor: _,
+        origin: _,
     } = static_def;
     affected
         .as_ref()
@@ -13235,7 +13274,8 @@ fn parsed_condition_reads_filter_population(
         ParsedCondition::YouCastSpellThisTurn { filter } => filter.as_ref().is_some_and(has_filter),
         ParsedCondition::BattlefieldEntriesThisTurn { filter, .. } => has_filter(filter),
         ParsedCondition::PlayerCountAtLeast { filter, .. } => has_player(filter),
-        ParsedCondition::SpellTargetsFilter { filter } => has_filter(filter),
+        ParsedCondition::SourceMatchesFilter { filter }
+        | ParsedCondition::SpellTargetsFilter { filter } => has_filter(filter),
         ParsedCondition::And { conditions } => conditions.iter().any(recurse),
         ParsedCondition::Or { conditions } => conditions.iter().any(recurse),
         ParsedCondition::Not { condition } => recurse(condition),
@@ -22008,6 +22048,16 @@ fn resolve_context_player(
     ability.controller
 }
 
+/// CR 101.4 + CR 608.2d: the player an optional rider's "may" would ask, read
+/// without asking. Combat damage's Phase D uses it only to order simultaneous
+/// rider choices in APNAP order; it opens no window.
+pub(crate) fn optional_rider_chooser(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<PlayerId> {
+    optional_prompt_player(state, ability)
+}
+
 /// CR 608.2d: Determine which player ANNOUNCES the choice — receives the "may"
 /// prompt — for an optional effect. Most go to the caster. Subject-anchored
 /// optional effects — "its controller may search their library" (Assassin's
@@ -22135,10 +22185,8 @@ fn ability_with_event_context_targets(
                             .into_iter()
                             .next()
                     }
-                    _ => crate::game::targeting::resolve_event_context_target(
-                        state,
-                        filter,
-                        pending.source_id,
+                    _ => crate::game::targeting::affected_event_context_target(
+                        state, &pending, filter,
                     ),
                 };
                 if let Some(target) = target {
@@ -22208,11 +22256,8 @@ fn hydrate_event_context_targets<'a>(
                 ) || !ability.has_authoritative_empty_binding()
             })
             .and_then(|filter| {
-                let target = crate::game::targeting::resolve_event_context_target(
-                    state,
-                    filter,
-                    ability.source_id,
-                )?;
+                let target =
+                    crate::game::targeting::affected_event_context_target(state, ability, filter)?;
                 // CR 400.7: hydration is an inference seam too; it admits an
                 // own-source referent only through the self-reference authority.
                 if matches!(filter, TargetFilter::ParentTarget) {
@@ -22254,6 +22299,86 @@ fn hydrate_event_context_targets<'a>(
     Cow::Owned(resolved)
 }
 
+/// CR 400.7j: "If an effect causes an object to move to a public zone, other
+/// parts of that effect can find that object." When this instruction's own
+/// events moved an event referent, re-pin the later instructions' captured pin
+/// from the departed incarnation to the arrival. An unpinned node gets the
+/// arrival pin when the departure is the incarnation the trigger event recorded. A move by another spell or ability never appears
+/// in these events, so it can't relatch. Delayed-trigger nodes keep their own
+/// creation-time successor rule.
+fn relatch_event_referent_pins(
+    trigger_event: Option<&GameEvent>,
+    sub: &ResolvedAbility,
+    effect_events: &[GameEvent],
+) -> Option<Box<ResolvedAbility>> {
+    let moves: Vec<_> = effect_events
+        .iter()
+        .filter_map(|event| {
+            let GameEvent::ZoneChanged {
+                object_id,
+                to,
+                record,
+                ..
+            } = event
+            else {
+                return None;
+            };
+            let departed = record.trigger_source_context()?.identity.reference;
+            let arrived = crate::game::triggers::zone_change_parent_target_pin(event)?;
+            (to.is_public() && departed.object_id == *object_id).then_some((departed, arrived))
+        })
+        .collect();
+    if moves.is_empty() {
+        return None;
+    }
+    let recorded: Vec<_> = trigger_event
+        .into_iter()
+        .flat_map(|event| {
+            moves.iter().filter_map(move |(departed, _)| {
+                crate::game::targeting::event_recorded_pin(event, departed.object_id)
+            })
+        })
+        .collect();
+    let mut owned = Box::new(sub.clone());
+    relatch_node(&mut owned, &moves, &recorded).then_some(owned)
+}
+
+fn relatch_node(
+    node: &mut ResolvedAbility,
+    moves: &[(
+        crate::types::identifiers::ObjectIncarnationRef,
+        crate::types::identifiers::ObjectIncarnationRef,
+    )],
+    recorded: &[crate::types::identifiers::ObjectIncarnationRef],
+) -> bool {
+    if matches!(node.effect, Effect::CreateDelayedTrigger { .. }) {
+        return false;
+    }
+    let mut changed = false;
+    for (departed, arrived) in moves {
+        if let Some(pin) = node
+            .target_incarnations
+            .iter_mut()
+            .find(|pin| *pin == departed)
+        {
+            *pin = *arrived;
+            changed = true;
+        } else if recorded.contains(departed)
+            && !node
+                .target_incarnations
+                .iter()
+                .any(|pin| pin.object_id == departed.object_id)
+        {
+            node.target_incarnations.push(*arrived);
+            changed = true;
+        }
+    }
+    for (_, child) in node.child_links_mut() {
+        changed |= relatch_node(child, moves, recorded);
+    }
+    changed
+}
+
 /// CR 603.2 + CR 701.3a: Resolve `ParentTarget` for a nested forward-result
 /// Attach host when the chain still has no bound parent target.
 fn nested_forward_result_attach_parent_target_ref(
@@ -22285,11 +22410,7 @@ fn nested_forward_result_attach_parent_target_ref(
     else {
         return None;
     };
-    crate::game::targeting::resolve_event_context_target(
-        state,
-        &TargetFilter::ParentTarget,
-        ability.source_id,
-    )
+    crate::game::targeting::affected_event_context_target(state, sub, &TargetFilter::ParentTarget)
 }
 
 /// CR 603.2: Filters that auto-resolve from `state.current_trigger_event` during
@@ -29895,6 +30016,20 @@ fn resolve_chain_body(
             // live, and a parked outer instruction's resume is its own boundary.
             return Ok(progress);
         };
+        // CR 400.7j: an event referent this instruction moved to a public zone is
+        // still found there by the later instructions of the same effect.
+        let relatched;
+        let sub = match relatch_event_referent_pins(
+            state.current_trigger_event.as_ref(),
+            sub,
+            &events[events_before..],
+        ) {
+            Some(owned) => {
+                relatched = owned;
+                &relatched
+            }
+            None => sub,
+        };
         // CR 603.10 + CR 608.2c: the parent instruction completed; its entries are observed
         // before the next instruction can change the entrant (S-a). The boundary is the next
         // WRITTEN instruction, judged after the metadata splice: a consumed rider modifies only
@@ -32871,20 +33006,25 @@ fn shared_quality_operand_values(
                     &state.all_creature_types,
                 )
             }),
-        _ => crate::game::targeting::resolved_targets(ability, operand, state)
-            .into_iter()
-            .find_map(|target| match target {
-                TargetRef::Object(id) => Some(id),
-                TargetRef::Player(_) => None,
-            })
-            .and_then(|id| state.objects.get(&id))
-            .map(|obj| {
-                crate::game::filter::object_shared_quality_values_public(
-                    obj,
-                    quality,
-                    &state.all_creature_types,
-                )
-            }),
+        _ => crate::game::targeting::resolved_targets_with(
+            ability,
+            operand,
+            state,
+            crate::game::targeting::ReferentRead::Inform,
+        )
+        .into_iter()
+        .find_map(|target| match target {
+            TargetRef::Object(id) => Some(id),
+            TargetRef::Player(_) => None,
+        })
+        .and_then(|id| state.objects.get(&id))
+        .map(|obj| {
+            crate::game::filter::object_shared_quality_values_public(
+                obj,
+                quality,
+                &state.all_creature_types,
+            )
+        }),
     }
 }
 
@@ -33530,19 +33670,24 @@ pub(crate) fn evaluate_condition(
             _ => false,
         },
         AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target } => {
-            crate::game::targeting::resolved_targets(ability, target, state)
-                .into_iter()
-                .find_map(|target_ref| match target_ref {
-                    TargetRef::Object(id) => Some(id),
-                    _ => None,
-                })
-                .is_some_and(|id| {
-                    crate::game::exile_links::shares_name_with_other_exiled_by_source(
-                        state,
-                        ability.source_id,
-                        id,
-                    )
-                })
+            crate::game::targeting::resolved_targets_with(
+                ability,
+                target,
+                state,
+                crate::game::targeting::ReferentRead::Inform,
+            )
+            .into_iter()
+            .find_map(|target_ref| match target_ref {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .is_some_and(|id| {
+                crate::game::exile_links::shares_name_with_other_exiled_by_source(
+                    state,
+                    ability.source_id,
+                    id,
+                )
+            })
         }
         // CR 400.7: source permanent entered the battlefield this turn.
         // For the "unless ~ entered this turn" sense, wrap with `Not`.
@@ -73454,31 +73599,31 @@ mod entry_observation_settlement_tests {
     }
 
     /// CR 608.2c + CR 101.4: a boundary marks the instruction on the ledger before a node bound
-    /// to its phase trigger's turn player, but not between the seat legs of a player-scope
+    /// by its own trigger, but not between the seat legs of a player-scope
     /// clause still in progress, whose seats' actions are one simultaneous event: neither
     /// before a seat leg resumed without a sidecar (Grismold, the Dreadsower reaches it; see the
     /// integration suite) nor under a sidecar. Synthetic: the nodes and the sidecar are built
     /// by hand.
     #[test]
     fn boundary_marks_the_instruction_outside_seat_legs() {
-        let mut seat_scoped = node(put_counter());
-        seat_scoped.scoped_player = Some(PlayerId(0));
-
-        // A node bound to its phase trigger's turn player is an ordinary instruction.
-        let mut phase_bound = node(put_counter());
-        phase_bound.set_phase_turn_player_recursive(PlayerId(0));
+        // A node bound by its trigger is an ordinary instruction.
+        let mut trigger_bound = node(put_counter());
+        trigger_bound.set_trigger_bound_player_recursive(PlayerId(0));
         let mut state = GameState::new_two_player(3);
         let (_, events) = entered(&mut state, 1);
-        settle_entries_before_instruction(&mut state, &events, &phase_bound, None);
+        settle_entries_before_instruction(&mut state, &events, &trigger_bound, None);
         assert_eq!(
             state.instruction_boundary_marks,
             vec![state.zone_changes_this_turn.len()],
             "the completed instruction's entry is below the mark"
         );
+        assert_eq!(state.battlefield_entry_observations.len(), 1);
         // A second boundary with no new ledger row marks nothing.
-        settle_entries_before_instruction(&mut state, &events, &phase_bound, None);
+        settle_entries_before_instruction(&mut state, &events, &trigger_bound, None);
         assert_eq!(state.instruction_boundary_marks.len(), 1);
 
+        let mut seat_scoped = trigger_bound;
+        seat_scoped.set_scoped_player_recursive(PlayerId(0));
         // A seat leg resumed without a sidecar: no observation (D3) and no mark.
         let mut state = GameState::new_two_player(3);
         let (_, events) = entered(&mut state, 1);
@@ -73506,6 +73651,64 @@ mod entry_observation_settlement_tests {
             state.instruction_boundary_marks.is_empty(),
             "the next seat leg is part of the same clause"
         );
+
+        let mut with_entry = with_entry(generic());
+        with_entry.set_trigger_bound_player_recursive(PlayerId(0));
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        settle_entries_before_instruction(&mut state, &events, &with_entry, None);
+        assert!(
+            state.battlefield_entry_observations.is_empty(),
+            "D1 defers a trigger-bound WithEntry rider"
+        );
+    }
+
+    /// CR 101.4: Iron Man's optional instruction runs outside a player-scope seat leg.
+    #[test]
+    fn iron_man_optional_frame_is_outside_entry_progress() {
+        use crate::game::combat::AttackTarget;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::ManaCost;
+
+        const IRON_MAN: &str = "Flying, haste\nGenius Industrialist — Whenever Iron Man attacks, create a Treasure token, then you may sacrifice a noncreature artifact. If you do, search your library for an artifact card with mana value equal to 1 plus the sacrificed artifact's mana value, put it onto the battlefield tapped, then shuffle.";
+        const FIREWEAVER: &str = "Whenever an artifact you control enters, this creature deals 1 damage to each opponent.";
+        const SOL_RING: &str = "{T}: Add {C}{C}.";
+
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        let iron_man = scenario
+            .add_creature_from_oracle(P0, "Iron Man, Titan of Innovation", 4, 4, IRON_MAN)
+            .from_oracle_text_with_keywords(&["Flying", "Haste"], IRON_MAN)
+            .as_artifact_creature()
+            .as_legendary()
+            .with_subtypes(vec!["Human", "Hero"])
+            .id();
+        scenario.add_creature_from_oracle(P0, "Reckless Fireweaver", 1, 3, FIREWEAVER);
+        let _ring = scenario
+            .add_spell_to_library_top(P0, "Sol Ring", false)
+            .as_artifact()
+            .with_mana_cost(ManaCost::generic(1))
+            .from_oracle_text(SOL_RING)
+            .id();
+        scenario.with_library_top(P0, &["Plains", "Island"]);
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(iron_man, AttackTarget::Player(P1))])
+            .unwrap();
+        runner.advance_until_stack_empty();
+        let state = runner.state();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == iron_man)
+        );
+        let frame = state
+            .active_optional_effect_frame()
+            .expect("Iron Man's sacrifice prompt");
+        assert_eq!(frame.ability.scoped_player, Some(P0));
+        assert!(
+            !crate::game::triggers::battlefield_entry_in_progress(state),
+            "Iron Man's optional frame must not count as an entry in progress"
+        );
+        assert_eq!(frame.ability.context.trigger_bound_player, Some(P0));
     }
 
     /// G2: a parked mid-entry entry is skipped by its ledger key, even under a
