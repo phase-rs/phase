@@ -11,6 +11,7 @@ import {
   type DeckEntry,
   looksCommanderSingleton,
   repairParsedDeck,
+  removeOneCopy,
   assignOathbreakerSlots,
   expandParsedDeck,
   parsedDeckHasCards,
@@ -23,6 +24,20 @@ vi.mock('../engineRuntime', () => ({
 }));
 
 describe('deckParser', () => {
+  it('removes one copy by name from the first positive matching row', () => {
+    const zero = { count: 0, name: 'Forest', sourcePrinting: { setCode: 'one', collectorNumber: '276' } };
+    const positive = { count: 2, name: 'Forest', sourcePrinting: { setCode: 'dmu', collectorNumber: '277' } };
+
+    expect(removeOneCopy([zero, positive], 'forest')).toEqual([zero, { ...positive, count: 1 }]);
+  });
+
+  it('removes one copy by exact key from the first positive matching row', () => {
+    const zero = { count: 0, name: 'Forest', sourcePrinting: { setCode: 'one', collectorNumber: '276' } };
+    const positive = { ...zero, count: 1 };
+
+    expect(removeOneCopy([zero, positive], positive)).toEqual([zero]);
+  });
+
   it('moves the selected Oathbreaker and signature spell into their special slots', () => {
     const result = assignOathbreakerSlots(
       {
@@ -949,6 +964,22 @@ describe('resolveCommander waterfall', () => {
     expect(resolved.main).not.toContainEqual({ count: 1, name: 'Zimone, Infinite Analyst' });
     expect(resolved.main).toHaveLength(87 + 2);
     expect(vi.mocked(inferCommander).mock.calls).toEqual([[main]]);
+  });
+
+  it('promotes the positive commander copy and preserves zero-count rows', async () => {
+    const name = 'Isamaru, Hound of Konda';
+    vi.mocked(inferCommander).mockResolvedValue(name);
+    const deck = detectAndParseDeck(`0 ${name} (CHK) 19\n1 ${name} (JMP) 116\n99 Plains\n0 Sol Ring`);
+
+    const resolved = await resolveCommander(deck);
+
+    expect(resolved.commander).toEqual([name]);
+    expect(resolved.main.reduce((sum, entry) => sum + entry.count, 0)).toBe(99);
+    expect(resolved.main).toEqual([
+      { count: 0, name, sourcePrinting: { setCode: 'chk', collectorNumber: '19' } },
+      { count: 99, name: 'Plains' },
+      { count: 0, name: 'Sol Ring' },
+    ]);
   });
 
   it('does not promote a deck when the engine returns null', async () => {
