@@ -94,11 +94,17 @@ impl Observer {
                 source: CausedAbilitySource::CausingObject,
             },
             Observer::AbolethSpawn => TriggerMode::AbilityTriggered {
-                cause: TriggerCause::EntersBattlefield { core_types: vec![] },
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: engine::types::statics::CausingObject::Any,
+                },
                 source: CausedAbilitySource::CausingObject,
             },
             Observer::StrictProctor => TriggerMode::AbilityTriggered {
-                cause: TriggerCause::EntersBattlefield { core_types: vec![] },
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: engine::types::statics::CausingObject::Any,
+                },
                 source: CausedAbilitySource::Any,
             },
         }

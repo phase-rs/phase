@@ -461,8 +461,8 @@ fn combat_wither_with_inapplicable_doubling_applies_constrictor_only() {
     // because CR 702.12 indestructible makes it rules-correct (not because
     // the engine destroys deathtouch victims — that gap is #11019).
     assert!(
-        runner.state().objects[&colossus].dealt_deathtouch_damage,
-        "CR 702.2b must mark the inline leg's deathtouch source"
+        !runner.state().objects[&colossus].dealt_deathtouch_damage,
+        "CR 704.5h: the check after combat damage consumed the inline leg's deathtouch record"
     );
     assert_eq!(
         runner.state().objects[&colossus].damage_marked,
@@ -708,8 +708,8 @@ fn constrictor_only_auto_applies_with_remainder_inline() {
         "lifelink must gain exactly the 4 dealt"
     );
     assert!(
-        runner.state().objects[&colossus].dealt_deathtouch_damage,
-        "CR 702.2b must mark the leg's deathtouch source"
+        !runner.state().objects[&colossus].dealt_deathtouch_damage,
+        "CR 704.5h: the check after combat damage consumed the leg's deathtouch record"
     );
     assert_eq!(
         runner.state().objects[&colossus].damage_marked,
@@ -896,8 +896,8 @@ fn village_pillagers_etb_each_leg_pauses_and_resumes() {
             "CR 120.1 must record victim {name}'s leg exactly once"
         );
         assert!(
-            runner.state().objects[&victim].dealt_deathtouch_damage,
-            "CR 702.2b must mark victim {name}'s resumed leg"
+            !runner.state().objects[&victim].dealt_deathtouch_damage,
+            "CR 704.5h: the check after the resume consumed victim {name}'s deathtouch record"
         );
         assert_eq!(
             runner.state().objects[&victim].damage_marked,

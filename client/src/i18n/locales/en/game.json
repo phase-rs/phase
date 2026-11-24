@@ -1384,7 +1384,8 @@
       "title": "{{effect}} Unless You Pay",
       "titleChooseOne": "{{effect}} Unless You Pay One",
       "dontPay": "Don’t Pay",
-      "takeEffect": "Take the Effect"
+      "takeEffect": "Take the Effect",
+      "priorChoice": "Player {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Splice onto Arcane?",
@@ -2063,7 +2064,8 @@
     "scrollLeft": "Scroll left",
     "scrollRight": "Scroll right",
     "confirm": "Confirm",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Adventure",
@@ -2194,6 +2196,13 @@
   "entryController": {
     "title": "Choose Entry Controller",
     "subtitle": "Choose which opponent controls this permanent as it enters."
+  },
+  "replacementDecisionOrder": {
+    "title": "Choose Which Decision First",
+    "subtitle": "These replacement choices happen at the same time. Choose which one to make first.",
+    "unknownObject": "Unknown object",
+    "attachedTo": "On {{host}}",
+    "attachments": "With {{names}}"
   },
   "optionalCost": {
     "gift": {
@@ -2489,6 +2498,9 @@
     "optionalTriggers": "Optional triggers ({{count, number}})",
     "replacementChoices": "Replacement choices ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Hold to see the full card"
+  },
   "optionalEffect": {
     "sourceFallback": "Effect",
     "title": "{{name}} - Optional Effect",
@@ -2632,6 +2644,9 @@
     "partitionSubtitle": "Separate your creatures into two piles. {{chooser}} will choose one.",
     "partitionSubtitleRemaining_one": "Separate your creatures into two piles. {{chooser}} will choose one. ({{count}} more player after you)",
     "partitionSubtitleRemaining_other": "Separate your creatures into two piles. {{chooser}} will choose one. ({{count}} more players after you)",
+    "partitionInstruction": "{{chooser}} chooses one",
+    "partitionInstructionRemaining_one": "{{chooser}} chooses one ({{count}} more player after you)",
+    "partitionInstructionRemaining_other": "{{chooser}} chooses one ({{count}} more players after you)",
     "pileALabel": "Pile A:",
     "pileBLabel": "Pile B:",
     "pileAria": "{{name}} — pile {{pile}}",

@@ -30,6 +30,15 @@
 # Exempt: lines (or the line immediately above) with
 #     // allow-raw-authority: <reason>      (A)
 #     // allow-raw-zone: <reason>           (B)
+#     // allow-raw-event-referent: <reason> (E)
+#   (E) Raw event-context referent reads: resolve_event_context_target(s) /
+#       resolve_event_context_target_for_event_or_state outside game/targeting.rs.
+#       An instruction that affects an event referent binds it through
+#       targeting::affected_event_context_target / resolve_event_referent (CR 400.7).
+#       A diff ratchet on these named APIs, not a proof of complete routing.
+#       Its view is SCOPE minus EVENT_REFERENT_EXCLUDES (only the authority
+#       itself), not the keyword exemptions.
+#
 # Allowed files (the authorities themselves and the layer/copy machinery that
 # must read raw keyword state): see SCOPE_EXCLUDES below.
 #
@@ -67,6 +76,12 @@ SCOPE_EXCLUDES=(
     ':(exclude)crates/engine/src/game/effects/become_copy.rs'
     ':(exclude)crates/engine/src/game/effects/token_copy.rs'
 )
+# (E) has its own view: only the referent authority is outside it, so the
+# keyword exemptions above never hide a raw referent read.
+EVENT_REFERENT_EXCLUDES=(
+    ':(exclude)**/*.md'
+    ':(exclude)crates/engine/src/game/targeting.rs'
+)
 
 # Pre-commit hook mode: only check staged changes (mirrors
 # check-parser-combinators.sh) so another agent's unstaged work isn't flagged.
@@ -78,18 +93,22 @@ fi
 # (A) Raw keyword queries.
 FORBIDDEN_KEYWORD_QUERY='\.keywords\.(contains|iter)\('
 
+# (E) Raw event-context referent reads, outside the referent authority.
+FORBIDDEN_EVENT_REFERENT='resolve_event_context_target(s|_for_event_or_state)?\('
+
 FAIL=0
 report_keyword=""
+report_event_referent=""
 
 filter_allow_annotation() {
-    local file="$1" candidates="$2" added="" rec ln text prev
+    local file="$1" candidates="$2" marker="${3:-allow-raw-authority}" added="" rec ln text prev
     while IFS= read -r rec; do
         [ -z "$rec" ] && continue
         ln="${rec%%$'\t'*}"; text="${rec#*$'\t'}"
-        case "$text" in *allow-raw-authority*) continue ;; esac
+        case "$text" in *"$marker"*) continue ;; esac
         if [ "$ln" -gt 1 ]; then
             prev=$(added_lines_text_at "$file" "$((ln - 1))")
-            case "$prev" in *allow-raw-authority*) continue ;; esac
+            case "$prev" in *"$marker"*) continue ;; esac
         fi
         added="${added}${text}
 "
@@ -125,7 +144,52 @@ while IFS= read -r file; do
     fi
 done <<< "$files"
 
-if [ "$FAIL" -eq 1 ]; then
+referent_files=$(git diff $DIFF_MODE --name-only "$BASE" -- "${SCOPE[@]}" "${EVENT_REFERENT_EXCLUDES[@]}" 2>/dev/null || true)
+if [ -n "$referent_files" ]; then
+    added_lines_load $DIFF_MODE "$BASE" -- "${SCOPE[@]}" "${EVENT_REFERENT_EXCLUDES[@]}"
+fi
+
+while IFS= read -r file; do
+    [ -f "$file" ] || continue
+
+    kept=$(added_lines_for "$file" | grep -E $'^[0-9]+\t[^+]' || true)
+    if [ -z "$kept" ]; then
+        continue
+    fi
+
+    referent_hits=$(added_lines_grep "$kept" "$FORBIDDEN_EVENT_REFERENT") || exit 2
+    referent_clean=$(filter_allow_annotation "$file" "$referent_hits" allow-raw-event-referent)
+    if [ -n "$referent_clean" ]; then
+        report_event_referent="${report_event_referent}
+  ${file}:"
+        while IFS= read -r line; do
+            report_event_referent="${report_event_referent}
+    ${line}"
+        done <<< "$referent_clean"
+        FAIL=1
+    fi
+done <<< "$referent_files"
+
+if [ -n "$report_event_referent" ]; then
+    cat >&2 <<EOF
+ERROR: New engine code reads an event-context referent raw.
+
+(E) An instruction that affects "it" / "that creature" from a trigger event
+binds it through targeting::affected_event_context_target (singular),
+targeting::bound_event_referent_objects (batch) or targeting::resolve_event_referent,
+so a referent that became a new object (CR 400.7) is not affected.
+
+Forbidden in added lines (diff vs ${BASE}):
+${report_event_referent}
+
+An information read (CR 608.2h) or a player referent may annotate the line with:
+
+    // allow-raw-event-referent: <one-line reason>
+
+EOF
+fi
+
+if [ -n "$report_keyword" ]; then
     cat >&2 <<EOF
 ERROR: New engine code bypasses a single-authority helper.
 

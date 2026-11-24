@@ -1351,7 +1351,8 @@
       "title": "{{effect}} à moins que vous ne payiez",
       "titleChooseOne": "{{effect}} à moins que vous ne payiez l'un",
       "dontPay": "Ne pas payer",
-      "takeEffect": "Subir l'effet"
+      "takeEffect": "Subir l'effet",
+      "priorChoice": "Joueur {{id}} : {{choice}}"
     },
     "spliceOffer": {
       "title": "Imprégner d’arcane ?",
@@ -2025,7 +2026,8 @@
     "scrollLeft": "Défiler vers la gauche",
     "scrollRight": "Défiler vers la droite",
     "confirm": "Confirmer",
-    "cancel": "Annuler"
+    "cancel": "Annuler",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Aventure",
@@ -2156,6 +2158,13 @@
   "entryController": {
     "title": "Choisir le contrôleur à l'arrivée",
     "subtitle": "Choisissez quel adversaire contrôle ce permanent à son arrivée."
+  },
+  "replacementDecisionOrder": {
+    "title": "Choisissez la première décision",
+    "subtitle": "Ces choix de remplacement ont lieu en même temps. Choisissez celui à faire en premier.",
+    "unknownObject": "Objet inconnu",
+    "attachedTo": "Sur {{host}}",
+    "attachments": "Avec {{names}}"
   },
   "optionalCost": {
     "gift": {
@@ -2451,6 +2460,9 @@
     "optionalTriggers": "Capacités déclenchées facultatives ({{count, number}})",
     "replacementChoices": "Choix de remplacement ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Maintenez appuyé pour voir la carte en entier"
+  },
   "optionalEffect": {
     "sourceFallback": "Effet",
     "title": "{{name}} - Effet facultatif",
@@ -2594,6 +2606,9 @@
     "partitionSubtitle": "Séparez vos créatures en deux tas. {{chooser}} en choisira un.",
     "partitionSubtitleRemaining_one": "Séparez vos créatures en deux tas. {{chooser}} en choisira un. ({{count}} joueur de plus après vous)",
     "partitionSubtitleRemaining_other": "Séparez vos créatures en deux tas. {{chooser}} en choisira un. ({{count}} joueurs de plus après vous)",
+    "partitionInstruction": "{{chooser}} en choisit un",
+    "partitionInstructionRemaining_one": "{{chooser}} en choisit un ({{count}} joueur de plus après vous)",
+    "partitionInstructionRemaining_other": "{{chooser}} en choisit un ({{count}} joueurs de plus après vous)",
     "pileALabel": "Tas A :",
     "pileBLabel": "Tas B :",
     "pileAria": "{{name}} — tas {{pile}}",

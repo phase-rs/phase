@@ -5,6 +5,10 @@
 // MEASURED, not assumed — the alternative already in this tree is `test_support.rs` / `support.rs`,
 // twin files kept equal by a comment asking a human to remember.
 #![recursion_limit = "512"]
+// Debug builds of this crate's large dispatch functions allocate stack frames above
+// clippy's 512 KB `large_unopt_stack_frames` default. Test threads run with
+// RUST_MIN_STACK = 16 MiB (.cargo/config.toml) and server runtime threads with 32 MiB.
+#![allow(clippy::large_unopt_stack_frames)]
 #[path = "../../src/source_census.rs"]
 mod source_census;
 
@@ -28,6 +32,7 @@ mod attack_qualifier_stack_conditions;
 mod attacks_alone_targeted_trigger;
 mod attacks_while_saddled_trigger;
 mod awe_strike_prevention;
+mod awe_strike_simultaneous_aggregation;
 mod banding_combat;
 mod batched_trigger_subject_count;
 mod battlefield_entry_authority_census;
@@ -46,6 +51,8 @@ mod bracket_fixture_signals;
 mod bracket_lists_data;
 mod bracket_tier_reconciliation;
 mod bring_to_light_free_cast_2880;
+mod bringer_of_the_last_gift;
+mod call_for_aid_phase2;
 mod candidate_pairs;
 mod cartographers_hawk_relative_damage_recipient;
 mod case_solve_condition;
@@ -63,8 +70,10 @@ mod combo_floors;
 mod combo_infinite_pile;
 mod combo_table;
 mod combo_table_on_resolve;
+mod concede_resumed_family_sba;
 mod corpse_appraiser;
 mod counter_removed_last_counter_threshold;
+mod cr732_shortcut_journal_retention;
 mod cross_slot_target_binding;
 mod crossway_troublemakers_attacking_keywords;
 mod cunning_rhetoric_attacks_you_scope_4736;
@@ -119,10 +128,12 @@ mod flamerush_rider_tapped_attacking_copy;
 mod food_chain_board;
 mod for_each_of_those_population;
 mod format_axis_census;
+mod forwarded_source_identity;
 mod freeform_commander_deck_rules;
 mod frenzy_attacker_unblocked_pump;
 mod frostcliff_siege_anchor_word_modes;
 mod gaeas_liege;
+mod galadriels_dismissal_kicked_phasing;
 mod galion_elvenkings_butler_attack_pt_set;
 mod game_over_clears_pending_resolution_choice;
 mod giggling_skitterspike_issue_890;
@@ -196,16 +207,19 @@ mod issue_8485_maze_of_ith_defender;
 mod issue_879_obsessive_pursuit;
 mod issue_941_champions_full_party;
 mod issue_9516_paladin_class_level3;
+mod issue_9760_cancel_cast_life_rollback;
 mod kaalia_zenith_seeker_reveal_types_8068;
 mod karazikar_attack_scope_7189;
 mod kashi_tribe_damage_tap_freeze;
 mod kibo_uktabi_prince_defending_player_sacrifice;
 mod kilo_live_offer_from_real_dump;
+mod lady_octopus_first_second_draw;
 mod later_instruction_unless_bindings;
 mod lathiel_end_step_counters_repro;
 mod layer_boundary_census;
 mod layer_two_control_change_triggers;
 mod leyline_tyrant_pay_any_red_damage;
+mod lost_in_the_maze;
 mod lost_monarch_combat_damage_by_type_intervening_if;
 mod mana_ability_mana_payment_window;
 mod mana_burn;
@@ -229,7 +243,9 @@ mod obeka_splitter_additional_phases;
 mod object_growth_cover_blink_boards;
 mod ogre_battlecaster_8775;
 mod ogre_marauder_defending_player_unless_sacrifice;
+mod one_shot_ledger_combat_pause_save_load;
 mod one_time_boon;
+mod optional_conjoined_payment_feasibility;
 mod oracle_parser;
 mod ozolith_leaves_battlefield_counters;
 mod pain_magnification_single_source_damage;
@@ -297,6 +313,7 @@ mod ureni_attack_trigger;
 mod vengeful_ancestor_goaded_attack_trigger;
 mod viewer_projection_ingest_gate;
 mod void_winnower_announced_x;
+mod vren_the_relentless;
 mod vrestin_menoptra_leader_5949;
 mod vulcan_mind_meld_exiler_plays;
 mod wba_fodder_multiset;
@@ -354,6 +371,7 @@ mod swords_target_legality_recheck;
 mod three_opponent_drain_shortcut;
 mod tromokratis;
 mod tunnel_tipster_face_down_entry_runtime;
+mod twisted_sewer_witch_role_per_rat;
 mod veteran_bodyguard_tap_redirect;
 mod watery_grasp_resolution_host;
 mod yurlok_of_scorch_thrash;
@@ -372,4 +390,5 @@ mod niambi_granted_trigger_once_each_turn;
 mod q_stacking_the_deck;
 mod risky_move_gain_control_trigger;
 mod token_attack_destination;
+mod unless_sacrifice_cant_be_sacrificed;
 mod venat_heros_sundering_transform_8071;

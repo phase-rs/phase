@@ -1,8 +1,8 @@
 import { useTranslation } from "react-i18next";
 
-import type { DeckEntry } from "../../services/deckParser";
+import { deckEntryKey, type DeckEntry } from "../../services/deckParser";
 import type { UnsupportedCard } from "../../services/deckCompatibility";
-import type { GroupAccent } from "./deckGrouping";
+import { printingLabel, repeatedEntryNames, type GroupAccent } from "./deckGrouping";
 
 import { CardEntryRow } from "./CardEntryRow";
 import type { CardHoverHandler } from "./hoverPreview";
@@ -15,12 +15,12 @@ export interface MoveListProps {
   section: "main" | "sideboard";
   title: string;
   entries: DeckEntry[];
-  onMove: (name: string, from: "main" | "sideboard") => void;
+  onMove: (entry: DeckEntry, from: "main" | "sideboard") => void;
   /** Optional — when omitted, rows render without a `-` remove button. See
    *  `CardEntryRowProps.onRemove`. */
-  onRemove?: (name: string, section: "main" | "sideboard") => void;
+  onRemove?: (entry: DeckEntry, section: "main" | "sideboard") => void;
   /** Forwarded to each row. See `CardEntryRowProps.onIncrement`. */
-  onIncrement?: (name: string, section: "main" | "sideboard") => void;
+  onIncrement?: (entry: DeckEntry, section: "main" | "sideboard") => void;
   /** Forwarded to each row. See `CardEntryRowProps.canIncrement`. */
   canIncrement?: (name: string) => boolean;
   onCardHover?: CardHoverHandler;
@@ -34,7 +34,7 @@ export interface MoveListProps {
   warning?: string;
   onChooseArt?: (cardName: string, x: number, y: number) => void;
   /** Forwarded to each row. See `CardEntryRowProps.onSetAsCommander`. */
-  onSetAsCommander?: (name: string) => void;
+  onSetAsCommander?: (entry: DeckEntry) => void;
   isCommanderEligible?: (name: string) => boolean;
   /** Forwarded to each row. Defaults to "compact", but every current call site
    *  passes "comfortable" — hover-revealed controls are unreachable on touch.
@@ -74,6 +74,7 @@ export function MoveList({
   const { t } = useTranslation("deck-builder");
   if (entries.length === 0 && !alwaysShow) return null;
   const count = totalCards(entries);
+  const repeatedNames = repeatedEntryNames(entries);
 
   return (
     <div className="mb-2">
@@ -101,8 +102,9 @@ export function MoveList({
       ) : (
         entries.map((entry) => (
           <CardEntryRow
-            key={entry.name}
+            key={deckEntryKey(entry)}
             entry={entry}
+            printingLabel={printingLabel(entry, repeatedNames)}
             section={section}
             onMove={onMove}
             onRemove={onRemove}

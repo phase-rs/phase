@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "The CR 702.19b trample lethal minimum now counts combat damage other attackers already committed to a blocker earlier in the same combat damage step, and a blocker with lethal damage already marked owes 0 even to a deathtouch attacker. Older full-game and P2P engines offer and validate different combat damage assignments in those combats."
+}

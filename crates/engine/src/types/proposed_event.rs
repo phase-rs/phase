@@ -7,14 +7,15 @@ use crate::game::game_object::{
 };
 
 use super::counter::CounterType;
+use super::definitions::ReplacementIdentity;
 
 use super::ability::{
     ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
     LibraryPosition, TargetRef,
 };
 use super::events::EventObjectSnapshot;
-use super::identifiers::{ObjectId, ObjectIncarnationRef};
-use super::keywords::Keyword;
+use super::identifiers::{ObjectId, ObjectIncarnationRef, ProtectionReplacementSourceExt};
+use super::keywords::{Keyword, MatchedProtectionQuality};
 use super::mana::{ManaType, UnitDecision};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
@@ -25,10 +26,31 @@ pub use super::token_spec::{
 };
 pub use super::zones::{ChainReferentIntent, EtbTapState};
 
+/// CR 616.1: identity of one replacement candidate: the source object plus a
+/// per-source ordinal — or, for virtual protection candidates, the quality's
+/// full 64-bit minor word. `u64`, never `usize`: the index rides in
+/// serialized pause records on every target including wasm32, where `usize`
+/// is 32 bits wide and would truncate fingerprint qualities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReplacementId {
     pub source: ObjectId,
-    pub index: usize,
+    pub index: u64,
+}
+
+impl ReplacementId {
+    /// Contained `u64`→`usize` conversion for registry indexing. Real
+    /// definition ordinals always fit; anything wider (a virtual-candidate
+    /// payload, or foreign) resolves to `None` — the same answer a direct
+    /// `.get()` gives an out-of-range index on 64-bit.
+    pub(crate) fn index_as_usize(self) -> Option<usize> {
+        usize::try_from(self.index).ok()
+    }
+}
+
+impl ReplacementIdentity for ReplacementId {
+    fn registry_index(self) -> Option<usize> {
+        self.index_as_usize()
+    }
 }
 
 /// CR 701.23a + CR 614.6: Final disposition of one found card after the
@@ -116,21 +138,33 @@ pub struct BoundSearchFoundCandidate {
 pub enum AppliedReplacementKey {
     Object {
         source: ObjectId,
-        index: usize,
+        index: u64,
     },
     Floating {
-        index: usize,
+        index: u64,
     },
     StepEndMana {
-        index: usize,
+        index: u64,
     },
     /// CR 614.12a: The selected controller for an as-enters replacement.
     /// This rides the event's existing replacement provenance so the selected
     /// answer remains distinguishable from an originating controller override.
     EntryControllerChoice {
         source: ObjectId,
-        index: usize,
+        index: u64,
         controller: PlayerId,
+    },
+    /// CR 702.16e + CR 615.13 (Matt F4, keyed by ability in R8-F1):
+    /// prevention by player/object protection inside a simultaneous batch.
+    /// Protection has no registry shield (and no rider), so it aggregates
+    /// under its own key — one application per (quality, recipient) per
+    /// batch — instead of fragmenting one event per damage event. The key
+    /// carries the matched protection quality (CR 702.16g: "protection from
+    /// [A] and from [B]" behaves as two separate abilities), never granter
+    /// identity: the gate claims each event for its first matching ability,
+    /// and qualities survive save/load while grantor tables do not.
+    Protection {
+        quality: MatchedProtectionQuality,
     },
 }
 
@@ -139,18 +173,21 @@ pub enum AppliedReplacementKey {
 enum TaggedAppliedReplacementKey {
     Object {
         source: ObjectId,
-        index: usize,
+        index: u64,
     },
     Floating {
-        index: usize,
+        index: u64,
     },
     StepEndMana {
-        index: usize,
+        index: u64,
     },
     EntryControllerChoice {
         source: ObjectId,
-        index: usize,
+        index: u64,
         controller: PlayerId,
+    },
+    Protection {
+        quality: MatchedProtectionQuality,
     },
 }
 
@@ -191,6 +228,9 @@ impl AppliedReplacementKeyCompat {
                 index,
                 controller,
             },
+            AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::Protection {
+                quality,
+            }) => AppliedReplacementKey::Protection { quality },
             AppliedReplacementKeyCompat::Legacy(ReplacementId {
                 source: ObjectId(0),
                 index,
@@ -216,15 +256,15 @@ impl<'de> Deserialize<'de> for AppliedReplacementKey {
 }
 
 impl AppliedReplacementKey {
-    pub fn object(source: ObjectId, index: usize) -> Self {
+    pub fn object(source: ObjectId, index: u64) -> Self {
         Self::Object { source, index }
     }
 
-    pub fn floating(index: usize) -> Self {
+    pub fn floating(index: u64) -> Self {
         Self::Floating { index }
     }
 
-    pub fn step_end_mana(index: usize) -> Self {
+    pub fn step_end_mana(index: u64) -> Self {
         Self::StepEndMana { index }
     }
 
@@ -232,18 +272,22 @@ impl AppliedReplacementKey {
         match self {
             AppliedReplacementKey::Object { source, .. }
             | AppliedReplacementKey::EntryControllerChoice { source, .. } => source,
-            AppliedReplacementKey::Floating { .. } | AppliedReplacementKey::StepEndMana { .. } => {
-                ObjectId(0)
-            }
+            AppliedReplacementKey::Floating { .. }
+            | AppliedReplacementKey::StepEndMana { .. }
+            | AppliedReplacementKey::Protection { .. } => ObjectId(0),
         }
     }
 
-    pub fn index(self) -> usize {
+    pub fn index(self) -> u64 {
         match self {
             AppliedReplacementKey::Object { index, .. }
             | AppliedReplacementKey::Floating { index }
             | AppliedReplacementKey::StepEndMana { index }
             | AppliedReplacementKey::EntryControllerChoice { index, .. } => index,
+            // Protection never reaches `as_replacement_id`: the aggregate
+            // drain matches it before the registry lookup. The 0 is a
+            // type-system placeholder, never a registry address.
+            AppliedReplacementKey::Protection { .. } => 0,
         }
     }
 
@@ -255,6 +299,19 @@ impl AppliedReplacementKey {
     }
 
     pub fn for_event(event: &ProposedEvent, id: ReplacementId) -> Self {
+        // CR 616.1 (Matt R10-F1): protection virtual candidates key by
+        // their quality (pure unpack — no state needed, so the applied-set
+        // path stays total). The rid index carries the minor word whole on
+        // every target (`u64`, never `usize`), so our own writes always
+        // decode; foreign rids in the source range fall through to the
+        // opaque object key, contained.
+        if let Some(discriminant) = id.source.protection_source_discriminant() {
+            if let Some(quality) =
+                MatchedProtectionQuality::from_replacement_parts(discriminant, id.index)
+            {
+                return Self::Protection { quality };
+            }
+        }
         if id.source != ObjectId(0) {
             return Self::object(id.source, id.index);
         }
@@ -505,6 +562,10 @@ pub struct TokenBatch {
     #[serde(default)]
     pub enter_tapped: EtbTapState,
     pub count: u32,
+    /// CR 614.6: where an applied replacement sent this batch's entrants
+    /// instead of the battlefield (see [`ProposedEvent::CreateToken`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirected_to: Option<Zone>,
 }
 
 impl TokenBatch {
@@ -516,6 +577,7 @@ impl TokenBatch {
             copy,
             enter_tapped,
             count,
+            redirected_to,
         } = self;
         ProposedEvent::CreateToken {
             owner,
@@ -524,6 +586,7 @@ impl TokenBatch {
             enter_tapped,
             count,
             appended: Vec::new(),
+            redirected_to,
             applied,
         }
     }
@@ -728,6 +791,10 @@ pub enum ProposedEvent {
             skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
         )]
         library_shuffle: crate::types::ability::LibraryShuffleMode,
+        /// CR 730.3 + CR 903.9c: a physical move approved separately from
+        /// this permanent's logical departure, which has not yet happened.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merged_departure: Option<ObjectIncarnationRef>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -736,6 +803,26 @@ pub enum ProposedEvent {
         target: TargetRef,
         amount: u32,
         is_combat: bool,
+        /// CR 608.2h + CR 702.16e: the source's name as observed when the
+        /// damage event was created — the live name for live sources, the
+        /// last-known-information projection for departed sources (a Clone
+        /// copying Volatile Rig now in the graveyard reads "Volatile Rig",
+        /// not "Clone"). Protection matching reads this override before the
+        /// live object so chosen-name protection (Runed Halo) survives its
+        /// source across pauses, resumes, and save/load. `None` (including
+        /// payloads written before the field existed) falls back to the live
+        /// object, exactly the pre-override behavior.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_name: Option<String>,
+        /// CR 400.7 + CR 608.2h: the source incarnation observed when the
+        /// damage event was created. Protection matching reads the live object
+        /// only while it is still this incarnation; a later object under the
+        /// id (a Clone back in the graveyard) is a different object and the
+        /// match falls to this incarnation's exit last-known information
+        /// instead. `None` (including payloads written before the field
+        /// existed) keeps the legacy live-first read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_incarnation: Option<u64>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -936,11 +1023,21 @@ pub enum ProposedEvent {
         /// whole event is delivered (and its created referent published) as one.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         appended: Vec<TokenBatch>,
+        /// CR 614.6 + CR 111.1: where an applied replacement sent the batch's
+        /// entrants instead of the battlefield (Hallowed Moonlight: "exile it
+        /// instead"). The creation itself still happens (CR 111.1, CR 701.7a);
+        /// only the entry is replaced. `None` is the ordinary battlefield entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redirected_to: Option<Zone>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     TokenEntry {
         entry_ref: ObjectId,
+        /// CR 614.6: the zone an applied replacement sent this entrant to
+        /// instead of the battlefield; `None` is the ordinary battlefield entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redirected_to: Option<Zone>,
         #[serde(default)]
         enter_tapped: EtbTapState,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1321,6 +1418,7 @@ impl ProposedEvent {
             co_entrants: None,
             ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
+            merged_departure: None,
             applied: HashSet::new(),
         }
     }
@@ -1642,6 +1740,7 @@ impl ProposedEvent {
                 enter_tapped,
                 count,
                 appended,
+                redirected_to,
                 applied,
             } => {
                 let mut views = Vec::with_capacity(appended.len() + 1);
@@ -1652,6 +1751,7 @@ impl ProposedEvent {
                     enter_tapped,
                     count,
                     appended: Vec::new(),
+                    redirected_to,
                     applied: applied.clone(),
                 });
                 views.extend(
@@ -1707,6 +1807,7 @@ impl ProposedEvent {
             enter_tapped,
             count,
             mut appended,
+            redirected_to,
             mut applied,
         } = views.next()?
         else {
@@ -1720,6 +1821,7 @@ impl ProposedEvent {
                 enter_tapped,
                 count,
                 appended: view_appended,
+                redirected_to: view_redirected_to,
                 applied: view_applied,
             } = view
             else {
@@ -1731,6 +1833,7 @@ impl ProposedEvent {
                 copy,
                 enter_tapped,
                 count,
+                redirected_to: view_redirected_to,
             });
             appended.extend(view_appended);
             applied.extend(view_applied);
@@ -1742,6 +1845,7 @@ impl ProposedEvent {
             enter_tapped,
             count,
             appended,
+            redirected_to,
             applied,
         })
     }
@@ -1757,6 +1861,7 @@ impl ProposedEvent {
             enter_tapped,
             count,
             appended,
+            redirected_to,
             ..
         } = self
         else {
@@ -1769,6 +1874,7 @@ impl ProposedEvent {
             copy,
             enter_tapped,
             count,
+            redirected_to,
         });
         batches.extend(appended);
         Some(batches)
@@ -2002,6 +2108,28 @@ mod tests {
         set.insert(id1);
         assert!(set.contains(&id2));
         assert!(!set.contains(&id3));
+    }
+
+    /// CR 702.16e + CR 615.13 (Matt F4, keyed by ability in R8-F1): the
+    /// protection tally key round-trips through the tagged mirror with its
+    /// matched quality, so paused-batch frames carrying protection
+    /// prevention survive save/load. The pre-quality shape (PR heads only,
+    /// never main) fails closed instead of loading as a quality-less key.
+    #[test]
+    fn protection_key_serde_round_trip() {
+        let key = AppliedReplacementKey::Protection {
+            quality: MatchedProtectionQuality::CardType(CoreType::Artifact),
+        };
+        let json = serde_json::to_string(&key).expect("the key serializes");
+        assert_eq!(
+            json,
+            r#"{"type":"Protection","quality":{"CardType":"Artifact"}}"#
+        );
+        let back: AppliedReplacementKey =
+            serde_json::from_str(&json).expect("the key deserializes");
+        assert_eq!(back, key);
+        assert_eq!(back.source(), ObjectId(0));
+        assert!(serde_json::from_str::<AppliedReplacementKey>(r#"{"type":"Protection"}"#).is_err());
     }
 
     #[test]
@@ -2297,6 +2425,7 @@ mod tests {
 
     fn batch(name: &str, count: u32) -> TokenBatch {
         TokenBatch {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: batch_spec(name),
             copy: None,
@@ -2306,11 +2435,12 @@ mod tests {
     }
 
     fn applied_with(index: usize) -> HashSet<AppliedReplacementKey> {
-        HashSet::from([AppliedReplacementKey::object(ObjectId(9), index)])
+        HashSet::from([AppliedReplacementKey::object(ObjectId(9), index as u64)])
     }
 
     fn compound(primary: &str, appended: Vec<TokenBatch>) -> ProposedEvent {
         ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: batch_spec(primary),
             copy: None,

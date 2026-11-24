@@ -232,7 +232,9 @@
 //! its spell half.
 
 use engine::ai_support::legal_actions;
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, CastingPermission, Duration, Effect, FilterProp, LibraryPosition,
@@ -241,9 +243,11 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+
+use crate::support::shared_card_db as load_db;
 
 /// Verbatim Oracle text (`client/public/card-data.json`, key `gwen stacy`).
 const GWEN_STACY: &str =
@@ -1480,5 +1484,210 @@ fn a_free_for_as_long_as_exiled_lifetime_is_not_a_declinable_resolution_offer() 
         "CR 117.1a: the exiled card must be castable at a later priority window through the \
          standing permission — and \"for as long as it remains exiled\" states no turn-based end, \
          so the turn boundary must not have revoked it"
+    );
+}
+
+/// CR 508.1a + CR 611.3a: Pick Up the Pace links cards exiled by its attack
+/// trigger and applies its play permission only while its controller attacked
+/// during the current turn.
+#[test]
+fn pick_up_the_pace_tracks_current_turn_attacks_for_linked_exile_play() {
+    let db = load_db().expect("integration card fixture must load");
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pick_up = scenario.add_real_card(P0, "Pick Up the Pace", Zone::Hand, db);
+    let first_goblin = scenario.add_real_card(P0, "Raging Goblin", Zone::Hand, db);
+    let second_goblin = scenario.add_real_card(P0, "Raging Goblin", Zone::Hand, db);
+    let mountain = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    let second_mountain = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    let first_exiled_spell = scenario.add_real_card(P0, "Shock", Zone::Library, db);
+    // The two draw steps between the attacks consume these fillers, leaving the
+    // land on top for the second attack's trigger.
+    scenario.add_real_card(P0, "Island", Zone::Library, db);
+    scenario.add_real_card(P0, "Island", Zone::Library, db);
+    let second_exiled_land = scenario.add_real_card(P0, "Forest", Zone::Library, db);
+    for _ in 0..4 {
+        scenario.add_real_card(P1, "Plains", Zone::Library, db);
+    }
+    scenario.add_real_card(P1, "Wall of Stone", Zone::Battlefield, db);
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+    runner.cast(pick_up).resolve();
+    assert_eq!(zone_of(&runner, pick_up), Zone::Battlefield);
+    runner.cast(first_goblin).resolve();
+    assert_eq!(zone_of(&runner, first_goblin), Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&first_goblin].entered_battlefield_turn,
+        Some(runner.state().turn_number),
+        "reach-guard: the first Raging Goblin must enter during the attacking turn"
+    );
+
+    runner.advance_to_combat();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { player: P0, .. }
+        ),
+        "reach-guard: the first attack must use the normal declare-attackers action, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .declare_attackers(&[(first_goblin, AttackTarget::Player(P1))])
+        .expect("the current-turn Raging Goblin must be a legal attacker");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        zone_of(&runner, first_exiled_spell),
+        Zone::Exile,
+        "reach-guard: the first attack trigger must exile the known spell"
+    );
+    assert!(
+        runner
+            .state()
+            .exile_links
+            .iter()
+            .any(|link| link.source_id == pick_up && link.exiled_id == first_exiled_spell),
+        "reach-guard: the first exiled spell must be linked to Pick Up the Pace"
+    );
+    runner.activate(mountain, 0).resolve();
+    let first_spell_actions = legal_actions(runner.state());
+    assert!(
+        can_cast(&runner, first_exiled_spell),
+        "CR 117.1a: the first linked spell must be castable after the attack; legal actions: {first_spell_actions:?}"
+    );
+
+    runner.advance_to_phase(Phase::DeclareBlockers);
+    runner.pass_both_players();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ),
+        "reach-guard: the first attack must reach the normal blocker declaration"
+    );
+    runner
+        .declare_blockers(&[])
+        .expect("the opponent may decline to block the first attack");
+    runner.combat_damage();
+    runner.advance_to_phase(Phase::Cleanup);
+    for _ in 0..6 {
+        if runner.state().active_player == P0 && runner.state().phase == Phase::PreCombatMain {
+            break;
+        }
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ) {
+            runner
+                .declare_attackers(&[])
+                .expect("the intervening opponent turn may declare no attackers");
+            runner.advance_until_stack_empty();
+            continue;
+        }
+        runner.advance_to_phase(Phase::End);
+        runner.advance_to_phase(Phase::PreCombatMain);
+    }
+    assert_eq!(runner.state().active_player, P0);
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+    assert_eq!(
+        zone_of(&runner, first_exiled_spell),
+        Zone::Exile,
+        "reach-guard: the first linked spell must still be exiled after cleanup"
+    );
+    assert!(
+        runner
+            .state()
+            .exile_links
+            .iter()
+            .any(|link| link.source_id == pick_up && link.exiled_id == first_exiled_spell),
+        "reach-guard: cleanup must not destroy the persistent source link"
+    );
+
+    runner.activate(mountain, 0).resolve();
+    assert_eq!(
+        runner
+            .state()
+            .players
+            .iter()
+            .find(|player| player.id == P0)
+            .expect("P0 exists")
+            .mana_pool
+            .total(),
+        1,
+        "reach-guard: the real Mountain must provide mana for the castability check"
+    );
+    assert!(
+        !can_cast(&runner, first_exiled_spell),
+        "CR 514.2: the still-linked spell must not be castable after the current-turn attack gate ends"
+    );
+
+    runner.cast(second_goblin).resolve();
+    assert_eq!(zone_of(&runner, second_goblin), Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&second_goblin].entered_battlefield_turn,
+        Some(runner.state().turn_number),
+        "reach-guard: the second Raging Goblin must be a new current-turn entrant"
+    );
+    runner.advance_to_combat();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { player: P0, .. }
+        ),
+        "reach-guard: the second attack must use the normal declare-attackers action, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .declare_attackers(&[(second_goblin, AttackTarget::Player(P1))])
+        .expect("the new current-turn Raging Goblin must be a legal attacker");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        zone_of(&runner, second_exiled_land),
+        Zone::Exile,
+        "reach-guard: the second attack trigger must exile the known basic land"
+    );
+    assert!(
+        runner
+            .state()
+            .exile_links
+            .iter()
+            .any(|link| link.source_id == pick_up && link.exiled_id == second_exiled_land),
+        "reach-guard: the newly exiled land must be linked to Pick Up the Pace"
+    );
+    runner.advance_to_phase(Phase::DeclareBlockers);
+    runner.pass_both_players();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ),
+        "reach-guard: the second attack must reach the normal blocker declaration"
+    );
+    runner
+        .declare_blockers(&[])
+        .expect("the opponent may decline to block the second attack");
+    runner.combat_damage();
+    runner.advance_to_phase(Phase::PostCombatMain);
+    runner.activate(second_mountain, 0).resolve();
+    let retained_spell_actions = legal_actions(runner.state());
+    assert!(
+        can_cast(&runner, first_exiled_spell),
+        "CR 611.3a: the first linked spell must become castable again after a later attack; legal actions: {retained_spell_actions:?}"
+    );
+    let second_land_actions = legal_actions(runner.state());
+    assert!(
+        can_play_land(&runner, second_exiled_land),
+        "CR 305.1: the newly linked basic land must be playable after the new attack; legal actions: {second_land_actions:?}"
     );
 }

@@ -1351,7 +1351,8 @@
       "title": "{{effect}} a menos que pagues",
       "titleChooseOne": "{{effect}} a menos que pagues uno",
       "dontPay": "No pagar",
-      "takeEffect": "Aceptar el efecto"
+      "takeEffect": "Aceptar el efecto",
+      "priorChoice": "Jugador {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "¿Empalmar con arcano?",
@@ -2025,7 +2026,8 @@
     "scrollLeft": "Desplazar a la izquierda",
     "scrollRight": "Desplazar a la derecha",
     "confirm": "Confirmar",
-    "cancel": "Cancelar"
+    "cancel": "Cancelar",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Aventura",
@@ -2156,6 +2158,13 @@
   "entryController": {
     "title": "Elegir controlador al entrar",
     "subtitle": "Elige qué oponente controla este permanente al entrar."
+  },
+  "replacementDecisionOrder": {
+    "title": "Elige qué decisión tomar primero",
+    "subtitle": "Estas elecciones de reemplazo ocurren a la vez. Elige cuál tomar primero.",
+    "unknownObject": "Objeto desconocido",
+    "attachedTo": "En {{host}}",
+    "attachments": "Con {{names}}"
   },
   "optionalCost": {
     "gift": {
@@ -2451,6 +2460,9 @@
     "optionalTriggers": "Habilidades disparadas opcionales ({{count, number}})",
     "replacementChoices": "Decisiones de reemplazo ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Mantén pulsado para ver la carta completa"
+  },
   "optionalEffect": {
     "sourceFallback": "Efecto",
     "title": "{{name}} - Efecto opcional",
@@ -2594,6 +2606,9 @@
     "partitionSubtitle": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno.",
     "partitionSubtitleRemaining_one": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno. ({{count}} jugador más después de ti)",
     "partitionSubtitleRemaining_other": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno. ({{count}} jugadores más después de ti)",
+    "partitionInstruction": "{{chooser}} elige uno",
+    "partitionInstructionRemaining_one": "{{chooser}} elige uno ({{count}} jugador más después de ti)",
+    "partitionInstructionRemaining_other": "{{chooser}} elige uno ({{count}} jugadores más después de ti)",
     "pileALabel": "Montón A:",
     "pileBLabel": "Montón B:",
     "pileAria": "{{name}} — montón {{pile}}",

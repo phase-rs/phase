@@ -1351,7 +1351,8 @@
       "title": "{{effect}}, sofern du nicht bezahlst",
       "titleChooseOne": "{{effect}}, sofern du nicht eines bezahlst",
       "dontPay": "Nicht bezahlen",
-      "takeEffect": "Den Effekt hinnehmen"
+      "takeEffect": "Den Effekt hinnehmen",
+      "priorChoice": "Spieler {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "An Arkan koppeln?",
@@ -2025,7 +2026,8 @@
     "scrollLeft": "Nach links scrollen",
     "scrollRight": "Nach rechts scrollen",
     "confirm": "Bestätigen",
-    "cancel": "Abbrechen"
+    "cancel": "Abbrechen",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Abenteuer",
@@ -2156,6 +2158,13 @@
   "entryController": {
     "title": "Kontrolleur beim Eintreten wählen",
     "subtitle": "Wähle, welcher Gegner diese bleibende Karte beim Eintreten kontrolliert."
+  },
+  "replacementDecisionOrder": {
+    "title": "Wähle die erste Entscheidung",
+    "subtitle": "Diese Ersetzungsentscheidungen fallen gleichzeitig an. Wähle, welche du zuerst triffst.",
+    "unknownObject": "Unbekanntes Objekt",
+    "attachedTo": "An {{host}}",
+    "attachments": "Mit {{names}}"
   },
   "optionalCost": {
     "gift": {
@@ -2451,6 +2460,9 @@
     "optionalTriggers": "Optionale ausgelöste Fähigkeiten ({{count, number}})",
     "replacementChoices": "Ersetzungsentscheidungen ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Gedrückt halten, um die ganze Karte zu sehen"
+  },
   "optionalEffect": {
     "sourceFallback": "Effekt",
     "title": "{{name}} - Optionaler Effekt",
@@ -2594,6 +2606,9 @@
     "partitionSubtitle": "Teile deine Kreaturen in zwei Stapel auf. {{chooser}} wird einen wählen.",
     "partitionSubtitleRemaining_one": "Teile deine Kreaturen in zwei Stapel auf. {{chooser}} wird einen wählen. ({{count}} weiterer Spieler nach dir)",
     "partitionSubtitleRemaining_other": "Teile deine Kreaturen in zwei Stapel auf. {{chooser}} wird einen wählen. ({{count}} weitere Spieler nach dir)",
+    "partitionInstruction": "{{chooser}} wählt einen",
+    "partitionInstructionRemaining_one": "{{chooser}} wählt einen ({{count}} weiterer Spieler nach dir)",
+    "partitionInstructionRemaining_other": "{{chooser}} wählt einen ({{count}} weitere Spieler nach dir)",
     "pileALabel": "Stapel A:",
     "pileBLabel": "Stapel B:",
     "pileAria": "{{name}} — Stapel {{pile}}",

@@ -393,11 +393,14 @@ pub fn resolve(
         targeted
     };
 
+    // CR 101.3 + CR 800.4i: A departed event player can still supply last
+    // known information to the branch predicate, but cannot receive counters.
     let additions: Vec<_> = players
-        .iter()
+        .into_iter()
+        .filter(|&player_id| crate::game::players::is_alive(state, player_id))
         .map(|player_id| PendingCounterAddition::Player {
             actor: ability.controller,
-            player_id: *player_id,
+            player_id,
             counter_kind: *counter_kind,
             count: amount,
             // CR 614.16: resolving-effect placements are eligible.
@@ -608,6 +611,7 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(1),
             cast_occurrence: None,
+            cycling_occurrence: None,
             source_incarnation: None,
             announced_source_incarnation: None,
             trigger_source: None,
@@ -621,6 +625,7 @@ mod tests {
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
+            declared_player_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -649,6 +654,7 @@ mod tests {
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
+            repeat_timing: crate::types::ability::RepeatForTiming::Sequential,
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
@@ -830,6 +836,7 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(1),
             cast_occurrence: None,
+            cycling_occurrence: None,
             source_incarnation: None,
             announced_source_incarnation: None,
             trigger_source: None,
@@ -843,6 +850,7 @@ mod tests {
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
+            declared_player_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -871,6 +879,7 @@ mod tests {
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
+            repeat_timing: crate::types::ability::RepeatForTiming::Sequential,
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,

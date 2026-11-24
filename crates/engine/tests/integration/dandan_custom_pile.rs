@@ -4,7 +4,6 @@
 //! copy limit (CR 407.3's ante refusal stays).
 
 use std::collections::BTreeMap;
-use std::io::BufReader;
 use std::sync::Arc;
 
 use engine::database::card_db::CardDatabase;
@@ -22,7 +21,6 @@ use engine::types::format::{FormatConfig, GameFormat, SelectedFormat};
 use engine::types::game_state::GameState;
 use engine::types::match_config::MatchConfig;
 use engine::types::replay::ReplayHeader;
-use flate2::read::GzDecoder;
 
 use crate::dandan_shared_pile_storage::expected_decklist;
 use crate::support::shared_card_db;
@@ -179,13 +177,7 @@ fn a_started_game_plays_only_the_pile() {
 }
 
 fn owned_db() -> Arc<CardDatabase> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/integration_cards.json.gz");
-    let file = std::fs::File::open(path).expect("fixture opens");
-    Arc::new(
-        CardDatabase::from_export_reader(GzDecoder::new(BufReader::new(file)))
-            .expect("fixture loads"),
-    )
+    Arc::new(CardDatabase::from_integration_fixture().expect("fixture loads"))
 }
 
 fn header(deck_data: DeckList) -> ReplayHeader {

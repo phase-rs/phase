@@ -4,7 +4,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{
-    all_consuming, eof, map, map_opt, map_parser, not, opt, peek, rest, value, verify,
+    all_consuming, eof, map, map_opt, map_parser, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::multi::many0;
 use nom::sequence::{delimited, preceded, terminated};
@@ -15,7 +15,7 @@ use super::super::oracle_nom::duration::{
     parse_duration, parse_for_as_long_as_condition, parse_until_source_exiles_another_card_body,
 };
 use super::super::oracle_nom::enters_under::{
-    parse_leading_control_clause, ControlClausePossessor,
+    parse_control_clause, parse_leading_control_clause, ControlClausePossessor,
 };
 use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
@@ -40,7 +40,9 @@ use super::gap_diagnosis::clause_gap_unimplemented;
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::{ParseContext, PlayerAntecedents};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_ir::effect_chain::{AcceptingPlayerBinding, ClauseIr, EffectChainIr};
+use crate::parser::oracle_ir::effect_chain::{
+    AcceptingPlayerBinding, ClauseIr, EffectChainIr, RepeatCount,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
@@ -50,9 +52,9 @@ use crate::types::ability::{
     EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
     NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PlayerRelation,
     PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement, StaticCondition,
-    StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
-    TypeFilter, TypedFilter,
+    RepeatForTiming, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -497,6 +499,7 @@ mod gate_reflexive_rider_tests {
                 ),
                 use_lki: true,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             }),
         }
     }
@@ -2318,15 +2321,17 @@ pub(super) fn change_zone_target_choice_timing(
     has_multi_target: bool,
     fragment_lower: &str,
 ) -> TargetChoiceTiming {
-    // A zone union is a fresh choice even without count metadata. Scalar
-    // filter-only seeds retain their established declaration behavior.
+    // CR 400.1 + CR 115.10a + CR 608.2d: a target filter that names more than
+    // one zone is a multi-origin population (Next of Kin's "from your hand or
+    // from the command zone"). The producer deliberately leaves `origin: None`
+    // because one `Zone` cannot hold the union, so the filter's own zones are
+    // the authority here too; without this the clause falls through to the
+    // battlefield/Stack default and the put card is treated as a stack target
+    // instead of a choice announced while applying the effect.
+    let target_zones = target.extract_zones();
     let off_battlefield_origin = origin.is_some_and(|zone| zone != Zone::Battlefield)
-        || (has_multi_target
-            || matches!(target, TargetFilter::Typed(_)) && target.extract_zones().len() > 1)
-            && target
-                .extract_zones()
-                .iter()
-                .any(|zone| *zone != Zone::Battlefield);
+        || (has_multi_target || target_zones.len() > 1)
+            && target_zones.iter().any(|zone| *zone != Zone::Battlefield);
     if off_battlefield_origin {
         // Off-BF non-"target " legs (Relic: "exiles a card from their graveyard")
         // are resolution picks; explicit "target cards …" (Memory's Journey) stay Stack.
@@ -3929,6 +3934,13 @@ fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
 /// description matches the anaphor, and rewrite its effect as a clone of the
 /// previous def's effect with the parsed count.
 pub(super) fn resolve_those_tokens_anaphors(defs: &mut [AbilityDefinition]) {
+    // CR 608.2c: an "Otherwise, create one of those tokens" branch names the
+    // tokens of the instruction it is the alternative to.
+    for def in defs.iter_mut() {
+        if let Some(else_def) = def.else_ability.as_deref_mut() {
+            rewrite_those_tokens_from_antecedent(&mut else_def.effect, &def.effect);
+        }
+    }
     for i in 1..defs.len() {
         let (prev_rest, cur_rest) = defs.split_at_mut(i);
         let prev = &prev_rest[i - 1];
@@ -5041,6 +5053,10 @@ fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition, token_is_attach
 /// own `static_abilities`. Transient resolution-time grants — keyword pumps and
 /// `GrantTrigger` installs such as Rite of the Raging Storm (#3297) — must
 /// remain sibling `GenericEffect`s targeting `LastCreated`.
+/// CR 111.3 + CR 608.2c: the caller offers only a grant stamped
+/// `ContinuousEffectOnset::WithEntry` (a clause with an "is"/"has" conjunct,
+/// which defines the token). A grant classified `WhenFollowed` remains a
+/// separate instruction.
 fn token_it_has_grant_should_fold_into_statics(
     token_effect: &Effect,
     static_abilities: &[StaticDefinition],
@@ -5076,7 +5092,14 @@ pub(super) fn fold_token_it_has_grants_into_token_statics(def: &mut AbilityDefin
         return;
     };
     let grant = *grant_box;
-    if grant.sub_link != SubAbilityLink::SequentialSibling {
+    // CR 111.3 + CR 608.2c: only text that defines the token folds into it. A
+    // grant classified `WhenFollowed` ("It becomes a 2/1 artifact creature and gains
+    // flying", Vv'viza, Orbital Overseer; "They gain haste", Chandra, Acolyte of
+    // Flame) remains a separate instruction that changes the token after it has
+    // entered.
+    if grant.sub_link != SubAbilityLink::SequentialSibling
+        || grant.entry_onset != ContinuousEffectOnset::WithEntry
+    {
         def.sub_ability = Some(Box::new(grant));
         return;
     }
@@ -5905,7 +5928,7 @@ fn is_chain_veil_for_each_grant(lower: &str) -> bool {
     )
 }
 
-pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
+pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<RepeatCount>, String) {
     let (repeat_for, _, rest) = strip_for_each_prefix_with_difference(text);
     (repeat_for, rest)
 }
@@ -5914,9 +5937,24 @@ pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String
 /// comparison provenance from the parser product. The optional binding is
 /// produced only by the dedicated controller-scoped `PowerExceedsBase` parser
 /// arm; it is not inferred by searching an arbitrary filter tree later.
+///
+/// CR 608.2c + CR 101.4: every count this peel returns is stamped
+/// `SimultaneousInstances` here, through [`RepeatCount::for_each_prefix`], so the
+/// timing travels with the count from the peel itself.
 pub(crate) fn strip_for_each_prefix_with_difference(
     text: &str,
-) -> (Option<QuantityExpr>, Option<QuantityExpr>, String) {
+) -> (Option<RepeatCount>, Option<QuantityExpr>, String) {
+    let (repeat_for, difference, rest) = peel_for_each_prefix_count(text);
+    (
+        repeat_for.map(RepeatCount::for_each_prefix),
+        difference,
+        rest,
+    )
+}
+
+/// The leading `for each` grammar behind [`strip_for_each_prefix_with_difference`]:
+/// the bare count, its comparison provenance, and the body.
+fn peel_for_each_prefix_count(text: &str) -> (Option<QuantityExpr>, Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("for each ")).parse(i)) {
         let rest_lower = &lower[text.len() - rest.len()..];
@@ -6070,14 +6108,19 @@ mod population_prefix_tests {
 #[cfg(test)]
 mod difference_binding_tests {
     use super::strip_for_each_prefix_with_difference;
-    use crate::types::ability::{QuantityExpr, QuantityRef};
+    use crate::parser::oracle_ir::effect_chain::RepeatCount;
+    use crate::types::ability::{QuantityExpr, QuantityRef, RepeatForTiming};
 
     #[test]
     fn comparison_parser_product_carries_difference_provenance() {
         let (repeat_for, difference, rest) = strip_for_each_prefix_with_difference(
             "for each creature you control with power greater than that creature's base power, put a counter",
         );
-        assert!(repeat_for.is_some());
+        // CR 608.2c + CR 101.4: the authority stamps the for-each timing.
+        assert_eq!(
+            repeat_for.as_ref().map(RepeatCount::timing),
+            Some(RepeatForTiming::SimultaneousInstances)
+        );
         assert!(difference.is_some());
         assert_eq!(rest, "put a counter");
     }
@@ -6106,7 +6149,7 @@ mod difference_binding_tests {
         );
         assert_eq!(
             repeat_for,
-            Some(QuantityExpr::ClampMin {
+            Some(RepeatCount::for_each_prefix(QuantityExpr::ClampMin {
                 inner: Box::new(QuantityExpr::Offset {
                     inner: Box::new(QuantityExpr::Multiply {
                         factor: -1,
@@ -6115,7 +6158,7 @@ mod difference_binding_tests {
                     offset: 2,
                 }),
                 minimum: 0,
-            })
+            }))
         );
         assert!(difference.is_none());
         assert_eq!(rest, "that player gains 2 life.");
@@ -6123,7 +6166,7 @@ mod difference_binding_tests {
         let (repeat_for, _, rest) = strip_for_each_prefix_with_difference(
             "For each card a player draws this way, that player gains 2 life.",
         );
-        assert_eq!(repeat_for, Some(tracked()));
+        assert_eq!(repeat_for, Some(RepeatCount::for_each_prefix(tracked())));
         assert_eq!(rest, "that player gains 2 life.");
     }
 }
@@ -8467,7 +8510,14 @@ fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
 /// The player is a placeholder rewritten from `binding` at delayed-trigger
 /// creation; "on your next turn" skips the creation turn's step, and
 /// CR 608.2c: "that player" is the owner of the object the parent moved.
-fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTriggerCondition> {
+///
+/// CR 608.2c + CR 108.3: "their" after an owner control clause names that owner
+/// (Phytotitan). The control clause is the pronoun's antecedent and stays part
+/// of the instruction, so the returned `usize` is the length of the retained
+/// antecedent prefix (`0` for every other form).
+fn parse_player_next_step_suffix(
+    input: &str,
+) -> OracleResult<'_, (usize, DelayedTriggerCondition)> {
     use crate::types::ability::{DelayedTriggerPlayerBinding, TurnGate};
     // A grouped name ("main phase") is two steps, so it is left to the table.
     let step = || {
@@ -8479,47 +8529,76 @@ fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTrigger
             },
         )
     };
-    let (rest, (binding, gate, phase)) = terminated(
-        preceded(
-            tag("at the beginning of "),
-            alt((
-                map(preceded(tag("your next "), step()), |phase| {
+    let player_next_step = preceded(
+        tag("at the beginning of "),
+        alt((
+            map(preceded(tag("your next "), step()), |phase| {
+                (
+                    DelayedTriggerPlayerBinding::Controller,
+                    TurnGate::None,
+                    phase,
+                )
+            }),
+            map(preceded(tag("that player's next "), step()), |phase| {
+                (
+                    DelayedTriggerPlayerBinding::ParentTargetOwner,
+                    TurnGate::None,
+                    phase,
+                )
+            }),
+            map(
+                delimited(tag("the "), step(), tag(" on your next turn")),
+                |phase| {
                     (
                         DelayedTriggerPlayerBinding::Controller,
-                        TurnGate::None,
+                        TurnGate::AfterCreationTurn,
                         phase,
                     )
-                }),
-                map(preceded(tag("that player's next "), step()), |phase| {
-                    (
-                        DelayedTriggerPlayerBinding::ParentTargetOwner,
-                        TurnGate::None,
-                        phase,
-                    )
-                }),
-                map(
-                    delimited(tag("the "), step(), tag(" on your next turn")),
-                    |phase| {
-                        (
-                            DelayedTriggerPlayerBinding::Controller,
-                            TurnGate::AfterCreationTurn,
-                            phase,
-                        )
+                },
+            ),
+        )),
+    );
+    // CR 608.2c + CR 108.3: "their" after an owner control clause names that owner (Phytotitan).
+    let owner_their = map(
+        (
+            recognize(terminated(
+                verify(
+                    parse_control_clause,
+                    |possessor: &ControlClausePossessor| {
+                        *possessor == ControlClausePossessor::Owner
                     },
                 ),
+                tag(" "),
             )),
+            preceded(tag("at the beginning of their next "), step()),
         ),
+        |(antecedent, phase): (&str, Phase)| {
+            (
+                antecedent.len(),
+                (
+                    DelayedTriggerPlayerBinding::ParentTargetOwner,
+                    TurnGate::None,
+                    phase,
+                ),
+            )
+        },
+    );
+    let (rest, (kept, (binding, gate, phase))) = terminated(
+        alt((map(player_next_step, |shape| (0, shape)), owner_their)),
         eof,
     )
     .parse(input)?;
     Ok((
         rest,
-        DelayedTriggerCondition::AtNextPhaseForPlayer {
-            phase,
-            player: crate::types::player::PlayerId(0),
-            gate,
-            binding,
-        },
+        (
+            kept,
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase,
+                player: crate::types::player::PlayerId(0),
+                gate,
+                binding,
+            },
+        ),
     ))
 }
 
@@ -8535,13 +8614,15 @@ fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTrigger
 /// `RestrictionScope::SourcesControlledBy` placeholder pattern.
 pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerCondition>) {
     let lower = text.to_lowercase();
-    if let Some((offset, condition, _)) = nom_primitives::scan_last_at_word_boundaries_with_offset(
-        &lower,
-        parse_player_next_step_suffix,
-    )
-    .filter(|(offset, ..)| *offset > 0)
+    if let Some((offset, (kept, condition), _)) =
+        nom_primitives::scan_last_at_word_boundaries_with_offset(
+            &lower,
+            parse_player_next_step_suffix,
+        )
+        .filter(|(offset, ..)| *offset > 0)
     {
-        let end = text.len() - (lower.len() - offset);
+        // The retained antecedent (`kept`) stays in the instruction text.
+        let end = text.len() - (lower.len() - (offset + kept));
         return (text[..end].trim_end_matches(',').trim(), Some(condition));
     }
     for (suffix, condition) in [
@@ -8776,6 +8857,22 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                     turn: None,
                 },
                 tag("at the beginning of that turn's end step, "),
+            ),
+            // CR 608.2c + CR 603.7a: "at the beginning of that player's next
+            // end step, " -- the player-anaphor prefix twin of the suffix arm in
+            // `strip_temporal_suffix` (Wanderer shape in trailing position).
+            // Table default is `ParentTargetOwner`; a Choose(Player|Opponent)
+            // antecedent rebinds to `ChosenPlayer` at the call site (Faramir).
+            // Textually distinct from the "that turn's end step" arm above
+            // ("player's" vs "turn's"), so neither shadows the other.
+            value(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    player: crate::types::player::PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner,
+                },
+                tag("at the beginning of that player's next end step, "),
             ),
             // CR 505.1 + CR 603.7a: "your next main phase" → PreCombatMain.
             // PlayerId(0) rewritten to ability.controller at resolve time
@@ -10638,6 +10735,7 @@ pub(super) fn try_parse_distribute_damage(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::DealDamage {
             amount,
             target,
@@ -10728,6 +10826,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::PutCounter {
             counter_type,
             count: count_expr,
@@ -10792,6 +10891,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::PreventDamage {
             amount,
             amount_dynamic,
@@ -10921,6 +11021,7 @@ pub(super) fn try_parse_bidirectional_prevent(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: to_effect,
         duration: None,
         sub_ability: Some(Box::new(by_ability)),
@@ -12016,7 +12117,8 @@ pub(crate) fn parse_pump_clause_with_context(
     // CR 608.2c: this clause has a live context, so a relative controller phrase
     // in the where-X count binds the player the ability introduced.
     let pump_antecedents = ctx.player_antecedents();
-    let pump_where_x = WhereXBinding::new(where_x.as_deref(), &pump_antecedents);
+    // CR 613.4c + CR 107.1b: X is the signed amount this pump adds.
+    let pump_where_x = WhereXBinding::new(where_x.as_deref(), &pump_antecedents).as_pt_adjustment();
     let power = apply_where_x_expression(power, pump_where_x)?;
     let toughness = apply_where_x_expression(toughness, pump_where_x)?;
 
@@ -12498,6 +12600,11 @@ enum PrintedNamePossessive {
 /// (`interim_you_anaphor_seed` → `You`), which is the behavior every call site
 /// had before this binding existed. Supplying antecedents is therefore strictly
 /// additive — it can only change cards that actually have an antecedent.
+///
+/// `slot` is the consumer axis: what the bound X feeds. A consumer that adds X
+/// as a signed P/T adjustment marks it with [`Self::as_pt_adjustment`], so
+/// [`Self::resolve_quantity`] can apply the CR 107.1b clamp the consumer's
+/// handler does not.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WhereXBinding<'a> {
     /// The `", where X is …"` text, absent when the clause printed none.
@@ -12505,6 +12612,21 @@ pub(crate) struct WhereXBinding<'a> {
     /// The players a relative controller phrase in `expression` can bind to.
     /// `None` means none were in scope at the lowering site.
     pub(crate) antecedents: Option<&'a PlayerAntecedents>,
+    /// What the bound X feeds.
+    pub(crate) slot: WhereXSlot,
+}
+
+/// What a where-X value feeds, which decides whether a negative X must be
+/// clamped at the X boundary (CR 107.1b).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum WhereXSlot {
+    /// A count, amount or set P/T value. Count/amount handlers clamp a negative
+    /// result themselves (CR 107.1b); CR 107.1b exempts effects that set P/T.
+    #[default]
+    Amount,
+    /// The signed amount a "gets ±X/±X" modification adds (CR 613.4c); a
+    /// negative X is clamped to 0 here (CR 107.1b).
+    PtAdjustment,
 }
 
 impl<'a> WhereXBinding<'a> {
@@ -12513,6 +12635,7 @@ impl<'a> WhereXBinding<'a> {
         Self {
             expression,
             antecedents: None,
+            slot: WhereXSlot::Amount,
         }
     }
 
@@ -12522,15 +12645,22 @@ impl<'a> WhereXBinding<'a> {
         Self {
             expression,
             antecedents: Some(antecedents),
+            slot: WhereXSlot::Amount,
         }
     }
 
     /// The same antecedents against a different expression — used where a seam
     /// licenses or normalizes the printed tail before the rewrites read it.
     pub(crate) fn with_expression(self, expression: Option<&'a str>) -> Self {
+        Self { expression, ..self }
+    }
+
+    /// CR 613.4c: the same binding, feeding the signed amount a "gets ±X/±X"
+    /// modification adds.
+    pub(crate) fn as_pt_adjustment(self) -> Self {
         Self {
-            expression,
-            antecedents: self.antecedents,
+            slot: WhereXSlot::PtAdjustment,
+            ..self
         }
     }
 
@@ -12547,9 +12677,38 @@ impl<'a> WhereXBinding<'a> {
     /// site goes through here so the expression and the antecedents it is read
     /// under cannot drift apart at a call site. `expression` is passed rather
     /// than read from `self` because some seams rewrite the tail (licensing,
-    /// nested owners) before the count is resolved.
+    /// nested owners) before the count is resolved. The slot then binds X
+    /// ([`WhereXSlot::bind`]).
     pub(crate) fn resolve_quantity(&self, expression: &str) -> Option<QuantityExpr> {
-        parse_where_x_quantity_expression_with_antecedents(expression, &self.antecedents_or_empty())
+        let antecedents = self.antecedents_or_empty();
+        let x = parse_where_x_quantity_expression_with_antecedents(expression, &antecedents)?;
+        Some(self.slot.bind(x))
+    }
+}
+
+impl WhereXSlot {
+    /// CR 107.1b: a negative X feeding a signed P/T adjustment is 0.
+    pub(crate) fn bind(self, x: QuantityExpr) -> QuantityExpr {
+        match self {
+            WhereXSlot::Amount => x,
+            WhereXSlot::PtAdjustment => match x {
+                QuantityExpr::ClampMin { minimum, .. } if minimum >= 0 => x,
+                QuantityExpr::ClampMin { .. }
+                | QuantityExpr::Ref { .. }
+                | QuantityExpr::Fixed { .. }
+                | QuantityExpr::DivideRounded { .. }
+                | QuantityExpr::Offset { .. }
+                | QuantityExpr::Multiply { .. }
+                | QuantityExpr::Sum { .. }
+                | QuantityExpr::UpTo { .. }
+                | QuantityExpr::Power { .. }
+                | QuantityExpr::Difference { .. }
+                | QuantityExpr::Max { .. } => QuantityExpr::ClampMin {
+                    inner: Box::new(x),
+                    minimum: 0,
+                },
+            },
+        }
     }
 }
 
@@ -12578,11 +12737,20 @@ pub(crate) fn parse_where_x_quantity_expression(where_x: &str) -> Option<Quantit
 /// `declared_that_player: TargetPlayer`. `PlayerAntecedents`' rung order already
 /// prefers the nearer antecedent, so this function adds no precedence logic of
 /// its own.
+///
+/// CR 608.2k: the set's characteristic rung is the owner a possessive pronoun
+/// ("its power") binds to — the trigger event's object when the clause's "it"
+/// names it (`ParseContext::player_antecedents`). `None` keeps `Source`.
 pub(crate) fn parse_where_x_quantity_expression_with_antecedents(
     where_x: &str,
     antecedents: &PlayerAntecedents,
 ) -> Option<QuantityExpr> {
-    parse_where_x_quantity_with_owner(where_x, PrintedNamePossessive::Source, None, antecedents)
+    parse_where_x_quantity_with_owner(
+        where_x,
+        PrintedNamePossessive::Source,
+        antecedents.characteristic_pronoun_owner,
+        antecedents,
+    )
 }
 
 /// Every arm of [`parse_where_x_quantity_expression`] except the printed-name
@@ -12606,8 +12774,10 @@ pub(crate) fn parse_where_x_quantity_core(where_x: &str) -> Option<QuantityExpr>
 /// plus its power", "half its toughness") bind the owner structurally during
 /// the shared parse instead of defaulting to `Source`. Used for boon-granted
 /// "it"/"that" perpetual tails, where the pronoun names the triggering
-/// object. Explicit self-references ("~'s power") keep `Source` — the pronoun
-/// grammar never matches them.
+/// object; the antecedent-threaded entry
+/// ([`parse_where_x_quantity_expression_with_antecedents`]) supplies the same
+/// owner from its characteristic rung. Explicit self-references ("~'s power")
+/// keep `Source` — the pronoun grammar never matches them.
 pub(crate) fn parse_where_x_quantity_expression_with_owner(
     where_x: &str,
     owner: ObjectScope,
@@ -13063,19 +13233,13 @@ pub(crate) fn apply_where_x_quantity_expression(
             qty: QuantityRef::CostXPaid,
         } if where_x.expression.is_some() => {
             let expression = where_x.expression.expect("checked is_some above");
-            parse_where_x_quantity_expression_with_antecedents(
-                expression,
-                &where_x.antecedents_or_empty(),
-            )?
+            where_x.resolve_quantity(expression)?
         }
         QuantityExpr::Ref {
             qty: QuantityRef::Variable { name },
         } if where_x.expression.is_some() && name.eq_ignore_ascii_case("X") => {
             let expression = where_x.expression.expect("checked is_some above");
-            parse_where_x_quantity_expression_with_antecedents(
-                expression,
-                &where_x.antecedents_or_empty(),
-            )?
+            where_x.resolve_quantity(expression)?
         }
         // CR 107.3i: "search ... for up to X ..., where X is …" wraps the X
         // count in `UpTo`. Recurse into `max` so the defining clause rewrites
@@ -13214,10 +13378,19 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
     // that creature's power" announces `TargetFilter::Any`, which names no
     // creature for the demonstrative to bind to, so it keeps `CostPaidObject`
     // and still reads the sacrificed creature.
-    let rebind_magnitude_target_anaphor = where_x_is_demonstrative_target_creature_stat(where_x)
-        && effect
-            .target_filter()
-            .is_some_and(target_filter_names_creature);
+    let referent = where_x_target_referent(where_x);
+    let pt_rebind_from = referent
+        .filter(|referent| match referent {
+            TargetReferent::Demonstrative => effect
+                .target_filter()
+                .is_some_and(target_filter_names_creature),
+            // CR 608.2c: "its power" in the where-clause of "target creature gets
+            // +X/…" names the clause subject, the announced target, not the source.
+            TargetReferent::SubjectPronoun => {
+                matches!(effect, Effect::Pump { target, .. } if target_filter_names_creature(target))
+            }
+        })
+        .map(TargetReferent::provisional_scope);
     // CR 107.3c: set when the clause DEFINES X but the definition is not
     // representable. Recorded here and converted to a gap node after the match
     // (the arms hold a mutable borrow of `effect`'s fields).
@@ -13287,8 +13460,8 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
         | Effect::SkipNextTurn { count: amount, .. }
         | Effect::Surveil { count: amount, .. } => {
             bind_where_x_quantity(amount, where_x, &mut unbound_where_x);
-            if rebind_magnitude_target_anaphor {
-                rebind_cost_paid_object_pt_to_target(amount);
+            if let Some(from) = pt_rebind_from {
+                rebind_pt_scope_to_target(amount, from);
             }
         }
         // CR 705.1: the flip count of an `Exactly` run is the where-X slot; an
@@ -13296,8 +13469,8 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
         Effect::FlipCoins { flips, .. } => {
             if let Some(amount) = flips.count_expr_mut() {
                 bind_where_x_quantity(amount, where_x, &mut unbound_where_x);
-                if rebind_magnitude_target_anaphor {
-                    rebind_cost_paid_object_pt_to_target(amount);
+                if let Some(from) = pt_rebind_from {
+                    rebind_pt_scope_to_target(amount, from);
                 }
             }
         }
@@ -13519,9 +13692,11 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
         | Effect::PumpAll {
             power, toughness, ..
         } => {
+            // CR 613.4c + CR 107.1b: X is the signed amount this pump adds.
+            let pump_where_x = where_x.as_pt_adjustment();
             match (
-                apply_where_x_expression(power.clone(), where_x),
-                apply_where_x_expression(toughness.clone(), where_x),
+                apply_where_x_expression(power.clone(), pump_where_x),
+                apply_where_x_expression(toughness.clone(), pump_where_x),
             ) {
                 (Some(bound_power), Some(bound_toughness)) => {
                     *power = bound_power;
@@ -13529,9 +13704,9 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
                 }
                 _ => unbound_where_x = where_x.expression.map(str::to_string),
             }
-            if rebind_magnitude_target_anaphor {
-                rebind_cost_paid_object_pt_value_to_target(power);
-                rebind_cost_paid_object_pt_value_to_target(toughness);
+            if let Some(from) = pt_rebind_from {
+                rebind_pt_value_scope_to_target(power, from);
+                rebind_pt_value_scope_to_target(toughness, from);
             }
         }
         Effect::PreventDamage {
@@ -13581,16 +13756,17 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
             // Xenagos, God of Revels), so a "that creature" anaphor in the
             // where-clause is the chosen target, not a cost/trigger referent.
             let target_based = target.is_some();
-            // CR 608.2c: "that creature's power"/"toughness" in the where-clause
-            // of a *targeted* grant is the target anaphor. The shared quantity
-            // grammar lowers the context-free phrase to `CostPaidObject` (its
-            // triggered-ability sense); on a targeted grant it must instead read
-            // the chosen recipient, so rebind that scope to `Target` here at the
-            // lowering seam. Gating on the demonstrative anaphor keeps a genuine
-            // participle cost referent ("the sacrificed creature's power",
-            // `CostPaidObject`) untouched.
-            let rebind_target_anaphor =
-                target_based && where_x_is_demonstrative_target_creature_stat(where_x);
+            // CR 608.2c: "that creature's power"/"toughness" or "its power"/
+            // "toughness" in the where-clause of a *targeted* grant names the
+            // chosen recipient. The shared quantity grammar lowers the
+            // demonstrative to `CostPaidObject` (its triggered-ability sense)
+            // and the pronoun to `Source`, so the referent's provisional scope
+            // is rebound to `Target` here at the lowering seam. Gating on the
+            // referent keeps a genuine participle cost referent ("the sacrificed
+            // creature's power") and an explicit self-reference untouched.
+            let rebind_from = referent
+                .filter(|_| target_based)
+                .map(TargetReferent::provisional_scope);
             for static_def in static_abilities.iter_mut() {
                 if let Some(condition) = static_def.condition.as_mut() {
                     apply_where_x_static_condition(
@@ -13617,8 +13793,8 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
                         where_x,
                         &mut unbound_where_x,
                     );
-                    if rebind_target_anaphor {
-                        rebind_target_anaphor_continuous_modification(modification);
+                    if let Some(from) = rebind_from {
+                        rebind_target_anaphor_continuous_modification(modification, from);
                     }
                 }
             }
@@ -13759,13 +13935,17 @@ fn apply_where_x_continuous_modification(
     unbound: &mut Option<String>,
 ) {
     match modification {
+        // CR 107.1b exempts effects that set P/T, so X stays an `Amount` here.
         ContinuousModification::SetDynamicPower { value, .. }
         | ContinuousModification::SetDynamicToughness { value, .. }
         | ContinuousModification::SetPowerDynamic { value, .. }
-        | ContinuousModification::SetToughnessDynamic { value, .. }
-        | ContinuousModification::AddDynamicPower { value, .. }
-        | ContinuousModification::AddDynamicToughness { value, .. } => {
+        | ContinuousModification::SetToughnessDynamic { value, .. } => {
             bind_where_x_quantity(value, where_x, unbound);
+        }
+        // CR 613.4c + CR 107.1b: X is the signed amount this modification adds.
+        ContinuousModification::AddDynamicPower { value, .. }
+        | ContinuousModification::AddDynamicToughness { value, .. } => {
+            bind_where_x_quantity(value, where_x.as_pt_adjustment(), unbound);
         }
         ContinuousModification::AddDynamicKeyword { value, .. } => {
             bind_where_x_quantity(value, where_x, unbound);
@@ -13842,8 +14022,54 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::RemoveManaCost => {}
+        | ContinuousModification::RemoveManaCost
+        // No dynamic quantity to rebind: scalar designation payload only.
+        | ContinuousModification::ChangeControllerToDesignation { .. } => {}
     }
+}
+
+/// CR 608.2c: the where-X phrase that names a targeted clause's announced
+/// recipient, keyed by the scope the shared quantity grammar provisionally gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetReferent {
+    /// "that creature's power"/"toughness".
+    Demonstrative,
+    /// "its"/"his"/"her"/"their power"/"toughness" — the clause subject.
+    SubjectPronoun,
+}
+
+impl TargetReferent {
+    fn provisional_scope(self) -> ObjectScope {
+        match self {
+            TargetReferent::Demonstrative => ObjectScope::CostPaidObject,
+            TargetReferent::SubjectPronoun => ObjectScope::Source,
+        }
+    }
+}
+
+/// CR 608.2c: classify a where-X definition as a target referent. Explicit
+/// self-references ("this creature's power", "~'s power") are not pronouns and
+/// return `None`, so they keep `Source`.
+fn where_x_target_referent(where_x: WhereXBinding<'_>) -> Option<TargetReferent> {
+    if where_x_is_demonstrative_target_creature_stat(where_x) {
+        return Some(TargetReferent::Demonstrative);
+    }
+    let expression = where_x
+        .expression?
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let parsed = all_consuming(|i| {
+        nom_quantity::parse_pronoun_characteristic_ref_with_scope(i, ObjectScope::Source)
+    })
+    .parse(expression.as_str())
+    .ok()
+    .map(|(_, qty)| qty);
+    matches!(
+        parsed,
+        Some(QuantityRef::Power { .. } | QuantityRef::Toughness { .. })
+    )
+    .then_some(TargetReferent::SubjectPronoun)
 }
 
 /// CR 608.2c: Does the where-clause definition read "that creature's power" /
@@ -13861,29 +14087,29 @@ fn where_x_is_demonstrative_target_creature_stat(where_x: WhereXBinding<'_>) -> 
         return false;
     };
     let expression = expression.trim().trim_end_matches('.').to_ascii_lowercase();
-    // The `if` condition scopes the parser temporary so it drops at the end of
-    // condition evaluation (before the owned `expression` string), avoiding the
+    // The `let` scopes the parser temporary so it drops at the end of the
+    // statement (before the owned `expression` string), avoiding the
     // tail-position borrow that an `is_ok()` return expression would create.
-    if all_consuming(preceded(
+    let matched = all_consuming(preceded(
         tag::<_, _, OracleError<'_>>("that creature's "),
         alt((tag("power"), tag("toughness"))),
     ))
     .parse(expression.as_str())
-    .is_ok()
-    {
-        return true;
-    }
-    false
+    .is_ok();
+    matched
 }
 
-/// CR 608.2c: Rebind a `ObjectScope::CostPaidObject` power/toughness reference
-/// inside a continuous modification's dynamic value to `ObjectScope::Target`.
-/// Applied only on a targeted grant whose where-clause is the demonstrative
-/// target anaphor (`where_x_is_demonstrative_target_creature_stat`), so the
-/// "that creature's power"/"toughness" pump (Xenagos, God of Revels) reads the
-/// announced recipient instead of the trigger/cost referent slot. Mirrors the
-/// modification coverage of `apply_where_x_continuous_modification`.
-fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousModification) {
+/// CR 608.2c: Rebind a power/toughness reference scoped `from` inside a
+/// continuous modification's dynamic value to `ObjectScope::Target`.
+/// Applied only on a targeted grant whose where-clause names the target
+/// (`where_x_target_referent`), so the "that creature's power" pump (Xenagos,
+/// God of Revels) and the "its power" pump (Fatal Frenzy) read the announced
+/// recipient. Mirrors the modification coverage of
+/// `apply_where_x_continuous_modification`.
+fn rebind_target_anaphor_continuous_modification(
+    modification: &mut ContinuousModification,
+    from: ObjectScope,
+) {
     match modification {
         ContinuousModification::SetDynamicPower { value, .. }
         | ContinuousModification::SetDynamicToughness { value, .. }
@@ -13892,7 +14118,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::AddDynamicPower { value, .. }
         | ContinuousModification::AddDynamicToughness { value, .. }
         | ContinuousModification::AddDynamicKeyword { value, .. } => {
-            rebind_cost_paid_object_pt_to_target(value);
+            rebind_pt_scope_to_target(value, from);
         }
         ContinuousModification::AddCounterOnEnter { .. }
         | ContinuousModification::SetStartingLoyalty { .. } => {}
@@ -13946,20 +14172,22 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::RemoveManaCost => {}
+        | ContinuousModification::RemoveManaCost
+        // No dynamic quantity to rebind: scalar designation payload only.
+        | ContinuousModification::ChangeControllerToDesignation { .. } => {}
     }
 }
 
-/// Retarget a `ObjectScope::CostPaidObject` power/toughness `QuantityRef` within
-/// a `QuantityExpr` to `ObjectScope::Target`, recursing through every composite
+/// Retarget a power/toughness `QuantityRef` scoped `from` within a
+/// `QuantityExpr` to `ObjectScope::Target`, recursing through every composite
 /// arm. Only the per-object power/toughness refs are rewritten; every other
-/// reference (object counts, mana value, non-`CostPaidObject` scopes) is left
-/// as-is so unrelated where-X bindings are never disturbed.
-pub(super) fn rebind_cost_paid_object_pt_to_target(expr: &mut QuantityExpr) {
+/// reference (object counts, mana value, other scopes) is left as-is so
+/// unrelated where-X bindings are never disturbed.
+pub(super) fn rebind_pt_scope_to_target(expr: &mut QuantityExpr, from: ObjectScope) {
     match expr {
         QuantityExpr::Ref {
             qty: QuantityRef::Power { scope } | QuantityRef::Toughness { scope },
-        } if *scope == ObjectScope::CostPaidObject => {
+        } if *scope == from => {
             *scope = ObjectScope::Target;
         }
         QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
@@ -13971,27 +14199,27 @@ pub(super) fn rebind_cost_paid_object_pt_to_target(expr: &mut QuantityExpr) {
         | QuantityExpr::Power {
             exponent: inner, ..
         } => {
-            rebind_cost_paid_object_pt_to_target(inner);
+            rebind_pt_scope_to_target(inner, from);
         }
         QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
-                rebind_cost_paid_object_pt_to_target(inner);
+                rebind_pt_scope_to_target(inner, from);
             }
         }
         QuantityExpr::Difference { left, right } => {
-            rebind_cost_paid_object_pt_to_target(left);
-            rebind_cost_paid_object_pt_to_target(right);
+            rebind_pt_scope_to_target(left, from);
+            rebind_pt_scope_to_target(right, from);
         }
     }
 }
 
-/// CR 613.4c: `PtValue` counterpart of [`rebind_cost_paid_object_pt_to_target`].
+/// CR 613.4c: `PtValue` counterpart of [`rebind_pt_scope_to_target`].
 /// A layer-7 pump magnitude is a `PtValue`, whose only quantity-bearing form is
 /// `PtValue::Quantity`; a fixed or placeholder magnitude carries no object scope
 /// to rebind. Exhaustive so a new `PtValue` form has to be classified here.
-fn rebind_cost_paid_object_pt_value_to_target(value: &mut PtValue) {
+fn rebind_pt_value_scope_to_target(value: &mut PtValue, from: ObjectScope) {
     match value {
-        PtValue::Quantity(expr) => rebind_cost_paid_object_pt_to_target(expr),
+        PtValue::Quantity(expr) => rebind_pt_scope_to_target(expr, from),
         PtValue::Fixed(_) | PtValue::Variable(_) => {}
     }
 }
@@ -14424,7 +14652,11 @@ pub(super) fn apply_where_x_ability_expression(
     if let Some(repeat_for) = def.repeat_for.take() {
         match apply_where_x_quantity_expression(repeat_for, where_x) {
             Some(bound) => def.repeat_for = Some(bound),
-            None => unbound_where_x = where_x.expression.map(str::to_string),
+            None => {
+                unbound_where_x = where_x.expression.map(str::to_string);
+                // The dropped count takes its iteration relation with it.
+                def.repeat_timing = RepeatForTiming::Sequential;
+            }
         }
     }
     if let Some(spec) = def.multi_target.as_mut() {
@@ -17366,7 +17598,9 @@ mod tests {
 }
 #[cfg(test)]
 mod where_x_tests {
-    use super::{parse_where_x_quantity_expression, strip_trailing_duration, WhereXBinding};
+    use super::{
+        parse_where_x_quantity_expression, strip_trailing_duration, WhereXBinding, WhereXSlot,
+    };
     use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
@@ -17376,6 +17610,140 @@ mod where_x_tests {
     use crate::types::counter::CounterType;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    const QUARTZWOOD_DAMAGE: &str = "the amount of damage those creatures dealt to that player";
+
+    #[test]
+    fn where_x_damage_dealt_binds_trigger_event_amount() {
+        let expected = Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        for expression in [
+            "the damage dealt",
+            "the amount of damage dealt",
+            QUARTZWOOD_DAMAGE,
+        ] {
+            assert_eq!(
+                parse_where_x_quantity_expression(expression),
+                expected,
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn where_x_damage_dealt_preserves_suffix_meaning() {
+        use crate::types::ability::{AggregateFunction, DamageChannel, DamageKindFilter};
+
+        assert_eq!(
+            parse_where_x_quantity_expression("the damage dealt to target opponent this turn"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::DamageDealtThisTurn {
+                    source: Box::new(TargetFilter::Any),
+                    target: Box::new(TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::Player,
+                            TargetFilter::Typed(
+                                TypedFilter::default().controller(ControllerRef::TargetPlayer),
+                            ),
+                        ],
+                    }),
+                    aggregate: AggregateFunction::Sum,
+                    group_by: None,
+                    damage_kind: DamageKindFilter::Any,
+                    channel: DamageChannel::Total,
+                },
+            })
+        );
+        assert_eq!(
+            parse_where_x_quantity_expression("the damage dealt this way"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount {
+                    aggregate: AggregateFunction::Sum,
+                    channel: DamageChannel::Total,
+                },
+            })
+        );
+        assert_eq!(
+            parse_where_x_quantity_expression(&format!("{QUARTZWOOD_DAMAGE} this turn")),
+            None
+        );
+        assert_eq!(
+            parse_where_x_quantity_expression(QUARTZWOOD_DAMAGE),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            })
+        );
+    }
+
+    #[test]
+    fn where_x_damage_dealt_explicit_grammar_requires_printed_subject() {
+        use crate::parser::oracle_nom::quantity::parse_quantity_ref_complete;
+
+        for subject in ["they", "it", "this creature"] {
+            let expression = format!("the amount of damage {subject} dealt to that player");
+            assert!(
+                parse_quantity_ref_complete(&expression).is_err(),
+                "{expression}"
+            );
+        }
+        assert_eq!(
+            parse_quantity_ref_complete(QUARTZWOOD_DAMAGE),
+            Ok(("", QuantityRef::EventContextAmount))
+        );
+    }
+
+    #[test]
+    fn where_x_damage_dealt_binds_quartzwood_token_stats() {
+        use crate::types::ability::DamageKindFilter;
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Trample\nWhenever one or more creatures you control with trample deal combat damage to a player, create an X/X green Dinosaur Beast creature token with trample, where X is the amount of damage those creatures dealt to that player.",
+            "Quartzwood Crasher",
+            &[],
+            &["Creature".to_string()],
+            &["Dinosaur".to_string(), "Beast".to_string()],
+        );
+        let [trigger] = parsed.triggers.as_slice() else {
+            panic!("expected one trigger, got {:?}", parsed.triggers);
+        };
+        assert_eq!(trigger.mode, TriggerMode::DamageDoneOnceByController);
+        assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+        assert!(trigger.batched);
+        assert!(trigger.valid_card.is_none());
+        assert_eq!(
+            trigger.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::WithKeyword {
+                        value: crate::types::keywords::Keyword::Trample,
+                    }]),
+            ))
+        );
+        let effect = trigger
+            .execute
+            .as_ref()
+            .expect("expected trigger effect")
+            .effect
+            .as_ref();
+        let Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } = effect
+        else {
+            panic!("expected token effect, got {effect:?}");
+        };
+        let stat = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(*power, stat);
+        assert_eq!(*toughness, stat);
+    }
 
     /// CR 706.2 + CR 706.4: "where X is the result" (of a die roll / coin flip)
     /// binds X to the rolled value via `EventContextAmount` — the same channel
@@ -18203,10 +18571,13 @@ mod where_x_tests {
             WhereXBinding::bare(Some("that creature's power")),
         );
 
-        let expected = PtValue::Quantity(QuantityExpr::Ref {
-            qty: QuantityRef::Power {
-                scope: ObjectScope::Target,
-            },
+        let expected = PtValue::Quantity(QuantityExpr::ClampMin {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                },
+            }),
+            minimum: 0,
         });
         let Effect::Pump {
             power, toughness, ..
@@ -18537,6 +18908,162 @@ mod where_x_tests {
         assert!(
             gain.contains(&demonstrative_mv),
             "you-gain GainLife.amount must bind Demonstrative mana value, got {gain:?}"
+        );
+    }
+
+    fn power(scope: ObjectScope) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power { scope },
+        }
+    }
+
+    fn event_object_rung() -> crate::parser::oracle_ir::context::PlayerAntecedents {
+        crate::parser::oracle_ir::context::PlayerAntecedents {
+            characteristic_pronoun_owner: Some(ObjectScope::EventSource),
+            ..Default::default()
+        }
+    }
+
+    /// CR 608.2k: the antecedent-threaded where-X entry reads the set's
+    /// characteristic rung as the owner of a possessive pronoun, bare or
+    /// composed; an explicit self-reference and an empty set keep `Source`.
+    #[test]
+    fn where_x_antecedent_rung_binds_pronoun_characteristic() {
+        use super::parse_where_x_quantity_expression_with_antecedents as with_antecedents;
+        let rung = event_object_rung();
+        assert_eq!(
+            with_antecedents("its power", &rung),
+            Some(power(ObjectScope::EventSource))
+        );
+        assert_eq!(
+            with_antecedents("twice its power", &rung),
+            Some(QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(power(ObjectScope::EventSource)),
+            })
+        );
+        assert_eq!(
+            with_antecedents("its toughness", &rung),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::EventSource,
+                },
+            })
+        );
+        assert_eq!(
+            with_antecedents("~'s power", &rung),
+            Some(power(ObjectScope::Source))
+        );
+        assert_eq!(
+            with_antecedents("its power", &Default::default()),
+            Some(power(ObjectScope::Source))
+        );
+    }
+
+    /// CR 107.1b + CR 613.4c: every X feeding a signed P/T adjustment is clamped
+    /// at zero, whatever bound it; a count slot keeps the bare reading.
+    #[test]
+    fn where_x_pt_adjustment_clamps_every_x() {
+        use crate::types::ability::PtValue;
+        let clamp = |inner: QuantityExpr| QuantityExpr::ClampMin {
+            inner: Box::new(inner),
+            minimum: 0,
+        };
+        let rung = event_object_rung();
+        let clamped = clamp(power(ObjectScope::EventSource));
+        let adjustment = WhereXBinding::new(Some("its power"), &rung).as_pt_adjustment();
+        assert_eq!(
+            adjustment.resolve_quantity("its power"),
+            Some(clamped.clone())
+        );
+        assert_eq!(
+            super::apply_where_x_expression(PtValue::Variable("-X".to_string()), adjustment),
+            Some(PtValue::Quantity(QuantityExpr::Multiply {
+                factor: -1,
+                inner: Box::new(clamped.clone()),
+            }))
+        );
+
+        // A count slot keeps the bare reading: its handler clamps itself.
+        assert_eq!(
+            WhereXBinding::new(Some("its power"), &rung).resolve_quantity("its power"),
+            Some(power(ObjectScope::EventSource))
+        );
+        let empty = Default::default();
+        assert_eq!(
+            WhereXBinding::new(Some("its power"), &empty)
+                .as_pt_adjustment()
+                .resolve_quantity("its power"),
+            Some(clamp(power(ObjectScope::Source)))
+        );
+        let creatures = WhereXBinding::new(Some("the number of creatures you control"), &rung)
+            .as_pt_adjustment()
+            .resolve_quantity("the number of creatures you control");
+        assert!(
+            matches!(
+                &creatures,
+                Some(QuantityExpr::ClampMin { inner, minimum: 0 })
+                    if matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ObjectCount { .. } })
+            ),
+            "{creatures:?}"
+        );
+        assert_eq!(
+            WhereXBinding::new(Some("~'s power"), &rung)
+                .as_pt_adjustment()
+                .resolve_quantity("~'s power"),
+            Some(clamp(power(ObjectScope::Source)))
+        );
+        // An already-floored X is not wrapped twice.
+        assert_eq!(WhereXSlot::PtAdjustment.bind(clamped.clone()), clamped);
+    }
+
+    /// CR 613.4c + CR 107.1b + CR 608.2k: the pump-clause consumer marks its X
+    /// as a signed adjustment, so every reading is clamped at zero; under a
+    /// trigger subject "its power" reads the event object, while an explicit
+    /// self-reference ("~'s power") and a context-free clause read `Source`.
+    #[test]
+    fn where_x_pump_clause_marks_signed_adjustment_under_event_subject() {
+        use crate::parser::oracle_ir::context::ParseContext;
+        use crate::types::ability::PtValue;
+        let event_subject = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..Default::default()
+        };
+        let pump = |text: &str, ctx: &ParseContext| {
+            let (power, toughness, _) = super::parse_pump_clause_with_context(text, ctx)
+                .unwrap_or_else(|| panic!("{text} must lower"));
+            assert_eq!(power, toughness, "{text}");
+            power
+        };
+        assert_eq!(
+            pump(
+                "gets +X/+X until end of turn, where X is its power",
+                &event_subject
+            ),
+            PtValue::Quantity(QuantityExpr::ClampMin {
+                inner: Box::new(power(ObjectScope::EventSource)),
+                minimum: 0,
+            })
+        );
+        assert_eq!(
+            pump(
+                "gets +X/+X until end of turn, where X is ~'s power",
+                &event_subject
+            ),
+            PtValue::Quantity(QuantityExpr::ClampMin {
+                inner: Box::new(power(ObjectScope::Source)),
+                minimum: 0,
+            })
+        );
+        assert_eq!(
+            pump(
+                "gets +X/+X until end of turn, where X is its power",
+                &ParseContext::default()
+            ),
+            PtValue::Quantity(QuantityExpr::ClampMin {
+                inner: Box::new(power(ObjectScope::Source)),
+                minimum: 0,
+            })
         );
     }
 }
@@ -19227,5 +19754,111 @@ mod dq_d_player_set_lift_tests {
             None
         );
         assert_eq!(parse_for_each_multiplier_prefix(" for every"), None);
+    }
+}
+
+#[cfg(test)]
+mod change_zone_target_choice_timing_tests {
+    use super::*;
+
+    fn creature_in(zones: &[Zone]) -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![if zones.len() == 1 {
+                FilterProp::InZone { zone: zones[0] }
+            } else {
+                FilterProp::InAnyZone {
+                    zones: zones.to_vec(),
+                }
+            }]),
+        )
+    }
+
+    /// CR 400.1 + CR 115.10a + CR 608.2d: a multi-origin filter is a resolution choice even
+    /// when the producer suppressed the single `origin` field. A single-zone
+    /// off-battlefield filter without `origin` keeps its historical Stack
+    /// default (Deadly Cover-Up's class), and printed "target" still wins.
+    #[test]
+    fn multi_zone_target_is_a_resolution_choice_without_an_explicit_origin() {
+        let fragment = "put a creature card onto the battlefield";
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &creature_in(&[Zone::Hand, Zone::Command]),
+                false,
+                fragment,
+            ),
+            TargetChoiceTiming::Resolution,
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &creature_in(&[Zone::Exile, Zone::Graveyard]),
+                false,
+                fragment,
+            ),
+            TargetChoiceTiming::Resolution,
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &creature_in(&[Zone::Hand, Zone::Command]),
+                false,
+                "put target creature card onto the battlefield",
+            ),
+            TargetChoiceTiming::Stack,
+            "a printed target word stays a stack-time target",
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &creature_in(&[Zone::Graveyard]),
+                false,
+                fragment,
+            ),
+            TargetChoiceTiming::Stack,
+            "single-zone off-battlefield seeds without an origin keep their historical timing",
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                Some(Zone::Hand),
+                &creature_in(&[Zone::Hand]),
+                false,
+                fragment,
+            ),
+            TargetChoiceTiming::Resolution,
+            "an explicit off-battlefield origin is unchanged",
+        );
+    }
+
+    /// Real-card witness for the wider class the multi-zone timing rule covers:
+    /// a hand/graveyard put that reaches this classifier through the literal
+    /// origin table rather than the new zone-list grammar. Swift Warkite is one
+    /// of nine cards whose put choice was still Stack-timed at base.
+    #[test]
+    fn real_hand_or_graveyard_put_is_resolution_timed() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Flying\nWhen this creature enters, you may put a creature card with mana value 3 or less from your hand or graveyard onto the battlefield. That creature gains haste. Return it to your hand at the beginning of the next end step.",
+            "Swift Warkite",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed.triggers.first().expect("Swift Warkite ETB trigger");
+        let execute = trigger.execute.as_ref().expect("ETB execute");
+        assert_eq!(
+            execute.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "the hand/graveyard put is a resolution choice, not a stack target"
+        );
+        let Effect::ChangeZone { origin, target, .. } = execute.effect.as_ref() else {
+            panic!(
+                "Swift Warkite ETB must be ChangeZone, got {:?}",
+                execute.effect
+            );
+        };
+        assert_eq!(origin, &None);
+        let zones = target.extract_zones();
+        assert!(zones.contains(&Zone::Hand));
+        assert!(zones.contains(&Zone::Graveyard));
     }
 }

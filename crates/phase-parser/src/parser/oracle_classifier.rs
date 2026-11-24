@@ -175,7 +175,9 @@ pub(crate) fn is_alternative_keyword_cost_pattern(lower: &str) -> bool {
     (lower_starts_with(lower, "you may ")
         || (lower_starts_with(lower, "as long as ") && scan_contains(lower, "you may ")))
         && scan_contains(lower, "rather than pay")
-        && (scan_contains(lower, "cycling cost") || scan_contains(lower, "crew cost"))
+        && (scan_contains(lower, "cycling cost")
+            || scan_contains(lower, "crew cost")
+            || scan_contains(lower, "equip cost"))
 }
 
 /// CR 118.9: Alternative-cost grant — "You may cast [filter] by paying {cost}
@@ -273,6 +275,21 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         return false;
     }
 
+    // CR 608.2c: "If <condition>, <imperative instruction>. [Otherwise, …]" on an
+    // instant or sorcery is a conditional instruction of the spell's effect, even
+    // when a later sentence carries a static marker ("They have \"…\"", Brood
+    // Birthing). Only an imperative body defers; a self-static body ("If X is 5 or
+    // more, this spell can't be countered", Banefire) keeps its routing.
+    if split_leading_conditional(lower).is_some_and(|(_, body)| {
+        EFFECT_IMPERATIVE_PREFIXES.iter().any(|prefix| {
+            tag::<_, _, OracleError<'_>>(*prefix)
+                .parse(body.as_str())
+                .is_ok()
+        })
+    }) {
+        return true;
+    }
+
     // CR 111.3 + CR 604.3a: "Create a … token. Its power is equal to … and its
     // toughness is equal to …" defines the created token's power and toughness.
     // A spell's characteristic-defining ability can't define another object's
@@ -303,6 +320,11 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         || scan_contains(lower, "until end of turn")
         || scan_contains(lower, "until your next turn")
         || scan_contains(lower, "this turn")
+        // CR 611.2b: "for as long as …" is a duration given to a continuous
+        // effect the spell's resolution creates (Immortal Obligation, Soul
+        // Partition); an instant's or sorcery's own static abilities never carry
+        // one, so the line is the spell's effect chain.
+        || scan_contains(lower, "for as long as ")
 }
 
 /// CR 702.8a + CR 601.3d: "[~|this spell] has flash" prefix — see the call
@@ -577,6 +599,10 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
     "enchanted ",
     "equipped ",
     "you control enchanted ",
+    // CR 613.1b + CR 725.5: Fealty to the Realm — "The monarch controls
+    // enchanted creature." Routes the designation-anchored control static to
+    // `parse_static_line` (sibling of the Control Magic prefix above).
+    "the monarch controls enchanted ",
     "all creatures ",
     "all permanents ",
     "other ",
@@ -641,6 +667,12 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
     }
 
     if super::oracle_static::is_win_first_coin_flip_set_each_turn_static(lower) {
+        return true;
+    }
+
+    // CR 120.6 + CR 704.5g: "Lethal damage dealt to [subject] is determined by their power
+    // rather than their toughness." (Zilortha, Strength Incarnate).
+    if super::oracle_static::is_lethal_damage_determined_by_power_static(lower) {
         return true;
     }
 
@@ -1459,10 +1491,51 @@ mod tests {
 
     #[test]
     fn masked_brood_birthing_stays_static() {
-        // Brood Birthing invariant: the "have " grant marker is OUTSIDE the quote,
-        // so masking the quoted span must NOT flip the line off static.
+        // Fragment shape only: the bare "they have" grant marker is OUTSIDE the
+        // quote, so masking the quoted span must NOT flip this fragment off
+        // static. Routing of Brood Birthing's whole spell line is decided by
+        // `should_defer_spell_to_effect` (see
+        // `spell_if_imperative_line_defers_to_effect`).
         let line = "they have \"sacrifice this token: add {c}.\"";
         assert!(is_static_pattern(&strip_double_quoted_spans(line)));
+    }
+
+    /// CR 608.2c: an "If <condition>, <imperative>" spell line is a conditional
+    /// instruction of the spell; a self-static If-line keeps its routing.
+    #[test]
+    fn spell_if_imperative_line_defers_to_effect() {
+        assert!(should_defer_spell_to_effect(
+            "if you control an eldrazi spawn, create three 0/1 colorless eldrazi spawn \
+             creature tokens. they have \"sacrifice this token: add {c}.\" otherwise, \
+             create one of those tokens."
+        ));
+        for self_static in [
+            "if x is 5 or more, this spell can't be countered and the damage can't be prevented.",
+            "if this spell was kicked, it has split second.",
+            "if you revealed a dragon card or controlled a dragon as you cast this spell, \
+             this spell can't be countered.",
+            "if you weren't the starting player, this spell costs {1} less to cast.",
+        ] {
+            assert!(!should_defer_spell_to_effect(self_static), "{self_static}");
+        }
+    }
+
+    /// CR 611.2b: an instant/sorcery line stating a "for as long as" duration
+    /// is the spell's effect chain, whatever the duration's position in the
+    /// line (Immortal Obligation, Soul Partition: both were whole-line statics
+    /// at base because no other arm matches them).
+    #[test]
+    fn spell_for_as_long_as_line_defers_to_effect() {
+        for line in [
+            "return target creature card from an opponent's graveyard to the battlefield \
+             under their control with a duty counter on it. for as long as that creature \
+             has a duty counter on it, it is goaded, can't attack you or a permanent you \
+             control, and can't block creatures you control.",
+            "exile target nonland permanent. for as long as that card remains exiled, its \
+             owner may play it. a spell cast by an opponent this way costs {2} more to cast.",
+        ] {
+            assert!(should_defer_spell_to_effect(line), "{line}");
+        }
     }
 
     #[test]

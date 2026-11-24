@@ -1600,6 +1600,7 @@ fn change_zone_choice(
         enters_modified_if: None,
         duration: None,
         performed_by: None,
+        privacy_zones: None,
     }
 }
 
@@ -4016,10 +4017,12 @@ fn ever_after_save_at_the_mimics_choice_keeps_the_announced_members() {
     for trusted in [false, true] {
         let restored = restore_round_trip(runner.state(), trusted)
             .unwrap_or_else(|error| panic!("trusted {trusted}: {error}"));
+        // CR 101.4c + CR 616.1 (this PR's staged population): the paused group is
+        // the staged owner's, not a `ChangeZone` frame's. Owner-approved
+        // precondition-only edit.
         let group = &restored
-            .active_change_zone_frame()
-            .and_then(|frame| frame.pending.as_ref())
-            .expect("the paused ChangeZone frame survives the restore")
+            .active_batch_delivery()
+            .expect("the paused staged population survives the restore")
             .logical_zone_change_group;
         assert_eq!(
             group.announced_members(),
@@ -4055,7 +4058,27 @@ fn ever_after_second_mimic_choice_is_not_preceded_by_a_replacement_choice() {
         .cast(ever_after)
         .target_objects(&[mimic_a, mimic_b])
         .commit();
-    pass_until_named_choice(&mut runner);
+    // Owner-approved sequencing edit (#10806 row; CR 101.4c + CR 616.1 + CR 614.12): this PR
+    // delivers Ever After's two Mimics as ONE staged population. P0 holds both as-enters
+    // decisions and first chooses which to make, so the ordering prompt precedes the
+    // creature-type choice.
+    for _ in 0..4 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementDecisionOrder { objects, .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![objects[0]],
+                    })
+                    .expect("P0 makes the first announced Mimic's decision first");
+            }
+            WaitingFor::NamedChoice { .. } => break,
+            _ => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes before the creature-type choice");
+            }
+        }
+    }
     assert_eq!(runner.state().objects[&mimic_a].zone, Zone::Graveyard);
     runner
         .act(GameAction::ChooseOption {
@@ -4063,8 +4086,10 @@ fn ever_after_second_mimic_choice_is_not_preceded_by_a_replacement_choice() {
         })
         .expect("Mimic A names Zombie");
 
-    // Reach: A is on the battlefield and B is still in the graveyard; B's own choice is next.
-    assert_eq!(runner.state().objects[&mimic_a].zone, Zone::Battlefield);
+    // Reach: B's own choice is next. Owner-approved sequencing edit (CR 614.12 + CR 614.12a):
+    // the Mimics enter at the same time, each choice is made before its permanent enters, so
+    // both are still in the graveyard when B's choice is asked (they enter together after it).
+    assert_eq!(runner.state().objects[&mimic_a].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&mimic_b].zone, Zone::Graveyard);
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),

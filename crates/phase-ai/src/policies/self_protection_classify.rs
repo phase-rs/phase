@@ -161,6 +161,10 @@ fn modification_is_defensive(m: &ContinuousModification) -> bool {
     match m {
         ContinuousModification::AddKeyword { keyword } => keyword_is_defensive(keyword),
         ContinuousModification::AddStaticMode { mode } => static_mode_is_defensive(mode),
+        ContinuousModification::GrantStaticAbility { definition } => {
+            definition.has_legacy_static_mode_shape()
+                && definition.mode == StaticMode::CantBeBlocked
+        }
         // CR 613.1f: Layer 6 applies ability-adding effects — inner static defs often
         // omit `affected` because the granted payload applies to ~.
         ContinuousModification::GrantAbility { definition } => {
@@ -183,6 +187,10 @@ fn modification_has_defensive_payload(m: &ContinuousModification) -> bool {
     match m {
         ContinuousModification::AddKeyword { keyword } => keyword_is_defensive(keyword),
         ContinuousModification::AddStaticMode { mode } => static_mode_is_defensive(mode),
+        ContinuousModification::GrantStaticAbility { definition } => {
+            definition.has_legacy_static_mode_shape()
+                && definition.mode == StaticMode::CantBeBlocked
+        }
         ContinuousModification::GrantAbility { definition } => {
             ability_has_defensive_payload(definition)
         }
@@ -1385,6 +1393,48 @@ mod tests {
     use engine::types::ability::{AbilityKind, ControllerRef, TypedFilter};
     use engine::types::card_type::CoreType;
     use engine::types::keywords::ProtectionTarget;
+
+    #[test]
+    fn surge_engine_reaches_both_defensive_classifiers() {
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            r#"Defender
+{U}: This creature loses defender and gains "This creature can't be blocked."
+{2}{U}: This creature becomes blue and has base power and toughness 5/4. Activate only if this creature doesn't have defender.
+{4}{U}{U}: Draw three cards. Activate only if this creature is blue and only once."#,
+            "Surge Engine",
+            &["Defender".into()],
+            &["Artifact".into(), "Creature".into()],
+            &["Construct".into()],
+        );
+        use engine::types::ability::AbilityCost;
+        use engine::types::mana::{ManaCost, ManaCostShard};
+
+        let activation = parsed
+            .abilities
+            .iter()
+            .find(|ability| {
+                ability.kind == AbilityKind::Activated
+                    && matches!(
+                        &ability.cost,
+                        Some(AbilityCost::Mana { cost: ManaCost::Cost { generic: 0, shards } })
+                            if shards.as_slice() == [ManaCostShard::Blue]
+                    )
+            })
+            .expect("Surge Engine's blue-mana activation");
+        assert!(ability_grants_self_protection(activation));
+        assert!(ability_has_defensive_payload(activation));
+
+        let draw = parsed
+            .abilities
+            .iter()
+            .find(|ability| {
+                ability.kind == AbilityKind::Activated
+                    && matches!(ability.effect.as_ref(), Effect::Draw { .. })
+            })
+            .expect("Surge Engine's draw activation");
+        assert!(!ability_grants_self_protection(draw));
+        assert!(!ability_has_defensive_payload(draw));
+    }
 
     fn grant_effect(
         affected: Option<TargetFilter>,

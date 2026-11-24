@@ -1351,7 +1351,8 @@
       "title": "{{effect}} a Menos Que Você Pague",
       "titleChooseOne": "{{effect}} a Menos Que Você Pague Um",
       "dontPay": "Não Pagar",
-      "takeEffect": "Aceitar o Efeito"
+      "takeEffect": "Aceitar o Efeito",
+      "priorChoice": "Jogador {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Unir com Arcano?",
@@ -2025,7 +2026,8 @@
     "scrollLeft": "Rolar para a esquerda",
     "scrollRight": "Rolar para a direita",
     "confirm": "Confirmar",
-    "cancel": "Cancelar"
+    "cancel": "Cancelar",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Aventura",
@@ -2156,6 +2158,13 @@
   "entryController": {
     "title": "Escolher controlador ao entrar",
     "subtitle": "Escolha qual oponente controla esta permanente ao entrar."
+  },
+  "replacementDecisionOrder": {
+    "title": "Escolha qual decisão tomar primeiro",
+    "subtitle": "Estas escolhas de substituição acontecem ao mesmo tempo. Escolha qual fazer primeiro.",
+    "unknownObject": "Objeto desconhecido",
+    "attachedTo": "Em {{host}}",
+    "attachments": "Com {{names}}"
   },
   "optionalCost": {
     "gift": {
@@ -2451,6 +2460,9 @@
     "optionalTriggers": "Habilidades desencadeadas opcionais ({{count, number}})",
     "replacementChoices": "Escolhas de substituição ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Mantenha pressionado para ver a carta inteira"
+  },
   "optionalEffect": {
     "sourceFallback": "Efeito",
     "title": "{{name}} - Efeito Opcional",
@@ -2594,6 +2606,9 @@
     "partitionSubtitle": "Separe suas criaturas em duas pilhas. {{chooser}} escolherá uma.",
     "partitionSubtitleRemaining_one": "Separe suas criaturas em duas pilhas. {{chooser}} escolherá uma. ({{count}} jogador a mais depois de você)",
     "partitionSubtitleRemaining_other": "Separe suas criaturas em duas pilhas. {{chooser}} escolherá uma. ({{count}} jogadores a mais depois de você)",
+    "partitionInstruction": "{{chooser}} escolhe uma",
+    "partitionInstructionRemaining_one": "{{chooser}} escolhe uma ({{count}} jogador a mais depois de você)",
+    "partitionInstructionRemaining_other": "{{chooser}} escolhe uma ({{count}} jogadores a mais depois de você)",
     "pileALabel": "Pilha A:",
     "pileBLabel": "Pilha B:",
     "pileAria": "{{name}} — pilha {{pile}}",

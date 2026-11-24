@@ -154,6 +154,7 @@ mod tests {
     ) -> Effect {
         Effect::GenericEffect {
             static_abilities: vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::Continuous,
                 affected,
                 modifications: vec![ContinuousModification::AddKeyword { keyword }],
@@ -171,6 +172,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }],
             target,
             duration: None,
@@ -261,6 +263,7 @@ mod tests {
     fn indestructible_grant_to_self() -> Effect {
         Effect::GenericEffect {
             static_abilities: vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::Continuous,
                 affected: Some(TargetFilter::Typed(
                     TypedFilter::creature().controller(ControllerRef::You),
@@ -282,6 +285,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }],
             target: None,
             duration: None,
@@ -415,6 +419,7 @@ mod tests {
     fn classifier_rejects_opponent_indestructible_grant() {
         let effect = Effect::GenericEffect {
             static_abilities: vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::Continuous,
                 affected: Some(TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::Opponent),
@@ -436,6 +441,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }],
             target: None,
             duration: None,
@@ -503,6 +509,7 @@ mod tests {
     fn classifier_recognises_self_ref_indestructible_grant() {
         let effect = Effect::GenericEffect {
             static_abilities: vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::Continuous,
                 affected: Some(TargetFilter::SelfRef),
                 modifications: vec![ContinuousModification::AddKeyword {
@@ -522,6 +529,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }],
             target: None,
             duration: None,

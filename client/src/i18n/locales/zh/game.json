@@ -1098,7 +1098,8 @@
     "confirm": "确认",
     "eyebrow": "对局选择",
     "scrollLeft": "向左滚动",
-    "scrollRight": "向右滚动"
+    "scrollRight": "向右滚动",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "chooseOneOfBranch": {
     "eyebrow": "选择",
@@ -1454,6 +1455,13 @@
     "subtitle": "选择该永久物进场时由哪位对手操控。",
     "title": "选择进场时的操控者"
   },
+  "replacementDecisionOrder": {
+    "title": "选择先做哪个决定",
+    "subtitle": "这些替代选择同时发生。请选择先做哪一个。",
+    "unknownObject": "未知对象",
+    "attachedTo": "结附于{{host}}",
+    "attachments": "带有{{names}}"
+  },
   "freeCastWindow": {
     "castNamed": "施放{{name}}",
     "castSuffix": "（不支付其法术力费用）",
@@ -1689,6 +1697,7 @@
       "defaultEffect": "除非你支付，否则反击",
       "dontPay": "不支付",
       "takeEffect": "承受效应",
+      "priorChoice": "玩家{{id}}：{{choice}}",
       "title": "除非你支付，否则{{effect}}",
       "titleChooseOne": "除非你支付其中一项，否则{{effect}}"
     },
@@ -2170,6 +2179,9 @@
       "title": "承诺赠礼？"
     }
   },
+  "choiceModal": {
+    "holdForFullCard": "长按查看整张牌"
+  },
   "optionalEffect": {
     "dontAskAgain": "本局游戏不再询问",
     "dontAskAgainForSameCard": "本局游戏中，对这张牌的每张同名牌都使用此选择",
@@ -2585,6 +2597,9 @@
     "chooseTitle": "选择一个牌堆",
     "chooserName": "牌手 {{number}}",
     "empty": "（空）",
+    "partitionInstruction": "{{chooser}}选择其中一个",
+    "partitionInstructionRemaining_one": "{{chooser}}选择其中一个（你之后还有{{count}}名牌手）",
+    "partitionInstructionRemaining_other": "{{chooser}}选择其中一个（你之后还有{{count}}名牌手）",
     "partitionSubtitle": "将你的生物分成两个牌堆。{{chooser}}将选择其中一个。",
     "partitionSubtitleRemaining_one": "将你的生物分成两个牌堆。{{chooser}}将选择其中一个。（你之后还有{{count}}名牌手）",
     "partitionSubtitleRemaining_other": "将你的生物分成两个牌堆。{{chooser}}将选择其中一个。（你之后还有{{count}}名牌手）",

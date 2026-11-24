@@ -277,7 +277,6 @@ const EXPECTED: &[(&str, &str)] = &[
     ("engine/tests/fixtures/f4_user_mode2_accept_commits_nothing_4p.json.gz", "OFFER@24 bounded=true bound=Measured unbounded=[LibraryDelta(PlayerId(0)), Counter(Plus1Plus1, Creature), TokensCreated, Life(PlayerId(1))] winner=None"),
     ("engine/tests/fixtures/familiar_relic_turn5_2p.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
     ("engine/tests/fixtures/fantastic_four_bounded_loop_4p.json.gz", "OFFER@24 bounded=true bound=Measured unbounded=[LibraryDelta(PlayerId(0)), Counter(Plus1Plus1, Creature), TokensCreated, Life(PlayerId(1))] winner=None"),
-    ("engine/tests/fixtures/integration_cards.json.gz", "RESTOREERR unversioned raw resolution state contains an Exploited trigg"),
     ("engine/tests/fixtures/kilo_freed_relic_pentad_4p.json.gz", "BUDGET Priority"),
     ("engine/tests/fixtures/kilo_freed_relic_pentad_max_of_one_4p.json.gz", "BUDGET Priority"),
     ("engine/tests/fixtures/legacy_deferred_spell_delivery/finale_of_promise_raw.json.gz", "RESTOREERR legacy deferred_spell_delivery snapshot cannot prove which o"),

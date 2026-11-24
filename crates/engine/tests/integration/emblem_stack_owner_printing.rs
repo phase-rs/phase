@@ -13,6 +13,7 @@ use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility,
     TargetFilter,
 };
+use engine::types::card::PrintedCardRef;
 use engine::types::card_printing::{CardPrinting, SharedPrinting};
 use engine::types::display_only::DisplayOnly;
 use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
@@ -24,10 +25,7 @@ use engine::types::zones::Zone;
 const NARSET: &str = "[+1]: You gain 2 life. Add {U}, {R}, or {W}. Spend this mana only to cast a noncreature spell.\n[−2]: Draw a card, then you may discard a card. When you discard a nonland card this way, Narset deals damage equal to that card's mana value to target creature or planeswalker.\n[−6]: You get an emblem with \"Whenever you cast a noncreature spell, this emblem deals 2 damage to any target.\"";
 
 fn printing() -> SharedPrinting {
-    SharedPrinting::new(CardPrinting {
-        set_code: "iko".into(),
-        collector_number: "195".into(),
-    })
+    SharedPrinting::new(CardPrinting::owner("iko", "195"))
 }
 
 fn assert_projected_printing(
@@ -356,11 +354,11 @@ fn emblem_stack_owner_printing_capture_disclosure_boundary() {
 
 #[test]
 fn emblem_stack_owner_printing_engine_group_ignores_captured_pair() {
+    let mut automatic = printing().as_ref().clone();
+    automatic.automatic_art_catalog_version = std::num::NonZeroU8::new(1);
     for second in [
-        Some(SharedPrinting::new(CardPrinting {
-            set_code: "cmm".into(),
-            collector_number: "930".into(),
-        })),
+        Some(SharedPrinting::new(automatic)),
+        Some(SharedPrinting::new(CardPrinting::owner("cmm", "930"))),
         Some(printing()),
         None,
     ] {
@@ -378,8 +376,14 @@ fn emblem_stack_owner_printing_engine_group_ignores_captured_pair() {
             .add_spell_to_hand(P0, "Noncreature trigger", true)
             .id();
         let mut runner = scenario.build();
+        let face = PrintedCardRef {
+            oracle_id: "b7ac6e89-941f-4ad9-a437-38ec38ec5263".into(),
+            face_name: "Narset of the Ancient Way".into(),
+        };
         for (id, pair) in [(first, Some(printing())), (next, second.clone())] {
             let object = runner.state_mut().objects.get_mut(&id).unwrap();
+            object.printed_ref = Some(face.clone());
+            object.base_printed_ref = Some(face.clone());
             object.printing = DisplayOnly::new(pair.clone());
             object.base_printing = DisplayOnly::new(pair);
         }
@@ -432,6 +436,32 @@ fn emblem_stack_owner_printing_engine_group_ignores_captured_pair() {
                 .iter()
                 .find(|entry| entry.source_id == emblem)
                 .unwrap();
+            let wire =
+                serde_json::to_value(ClientGameStateRef::wrap(commit.state(), Some(P0))).unwrap();
+            let source = &wire["state"]["objects"][emblem.0.to_string()]["emblem_source"];
+            let row = &wire["derived"]["stack_entry_details"][entry.id.0.to_string()];
+            if pair
+                .as_ref()
+                .is_some_and(|printing| printing.automatic_art_catalog_version.is_some())
+            {
+                let marked = serde_json::json!({
+                    "set_code": "iko", "collector_number": "195", "automatic_art_catalog_version": 1
+                });
+                assert_eq!(source["printing"], marked);
+                assert_eq!(row["printing"], marked);
+                let other = entries.iter().find(|other| other.id != entry.id).unwrap();
+                let other_source =
+                    &wire["state"]["objects"][other.source_id.0.to_string()]["emblem_source"];
+                let other_row = &wire["derived"]["stack_entry_details"][other.id.0.to_string()];
+                let owner = serde_json::json!({"set_code":"iko","collector_number":"195"});
+                assert_eq!(other_source["printing"], owner);
+                assert_eq!(other_row["printing"], owner);
+                let expected_face = serde_json::to_value(&face).unwrap();
+                assert_eq!(source["printed_ref"], expected_face);
+                assert_eq!(other_source["printed_ref"], expected_face);
+                assert_eq!(row["printed_ref"], expected_face);
+                assert_eq!(other_row["printed_ref"], expected_face);
+            }
             assert_projected_printing(commit.state(), emblem, entry.id, pair);
         }
         let wire =

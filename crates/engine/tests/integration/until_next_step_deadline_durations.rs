@@ -142,7 +142,9 @@ fn orcish_farmer_swamp_change_expires_at_the_lands_controllers_untap_step() {
     let mut runner = scenario.build();
 
     assert!(
-        land_subtypes(&mut runner, forest).contains(&"Forest".to_string()),
+        land_subtypes(&mut runner, forest)
+            .iter()
+            .any(|i| i == "Forest"),
         "precondition: the targeted land starts as a Forest"
     );
 
@@ -155,7 +157,7 @@ fn orcish_farmer_swamp_change_expires_at_the_lands_controllers_untap_step() {
     };
     let subtypes = land_subtypes(&mut runner, forest);
     assert!(
-        subtypes.contains(&"Swamp".to_string()) && !subtypes.contains(&"Forest".to_string()),
+        subtypes.iter().any(|i| i == "Swamp") && !subtypes.iter().any(|i| i == "Forest"),
         "CR 305.7: setting a land's basic type replaces its other land types; \
          got subtypes={subtypes:?} waiting_for={waiting}",
     );
@@ -166,7 +168,7 @@ fn orcish_farmer_swamp_change_expires_at_the_lands_controllers_untap_step() {
     drive_to(&mut runner, Phase::End, farmer_turn);
     let subtypes = land_subtypes(&mut runner, forest);
     assert!(
-        subtypes.contains(&"Swamp".to_string()),
+        subtypes.iter().any(|i| i == "Swamp"),
         "the change must outlive the turn it was created on; subtypes={subtypes:?}",
     );
 
@@ -181,7 +183,7 @@ fn orcish_farmer_swamp_change_expires_at_the_lands_controllers_untap_step() {
     );
     let subtypes = land_subtypes(&mut runner, forest);
     assert!(
-        subtypes.contains(&"Forest".to_string()) && !subtypes.contains(&"Swamp".to_string()),
+        subtypes.iter().any(|i| i == "Forest") && !subtypes.iter().any(|i| i == "Swamp"),
         "the Swamp change must expire at its controller's next untap step \
          (CR 502.3); still a Swamp means the duration was dropped and stamped \
          Permanent. subtypes={subtypes:?}",

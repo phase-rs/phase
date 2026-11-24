@@ -1762,15 +1762,7 @@ mod tests {
                     };
                     let expected: Vec<_> = sets
                         .iter()
-                        .map(|set| {
-                            (
-                                "Plains".to_string(),
-                                CardPrinting {
-                                    set_code: (*set).into(),
-                                    collector_number: "001".into(),
-                                },
-                            )
-                        })
+                        .map(|set| ("Plains".to_string(), CardPrinting::owner(*set, "001")))
                         .collect();
                     assert_eq!(actual, expected,
                         "pairing objects retain the authenticated owner's exact printing budget: pod seat {}",
@@ -1879,7 +1871,7 @@ mod tests {
         // than dropping it.
         let (active, expected_pool_before) = {
             let state = session.shared_stack.as_mut().unwrap();
-            let mut orphaned: Vec<_> = state.main_stack.drain(..).collect();
+            let mut orphaned: Vec<_> = std::mem::take(&mut state.main_stack);
             orphaned.append(&mut state.piles[0]);
             state.inspected[0] = 0;
             assert!(state.piles[0].is_empty());

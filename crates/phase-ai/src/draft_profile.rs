@@ -1036,6 +1036,10 @@ fn is_evasion_modification(modification: &ContinuousModification) -> bool {
             is_evasion_keyword(keyword, RoleReading::Full)
         }
         ContinuousModification::AddStaticMode { mode } => is_block_restriction(mode),
+        ContinuousModification::GrantStaticAbility { definition } => {
+            definition.has_legacy_static_mode_shape()
+                && definition.mode == StaticMode::CantBeBlocked
+        }
         // Exhaustive: every other modification changes a characteristic,
         // grants an ability, or rewrites text — none restricts blocking.
         ContinuousModification::CopyValues { .. }
@@ -1077,12 +1081,12 @@ fn is_evasion_modification(modification: &ContinuousModification) -> bool {
         | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }
         | ContinuousModification::AddColor { .. }
-        | ContinuousModification::GrantStaticAbility { .. }
         | ContinuousModification::SwitchPowerToughness
         | ContinuousModification::AssignDamageFromToughness
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -2664,6 +2668,40 @@ mod tests {
         let atomic: engine::database::mtgjson::AtomicCard =
             serde_json::from_value(json).expect("valid AtomicCard fixture");
         engine::database::synthesis::build_oracle_face(&atomic, None)
+    }
+
+    #[test]
+    fn surge_activation_and_printed_kavu_evasion_keep_their_draft_readings() {
+        let surge = oracle_face(serde_json::json!({
+            "name": "Surge Engine",
+            "type": "Artifact Creature — Construct",
+            "types": ["Artifact", "Creature"],
+            "subtypes": ["Construct"],
+            "manaCost": "{2}",
+            "power": "3",
+            "toughness": "2",
+            "text": r#"Defender
+{U}: This creature loses defender and gains "This creature can't be blocked."
+{2}{U}: This creature becomes blue and has base power and toughness 5/4. Activate only if this creature doesn't have defender.
+{4}{U}{U}: Draw three cards. Activate only if this creature is blue and only once."#,
+        }));
+        assert!(face_grants_self_evasion(&surge));
+        assert!(is_evasive(&surge, RoleReading::Full));
+        assert!(!is_evasive(&surge, RoleReading::Classic));
+
+        let kavu = oracle_face(serde_json::json!({
+            "name": "Chomping Kavu",
+            "type": "Creature — Kavu",
+            "types": ["Creature"],
+            "subtypes": ["Kavu"],
+            "manaCost": "{3}{G}",
+            "power": "3",
+            "toughness": "3",
+            "text": r#"Backup 1 (When this creature enters, put a +1/+1 counter on target creature. If that's another creature, it gains the following ability until end of turn.)
+        This creature can't be blocked by creatures with power 2 or less."#,
+        }));
+        assert!(is_evasive(&kavu, RoleReading::Full));
+        assert!(!face_grants_self_evasion(&kavu));
     }
 
     /// Sakura-Tribe Elder: a printed CHK fixer whose land search is the

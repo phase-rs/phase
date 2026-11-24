@@ -1351,7 +1351,8 @@
       "title": "{{effect}}, chyba że zapłacisz",
       "titleChooseOne": "{{effect}}, chyba że zapłacisz jeden",
       "dontPay": "Nie płać",
-      "takeEffect": "Przyjmij efekt"
+      "takeEffect": "Przyjmij efekt",
+      "priorChoice": "Gracz {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Połącz z Arcane?",
@@ -2025,7 +2026,8 @@
     "scrollLeft": "Przewiń w lewo",
     "scrollRight": "Przewiń w prawo",
     "confirm": "Potwierdź",
-    "cancel": "Anuluj"
+    "cancel": "Anuluj",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Adventure",
@@ -2156,6 +2158,13 @@
   "entryController": {
     "title": "Wybierz kontrolującego przy wejściu",
     "subtitle": "Wybierz przeciwnika, który kontroluje ten permanent, gdy wchodzi na pole bitwy."
+  },
+  "replacementDecisionOrder": {
+    "title": "Wybierz, którą decyzję podjąć najpierw",
+    "subtitle": "Te wybory zastąpienia zachodzą jednocześnie. Wybierz, którego dokonasz najpierw.",
+    "unknownObject": "Nieznany obiekt",
+    "attachedTo": "Na: {{host}}",
+    "attachments": "Z: {{names}}"
   },
   "optionalCost": {
     "gift": {
@@ -2451,6 +2460,9 @@
     "optionalTriggers": "Opcjonalne zdolności wyzwalane ({{count, number}})",
     "replacementChoices": "Wybory zastępowania ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Przytrzymaj, aby zobaczyć całą kartę"
+  },
   "optionalEffect": {
     "sourceFallback": "Efekt",
     "title": "{{name}} - Efekt opcjonalny",
@@ -2594,6 +2606,9 @@
     "partitionSubtitle": "Rozdziel swoje stwory na dwa stosy. {{chooser}} wybierze jeden.",
     "partitionSubtitleRemaining_one": "Rozdziel swoje stwory na dwa stosy. {{chooser}} wybierze jeden. ({{count}} gracz więcej po tobie)",
     "partitionSubtitleRemaining_other": "Rozdziel swoje stwory na dwa stosy. {{chooser}} wybierze jeden. ({{count}} graczy więcej po tobie)",
+    "partitionInstruction": "{{chooser}} wybiera jeden",
+    "partitionInstructionRemaining_one": "{{chooser}} wybiera jeden ({{count}} gracz więcej po tobie)",
+    "partitionInstructionRemaining_other": "{{chooser}} wybiera jeden ({{count}} graczy więcej po tobie)",
     "pileALabel": "Stos A:",
     "pileBLabel": "Stos B:",
     "pileAria": "{{name}} — stos {{pile}}",
