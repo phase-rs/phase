@@ -104,7 +104,7 @@ use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AttachCardinality, AttachSelection, AttachmentReferent,
     AttackSubject, AttackedYouScope, CardTypeSetSource, CombatRelationSubject,
-    ContinuousModification, ControllerRef, Duration, Effect, EffectScope, GuessSubject,
+    ContinuousModification, ControllerRef, CountScope, Duration, Effect, EffectScope, GuessSubject,
     KeeperConstraint, LibraryInstructionActor, ModalChoice, MultiTargetSpec, NameStickerSet,
     ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
     ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementDefinition, ResolvedAbility,
@@ -1381,7 +1381,7 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
         read_mctrl: effective_span(p.reads_membership_ctrl, board_reads.set_membership),
         write_mctrl: membership_ctrl_of(board_writes, eff_external_ctrl, p.writes_membership_self),
     };
-    if feeds(
+    feeds(
         board_reads,
         board_writes,
         FeedContext::new(
@@ -1395,11 +1395,7 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
             },
             board_spans,
         ),
-    ) {
-        return true;
-    }
-
-    false
+    )
 }
 
 /// The membership-write census applying to an effective write set: external
@@ -1860,8 +1856,9 @@ fn flag_legacy_write_target(p: &mut RwProfile, target: &TargetFilter) {
 
 /// Record a per-member binding (`bind_per_member`) when an effect WRITE target names a per-member-bound
 /// referent (CR 603.10a, PR-6.75 c5) — the write path's counterpart to
-/// `member_bound_target_filter` read-position wiring. A `ChangeZone{TrackedSet}`
-/// return (Day of the Dragons) writes a per-source set ⇒ members diverge.
+/// `member_bound_target_filter` read-position wiring. A
+/// `ChangeZoneAll{origin: Exile, TrackedSetFiltered}` return (Day of the
+/// Dragons) writes a per-source set ⇒ members diverge.
 fn flag_member_bound_write_target(p: &mut RwProfile, target: &TargetFilter) {
     if member_bound_target_filter(target) {
         p.bind_per_member();
@@ -2067,6 +2064,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana
+        | TriggerCondition::LoyaltyCountersRemovedAtLeast { .. }
         | TriggerCondition::FirstTimeObjectTappedThisTurn
         // Both first-time siblings are terminal here: neither carries a legacy
         // player-filter/quantity ref, so the D5 legacy-batch-prompt flag is
@@ -2213,7 +2211,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceIsEquipped
@@ -2406,6 +2404,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -4729,7 +4728,8 @@ fn walk_ability(
         declares_return_result: _, // producer effect accounts for publication
         reads_return_result,      // instruction-local result is member-bound
         source_id: _,
-        cast_occurrence: _,    // finalized-cast provenance, no read/write effect
+        cast_occurrence: _, // finalized-cast provenance, no read/write effect
+        cycling_occurrence: _,
         source_incarnation: _, // self-transform epoch latch, no read/write effect
         announced_source_incarnation: _, // announcement-time source epoch, no read/write effect
         trigger_source: _,     // exact triggered-source authority, no read/write effect
@@ -4789,6 +4789,7 @@ fn walk_ability(
         entry_onset: _,  // CR 611.2e onset tag, no read or write
         sibling_condition: _, // replication marker, no read/write effect
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         replacement_applied: _,
         parent_target_missing_reason: _,
         activation_cost_reduction: _,
@@ -4939,6 +4940,7 @@ fn walk_definition(
         iteration_kind_binding: _,
         sibling_condition: _,
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker
@@ -4947,6 +4949,7 @@ fn walk_definition(
         // intact, and no runtime path reaches such a tree. See
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        linked_exile_return: _,
         face_down_in_exile: _,
         granting_object: _,
         // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
@@ -7369,6 +7372,19 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::CardsDrawnThisTurn { player: _ }
         | QuantityRef::CardsDrawnLastTurn { player: _ }
         | QuantityRef::CardsDiscardedThisTurn { .. } => reads_player_of(StateKind::JournalCards),
+        QuantityRef::CardsCycled {
+            scope,
+            window: _,
+            name: _,
+        } => {
+            // CR 603.3b + CR 608.2h: This reads a player journal, with a per-source
+            // binding only when the scope uses that source's persisted player choice.
+            let mut profile = reads_player_of(StateKind::JournalCards);
+            if matches!(scope, CountScope::SourceChosenPlayer) {
+                profile.bind_per_member();
+            }
+            profile
+        }
         QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::OpponentSpellsCastSinceLastTurn { player: _ }
@@ -7753,6 +7769,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana
+        | TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum: _ }
         | TriggerCondition::FirstTimeObjectTappedThisTurn
         | TriggerCondition::WasType { .. }
         | TriggerCondition::AttackedThisTurn
@@ -7896,7 +7913,7 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted
@@ -11586,6 +11603,62 @@ mod poison_condition_rw_tests {
                 static_profile, expected,
                 "the static sibling arm records the same player read ({player:?})"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod cycling_quantity_rw_tests {
+    use super::*;
+    use crate::types::ability::{Comparator, CyclingHistoryWindow};
+    use crate::types::{identifiers::ObjectId, player::PlayerId};
+
+    #[test]
+    fn phase3_v5_cycling_footprint_tracks_only_the_player_journal_and_bound_choice() {
+        let name = "Yidaro, Wandering Monster".to_owned();
+        let fixed = |value| QuantityExpr::Fixed { value };
+        let profiles = |lhs: QuantityExpr| {
+            let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+            ability.condition = Some(AbilityCondition::QuantityCheck {
+                lhs: lhs.clone(),
+                comparator: Comparator::GE,
+                rhs: fixed(4),
+            });
+            let trigger = TriggerCondition::QuantityComparison {
+                lhs,
+                comparator: Comparator::GE,
+                rhs: fixed(2),
+            };
+            [
+                ability_rw_profile(&ability),
+                trigger_condition_rw_profile(&trigger),
+            ]
+        };
+        for (window, name) in [
+            (CyclingHistoryWindow::ThisGame, Some(name)),
+            (CyclingHistoryWindow::ThisTurn, None),
+        ] {
+            for (scope, bound) in [
+                (CountScope::Controller, false),
+                (CountScope::SourceChosenPlayer, true),
+            ] {
+                for profile in profiles(QuantityExpr::Ref {
+                    qty: QuantityRef::CardsCycled {
+                        scope,
+                        window,
+                        name: name.clone(),
+                    },
+                }) {
+                    assert_eq!(profile.reads_player, KindSet::one(StateKind::JournalCards));
+                    assert_eq!(profile.reads_member_bound(), bound);
+                    assert!(!profile.legacy_batch_prompt());
+                    assert!(!profile.reads_event_live);
+                    assert!(!profile.writes_event_object.any());
+                }
+            }
+        }
+        for profile in profiles(fixed(0)) {
+            assert_eq!(profile, RwProfile::empty());
         }
     }
 }

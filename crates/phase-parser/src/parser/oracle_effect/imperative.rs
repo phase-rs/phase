@@ -20,9 +20,9 @@ use super::counter::{
     try_parse_remove_counter,
 };
 use super::lower::{
-    parse_multi_target_count_expr, parse_where_x_quantity_expression,
-    parse_where_x_quantity_expression_with_owner, rebind_pt_scope_to_target,
-    strip_leading_quantifier, strip_terminal_where_x, strip_trailing_where_x, WhereXBinding,
+    parse_multi_target_count_expr, parse_where_x_quantity_expression_with_owner,
+    rebind_pt_scope_to_target, strip_leading_quantifier, strip_terminal_where_x,
+    strip_trailing_where_x, WhereXBinding,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
@@ -77,8 +77,9 @@ use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
-    fold_article_led_type_union, match_mass_union_separator, parse_anaphoric_target_ref,
-    parse_declared_damage_source_target, parse_definite_parent_reference, parse_event_context_ref,
+    fold_article_led_type_union, linked_exile_return_mark, match_mass_union_separator,
+    parse_anaphoric_target_ref, parse_declared_damage_source_target,
+    parse_definite_parent_reference, parse_event_context_ref, parse_exiled_card_anaphor,
     parse_fight_target, parse_mass_type_union, parse_target, parse_target_with_ctx,
     parse_target_with_syntax, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
     parse_word_bounded, resolve_pronoun_target, resolve_singular_exiled_card_target,
@@ -786,6 +787,7 @@ pub(super) fn parse_earthbend_params(text: &str, lower_rest: &str) -> (TargetFil
 pub(super) fn parse_earthbend_count_expr(
     text: &str,
     lower_rest: &str,
+    ctx: &ParseContext,
 ) -> Option<(TargetFilter, QuantityExpr)> {
     if let Ok((rem, n)) = nom_primitives::parse_number.parse(lower_rest) {
         let target_text = rem.trim_start();
@@ -825,8 +827,13 @@ pub(super) fn parse_earthbend_count_expr(
         // `Effect::unimplemented` gap so coverage counts the card as unsupported.
         // (matthewevans review, PR #5881.)
         if let Ok((where_body, _)) = tag::<_, _, OracleError<'_>>(", where x is ").parse(rem) {
-            let count = crate::parser::oracle_quantity::parse_quantity_ref(where_body)
-                .map(|qty| QuantityExpr::Ref { qty })
+            let antecedents = ctx.player_antecedents();
+            let count = WhereXBinding::new(Some(where_body), &antecedents)
+                .resolve_trigger_event_stat()
+                .or_else(|| {
+                    crate::parser::oracle_quantity::parse_quantity_ref(where_body)
+                        .map(|qty| QuantityExpr::Ref { qty })
+                })
                 .or_else(|| {
                     crate::parser::oracle_quantity::parse_event_context_quantity(where_body)
                 })?;
@@ -1401,6 +1408,77 @@ fn parse_discard_unless_filter<'a>(
     }
     (before, Some(filter))
 }
+
+/// CR 701.9a + CR 608.2c + CR 201.2a: the card filter of a discard
+/// instruction's noun phrase ("cards", "a creature card", "cards with that
+/// name", "nonland cards with that name"). The outer `None` means the noun is
+/// not recognized, so the instruction fails closed; the inner `None` means a
+/// plain "card(s)", which any card in the hand satisfies.
+fn parse_discard_noun_filter(noun: &str) -> Option<Option<TargetFilter>> {
+    // CR 201.2a + CR 608.2c: a trailing "with that name" binds the discard to the
+    // card name chosen earlier in this resolution (Brain Pry). It composes onto
+    // whatever type qualifier precedes it.
+    let (noun, has_chosen_name) = match terminated(
+        take_until::<_, _, OracleError<'_>>(" with that name"),
+        all_consuming(tag(" with that name")),
+    )
+    .parse(noun)
+    {
+        Ok((_, base)) => (base, true),
+        Err(_) => (noun, false),
+    };
+    let plain_noun = noun.to_lowercase();
+    let type_filter = if all_consuming((
+        opt(tag::<_, _, OracleError<'_>>("additional ")),
+        alt((tag("cards"), tag("card"))),
+    ))
+    .parse(plain_noun.as_str())
+    .is_ok()
+    {
+        None
+    } else {
+        Some(parse_discard_card_filter(noun)?)
+    };
+    Some(match (type_filter, has_chosen_name) {
+        (filter, false) => filter,
+        (None, true) => Some(TargetFilter::HasChosenName),
+        (Some(filter), true) => Some(TargetFilter::And {
+            filters: vec![filter, TargetFilter::HasChosenName],
+        }),
+    })
+}
+
+/// CR 701.9a + CR 608.2c: whether an "all <noun>" discard can carry this parsed
+/// noun filter. Two parsed shapes are refused (fail closed):
+/// - a noun that names a zone ("all cards from their hand", Khorvath's Fury): a
+///   discard's pool is always the discarding player's hand (CR 701.9a), so the
+///   zone restates the whole-hand instruction rather than filtering the hand.
+///   Accepting it here would be wrong, not merely misplaced: the printed
+///   instruction sits under a per-player friend-or-foe fan-out, and this arm
+///   establishes neither which player discards under that fan-out nor how the
+///   following "draws that many cards" reads the discarded count, so a lowered
+///   discard would claim semantics nothing here backs;
+/// - a mana-value comparison over an `Anaphoric` / `Demonstrative` object
+///   referent ("cards with that spell's mana value"): after a reveal of a
+///   one-card hand the earlier-instruction referent (CR 608.2c) is the revealed
+///   card, so the read would not name the spell (CR 202.3).
+fn discard_all_filter_is_representable(filter: &TargetFilter) -> bool {
+    !crate::types::ability::filter_contains_filter_prop(filter, &|prop| {
+        matches!(prop, FilterProp::InZone { .. })
+            || matches!(prop, FilterProp::Cmc { value, .. }
+            if crate::types::ability::quantity_expr_contains_scope(value, ObjectScope::Anaphoric)
+                || crate::types::ability::quantity_expr_contains_scope(
+                    value,
+                    ObjectScope::Demonstrative,
+                ))
+    })
+}
+
+/// CR 201.4a: the gap an "all … with that name" discard lowers to when the
+/// preceding card-name choice prints a characteristic `ChoiceType::CardName`
+/// cannot carry ("choose a nonland card name").
+pub(crate) const DISCARD_CHOSEN_NAME_CHARACTERISTIC_GAP: &str =
+    "discard_chosen_name_characteristic";
 
 /// CR 701.9a + CR 608.2c: Parse the card-type filter portion of a discard phrase.
 ///
@@ -2164,6 +2242,61 @@ pub(super) fn parse_targeted_action_ast(
                 filter: None,
             });
         }
+        // CR 701.9a + CR 608.2c: "discards all <filter> cards" discards every card in the
+        // discarding player's hand that matches the filter. The count is the census of
+        // those cards in that player's hand (`ZoneCardCount`, scoped to the discarding
+        // player by the resolver and read once when the discard is applied, CR 608.2h),
+        // so the forced branch moves exactly the matching cards
+        // and a hand with none requires zero. "all other …" is relative to cards chosen
+        // earlier in the resolution, not to the source, so it fails closed.
+        if let Ok((rest, _)) =
+            (tag::<_, _, OracleError<'_>>("all "), not(tag("other "))).parse(after_discard)
+        {
+            if random || up_to {
+                return None;
+            }
+            let original_rest = &text[text.len() - rest.len()..];
+            let filter = parse_discard_noun_filter(
+                crate::parser::oracle_util::normalize_count_slot_text(original_rest),
+            )??;
+            if !discard_all_filter_is_representable(&filter) {
+                return None;
+            }
+            // CR 201.4a + CR 608.2c: "with that name" reads the name an earlier "choose a
+            // <characteristic> card name" instruction chose, and `ChoiceType::CardName`
+            // cannot carry that characteristic, so an out-of-characteristic name (a land,
+            // for "nonland") would discard every copy. Fail closed with an explicit gap
+            // until the choice enforces it.
+            if ctx.pending_card_name_characteristic.is_some()
+                && crate::types::ability::filter_grammar_any(&filter, &|node| {
+                    matches!(
+                        node,
+                        crate::types::ability::FilterGrammarNode::Filter(
+                            TargetFilter::HasChosenName
+                        )
+                    )
+                })
+            {
+                return Some(TargetedImperativeAst::Unimplemented {
+                    gap: DISCARD_CHOSEN_NAME_CHARACTERISTIC_GAP,
+                    fragment: text.to_string(),
+                });
+            }
+            return Some(TargetedImperativeAst::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Hand,
+                        card_types: vec![],
+                        filter: Some(filter.clone()),
+                        scope: CountScope::ScopedPlayer,
+                    },
+                },
+                random: false,
+                up_to: false,
+                unless_filter: None,
+                filter: Some(filter),
+            });
+        }
         // CR 701.9a: "discard any number of [filter] cards" — opt-choice
         // discard where the player picks any 0..hand-size. Encoded as
         // count = HandSize with up_to = true so the controller chooses how
@@ -2220,37 +2353,7 @@ pub(super) fn parse_targeted_action_ast(
         ))
         .parse(noun_lower.as_str())
         .map_or(slot.noun, |(_, body)| &slot.noun[..body.len()]);
-        // CR 201.2a + CR 608.2c: a trailing "with that name" binds the discard to the
-        // card name chosen earlier in this resolution (Brain Pry). It composes onto
-        // whatever type qualifier precedes it.
-        let (noun, has_chosen_name) = match terminated(
-            take_until::<_, _, OracleError<'_>>(" with that name"),
-            all_consuming(tag(" with that name")),
-        )
-        .parse(noun)
-        {
-            Ok((_, base)) => (base, true),
-            Err(_) => (noun, false),
-        };
-        let plain_noun = noun.to_lowercase();
-        let type_filter = if all_consuming((
-            opt(tag::<_, _, OracleError<'_>>("additional ")),
-            alt((tag("cards"), tag("card"))),
-        ))
-        .parse(plain_noun.as_str())
-        .is_ok()
-        {
-            None
-        } else {
-            Some(parse_discard_card_filter(noun)?)
-        };
-        let filter = match (type_filter, has_chosen_name) {
-            (filter, false) => filter,
-            (None, true) => Some(TargetFilter::HasChosenName),
-            (Some(filter), true) => Some(TargetFilter::And {
-                filters: vec![filter, TargetFilter::HasChosenName],
-            }),
-        };
+        let filter = parse_discard_noun_filter(noun)?;
         return Some(TargetedImperativeAst::Discard {
             count,
             random,
@@ -2470,16 +2573,15 @@ pub(super) fn parse_targeted_action_ast(
         // non-battlefield returns (for example a granted delayed return to a
         // graveyard) retain their normal antecedent and zone semantics.
         let target_text_lower = target_text.trim().to_ascii_lowercase();
-        let names_linked_exiled_card =
-            all_consuming((tag::<_, _, OracleError<'_>>("the exiled card"), space0, eof))
-                .parse(target_text_lower.as_str())
-                .is_ok();
+        let exiled_anaphor = parse_exiled_card_anaphor(target_text_lower.trim())
+            .ok()
+            .map(|(_, number)| number);
         let returns_to_hand = matches!(dest, Some(ref d) if d.zone == Zone::Hand);
         let target = if returns_to_hand
             && ctx.current_ability_exile_cost_zone.is_none()
-            && names_linked_exiled_card
+            && exiled_anaphor == Some(AnaphorNumber::Singular)
         {
-            resolve_singular_exiled_card_target(ctx.chain_has_prior_exile_producer, target)
+            resolve_singular_exiled_card_target(ctx.chain_prior_publishers, target)
         } else {
             target
         };
@@ -2530,6 +2632,15 @@ pub(super) fn parse_targeted_action_ast(
         if super::target_span_dropped_this_way_anaphor(target_text, &target) {
             return None;
         }
+        // CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel. Whether
+        // it names only the cards the linked exile instruction exiled depends on the
+        // return's own resolution chain (CR 608.2c), and that chain is fixed only on
+        // the finished tree, after assembly and the Phase 2 passes have placed this
+        // clause on one side or the other of a delayed-trigger edge (CR 603.7c). The
+        // clause keeps this binding and carries the mark;
+        // `parser::oracle::bind_linked_exile_returns` decides it there.
+        let linked_exile_return =
+            exiled_anaphor.and_then(|number| linked_exile_return_mark(number, &target));
 
         // CR 400.7: Single-object battlefield destinations use ChangeZone;
         // mass destinations use ChangeZoneAll. Only pure mass-bounce
@@ -2567,6 +2678,7 @@ pub(super) fn parse_targeted_action_ast(
                         enters_under,
                         enter_tapped: d.enter_tapped,
                         enter_with_counters: d.enter_with_counters,
+                        linked_exile_return,
                     })
                 } else {
                     // CR 701.3a + CR 303.4f: "return … to the battlefield attached
@@ -2587,6 +2699,7 @@ pub(super) fn parse_targeted_action_ast(
                         enter_with_counters: d.enter_with_counters,
                         face_down: d.face_down,
                         attach_host,
+                        linked_exile_return,
                     })
                 }
             }
@@ -2647,6 +2760,7 @@ pub(super) fn parse_targeted_action_ast(
                         enters_under: EntersUnderSpec::Default,
                         enter_tapped: false,
                         enter_with_counters: vec![],
+                        linked_exile_return,
                     })
                 } else if origin.is_some() {
                     Some(TargetedImperativeAst::ReturnToZone {
@@ -2655,12 +2769,14 @@ pub(super) fn parse_targeted_action_ast(
                         destination: Zone::Hand,
                         up_to: return_up_to,
                         multi_target: return_multi_target,
+                        linked_exile_return,
                     })
                 } else {
                     Some(TargetedImperativeAst::Return {
                         target,
                         selection,
                         multi_target: return_multi_target,
+                        linked_exile_return,
                     })
                 }
             }
@@ -2688,6 +2804,7 @@ pub(super) fn parse_targeted_action_ast(
                         enters_under: EntersUnderSpec::Default,
                         enter_tapped: false,
                         enter_with_counters: vec![],
+                        linked_exile_return,
                     })
                 } else {
                     Some(TargetedImperativeAst::ReturnToZone {
@@ -2696,6 +2813,7 @@ pub(super) fn parse_targeted_action_ast(
                         destination: d.zone,
                         up_to: return_up_to,
                         multi_target: return_multi_target,
+                        linked_exile_return,
                     })
                 }
             }
@@ -2711,6 +2829,7 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         selection,
                         multi_target: return_multi_target,
+                        linked_exile_return,
                     })
                 }
             }
@@ -2840,6 +2959,112 @@ pub(super) fn parse_targeted_action_ast(
     None
 }
 
+/// CR 400.7 + CR 608.2c: a set-wide return — every object of `target` moves to
+/// `destination` together. Single authority for the `ChangeZoneAll` a mass return
+/// lowers to: the `ReturnAllToZone` lowering and the finished-tree linked-exile pass
+/// (`parser::oracle::bind_linked_exile_returns`) both build it here.
+///
+/// CR 406.6 + CR 607.2a: a linked-exile population (`ExiledBySource`, or the
+/// chain set narrowed to its `Exiled`-caused members) is in exile, so it moves out
+/// of exile whatever origin the text implied.
+pub(crate) fn return_all_to_zone_effect(
+    origin: Option<Zone>,
+    destination: Zone,
+    target: TargetFilter,
+    enters_under: Option<ControllerRef>,
+    enter_tapped: crate::types::zones::EtbTapState,
+    enter_with_counters: Vec<(crate::types::counter::CounterType, QuantityExpr)>,
+) -> Effect {
+    let origin = match &target {
+        TargetFilter::ExiledBySource => Some(Zone::Exile),
+        TargetFilter::TrackedSetFiltered {
+            caused_by: Some(ThisWayCause::Exiled),
+            ..
+        } => Some(Zone::Exile),
+        TargetFilter::TrackedSetFiltered {
+            caused_by: None | Some(ThisWayCause::OwnerLibraryShuffleSubject | ThisWayCause::Sacrificed | ThisWayCause::Destroyed | ThisWayCause::Milled | ThisWayCause::Discarded | ThisWayCause::Tapped | ThisWayCause::Returned | ThisWayCause::Bounced | ThisWayCause::PutIntoGraveyard | ThisWayCause::ControlGained),
+            ..
+        }
+        // Every other shape names a population the text's own origin governs.
+        | TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Typed(..)
+        | TargetFilter::Not { .. }
+        | TargetFilter::Or { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => origin,
+    };
+    Effect::ChangeZoneAll {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        origin,
+        destination,
+        target,
+        enters_under,
+        enter_tapped,
+        enters_attacking: false,
+        // CR 122.1 + CR 122.1h: each returned object enters with these
+        // counters (e.g. a finality counter on Shilgengar's mass return).
+        enter_with_counters,
+        face_down_profile: None,
+        library_position: None,
+        library_shuffle: Default::default(),
+        random_order: false,
+    }
+}
+
 pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
     match ast {
         // CR 701.26a/b: map the parser AST tap/untap variants onto the
@@ -2935,6 +3160,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             selection,
             multi_target: _,
+            linked_exile_return: _,
         } => Effect::Bounce {
             target,
             destination: None,
@@ -2965,6 +3191,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_with_counters,
             face_down,
             attach_host: _,
+            linked_exile_return: _,
         } => {
             // CR 110.2a: fail closed. A printed control clause whose
             // antecedent could not be named must NOT collapse into the
@@ -3022,6 +3249,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             destination,
             up_to,
             multi_target: _,
+            linked_exile_return: _,
         } => Effect::ChangeZone {
             actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
@@ -3046,6 +3274,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_under,
             enter_tapped,
             enter_with_counters,
+            linked_exile_return: _,
         } => {
             // CR 110.2a: fail closed on an unbindable control clause rather
             // than silently defaulting the controller for the whole moved
@@ -3056,30 +3285,14 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                     p.printed_clause(),
                 );
             }
-            let origin = match &target {
-                TargetFilter::ExiledBySource => Some(Zone::Exile),
-                TargetFilter::TrackedSetFiltered {
-                    caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
-                    ..
-                } => Some(Zone::Exile),
-                _ => origin,
-            };
-            Effect::ChangeZoneAll {
-                actor: crate::types::ability::LibraryInstructionActor::Controller,
+            return_all_to_zone_effect(
                 origin,
                 destination,
                 target,
-                enters_under: enters_under.as_controller_ref(),
-                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
-                enters_attacking: false,
-                // CR 122.1 + CR 122.1h: each returned object enters with these
-                // counters (e.g. a finality counter on Shilgengar's mass return).
+                enters_under.as_controller_ref(),
+                crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                 enter_with_counters,
-                face_down_profile: None,
-                library_position: None,
-                library_shuffle: Default::default(),
-                random_order: false,
-            }
+            )
         }
         // CR 115.6: the "up to N" target cardinality is an ability-level field
         // (`ParsedEffectClause.multi_target`), not an `Effect::Fight` field. It is
@@ -3144,6 +3357,9 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
         },
         TargetedImperativeAst::ZoneCounterProxy(ast) => lower_zone_counter_ast(*ast),
+        TargetedImperativeAst::Unimplemented { gap, fragment } => {
+            Effect::unimplemented(gap, fragment)
+        }
     }
 }
 
@@ -3625,27 +3841,43 @@ fn parse_same_name_exile_source<'a>(
     .parse(input)
 }
 
-/// CR 406.2 + CR 404.1 + CR 108.2 + CR 608.2f: "exile all `<permanent types>` and
-/// `<zone(s)>`" — a heterogeneous mass exile whose operand unions a battlefield
-/// permanent population with one or more whole-zone populations (every card in
-/// every player's graveyard / hand / library, keyed by owner per CR 400.3).
-/// Ultimate Nullification ("Exile all creatures and graveyards") is the
-/// exemplar. Generalizes to any permutation ("… creatures and artifacts and
-/// graveyards", "… creatures and graveyards and hands").
+/// CR 406.2 + CR 404.1 + CR 108.2 + CR 608.2f: "exile all `<population>` and
+/// `<population>`, …" — a heterogeneous mass exile whose operand is ONE union
+/// of populations, so the resolving `ChangeZoneAll` (built with `origin: None`
+/// and scanning `extract_zones()`) moves every match simultaneously
+/// (CR 608.2f). One shared [`parse_mass_type_union`] read feeds two ways in:
 ///
-/// The permanent legs are parsed by [`parse_mass_type_union`] (CR 205.2a +
-/// CR 205.3a — a card-type/subtype union) and scoped to the battlefield via
-/// `InZone`; the trailing zone legs become an all-cards (`TypeFilter::Card`),
-/// all-owners (`controller: None`) leg carrying the zone union on `InAnyZone`.
-/// The two are merged into one `Or`, so the resolving `ChangeZoneAll` scans
-/// `extract_zones()` = Battlefield ∪ zone-union and moves every match to exile
-/// simultaneously (CR 608.2f) — one instruction, never a battlefield wipe plus
-/// an orphaned zone conjunct.
+/// * Way 1 — bare battlefield permanent legs followed by trailing whole-zone
+///   words ("Exile all creatures and graveyards", Ultimate Nullification). The
+///   permanent legs are a CR 205.2a + CR 205.3a type union scoped to the
+///   battlefield via `InZone`; the trailing zone legs become an all-cards
+///   (`TypeFilter::Card`, CR 108.2), all-owners (`controller: None`,
+///   CR 400.3) leg carrying the zone union on `InAnyZone` (CR 404.1).
+/// * Way 2 — every leg carries its OWN zone ("Exile all creatures and
+///   planeswalkers with mana value 3 or less from the battlefield and all
+///   creature and planeswalker cards with mana value 3 or less from all
+///   graveyards", Shadows' Verdict; "Exile all permanents and all cards from
+///   all graveyards", Once More with Feeling). Each leg keeps its own filter,
+///   controller, and zone. One `ChangeZoneAll` announces a single population
+///   latched before any object moves, so a leaves-the-graveyard trigger's
+///   look-back (CR 603.10a) still sees the graveyard leg's cards leave even
+///   when an earlier leg exiled the watching permanent — a chained second
+///   effect would move the groups as two separate zone-change events and lose
+///   the trigger (Stonebound Mentor watching Shadows' Verdict).
 ///
-/// Declines (`None`) unless a permanent leg is followed by at least one zone leg
-/// AND the operand is fully consumed (only trailing punctuation may remain), so
-/// pure type unions ("all creatures and artifacts") keep the existing type-union
-/// path and no trailing fragment is ever silently dropped.
+/// CR 109.2: a leg with no zone property is a battlefield permanent, so when
+/// any other leg names a zone the bare legs gain `InZone(Battlefield)` —
+/// without it `extract_zones()` would report only the written zones and the
+/// battlefield would never be scanned. A union of purely bare legs is
+/// returned unchanged (one battlefield population; the resolver defaults an
+/// empty `extract_zones()` to the battlefield).
+///
+/// Declines (`None`) on every other shape — a single leg, fewer than two
+/// `Typed` legs, a stack-object or non-Typed leg, legs that all name one zone,
+/// an operand whose "this way" anaphor or anaphoric player's zone the filter
+/// dropped, or a remainder beyond trailing punctuation — so owner-scoped zone
+/// forms keep their own paths and no trailing fragment is ever silently
+/// dropped.
 pub(super) fn try_parse_mass_exile_permanents_and_zones(
     rest: &str,
     rest_lower: &str,
@@ -3657,40 +3889,139 @@ pub(super) fn try_parse_mass_exile_permanents_and_zones(
     if !starts_with_type_word(rest_lower) {
         return None;
     }
-    // CR 205.2a + CR 205.3a: consume the leading permanent-type union
-    // ("creatures", "creatures and artifacts", …); `rem` is the untyped tail
-    // (e.g. " and graveyards").
-    let (perm_filter, rem) = parse_mass_type_union(rest, ctx);
-    // The leading leg MUST be a bare battlefield permanent-type description. If
-    // `parse_mass_type_union` already consumed an explicit source zone or owner
-    // scope ("… cards from that player's hand", "… cards from all hands"), this
-    // form belongs to the owner-scoped multi-zone parser, not here — injecting
-    // `InZone(Battlefield)` below would make that zone leg unsatisfiable and the
-    // rebuilt zone leg would drop the parsed owner (CR 400.3) and type
-    // restriction (CR 205). Decline so Thought Distortion / Worldfire keep their
-    // existing owner-scoped parse.
-    if !is_bare_battlefield_permanent_leg(&perm_filter) {
+    // CR 205.2a + CR 205.3a: consume the whole population list ("creatures",
+    // "creatures and artifacts", "creatures … from the battlefield and all
+    // creature cards … from all graveyards"); `rem` is whatever follows the
+    // last leg — trailing zone words, sentence punctuation, or an orphan
+    // fragment the guards below must reject.
+    let (union, rem) = parse_mass_type_union(rest, ctx);
+    // ---- Way 1: bare permanent legs + trailing whole-zone words ----
+    // The legs MUST be bare battlefield permanent-type descriptions. If
+    // `parse_mass_type_union` already consumed an explicit source zone or
+    // owner scope ("… cards from that player's hand", "… cards from all
+    // hands"), this form belongs to the owner-scoped multi-zone parser, not
+    // here — injecting `InZone(Battlefield)` below would make that zone leg
+    // unsatisfiable and the rebuilt zone leg would drop the parsed owner
+    // (CR 400.3) and type restriction (CR 205). Declining keeps Thought
+    // Distortion / Worldfire on their existing owner-scoped parse; a bare
+    // union whose tail is not bare zone words falls through to Way 2.
+    if is_bare_battlefield_permanent_leg(&union) {
+        // CR 404.1 + CR 108.2: the trailing whole-zone union — `None` when the
+        // tail is not bare zone words.
+        if let Some(zones) = parse_trailing_zone_union(&rem.to_lowercase()) {
+            // CR 109.2: a bare card-type description ("creatures", no zone
+            // word / "card") means permanents of that type on the
+            // battlefield — so scope the permanent legs to the battlefield.
+            // This also makes `ChangeZoneAll::extract_zones` yield
+            // Battlefield ∪ zone-union; without it the zone leg would shadow
+            // the scan and battlefield permanents would never be collected.
+            let perm_scoped = super::add_filter_props(
+                union,
+                &[FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }],
+            );
+            // CR 108.2 + CR 404.1: "all cards in `<zone(s)>`" — a bare zone
+            // word (no possessive) is every player's such zone, so the leg is
+            // `TypeFilter::Card` (CR 108.2) with `controller` left `None`
+            // (every owner).
+            let zone_leg = TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::InAnyZone { zones }]),
+            );
+            return Some(merge_or_filters(perm_scoped, zone_leg));
+        }
+    }
+    // ---- Way 2: every leg carries its own zone (or is bare = battlefield) ----
+    // CR 608.2f: at least two population legs — a single leg, however scoped,
+    // is not a union and keeps the generic single-population path.
+    let TargetFilter::Or {
+        filters: leg_filters,
+    } = &union
+    else {
+        return None;
+    };
+    if leg_filters.len() < 2 {
         return None;
     }
-    // CR 404.1 + CR 108.2: the trailing whole-zone union — declines if absent.
-    let zones = parse_trailing_zone_union(&rem.to_lowercase())?;
-    // CR 109.2: a bare card-type description ("creatures", no zone word / "card")
-    // means permanents of that type on the battlefield — so scope the permanent
-    // legs to the battlefield. This also makes `ChangeZoneAll::extract_zones`
-    // yield Battlefield ∪ zone-union; without it the zone leg would shadow the
-    // scan and battlefield permanents would never be collected.
-    let perm_scoped = super::add_filter_props(
-        perm_filter,
-        &[FilterProp::InZone {
-            zone: Zone::Battlefield,
-        }],
-    );
-    // CR 108.2 + CR 404.1: "all cards in `<zone(s)>`" — a bare zone word (no
-    // possessive) is every player's such zone, so the leg is `TypeFilter::Card`
-    // (CR 108.2) with `controller` left `None` (every owner).
-    let zone_leg =
-        TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InAnyZone { zones }]));
-    Some(merge_or_filters(perm_scoped, zone_leg))
+    // Every leg must be a plain `Typed` population. Any other shape — a
+    // `StackSpell`/`TrackedSet` referent or an `And`/`Not`-wrapped exclusion —
+    // has its own mass-exile path and must not be silently re-scoped here.
+    if !leg_filters
+        .iter()
+        .all(|leg| matches!(leg, TargetFilter::Typed(_)))
+    {
+        return None;
+    }
+    // CR 112.1: a stack-object leg ("exile all creatures and all spells") is
+    // dispatched by the stack-scoped mass-exile paths, never a zone union.
+    if filter_targets_stack(&union) {
+        return None;
+    }
+    // Full consumption: nothing but sentence punctuation may remain, so no
+    // trailing fragment is orphaned into an unsupported child clause.
+    if !terminal_punctuation_only(rem) {
+        return None;
+    }
+    // CR 109.2: a leg with no zone property is a battlefield permanent. A
+    // purely bare union is one battlefield population, returned unchanged (the
+    // resolver defaults an empty `extract_zones()` to the battlefield).
+    let leg_zones: Vec<Vec<Zone>> = leg_filters
+        .iter()
+        .map(TargetFilter::extract_zones)
+        .collect();
+    let population = if leg_zones.iter().all(Vec::is_empty) {
+        union
+    } else {
+        // CR 608.2f: the union is a CROSS-zone operation only when the legs, bare
+        // ones counted as battlefield, name at least two distinct zones. Legs that
+        // all name the same zone ("artifact and enchantment cards from all
+        // graveyards") are one population the generic single-origin path already
+        // reads; leave that parse untouched.
+        let mut zones = vec![];
+        for leg in &leg_zones {
+            for zone in if leg.is_empty() {
+                &[Zone::Battlefield][..]
+            } else {
+                leg.as_slice()
+            } {
+                if !zones.contains(zone) {
+                    zones.push(*zone);
+                }
+            }
+        }
+        if zones.len() < 2 {
+            return None;
+        }
+        // A bare leg beside a zoned one must name its battlefield, or
+        // `extract_zones()` would report only the written zones.
+        let filters = leg_filters
+            .iter()
+            .zip(&leg_zones)
+            .map(|(leg, zones)| {
+                if zones.is_empty() {
+                    super::add_filter_props(
+                        leg.clone(),
+                        &[FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        }],
+                    )
+                } else {
+                    leg.clone()
+                }
+            })
+            .collect();
+        TargetFilter::Or { filters }
+    };
+    // The generic exile path refuses an operand whose "this way" anaphor or
+    // anaphoric player's zone the filter dropped (Elder Brain: "exile all cards
+    // from that player's hand"); the union must refuse the same operands rather
+    // than sweep every player's zone.
+    if super::target_span_dropped_this_way_anaphor(rest, &population)
+        || operand_dropped_player_possessive_source(rest_lower, &population)
+    {
+        return None;
+    }
+    Some(population)
 }
 
 /// Whether every leg of `filter` is a BARE battlefield permanent-type
@@ -5267,6 +5598,12 @@ pub(super) fn parse_choose_ast(
     // zone choice nor targeting; decline before those parsers so the clause
     // stays unsupported instead of lowering to a five-color choice, a card pick,
     // or `TargetOnly { Any }`.
+    // The mana form ("Choose a color of a permanent you control. Add one mana
+    // of that color.") is recognized on the whole body by
+    // `mana::try_parse_color_of_objects_mana`, which lowers it to
+    // `ManaProduction::AnyOneColorAmongPermanents` because that choice is made
+    // while the production resolves (CR 608.2d); this decline covers every form
+    // that recognizer declines.
     if preceded(tag::<_, _, OracleError<'_>>("choose a color"), tag(" of "))
         .parse(lower)
         .is_ok()
@@ -5502,6 +5839,12 @@ pub(super) fn parse_choose_ast(
         // it in `GuessSubject::CommittedChoice` (in-order instructions within one
         // ability — not a CR 607.2d link between two distinct printed abilities).
         ctx.pending_choice_type = Some(choice_type.clone());
+        // CR 201.4a: record the characteristic the CardName choice drops, for the
+        // "with that name" discard fence in `parse_targeted_action_ast`.
+        if matches!(choice_type, ChoiceType::CardName { .. }) {
+            ctx.pending_card_name_characteristic =
+                super::parse_card_name_choice_characteristic(lower);
+        }
         return Some(ChooseImperativeAst::NamedChoice {
             choice_type,
             selection,
@@ -7743,7 +8086,7 @@ pub(super) fn parse_utility_imperative_ast(
                         // sites keep their own same-chain bindings.
                         return Some(UtilityImperativeAst::Copy {
                             target: resolve_singular_exiled_card_target(
-                                ctx.chain_has_prior_exile_producer,
+                                ctx.chain_prior_publishers,
                                 TargetFilter::ExiledBySource,
                             ),
                             retarget,
@@ -10173,7 +10516,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             {
                 let origin = match target {
                     TargetFilter::TrackedSetFiltered {
-                        caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
+                        caused_by: Some(ThisWayCause::Exiled),
                         ..
                     } => origin.or(Some(Zone::Exile)),
                     TargetFilter::TrackedSetFiltered { .. } => origin,
@@ -11612,9 +11955,9 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
     };
     let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
     // A selected graveyard population explicitly owned by the caster or the
-    // declared player has one library subject (Dwell on the Past). ParentTarget/
-    // SelfRef moves do not establish that guarantee: their receiving owner may
-    // differ from the terminal actor.
+    // declared player has one library subject (Dwell on the Past).
+    // This check covers typed populations. The match below handles scalar self
+    // moves explicitly.
     let single_library_population = matches!(
         &effect,
         Effect::ChangeZone {
@@ -11667,6 +12010,15 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
             library_shuffle,
             ..
         } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
+        // CR 701.24a + CR 701.24c: the separate controller shuffle also
+        // applies when this specific source cannot be moved.
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            library_shuffle,
+            ..
+        } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
         Effect::ChangeZone {
             library_shuffle, ..
         } if single_library_population => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
@@ -11699,6 +12051,7 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect,
         duration: None,
         sub_ability: Some(Box::new(shuffle)),
@@ -12670,10 +13023,12 @@ pub(super) fn parse_exile_ast(
         // types> and <zone(s)>" — a heterogeneous union of a battlefield
         // permanent population and whole-zone (graveyard/hand/library)
         // populations (Ultimate Nullification: "Exile all creatures and
-        // graveyards"). Recognized before the type-only union path below, which
-        // parses only the permanent leg and orphans the trailing zone leg as an
-        // unsupported child clause. `origin: None` defers the multi-zone scan to
-        // `extract_zones()` (Battlefield ∪ zone-union) carried on the filter.
+        // graveyards"), or of legs each carrying their own zone (Shadows'
+        // Verdict: "… from the battlefield and … from all graveyards").
+        // Recognized before the type-only union path below, which parses only
+        // the first leg and orphans the rest as unsupported child clauses.
+        // `origin: None` defers the multi-zone scan to `extract_zones()`
+        // (Battlefield ∪ zone-union) carried on the filter.
         if let Some(target) = try_parse_mass_exile_permanents_and_zones(rest, rest_lower, ctx) {
             return Some(ZoneCounterImperativeAst::Exile {
                 origin: None,
@@ -13425,6 +13780,28 @@ fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
                 name: "X".to_string(),
             },
         });
+    }
+
+    // CR 608.2c + CR 119.4: "pay that much life" — the payment amount is the
+    // triggering event's amount ("that much" names the life just gained for a
+    // LifeGained trigger), read at resolution through the shared
+    // `EventContextAmount` cascade. FULL-CONSUMPTION (an optional trailing
+    // period only): a rider the cost grammar cannot read makes the whole cost
+    // decline, so Verrak, Warped Sengir's "pay that much life again" stays
+    // honestly `Unimplemented` — its repeat-payment adverb plus the "if life
+    // was paid to activate it" condition need their own feature (issue
+    // #11295) — instead of silently dropping "again" and flipping green with
+    // a mis-bound amount.
+    if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>("that much life").parse(rest) {
+        if terminated(opt(tag::<_, _, OracleError<'_>>(".")), eof)
+            .parse(tail.trim())
+            .is_ok()
+        {
+            return Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            });
+        }
+        return None;
     }
 
     // CR 118.8: "pay half your life[, rounded up]" — delegate the life-fraction
@@ -16040,7 +16417,8 @@ pub(super) fn parse_imperative_family_ast(
                 .map(|(r, _)| r)
                 .unwrap_or("");
             let amount = if let Some(expr) = where_x {
-                parse_where_x_quantity_expression(&expr)
+                let antecedents = ctx.player_antecedents();
+                WhereXBinding::new(Some(&expr), &antecedents).resolve_quantity(&expr)
                     .unwrap_or(QuantityExpr::Fixed { value: 0 })
             } else {
                 // CR 107.3a + CR 701.63a: Endure X uses the activation's
@@ -17637,6 +18015,16 @@ pub(crate) fn try_parse_reflexive_coin_flip_branch<'a>(
 }
 
 pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEffectClause {
+    // CR 607.2a: a return's "the exiled card(s)" mark rides the AST variant, which
+    // `lower_targeted_action_ast` turns into a bare `Effect`; lift it onto the clause
+    // here, the one seam every imperative-family lowering passes through.
+    let linked_exile_return = ast.linked_exile_return();
+    let mut clause = lower_imperative_family_clause(ast);
+    clause.linked_exile_return = linked_exile_return;
+    clause
+}
+
+fn lower_imperative_family_clause(ast: ImperativeFamilyAst) -> ParsedEffectClause {
     match ast {
         // CR 701.9a + CR 701.70a + CR 608.2c: Recruit's contingent token sees exactly the
         // immediately preceding discard result. The typed condition is carried
@@ -18623,6 +19011,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 enter_with_counters,
                 face_down,
                 attach_host: Some(host),
+                linked_exile_return,
             },
         )) => {
             // CR 110.2a: fail closed before the attachment is installed. An
@@ -18648,6 +19037,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                     enter_with_counters,
                     face_down,
                     attach_host: None,
+                    linked_exile_return,
                 },
             ));
             // CR 701.3a: the returning Aura/permanent is SelfRef; the host is the
@@ -23780,8 +24170,8 @@ mod tests {
     /// CR 122.1: literal-N earthbend keeps the `Fixed` count path intact.
     #[test]
     fn earthbend_count_expr_literal_n() {
-        let (target, count) =
-            parse_earthbend_count_expr("2", "2").expect("literal-N earthbend parses");
+        let (target, count) = parse_earthbend_count_expr("2", "2", &ParseContext::default())
+            .expect("literal-N earthbend parses");
         assert_eq!(count, QuantityExpr::Fixed { value: 2 });
         assert_eq!(target, default_earthbend_target());
     }
@@ -23791,8 +24181,8 @@ mod tests {
     #[test]
     fn earthbend_count_expr_x_with_player_counter_tail() {
         let tail = "x, where x is the number of experience counters you have";
-        let (_, count) =
-            parse_earthbend_count_expr(tail, tail).expect("player-counter where-clause parses");
+        let (_, count) = parse_earthbend_count_expr(tail, tail, &ParseContext::default())
+            .expect("player-counter where-clause parses");
         assert_eq!(
             count,
             QuantityExpr::Ref {
@@ -23808,7 +24198,8 @@ mod tests {
     /// to the spell-cost X resolution path (Variable("X")), not Fixed 0.
     #[test]
     fn earthbend_count_expr_bare_x_falls_through_to_variable() {
-        let (_, count) = parse_earthbend_count_expr("x", "x").expect("bare earthbend X parses");
+        let (_, count) = parse_earthbend_count_expr("x", "x", &ParseContext::default())
+            .expect("bare earthbend X parses");
         assert_eq!(
             count,
             QuantityExpr::Ref {
@@ -23832,8 +24223,8 @@ mod tests {
             Comparator, ControllerRef, FilterProp, PtStat, TargetFilter, TypeFilter,
         };
         let tail = "x, where x is the number of creatures you control with power 4 or greater";
-        let (target, count) =
-            parse_earthbend_count_expr(tail, tail).expect("object-count where-clause parses");
+        let (target, count) = parse_earthbend_count_expr(tail, tail, &ParseContext::default())
+            .expect("object-count where-clause parses");
         assert_eq!(
             target,
             default_earthbend_target(),
@@ -23872,8 +24263,8 @@ mod tests {
     fn earthbend_count_expr_object_count_subtype() {
         use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter};
         let tail = "x, where x is the number of forests you control";
-        let (target, count) =
-            parse_earthbend_count_expr(tail, tail).expect("subtype-count where-clause parses");
+        let (target, count) = parse_earthbend_count_expr(tail, tail, &ParseContext::default())
+            .expect("subtype-count where-clause parses");
         assert_eq!(target, default_earthbend_target());
         let QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
@@ -23900,8 +24291,8 @@ mod tests {
     #[test]
     fn earthbend_count_expr_mana_spent_to_cast() {
         let tail = "x, where x is the amount of mana spent to cast her";
-        let (target, count) =
-            parse_earthbend_count_expr(tail, tail).expect("mana-spent where-clause parses");
+        let (target, count) = parse_earthbend_count_expr(tail, tail, &ParseContext::default())
+            .expect("mana-spent where-clause parses");
         assert_eq!(target, default_earthbend_target());
         assert!(
             matches!(
@@ -23926,7 +24317,7 @@ mod tests {
     fn earthbend_count_expr_unrecognized_where_clause_is_strict_failure() {
         let tail = "x, where x is the number of glorbs you frobnicate";
         assert_eq!(
-            parse_earthbend_count_expr(tail, tail),
+            parse_earthbend_count_expr(tail, tail, &ParseContext::default()),
             None,
             "an unrecognized where-clause quantity must fail strictly, not bind a fake Variable{{X}}"
         );

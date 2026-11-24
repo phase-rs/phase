@@ -31,7 +31,9 @@ use super::sequence::parse_dig_from_among;
 use super::subject;
 use super::{parse_effect_clause_inner, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
-use crate::parser::oracle_ir::context::{SpellAnaphorBinding, TriggerZoneChangeProvenance};
+use crate::parser::oracle_ir::context::{
+    SpellAnaphorBinding, TriggerConditionScope, TriggerZoneChangeProvenance,
+};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
@@ -167,6 +169,15 @@ fn type_filter_references_subtype(filter: &TypeFilter) -> bool {
 pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> {
     let lower = text.to_lowercase();
     let prefix_rest = parse_leading_conditional_prefix(&lower)?;
+    if nom_condition::parse_named_cycling_head(prefix_rest).is_ok() {
+        let (comma, _) = nom_condition::parse_named_game_cycling_condition(prefix_rest).ok()?;
+        let comma = TextPair::new(text, &lower).original_remainder(comma)?;
+        let guard = text.strip_suffix(comma)?; // allow-noncombinator: split at the TextPair-mapped comma
+        let (body, _) = tag::<_, _, OracleError<'_>>(",").parse(comma).ok()?;
+        let body = body.trim();
+        return (!body.is_empty()).then(|| (guard.trim().to_owned(), body.to_owned()));
+    }
+
     let condition_start_idx = lower.len() - prefix_rest.len();
 
     let mut paren_depth = 0u32;
@@ -2093,7 +2104,7 @@ fn parse_its_a_card_type_gate_body<'a>(
         }
     }
     let type_word = type_str.rsplit(' ').next().unwrap_or(type_str);
-    let capitalized = format!("{}{}", &type_word[..1].to_uppercase(), &type_word[1..]);
+    let capitalized = format!("{}{}", type_word[..1].to_uppercase(), &type_word[1..]);
     // CR 608.2c: "permanent" is not a CoreType (it spans CR 110.1's permanent card
     // types). Build the condition via the existing parse_type_phrase_folding building block —
     // "permanent card" → TargetFilter::Typed(TypeFilter::Permanent) — and gate on it
@@ -3714,7 +3725,7 @@ pub(super) fn try_parse_type_setting(text: &str) -> Option<AbilityDefinition> {
         .ok()?;
 
     let type_name = type_name.trim();
-    let capitalized = format!("{}{}", &type_name[..1].to_uppercase(), &type_name[1..]);
+    let capitalized = format!("{}{}", type_name[..1].to_uppercase(), &type_name[1..]);
     CoreType::from_str(&capitalized).ok()?;
 
     let mut remove_types = Vec::new();
@@ -5319,16 +5330,29 @@ pub(super) fn strip_routed_suffix_conditional(
         return (general(cond), effect_text);
     }
 
-    if let Some((condition, route)) =
-        parse_triggering_spell_targets_filter_ability_condition(condition_core)
-            .map(|condition| (condition, LeadingConditionRoute::General))
-            .or_else(|| try_routed_nom_condition_as_ability_condition(condition_core, ctx))
-            .or_else(|| {
-                parse_condition_text_in(condition_core, ctx)
-                    .or_else(|| parse_control_count_as_ability_condition(condition_core))
-                    .map(|condition| (condition, LeadingConditionRoute::General))
-            })
+    // CR 603.7c + CR 603.7e + CR 400.7: a trailing condition on a delayed
+    // payload is checked against the delayed object's source and zone at the
+    // delayed trigger's fire/resolution boundary. The temporal suffix is the
+    // existing parser seam that proves this clause is such a payload; use the
+    // typed scope only while lowering its condition so ordinary trigger-body
+    // source-zone guards remain explicit gaps.
+    let previous_trigger_condition_scope = ctx.trigger_condition_scope;
+    if super::lower::strip_temporal_suffix(effect_prefix)
+        .1
+        .is_some()
     {
+        ctx.trigger_condition_scope = TriggerConditionScope::Delayed;
+    }
+    let condition_result = parse_triggering_spell_targets_filter_ability_condition(condition_core)
+        .map(|condition| (condition, LeadingConditionRoute::General))
+        .or_else(|| try_routed_nom_condition_as_ability_condition(condition_core, ctx))
+        .or_else(|| {
+            parse_condition_text_in(condition_core, ctx)
+                .or_else(|| parse_control_count_as_ability_condition(condition_core))
+                .map(|condition| (condition, LeadingConditionRoute::General))
+        });
+    ctx.trigger_condition_scope = previous_trigger_condition_scope;
+    if let Some((condition, route)) = condition_result {
         // CR 608.2c + CR 109.2: in an " or if " chain on a targeting effect, a
         // bare "it's a <type>" disjunct describes the effect's target, not a
         // revealed card (`RevealedHasCardType` would never see the target).
@@ -6903,7 +6927,7 @@ fn build_instead_def(
         &effect_text,
         kind,
         parent_target_available,
-        ctx.effective_spell_anaphor_binding(),
+        ctx,
     );
     let mut result = super::instead_override_definition(
         instead_def,
@@ -7840,7 +7864,7 @@ pub(crate) fn static_condition_to_ability_condition(
         // Layer-6 gate (the conditional hexproof grant) with no effect-resolution
         // (`AbilityCondition`) equivalent. `Not(SourceHasDealtDamage)` is handled by
         // the inner Not sub-match's `_ => None` arm above.
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         // CR 110.5b + CR 611.2b: `IsTapped { scope }` is a duration-only
         // target-relative tap condition (Zygon Infiltrator's copy duration), not
@@ -7868,6 +7892,114 @@ pub(crate) fn static_condition_to_ability_condition(
         // so there is no attacker whose latched record could answer. The anchor
         // is structurally unavailable here, not merely unused.
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::None => None,
+    }
+}
+
+/// CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: a delayed ability's
+/// source-zone intervening-if is checked when the delayed object is put on the
+/// stack and again as it resolves, against the source incarnation that created
+/// it. Keep this bridge scoped to delayed-trigger bodies; ordinary effect
+/// conditions must remain strict gaps when no effect-time equivalent exists.
+fn static_condition_to_delayed_ability_condition(
+    sc: &StaticCondition,
+    ctx: &mut ParseContext,
+) -> Option<AbilityCondition> {
+    if !matches!(ctx.trigger_condition_scope, TriggerConditionScope::Delayed) {
+        return None;
+    }
+
+    match sc {
+        StaticCondition::SourceInZone { zone } => Some(AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone { zone: *zone }],
+                ..Default::default()
+            }),
+        }),
+        StaticCondition::Not { condition } => {
+            static_condition_to_delayed_ability_condition(condition, ctx).map(|condition| {
+                AbilityCondition::Not {
+                    condition: Box::new(condition),
+                }
+            })
+        }
+        StaticCondition::And { conditions } => Some(AbilityCondition::And {
+            conditions: conditions
+                .iter()
+                .map(|condition| static_condition_to_delayed_ability_condition(condition, ctx))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        StaticCondition::Or { conditions } => Some(AbilityCondition::Or {
+            conditions: conditions
+                .iter()
+                .map(|condition| static_condition_to_delayed_ability_condition(condition, ctx))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        // Only source-zone leaves and Boolean composition are admitted here.
+        // Every other leaf is explicit so a future StaticCondition variant
+        // forces a deliberate decision about delayed source-zone semantics.
+        StaticCondition::DevotionGE { .. }
+        | StaticCondition::IsPresent { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::QuantityQuality { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
+        | StaticCondition::IsInitiative
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::PlayerIsPoisoned { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::Unrecognized { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage { .. }
+        | StaticCondition::SourceExertedThisTurn
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::IsTapped { .. }
+        | StaticCondition::SourceIsFaceUp
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => None,
     }
 }
@@ -7965,6 +8097,29 @@ pub fn ability_condition_to_static_condition(ac: &AbilityCondition) -> Option<St
                 .map(ability_condition_to_static_condition)
                 .collect::<Option<Vec<_>>>()?,
         }),
+
+        // CR 603.7c + CR 603.7e + CR 400.7: invert only the exact source-zone
+        // filter emitted for a delayed payload. A typed filter with any
+        // additional type, controller, or property axis remains an ordinary
+        // `SourceMatchesFilter` and is intentionally not generalized into
+        // `SourceInZone`.
+        AbilityCondition::SourceMatchesFilter {
+            filter:
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }),
+        } if type_filters.is_empty()
+            && controller.is_none()
+            && properties.len() == 1
+            && matches!(properties.first(), Some(FilterProp::InZone { .. })) =>
+        {
+            let [FilterProp::InZone { zone }] = properties.as_slice() else {
+                unreachable!("guarded by the exact single InZone property check")
+            };
+            Some(StaticCondition::SourceInZone { zone: *zone })
+        }
 
         // Casting-context conditions — read `SpellContext` / cast history at
         // resolution time; no continuous-evaluation (`StaticCondition`)
@@ -9267,7 +9422,8 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
     if !rest.trim().is_empty() {
         return None;
     }
-    static_condition_to_ability_condition(&condition, ctx)
+    static_condition_to_delayed_ability_condition(&condition, ctx)
+        .or_else(|| static_condition_to_ability_condition(&condition, ctx))
 }
 
 /// CR 109.4 + CR 109.5 + CR 608.2c: Consume the anaphoric control predicate
@@ -11140,6 +11296,181 @@ mod tests {
             strip_suffix_conditional(original, &mut ParseContext::default());
         assert_eq!(condition, None);
         assert_eq!(remainder, original);
+    }
+
+    /// CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: the source-zone bridge is
+    /// deliberately exact and scoped to delayed bodies. The delayed intervening-if
+    /// path recovers the trigger-layer zone condition while ordinary effect
+    /// lowering remains an explicit gap. Recursive negation remains intact.
+    #[test]
+    fn source_in_zone_bridge_inverse_and_delayed_trigger_shape() {
+        for zone in [
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Zone::Exile,
+            Zone::Hand,
+            Zone::Library,
+            Zone::Command,
+        ] {
+            let static_condition = StaticCondition::SourceInZone { zone };
+            let expected_filter = TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone { zone }],
+                ..Default::default()
+            });
+            let ability_condition = AbilityCondition::SourceMatchesFilter {
+                filter: expected_filter.clone(),
+            };
+            assert_eq!(
+                static_condition_to_ability_condition(
+                    &static_condition,
+                    &mut ParseContext::default()
+                ),
+                None,
+                "ordinary source-zone guards remain explicit gaps for {zone:?}"
+            );
+            let mut delayed_ctx = ParseContext {
+                trigger_condition_scope: TriggerConditionScope::Delayed,
+                ..Default::default()
+            };
+            assert_eq!(
+                static_condition_to_delayed_ability_condition(&static_condition, &mut delayed_ctx),
+                Some(ability_condition.clone()),
+                "delayed source-zone bridge for {zone:?}"
+            );
+            assert_eq!(
+                ability_condition_to_static_condition(&ability_condition),
+                Some(static_condition.clone()),
+                "exact source-zone inverse for {zone:?}"
+            );
+            assert_eq!(
+                crate::parser::oracle_trigger::static_condition_to_trigger_condition(
+                    &static_condition
+                ),
+                Some(crate::types::ability::TriggerCondition::SourceInZone { zone }),
+                "delayed_intervening_if must recover TriggerCondition::SourceInZone for {zone:?}"
+            );
+
+            let negated_static = StaticCondition::Not {
+                condition: Box::new(static_condition.clone()),
+            };
+            let negated_ability = AbilityCondition::Not {
+                condition: Box::new(ability_condition.clone()),
+            };
+            assert_eq!(
+                static_condition_to_ability_condition(
+                    &negated_static,
+                    &mut ParseContext::default()
+                ),
+                None,
+                "ordinary negated source-zone guards remain explicit gaps for {zone:?}"
+            );
+            let mut delayed_ctx = ParseContext {
+                trigger_condition_scope: TriggerConditionScope::Delayed,
+                ..Default::default()
+            };
+            assert_eq!(
+                static_condition_to_delayed_ability_condition(&negated_static, &mut delayed_ctx),
+                Some(negated_ability.clone()),
+                "delayed negated source-zone bridge for {zone:?}"
+            );
+            assert_eq!(
+                ability_condition_to_static_condition(&negated_ability),
+                Some(negated_static.clone()),
+                "negated source-zone inverse for {zone:?}"
+            );
+            assert_eq!(
+                crate::parser::oracle_trigger::static_condition_to_trigger_condition(
+                    &negated_static
+                ),
+                Some(crate::types::ability::TriggerCondition::Not {
+                    condition: Box::new(crate::types::ability::TriggerCondition::SourceInZone {
+                        zone,
+                    }),
+                }),
+                "negated delayed intervening-if trigger for {zone:?}"
+            );
+        }
+
+        let broader = AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    },
+                    FilterProp::Token,
+                ],
+                ..Default::default()
+            }),
+        };
+        assert_eq!(
+            ability_condition_to_static_condition(&broader),
+            None,
+            "an extra property must not generalize through SourceInZone"
+        );
+    }
+
+    /// CR 603.7c + CR 603.7e + CR 400.7: delayed source-zone lowering is
+    /// fail-closed when a recursive boolean also contains a static-only
+    /// predicate with no effect-resolution equivalent.
+    #[test]
+    fn delayed_source_zone_mixed_condition_fails_closed() {
+        let source_in_zone = StaticCondition::SourceInZone {
+            zone: Zone::Battlefield,
+        };
+        let static_only = StaticCondition::SourceEnteredThisTurn;
+        let mut delayed_ctx = ParseContext {
+            trigger_condition_scope: TriggerConditionScope::Delayed,
+            ..Default::default()
+        };
+
+        let source_filter = AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }],
+                ..Default::default()
+            }),
+        };
+        let nested_source_zone = StaticCondition::Or {
+            conditions: vec![
+                source_in_zone.clone(),
+                StaticCondition::Not {
+                    condition: Box::new(source_in_zone.clone()),
+                },
+            ],
+        };
+        assert_eq!(
+            static_condition_to_delayed_ability_condition(&nested_source_zone, &mut delayed_ctx),
+            Some(AbilityCondition::Or {
+                conditions: vec![
+                    source_filter.clone(),
+                    AbilityCondition::Not {
+                        condition: Box::new(source_filter.clone()),
+                    },
+                ],
+            }),
+            "delayed source-zone boolean trees should recurse through Not/Or"
+        );
+
+        for condition in [
+            StaticCondition::And {
+                conditions: vec![source_in_zone.clone(), static_only.clone()],
+            },
+            StaticCondition::Or {
+                conditions: vec![source_in_zone.clone(), static_only.clone()],
+            },
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::And {
+                    conditions: vec![source_in_zone.clone(), static_only.clone()],
+                }),
+            },
+        ] {
+            assert_eq!(
+                static_condition_to_delayed_ability_condition(&condition, &mut delayed_ctx),
+                None,
+                "mixed delayed source-zone conditions must not partially lower: {condition:?}"
+            );
+        }
     }
 
     #[test]
@@ -18900,5 +19231,51 @@ mod referent_owner_tests {
             writers[0].contains("fn referent_condition"), // allow-noncombinator: source-reading test instrument, not Oracle parsing
             "the single writer must be referent_condition, found {writers:?}"
         );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn named_cycling_split_commits_at_the_first_structural_suffix() {
+    use crate::types::ability::CyclingHistoryWindow;
+
+    // No printed card has these adversarial shapes. Yidaro, Wandering Monster
+    // is the nearest printed case.
+    let body = "counter nine or more times this game, then draw a card.";
+    for name in ["Yidaro, Wandering Monster", "Yidaro,   Wandering Monster"] {
+        let guard = format!("If you've cycled a card named {name} four or more times this game");
+        let text = format!("{guard},  {body}  ");
+        let (actual_guard, actual_body) =
+            split_leading_conditional(&text).expect("named game guard");
+        assert_eq!(actual_guard, guard);
+        assert_eq!(actual_body, body);
+        let lower = actual_guard.to_lowercase();
+        let (rest, condition) =
+            nom_condition::parse_inner_condition(parse_leading_conditional_prefix(&lower).unwrap())
+                .unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CardsCycled {
+                        scope: crate::types::ability::CountScope::Controller,
+                        window: CyclingHistoryWindow::ThisGame,
+                        name: Some("yidaro, wandering monster".into()),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        );
+    }
+    for suffix in [
+        "four or more times this turn",
+        "four or fewer times this game",
+        "four or more times this game during your turn",
+    ] {
+        let text =
+            format!("If you've cycled a card named Yidaro, Wandering Monster {suffix}, {body}");
+        assert_eq!(split_leading_conditional(&text), None, "{text}");
     }
 }

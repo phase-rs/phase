@@ -1174,12 +1174,12 @@ fn docs_manifest_example_parses_validates_and_names_a_real_package() {
         }
     }
     assert!(
-        names.contains(&"phase-engine".to_string()),
+        names.iter().any(|i: &String| i == "phase-engine"),
         "instrument check: the package scan must find a package it is known to contain, else a \
          missing package would pass vacuously. found: {names:?}"
     );
     assert!(
-        !names.contains(&"engine".to_string()),
+        !names.iter().any(|i: &String| i == "engine"),
         "positive control for the exact defect: `engine` is the lib TARGET name, and if a package \
          by that name ever exists this test stops discriminating"
     );
@@ -2607,7 +2607,7 @@ fn argv_surface_is_one_authority() {
     assert_eq!(emitted, isolate::UNCONDITIONAL_FLAGS);
     // and the conditional one is still conditional
     t.filter_match = manifest::FilterMatch::Substring;
-    assert!(!isolate::argv(&t).contains(&"--exact".to_string()));
+    assert!(!isolate::argv(&t).iter().any(|i| i == "--exact"));
 }
 
 // ------------------------------------------------------------------ surface 2: env

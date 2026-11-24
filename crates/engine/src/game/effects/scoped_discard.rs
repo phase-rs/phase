@@ -19,12 +19,12 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingPlayerScopeChoice, WaitingFor};
+use crate::types::game_state::{DiscardCause, GameState, PendingPlayerScopeChoice, WaitingFor};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-use super::discard::{player_hand_discard_pool, PlayerHandDiscardPool};
+use super::discard::{discard_count, player_hand_discard_pool, PlayerHandDiscardPool};
 
 /// CR 101.4: whether this player fan-out is a bare, chosen hand discard
 /// whose per-player choices must all be made before any card is discarded.
@@ -110,18 +110,18 @@ fn scoped_discard_step(
         return ScopedDiscardStep::Noop;
     };
     // CR 701.9b + CR 608.2d: `UpTo` is the may-pick-fewer flag, not a count.
-    let (inner, up_to) = count.peel_up_to();
-    // CR 107.1b: a calculation that would yield a negative number uses zero.
-    let wanted =
-        crate::game::quantity::resolve_quantity_with_targets(state, inner, &scoped).max(0) as usize;
+    let up_to = count.peel_up_to().1;
     let (player, pool) = match player_hand_discard_pool(state, &scoped, target, filter.as_ref()) {
         Ok(PlayerHandDiscardPool::Eligible { player, cards }) => (player, cards),
         // CR 608.2b + CR 701.9a + CR 609.3: no player, or a player no spell or
         // ability can force to discard, discards nothing.
-        Ok(PlayerHandDiscardPool::NoPlayer | PlayerHandDiscardPool::Muzzled) | Err(_) => {
+        Ok(PlayerHandDiscardPool::NoPlayer | PlayerHandDiscardPool::Muzzled { .. }) | Err(_) => {
             return ScopedDiscardStep::Noop;
         }
     };
+    // CR 608.2c + CR 107.1b: the count, read for the discarding player and
+    // clamped at zero by the shared discard authority.
+    let wanted = discard_count(state, &scoped, player) as usize;
     let count = if up_to {
         wanted
     } else {
@@ -207,6 +207,21 @@ fn deliver_scoped_discards(
         });
         return Ok(super::ResolutionProgress::Complete);
     }
+    let delivery = scoped_discard_delivery_node(template, cards, DiscardCause::Effect);
+    super::resolve_ability_chain_step(state, &delivery, events, depth)
+}
+
+/// CR 101.4 + CR 701.9a: the one specific-card discard node that delivers a
+/// simultaneous instruction's collected hand picks (`cards`, already checked
+/// to still be in hand). `cause` is the node's own (CR 118.12): `Effect` for
+/// "each opponent discards a card", `Cost` for the discards chosen to pay a
+/// CR 118.12a unless-cost (`simultaneous_unless`), which Library-of-Leng-class
+/// replacements must not touch.
+pub(super) fn scoped_discard_delivery_node(
+    template: &ResolvedAbility,
+    cards: Vec<TargetRef>,
+    cause: DiscardCause,
+) -> ResolvedAbility {
     let mut delivery = template.clone();
     delivery.effect = Effect::DiscardCard {
         count: cards.len() as u32,
@@ -214,7 +229,9 @@ fn deliver_scoped_discards(
     };
     delivery.multi_target = None;
     delivery.targets = cards;
-    super::resolve_ability_chain_step(state, &delivery, events, depth)
+    delivery.context.discard_cause = cause;
+    delivery.sub_ability = None;
+    delivery
 }
 
 /// CR 101.4: walk `remaining` in APNAP order, collecting each seat's choice

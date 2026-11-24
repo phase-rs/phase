@@ -57,10 +57,18 @@ pub fn resolve(
         // last known context before collecting the affected objects.
         let effective_filter =
             crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
-        let tracked_set_id = tracked_set_id_from_filter(&effective_filter)
-            .or_else(|| crate::game::targeting::latest_tracked_set_id(state));
-        source_ids = tracked_set_id
-            .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+        // CR 730.3c: the members, then the components this reader finds (D2, D7, D4).
+        let binding = tracked_set_binding_from_filter(&effective_filter)
+            .or_else(|| crate::game::targeting::latest_tracked_set_id(state).map(|id| (id, None)));
+        source_ids = binding
+            .map(|(id, caused_by)| {
+                crate::game::merge::tracked_set_found_objects(
+                    state,
+                    id,
+                    Some(ability),
+                    caused_by.as_ref(),
+                )
+            })
             .unwrap_or_default()
             .into_iter()
             .filter(|id| matches_target_filter(state, *id, &effective_filter, &ctx))
@@ -206,13 +214,18 @@ fn references_tracked_set(filter: &TargetFilter) -> bool {
     }
 }
 
-fn tracked_set_id_from_filter(filter: &TargetFilter) -> Option<TrackedSetId> {
+/// CR 608.2c: the tracked set a (possibly composed) filter reads, with that
+/// node's `caused_by` (D4).
+fn tracked_set_binding_from_filter(
+    filter: &TargetFilter,
+) -> Option<(TrackedSetId, Option<crate::types::ability::ThisWayCause>)> {
     match filter {
-        TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => Some(*id),
+        TargetFilter::TrackedSet { id } => Some((*id, None)),
+        TargetFilter::TrackedSetFiltered { id, caused_by, .. } => Some((*id, *caused_by)),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().find_map(tracked_set_id_from_filter)
+            filters.iter().find_map(tracked_set_binding_from_filter)
         }
-        TargetFilter::Not { filter } => tracked_set_id_from_filter(filter),
+        TargetFilter::Not { filter } => tracked_set_binding_from_filter(filter),
         _ => None,
     }
 }

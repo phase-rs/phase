@@ -56,6 +56,21 @@ describe("migrateSavedDecks — bare-slash names", () => {
   });
 });
 
+it("preserves separately printed rows when migrating saved decks", () => {
+  const key = STORAGE_KEY_PREFIX + "Split Forests";
+  const main = [
+    { count: 4, name: "Forest", sourcePrinting: { setCode: "one", collectorNumber: "276" } },
+    { count: 3, name: "Forest", sourcePrinting: { setCode: "dmu", collectorNumber: "277" } },
+    { count: 5, name: "Forest", sourcePrinting: { setCode: "neo", collectorNumber: "292" } },
+  ];
+  const raw = JSON.stringify({ main, sideboard: [] });
+  localStorage.setItem(key, raw);
+
+  migrateSavedDecks();
+
+  expect(localStorage.getItem(key)).toBe(raw);
+});
+
 describe("migrateSavedDecks — malformed records", () => {
   it("skips malformed records stored before a well-formed deck that needs repair", () => {
     const malformed = [
@@ -120,6 +135,27 @@ describe("canonicalizeSavedDeckNames", () => {
       { name: "Summon: Choco/Mog", count: 1 },
     ]);
     expect(stored.format).toBe("Modern");
+  });
+
+  it("rewrites the batch when a saved entry has a malformed printing", async () => {
+    const badKey = STORAGE_KEY_PREFIX + "Malformed printing";
+    const otherKey = STORAGE_KEY_PREFIX + "Other deck";
+    localStorage.setItem(badKey, JSON.stringify({
+      main: [{ count: 1, name: "forest", sourcePrinting: { collectorNumber: "276" } }],
+      sideboard: [],
+    }));
+    localStorage.setItem(otherKey, JSON.stringify({
+      main: [{ count: 2, name: "island" }],
+      sideboard: [],
+    }));
+    mocks.canonicalCardNames.mockImplementation(renameTo({ forest: "Forest", island: "Island" }));
+
+    await canonicalizeSavedDeckNames();
+
+    expect(JSON.parse(localStorage.getItem(badKey) ?? "{}").main[0].name).toBe("Forest");
+    expect(JSON.parse(localStorage.getItem(otherKey) ?? "{}").main).toEqual([
+      { count: 2, name: "Island" },
+    ]);
   });
 
   it("leaves a deck with nothing to rename byte-identical", async () => {

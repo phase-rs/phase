@@ -14,7 +14,7 @@ use engine::types::ability::{
     DelayedTriggerCondition, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::{DelayedTrigger, WaitingFor, ZoneDeparture};
+use engine::types::game_state::{DelayedTrigger, ReplacementChoiceKind, WaitingFor, ZoneDeparture};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -1401,89 +1401,124 @@ fn a_from_anywhere_observer_that_left_with_its_owner_does_not_trigger() {
     );
 }
 
-/// The board of the two Rise of the Dark Realms rows: P0 controls P2's Twilight
-/// Diviner ("Whenever one or more other creatures you control enter, if they
-/// entered or were cast from a graveyard, create a token that's a copy of one
-/// of them.") through Turn Against and casts Rise of the Dark Realms ("Put all
-/// creature cards from all graveyards onto the battlefield under your
-/// control."). Phyrexian Metamorph is in P0's graveyard; its optional copy
-/// replacement pauses the move. `entered_first` puts a Grizzly Bears card in
-/// the graveyard too, which enters before the pause; otherwise a Bears is
-/// already on the battlefield for the Metamorph to copy. `suppressor` gives P2
-/// Hushbringer ("Creatures entering or dying don't cause abilities to
-/// trigger."). P2 concedes at the Metamorph's prompt, so the Diviner (and
-/// Hushbringer) leave the game, and P0 then has the Metamorph enter as a copy
-/// of the Bears. Returns how many Diviner triggers wait or are on the stack.
+fn finish_metamorph_entry_after_concession(
+    runner: &mut GameRunner,
+    metamorph: ObjectId,
+    bears: ObjectId,
+    copy_source: ObjectId,
+    origin: Zone,
+) {
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: P0,
+                kind: ReplacementChoiceKind::OptionalBranch,
+                candidates,
+                ..
+            } if candidates.len() == 2 && candidates.iter().all(|option| option.source_id == metamorph)
+        ),
+        "expected P0's Metamorph copy replacement, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(runner, metamorph), origin);
+    assert_eq!(zone(runner, bears), origin);
+    assert_eq!(zone(runner, copy_source), Zone::Battlefield);
+
+    runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("P2 concedes while the Metamorph replacement is pending");
+    assert!(runner.state().players[2].is_eliminated);
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P0 accepts the Metamorph replacement");
+    let WaitingFor::CopyTargetChoice {
+        player: P0,
+        source_id,
+        valid_targets,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected P0's Metamorph copy choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*source_id, metamorph);
+    // CR 707.5 + CR 614.12a: the Metamorph copies a permanent already on
+    // the battlefield, not another creature entering in the same event.
+    assert_eq!(zone(runner, bears), origin);
+    assert!(!valid_targets.contains(&bears));
+    assert_eq!(zone(runner, copy_source), Zone::Battlefield);
+    assert!(valid_targets.contains(&copy_source));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(engine::types::ability::TargetRef::Object(copy_source)),
+        })
+        .expect("P0 chooses the pre-existing permanent");
+
+    assert_eq!(zone(runner, bears), Zone::Battlefield);
+    assert_eq!(zone(runner, metamorph), Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&metamorph].name,
+        runner.state().objects[&copy_source].name
+    );
+}
+
+fn count_and_resolve_entry_triggers(runner: &mut GameRunner, observer: ObjectId) -> usize {
+    drive_trigger_prompts(runner);
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .all(|entry| entry.source_id == observer && entry.controller == P0),
+        "only P0's observer triggers may remain after the entry spell resolves"
+    );
+    let count = triggers_from(runner, observer);
+    runner.advance_until_stack_empty();
+    assert!(
+        runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the spell and its triggers must finish at priority, got {:?}",
+        runner.state().waiting_for
+    );
+    count
+}
+
 /// Whose Hushbringer is on the board of the Rise rows, if any.
 #[derive(Clone, Copy, PartialEq)]
 enum RiseSuppressor {
     None,
-    /// P2 owns and controls it, and the Diviner is P2's too (stolen by P0).
+    /// P2 owns and controls it.
     OwnedByLeaver,
-    /// P0 owns it and P2 controls it through Turn Against; the Diviner is P0's.
+    /// P0 owns it and P2 controls it through Turn Against.
     BorrowedByLeaver,
 }
 
-fn diviner_triggers_after_its_owner_leaves_mid_rise(
-    entered_first: bool,
+/// P0 resolves Rise of the Dark Realms with the Bears and Metamorph in the
+/// graveyard and Runeclaw Bear already on the battlefield as the copy choice.
+/// P2 concedes at the optional replacement, before the creatures enter.
+fn diviner_triggers_after_a_concession_mid_rise(
+    diviner_owner: PlayerId,
     suppressor: RiseSuppressor,
 ) -> usize {
-    // The members of the simultaneous return are delivered in the engine's
-    // order; use the board on which the Bears is on the battlefield when the
-    // Metamorph's prompt opens.
-    [false, true]
-        .into_iter()
-        .find_map(|metamorph_added_first| {
-            diviner_triggers_on_board(entered_first, suppressor, metamorph_added_first)
-        })
-        .expect("reach guard: one board has the Bears on the battlefield at the pause")
-}
-
-fn diviner_triggers_on_board(
-    entered_first: bool,
-    suppressor: RiseSuppressor,
-    metamorph_added_first: bool,
-) -> Option<usize> {
     let db = shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    let mut borrowed_hushbringer = None;
-    if suppressor == RiseSuppressor::BorrowedByLeaver {
-        borrowed_hushbringer =
-            Some(scenario.add_real_card(P0, "Hushbringer", Zone::Battlefield, db));
-    }
-    let diviner_owner = if suppressor == RiseSuppressor::BorrowedByLeaver {
-        P0
-    } else {
-        P2
-    };
+    let metamorph = scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Graveyard, db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Graveyard, db);
+    let runeclaw = scenario.add_real_card(P0, "Runeclaw Bear", Zone::Battlefield, db);
     let diviner = scenario.add_real_card(diviner_owner, "Twilight Diviner", Zone::Battlefield, db);
-    if suppressor == RiseSuppressor::OwnedByLeaver {
-        scenario.add_real_card(P2, "Hushbringer", Zone::Battlefield, db);
-    }
-    let bears_zone = if entered_first {
-        Zone::Graveyard
-    } else {
-        Zone::Battlefield
+    let hushbringer = match suppressor {
+        RiseSuppressor::None => None,
+        RiseSuppressor::OwnedByLeaver => {
+            Some(scenario.add_real_card(P2, "Hushbringer", Zone::Battlefield, db))
+        }
+        RiseSuppressor::BorrowedByLeaver => {
+            Some(scenario.add_real_card(P0, "Hushbringer", Zone::Battlefield, db))
+        }
     };
-    let (metamorph, bears) = if metamorph_added_first {
-        let metamorph = scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Graveyard, db);
-        (
-            metamorph,
-            scenario.add_real_card(P0, "Grizzly Bears", bears_zone, db),
-        )
-    } else {
-        let bears = scenario.add_real_card(P0, "Grizzly Bears", bears_zone, db);
-        (
-            scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Graveyard, db),
-            bears,
-        )
-    };
-    // An ordinary creature delivery after the Metamorph's copy pause: in the
-    // borrowed-suppressor board it enters through the owner's settlement.
-    if suppressor == RiseSuppressor::BorrowedByLeaver {
-        scenario.add_real_card(P0, "Runeclaw Bear", Zone::Graveyard, db);
-    }
     let turn_against = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
     // P2's own Turn Against, cast on P0's Hushbringer during P0's turn.
     let p2_turn_against = scenario.add_real_card(P2, "Turn Against", Zone::Hand, db);
@@ -1494,7 +1529,7 @@ fn diviner_triggers_on_board(
     scenario.with_mana_pool(P0, pool);
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
     let mut runner = scenario.build();
-    if let Some(hushbringer) = borrowed_hushbringer {
+    if let (RiseSuppressor::BorrowedByLeaver, Some(hushbringer)) = (suppressor, hushbringer) {
         // CR 117.3d: stage P2's priority after the preceding players pass; P2
         // casts Turn Against ("Gain control of target creature until end of
         // turn.") at instant speed through the public action path, then
@@ -1533,63 +1568,34 @@ fn diviner_triggers_on_board(
             .act(GameAction::PassPriority)
             .expect("priority passes while Rise of the Dark Realms resolves");
     }
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { player: P0, .. }
-        ),
-        "reach guard: the Metamorph's copy replacement pauses the move: {:?}",
-        runner.state().waiting_for
+    finish_metamorph_entry_after_concession(
+        &mut runner,
+        metamorph,
+        bears,
+        runeclaw,
+        Zone::Graveyard,
     );
-    assert_eq!(zone(&runner, metamorph), Zone::Graveyard);
-    if zone(&runner, bears) != Zone::Battlefield {
-        return None;
-    }
-
-    runner
-        .act(GameAction::Concede { player_id: P2 })
-        .expect("P2 concedes");
-    if diviner_owner == P2 {
-        assert_eq!(zone(&runner, diviner), Zone::Exile);
-    } else {
-        assert_eq!(zone(&runner, diviner), Zone::Battlefield);
-    }
-
-    for _ in 0..6 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::ReplacementChoice { .. } => {
-                runner
-                    .act(GameAction::ChooseReplacement { index: 0 })
-                    .expect("P0 has the Metamorph enter as a copy");
-            }
-            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
-                runner
-                    .act(GameAction::ChooseTarget {
-                        target: Some(engine::types::ability::TargetRef::Object(valid_targets[0])),
-                    })
-                    .expect("P0 copies the Bears");
-            }
-            _ => break,
+    assert_eq!(zone(&runner, rise), Zone::Graveyard);
+    assert_eq!(
+        zone(&runner, diviner),
+        if diviner_owner == P2 {
+            Zone::Exile
+        } else {
+            Zone::Battlefield
+        }
+    );
+    // CR 800.4a: P2's own Hushbringer leaves; the borrowed one returns to
+    // P0's control without leaving the battlefield.
+    if let Some(hushbringer) = hushbringer {
+        if suppressor == RiseSuppressor::BorrowedByLeaver {
+            assert_eq!(zone(&runner, hushbringer), Zone::Battlefield);
+            assert_eq!(runner.state().objects[&hushbringer].controller, P0);
+        } else {
+            assert_eq!(zone(&runner, hushbringer), Zone::Exile);
         }
     }
-    assert_eq!(zone(&runner, metamorph), Zone::Battlefield);
-    let queued = runner
-        .state()
-        .pending_trigger_order
-        .iter()
-        .flat_map(|order| order.groups.iter())
-        .flat_map(|group| group.triggers.iter())
-        .chain(runner.state().deferred_triggers.iter())
-        .filter(|context| context.pending.source_id == diviner)
-        .count();
-    let announcing = runner
-        .state()
-        .pending_trigger
-        .iter()
-        .filter(|pending| pending.source_id == diviner)
-        .count();
-    // An ability being announced is already a stack entry; count it once.
-    Some(queued + triggers_from(&runner, diviner).max(announcing))
+
+    count_and_resolve_entry_triggers(&mut runner, diviner)
 }
 
 /// CR 603.6c + CR 603.10: a "from anywhere" ability is read in the game after
@@ -2345,10 +2351,9 @@ fn an_earlier_checks_trigger_leaves_with_its_controller_who_loses_in_the_next_ch
 /// turn.") and Sol Ring on P0's side; with `suppressor`, Hushbringer
 /// ("Creatures entering or dying don't cause abilities to trigger.") is P2's.
 /// P0 casts Tooth and Nail for its hand mode ("Put up to two creature cards
-/// from your hand onto the battlefield."), choosing Grizzly Bears and then
-/// Phyrexian Metamorph, whose optional copy replacement pauses the move. P2
-/// concedes there, and P0 has the Metamorph enter as a copy of Sol Ring.
-/// Returns how many Vampire triggers wait or are on the stack.
+/// from your hand onto the battlefield."), choosing Grizzly Bears and
+/// Phyrexian Metamorph to enter together. P2 concedes at the Metamorph's
+/// optional replacement, then P0 has it enter as a copy of Sol Ring.
 fn vampire_triggers_after_a_concession_mid_tooth_and_nail(
     suppressor_owner: Option<PlayerId>,
     vampire_owner: PlayerId,
@@ -2357,7 +2362,7 @@ fn vampire_triggers_after_a_concession_mid_tooth_and_nail(
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let vampire = scenario.add_real_card(vampire_owner, "Welcoming Vampire", Zone::Battlefield, db);
-    scenario.add_real_card(P0, "Sol Ring", Zone::Battlefield, db);
+    let sol_ring = scenario.add_real_card(P0, "Sol Ring", Zone::Battlefield, db);
     // `Some(P2)`: P2 owns and controls the Hushbringer. `Some(P0)`: it is in P0's
     // graveyard and P2 reanimates it below, so P0 owns it and P2 controls it.
     let reanimated = suppressor_owner == Some(P0);
@@ -2381,6 +2386,7 @@ fn vampire_triggers_after_a_concession_mid_tooth_and_nail(
     pool.extend((0..8).map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])));
     pool.extend((0..4).map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![])));
     scenario.with_mana_pool(P0, pool);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
     let mut runner = scenario.build();
     if let (Some(hushbringer), Some(reanimate)) = (suppressor, reanimate) {
         // CR 117.1a: it is P2's turn and main phase, so P2 casts the sorcery
@@ -2410,118 +2416,95 @@ fn vampire_triggers_after_a_concession_mid_tooth_and_nail(
     }
     runner.cast(tooth_and_nail).modes(&[1]).commit();
     for _ in 0..8 {
-        if matches!(
-            runner.state().waiting_for,
-            WaitingFor::EffectZoneChoice { .. }
-        ) {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
         runner
             .act(GameAction::PassPriority)
             .expect("priority passes while Tooth and Nail resolves");
     }
+    let WaitingFor::EffectZoneChoice {
+        player: P0,
+        source_id,
+        zone: Zone::Hand,
+        destination: Some(Zone::Battlefield),
+        count: 2,
+        min_count: 0,
+        up_to: true,
+        cards,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected P0's Tooth and Nail hand choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*source_id, tooth_and_nail);
+    assert!(cards.contains(&bears) && cards.contains(&metamorph));
     runner
         .act(GameAction::SelectCards {
-            cards: vec![bears, metamorph],
+            cards: vec![metamorph, bears],
         })
-        .expect("P0 puts the Bears and then the Metamorph onto the battlefield");
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { player: P0, .. }
-        ),
-        "reach guard: the Metamorph's copy replacement pauses the move: {:?}",
-        runner.state().waiting_for
+        .expect("P0 chooses the Metamorph and Bears to enter together");
+    finish_metamorph_entry_after_concession(&mut runner, metamorph, bears, sol_ring, Zone::Hand);
+    assert_eq!(
+        runner.state().objects[&metamorph].card_types.core_types,
+        runner.state().objects[&sol_ring].card_types.core_types,
+        "the Metamorph enters as a noncreature artifact"
     );
-    assert_eq!(zone(&runner, bears), Zone::Battlefield);
-    assert_eq!(zone(&runner, metamorph), Zone::Hand);
-
-    runner
-        .act(GameAction::Concede { player_id: P2 })
-        .expect("P2 concedes");
-    if reanimated {
-        // CR 800.4a: the permanent P2 still controls is exiled with them.
-        assert_eq!(zone(&runner, suppressor.unwrap()), Zone::Exile);
-        assert_eq!(runner.state().objects[&suppressor.unwrap()].owner, P0);
+    assert_eq!(zone(&runner, tooth_and_nail), Zone::Graveyard);
+    // CR 800.4a: P2's cards leave the game, and the Hushbringer they
+    // reanimated, if any, is exiled because they still control it.
+    if let Some(hushbringer) = suppressor {
+        assert_eq!(zone(&runner, hushbringer), Zone::Exile);
+        assert_eq!(
+            runner.state().objects[&hushbringer].owner,
+            suppressor_owner.unwrap()
+        );
     }
-    for _ in 0..6 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::ReplacementChoice { .. } => {
-                runner
-                    .act(GameAction::ChooseReplacement { index: 0 })
-                    .expect("P0 has the Metamorph enter as a copy");
-            }
-            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
-                let sol_ring = valid_targets
-                    .iter()
-                    .copied()
-                    .find(|id| runner.state().objects[id].name == "Sol Ring")
-                    .expect("Sol Ring is a legal copy choice");
-                runner
-                    .act(GameAction::ChooseTarget {
-                        target: Some(engine::types::ability::TargetRef::Object(sol_ring)),
-                    })
-                    .expect("P0 copies Sol Ring");
-            }
-            _ => break,
+    assert_eq!(
+        zone(&runner, vampire),
+        if vampire_owner == P2 {
+            Zone::Exile
+        } else {
+            Zone::Battlefield
         }
-    }
-    assert_eq!(zone(&runner, metamorph), Zone::Battlefield);
-    let queued = runner
-        .state()
-        .pending_trigger_order
-        .iter()
-        .flat_map(|order| order.groups.iter())
-        .flat_map(|group| group.triggers.iter())
-        .chain(runner.state().deferred_triggers.iter())
-        .filter(|context| context.pending.source_id == vampire)
-        .count();
-    let announcing = runner
-        .state()
-        .pending_trigger
-        .iter()
-        .filter(|pending| pending.source_id == vampire)
-        .count();
-    // An ability being announced is already a stack entry; count it once.
-    queued + triggers_from(&runner, vampire).max(announcing)
+    );
+    let hand_before = runner.state().players[0].hand.len();
+    let count = count_and_resolve_entry_triggers(&mut runner, vampire);
+    assert_eq!(runner.state().players[0].hand.len(), hand_before + count);
+    count
 }
 
-/// CR 603.6a + CR 603.10 + CR 603.2g: a suppressor that applied when an entry
-/// happened still applies to it after its owner leaves, on the hand-to-
-/// battlefield path too, where the game after the entry is read at final
-/// settlement. The Bears entered under Hushbringer, so Welcoming Vampire does
-/// not trigger for it.
+/// CR 603.6a + CR 603.10 + CR 800.4a: Hushbringer leaves with P2 before the
+/// Bears enter, so it does not suppress the surviving Vampire's trigger.
 #[test]
-fn a_departed_suppressor_still_applies_to_the_hand_entry_completed_before_its_owner_left() {
+fn a_hand_entry_after_the_suppressors_owner_concedes_triggers_the_surviving_observer_once() {
     assert_eq!(
         vampire_triggers_after_a_concession_mid_tooth_and_nail(Some(P2), P0),
-        0
+        1
     );
 }
 
-/// CR 603.6a + CR 603.3a: the positive control of the row above, with the same
-/// concession and the same noncreature copy: without Hushbringer the Bears'
-/// entry triggers Welcoming Vampire, once.
+/// CR 603.6a: without Hushbringer, the same simultaneous entry triggers
+/// Welcoming Vampire once for the Bears; the Sol Ring copy is not a creature.
 #[test]
-fn a_hand_entry_completed_before_a_concession_triggers_the_survivors_observer_once() {
+fn a_hand_entry_after_an_unrelated_concession_triggers_the_surviving_observer_once() {
     assert_eq!(
         vampire_triggers_after_a_concession_mid_tooth_and_nail(None, P0),
         1
     );
 }
 
-/// CR 800.4a + CR 603.6a + CR 603.10: a suppressor P0 owns that P2 controls
-/// (P2 returned it with Reanimate: "Put target creature card from a graveyard
-/// onto the battlefield under your control.") is exiled when P2 concedes, with
-/// the objects P2 controls, and still suppressed the entry completed before
-/// that: the Bears entered under Hushbringer, so Welcoming Vampire does not
-/// trigger for it. P2 casts Reanimate in their own main phase through the public
-/// path; the row checks ownership, control and the exile.
+/// CR 800.4a + CR 603.6a + CR 603.10: P0 owns the Hushbringer P2 reanimated.
+/// P2 still controls it at concession, so it is exiled before the Bears enter
+/// and no longer prevents Welcoming Vampire from triggering.
 #[test]
-fn a_suppressor_exiled_under_the_leavers_control_still_applies_to_the_completed_entry() {
+fn a_hand_entry_after_the_suppressor_is_exiled_triggers_the_surviving_observer_once() {
     assert_eq!(
         vampire_triggers_after_a_concession_mid_tooth_and_nail(Some(P0), P0),
-        0
+        1
     );
 }
 
@@ -2529,61 +2512,53 @@ fn a_suppressor_exiled_under_the_leavers_control_still_applies_to_the_completed_
 /// concession keeps suppressing. P0 owns Twilight Diviner and Hushbringer; P2
 /// controls the Hushbringer through Turn Against, which ends when P2 concedes
 /// (CR 800.4a: control effects end before anything still controlled is exiled),
-/// so it stays on the battlefield under P0. P0's Rise of the Dark Realms pauses
-/// at the Metamorph's copy choice before anything has entered, and P2 concedes;
-/// the Hushbringer still suppresses the Metamorph's later entry and the Runeclaw
-/// Bear's, which enters after it, so the Diviner does not trigger.
+/// so the Hushbringer stays on the battlefield under P0 and suppresses both
+/// creatures entering when Rise of the Dark Realms resumes.
 #[test]
 fn a_suppressor_whose_control_reverts_when_its_controller_concedes_keeps_suppressing() {
     assert_eq!(
-        diviner_triggers_after_its_owner_leaves_mid_rise(false, RiseSuppressor::BorrowedByLeaver),
+        diviner_triggers_after_a_concession_mid_rise(P0, RiseSuppressor::BorrowedByLeaver),
         0
     );
 }
 
-/// CR 603.6a + CR 603.10 + CR 603.3a: a survivor-controlled observer whose
-/// source leaves with its owner keeps the trigger for the entry completed
-/// before it left, on the hand-to-battlefield path. P0 controls P2's Welcoming
-/// Vampire (Turn Against); the Bears enters, P2 concedes at the Metamorph's
-/// copy choice, and the Vampire triggers for P0 once.
+/// CR 603.6a + CR 603.10 + CR 800.4a: P0 controls P2's Welcoming Vampire
+/// through Turn Against, but it leaves with P2 before the Bears enter.
 #[test]
-fn a_stolen_observer_keeps_its_trigger_for_the_hand_entry_completed_before_its_owner_left() {
+fn a_stolen_observer_does_not_trigger_for_a_hand_entry_after_its_owner_concedes() {
     assert_eq!(
         vampire_triggers_after_a_concession_mid_tooth_and_nail(None, P2),
-        1
+        0
     );
 }
 
-/// CR 603.10a + CR 800.4a: a departed observer cannot trigger for an event that
-/// happens after it left. Nothing had entered when P2 conceded, so the Diviner
-/// does not trigger for the Metamorph's later entry.
+/// CR 603.6a + CR 603.10 + CR 800.4a: the Diviner leaves with its owner
+/// before Rise of the Dark Realms returns either creature.
 #[test]
 fn a_departed_observer_does_not_trigger_for_an_entry_after_it_left() {
     assert_eq!(
-        diviner_triggers_after_its_owner_leaves_mid_rise(false, RiseSuppressor::None),
+        diviner_triggers_after_a_concession_mid_rise(P2, RiseSuppressor::None),
         0
     );
 }
 
-/// CR 603.3a: the positive control of the two rows around it. The Bears entered
-/// from the graveyard while P0 controlled the Diviner, before P2 conceded, so
-/// that ability triggered for P0 and is kept, once.
+/// CR 603.6a: when the Diviner stays and no Hushbringer is present, the
+/// simultaneous entry of two creatures from the graveyard triggers it once.
 #[test]
-fn a_departed_observer_keeps_its_trigger_for_an_entry_completed_before_it_left() {
+fn a_graveyard_entry_after_an_unrelated_concession_triggers_the_surviving_observer_once() {
     assert_eq!(
-        diviner_triggers_after_its_owner_leaves_mid_rise(true, RiseSuppressor::None),
+        diviner_triggers_after_a_concession_mid_rise(P0, RiseSuppressor::None),
         1
     );
 }
 
-/// CR 603.10a + CR 603.2g: a suppressor that applied when an occurrence
-/// happened still applies to it after its owner leaves. The Bears entered under
-/// Hushbringer, so the Diviner's retained trigger does not fire for it.
+/// CR 800.4a + CR 603.6a + CR 603.10: Hushbringer leaves with P2 before the
+/// simultaneous graveyard entry, so the surviving Diviner triggers once.
 #[test]
-fn a_departed_suppressor_still_applies_to_the_entry_completed_before_its_owner_left() {
+fn a_graveyard_entry_after_the_suppressors_owner_concedes_triggers_the_surviving_observer_once() {
     assert_eq!(
-        diviner_triggers_after_its_owner_leaves_mid_rise(true, RiseSuppressor::OwnedByLeaver),
-        0
+        diviner_triggers_after_a_concession_mid_rise(P0, RiseSuppressor::OwnedByLeaver),
+        1
     );
 }
 

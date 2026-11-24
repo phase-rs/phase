@@ -20,7 +20,7 @@ use engine::types::counter::CounterType;
 use engine::types::definitions::Definitions;
 use engine::types::events::{BoundActivationCost, GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    AbilityActivationRecord, ActivationTargetFact, AutoPassMode, DepartedStackSpell,
+    AbilityActivationRecord, ActivationTargetFact, AutoPassMode, CyclingRecord, DepartedStackSpell,
     LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileLki, LinkedExileSnapshot,
     PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry,
     StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
@@ -119,6 +119,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::cards_drawn_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::spells_cast_this_game", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::spells_cast_this_game_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::cycles_completed_this_game_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::spells_cast_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::abilities_activated_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lands_played_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -278,15 +279,6 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         game_state,
         "GameState",
         None,
-        "post_replacement_token_choice_applied",
-        "Option<HashSet>",
-        Classification::Canonical(OPTION_HASH_SET),
-    );
-    add_spec(
-        &mut specs,
-        game_state,
-        "GameState",
-        None,
         "creature_types_dealt_combat_damage_this_turn",
         "im::HashSet",
         Classification::Canonical(IM_HASH_SET),
@@ -321,6 +313,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "cards_drawn_this_turn",
         "spells_cast_this_game",
         "spells_cast_this_game_by_player",
+        "cycles_completed_this_game_by_player",
         "spells_cast_this_turn_by_player",
         "lands_played_this_turn_by_player",
         "attacking_creatures_this_turn",
@@ -927,6 +920,22 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::DeserializeOnlyOrRuntime,
         ),
         (
+            "src/game/zone_pipeline.rs",
+            "MemberDeliveryOwner",
+            None,
+            "population_devour_snapshot",
+            "Option<HashSet>",
+            Classification::DeserializeOnlyOrRuntime,
+        ),
+        (
+            "src/types/game_state.rs",
+            "StagedBatchDelivery",
+            None,
+            "population_devour_snapshot",
+            "Option<HashSet>",
+            Classification::Canonical(OPTION_HASH_SET),
+        ),
+        (
             "src/game/effects/choose_one_of.rs",
             "PromptRequest",
             None,
@@ -996,6 +1005,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::Canonical(HASH_SET),
         );
     }
+    add_spec(
+        &mut specs,
+        "src/types/proposed_event.rs",
+        "TokenBatch",
+        None,
+        "applied",
+        "HashSet",
+        Classification::Canonical(HASH_SET),
+    );
 
     for owner in NUMERIC_MAP_ROUND_TRIP_OWNERS {
         let spec = specs.get_mut(owner.id).unwrap_or_else(|| {
@@ -1380,7 +1398,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        62,
+        63,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -2013,6 +2031,21 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (PlayerId(0), im::Vector::from(vec![first_spell])),
         (PlayerId(1), im::Vector::from(vec![second_spell])),
     ]);
+    let first_cycle = CyclingRecord {
+        name: "First cycled card".to_owned(),
+        turn: 1,
+    };
+    let second_cycle = CyclingRecord {
+        name: "Second cycled card".to_owned(),
+        turn: 2,
+    };
+    state.cycles_completed_this_game_by_player = HashMap::from([
+        (PlayerId(0), im::Vector::unit(first_cycle.clone())),
+        (
+            PlayerId(1),
+            im::Vector::from(vec![first_cycle, second_cycle]),
+        ),
+    ]);
     state.lands_played_this_turn_by_player = HashMap::from([
         (
             PlayerId(0),
@@ -2314,6 +2347,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "cards_drawn_this_turn",
         "spells_cast_this_game",
         "spells_cast_this_game_by_player",
+        "cycles_completed_this_game_by_player",
         "spells_cast_this_turn_by_player",
         "abilities_activated_this_turn_by_player",
         "lands_played_this_turn_by_player",
@@ -2340,7 +2374,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        47,
+        48,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {

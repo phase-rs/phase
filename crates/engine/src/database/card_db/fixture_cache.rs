@@ -40,6 +40,20 @@ impl CardDatabase {
             .and_then(|binary| Location::beside(&binary, &bytes));
         load(&bytes, decompress, location.as_ref())
     }
+
+    /// Test loader for a fixture made of named parts (the integration card shards), through the
+    /// same cache. The cache key hashes each part's name, length and bytes; `text` assembles the
+    /// export JSON only when no cache file is served.
+    pub fn from_parts_cached<'a>(
+        parts: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+        text: impl FnOnce() -> io::Result<String>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let hash = parts_hash(parts);
+        let location = std::env::current_exe()
+            .ok()
+            .and_then(|binary| Location::beside_hash(&binary, hash));
+        load(&[], |_| text(), location.as_ref())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -47,6 +61,19 @@ pub(super) struct Key {
     pub(super) fixture_hash: u64,
     pub(super) binary_len: u64,
     pub(super) binary_mtime_ns: u128,
+}
+
+/// Hash of named parts. Each name and body is length-framed, so moving a byte between two parts
+/// changes the hash.
+fn parts_hash<'a>(parts: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    for (name, bytes) in parts {
+        hasher.write_u64(name.len() as u64);
+        hasher.write(name.as_bytes());
+        hasher.write_u64(bytes.len() as u64);
+        hasher.write(bytes);
+    }
+    hasher.finish()
 }
 
 pub(super) fn fixture_hash(bytes: &[u8]) -> u64 {
@@ -65,6 +92,11 @@ struct Location {
 impl Location {
     /// The cache file for `fixture` beside `binary`, keyed by the binary's size and mtime.
     fn beside(binary: &Path, fixture: &[u8]) -> Option<Self> {
+        Self::beside_hash(binary, fixture_hash(fixture))
+    }
+
+    /// [`Self::beside`] for a fixture whose hash the caller already computed.
+    fn beside_hash(binary: &Path, fixture_hash: u64) -> Option<Self> {
         let metadata = fs::metadata(binary).ok()?;
         let binary_mtime_ns = metadata
             .modified()
@@ -77,7 +109,7 @@ impl Location {
         Some(Self {
             path: path.into(),
             key: Key {
-                fixture_hash: fixture_hash(fixture),
+                fixture_hash,
                 binary_len: metadata.len(),
                 binary_mtime_ns,
             },
@@ -847,5 +879,26 @@ mod tests {
             }
         );
         assert!(Location::beside(&dir.path().join("absent"), &fixture).is_none());
+    }
+
+    #[test]
+    fn the_parts_hash_follows_every_name_byte_and_boundary() {
+        let base = parts_hash([("a.jsonl", &b"xy"[..]), ("b.jsonl", &b"z"[..])]);
+        assert_eq!(
+            base,
+            parts_hash([("a.jsonl", &b"xy"[..]), ("b.jsonl", &b"z"[..])])
+        );
+        assert_ne!(
+            base,
+            parts_hash([("a.jsonl", &b"xy"[..]), ("b.jsonl", &b"Z"[..])])
+        );
+        assert_ne!(
+            base,
+            parts_hash([("a.jsonl", &b"x"[..]), ("b.jsonl", &b"yz"[..])])
+        );
+        assert_ne!(
+            base,
+            parts_hash([("c.jsonl", &b"xy"[..]), ("b.jsonl", &b"z"[..])])
+        );
     }
 }

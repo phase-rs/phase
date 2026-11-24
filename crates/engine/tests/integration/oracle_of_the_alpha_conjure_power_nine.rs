@@ -165,7 +165,7 @@ fn oracle_of_the_alpha_etb_conjures_power_nine_into_library_then_shuffles() {
     let p1_names = library_names(outcome.state(), P1);
     for name in POWER_NINE {
         assert!(
-            !p1_names.contains(&name.to_string()),
+            !p1_names.iter().any(|i| i == name),
             "opponent library must not contain {name}: {p1_names:?}"
         );
     }

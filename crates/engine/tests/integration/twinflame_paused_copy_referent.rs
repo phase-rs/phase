@@ -2022,10 +2022,9 @@ fn r18_sibling_declined_moonlit_meditation_keeps_kiki_jikis_copy() {
 }
 
 /// The answers on a Kiki-Jiki board with Moonlit Meditation and Jinnie Fay:
-/// order Moonlit Meditation first, accept it, and decline Jinnie Fay on the
-/// modified original event. On Moonlit's own copy event (raised with two
-/// CopyToken owners parked) accept Jinnie Fay when `accept_jinnie`, taking the
-/// Cat branch. `branch_frames` records the frames at each branch prompt.
+/// order Moonlit Meditation first and accept it; accept Jinnie Fay on its only
+/// prompt when `accept_jinnie` (taking the Cat branch), decline it otherwise.
+/// `branch_frames` records the frames at each branch prompt.
 fn moonlit_then_jinnie(
     accept_jinnie: bool,
     branch_frames: &mut Vec<Vec<FrameKind>>,
@@ -2042,7 +2041,7 @@ fn moonlit_then_jinnie(
                 _ if only_from(candidates, MOONLIT_MEDITATION) => {
                     accept_index(candidates, MOONLIT_MEDITATION)
                 }
-                _ if accept_jinnie && copy_token_frame_count(runner) == 2 => {
+                _ if accept_jinnie && only_from(candidates, JINNIE) => {
                     accept_index(candidates, JINNIE)
                 }
                 _ => decline_index(candidates, JINNIE),
@@ -2057,25 +2056,34 @@ fn moonlit_then_jinnie(
     }
 }
 
-/// The Jinnie Fay prompt raised on Moonlit Meditation's own copy event, while
-/// Moonlit's copy owner is parked above Kiki-Jiki's.
-fn assert_jinnie_prompted_on_moonlits_copy_event(run: &KikiJikiRun) {
-    assert!(
-        run.prompts.iter().any(
-            |prompt| prompt.kind == KikiJikiPromptKind::ReplacementChoice
-                && prompt.copy_token_frames == 2
+/// The one Jinnie Fay prompt on the event Moonlit Meditation modified, raised
+/// with Kiki-Jiki's single CopyToken owner parked (CR 614.5: one offer).
+fn assert_jinnie_prompted_once_on_the_modified_event(run: &KikiJikiRun) {
+    let jinnie: Vec<_> = run
+        .prompts
+        .iter()
+        .filter(|prompt| {
+            prompt.kind == KikiJikiPromptKind::ReplacementChoice
                 && prompt.candidates.iter().all(|name| name == JINNIE)
-        ),
-        "REACH-GUARD: Jinnie Fay prompts on Moonlit's copy event with two CopyToken owners \
-         parked, saw {:?}",
+        })
+        .collect();
+    assert_eq!(
+        jinnie.len(),
+        1,
+        "REACH-GUARD: Jinnie Fay prompts exactly once on the modified event, saw {:?}",
+        run.prompts
+    );
+    assert_eq!(
+        jinnie[0].copy_token_frames, 1,
+        "REACH-GUARD: the Jinnie prompt is raised with one CopyToken owner parked, saw {:?}",
         run.prompts
     );
 }
 
 /// R19: R18's board plus P0's Jinnie Fay. Moonlit Meditation is ordered first
-/// and accepted; Jinnie Fay is declined on the modified event and again on
-/// Moonlit's copy event, which pauses with Moonlit's own copy owner above
-/// Kiki-Jiki's. Moonlit's copy is still Kiki-Jiki's "it" (CR 614.6).
+/// and accepted, rewriting Kiki-Jiki's event at once; Jinnie Fay is offered
+/// once on the modified event (CR 614.5) and declined. Moonlit's copy is still
+/// Kiki-Jiki's "it" (CR 614.6).
 #[test]
 fn r19_moonlit_copy_paused_inside_a_declined_jinnie_prompt_is_kiki_jikis_it() {
     let mut branch_frames = Vec::new();
@@ -2086,7 +2094,7 @@ fn r19_moonlit_copy_paused_inside_a_declined_jinnie_prompt_is_kiki_jikis_it() {
     let Some(run) = run else {
         return;
     };
-    assert_jinnie_prompted_on_moonlits_copy_event(&run);
+    assert_jinnie_prompted_once_on_the_modified_event(&run);
     assert!(
         branch_frames.is_empty(),
         "REACH-GUARD: no Jinnie Fay substitution was accepted"
@@ -2103,10 +2111,10 @@ fn r19_moonlit_copy_paused_inside_a_declined_jinnie_prompt_is_kiki_jikis_it() {
 }
 
 /// R19b: Kiki-Jiki copies a Triskelion that Moonlit Meditation enchants, under
-/// Hardened Scales and Branching Evolution. Moonlit is accepted; its copy's
-/// "enters with three +1/+1 counters" pauses on the counter ordering with
-/// Moonlit's copy owner above Kiki-Jiki's. The copy is Kiki-Jiki's "it"
-/// (CR 614.6).
+/// Hardened Scales and Branching Evolution. Moonlit is accepted, rewriting
+/// Kiki-Jiki's event at once; its copy's "enters with three +1/+1 counters"
+/// pauses on the counter ordering with Kiki-Jiki's single CopyToken owner
+/// parked. The copy is Kiki-Jiki's "it" (CR 614.6).
 #[test]
 fn r19b_moonlit_copy_paused_on_a_counter_prompt_is_kiki_jikis_it() {
     let run = run_kiki_jiki_with(
@@ -2139,10 +2147,10 @@ fn r19b_moonlit_copy_paused_on_a_counter_prompt_is_kiki_jikis_it() {
     assert!(
         run.prompts.iter().any(
             |prompt| prompt.kind == KikiJikiPromptKind::ReplacementChoice
-                && prompt.copy_token_frames == 2
+                && prompt.copy_token_frames == 1
                 && prompt.candidates.iter().any(|name| name == HARDENED_SCALES)
         ),
-        "REACH-GUARD: the copy's counter ordering is raised with two CopyToken owners parked, \
+        "REACH-GUARD: the copy's counter ordering is raised with one CopyToken owner parked, \
          saw {:?}",
         run.prompts
     );
@@ -2163,9 +2171,9 @@ fn r19b_moonlit_copy_paused_on_a_counter_prompt_is_kiki_jikis_it() {
     );
 }
 
-/// R22: R19's board with Jinnie Fay accepted on Moonlit's copy event (the Cat
-/// branch). Two substitutions: the Cat replaced Moonlit's copy, which replaced
-/// Kiki-Jiki's, so the Cat is "it" (CR 614.6 twice).
+/// R22: R19's board with Jinnie Fay accepted on the Moonlit-modified event
+/// (the Cat branch). Two substitutions: the Cat replaced Moonlit's copy, which
+/// replaced Kiki-Jiki's, so the Cat is "it" (CR 614.6 twice).
 #[test]
 fn r22_jinnie_cat_replacing_moonlits_copy_is_kiki_jikis_it() {
     let mut branch_frames = Vec::new();
@@ -2176,19 +2184,13 @@ fn r22_jinnie_cat_replacing_moonlits_copy_is_kiki_jikis_it() {
     let Some(run) = run else {
         return;
     };
-    assert_jinnie_prompted_on_moonlits_copy_event(&run);
-    // The substitute's drain went into the frame beneath Moonlit's copy owner,
-    // which the zero-token delivery of Moonlit's replaced event re-parked on
-    // top: that delivery completed having created nothing.
+    assert_jinnie_prompted_once_on_the_modified_event(&run);
+    // The branch prompt parks the replacement, not a continuation: no
+    // PostReplacement frame, and Kiki-Jiki's single CopyToken owner.
     assert_eq!(
         branch_frames,
-        vec![vec![
-            FrameKind::AbilityContinuation,
-            FrameKind::CopyToken,
-            FrameKind::PostReplacement,
-            FrameKind::CopyToken,
-        ]],
-        "REACH-GUARD: one branch prompt, raised with Moonlit's copy owner on top"
+        vec![vec![FrameKind::AbilityContinuation, FrameKind::CopyToken]],
+        "REACH-GUARD: one branch prompt, raised with Kiki-Jiki's copy owner parked"
     );
     assert_eq!(
         run.token_names[0], "Cat",
@@ -2215,16 +2217,11 @@ fn r22s_jinnie_cat_replacing_moonlits_copy_is_kiki_jikis_it_across_save_and_rest
     let Some(run) = run else {
         return;
     };
-    assert_jinnie_prompted_on_moonlits_copy_event(&run);
+    assert_jinnie_prompted_once_on_the_modified_event(&run);
     assert_eq!(
         branch_frames,
-        vec![vec![
-            FrameKind::AbilityContinuation,
-            FrameKind::CopyToken,
-            FrameKind::PostReplacement,
-            FrameKind::CopyToken,
-        ]],
-        "REACH-GUARD: one branch prompt, raised with Moonlit's copy owner on top"
+        vec![vec![FrameKind::AbilityContinuation, FrameKind::CopyToken]],
+        "REACH-GUARD: one branch prompt, raised with Kiki-Jiki's copy owner parked"
     );
     assert_eq!(
         run.token_names[0], "Cat",

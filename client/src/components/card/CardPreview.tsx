@@ -1780,7 +1780,11 @@ function CardInfoPanel({
                   </span>
                 )}
                 {reminder && (
-                  <GameplayTooltip id={tooltipId} className="right-auto left-0 mb-1.5 w-52 px-2.5 py-1.5 text-[10px] font-normal text-slate-200 shadow-xl">
+                  <GameplayTooltip
+                    id={tooltipId}
+                    touch="toggle"
+                    className="right-auto left-0 mb-1.5 w-52 px-2.5 py-1.5 text-[10px] font-normal text-slate-200 shadow-xl"
+                  >
                     <RichLabel text={reminder} size="xs" />
                   </GameplayTooltip>
                 )}
@@ -1790,9 +1794,11 @@ function CardInfoPanel({
         </div>
       )}
 
-      {/* Counters */}
+      {/* Counters. Like the keywords row, the row takes pointer events inside
+          the click-through preview, so hovering or tapping a counter reaches
+          its explanation. */}
       {counters.length > 0 && (
-        <div className="mt-1 flex flex-wrap gap-x-3 text-gray-400">
+        <div className="pointer-events-auto mt-1 flex flex-wrap gap-x-3 text-gray-400">
           {counters.map((row) => {
             const type = row.counter;
             // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this counter
@@ -1800,7 +1806,7 @@ function CardInfoPanel({
             // tooltip so its summary can't contradict the row.
             const unbounded = isUnbounded(row);
             return (
-              <CounterTooltip key={type} type={type} count={row.count} isUnbounded={unbounded}>
+              <CounterTooltip key={type} type={type} count={row.count} isUnbounded={unbounded} touch="toggle">
                 <span>
                   {formatCounterType(type)}: {unbounded ? "∞" : row.count}
                 </span>

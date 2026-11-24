@@ -756,7 +756,7 @@ function CreatureSummary({ objects }: { objects: GameObject[] }) {
     <span className="group relative inline-flex h-5 items-center gap-1 rounded-full bg-black/45 px-2 text-[10px] font-black tabular-nums text-slate-100 ring-1 ring-white/12">
       <span aria-hidden>⚔</span>
       <span>{`${power}/${toughness}`}</span>
-      <GameplayTooltip className="left-0 right-auto w-52">
+      <GameplayTooltip className="left-0 right-auto w-52" touch="toggle">
         {t("battlefieldOverflow.creatures.totalPower", { power, toughness })}
       </GameplayTooltip>
     </span>

@@ -142,8 +142,7 @@ pub struct PlayerDeckPayload {
     #[serde(default)]
     pub estimated_bracket_tier: Option<CommanderBracketTier>,
     /// Normalized owner choices, display-only (CR 203.1 + CR 206.1).
-    /// Resolvers, and between games `rebind_retained_printings`, bind these to the
-    /// payload's entries before database-free loading.
+    /// Resolvers bind these to the payload's entries before database-free loading.
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -503,6 +502,21 @@ fn section_budgets<'a>(
     budgets
 }
 
+/// True when `row` can bind at all: a known section, at least one copy, and a name, set
+/// code and collector number that are non-empty and free of control characters. The one
+/// filter for deck ingress and for a continuation's allocation.
+fn is_admissible_printing_row(row: &DeckPrinting) -> bool {
+    row.section != DeckSection::Unknown
+        && row.count != 0
+        && [
+            &row.name,
+            &row.printing.set_code,
+            &row.printing.collector_number,
+        ]
+        .into_iter()
+        .all(|s| !s.is_empty() && !s.chars().any(char::is_control))
+}
+
 /// CR 203.1 + CR 206.1: replace `payload`'s rows and bindings with `rows` bound to its
 /// entries. Invalid rows disappear. Each (section, round-trip name) row stream is clamped,
 /// in row order, to the copies its entries hold. A row left with nothing to bind is
@@ -523,16 +537,7 @@ fn bind_printing_rows<'a>(
     let mut budgets: [Option<HashMap<Cow<'a, str>, NameBudget>>; 10] =
         std::array::from_fn(|_| None);
     for row in rows {
-        if row.section == DeckSection::Unknown
-            || row.count == 0
-            || [
-                &row.name,
-                &row.printing.set_code,
-                &row.printing.collector_number,
-            ]
-            .into_iter()
-            .any(|s| s.is_empty() || s.chars().any(char::is_control))
-        {
+        if !is_admissible_printing_row(&row) {
             continue;
         }
         let Some(mut row) = names.canonical_row(row) else {
@@ -575,28 +580,193 @@ pub fn normalize_deck_printings(db: &CardDatabase, payload: &mut PlayerDeckPaylo
     bind_printing_rows(payload, submitted, LookupNames::Database(db));
 }
 
-/// CR 100.4 + CR 203.1 + CR 206.1: between games of a match, bind a seat's retained
-/// printing rows to the lists it plays the next game with. Entries are named through the
-/// record's face-identity correspondence, never by raw face name, so qualified-only cards
-/// and same-named cards keep their own rows, and no card database is needed. A card a
-/// sideboard swap moved into a section it has no row in gets no printing. The record
-/// itself is not changed (see `load_next_game_decks`).
-pub(crate) fn rebind_retained_printings(
-    pool: &PlayerDeckPool,
-    mut seat: PlayerDeckPayload,
-) -> PlayerDeckPayload {
-    match pool.printings.get().as_deref() {
-        Some(record) => bind_printing_rows(
-            &mut seat,
-            record.rows().iter().cloned(),
-            LookupNames::Retained(record),
-        ),
-        None => {
-            seat.printings.clear();
-            seat.printing_entry_names.clear();
+/// CR 100.4: the two lists a sideboard submission repartitions. Owner printings carry
+/// between these and no other sections.
+const PLAYABLE_PRINTING_SECTIONS: [DeckSection; 2] =
+    [DeckSection::MainDeck, DeckSection::Sideboard];
+
+/// `count` consecutive copies of one registered row's printing.
+struct PrintingSpan<'a> {
+    count: u32,
+    printing: &'a CardPrinting,
+}
+
+/// One face's printings for a continuation, indexed like `PLAYABLE_PRINTING_SECTIONS`.
+struct PlayablePrintingAllocation<'a> {
+    /// What each section's copies bind, up to that section's capacity.
+    streams: [Vec<PrintingSpan<'a>>; 2],
+    /// The registered rows of each section that no copy bound this game, in row order.
+    /// Counts exclude copies assigned to either stream, including the assigned portion
+    /// of a split row, so reading on into them never offers a registered copy twice.
+    unabsorbed: [Vec<PrintingSpan<'a>>; 2],
+}
+
+/// CR 100.4 + CR 203.1 + CR 206.1: `face`'s printing stream for each playable section,
+/// given the copies each holds this game (`capacities`, indexed like
+/// `PLAYABLE_PRINTING_SECTIONS`). A section binds its own registered rows first, in row
+/// order, up to its capacity. The rows that clamp cuts off then fill the other section's
+/// remaining copies, in the donor's row order. The unabsorbed suffixes stay in their
+/// original section and row order. The continuation sideboard reader appends the
+/// sideboard suffix first, then the main-deck suffix, for copies released into the
+/// ordinary sideboard after deck loading. Admissible rows from unambiguous streams
+/// bind when they fit the effective capacity and the destination key can be emitted.
+/// Returning to the original partition restores local bindings when each stream fits
+/// its section. A key shared by distinct faces contributes no local or overflow rows.
+/// Display-only: no rules path reads the result.
+fn allocate_playable_printings<'a>(
+    record: &'a DeckPrintingRecord,
+    face: &CardFace,
+    capacities: [u64; 2],
+) -> PlayablePrintingAllocation<'a> {
+    let mut vacancies = capacities;
+    let mut streams: [_; 2] = std::array::from_fn(|_| Vec::new());
+    let mut overflow: [_; 2] = std::array::from_fn(|_| Vec::new());
+    for (index, section) in PLAYABLE_PRINTING_SECTIONS.into_iter().enumerate() {
+        let Some(name) = record.unambiguous_lookup_name(section, face) else {
+            continue;
+        };
+        for row in record.rows_named(section, Some(name)) {
+            if !is_admissible_printing_row(row) {
+                continue;
+            }
+            let count = vacancies[index].min(u64::from(row.count)) as u32;
+            if count > 0 {
+                streams[index].push(PrintingSpan {
+                    count,
+                    printing: &row.printing,
+                });
+                vacancies[index] -= u64::from(count);
+            }
+            if count < row.count {
+                overflow[index].push(PrintingSpan {
+                    count: row.count - count,
+                    printing: &row.printing,
+                });
+            }
         }
     }
-    seat
+    // Reversed, each section meets the other's overflow: main takes the sideboard's.
+    for (index, donor) in overflow.iter_mut().rev().enumerate() {
+        for span in donor.iter_mut() {
+            if vacancies[index] == 0 {
+                break;
+            }
+            let count = vacancies[index].min(u64::from(span.count)) as u32;
+            streams[index].push(PrintingSpan { count, ..*span });
+            vacancies[index] -= u64::from(count);
+            span.count -= count;
+        }
+        donor.retain(|span| span.count > 0);
+    }
+    PlayablePrintingAllocation {
+        streams,
+        unabsorbed: overflow,
+    }
+}
+
+/// The copies of `face` in `entries`, by face identity (never by raw name).
+fn face_capacity(entries: &[DeckEntry], face: &CardFace) -> u64 {
+    let identity = deck_face_identity(face);
+    entries
+        .iter()
+        .filter(|entry| deck_face_identity(&entry.card) == identity)
+        .map(|entry| u64::from(entry.count))
+        .sum()
+}
+
+/// CR 100.4: continuation binding uses the effective playable partition and the
+/// immutable registration. Other sections retain their section-local bindings.
+fn bind_continuation_printings(
+    seat: &mut PlayerDeckPayload,
+    record: Option<&DeckPrintingRecord>,
+    sideboard_policy: crate::types::format::SideboardPolicy,
+) {
+    let Some(record) = record else {
+        seat.printings.clear();
+        seat.printing_entry_names.clear();
+        return;
+    };
+    let sections = PLAYABLE_PRINTING_SECTIONS;
+    let rows = record.rows().iter();
+    if sideboard_policy == crate::types::format::SideboardPolicy::Forbidden {
+        bind_printing_rows(seat, rows.cloned(), LookupNames::Retained(record));
+        return;
+    }
+    bind_printing_rows(
+        seat,
+        rows.filter(|row| !sections.contains(&row.section)).cloned(),
+        LookupNames::Retained(record),
+    );
+
+    let lists = [seat.main_deck.as_slice(), seat.sideboard.as_slice()];
+    let mut capacities = HashMap::<_, [u64; 2]>::new();
+    let mut indexes = std::array::from_fn::<_, 2, _>(|section| {
+        let mut by_face = HashMap::<_, Vec<usize>>::new();
+        for (index, entry) in lists[section].iter().enumerate() {
+            let identity = deck_face_identity(&entry.card);
+            by_face.entry(identity).or_default().push(index);
+            capacities.entry(identity).or_default()[section] += u64::from(entry.count);
+        }
+        by_face
+    });
+
+    let mut rows = Vec::new();
+    let mut bindings = Vec::new();
+    let mut allocations = HashMap::new();
+    for (index, (section, entries)) in sections.into_iter().zip(lists).enumerate() {
+        let local_names: HashSet<_> = entries
+            .iter()
+            .filter_map(|entry| record.unambiguous_lookup_name(section, &entry.card))
+            .collect();
+        for entry in entries {
+            let identity = deck_face_identity(&entry.card);
+            let Some(entry_indexes) = indexes[index].remove(&identity) else {
+                continue;
+            };
+            let allocation = allocations.entry(identity).or_insert_with(|| {
+                allocate_playable_printings(record, &entry.card, capacities[&identity])
+            });
+            let stream = std::mem::take(&mut allocation.streams[index]);
+            if stream.is_empty() {
+                continue;
+            }
+            let name = if let Some(name) = record.unambiguous_lookup_name(section, &entry.card) {
+                name
+            } else {
+                let donor_name = record
+                    .lookup_name(sections[1 - index], &entry.card)
+                    .expect("allocated stream has a retained key");
+                // The destination's own emittable keys are reserved, so a carried stream
+                // never joins another face's local stream under one key. Only a hand-built
+                // resolved payload shares keys: ingress derives them per face.
+                if local_names.contains(donor_name) {
+                    continue;
+                }
+                donor_name
+            };
+            bindings.extend(
+                entry_indexes
+                    .into_iter()
+                    .map(|entry_index| DeckEntryLookupName {
+                        section,
+                        entry_index,
+                        name: name.to_string(),
+                    }),
+            );
+            rows.extend(stream.into_iter().map(|span| {
+                let mut printing = span.printing.clone();
+                printing.automatic_art_catalog_version = None;
+                DeckPrinting {
+                    section,
+                    name: name.to_string(),
+                    count: span.count,
+                    printing,
+                }
+            }));
+        }
+    }
+    seat.printings.extend(rows);
+    seat.printing_entry_names.extend(bindings);
 }
 
 /// Resolve a single player's deck list (name-only) into a `PlayerDeckPayload`
@@ -1755,8 +1925,7 @@ enum PrintingRecordSource<'a> {
     /// A new match: built from the payload's normalized rows.
     Payload,
     /// The next game of a match (CR 100.4): the seat's record from the previous game,
-    /// the same allocation, never rebuilt from the clamped rows its payload carries, so a
-    /// row a sideboard swap left unbound in one game binds again when the card returns.
+    /// reused for every game's allocation, so a row can bind again when the card returns.
     Previous(&'a [PlayerDeckPool]),
 }
 
@@ -1820,8 +1989,8 @@ pub(crate) fn load_next_game_decks(
     load_decks(state, payload, PrintingRecordSource::Previous(previous));
 }
 
-/// The shared body of `load_deck_into_state` and `load_next_game_decks`: they differ only
-/// in where each seat's printing record comes from.
+/// Load the game-start partition, with owner printing bindings from ingress or
+/// from the seat's original registration on continuation.
 fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRecordSource<'_>) {
     for deck in std::iter::once(&payload.player)
         .chain(std::iter::once(&payload.opponent))
@@ -2082,6 +2251,26 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
             });
     }
 
+    let continuation_payload = match records {
+        PrintingRecordSource::Payload => None,
+        PrintingRecordSource::Previous(_) => {
+            let mut bound = payload.clone();
+            for pool in &state.deck_pools {
+                let deck = payload_for_player_mut(&mut bound, pool.player);
+                if !drop_sideboard {
+                    deck.main_deck = pool.registered_main.as_ref().clone();
+                    deck.sideboard = pool.registered_sideboard.as_ref().clone();
+                }
+                bind_continuation_printings(
+                    deck,
+                    pool.printings.get().as_deref(),
+                    state.format_config.sideboard_policy,
+                );
+                validate_printing_bindings(deck);
+            }
+            Some(bound)
+        }
+    };
     // CR 400.1: a seat whose library is stored in another seat's container gets
     // no pool and loads no cards; the holder's pool backs the shared pile.
     let library_holders: Vec<PlayerId> = state
@@ -2094,25 +2283,23 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
         .deck_pools
         .retain(|pool| library_holders.contains(&pool.player));
 
-    // CR 903.5a: load the command-zone-netted list, not the submitted one, so
-    // the library holds exactly the copies the command zone did not claim. The
-    // registered pools above were built from the same `main_deck_for` output,
-    // so library and pool cannot disagree about the 100.
-    let p0_library = netted_main_deck(&payload.player);
-    let p1_library = netted_main_deck(&payload.opponent);
-    if library_holders.contains(&PlayerId(0)) {
-        load_player_library(state, &payload.player, &p0_library, PlayerId(0));
-    }
-    if library_holders.contains(&PlayerId(1)) {
-        load_player_library(state, &payload.opponent, &p1_library, PlayerId(1));
-    }
-
-    // Load additional AI decks into PlayerId(2), PlayerId(3), etc.
-    for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
-        let player_id = PlayerId((2 + i) as u8);
-        if library_holders.contains(&player_id) {
-            let library = netted_main_deck(ai_deck);
-            load_player_library(state, ai_deck, &library, player_id);
+    // Effective indexes belong to creation only. Rules readers later in this
+    // function keep the submitted payload, including its pre-netting main deck.
+    let creation_payload = continuation_payload.as_ref().unwrap_or(payload);
+    for (seat, deck) in std::iter::once(&creation_payload.player)
+        .chain(std::iter::once(&creation_payload.opponent))
+        .chain(&creation_payload.ai_decks)
+        .enumerate()
+    {
+        let owner = PlayerId(seat as u8);
+        if library_holders.contains(&owner) {
+            // Ingress and forbidden-sideboard continuations consume the netted prefix.
+            let retained = if continuation_payload.is_some() && !drop_sideboard {
+                None
+            } else {
+                Some(netted_main_deck(deck))
+            };
+            load_player_library(state, deck, retained.as_deref(), owner);
         }
     }
 
@@ -2144,9 +2331,9 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
         // a phantom commander the Horde never owns. Skip the same seats whose
         // libraries are replaced.
         let horde_seats = crate::game::horde::horde_seats(state);
-        for (seat, deck) in std::iter::once(&payload.player)
-            .chain(std::iter::once(&payload.opponent))
-            .chain(&payload.ai_decks)
+        for (seat, deck) in std::iter::once(&creation_payload.player)
+            .chain(std::iter::once(&creation_payload.opponent))
+            .chain(&creation_payload.ai_decks)
             .enumerate()
         {
             if horde_seats.contains(&PlayerId(seat as u8)) {
@@ -2180,27 +2367,27 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
         }
     }
 
-    load_player_attraction_deck(state, &payload.player, PlayerId(0));
-    load_player_attraction_deck(state, &payload.opponent, PlayerId(1));
-    for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
+    load_player_attraction_deck(state, &creation_payload.player, PlayerId(0));
+    load_player_attraction_deck(state, &creation_payload.opponent, PlayerId(1));
+    for (i, ai_deck) in creation_payload.ai_decks.iter().enumerate() {
         load_player_attraction_deck(state, ai_deck, PlayerId((2 + i) as u8));
     }
-    load_player_contraption_deck(state, &payload.player, PlayerId(0));
-    load_player_contraption_deck(state, &payload.opponent, PlayerId(1));
-    for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
+    load_player_contraption_deck(state, &creation_payload.player, PlayerId(0));
+    load_player_contraption_deck(state, &creation_payload.opponent, PlayerId(1));
+    for (i, ai_deck) in creation_payload.ai_decks.iter().enumerate() {
         load_player_contraption_deck(state, ai_deck, PlayerId((2 + i) as u8));
     }
     crate::game::stickers::set_player_sticker_sheets(
         state,
         PlayerId(0),
-        &payload.player.sticker_sheets,
+        &creation_payload.player.sticker_sheets,
     );
     crate::game::stickers::set_player_sticker_sheets(
         state,
         PlayerId(1),
-        &payload.opponent.sticker_sheets,
+        &creation_payload.opponent.sticker_sheets,
     );
-    for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
+    for (i, ai_deck) in creation_payload.ai_decks.iter().enumerate() {
         crate::game::stickers::set_player_sticker_sheets(
             state,
             PlayerId((2 + i) as u8),
@@ -2210,9 +2397,9 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
 
     if state.format_config.format == crate::types::format::GameFormat::Oathbreaker {
         // Oathbreaker RC: Place signature spells in the command zone at game start.
-        for (seat, deck) in std::iter::once(&payload.player)
-            .chain(std::iter::once(&payload.opponent))
-            .chain(&payload.ai_decks)
+        for (seat, deck) in std::iter::once(&creation_payload.player)
+            .chain(std::iter::once(&creation_payload.opponent))
+            .chain(&creation_payload.ai_decks)
             .enumerate()
         {
             for copy in entry_copies(deck, DeckSection::SignatureSpell, None) {
@@ -2224,13 +2411,17 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
     }
 
     if state.format_config.format.is_planechase_family() {
-        load_shared_planar_deck(state, &payload.player, PlayerId(0));
+        load_shared_planar_deck(state, &creation_payload.player, PlayerId(0));
     }
     // CR 904.3 / CR 904.13d: both Archenemy variants load the archenemy
     // seat's scheme deck as the shared scheme deck.
     if state.format_config.format.is_archenemy_family() {
         let archenemy = crate::game::topology::archenemy(state).unwrap_or(PlayerId(0));
-        load_shared_scheme_deck(state, payload_for_player(payload, archenemy), archenemy);
+        load_shared_scheme_deck(
+            state,
+            payload_for_player(creation_payload, archenemy),
+            archenemy,
+        );
     }
 
     // Momir Basic: grant each player a game-start command-zone emblem carrying
@@ -2410,10 +2601,10 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
 fn load_player_library(
     state: &mut GameState,
     payload: &PlayerDeckPayload,
-    retained: &[DeckEntry],
+    retained: Option<&[DeckEntry]>,
     owner: PlayerId,
 ) {
-    let mut copies = entry_copies(payload, DeckSection::MainDeck, Some(retained));
+    let mut copies = entry_copies(payload, DeckSection::MainDeck, retained);
     assign_basic_land_art(&mut copies);
     shuffle_copy_placement(state, &mut copies);
     for copy in copies {
@@ -2564,9 +2755,9 @@ fn assign_basic_land_art(copies: &mut [DeckCardCopy<'_>]) {
 /// normalized rows unchanged, plus the index-free form of its bindings. Needs no card
 /// database, so database-free loading retains the same record.
 ///
-/// Two entries with one face identity in one section always share a round-trip name
-/// (`round_trip_name` reads only the face and the database), so the first binding of a
-/// face identity names it.
+/// Deck ingress derives one round-trip name per face. Preserve each distinct key
+/// claim from resolved payloads in binding order so continuation allocation can
+/// detect shared keys, including claims after a face's first binding.
 fn retained_printing_record(
     deck: &PlayerDeckPayload,
 ) -> DisplayOnly<Option<Arc<DeckPrintingRecord>>> {
@@ -2581,7 +2772,7 @@ fn retained_printing_record(
             .card;
         if !lookup_names
             .iter()
-            .any(|known| known.names(binding.section, face))
+            .any(|known| known.name == binding.name && known.names(binding.section, face))
         {
             lookup_names.push(DeckFaceLookupName::of(
                 binding.section,
@@ -2610,6 +2801,7 @@ fn retained_printing_record(
 pub(crate) fn outside_game_copy_printing(
     pool: &PlayerDeckPool,
     brought_in: &[OutsideGameCardUse],
+    game: u8,
     section: DeckSection,
     face: &CardFace,
 ) -> Option<SharedPrinting> {
@@ -2634,15 +2826,9 @@ pub(crate) fn outside_game_copy_printing(
         | DeckSection::Unknown => return None,
     };
     let identity = deck_face_identity(face);
-    let copies = |list: &[DeckEntry]| -> u32 {
-        list.iter()
-            .filter(|entry| deck_face_identity(&entry.card) == identity)
-            .map(|entry| entry.count)
-            .sum()
-    };
     // A multi-pick outside-game choice calls the sideboard route once per selection, and
     // each call adds 1 to `count`, so copies are counted, not uses.
-    let brought: u32 = brought_in
+    let brought: u64 = brought_in
         .iter()
         .filter(|used| used.player == pool.player)
         .filter(|used| {
@@ -2650,11 +2836,33 @@ pub(crate) fn outside_game_copy_printing(
                 .get(used.sideboard_index)
                 .is_some_and(|entry| deck_face_identity(&entry.card) == identity)
         })
-        .map(|used| used.count)
+        .map(|used| u64::from(used.count))
         .sum();
-    let taken = copies(registered).saturating_sub(copies(current)) + brought;
+    let capacity = face_capacity(registered, face);
+    let mut taken = capacity.saturating_sub(face_capacity(current, face)) + brought;
+    if section == DeckSection::Sideboard && game > 1 {
+        // Restore uses the saved game-start lists and ordinal. Existing objects keep
+        // their stamps. A released Limited designation can use the unabsorbed tail.
+        let PlayablePrintingAllocation {
+            streams: [_, stream],
+            unabsorbed: [main, sideboard],
+        } = allocate_playable_printings(
+            record,
+            face,
+            [face_capacity(&pool.registered_main, face), capacity],
+        );
+        for span in stream.into_iter().chain(sideboard).chain(main) {
+            if taken < u64::from(span.count) {
+                let mut printing = span.printing.clone();
+                printing.automatic_art_catalog_version = None;
+                return Some(SharedPrinting::new(printing));
+            }
+            taken -= u64::from(span.count);
+        }
+        return None;
+    }
     record
-        .printing_of(section, face, taken)
+        .printing_of(section, face, u32::try_from(taken).ok()?)
         .cloned()
         .map(SharedPrinting::new)
 }
@@ -4368,15 +4576,15 @@ mod tests {
         load_and_hydrate_decks(&mut state, &payload, Some(&db));
 
         assert!(
-            state.all_creature_types.contains(&"Saproling".to_string()),
+            state.all_creature_types.iter().any(|i| i == "Saproling"),
             "Saproling must be recognized via corpus seeding (#1471 Coat of Arms)"
         );
         assert!(
-            state.all_creature_types.contains(&"Golem".to_string()),
+            state.all_creature_types.iter().any(|i| i == "Golem"),
             "Golem must be recognized via corpus seeding (#1472 Morophon)"
         );
         assert!(
-            state.all_creature_types.contains(&"Bear".to_string()),
+            state.all_creature_types.iter().any(|i| i == "Bear"),
             "deck-listed subtype must still appear"
         );
         // Sorted and deduped.
@@ -4406,7 +4614,7 @@ mod tests {
 
         let mut state = GameState::new_two_player(42);
         load_and_hydrate_decks(&mut state, &payload, None);
-        assert!(state.all_creature_types.contains(&"Bear".to_string()));
+        assert!(state.all_creature_types.iter().any(|i| i == "Bear"));
     }
 
     #[test]
@@ -4437,8 +4645,8 @@ mod tests {
         load_deck_into_state(&mut state, &payload);
 
         // Commander creature subtypes are collected for Changeling CDA
-        assert!(state.all_creature_types.contains(&"Angel".to_string()));
-        assert!(state.all_creature_types.contains(&"Cleric".to_string()));
+        assert!(state.all_creature_types.iter().any(|i| i == "Angel"));
+        assert!(state.all_creature_types.iter().any(|i| i == "Cleric"));
     }
 
     fn twin_face_json(oracle_id: &str) -> serde_json::Value {
@@ -4521,17 +4729,24 @@ mod tests {
         let mut bare = payload.clone();
         bare.printings.clear();
         bare.printing_entry_names.clear();
-        let rebound = rebind_retained_printings(&pool, bare);
+        let mut rebound = bare;
+        bind_continuation_printings(
+            &mut rebound,
+            pool.printings.get().as_deref(),
+            FormatConfig::standard().sideboard_policy,
+        );
         assert_eq!(rebound.printings, payload.printings);
         assert_eq!(binding_tuples(&rebound), binding_tuples(&payload));
 
         // Shrink: each homonym clamps to its own smaller list.
-        let shrunk = rebind_retained_printings(
-            &pool,
-            PlayerDeckPayload {
-                main_deck: vec![entry(winner, 1), entry(loser, 1), entry(winner, 2)],
-                ..Default::default()
-            },
+        let mut shrunk = PlayerDeckPayload {
+            main_deck: vec![entry(winner, 1), entry(loser, 1), entry(winner, 2)],
+            ..Default::default()
+        };
+        bind_continuation_printings(
+            &mut shrunk,
+            pool.printings.get().as_deref(),
+            FormatConfig::standard().sideboard_policy,
         );
         assert_eq!(
             shrunk.printings,
@@ -4553,9 +4768,676 @@ mod tests {
             }],
             ..Default::default()
         };
-        let none = rebind_retained_printings(&PlayerDeckPool::default(), stale);
+        let mut none = stale;
+        bind_continuation_printings(&mut none, None, FormatConfig::standard().sideboard_policy);
+        let copies = entry_copies(&none, DeckSection::MainDeck, None);
+        assert_eq!(copies.len(), 1);
+        assert!(copies[0].printing.is_none());
         assert!(none.printings.is_empty());
         assert!(none.printing_entry_names.is_empty());
+    }
+
+    #[test]
+    fn playable_continuation_binds_carried_homonym_rows_to_resolved_entries() {
+        let db = twin_database();
+        let winner = db.get_face_by_name("Twin").expect("bare Twin");
+        let loser = db.get_face_by_name("twin [loser]").expect("qualified Twin");
+        assert_ne!(deck_face_identity(winner), deck_face_identity(loser));
+        assert_eq!(round_trip_name(&db, winner), "Twin");
+        assert_eq!(round_trip_name(&db, loser), "twin [loser]");
+        let entry = |face: &CardFace, count| DeckEntry::from_resolved_face(&db, face, count);
+        let mut original = PlayerDeckPayload {
+            main_deck: vec![entry(loser, 1), entry(loser, 1)],
+            sideboard: vec![entry(winner, 1)],
+            printings: vec![
+                twin_row("twin [loser]", 1, "loser-first"),
+                twin_row("twin [loser]", 1, "loser-second"),
+                DeckPrinting {
+                    section: DeckSection::Sideboard,
+                    ..twin_row("Twin", 2, "winner")
+                },
+                DeckPrinting {
+                    section: DeckSection::Sideboard,
+                    ..twin_row("twin [loser]", 1, "wrong-section")
+                },
+            ],
+            ..Default::default()
+        };
+        normalize_deck_printings(&db, &mut original);
+        validate_printing_bindings(&original);
+        let before = entry_copies(&original, DeckSection::Sideboard, None);
+        assert_eq!(before.len(), 1);
+        assert_eq!(
+            before[0].printing.as_deref(),
+            Some(&CardPrinting::owner("winner", "1"))
+        );
+        assert_eq!(original.printings.len(), 3);
+        assert_eq!(original.printings[2].count, 1);
+        let ingress_record = retained_printing_record(&original);
+        let expected_record = DeckPrintingRecord::new(
+            original.printings.clone(),
+            vec![
+                DeckFaceLookupName::of(DeckSection::MainDeck, loser, "twin [loser]".to_string()),
+                DeckFaceLookupName::of(DeckSection::Sideboard, winner, "Twin".to_string()),
+            ],
+        );
+        assert_eq!(
+            serde_json::to_vec(ingress_record.get().as_deref().expect("ingress record")).unwrap(),
+            serde_json::to_vec(&expected_record).unwrap()
+        );
+
+        // A new match with an unannotated main copy still clamps sideboard ingress
+        // to the local copy, even when the over-capacity suffix could fit in main.
+        let mut ingress = PlayerDeckPayload {
+            main_deck: vec![entry(winner, 1)],
+            sideboard: vec![entry(winner, 1)],
+            printings: vec![DeckPrinting {
+                section: DeckSection::Sideboard,
+                ..twin_row("Twin", 2, "side-only")
+            }],
+            ..Default::default()
+        };
+        normalize_deck_printings(&db, &mut ingress);
+        assert_eq!(ingress.printings[0].count, 1);
+        let mut state = GameState::new_two_player(4910);
+        load_deck_into_state(
+            &mut state,
+            &DeckPayload {
+                player: ingress,
+                ..Default::default()
+            },
+        );
+        assert_eq!(state.objects.len(), 1);
+        let created = state.objects.values().next().expect("the main copy loads");
+        assert_eq!(created.name, "Twin");
+        assert!(created.printing.get().is_none());
+        assert!(created.base_printing.get().is_none());
+
+        let record = retained_printing_record(&original);
+        let mut moved = PlayerDeckPayload {
+            sideboard: vec![entry(loser, 1), entry(winner, 1), entry(loser, 1)],
+            ..Default::default()
+        };
+        bind_continuation_printings(
+            &mut moved,
+            record.get().as_deref(),
+            FormatConfig::standard().sideboard_policy,
+        );
+        validate_printing_bindings(&moved);
+        let copies = entry_copies(&moved, DeckSection::Sideboard, None);
+        let actual: Vec<_> = copies
+            .iter()
+            .map(|copy| (deck_face_identity(copy.face), copy.printing.as_deref()))
+            .collect();
+        let first = CardPrinting::owner("loser-first", "1");
+        let middle = CardPrinting::owner("winner", "1");
+        let last = CardPrinting::owner("loser-second", "1");
+        assert_eq!(
+            actual,
+            [
+                (deck_face_identity(loser), Some(&first)),
+                (deck_face_identity(winner), Some(&middle)),
+                (deck_face_identity(loser), Some(&last)),
+            ]
+        );
+    }
+
+    #[test]
+    fn playable_continuation_rejects_a_key_claimed_by_another_faces_second_binding() {
+        let [face_a, face_b] = ["Face A", "Face B"].map(|name| CardFace {
+            name: name.to_string(),
+            ..make_creature_face()
+        });
+        let entry = |face: &CardFace| DeckEntry {
+            card: face.clone(),
+            count: 1,
+        };
+        let [main, side] = PLAYABLE_PRINTING_SECTIONS;
+        let original = PlayerDeckPayload {
+            main_deck: vec![entry(&face_b), entry(&face_b), entry(&face_a)],
+            printings: vec![twin_row("x", 1, "shared-x")],
+            printing_entry_names: [(1, "y"), (0, "x"), (2, "x")]
+                .into_iter()
+                .map(|(entry_index, name)| DeckEntryLookupName {
+                    section: main,
+                    entry_index,
+                    name: name.to_string(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        validate_printing_bindings(&original);
+        let game_one = entry_copies(&original, main, None);
+        assert_eq!(game_one.len(), 3);
+        assert_eq!(
+            deck_face_identity(game_one[0].face),
+            deck_face_identity(&face_b)
+        );
+        assert_eq!(
+            game_one[0].printing.as_deref(),
+            Some(&CardPrinting::owner("shared-x", "1"))
+        );
+        assert!(game_one[1..].iter().all(|copy| copy.printing.is_none()));
+
+        let record = retained_printing_record(&original);
+        let retained = record.get().as_deref().expect("game one retains printings");
+        assert_eq!(retained.lookup_name(main, &face_b), Some("y"));
+        assert_eq!(retained.lookup_name(main, &face_a), Some("x"));
+        assert!(retained.printing_of(side, &face_a, 0).is_none());
+
+        let mut moved = PlayerDeckPayload {
+            main_deck: vec![entry(&face_b), entry(&face_b)],
+            sideboard: vec![entry(&face_a)],
+            ..Default::default()
+        };
+        let policy = FormatConfig::standard().sideboard_policy;
+        bind_continuation_printings(&mut moved, Some(retained), policy);
+        validate_printing_bindings(&moved);
+        let sideboard = entry_copies(&moved, side, None);
+        assert_eq!(sideboard.len(), 1);
+        assert_eq!(
+            deck_face_identity(sideboard[0].face),
+            deck_face_identity(&face_a)
+        );
+        let loader_stamp = sideboard[0].printing.as_deref();
+        let pool = PlayerDeckPool {
+            registered_main: Arc::new(moved.main_deck.clone()),
+            registered_sideboard: Arc::new(moved.sideboard.clone()),
+            current_sideboard: Arc::new(moved.sideboard.clone()),
+            printings: record.clone(),
+            ..Default::default()
+        };
+        let fetched = outside_game_copy_printing(&pool, &[], 2, side, &face_a);
+
+        // With no swap, base already bound x to A in main. The continuation now fails closed.
+        let mut unchanged = original.clone();
+        bind_continuation_printings(&mut unchanged, Some(retained), policy);
+        validate_printing_bindings(&unchanged);
+        let unchanged = entry_copies(&unchanged, main, None);
+        assert_eq!(unchanged.len(), 3);
+        assert_eq!(
+            deck_face_identity(unchanged[2].face),
+            deck_face_identity(&face_a)
+        );
+        assert_eq!(
+            (
+                loader_stamp,
+                fetched.as_deref(),
+                unchanged[2].printing.as_deref()
+            ),
+            (None, None, None),
+            "swapped loader, swapped game-two reader, unchanged loader"
+        );
+
+        let mut both_keys_have_rows = original;
+        both_keys_have_rows
+            .printings
+            .push(twin_row("y", 1, "unique-y"));
+        let y_printing = CardPrinting::owner("unique-y", "1");
+        for expected_first_copy in [Some(&y_printing), None] {
+            validate_printing_bindings(&both_keys_have_rows);
+            let record = retained_printing_record(&both_keys_have_rows);
+            let mut continuation = both_keys_have_rows.clone();
+            bind_continuation_printings(&mut continuation, record.get().as_deref(), policy);
+            validate_printing_bindings(&continuation);
+            let copies = entry_copies(&continuation, main, None);
+            let stamps: Vec<_> = copies.iter().map(|copy| copy.printing.as_deref()).collect();
+            assert_eq!(stamps, [expected_first_copy, None, None]);
+            // When x is B's first key, its ambiguity rules out that stream. B does
+            // not fall back to its later y claim, even though y has a usable row.
+            both_keys_have_rows.printing_entry_names.swap(0, 1);
+        }
+    }
+
+    #[test]
+    fn playable_continuation_skips_carried_rows_with_colliding_retained_keys() {
+        let db = twin_database();
+        let face_a = db.get_face_by_name("Twin").expect("bare Twin");
+        let face_b = db.get_face_by_name("twin [loser]").expect("qualified Twin");
+        let entry = |face, count| DeckEntry::from_resolved_face(&db, face, count);
+        let original = PlayerDeckPayload {
+            main_deck: vec![entry(face_a, 2)],
+            sideboard: vec![entry(face_b, 1)],
+            printings: vec![
+                twin_row("shared", 1, "face-a"),
+                DeckPrinting {
+                    section: DeckSection::Sideboard,
+                    ..twin_row("shared", 1, "face-b")
+                },
+            ],
+            printing_entry_names: PLAYABLE_PRINTING_SECTIONS
+                .into_iter()
+                .map(|section| DeckEntryLookupName {
+                    section,
+                    entry_index: 0,
+                    name: "shared".to_string(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        validate_printing_bindings(&original);
+        let record = retained_printing_record(&original);
+        let mut moved = PlayerDeckPayload {
+            main_deck: vec![entry(face_a, 2), entry(face_b, 1)],
+            ..Default::default()
+        };
+        bind_continuation_printings(
+            &mut moved,
+            record.get().as_deref(),
+            FormatConfig::standard().sideboard_policy,
+        );
+        validate_printing_bindings(&moved);
+        let copies = entry_copies(&moved, DeckSection::MainDeck, None);
+        let actual: Vec<_> = copies
+            .iter()
+            .map(|copy| (deck_face_identity(copy.face), copy.printing.as_deref()))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                (
+                    deck_face_identity(face_a),
+                    Some(&CardPrinting::owner("face-a", "1"))
+                ),
+                (deck_face_identity(face_a), None),
+                (deck_face_identity(face_b), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn playable_continuation_handles_ambiguous_printing_streams() {
+        let [face_a, face_b] = ["Face A", "Face B"].map(|name| CardFace {
+            name: name.to_string(),
+            ..make_creature_face()
+        });
+        let entry = |face: &CardFace| DeckEntry {
+            card: face.clone(),
+            count: 1,
+        };
+        let [main, side] = PLAYABLE_PRINTING_SECTIONS;
+        let payload = |sections: [DeckSection; 2]| {
+            let mut payload = PlayerDeckPayload::default();
+            for (face, section) in [&face_a, &face_b].into_iter().zip(sections) {
+                let entries = if section == main {
+                    &mut payload.main_deck
+                } else {
+                    &mut payload.sideboard
+                };
+                entries.push(entry(face));
+            }
+            payload
+        };
+        let register = |sections: [DeckSection; 2]| {
+            let mut original = payload(sections);
+            for section in PLAYABLE_PRINTING_SECTIONS {
+                let entries = section_entries(&original, section).len();
+                if entries == 0 {
+                    continue;
+                }
+                original.printings.push(DeckPrinting {
+                    section,
+                    ..twin_row("shared", 1, if section == main { "main" } else { "side" })
+                });
+                original
+                    .printing_entry_names
+                    .extend((0..entries).map(|entry_index| DeckEntryLookupName {
+                        section,
+                        entry_index,
+                        name: "shared".to_string(),
+                    }));
+            }
+            validate_printing_bindings(&original);
+            retained_printing_record(&original)
+        };
+        let cases = [
+            (
+                "both move to main",
+                [side, side],
+                [main, main],
+                [None; 2],
+                [None; 2],
+            ),
+            (
+                "one moves to main",
+                [side, side],
+                [main, side],
+                [None; 2],
+                [None; 2],
+            ),
+            (
+                "both move to side",
+                [main, main],
+                [side, side],
+                [None; 2],
+                [None; 2],
+            ),
+            (
+                "one moves to side",
+                [main, main],
+                [side, main],
+                [None; 2],
+                [None; 2],
+            ),
+            (
+                "cross-section keys with the local sideboard face present",
+                [main, side],
+                [side, side],
+                [None, Some("side")],
+                [Some("main"), Some("side")],
+            ),
+            (
+                "cross-section keys swap into vacated destinations",
+                [main, side],
+                [side, main],
+                [Some("main"), Some("side")],
+                [Some("main"), None],
+            ),
+        ];
+        let mut mismatches = Vec::new();
+        for (label, original, current, loaded, outside_game) in cases {
+            let record = register(original);
+            let mut moved = payload(current);
+            bind_continuation_printings(
+                &mut moved,
+                record.get().as_deref(),
+                FormatConfig::standard().sideboard_policy,
+            );
+            validate_printing_bindings(&moved);
+            let pool = PlayerDeckPool {
+                registered_main: Arc::new(moved.main_deck.clone()),
+                registered_sideboard: Arc::new(moved.sideboard.clone()),
+                current_sideboard: Arc::new(moved.sideboard.clone()),
+                printings: record,
+                ..Default::default()
+            };
+            for (index, (face, section)) in [&face_a, &face_b].into_iter().zip(current).enumerate()
+            {
+                let copies = entry_copies(&moved, section, None);
+                let copy = copies
+                    .iter()
+                    .find(|copy| deck_face_identity(copy.face) == deck_face_identity(face))
+                    .expect("the continuation contains this face");
+                let expected = loaded[index].map(|tag| CardPrinting::owner(tag, "1"));
+                if copy.printing.as_deref() != expected.as_ref() {
+                    mismatches.push((
+                        label,
+                        "loader",
+                        &face.name,
+                        copy.printing.as_deref().cloned(),
+                    ));
+                }
+                if section == side {
+                    let expected = outside_game[index].map(|tag| CardPrinting::owner(tag, "1"));
+                    let actual = outside_game_copy_printing(&pool, &[], 2, side, face);
+                    if actual.as_deref() != expected.as_ref() {
+                        mismatches.push((
+                            label,
+                            "sideboard reader",
+                            &face.name,
+                            actual.as_deref().cloned(),
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:?}");
+    }
+
+    #[test]
+    fn playable_continuation_binds_only_usable_printing_rows() {
+        let [face_a, face_b] = ["Face A", "Face B"].map(|name| CardFace {
+            name: name.to_string(),
+            ..make_creature_face()
+        });
+        let entry = |face: &CardFace, count| DeckEntry {
+            card: face.clone(),
+            count,
+        };
+        let [main, side] = PLAYABLE_PRINTING_SECTIONS;
+        let mut mismatches = Vec::new();
+        for (destination, donor) in [(main, side), (side, main)] {
+            let mut original = PlayerDeckPayload::default();
+            for (section, entries) in [
+                (main, &mut original.main_deck),
+                (side, &mut original.sideboard),
+            ] {
+                let (tag, entries_to_add) = if section == destination {
+                    ("ambiguous", vec![entry(&face_a, 1), entry(&face_b, 1)])
+                } else {
+                    ("carried", vec![entry(&face_a, 1)])
+                };
+                original
+                    .printing_entry_names
+                    .extend(
+                        (0..entries_to_add.len()).map(|entry_index| DeckEntryLookupName {
+                            section,
+                            entry_index,
+                            name: "shared".to_string(),
+                        }),
+                    );
+                entries.extend(entries_to_add);
+                original.printings.push(DeckPrinting {
+                    section,
+                    ..twin_row("shared", 1, tag)
+                });
+            }
+            validate_printing_bindings(&original);
+            let record = retained_printing_record(&original);
+            let allocation = allocate_playable_printings(
+                record.get().as_deref().expect("retained rows"),
+                &face_a,
+                [0, 0],
+            );
+            let [main_tail, sideboard_tail] = allocation.unabsorbed;
+            let (valid_tail, ambiguous_tail) = if donor == main {
+                (main_tail, sideboard_tail)
+            } else {
+                (sideboard_tail, main_tail)
+            };
+            assert!(ambiguous_tail.is_empty());
+            let [span] = valid_tail.as_slice() else {
+                panic!("expected the sole admissible donor row in the tail");
+            };
+            assert_eq!(span.printing, &CardPrinting::owner("carried", "1"));
+            assert_eq!(span.count, 1);
+            let (main_deck, sideboard) = if destination == main {
+                (vec![entry(&face_a, 2)], vec![entry(&face_b, 1)])
+            } else {
+                (vec![entry(&face_b, 1)], vec![entry(&face_a, 2)])
+            };
+            let mut moved = PlayerDeckPayload {
+                main_deck,
+                sideboard,
+                ..Default::default()
+            };
+            bind_continuation_printings(
+                &mut moved,
+                record.get().as_deref(),
+                FormatConfig::standard().sideboard_policy,
+            );
+            validate_printing_bindings(&moved);
+            let carried = CardPrinting::owner("carried", "1");
+            for (section, face, expected) in [
+                (destination, &face_a, vec![Some(&carried), None]),
+                (donor, &face_b, vec![None]),
+            ] {
+                let copies = entry_copies(&moved, section, None);
+                assert!(copies
+                    .iter()
+                    .all(|copy| deck_face_identity(copy.face) == deck_face_identity(face)));
+                let actual: Vec<_> = copies.iter().map(|copy| copy.printing.as_deref()).collect();
+                if actual != expected {
+                    mismatches.push(format!("carry to {destination:?}, {section:?}: {actual:?}"));
+                }
+            }
+            let pool = PlayerDeckPool {
+                registered_main: Arc::new(moved.main_deck),
+                registered_sideboard: Arc::new(moved.sideboard.clone()),
+                current_sideboard: Arc::new(moved.sideboard),
+                printings: record,
+                ..Default::default()
+            };
+            let (face, expected) = if destination == side {
+                (&face_a, Some(&carried))
+            } else {
+                (&face_b, None)
+            };
+            assert_eq!(
+                outside_game_copy_printing(&pool, &[], 2, side, face).as_deref(),
+                expected
+            );
+        }
+
+        let mut unchanged = PlayerDeckPayload {
+            main_deck: vec![entry(&face_a, 1), entry(&face_b, 1)],
+            sideboard: vec![entry(&face_a, 1), entry(&face_b, 1)],
+            ..Default::default()
+        };
+        for section in PLAYABLE_PRINTING_SECTIONS {
+            for (entry_index, name) in ["valid", "malformed"].into_iter().enumerate() {
+                let mut row = DeckPrinting {
+                    section,
+                    ..twin_row(name, 1, name)
+                };
+                if entry_index == 1 {
+                    row.printing.collector_number.clear();
+                }
+                unchanged.printings.push(row);
+                unchanged.printing_entry_names.push(DeckEntryLookupName {
+                    section,
+                    entry_index,
+                    name: name.to_string(),
+                });
+            }
+        }
+        validate_printing_bindings(&unchanged);
+        let record = retained_printing_record(&unchanged);
+        let allocation = allocate_playable_printings(
+            record.get().as_deref().expect("retained rows"),
+            &face_b,
+            [0, 0],
+        );
+        assert!(allocation.unabsorbed.iter().all(Vec::is_empty));
+        bind_continuation_printings(
+            &mut unchanged,
+            record.get().as_deref(),
+            FormatConfig::standard().sideboard_policy,
+        );
+        validate_printing_bindings(&unchanged);
+        let valid = CardPrinting::owner("valid", "1");
+        let copies = entry_copies(&unchanged, main, None);
+        assert_eq!(copies.len(), 2);
+        assert_eq!(copies[0].printing.as_deref(), Some(&valid));
+        if let Some(printing) = copies[1].printing.as_deref() {
+            mismatches.push(format!("malformed main printing: {printing:?}"));
+        }
+        let pool = PlayerDeckPool {
+            registered_main: Arc::new(unchanged.main_deck),
+            registered_sideboard: Arc::new(unchanged.sideboard.clone()),
+            current_sideboard: Arc::new(unchanged.sideboard),
+            printings: record,
+            ..Default::default()
+        };
+        assert_eq!(
+            outside_game_copy_printing(&pool, &[], 2, side, &face_a).as_deref(),
+            Some(&valid)
+        );
+        if let Some(printing) = outside_game_copy_printing(&pool, &[], 2, side, &face_b).as_deref()
+        {
+            mismatches.push(format!("malformed sideboard printing: {printing:?}"));
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn playable_continuation_matches_expanded_copy_oracle_for_every_partition() {
+        let db = twin_database();
+        let face = db.get_face_by_name("Twin").expect("bare Twin");
+        let side = DeckSection::Sideboard;
+        let main = DeckSection::MainDeck;
+        let record = DeckPrintingRecord::new(
+            vec![
+                twin_row("Twin", 1, "main-first"),
+                twin_row("Twin", 2, "main-last"),
+                DeckPrinting {
+                    section: side,
+                    ..twin_row("Twin", 1, "side-first")
+                },
+                DeckPrinting {
+                    section: side,
+                    ..twin_row("Twin", 1, "side-last")
+                },
+            ],
+            [main, side]
+                .map(|section| DeckFaceLookupName::of(section, face, "Twin".to_string()))
+                .to_vec(),
+        );
+        let original = [
+            vec!["main-first", "main-last", "main-last"],
+            vec!["side-first", "side-last"],
+        ];
+        fn expand(rows: Vec<PrintingSpan<'_>>) -> Vec<&str> {
+            rows.into_iter()
+                .flat_map(|span| {
+                    std::iter::repeat_n(span.printing.set_code.as_str(), span.count as usize)
+                })
+                .collect::<Vec<_>>()
+        }
+        for capacities in
+            (0usize..=6).flat_map(|total| (0..=total).map(move |main| [main, total - main]))
+        {
+            let allocation =
+                allocate_playable_printings(&record, face, capacities.map(|count| count as u64));
+            let expanded = allocation.streams.map(expand);
+            let [main_tail, sideboard_tail] = allocation.unabsorbed;
+            let tail = expand(sideboard_tail)
+                .into_iter()
+                .chain(expand(main_tail))
+                .collect::<Vec<_>>();
+            let expected_tail = [1, 0]
+                .into_iter()
+                .flat_map(|index| {
+                    let other = 1 - index;
+                    let carried = capacities[other].saturating_sub(original[other].len());
+                    original[index]
+                        .iter()
+                        .copied()
+                        .skip(capacities[index] + carried)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(tail, expected_tail, "capacities {capacities:?}");
+            for index in 0..2 {
+                let local = &original[index];
+                let donor = &original[1 - index];
+                let kept = local.len().min(capacities[index]);
+                let expected: Vec<_> = local
+                    .iter()
+                    .copied()
+                    .take(kept)
+                    .chain(
+                        donor
+                            .iter()
+                            .copied()
+                            .skip(capacities[1 - index])
+                            .take(capacities[index] - kept),
+                    )
+                    .collect();
+                assert_eq!(expanded[index], expected, "capacities {capacities:?}");
+            }
+            let mut combined: Vec<_> = expanded.into_iter().flatten().chain(tail).collect();
+            combined.sort_unstable();
+            assert_eq!(
+                combined,
+                [
+                    "main-first",
+                    "main-last",
+                    "main-last",
+                    "side-first",
+                    "side-last"
+                ]
+            );
+        }
     }
 
     /// CR 100.4 + CR 203.1 + CR 206.1: a continuation load hands every seat, including a

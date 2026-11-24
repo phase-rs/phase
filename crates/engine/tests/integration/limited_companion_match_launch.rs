@@ -1589,7 +1589,7 @@ fn limited_unrevealed_designation_is_a_sideboard_card_for_outside_the_game_effec
         "the revealed companion is not a sideboard card: {revealed:?}"
     );
     assert!(
-        revealed.contains(&"Plains".to_string()),
+        revealed.iter().any(|i| i == "Plains"),
         "reach guard: the wish saw the sideboard: {revealed:?}"
     );
 }

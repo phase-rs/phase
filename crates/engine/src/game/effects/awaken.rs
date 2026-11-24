@@ -179,8 +179,8 @@ mod tests {
             } => {
                 assert_eq!(*power, Some(PtValue::Fixed(0)));
                 assert_eq!(*toughness, Some(PtValue::Fixed(0)));
-                assert!(types.contains(&"Creature".to_string()));
-                assert!(types.contains(&"Elemental".to_string()));
+                assert!(types.iter().any(|i: &String| i == "Creature"));
+                assert!(types.iter().any(|i: &String| i == "Elemental"));
                 assert!(
                     remove_types.is_empty(),
                     "CR 205.1b: land type must be preserved"

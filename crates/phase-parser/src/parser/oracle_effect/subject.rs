@@ -2,9 +2,9 @@ use crate::parser::oracle_nom::error::OracleError;
 use crate::parser::oracle_nom::target::PlayerAnaphor;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1, take_until};
-use nom::character::complete::multispace0;
+use nom::character::complete::{anychar, multispace0};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value, verify};
-use nom::multi::separated_list1;
+use nom::multi::{many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
@@ -879,6 +879,7 @@ fn build_conditional_protection_grant_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities,
             duration: duration.clone(),
@@ -946,6 +947,7 @@ fn build_additive_type_continuous_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
@@ -1033,6 +1035,7 @@ fn try_parse_compound_all_subjects_become_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities,
             duration: merged_duration.clone(),
@@ -1781,10 +1784,11 @@ fn try_parse_combat_tax_effect_clause(text: &str) -> Option<ParsedEffectClause> 
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous().modifications(vec![
                 ContinuousModification::GrantStaticAbility {
-                    definition: Box::new(static_def),
+                    definition: Box::new(static_def.resolution_installed()),
                 },
             ])],
             duration: None,
@@ -2062,6 +2066,7 @@ fn try_parse_target_and_same_name_pump_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::PumpAll {
             power,
             toughness,
@@ -2216,6 +2221,7 @@ fn try_parse_subject_restriction_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked {
                     by: None,
@@ -2274,6 +2280,7 @@ fn try_parse_subject_restriction_clause(
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
+                linked_exile_return: None,
                 effect: Effect::GenericEffect {
                     static_abilities,
                     duration: duration.clone(),
@@ -2311,6 +2318,7 @@ fn try_parse_subject_restriction_clause(
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
+                linked_exile_return: None,
                 effect: Effect::GenericEffect {
                     static_abilities: vec![
                         imperative::must_attack_away_static_definition().affected(affected)
@@ -2378,6 +2386,7 @@ fn try_parse_subject_restriction_clause(
                     head_text: None,
                     optional_targeting: false,
                     unlowered_guard: None,
+                    linked_exile_return: None,
                     effect: Effect::ForceAttack {
                         target: static_affected_for_application(&application),
                         required_defender,
@@ -2424,6 +2433,7 @@ fn try_parse_subject_restriction_clause(
                         head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
+                        linked_exile_return: None,
                         entry_onset: ContinuousEffectOnset::WhenFollowed,
                         effect: Effect::ForceAttack {
                             target: TargetFilter::ParentTarget,
@@ -2460,6 +2470,7 @@ fn try_parse_subject_restriction_clause(
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
+                linked_exile_return: None,
                 effect: Effect::GenericEffect {
                     static_abilities: vec![
                         imperative::must_attack_static_definition().affected(affected)
@@ -2530,6 +2541,7 @@ fn try_parse_subject_restriction_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(mode.clone())
                     .affected(affected)
@@ -2580,6 +2592,7 @@ fn try_parse_subject_restriction_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(mode.clone())
                     .affected(affected)
@@ -2618,6 +2631,7 @@ fn try_parse_subject_restriction_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::AssignNoCombatDamage)
                     .affected(affected)
@@ -2741,6 +2755,7 @@ fn try_parse_can_attack_with_defender(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![def],
             duration: duration.clone(),
@@ -2792,6 +2807,7 @@ fn try_parse_targeting_bypass_clause(text: &str) -> Option<ParsedEffectClause> {
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::unimplemented("targeting_bypass_unmodeled", text),
         duration,
         sub_ability: None,
@@ -2853,6 +2869,7 @@ fn try_parse_can_block_additional(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::new(mode.clone())
                 .affected(affected)
@@ -5788,6 +5805,7 @@ fn try_split_pump_compound(
         head_text: Some(pump_part.to_string()),
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect,
         duration,
         sub_ability,
@@ -5993,6 +6011,7 @@ fn build_keyword_choice_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect,
         duration: None,
         sub_ability,
@@ -6199,6 +6218,7 @@ fn build_pt_choice_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect,
         duration: None,
         sub_ability,
@@ -6248,6 +6268,7 @@ fn build_continuous_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability: None,
@@ -6307,6 +6328,7 @@ fn build_continuous_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::GenericEffect {
                 static_abilities,
                 duration: duration.clone(),
@@ -6427,6 +6449,7 @@ fn build_continuous_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability: None,
@@ -6467,6 +6490,7 @@ fn build_continuous_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities,
             duration: duration.clone(),
@@ -6817,6 +6841,7 @@ fn build_become_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability: None,
@@ -6851,6 +6876,7 @@ fn build_become_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability: None,
@@ -6911,6 +6937,7 @@ fn build_become_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability: None,
@@ -7050,6 +7077,7 @@ fn build_become_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::BecomeCopy {
                 target,
                 recipient,
@@ -7093,6 +7121,7 @@ fn build_become_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::BecomeCopy {
                 target,
                 recipient,
@@ -7139,6 +7168,7 @@ fn build_become_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability: None,
@@ -7202,6 +7232,7 @@ fn build_become_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
@@ -7343,6 +7374,7 @@ fn try_parse_become_and_attack_if_able(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
@@ -7454,6 +7486,7 @@ fn try_parse_set_life_total(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::SetLifeTotal { target, amount },
         duration: None,
         sub_ability: None,
@@ -7718,6 +7751,7 @@ fn try_parse_become_choice(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::Choose {
             chooser: crate::types::ability::ControllerRef::You,
             choice_type,
@@ -7799,6 +7833,7 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![
                 make_static(StaticMode::CantGainLife),
@@ -7862,6 +7897,7 @@ fn build_restriction_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![static_def],
                 duration: duration.clone(),
@@ -8062,7 +8098,8 @@ fn build_restriction_clause(
             // phrase keeps being re-evaluated per counter edit.
             let granted = StaticDefinition::new(StaticMode::CantAttack)
                 .affected(TargetFilter::SelfRef)
-                .attack_defended(Some(defended));
+                .attack_defended(Some(defended))
+                .resolution_installed();
             let installer = StaticDefinition::continuous()
                 .affected(affected)
                 .modifications(vec![ContinuousModification::GrantStaticAbility {
@@ -8074,6 +8111,7 @@ fn build_restriction_clause(
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
+                linked_exile_return: None,
                 effect: Effect::GenericEffect {
                     static_abilities: vec![installer],
                     duration: duration.clone(),
@@ -8194,6 +8232,7 @@ fn build_restriction_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities,
             duration: duration.clone(),
@@ -8785,6 +8824,48 @@ fn extract_pump_modifiers(
     Some((power?, toughness?))
 }
 
+/// CR 701.15b + CR 611.2a: the goad designation a resolving effect installs
+/// on its affected objects. The goader is the installing effect's controller,
+/// and the designation lasts for the duration the effect carries.
+fn goaded_designation_installer(affected: TargetFilter) -> StaticDefinition {
+    StaticDefinition::continuous()
+        .affected(affected)
+        .modifications(vec![ContinuousModification::AddStaticMode {
+            mode: StaticMode::Goaded,
+        }])
+        .description("goaded".to_string())
+}
+
+/// The negation that opens a restriction predicate ("can't" / "cannot").
+fn restriction_negation(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("can't "), tag("cannot "))).parse(input)
+}
+
+/// A list separator between two restriction predicates: a join only counts
+/// when another negation follows it.
+fn restriction_list_join(input: &str) -> OracleResult<'_, &str> {
+    terminated(
+        alt((tag(", and "), tag(", "), tag(" and "))),
+        peek(restriction_negation),
+    )
+    .parse(input)
+}
+
+/// CR 608.2c: a list of whole "can't …" predicates sharing one subject ("it is
+/// goaded, can't attack …, and can't block …"); a join requires a following
+/// negation, so a conjunction inside a predicate stays in it, and each item
+/// keeps its own object grammar for `build_restriction_clause`.
+fn parse_restriction_predicate_list(input: &str) -> OracleResult<'_, Vec<&str>> {
+    separated_list1(
+        restriction_list_join,
+        recognize(preceded(
+            restriction_negation,
+            many_till(anychar, peek(alt((recognize(restriction_list_join), eof)))),
+        )),
+    )
+    .parse(input)
+}
+
 /// CR 701.15a: Parse "it's goaded [duration]" / "it is goaded [duration]" copula
 /// state-setting clauses. The contraction "it's" fuses the subject pronoun with
 /// the copula "is", so `find_predicate_start` cannot split subject from predicate.
@@ -8801,8 +8882,11 @@ fn extract_pump_modifiers(
 ///
 /// Covers: Jon Irenicus, Shattered One ("it's goaded for the rest of the game"),
 /// Vislor Turlough ("it's goaded for as long as they control it"), the
-/// non-contracted form ("it is goaded"), and Dack Fayden, Helping Hand
-/// (plural: "They're goaded for the rest of the game").
+/// non-contracted form ("it is goaded"), Dack Fayden, Helping Hand
+/// (plural: "They're goaded for the rest of the game"), and Immortal
+/// Obligation (singular, with restrictions: "it is goaded, can't attack you or
+/// a permanent you control, and can't block creatures you control" under the
+/// chain's stated "for as long as" duration).
 fn try_parse_copula_goaded_clause(
     text: &str,
     ctx: &mut ParseContext,
@@ -8827,6 +8911,16 @@ fn try_parse_copula_goaded_clause(
     .parse(lower.as_str())
     .ok()?;
     let remainder = after_subject.trim_start().trim_end_matches('.').trim();
+    if matches!(number, AnaphorNumber::Singular) {
+        if let Ok((_, predicates)) = all_consuming(preceded(
+            tag::<_, _, OracleError<'_>>(", "),
+            parse_restriction_predicate_list,
+        ))
+        .parse(remainder)
+        {
+            return build_goaded_restriction_clause(ctx, predicates);
+        }
+    }
     // Parse optional trailing duration ("for the rest of the game", "for as long as ...").
     let inline_duration = if remainder.is_empty() {
         // CR 701.15a: Default goad duration is until the goading player's next turn.
@@ -8871,12 +8965,7 @@ fn try_parse_copula_goaded_clause(
             // default).
             (
                 Effect::GenericEffect {
-                    static_abilities: vec![StaticDefinition::continuous()
-                        .affected(affected)
-                        .modifications(vec![ContinuousModification::AddStaticMode {
-                            mode: StaticMode::Goaded,
-                        }])
-                        .description("goaded".to_string())],
+                    static_abilities: vec![goaded_designation_installer(affected)],
                     duration: Some(duration.clone()),
                     target: None,
                     end_cost: None,
@@ -8890,8 +8979,66 @@ fn try_parse_copula_goaded_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect,
         duration,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
+    })
+}
+
+/// CR 701.15b + CR 508.1c + CR 509.1b + CR 611.2b: "it is goaded, can't attack
+/// …, and can't block …" is one continuous effect whose parts share the stated
+/// duration (Immortal Obligation); the goader and each restriction's "you" are
+/// the spell's controller. Declines (honest red) without a stated duration,
+/// when "it" is not the chain's object anaphor, or when any conjunct is not a
+/// whole restriction `build_restriction_clause` lowers.
+fn build_goaded_restriction_clause(
+    ctx: &mut ParseContext,
+    predicates: Vec<&str>,
+) -> Option<ParsedEffectClause> {
+    // CR 611.2a + CR 611.2b: decline rather than guess a duration.
+    let duration = ctx.stated_clause_duration.clone()?;
+    let application = parse_subject_application_for("it", ctx, AnaphorConsumer::AffectedObject)?;
+    let affected = static_affected_for_application(&application);
+    // CR 608.2c: bind only the chain's object anaphor (ParentTarget).
+    if !matches!(affected, TargetFilter::ParentTarget) {
+        return None;
+    }
+    let mut static_abilities = vec![goaded_designation_installer(affected)];
+    for predicate in predicates {
+        let clause = build_restriction_clause(application.clone(), predicate)?;
+        // A conjunct carrying its own duration is not this shape.
+        if clause.duration.is_some() {
+            return None;
+        }
+        let Effect::GenericEffect {
+            static_abilities: parts,
+            ..
+        } = clause.effect
+        else {
+            return None;
+        };
+        static_abilities.extend(parts);
+    }
+    Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
+        optional_targeting: false,
+        unlowered_guard: None,
+        linked_exile_return: None,
+        effect: Effect::GenericEffect {
+            static_abilities,
+            duration: Some(duration.clone()),
+            target: application.target,
+            end_cost: None,
+        },
+        duration: Some(duration),
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -14431,6 +14578,174 @@ mod tests {
         .is_some());
     }
 
+    /// Immortal Obligation's second sentence after the chain peeled its leading
+    /// "For as long as …" duration (verbatim, capitalised as the clause shell
+    /// hands it over).
+    const GOADED_RESTRICTION_TAIL: &str =
+        "It is goaded, can't attack you or a permanent you control, and can't block creatures you control.";
+
+    /// The duration the chain states for Immortal Obligation's tail.
+    fn duty_counter_duration() -> Duration {
+        parse_duration("for as long as that creature has a duty counter on it")
+            .expect("duty-counter duration parses")
+            .1
+    }
+
+    /// A context in which the chain declared an object target, so "it" is the
+    /// chain's `ParentTarget` anaphor (CR 608.2c).
+    fn declared_object_target_ctx(stated: Option<Duration>) -> ParseContext {
+        ParseContext {
+            chain_declared_object_target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            stated_clause_duration: stated,
+            ..Default::default()
+        }
+    }
+
+    /// CR 701.15b + CR 508.1c + CR 509.1b + CR 611.2b: the goad graft first,
+    /// then the caster-latched attack prohibition, then the block whitelist,
+    /// all under the one stated duration.
+    fn assert_goaded_restriction_effect(effect: &Effect, duration: &Duration) {
+        let Effect::GenericEffect {
+            static_abilities,
+            duration: effect_duration,
+            ..
+        } = effect
+        else {
+            panic!("expected one GenericEffect, got {effect:?}");
+        };
+        assert_eq!(effect_duration.as_ref(), Some(duration));
+        assert_eq!(static_abilities.len(), 3, "{static_abilities:?}");
+        assert!(static_abilities
+            .iter()
+            .all(|def| def.affected == Some(TargetFilter::ParentTarget)));
+        assert_eq!(
+            static_abilities[0].modifications,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Goaded,
+            }]
+        );
+        let modifications = static_abilities[1].modifications.as_slice();
+        let [ContinuousModification::GrantStaticAbility { definition }] = modifications else {
+            panic!("expected the CantAttack grant, got {modifications:?}");
+        };
+        assert_eq!(definition.mode, StaticMode::CantAttack);
+        assert_eq!(
+            definition.attack_defended,
+            Some(crate::types::triggers::AttackTargetFilter::PlayerOrPermanents)
+        );
+        assert_eq!(
+            static_abilities[2].modifications,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::BlockRestriction {
+                    filter: TargetFilter::Not {
+                        filter: Box::new(TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::You)
+                        )),
+                    },
+                },
+            }]
+        );
+    }
+
+    /// CR 611.2a + CR 611.2b + CR 608.2c: the singular goaded-with-restrictions
+    /// tail lowers only under a stated duration and only when "it" is the
+    /// chain's object anaphor. Reach-guard: the same tail and context with the
+    /// stated duration lowers to the one durationed effect, at the helper and at
+    /// the clause entry.
+    #[test]
+    fn goaded_restriction_tail_declines_without_a_stated_duration() {
+        let mut ctx = declared_object_target_ctx(None);
+        assert!(try_parse_copula_goaded_clause(GOADED_RESTRICTION_TAIL, &mut ctx).is_none());
+        let mut ctx = declared_object_target_ctx(None);
+        let clause =
+            crate::parser::oracle_effect::parse_effect_clause(GOADED_RESTRICTION_TAIL, &mut ctx);
+        assert!(
+            matches!(&clause.effect, Effect::Unimplemented { name, .. } if name == "unbound_subject"),
+            "{:?}",
+            clause.effect
+        );
+        // The refusal node carries no graft, so nothing is goaded.
+        assert_eq!(clause.duration, None);
+        assert!(clause.sub_ability.is_none());
+
+        let duration = duty_counter_duration();
+        let mut ctx = declared_object_target_ctx(Some(duration.clone()));
+        let clause = try_parse_copula_goaded_clause(GOADED_RESTRICTION_TAIL, &mut ctx)
+            .expect("the stated duration admits the tail");
+        assert_goaded_restriction_effect(&clause.effect, &duration);
+        assert_eq!(clause.duration, Some(duration.clone()));
+        let mut ctx = declared_object_target_ctx(Some(duration.clone()));
+        let clause =
+            crate::parser::oracle_effect::parse_effect_clause(GOADED_RESTRICTION_TAIL, &mut ctx);
+        assert_goaded_restriction_effect(&clause.effect, &duration);
+
+        // Hostile sibling: no declared object target, so "it" is not the
+        // chain's ParentTarget anaphor (CR 608.2c) and the tail declines.
+        let mut ctx = ParseContext {
+            stated_clause_duration: Some(duration),
+            ..Default::default()
+        };
+        assert!(try_parse_copula_goaded_clause(GOADED_RESTRICTION_TAIL, &mut ctx).is_none());
+    }
+
+    /// CR 608.2c: the predicate list splits only before a negation, so an "and"
+    /// or a comma inside a predicate stays in it.
+    #[test]
+    fn restriction_predicate_list_splits_only_before_a_negation() {
+        // Immortal Obligation's verbatim tail (lowercased, after "goaded, ").
+        // The other three inputs are synthetic: no printed card has them;
+        // nearest printed card Immortal Obligation, whose tail they alter in the
+        // last conjunct or the separator only. Kept to pin that a join needs a
+        // following negation and that each separator alternative works.
+        for (input, expected) in [
+            (
+                "can't attack you or a permanent you control, and can't block creatures you control",
+                vec![
+                    "can't attack you or a permanent you control",
+                    "can't block creatures you control",
+                ],
+            ),
+            (
+                "can't attack you or a permanent you control, and gains flying",
+                vec!["can't attack you or a permanent you control, and gains flying"],
+            ),
+            (
+                "can't attack you, can't block creatures you control",
+                vec!["can't attack you", "can't block creatures you control"],
+            ),
+            (
+                "can't attack you and can't block",
+                vec!["can't attack you", "can't block"],
+            ),
+        ] {
+            let (_, items) = all_consuming(parse_restriction_predicate_list)
+                .parse(input)
+                .unwrap_or_else(|e| panic!("{input:?}: {e:?}"));
+            assert_eq!(items, expected, "{input:?}");
+        }
+    }
+
+    /// The singular copula without a restriction tail keeps its lowering
+    /// (asserted unchanged, not asserted correct at runtime: the resolver
+    /// ignores the stated duration, a pre-existing defect).
+    #[test]
+    fn copula_goaded_singular_without_a_restriction_tail_keeps_its_lowering() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_copula_goaded_clause("it's goaded", &mut ctx).expect("parses");
+        assert_eq!(
+            clause.effect,
+            Effect::Goad {
+                target: TargetFilter::SelfRef
+            }
+        );
+        let mut ctx = ParseContext::default();
+        let clause =
+            try_parse_copula_goaded_clause("it's goaded for the rest of the game", &mut ctx)
+                .expect("parses");
+        assert!(matches!(clause.effect, Effect::Goad { .. }));
+        assert_eq!(clause.duration, Some(Duration::Permanent));
+    }
+
     // CR 509.1h: "Target unblocked attacking creature becomes blocked." parses to
     // `Effect::BecomeBlocked` whose target is a Typed(creature) filter carrying
     // both FilterProp::BlockStatus { Unblocked } and FilterProp::Attacking. SHAPE test — runtime
@@ -15560,6 +15875,144 @@ mod entry_onset_tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn permanent_token_riders_stay_separate_instructions() {
+        let overseer = card(
+            "Flying, Vigilance\nWhen Vv'viza enters, conjure a card of your choice from the Planets Spellbook onto the battlefield.\nWhenever you attack, create a Lander token. It becomes a 2/1 artifact creature and gains flying.",
+            "Vv'viza, Orbital Overseer",
+            &["Conjure", "Flying", "Vigilance"],
+            &["Legendary", "Creature"],
+            &["Jellyfish", "Advisor"],
+        );
+        let chandra = card(
+            "[0]: Put a loyalty counter on each red planeswalker you control.\n[0]: Create two 1/1 red Elemental creature tokens. They gain haste. Sacrifice them at the beginning of the next end step.\n[−2]: You may cast target instant or sorcery card with mana value 3 or less from your graveyard. If that spell would be put into your graveyard, exile it instead.",
+            "Chandra, Acolyte of Flame",
+            &[],
+            &["Legendary", "Planeswalker"],
+            &["Chandra"],
+        );
+        for (name, token, expected_mods) in [
+            (
+                "Lander",
+                overseer
+                    .triggers
+                    .iter()
+                    .filter_map(|trigger| trigger.execute.as_deref())
+                    .flat_map(nodes)
+                    .find(|node| matches!(&*node.effect, Effect::Token { name, .. } if name == "Lander"))
+                    .expect("Lander token"),
+                vec![
+                    ContinuousModification::SetPower { value: 2 },
+                    ContinuousModification::SetToughness { value: 1 },
+                    ContinuousModification::AddType {
+                        core_type: phase_ast::types::CoreType::Creature,
+                    },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    },
+                ],
+            ),
+            (
+                "Elemental",
+                chandra
+                    .abilities
+                    .iter()
+                    .flat_map(nodes)
+                    .find(|node| matches!(&*node.effect, Effect::Token { name, .. } if name == "Elemental"))
+                    .expect("Elemental token"),
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }],
+            ),
+        ] {
+            let Effect::Token {
+                static_abilities, ..
+            } = &*token.effect
+            else {
+                unreachable!("token node was selected");
+            };
+            assert!(
+                static_abilities.is_empty(),
+                "{name}: rider must not be folded into token statics"
+            );
+            let rider = token.sub_ability.as_deref().expect("separate rider");
+            assert_eq!(rider.sub_link, SubAbilityLink::SequentialSibling);
+            assert_eq!(rider.entry_onset, WhenFollowed);
+            let Effect::GenericEffect {
+                static_abilities,
+                target: Some(TargetFilter::LastCreated),
+                duration: Some(Duration::Permanent),
+                ..
+            } = &*rider.effect
+            else {
+                panic!(
+                    "{name}: expected permanent LastCreated rider, got {:?}",
+                    rider.effect
+                );
+            };
+            let mods: Vec<_> = static_abilities
+                .iter()
+                .flat_map(|definition| &definition.modifications)
+                .collect();
+            for modification in &expected_mods {
+                assert!(
+                    mods.contains(&modification),
+                    "{name}: missing {modification:?} in {mods:?}"
+                );
+            }
+            if name == "Elemental" {
+                let delayed = rider.sub_ability.as_deref().expect("delayed sacrifice");
+                let Effect::CreateDelayedTrigger { effect, .. } = &*delayed.effect else {
+                    panic!("expected delayed trigger, got {:?}", delayed.effect);
+                };
+                assert!(
+                    matches!(
+                        &*effect.effect,
+                        Effect::Sacrifice {
+                            target: TargetFilter::LastCreated,
+                            ..
+                        }
+                    ),
+                    "{effect:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn estrids_token_defining_grant_still_folds() {
+        let estrid = card(
+            "[+2]: Untap each enchanted permanent you control.\n[−1]: Create a white Aura enchantment token named Mask attached to another target permanent. The token has enchant permanent and umbra armor.\n[−7]: Mill seven cards. Return all non-Aura enchantment cards from your graveyard to the battlefield, then do the same for Aura cards.\nEstrid, the Masked can be your commander.",
+            "Estrid, the Masked",
+            &["Mill"],
+            &["Legendary", "Planeswalker"],
+            &["Estrid"],
+        );
+        let mask = estrid
+            .abilities
+            .iter()
+            .flat_map(nodes)
+            .find(|node| matches!(&*node.effect, Effect::Token { name, .. } if name == "Mask"))
+            .expect("Mask token");
+        let Effect::Token {
+            static_abilities, ..
+        } = &*mask.effect
+        else {
+            unreachable!("Mask token node was selected");
+        };
+        assert!(
+            static_abilities
+                .iter()
+                .any(|definition| definition.description.as_deref()
+                    == Some("The token has enchant permanent and umbra armor")),
+            "Mask's defining grant must fold: {static_abilities:?}"
+        );
+        assert!(!mask
+            .sub_ability
+            .as_deref()
+            .is_some_and(|node| generic_effect(&node.effect)));
     }
 
     /// CR 611.2e: every `WithEntry` stamp this module's fixtures produce lands on a kind that

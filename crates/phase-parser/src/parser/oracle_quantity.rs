@@ -51,6 +51,7 @@ use crate::types::ability::{
 };
 use crate::types::counter::CounterType;
 use crate::types::event_kinds::PlayerActionKind;
+#[cfg(test)]
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
@@ -2028,6 +2029,9 @@ pub(crate) fn parse_event_context_quantity_with_context(
     {
         return Some(expr);
     }
+    if let Ok((_, qty)) = nom_quantity::parse_event_context_mana_produced_by_self(lower) {
+        return Some(QuantityExpr::Ref { qty });
+    }
     // CR 120.1 + CR 603.2c + CR 608.2c: "opponents dealt damage this way" in
     // trigger-context effects counts the damaged opponents, not the numeric
     // damage amount. Must precede the passive-voice "dealt damage" numeric
@@ -3227,26 +3231,7 @@ fn parse_optional_offer_accepted_clause(
 /// suspended cards (no ownership restriction). Never a one-off `Suspended` tag or a
 /// verbatim string match.
 pub(crate) fn suspended_card_filter(owner: Option<ControllerRef>) -> TargetFilter {
-    use crate::types::counter::{CounterMatch, CounterType};
-    let mut properties = vec![
-        // CR 400.1: in the exile zone.
-        FilterProp::InZone { zone: Zone::Exile },
-        // CR 702.62b: has suspend.
-        FilterProp::HasKeywordKind {
-            value: KeywordKind::Suspend,
-        },
-        // CR 702.62b: bears at least one time counter.
-        FilterProp::Counters {
-            counters: CounterMatch::OfType(CounterType::Time),
-            comparator: Comparator::GE,
-            count: QuantityExpr::Fixed { value: 1 },
-        },
-    ];
-    if let Some(o) = owner {
-        // CR 108.3: owned by the given player reference.
-        properties.push(FilterProp::Owned { controller: o });
-    }
-    TargetFilter::Typed(TypedFilter::card().properties(properties))
+    TargetFilter::suspended_card(owner)
 }
 
 /// Parse the clause after "for each" into a QuantityRef.
@@ -3661,7 +3646,7 @@ pub(crate) fn kinds_census_pronoun_self_antecedent(ctx: &ParseContext) -> Option
         && ctx.chain_declared_object_target.is_none()
         && !ctx.token_created_in_chain
         && ctx.chain_prior_mass_population.is_none()
-        && !ctx.chain_has_prior_exile_producer
+        && !ctx.chain_prior_publishers.includes_exile()
         && ctx.chain_prior_chosen_target.is_none();
     (names_own_object && chain_names_no_nearer_object).then_some(TargetFilter::SelfRef)
 }
@@ -4265,13 +4250,37 @@ fn with_target_controller(filter: TargetFilter, controller: ControllerRef) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::oracle_ir::context::ChosenColorQualifierScope;
+    use crate::parser::oracle_ir::context::{ChainPriorPublishers, ChosenColorQualifierScope};
     use crate::types::ability::ChoiceType;
     use crate::types::ability::{
         CardTypeSetSource, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope,
         RoundingMode, SubtypeExclusion, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
+
+    #[test]
+    fn event_context_mana_produced_by_self() {
+        for subject in ["~", "this creature"] {
+            let phrase = format!("the amount of mana {subject} produced");
+            assert_eq!(
+                parse_event_context_quantity(&phrase),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                })
+            );
+        }
+        for phrase in [
+            "the amount of mana another creature produced",
+            "the amount of mana this creature produced last turn",
+        ] {
+            assert_ne!(
+                parse_event_context_quantity(phrase),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                })
+            );
+        }
+    }
 
     // -----------------------------------------------------------------------
     // CR 608.2c — the spell-history swallow guard, and the narrow contract of
@@ -5078,7 +5087,7 @@ mod tests {
             (
                 "prior exile producer",
                 ParseContext {
-                    chain_has_prior_exile_producer: true,
+                    chain_prior_publishers: ChainPriorPublishers::IncludesExile,
                     ..self_trigger.clone()
                 },
             ),

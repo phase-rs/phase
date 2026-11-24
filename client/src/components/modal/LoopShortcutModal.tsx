@@ -253,7 +253,7 @@ function FamilyBadges({ axes }: { axes: ResourceAxis[] }) {
   return (
     <div className="flex flex-wrap gap-1">
       {families.map((family) => (
-        <UnboundedBadge key={family} family={family} />
+        <UnboundedBadge key={family} family={family} touch="toggle" />
       ))}
     </div>
   );

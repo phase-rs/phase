@@ -7,7 +7,7 @@ import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import type { DistributionUnit, TargetRef, WaitingFor } from "../../adapter/types.ts";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
-import { gameButtonClass } from "../ui/buttonStyles.ts";
+import { StepperRow } from "./StepperRow.tsx";
 import { targetLabel } from "./targetRef.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 
@@ -74,36 +74,41 @@ export function DistributeAmongModal({ data }: { data: DistributeAmong["data"] }
       footer={<ConfirmButton onClick={handleConfirm} disabled={!isValid} />}
     >
       <div className="mb-4 space-y-3">
-        {data.targets.map((target, i) => (
-          <div
-            key={i}
-            {...("Object" in target ? hoverProps(target.Object) : undefined)}
-            className="flex items-center justify-between gap-3 rounded-lg bg-gray-800/60 p-3"
-          >
-            <span className="text-sm font-medium text-gray-200">
-              {targetLabel(target, objects)}
-            </span>
-            <div className="flex items-center gap-2">
-              <button
-                className={gameButtonClass({ tone: "neutral", size: "xs" })}
-                onClick={() => setAmount(i, amounts[i] - 1)}
-                disabled={amounts[i] <= 0}
-              >
-                −
-              </button>
-              <span className="w-8 text-center text-sm font-bold text-white">
-                {amounts[i]}
-              </span>
-              <button
-                className={gameButtonClass({ tone: "neutral", size: "xs" })}
-                onClick={() => setAmount(i, amounts[i] + 1)}
-                disabled={remaining <= 0}
-              >
-                +
-              </button>
-            </div>
-          </div>
-        ))}
+        {data.targets.map((target, i) => {
+          const name = targetLabel(target, objects);
+          const value = amounts[i];
+          return (
+            <StepperRow
+              key={i}
+              hoverProps={"Object" in target ? hoverProps(target.Object) : undefined}
+              value={value}
+              decrementLabel="−"
+              incrementLabel="+"
+              onDecrement={() => setAmount(i, value - 1)}
+              onIncrement={() => setAmount(i, value + 1)}
+              decrementDisabled={value <= 0}
+              incrementDisabled={remaining <= 0}
+              shortcuts={[
+                {
+                  key: "remaining",
+                  label: t("distributeAmong.assignRemainingButton", { amount: remaining }),
+                  ariaLabel: t("distributeAmong.assignRemainingTo", { count: remaining, target: name }),
+                  onClick: () => setAmount(i, value + remaining),
+                  disabled: remaining <= 0,
+                },
+                {
+                  key: "clear",
+                  label: t("distributeAmong.clearButton"),
+                  ariaLabel: t("distributeAmong.clearTarget", { target: name }),
+                  onClick: () => setAmount(i, 0),
+                  disabled: value <= 0,
+                },
+              ]}
+            >
+              <span className="text-sm font-medium text-gray-200">{name}</span>
+            </StepperRow>
+          );
+        })}
       </div>
     </ChoiceOverlay>
   );

@@ -1960,6 +1960,7 @@ fn spell_alternative_cost_is_payable(
             legs,
             super::cost_payability::ObjectLegPayment::Unguided,
             super::cost_payability::CostSourceRole::SpellBeingCast,
+            super::cost_payability::ExileCostPopulation::PayerZones,
         )
         || !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, committed_life)
     {
@@ -4599,13 +4600,14 @@ fn finish_selected_return_to_hand_after_automatic(
                 "return-cost continuation missing an activation ability index".to_string(),
             )
         })?;
-        match super::casting::pay_ability_cost_for_activation(
+        match super::costs::pay_ability_cost_for_activation_with_loyalty_tally(
             state,
             player,
             pending.object_id,
             &cost,
             Some(ability_index),
             &mut pending.ability.context.cost_removed_counter_amount,
+            &mut pending.ability.context.loyalty_counters_removed,
             events,
         )? {
             super::casting::PaymentOutcome::Paid => {}
@@ -6117,13 +6119,14 @@ pub(crate) fn handle_sacrifice_for_cost(
         pending.activation_cost = residual;
         if let Some(source_legs) = source_legs {
             let source_event_start = events.len();
-            match super::casting::pay_ability_cost_for_activation(
+            match super::costs::pay_ability_cost_for_activation_with_loyalty_tally(
                 state,
                 player,
                 pending.object_id,
                 &source_legs,
                 pending.activation_ability_index,
                 &mut pending.ability.context.cost_removed_counter_amount,
+                &mut pending.ability.context.loyalty_counters_removed,
                 events,
             )? {
                 super::casting::PaymentOutcome::Paid => {}
@@ -6663,13 +6666,14 @@ pub(crate) fn handle_return_to_hand_for_cost(
             pending.activation_cost = deferred_return_cost;
 
             if let Some(cost) = automatic_cost {
-                match super::casting::pay_ability_cost_for_activation(
+                match super::costs::pay_ability_cost_for_activation_with_loyalty_tally(
                     state,
                     player,
                     pending.object_id,
                     &cost,
                     Some(ability_index),
                     &mut pending.ability.context.cost_removed_counter_amount,
+                    &mut pending.ability.context.loyalty_counters_removed,
                     events,
                 )? {
                     super::casting::PaymentOutcome::Paid => {}
@@ -6966,7 +6970,11 @@ fn pay_selected_counter_cost(
         .activation_ability_index
         .is_some()
         .then_some(&mut pending.ability.context.cost_removed_counter_amount);
-    match super::costs::pay_counter_cost_removals(state, removals, ledger, events) {
+    let loyalty_ledger = pending
+        .activation_ability_index
+        .is_some()
+        .then_some(&mut pending.ability.context.loyalty_counters_removed);
+    match super::costs::pay_counter_cost_removals(state, removals, ledger, loyalty_ledger, events) {
         super::costs::CounterCostRemovalProgress::Complete => {}
         super::costs::CounterCostRemovalProgress::AwaitingReplacementChoice(removal) => {
             pending.mark_activation_cost_committed();
@@ -7022,13 +7030,14 @@ fn finish_counter_cost_payment(
             // automatic residual can pause on a cost replacement (a self-move or
             // a counter removal), so the typed continuation resumes this pending
             // activation without replaying the counters already removed.
-            match super::casting::pay_ability_cost_for_activation(
+            match super::costs::pay_ability_cost_for_activation_with_loyalty_tally(
                 state,
                 player,
                 pending.object_id,
                 &cost,
                 Some(ability_index),
                 &mut pending.ability.context.cost_removed_counter_amount,
+                &mut pending.ability.context.loyalty_counters_removed,
                 events,
             )? {
                 super::casting::PaymentOutcome::Paid => {}
@@ -7084,18 +7093,27 @@ pub(crate) fn resume_counter_cost_removal_payment(
     let PausedCounterCostRemoval {
         in_flight,
         remaining,
+        aggregate_credit,
         replacement_subtree: _,
     } = *removal;
     let settled = super::effects::counters::settled_in_flight_counter_removal(state, &in_flight);
     let is_activation = pending.activation_ability_index.is_some();
-    if is_activation {
+    let credit_aggregate = matches!(
+        aggregate_credit,
+        crate::types::game_state::CounterRemovalAggregateCredit::Credit
+    );
+    if is_activation && credit_aggregate {
         super::costs::credit_cost_removed_counters(
             &mut pending.ability.context.cost_removed_counter_amount,
             settled,
         );
     }
-    let ledger = is_activation.then_some(&mut pending.ability.context.cost_removed_counter_amount);
-    match super::costs::pay_counter_cost_removals(state, remaining, ledger, events) {
+    let ledger = (is_activation && credit_aggregate)
+        .then_some(&mut pending.ability.context.cost_removed_counter_amount);
+    let loyalty_ledger =
+        is_activation.then_some(&mut pending.ability.context.loyalty_counters_removed);
+    match super::costs::pay_counter_cost_removals(state, remaining, ledger, loyalty_ledger, events)
+    {
         super::costs::CounterCostRemovalProgress::Complete => {}
         super::costs::CounterCostRemovalProgress::AwaitingReplacementChoice(removal) => {
             state.pending_cost_move_resume =
@@ -8556,13 +8574,14 @@ fn surface_next_interactive_activation_cost_leg(
                     pending.activation_cost_snapshot.as_deref(),
                     super::casting::ActivationCostGuardSite::LibraryAggregateTierOne,
                 )?;
-                match super::costs::pay_ability_cost_for_activation(
+                match super::costs::pay_ability_cost_for_activation_with_loyalty_tally(
                     state,
                     player,
                     source_id,
                     &tier_one,
                     ability_index,
                     &mut pending.ability.context.cost_removed_counter_amount,
+                    &mut pending.ability.context.loyalty_counters_removed,
                     events,
                 )? {
                     super::casting::PaymentOutcome::Paid => {}
@@ -9576,13 +9595,14 @@ pub(super) fn push_activated_ability_to_stack(
             ));
         }
         if let super::casting::PaymentOutcome::Paused { remaining_cost } =
-            super::casting::pay_ability_cost_for_activation(
+            super::costs::pay_ability_cost_for_activation_with_loyalty_tally(
                 state,
                 player,
                 source_id,
                 cost,
                 Some(ability_index),
                 &mut resolved.context.cost_removed_counter_amount,
+                &mut resolved.context.loyalty_counters_removed,
                 events,
             )?
         {
@@ -16331,9 +16351,10 @@ fn finalize_cast_with_phyrexian_choices_inner(
             expected_old_kind: Box::new(expected_old_kind),
             resulting_kind: Box::new(resulting_kind),
             expected_old_paid_facts: expected_old_paid_facts.map(Box::new),
-            resulting_paid_facts: Box::new(resulting_paid_facts),
+            resulting_paid_facts: Some(Box::new(resulting_paid_facts)),
             expected_old_cast_occurrence,
             resulting_cast_occurrence: Some(occurrence),
+            resulting_cycling_occurrence: None,
             cause,
         })
         .expect("resolved stack entry finalize must have a live journal cause");
@@ -18180,8 +18201,7 @@ fn auto_tap_mana_sources_inner(
                     })
                 });
                 // CR 605.3b + CR 605.3c: successful, unpaused resolution
-                // completes the activation even when its live amount is zero
-                // and no ManaAbilityProduced event is emitted.
+                // completes the activation even when its live amount is zero.
                 let completed = resolved.is_ok();
                 if completed {
                     completed_sources.insert(option.object_id);
@@ -18250,7 +18270,7 @@ fn auto_tap_mana_sources_inner(
                     activation_event,
                 )
                 .expect("intrinsic mana activation trigger collection cause must be live");
-                mana_payment::produce_mana(
+                let deposited = mana_payment::produce_mana(
                     state,
                     option.object_id,
                     option.mana_type,
@@ -18272,6 +18292,10 @@ fn auto_tap_mana_sources_inner(
                     player_id: player,
                     source_id: option.object_id,
                     produced: vec![option.mana_type],
+                    // CR 614.1a: Use the post-replacement deposit count.
+                    resolution: crate::types::events::ManaResolutionShare::WholeResolution {
+                        total: u32::try_from(deposited.len()).unwrap_or(u32::MAX),
+                    },
                     trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
                 });
             });
