@@ -278,6 +278,7 @@ mod collector_ouphe_mana_ability_prohibition;
 mod colorless_spell_cost_reduction;
 mod combat_batch_apnap_order;
 mod combat_damage_stack_object;
+mod combat_damage_suggestion;
 mod combat_history_mass_effects;
 mod combat_hit_bookkeeping_follows_delivery;
 mod combat_target_support;
