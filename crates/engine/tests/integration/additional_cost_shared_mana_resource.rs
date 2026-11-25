@@ -12,9 +12,11 @@
 
 use engine::ai_support::{legal_actions, legal_actions_full};
 use engine::game::casting::can_cast_object_now;
+use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::AdditionalCost;
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -28,6 +30,8 @@ const THRILL_OF_POSSIBILITY: &str =
     "As an additional cost to cast this spell, discard a card.\nDraw two cards.";
 const SKIRGE_FAMILIAR: &str = "Flying\nDiscard a card: Add {B}.";
 const REDEMPTOR_DREADNOUGHT: &str = "Fallen Warrior \u{2014} As an additional cost to cast this spell, you may exile a creature card from your graveyard.\nTrample\nPlasma Incinerator \u{2014} Whenever this creature attacks, if a card is exiled with it, it gets +X/+X until end of turn, where X is the power of the exiled card.";
+const AS_FORETOLD: &str = "At the beginning of your upkeep, put a time counter on this enchantment.\nOnce each turn, you may pay {0} rather than pay the mana cost for a spell you cast with mana value X or less, where X is the number of time counters on this enchantment.";
+const CONSPIRACY_UNRAVELER: &str = "Flying\nYou may collect evidence 10 rather than pay the mana cost for spells you cast. (To collect evidence 10, exile cards with total mana value 10 or greater from your graveyard.)";
 const STITCHED_DRAKE: &str =
     "As an additional cost to cast this spell, exile a creature card from your graveyard.\nFlying";
 
@@ -91,19 +95,29 @@ fn castable(runner: &GameRunner, spell: ObjectId) -> bool {
     can_cast_object_now(runner.state(), P0, spell)
 }
 
+/// Whether an optional additional cost is paid when it is offered.
+#[derive(Clone, Copy, Default)]
+enum CostElection {
+    Pay,
+    #[default]
+    Decline,
+}
+
 /// How a cast's prompts are answered.
 #[derive(Default)]
 struct Answers {
-    /// Whether an optional additional cost is paid. A Choice always
-    /// takes its first branch, the object leg.
-    optional: bool,
+    /// The election for an optional additional cost. A Choice always takes its
+    /// first branch: a granted alternative cost when one is offered, otherwise
+    /// the additional cost's object leg.
+    optional: CostElection,
     /// Objects preferred when a cost asks for a selection.
     picks: Vec<ObjectId>,
 }
 
 struct Trail {
     prompts: Vec<&'static str>,
-    refused: bool,
+    /// The error of the action the engine refused, if one was.
+    refused: Option<EngineError>,
 }
 
 /// Dispatch the cast and answer every prompt until priority. During a mana
@@ -112,22 +126,30 @@ struct Trail {
 fn drive(runner: &mut GameRunner, spell: ObjectId, answers: &Answers) -> Trail {
     let mut trail = Trail {
         prompts: Vec::new(),
-        refused: false,
+        refused: None,
     };
-    if runner.act(cast_action(runner, spell)).is_err() {
-        trail.refused = true;
+    if let Err(error) = runner.act(cast_action(runner, spell)) {
+        trail.refused = Some(error);
         return trail;
     }
     let mut used: Vec<ObjectId> = Vec::new();
     for _ in 0..40 {
         let action = match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { cost, .. } => {
-                let pay = match cost {
-                    AdditionalCost::Choice(..) => true,
-                    _ => answers.optional,
+                let election = match cost {
+                    AdditionalCost::Choice(..) => CostElection::Pay,
+                    AdditionalCost::Optional { .. } | AdditionalCost::Kicker { .. } => {
+                        answers.optional
+                    }
+                    AdditionalCost::Required(cost) => {
+                        panic!("a required cost isn't an election: {cost:?}")
+                    }
                 };
                 GameAction::DecideOptionalCost {
-                    index: if pay { 0 } else { 1 },
+                    index: match election {
+                        CostElection::Pay => 0,
+                        CostElection::Decline => 1,
+                    },
                 }
             }
             WaitingFor::PayCost { choices, count, .. } => {
@@ -150,7 +172,10 @@ fn drive(runner: &mut GameRunner, spell: ObjectId, answers: &Answers) -> Trail {
             }
             WaitingFor::ManaSourceSelection { options, .. } => {
                 let Some(selection) = options.first().cloned() else {
-                    break;
+                    panic!(
+                        "a mana source selection offers nothing after {:?}",
+                        trail.prompts
+                    );
                 };
                 GameAction::ActivateManaSource { selection }
             }
@@ -172,11 +197,16 @@ fn drive(runner: &mut GameRunner, spell: ObjectId, answers: &Answers) -> Trail {
                     None => GameAction::PassPriority,
                 }
             }
-            _ => break,
+            // CR 601.2i: the cast is complete once its caster has priority again.
+            WaitingFor::Priority { .. } => break,
+            unsupported => panic!(
+                "the driver has no answer for {unsupported:?} after {:?}",
+                trail.prompts
+            ),
         };
         trail.prompts.push(runner.waiting_for_kind());
-        if runner.act(action).is_err() {
-            trail.refused = true;
+        if let Err(error) = runner.act(action) {
+            trail.refused = Some(error);
             break;
         }
     }
@@ -188,8 +218,9 @@ fn drive(runner: &mut GameRunner, spell: ObjectId, answers: &Answers) -> Trail {
 /// the stack, so the spell's own zone is read, not the stack's length.
 fn assert_cast_completes(runner: &GameRunner, spell: ObjectId, trail: &Trail, row: &str) {
     assert!(
-        !trail.refused,
-        "{row}: the cast must not be refused: {:?} then {:?}",
+        trail.refused.is_none(),
+        "{row}: the cast must not be refused: {:?} after {:?}, then {:?}",
+        trail.refused,
         trail.prompts,
         runner.state().waiting_for
     );
@@ -474,7 +505,7 @@ fn redemptor_dreadnought_exile_is_offered_only_with_a_card_to_spare() {
         &mut bare.runner,
         bare.spell,
         &Answers {
-            optional: true,
+            optional: CostElection::Pay,
             ..Answers::default()
         },
     );
@@ -496,7 +527,7 @@ fn redemptor_dreadnought_exile_is_offered_only_with_a_card_to_spare() {
         &mut spare.runner,
         spare.spell,
         &Answers {
-            optional: true,
+            optional: CostElection::Pay,
             // The mana ability's exile takes the noncreature card if asked first.
             picks: vec![other],
         },
@@ -573,4 +604,168 @@ fn stitched_drake_needs_a_card_besides_the_creature_card() {
     assert_cast_completes(&both.runner, both.spell, &trail, "creature and noncreature");
     assert_eq!(zone(&both.runner, creature), Zone::Exile);
     assert_eq!(zone(&both.runner, other), Zone::Exile);
+}
+
+/// P0: Thrill of Possibility and an Island in hand, Skirge Familiar and no red
+/// source; with `foretold`, As Foretold with two time counters.
+fn foretold_board(foretold: bool) -> (Board, ObjectId, Option<ObjectId>) {
+    let mut sc = scenario();
+    let spell = sc
+        .add_spell_to_hand_from_oracle(P0, "Thrill of Possibility", true, THRILL_OF_POSSIBILITY)
+        .with_mana_cost(cost(1, &[ManaCostShard::Red]))
+        .id();
+    sc.add_creature_from_oracle(P0, "Skirge Familiar", 3, 2, SKIRGE_FAMILIAR)
+        .with_mana_cost(cost(4, &[ManaCostShard::Black]));
+    let island = sc.add_land_to_hand(P0, "Island").id();
+    let enchantment = foretold.then(|| {
+        let enchantment = sc
+            .add_enchantment_from_oracle(P0, "As Foretold", AS_FORETOLD)
+            .with_mana_cost(cost(2, &[ManaCostShard::Blue]))
+            .id();
+        sc.with_counter(enchantment, CounterType::Time, 2);
+        enchantment
+    });
+    (
+        Board {
+            runner: sc.build(),
+            spell,
+        },
+        island,
+        enchantment,
+    )
+}
+
+/// T10. CR 118.9d: additional costs apply to an alternative cost, which
+/// replaces the mana cost. Skirge Familiar's discard contends with Thrill of
+/// Possibility's, and {1}{R} can't be paid without a red source, but As
+/// Foretold's {0} can: the cast is offered and discards the Island. Without As
+/// Foretold it stays refused.
+#[test]
+fn a_granted_alternative_cost_keeps_a_contended_cast_offered() {
+    let (mut bare, _, _) = foretold_board(false);
+    assert!(!castable(&bare.runner, bare.spell));
+    assert_not_castable(&mut bare.runner, bare.spell, "no red source");
+
+    let (mut board, island, foretold) = foretold_board(true);
+    let foretold = foretold.unwrap();
+    assert!(castable(&board.runner, board.spell));
+    assert!(offered(&board.runner, board.spell));
+    let trail = drive(&mut board.runner, board.spell, &Answers::default());
+
+    assert_cast_completes(&board.runner, board.spell, &trail, "As Foretold");
+    assert!(
+        board
+            .runner
+            .state()
+            .alt_cost_grant_permissions_used
+            .contains(&foretold),
+        "As Foretold's {{0}} is the cost paid: {:?}",
+        trail.prompts
+    );
+    assert_eq!(
+        zone(&board.runner, island),
+        Zone::Graveyard,
+        "the Island is discarded for the additional cost: {:?}",
+        trail.prompts
+    );
+}
+
+/// P0: Soaring Stoneglider in hand, As Foretold with three time counters,
+/// `graveyard` cards in the graveyard and, with `board`, T1's Plains, Mountain
+/// and Rubble Rouser.
+fn foretold_stoneglider(graveyard: usize, board: bool) -> (Board, Vec<ObjectId>, ObjectId) {
+    let mut sc = scenario();
+    let spell = add_stoneglider(&mut sc);
+    if board {
+        add_rubble_rouser(&mut sc);
+        sc.add_basic_land(P0, ManaColor::White);
+        sc.add_basic_land(P0, ManaColor::Red);
+    }
+    let cards = add_graveyard_cards(&mut sc, graveyard);
+    let foretold = sc
+        .add_enchantment_from_oracle(P0, "As Foretold", AS_FORETOLD)
+        .with_mana_cost(cost(2, &[ManaCostShard::Blue]))
+        .id();
+    sc.with_counter(foretold, CounterType::Time, 3);
+    (
+        Board {
+            runner: sc.build(),
+            spell,
+        },
+        cards,
+        foretold,
+    )
+}
+
+/// T11. CR 118.9d, the Choice twin of T10: on T1's board neither branch of
+/// Soaring Stoneglider's cost is payable beside {2}{W}, but As Foretold's {0}
+/// needs no mana, so the cast is offered and both graveyard cards pay the
+/// exile branch.
+#[test]
+fn a_granted_alternative_cost_keeps_a_contended_choice_cast_offered() {
+    let (mut board, graveyard, foretold) = foretold_stoneglider(2, true);
+    assert!(castable(&board.runner, board.spell));
+    assert!(offered(&board.runner, board.spell));
+    let trail = drive(&mut board.runner, board.spell, &Answers::default());
+
+    assert_cast_completes(&board.runner, board.spell, &trail, "As Foretold");
+    for card in &graveyard {
+        assert_eq!(
+            zone(&board.runner, *card),
+            Zone::Exile,
+            "both cards are exiled for the cost: {:?}",
+            trail.prompts
+        );
+    }
+    assert!(
+        board
+            .runner
+            .state()
+            .alt_cost_grant_permissions_used
+            .contains(&foretold),
+        "As Foretold's {{0}} is the cost paid: {:?}",
+        trail.prompts
+    );
+}
+
+/// T12. CR 118.9d + CR 601.2h: the additional cost still applies to As
+/// Foretold's {0}. With no mana source and one graveyard card neither branch
+/// can be paid beside it, so the cast isn't offered; with two the exile branch
+/// is paid and the cast completes. Only the offer is asserted on the refused
+/// board: the handler's alternative-cost arm accepts a directly dispatched
+/// cast before it judges the choice, as it did before this module.
+#[test]
+fn a_granted_alternative_cost_does_not_waive_the_choice() {
+    let (bare, _, _) = foretold_stoneglider(1, false);
+    assert!(!castable(&bare.runner, bare.spell));
+    assert!(!offered(&bare.runner, bare.spell));
+
+    let (mut board, graveyard, _) = foretold_stoneglider(2, false);
+    assert!(castable(&board.runner, board.spell));
+    assert!(offered(&board.runner, board.spell));
+    let trail = drive(&mut board.runner, board.spell, &Answers::default());
+    assert_cast_completes(&board.runner, board.spell, &trail, "two graveyard cards");
+    for card in &graveyard {
+        assert_eq!(zone(&board.runner, *card), Zone::Exile);
+    }
+}
+
+/// T13. CR 118.3: Conspiracy Unraveler's collect evidence 10 takes both
+/// graveyard cards (mana value 5 each), leaving none for Soaring Stoneglider's
+/// exile branch, and no mana pays {1}{W}. An alternative cost with a non-mana
+/// leg isn't judged together with the choice, so it doesn't open the cast.
+#[test]
+fn an_alternative_cost_with_an_object_leg_does_not_open_a_contended_choice() {
+    let mut sc = scenario();
+    let spell = add_stoneglider(&mut sc);
+    sc.add_creature_from_oracle(P0, "Conspiracy Unraveler", 6, 6, CONSPIRACY_UNRAVELER)
+        .with_mana_cost(cost(5, &[ManaCostShard::Blue, ManaCostShard::Blue]));
+    for i in 0..2 {
+        sc.add_spell_to_graveyard(P0, &format!("Graveyard Card {i}"), true)
+            .with_mana_cost(cost(5, &[]));
+    }
+    let runner = sc.build();
+
+    assert!(!castable(&runner, spell));
+    assert!(!offered(&runner, spell));
 }

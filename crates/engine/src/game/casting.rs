@@ -23108,19 +23108,34 @@ fn prepared_declaration_pending(prepared: &PreparedSpellCast, player: PlayerId) 
         || ResolvedAbility::new(Effect::NoOp, Vec::new(), prepared.object_id, player),
         |def| build_resolved_from_def(def, prepared.object_id, player),
     );
-    let mut pending = PendingCast::new(
+    pending_cast_from_prepared(prepared, resolved)
+}
+
+/// CR 118.9a + CR 601.2b: the granted alternative cost `player` can pay for
+/// `prepared`, a cast that hasn't already elected an alternative cost by its
+/// method or its permission.
+fn granted_alternative_cost(
+    state: &GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+) -> Option<casting_costs::PayableSpellAlternativeCost> {
+    if cast_has_elected_alternative_cost(
+        state,
+        player,
         prepared.object_id,
-        prepared.card_id,
-        resolved,
-        prepared.mana_cost.clone(),
-    );
-    pending.base_cost = Some(prepared.base_mana_cost.clone());
-    pending.casting_variant = prepared.casting_variant;
-    pending.alternative_cost_keyword = prepared.alternative_cost_keyword.clone();
-    pending.cast_timing_permission = prepared.cast_timing_permission;
-    pending.origin_zone = prepared.origin_zone;
-    pending.payment_mode = prepared.payment_mode;
-    pending
+        prepared.casting_permission_index,
+        prepared.casting_variant,
+    )
+    .unwrap_or(true)
+    {
+        return None;
+    }
+    casting_costs::payable_spell_alternative_cost_details_at_index(
+        state,
+        player,
+        prepared.object_id,
+        prepared.casting_permission_index,
+    )
 }
 
 fn can_cast_prepared_now_with_probe(
@@ -23411,7 +23426,10 @@ fn can_cast_prepared_now_with_probe(
         // discard beside Thrill of Possibility), the two are judged together
         // by the declaration-time authority. The contention gate keeps every
         // other spell, and every battlefield leg, on the checks above.
+        // CR 118.9: an alternative cost replaces the mana cost judged here, so
+        // a payable granted one keeps the cast on offer.
         if casting_costs::cost_contends_with_mana_abilities(state, player, prepared.object_id, cost)
+            && !granted_alternative_cost(state, player, prepared).is_some()
             && !casting_costs::required_declaration_offerable(
                 state,
                 player,
@@ -23442,7 +23460,22 @@ fn can_cast_prepared_now_with_probe(
             casting_costs::required_declaration_offerable(state, player, &pending, cost, None)
                 .unwrap_or(false)
         };
-        if !costs.iter().any(branch_is_offerable) {
+        // CR 118.9d: additional costs apply to an alternative cost, which
+        // replaces the mana cost the branches are judged with above. A payable
+        // granted one keeps the cast on offer when some branch can be paid
+        // beside it.
+        if !costs.iter().any(branch_is_offerable)
+            && !granted_alternative_cost(state, player, prepared).is_some_and(|alternative| {
+                casting_costs::choice_branch_offerable_under_alternative(
+                    state,
+                    player,
+                    &pending,
+                    &alternative.cost,
+                    costs,
+                )
+                .unwrap_or(false)
+            })
+        {
             return false;
         }
     }
@@ -23558,23 +23591,7 @@ fn can_cast_prepared_now_with_probe(
 
     // CR 118.9a + CR 601.2b: a cast that already elected an alternative cost, by its method or its
     // permission, can't also take a granted one.
-    if !cast_has_elected_alternative_cost(
-        state,
-        player,
-        prepared.object_id,
-        prepared.casting_permission_index,
-        prepared.casting_variant,
-    )
-    .unwrap_or(true)
-        && targets_ok
-        && super::casting_costs::payable_spell_alternative_cost_details_at_index(
-            state,
-            player,
-            prepared.object_id,
-            prepared.casting_permission_index,
-        )
-        .is_some()
-    {
+    if targets_ok && granted_alternative_cost(state, player, prepared).is_some() {
         return true;
     }
 

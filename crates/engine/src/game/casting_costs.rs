@@ -11902,6 +11902,39 @@ fn defiler_offer_alongside<'a>(
     defiler_reduction_alongside(state, player, object_id, committed_life)
 }
 
+/// CR 118.9d + CR 601.2f-h: whether some branch of a mandatory choice of
+/// additional costs can be declared when `alternative`, a granted alternative
+/// cost, is paid in place of the mana cost. Additional costs apply to an
+/// alternative cost, so each branch is judged with the alternative's mana as
+/// the cast's base.
+///
+/// CR 118.3: an alternative with a non-mana leg (Conspiracy Unraveler's
+/// collect evidence) could spend the objects a branch needs, and nothing here
+/// judges the two together, so such an alternative doesn't open the cast.
+pub(super) fn choice_branch_offerable_under_alternative(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    alternative: &AbilityCost,
+    branches: &[AbilityCost],
+) -> Result<bool, EngineError> {
+    let split =
+        split_declared_mana_addition_and_residual(Some(state), Some(pending), alternative.clone())?;
+    if split.residual.is_some() {
+        return Ok(false);
+    }
+    let mut priced = pending.clone();
+    priced.cost = ManaCost::zero();
+    priced.base_cost = Some(ManaCost::zero());
+    priced.declared_mana_additions.extend(split.declared);
+    for branch in branches {
+        if required_declaration_offerable(state, player, &priced, branch, None)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// CR 601.2b + CR 601.2f: whether an object's own required additional cost can
 /// be declared, its declared mana total priced with a matching Defiler's
 /// reduction when the plain total is unaffordable. The Defiler is announced with
