@@ -962,7 +962,7 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 96] = [
     UnsupportedCapability {
         code: "local.keep-exact-permanents-unsupported",
         area: "prompts",
-        reason: "WaitingFor::KeepExactPermanentsChoice is the count-exact sibling of the aggregate case above. It is listed separately because it emits a separate code, not because it is a separate gap: both are selection-under-constraint over battlefield permanents.",
+        reason: "WaitingFor::KeepExactPermanentsChoice is the count-bounded sibling (an exact count, or up to a count) of the aggregate case above. It is listed separately because it emits a separate code, not because it is a separate gap: both are selection-under-constraint over battlefield permanents.",
         suggested_protocol_extension: "Covered by the aggregate-constraint extension proposed on local.non-target-selection-unsupported.",
     },
     UnsupportedCapability {

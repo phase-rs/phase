@@ -185,6 +185,25 @@ pub fn parse_no_abilities(input: &str) -> OracleResult<'_, FilterProp> {
     value(FilterProp::HasNoAbilities, tag("no abilities")).parse(input)
 }
 
+/// CR 605.1: an object with a mana ability — an activated or triggered ability
+/// meeting the mana-ability criteria. Narrow primitive shared by the
+/// target-suffix scanner (oracle_target.rs) and the search-library filter
+/// scanner (oracle_effect/search.rs); each call site supplies its own
+/// surrounding "with " grammar, so this matches the bare predicate only.
+/// Both number forms are printed Oracle text: singular "a mana ability"
+/// (Raggadragga clause 2) and plural "mana abilities" (Power Sink: "tap all
+/// lands with mana abilities they control"). The predicate is "has ≥1 mana
+/// ability" regardless of subject number, so both lower to HasManaAbility.
+/// The two heads ("a ..." vs "mana ...") are disjoint, so alt order is
+/// immaterial.
+pub fn parse_mana_ability(input: &str) -> OracleResult<'_, FilterProp> {
+    alt((
+        value(FilterProp::HasManaAbility, tag("a mana ability")),
+        value(FilterProp::HasManaAbility, tag("mana abilities")),
+    ))
+    .parse(input)
+}
+
 /// Parse the inner content of a "with" clause.
 fn parse_with_inner(input: &str) -> OracleResult<'_, FilterProp> {
     alt((
@@ -1010,6 +1029,42 @@ mod tests {
     #[test]
     fn test_parse_no_abilities_failure() {
         assert!(parse_no_abilities("flying").is_err());
+    }
+
+    #[test]
+    fn test_parse_mana_ability() {
+        // CR 605.1: bare "a mana ability" predicate → HasManaAbility,
+        // fully consumed.
+        let (rest, prop) = parse_mana_ability("a mana ability").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_mana_ability_residual() {
+        // Only the bare predicate is consumed; trailing grammar is left for the
+        // call site's scanner.
+        let (rest, prop) = parse_mana_ability("a mana ability and more").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, " and more");
+    }
+
+    #[test]
+    fn test_parse_mana_ability_failure() {
+        assert!(parse_mana_ability("flying").is_err());
+    }
+
+    #[test]
+    fn test_parse_mana_ability_plural() {
+        // CR 605.1: plural "mana abilities" (Power Sink: "tap all lands with
+        // mana abilities they control") lowers to the same HasManaAbility
+        // predicate; trailing grammar is left for the call site's scanner.
+        let (rest, prop) = parse_mana_ability("mana abilities").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, "");
+        let (rest, prop) = parse_mana_ability("mana abilities they control").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, " they control");
     }
 
     #[test]

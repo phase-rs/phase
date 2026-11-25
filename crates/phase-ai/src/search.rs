@@ -2858,7 +2858,7 @@ pub fn fallback_action(
             Some(GameAction::ChooseKeptCreatures { kept })
         }
 
-        // CR 101.4 + CR 701.21a: choose a valid exact-size baseline subset.
+        // CR 101.4 + CR 701.21a: the first required_count eligible permanents are within min..=max for exact and up-to prompts alike.
         WaitingFor::KeepExactPermanentsChoice {
             eligible,
             required_count,

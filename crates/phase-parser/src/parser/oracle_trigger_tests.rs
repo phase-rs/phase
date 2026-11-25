@@ -41532,21 +41532,8 @@ fn tawnos_the_toymaker_copy_is_an_artifact() {
     assert_no_unimplemented(execute.as_ref());
 }
 
-// V10 — CR 121.1 + CR 603.4: the trigger-side "equal to the difference" rewrites
-// (`lower_trigger_ir`) discriminate on the gap node's recorded DESCRIPTION, never
-// on its name. Phase 1 names every fallback gap by the sub-grammar verdict that
-// refused it, so the pre-phase `name == "draw"` / `name == "lose"` guards can
-// never be true again — restoring either one makes the rewrite stop firing and
-// this test (and the `draw` arm's `parse_difference_draw_trigger_...` above) go
-// red.
-//
-// The `lose` arm additionally carries a DECLARED widening: the name compare was
-// the only thing refusing `"they lose life equal to the difference"` (a fallback
-// node whose first word was `they`). With the name gone, the exact-text compare is
-// the entire bound, so the negative half below pins it against a different
-// `Unimplemented` description that must NOT convert.
 #[test]
-fn difference_life_loss_rewrite_keys_on_the_description_not_the_gap_name() {
+fn difference_life_loss_binds_only_the_deferred_count() {
     const OTHER_REVEALED_CLASS: &str =
         "lose life equal to the mana value of the card revealed by the other player";
 
@@ -41574,10 +41561,6 @@ fn difference_life_loss_rewrite_keys_on_the_description_not_the_gap_name() {
         def
     }
 
-    // Positive: the migrated `lose` arm converts the anaphoric clause against the
-    // hoisted operands. This is the only test that reaches the arm at all — the two
-    // standing `parse_effect_chain` positives are satisfied by the effect layer and
-    // never enter `lower_trigger_ir`.
     let def = hosted_gate_trigger("lose life equal to the difference");
     let execute = def.execute.as_ref().expect("execute ability");
     let Effect::LoseLife { amount, target } = execute.effect.as_ref() else {
@@ -41587,9 +41570,8 @@ fn difference_life_loss_rewrite_keys_on_the_description_not_the_gap_name() {
         );
     };
     assert_eq!(
-        target,
-        &Some(TargetFilter::ParentTarget),
-        "the rewritten life loss is directed at the trigger's parent target"
+        target, &None,
+        "an imperative without an explicit subject defaults to the controller"
     );
     let QuantityExpr::Difference { left, right } = amount else {
         panic!("expected a Difference amount, got {amount:?}");
@@ -41605,12 +41587,6 @@ fn difference_life_loss_rewrite_keys_on_the_description_not_the_gap_name() {
     );
     assert_eq!(**right, QuantityExpr::Fixed { value: 7 });
 
-    // Negative (multi-authority): a DIFFERENT gap node reaching the same arm with
-    // `difference_count` bound must be refused by the exact-text compare. The
-    // OtherRevealedCard class node is the neighbouring `lose`-flavoured producer
-    // renamed by P1.5 (`other_revealed_card_quantity`); under either name it is only
-    // the description that refuses it. `hosted_gate_trigger` proves the arm was
-    // reachable, so this is not a vacuous negative.
     let def = hosted_gate_trigger(OTHER_REVEALED_CLASS);
     let execute = def.execute.as_ref().expect("execute ability");
     assert_eq!(
@@ -48227,4 +48203,94 @@ fn trigger_verrak_pay_that_much_life_again_stays_unimplemented() {
             if name == "unparsed_verb_arguments"
                 && description.as_deref() == Some("pay that much life again")
     ));
+}
+
+/// Raggadragga, Goreguts Boss (issue #1184) — "Whenever a creature you
+/// control with a mana ability attacks, untap it." The "with a mana ability"
+/// subject qualifier (CR 605.1) is a declaration-time property of the
+/// attacker (CR 508.1), so it folds into the attack trigger's `valid_card`
+/// as `FilterProp::HasManaAbility` — the trigger must NOT strand as
+/// `Unknown` (the pre-fix fixture shape in `r.jsonl`).
+#[test]
+fn raggadragga_attack_trigger_subject_keeps_mana_ability() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control with a mana ability attacks, untap it.",
+        "Raggadragga, Goreguts Boss",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    let typed = match def.valid_card.as_ref() {
+        Some(TargetFilter::Typed(tf)) => tf,
+        other => panic!("attack subject must be a typed filter, got {other:?}"),
+    };
+    assert!(
+        typed.type_filters.contains(&TypeFilter::Creature),
+        "subject must stay a creature filter, got {:?}",
+        typed.type_filters
+    );
+    assert_eq!(typed.controller, Some(ControllerRef::You));
+    assert!(
+        typed.properties.contains(&FilterProp::HasManaAbility),
+        "subject must carry HasManaAbility, got {:?}",
+        typed.properties
+    );
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::SetTapState {
+                target: TargetFilter::TriggeringSource,
+                state: TapStateChange::Untap,
+                ..
+            }
+        ),
+        "expected untap-the-attacker, got {:?}",
+        execute.effect
+    );
+    assert_no_unimplemented(execute);
+}
+
+/// SHAPE pin for Raggadragga's third clause — "Whenever you cast a spell, if
+/// at least seven mana was spent to cast it, ...". The intervening-if
+/// (CR 603.4) reads the triggering spell's payment record (CR 601.2h).
+/// Reach-guard for the runtime tests: if this shape regresses, the runtime
+/// silence/pump tests would fail for a parse reason, not a rules reason.
+#[test]
+fn raggadragga_seven_mana_spell_trigger_shape() {
+    let def = parse_trigger_line(
+        "Whenever you cast a spell, if at least seven mana was spent to cast it, untap target creature. It gets +7/+7 and gains trample until end of turn.",
+        "Raggadragga, Goreguts Boss",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    match def.condition.as_ref() {
+        Some(TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        }) => {
+            assert!(
+                matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ManaSpentToCast {
+                            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                            metric: crate::types::ability::CastManaSpentMetric::Total,
+                        },
+                    }
+                ),
+                "lhs must read total mana spent on the triggering spell, got {lhs:?}"
+            );
+            assert_eq!(*comparator, Comparator::GE);
+            assert!(
+                matches!(rhs, QuantityExpr::Fixed { value: 7 }),
+                "threshold must be seven, got {rhs:?}"
+            );
+        }
+        other => panic!("expected the seven-mana intervening-if, got {other:?}"),
+    }
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert_no_unimplemented(execute);
+    assert!(
+        execute.sub_ability.is_some(),
+        "the +7/+7 trample continuation must be attached past the untap"
+    );
 }

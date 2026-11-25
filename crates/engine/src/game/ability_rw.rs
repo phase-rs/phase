@@ -3643,7 +3643,7 @@ fn legacy_effect(x: &Effect) -> bool {
             target_player,
             ..
         } => legacy_target_filter(filter) || legacy_quantity_expr(count) || otf(target_player),
-        // `keeper_constraint`'s `ExactCount { count }` and
+        // `keeper_constraint`'s `Count { count }` and
         // `keeper_counter`'s `KeeperCounterMark::count` are both unread
         // `QuantityExpr` positions closed together here — the pre-existing
         // `keeper_constraint` omission is the same fail-open shape the new
@@ -3660,7 +3660,7 @@ fn legacy_effect(x: &Effect) -> bool {
                 || legacy_target_filter(sacrifice_filter)
                 || oqe(total_power_cap)
                 || keeper_constraint.as_ref().is_some_and(
-                    |KeeperConstraint::ExactCount { count }| legacy_quantity_expr(count),
+                    |KeeperConstraint::Count { count }| legacy_quantity_expr(count),
                 )
                 || keeper_counter
                     .as_ref()

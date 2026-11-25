@@ -115,7 +115,7 @@ vi.mock("../../components/draft/SetSelector", () => ({ SetSelector: () => null }
 
 import { DraftPodPage } from "../DraftPodPage";
 import { useDraftPodStore } from "../../stores/draftPodStore";
-import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
+import { DRAFT_RECOVERY_CONNECTION_ERROR, useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 import { useConnectivityStore } from "../../stores/connectivityStore";
 import {
   clearActiveDraftPod,
@@ -599,7 +599,7 @@ describe("DraftPodPage exits", () => {
       failPeer();
       renderApp(["/", "/draft-pod?entry=host"]);
       expect(await screen.findByRole("button", { name: "Try Reconnecting" })).toBeEnabled();
-      expect(useDraftPodStore.getState().configError).toBe("podError.connection");
+      expect(useDraftPodStore.getState().configError).toBe(DRAFT_RECOVERY_CONNECTION_ERROR);
       useDraftPodStore.setState({ config: { ...useDraftPodStore.getState().config, setName: "Typed" } });
 
       await clickMenu();

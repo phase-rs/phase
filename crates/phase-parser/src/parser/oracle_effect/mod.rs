@@ -20411,6 +20411,11 @@ enum KeeperChooserScope {
     EachPlayer,
     /// "each opponent …" (No One Will Hear Your Cries).
     EachOpponent,
+    /// "that player …" — the player the trigger condition introduced
+    /// (Archfiend of Depravity). The seat is bound at lowering by
+    /// `that_player_keeper_scope`; a "that player" with no trigger-bound
+    /// antecedent lowers to `Effect::unimplemented`.
+    ThatPlayer,
 }
 
 /// The head-verb axis: HOW the keeper is nominated.
@@ -20495,7 +20500,7 @@ fn parse_keeper_count(input: &str) -> OracleResult<'_, u32> {
 }
 
 /// CR 608.2c + CR 701.8a + CR 701.21a: the whole-instruction head grammar for
-/// the keeper-and-dispose class — "[each player|each opponent] <head>
+/// the keeper-and-dispose class — "[each player|each opponent|that player] <head>
 /// <quantifier> <domain> [they control](, then| and|. )<dispose> the rest".
 ///
 /// Every axis is one `alt()`, chained in printed order. The disposal tail must
@@ -20523,6 +20528,7 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
         opt(alt((
             value(KeeperChooserScope::EachPlayer, tag("each player ")),
             value(KeeperChooserScope::EachOpponent, tag("each opponent ")),
+            value(KeeperChooserScope::ThatPlayer, tag("that player ")),
         ))),
         |scope| scope.unwrap_or(KeeperChooserScope::Controller),
     )
@@ -20636,8 +20642,8 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
 
     // The supported-combination gate. Exhaustive on (scope, head, quantifier,
     // verb) with NO wildcard arm, so a future per-player keeper-and-destroy
-    // primitive or a `KeeperConstraint` range variant becomes a compile error
-    // here rather than a silently wrong parse.
+    // primitive or a new keeper head becomes a compile error here rather than
+    // a silently wrong parse.
     match (scope, &head, quantifier, verb) {
         // CR 701.8a: the controller-scope "choose up to N, then destroy the
         // rest" form. Duneblast, Mount Doom.
@@ -20647,13 +20653,44 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
             KeeperQuantifier::UpTo(_),
             KeeperDisposalVerb::Destroy,
         ) => {}
-        // CR 101.4 + CR 701.21a: the per-player keeper-and-sacrifice class.
+        // CR 101.4 + CR 701.21a: per-player keeper-and-sacrifice, exact count.
         (
             KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
             _,
             KeeperQuantifier::Exact(_),
             KeeperDisposalVerb::Sacrifice,
         ) => {}
+        // Zero-card axis: the only printed "that player" keeper (Archfiend of
+        // Depravity) prints "up to two". Accepting an exact count would claim an
+        // instruction no card prints.
+        (
+            KeeperChooserScope::ThatPlayer,
+            _,
+            KeeperQuantifier::Exact(_),
+            KeeperDisposalVerb::Sacrifice,
+        ) => return Err(oracle_err(start)),
+        // CR 101.4 + CR 701.21a: per-player "chooses up to N … sacrifices the rest"
+        // (Covetous Elegy; Archfiend of Depravity's "that player chooses"). The
+        // count is a maximum; a seat may keep fewer.
+        (
+            KeeperChooserScope::EachPlayer
+            | KeeperChooserScope::EachOpponent
+            | KeeperChooserScope::ThatPlayer,
+            KeeperHead::Choose,
+            KeeperQuantifier::UpTo(_),
+            KeeperDisposalVerb::Sacrifice,
+        ) => {}
+        // Zero-card axis: no printed card nominates a per-player keeper by placing
+        // counters on "up to N" permanents (census: `puts? [^.]*counters? on up to
+        // [^.]*the rest` over MTGJSON AtomicCards returns no card).
+        (
+            KeeperChooserScope::EachPlayer
+            | KeeperChooserScope::EachOpponent
+            | KeeperChooserScope::ThatPlayer,
+            KeeperHead::Counter { .. },
+            KeeperQuantifier::UpTo(_),
+            KeeperDisposalVerb::Sacrifice,
+        ) => return Err(oracle_err(start)),
         // Zero-card axis: no printed card nominates a controller-scope keeper
         // BY placing a counter. CR 122.1's counter is what nominates the
         // keeper, and the controller-scope lowering
@@ -20680,34 +20717,16 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
         (KeeperChooserScope::Controller, _, KeeperQuantifier::Exact(_), _) => {
             return Err(oracle_err(start))
         }
-        // Zero-card axis: no printed card reaches this combination. A `jq -r
-        // 'to_entries[] | select(.value.oracle_text != null) |
-        // select(.value.oracle_text | test("choose[s]? up to"; "i")) |
-        // select(.value.oracle_text | test("sacrifices? the rest"; "i")) |
-        // .key' client/public/card-data.json` census over "choose(s) up to
-        // ... sacrifice(s) the rest" finds three cards: Archfiend of
-        // Depravity's "that player chooses" declines earlier, at the
-        // head-verb step, on its unmodelled subject
-        // (`keeper_dispose_head_declines_an_unmodelled_subject`). The
-        // controller-scope lowering is also `DestroyAll` over the
-        // tracked-set complement; no controller-scope sacrifice primitive
-        // with that complement exists.
+        // Zero-card axis: the printed "chooses up to … sacrifices the rest"
+        // class is Covetous Elegy and Archfiend of Depravity, both per-player
+        // and accepted above. The controller-scope lowering is `DestroyAll`
+        // over the tracked-set complement; no controller-scope sacrifice
+        // primitive with that complement exists.
         (
             KeeperChooserScope::Controller,
             _,
             KeeperQuantifier::UpTo(_),
             KeeperDisposalVerb::Sacrifice,
-        ) => return Err(oracle_err(start)),
-        // Deferred axis: the "up to N" per-player keeper cardinality. Covetous
-        // Elegy is its only card. `KeeperConstraint` has exactly one variant,
-        // `ExactCount`; a range form pulls `WaitingFor::KeepExactPermanentsChoice`'s
-        // `required_count`, the client adapter and the AI candidate seam into
-        // scope, so it is a separate unit.
-        (
-            KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
-            _,
-            KeeperQuantifier::UpTo(_),
-            _,
         ) => return Err(oracle_err(start)),
         // Deferred axis: the per-player keeper-and-DESTROY form. Divine
         // Reckoning is its only card. CR 701.8a destroy and CR 701.21a sacrifice
@@ -20715,7 +20734,9 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
         // sacrifice-specific down to its terminal, so this needs its own
         // primitive rather than a flag on this one.
         (
-            KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
+            KeeperChooserScope::EachPlayer
+            | KeeperChooserScope::EachOpponent
+            | KeeperChooserScope::ThatPlayer,
             _,
             _,
             KeeperDisposalVerb::Destroy,
@@ -20746,6 +20767,51 @@ pub(crate) fn is_keeper_dispose_head(lower: &str) -> bool {
     parse_keeper_dispose_head(lower).is_ok()
 }
 
+/// CR 603.2b + CR 102.1 + CR 805.4d: the seat a keeper instruction's "that
+/// player" subject names. Bound through the shared anaphor binder, so a player
+/// the chain itself declared outranks the trigger condition's player (the
+/// precedence `coordinated_player_member` keeps by declining) and declines here.
+/// Inside a printed trigger, "that player" after "at the beginning of each
+/// opponent's <step>" (`ScopedPlayer`) is that step's turn player, and after an
+/// event head (`TriggeringPlayer`) is the event's player; both are what
+/// `PlayerFilter::TriggeringPlayer` reads from the trigger event at resolution
+/// (`extract_player_from_event`'s `PhaseChangedFor` / `PhaseChanged` arms).
+/// Every other antecedent, or none, is unbound: the caller marks the
+/// instruction unimplemented. Keeper-owned and deliberately narrower than
+/// `coordinated_player_member`, whose `ScopedPlayer` verdict "you and that
+/// player each …" cards depend on. A `ScopedPlayer` set by a nested per-seat
+/// seeder would also map here; no printed keeper card reaches one (Archfiend of
+/// Depravity is the only "that player" keeper card).
+fn that_player_keeper_scope(ctx: &ParseContext) -> Option<PlayerFilter> {
+    if !ctx.in_trigger {
+        return None;
+    }
+    let that_player = ControllerPhrase {
+        subject: ControllerSubject::Anaphoric(nom_target::PlayerAnaphor::ThatPlayer),
+        form: nom_target::ControllerForm::Singular,
+        tense: nom_target::ControllerTense::Present,
+    };
+    match bind_controller_phrase(&that_player, &ctx.player_antecedents())? {
+        ControllerRef::ScopedPlayer | ControllerRef::TriggeringPlayer => {
+            Some(PlayerFilter::TriggeringPlayer)
+        }
+        ControllerRef::You
+        | ControllerRef::Opponent
+        | ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::ChosenPlayer { .. }
+        | ControllerRef::DeclaredPlayer { .. }
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer
+        | ControllerRef::SpecificPlayer { .. } => None,
+    }
+}
+
 /// CR 608.2c + CR 701.8a + CR 701.21a + CR 101.4: Whole-body recognizer for the
 /// keeper-and-dispose class — one keeper nomination followed immediately by a
 /// disposal of everything else in the same domain.
@@ -20755,6 +20821,7 @@ pub(crate) fn is_keeper_dispose_head(lower: &str) -> bool {
 ///   typed filter minus the tracked set (Duneblast, Mount Doom).
 /// * `EachPlayer` / `EachOpponent` → one `ChooseAndSacrificeRest` scoped per
 ///   player.
+/// * `ThatPlayer` → the same, scoped to the trigger's player.
 ///
 /// CR 608.2c: "The controller of the spell or ability follows its instructions
 /// in the order written. However, replacement effects may modify these actions."
@@ -20864,21 +20931,29 @@ fn parse_keeper_dispose_rest_ir(
                     .push();
             }
         },
-        KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent => {
-            // The gate admits only `Exact` on this subject; `UpTo` is the
-            // deferred Covetous Elegy axis, so this cannot be reached.
-            let KeeperQuantifier::Exact(printed_count) = head.quantifier else {
-                return None;
+        KeeperChooserScope::EachPlayer
+        | KeeperChooserScope::EachOpponent
+        | KeeperChooserScope::ThatPlayer => {
+            // CR 101.4 + CR 701.21a: an exact count, or a maximum the seat may keep
+            // fewer of (Covetous Elegy). CR 609.3 clamps an exact count at resolution.
+            let count = match head.quantifier {
+                KeeperQuantifier::Exact(n) => QuantityExpr::Fixed {
+                    value: i32::try_from(n).ok()?,
+                },
+                KeeperQuantifier::UpTo(n) => QuantityExpr::up_to(QuantityExpr::Fixed {
+                    value: i32::try_from(n).ok()?,
+                }),
             };
-            let keep_count = i32::try_from(printed_count).ok()?;
             // CR 101.4: every player in scope nominates, in APNAP order. The
             // effect iterates players itself, so the keeper filter carries NO
             // controller and the printed control clause is expressed here.
             let player_scope = match head.scope {
-                KeeperChooserScope::EachPlayer => PlayerFilter::All,
-                KeeperChooserScope::EachOpponent => PlayerFilter::Opponent,
+                KeeperChooserScope::EachPlayer => Some(PlayerFilter::All),
+                KeeperChooserScope::EachOpponent => Some(PlayerFilter::Opponent),
+                // CR 603.2b + CR 102.1: the trigger condition's player.
+                KeeperChooserScope::ThatPlayer => that_player_keeper_scope(ctx),
                 // Unreachable: this whole block is inside the
-                // `KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent`
+                // `KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent | KeeperChooserScope::ThatPlayer`
                 // match arm above (`Controller` is handled by the sibling arm),
                 // so a `Controller` value can never flow through this branch.
                 KeeperChooserScope::Controller => {
@@ -20902,32 +20977,54 @@ fn parse_keeper_dispose_rest_ir(
                     },
                 }),
             };
-            builder
-                .clause(
-                    keeper_source,
-                    // CR 701.21a: each unchosen permanent is sacrificed by its
-                    // own controller, not destroyed by the spell's controller.
-                    parsed_clause(Effect::ChooseAndSacrificeRest {
-                        categories: Vec::new(),
-                        chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
-                        choose_filter: head.filter.clone(),
-                        sacrifice_filter: head.filter,
-                        total_power_cap: None,
-                        // CR 609.3: a player with fewer eligible permanents than
-                        // the printed count keeps as many as they can.
-                        keeper_constraint: Some(KeeperConstraint::ExactCount {
-                            count: QuantityExpr::Fixed { value: keep_count },
-                        }),
-                        keeper_counter,
-                    }),
-                    remainder_source.map(|_| ClauseBoundary::Sentence),
-                    ClauseDisposition::Emit {
-                        followup: None,
-                        intrinsic: None,
-                    },
-                )
-                .player_scope(Some(player_scope))
-                .push();
+            match player_scope {
+                Some(player_scope) => {
+                    builder
+                        .clause(
+                            keeper_source,
+                            // CR 701.21a: each unchosen permanent is sacrificed by its
+                            // own controller, not destroyed by the spell's controller.
+                            parsed_clause(Effect::ChooseAndSacrificeRest {
+                                categories: Vec::new(),
+                                chooser_scope:
+                                    crate::types::ability::CategoryChooserScope::EachPlayerSelf,
+                                choose_filter: head.filter.clone(),
+                                sacrifice_filter: head.filter,
+                                total_power_cap: None,
+                                keeper_constraint: Some(KeeperConstraint::Count { count }),
+                                keeper_counter,
+                            }),
+                            remainder_source.map(|_| ClauseBoundary::Sentence),
+                            ClauseDisposition::Emit {
+                                followup: None,
+                                intrinsic: None,
+                            },
+                        )
+                        .player_scope(Some(player_scope))
+                        .push();
+                }
+                // "that player" names no player this context can bind
+                // (a spell, or a trigger whose antecedent is not the event's player).
+                // Claim the whole printed instruction as one honest gap rather than
+                // letting the line fall to the general chain parser's targeted shape.
+                None => {
+                    let whole_source = text.get(..head.disposal_span.1)?;
+                    builder
+                        .clause(
+                            whole_source,
+                            parsed_clause(Effect::unimplemented(
+                                "keeper_dispose_unbound_that_player",
+                                whole_source,
+                            )),
+                            remainder_source.map(|_| ClauseBoundary::Sentence),
+                            ClauseDisposition::Emit {
+                                followup: None,
+                                intrinsic: None,
+                            },
+                        )
+                        .push();
+                }
+            }
         }
     }
 
@@ -21452,7 +21549,7 @@ fn parse_threshold_land_balance_ir(
                 choose_filter: land.clone(),
                 sacrifice_filter: land,
                 total_power_cap: None,
-                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                keeper_constraint: Some(KeeperConstraint::Count {
                     count: QuantityExpr::Fixed { value: keep_count },
                 }),
                 keeper_counter: None,
@@ -31657,6 +31754,36 @@ fn declared_object_target_controller_antecedent(clauses: &[ClauseIr]) -> Option<
         return None;
     };
     Some(ControllerRef::ParentTargetController)
+}
+
+/// CR 608.2c + CR 118.12a + CR 109.4: the payer an earlier `unless_pay` clause
+/// introduced, as the third-person antecedent for a bare-reflexive-outcome-led
+/// consequence chunk ("Counter target spell unless its controller pays {X}. If
+/// that player doesn't, they tap all lands with mana abilities they control" —
+/// Power Sink). Reads the NEAREST earlier clause carrying `unless_pay`, so the
+/// payer is the player the connector's outcome is about (CR 608.2c: anaphors
+/// resolve in the order written).
+///
+/// The payer mapping is deliberately narrow: only payers naming exactly one
+/// already-bound player map (`ParentTargetController`, the counter/unless
+/// shape; `TriggeringPlayer`, the third-party-voice shape). Every other payer
+/// fails closed to `None` (current behavior): per-player-iteration payers
+/// (`ScopedPlayer`) must fall through to the `ScopedPlayer` rung (Tariff
+/// class), `Controller` would merely restate the `You` fallback, and
+/// `AllPlayers`/`Opponent`/disjunctive payers name no single antecedent. The
+/// declared-target payer shape (`Typed`, "target player pays") likewise fails
+/// closed: no `TargetFilter::TargetPlayer` variant exists, and a `Typed` shape
+/// carries no single-player `ControllerRef` mapping.
+fn unless_payer_controller_antecedent(clauses: &[ClauseIr]) -> Option<ControllerRef> {
+    let payer = clauses
+        .iter()
+        .rev()
+        .find_map(|clause| clause.unless_pay.as_ref().map(|modifier| &modifier.payer))?;
+    match payer {
+        TargetFilter::ParentTargetController => Some(ControllerRef::ParentTargetController),
+        TargetFilter::TriggeringPlayer => Some(ControllerRef::TriggeringPlayer),
+        _ => None,
+    }
 }
 
 /// CR 601.2c + CR 115.1: the single target filter a chain node announces as
@@ -45970,9 +46097,8 @@ pub(crate) fn rewrite_event_anchored_zone_counts_to_scoped(def: &mut AbilityDefi
 /// parser cannot see the comparison operands, so it emits this placeholder and
 /// the trigger-level difference binding in `lower_trigger_ir` (oracle_trigger.rs)
 /// replaces it with the `QuantityExpr::Difference` of the condition's two
-/// operands (alongside the sibling draw/lose bindings). Left unbound
-/// (a card with the anaphor but no comparison), a `Variable` ref resolves to 0
-/// in `quantity::resolve_ref`, so the effect is inert rather than wrong.
+/// operands. The binding and final coverage guards turn unbound placeholders
+/// into explicit gaps.
 pub(crate) const DIFFERENCE_ANAPHOR_VARIABLE: &str = "difference";
 
 /// Construct the deferred "the difference" count placeholder (see
@@ -45997,8 +46123,8 @@ pub(crate) fn is_difference_anaphor_placeholder(expr: &QuantityExpr) -> bool {
 }
 
 /// The count position of a verb that is not a "the difference" carrier (draw,
-/// mill, scry, surveil, discard, gain/lose life, reveal from hand). Only a
-/// carrier [`resolve_difference_anaphor_in_effect`] rebinds (token creation) may
+/// mill, scry, surveil, discard, gain life, reveal from hand). Only a
+/// carrier [`resolve_difference_anaphor_in_effect`] rebinds may
 /// take the deferred placeholder; every other verb rejects it, so "draw cards
 /// equal to the difference" keeps the `Unimplemented` → trigger-rewrite contract
 /// in `lower_trigger_ir`.
@@ -46024,7 +46150,9 @@ pub(super) fn parse_verb_count_slot<'a>(
 ///   * with a bound `Difference` (`bound = Some`), each placeholder binds to it, and
 ///   * with none to bind (`bound = None`), the carrying effect is downgraded to
 ///     an explicit `Effect::Unimplemented` — an honest coverage gap rather than a
-///     silently-zero effect that reads as supported.
+///     silently-zero effect that reads as supported. Life loss defers that
+///     rejection to the final ability boundary so a nested continuation gets
+///     every chance to inherit its comparison.
 pub(crate) fn resolve_difference_anaphor_in_ability(
     def: &mut AbilityDefinition,
     bound: Option<&QuantityExpr>,
@@ -46064,6 +46192,7 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
             ("put", "counters equal to the difference")
         }
         Effect::Token { .. } => ("create", "tokens equal to the difference"),
+        Effect::LoseLife { .. } if bound.is_some() => ("lose", "life equal to the difference"),
         _ => return,
     };
     let is_placeholder = effect
@@ -46081,6 +46210,36 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
         None => {
             *effect = Effect::unimplemented(downgrade.0, downgrade.1);
         }
+    }
+}
+
+/// CR 608.2c: An independent ability's governing comparison must supply the
+/// two operands before an anaphoric life-loss amount can be interpreted.
+pub(super) fn reject_unbound_life_loss_in_effect(effect: &mut Effect) -> std::ops::ControlFlow<()> {
+    if matches!(
+        effect,
+        Effect::LoseLife { amount, .. } if is_difference_anaphor_placeholder(amount)
+    ) {
+        *effect = Effect::unimplemented("lose", "life equal to the difference");
+    }
+    std::ops::ControlFlow::Continue(())
+}
+
+pub(crate) fn reject_unbound_life_loss_difference(parsed: &mut super::oracle::ParsedAbilities) {
+    use crate::types::ability_visit::effects_mut;
+
+    let mut reject = reject_unbound_life_loss_in_effect;
+    for ability in &mut parsed.abilities {
+        let _ = effects_mut::visit_ability_def(ability, &mut reject);
+    }
+    for trigger in &mut parsed.triggers {
+        let _ = effects_mut::visit_trigger(trigger, &mut reject);
+    }
+    for definition in &mut parsed.statics {
+        let _ = effects_mut::visit_static(definition, &mut reject);
+    }
+    for replacement in &mut parsed.replacements {
+        let _ = effects_mut::visit_replacement(replacement, &mut reject);
     }
 }
 
@@ -52221,6 +52380,13 @@ fn parse_effect_chain_ir_body(
             } else {
                 (None, text, None, None, None)
             };
+        // CR 608.2c + CR 118.12a: snapshot whether this chunk is led by a BARE
+        // reflexive outcome gate ("If they do" / "If that player doesn't")
+        // BEFORE `if_you_do` is moved into `condition` below — the unless-payer
+        // seed rung reads this snapshot when the chunk context is built.
+        let reflexive_outcome_led = if_you_do
+            .as_ref()
+            .is_some_and(conditions::is_bare_reflexive_outcome_gate);
         // CR 603.12 + CR 608.2c: a `When you do, if <guard>, <body>` guard is
         // stamped on the reflexive body exactly as a leading general conditional
         // is stamped on its instruction, so its route joins the same binding
@@ -53492,6 +53658,13 @@ fn parse_effect_chain_ir_body(
         // those nested delayed/reflexive/continuation parses; the public wrapper
         // restores the caller's value on every return path.
         ctx.chain_prior_publishers = chain_prior_publishers;
+        // CR 608.2c + CR 118.12a: the unless-payer antecedent for a
+        // bare-reflexive-outcome-led consequence chunk (Power Sink). Gated on
+        // the strip-time snapshot: only "If they do / If that player doesn't"
+        // connectors prove the payer is the player the outcome is about.
+        let unless_payer_scope = reflexive_outcome_led
+            .then(|| unless_payer_controller_antecedent(builder.clauses()))
+            .flatten();
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             // CR 608.2k: precedence for a bare object anaphor, nearest antecedent
@@ -53577,8 +53750,14 @@ fn parse_effect_chain_ir_body(
             // CR 608.2c: a chosen-player scope set by an earlier "choose a
             // player" sentence (Gluntch) takes precedence — the "they"/"that
             // player controls" anaphor binds to the most recent choice.
-            relative_player_scope: chain_chosen_player_scope
+            relative_player_scope: unless_payer_scope
                 .clone()
+                // CR 608.2c: the bare reflexive connector proves the unless
+                // payer is the decliner, so the payer outranks every other
+                // third-person rung (nearest introduction wins; zero
+                // choose-a-player+unless pairings per corpus census, and the
+                // declared rung converges where it also fires).
+                .or_else(|| chain_chosen_player_scope.clone())
                 // CR 608.2c (issue #1670): body "its controller may" antecedent
                 // (Star Athlete; issue #3659 Gix — "its controller may pay … if
                 // they do, they draw" must bind "they" to the creature's
@@ -54469,30 +54648,6 @@ fn parse_effect_chain_ir_body(
                 None
             }
         });
-        // CR 119.3 + CR 608.2c: "they lose life equal to the difference" — when a
-        // leading QuantityCheck condition bounds life lost (Lolth emblem: "if that
-        // player lost less than 8 life this turn"), the loss amount is the unsigned
-        // gap between the threshold and life lost this turn.
-        let difference_lose = condition.as_ref().and_then(|cond| {
-            let lower = text_no_qty.to_lowercase();
-            let clean = lower.trim().trim_end_matches('.');
-            if all_consuming(alt((
-                tag::<_, _, OracleError<'_>>("lose life equal to the difference"),
-                tag("they lose life equal to the difference"),
-            )))
-            .parse(clean)
-            .is_ok()
-            {
-                conditions::difference_expr(cond).map(|diff| {
-                    parsed_clause(Effect::LoseLife {
-                        amount: diff,
-                        target: Some(TargetFilter::ParentTarget),
-                    })
-                })
-            } else {
-                None
-            }
-        });
         // CR 608.2c + CR 608.2d + CR 118.12: an "any opponent / any player / any other
         // player may" action is performed by the player who accepts. Its immediate
         // "if a player does" consequence names that same player, even when an enclosing
@@ -54544,8 +54699,6 @@ fn parse_effect_chain_ir_body(
             (retained_type_clause.lower(duration_binding), repeat_for)
         } else if let Some(draw) = difference_draw {
             (draw, repeat_for)
-        } else if let Some(lose) = difference_lose {
-            (lose, repeat_for)
         } else if let Some(rider) = entry_rider {
             (rider, repeat_for)
         } else {
@@ -54636,30 +54789,6 @@ fn parse_effect_chain_ir_body(
         );
         let (clause, repeat_for) = lower_copy_each_tracked_spell(&text_no_qty, clause, repeat_for);
         let head_window = ctx.head_window.take_window();
-
-        // CR 608.2c: a clause that STATED its subject ("target opponent loses
-        // life equal to the difference" — Ancient Cellarspawn) has it peeled
-        // into `leading_subject_application`, and its quantity gap records only
-        // the bare predicate. The trigger-side "difference" rewrite binds that
-        // bare predicate to `ParentTarget`, which is right only for the
-        // anaphoric "they" (Lolth's emblem, whose peeled subject IS
-        // `ParentTarget`); for a stated subject it made the controller lose the
-        // life. Record the whole clause instead, so the rewrite can't claim it
-        // and the gap stays honest until the stated subject is threaded through.
-        let clause = match leading_subject_application.as_ref() {
-            Some(application)
-                if application.affected != TargetFilter::ParentTarget
-                    && clause.effect.unimplemented_description().is_some_and(
-                        crate::parser::oracle_trigger::is_difference_lose_life_gap,
-                    ) =>
-            {
-                parsed_clause(Effect::unimplemented(
-                    "difference_drops_stated_subject",
-                    text.trim(),
-                ))
-            }
-            _ => clause,
-        };
 
         // CR 608.2c: advance once per finalized chunk, including player choices
         // nested in its own sub-ability chain. Speculative parses only read it.

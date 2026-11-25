@@ -2503,6 +2503,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: ObjectId(7),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(!should_exclude_event(&cast));
     }
@@ -2653,6 +2655,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         let entries = resolve_log_entries(&[event], &state, &state);
         assert_eq!(entries.len(), 1);
