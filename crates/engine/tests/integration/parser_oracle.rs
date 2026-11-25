@@ -795,7 +795,10 @@ fn render_net_effect_carrier_census() {
     // 241: + `Effect::ResumeDamageBatch` (internal paused damage batch; its portions carry
     // `DamageContextSnapshot`, `TargetRef`, `ObjectId` and `EffectKind`, none of which reaches a
     // `description`, so no RENDER_DESCEND arm).
-    const EFFECT_VARIANT_PIN: usize = 241;
+    // 242: + `Effect::ReselectAttackTarget` (CR 508.7; Misleading Signpost, Portal Mage). Its only
+    // field is a `TargetFilter`, the same payload as `Effect::BecomeBlocked`, which reaches no
+    // `description`, so no RENDER_DESCEND arm.
+    const EFFECT_VARIANT_PIN: usize = 242;
     /// `(enum header, pinned variant count, the ONE variant the net destructures)`.
     const PAYLOAD_ENUM_PINS: &[(&str, usize, &str)] = &[
         ("pub enum CastingPermission {", 8, "ExileWithAltCost"),
