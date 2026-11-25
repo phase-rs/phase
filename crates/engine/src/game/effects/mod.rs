@@ -1599,12 +1599,15 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
     // replacement subtree has retired resumes before any further resolution
     // work; every frame left on top of it is outer work.
-    if state.counter_cost_root_is_due() {
+    if state.counter_cost_root_is_due() || state.outside_game_entry_resume_is_due() {
         return;
     }
     counters::drain_pending_counter_moves(state, events);
     counters::drain_pending_counter_removals(state, events);
     counters::drain_pending_counter_additions(state, events);
+    if state.outside_game_entry_resume_is_due() {
+        return;
+    }
     if waits_for_resolution_choice(&state.waiting_for) {
         state.resolution_stack.note_repeat_until_descendant_choice();
         return;
@@ -2281,7 +2284,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
     // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
     // replacement subtree has retired resumes before any further resolution
     // work; every frame left on top of it is outer work.
-    if state.counter_cost_root_is_due() {
+    if state.counter_cost_root_is_due() || state.outside_game_entry_resume_is_due() {
         return;
     }
 
@@ -27369,6 +27372,7 @@ fn resolve_chain_body(
     // value catches the replace case correctly (issue #491).
     let pending_continuation_before = state.active_ability_continuation().cloned();
     let child_stack_start = state.resolution_stack.capture_child_boundary();
+    let outer_resolution_depth = state.resolution_stack.len();
     // CR 118.12: a latched payment origin belongs to this node — the drained
     // chain's head — and to no other. Take it before any fan-out, skip, or
     // descent below can reach another node; only this node's own `PayCost`
@@ -30436,7 +30440,17 @@ fn resolve_chain_body(
     // CR 706.3b + CR 608.2c: a native die instruction owns its entire table
     // process. Its printed tail cannot inspect a partial aggregate or pass a
     // gate until all survivors and every selected branch have completed.
-    if matches!(ability.effect, Effect::RollDie { .. }) && progress.is_pending() {
+    let random_battlefield_draft = matches!(
+        ability.effect,
+        Effect::DraftFromSpellbook {
+            destination: Zone::Battlefield,
+            selection: crate::types::ability::SpellbookSelection::Random,
+            ..
+        }
+    );
+    if (matches!(ability.effect, Effect::RollDie { .. }) || random_battlefield_draft)
+        && progress.is_pending()
+    {
         if let Some(sub) = ability.sub_ability.as_deref() {
             let mut tail = sub.clone();
             if should_propagate_parent_targets(ability, &tail) {
@@ -30453,6 +30467,9 @@ fn resolve_chain_body(
                     .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
             } else {
                 state.park_ability_continuation(pending);
+            }
+            if random_battlefield_draft {
+                state.rebase_outside_game_entry_boundary(ability.source_id, outer_resolution_depth);
             }
         }
         return Ok(progress);

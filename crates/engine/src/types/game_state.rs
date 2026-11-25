@@ -8772,6 +8772,126 @@ impl ReplacementSubtreeBoundary {
     }
 }
 
+impl GameState {
+    pub(crate) fn outside_game_card_entry(&self, entry_ref: ObjectId) -> Option<&LiminalEntry> {
+        let entry = self.liminal_entries.get(&entry_ref)?;
+        let LiminalEntryKind::OutsideGameCard { original, .. } = &entry.kind else {
+            return None;
+        };
+        let LiminalEntrant::Card(card) = &entry.object else {
+            return None;
+        };
+        (entry_ref != ObjectId(0)
+            && entry_ref.0 < self.next_object_id
+            && card.id == entry_ref
+            && !card.is_token
+            && card.zone == Zone::Battlefield
+            && !self.objects.contains_key(&entry_ref)
+            && original.as_ref().is_none_or(|original| {
+                original.id == entry_ref && !original.is_token && original.owner == card.owner
+            }))
+        .then_some(entry)
+    }
+
+    fn validate_restored_outside_game_card_entries(&self) -> Result<(), String> {
+        for (&entry_ref, entry) in &self.liminal_entries {
+            if matches!(entry.kind, LiminalEntryKind::OutsideGameCard { .. })
+                && (self.outside_game_card_entry(entry_ref).is_none()
+                    || self.battlefield.contains(&entry_ref)
+                    || self.exile.contains(&entry_ref)
+                    || self.stack.iter().any(|entry| entry.id == entry_ref)
+                    || self.players.iter().any(|player| {
+                        player.hand.contains(&entry_ref)
+                            || self.library_of(player.id).contains(&entry_ref)
+                            || self.graveyard_of(player.id).contains(&entry_ref)
+                    }))
+            {
+                return Err(format!(
+                    "invalid outside-game card projection {entry_ref:?}"
+                ));
+            }
+        }
+        let validate_proposal = |proposed: &ProposedEvent| {
+            if let ProposedEvent::OutsideGameCardEntry { entry_ref, .. } = proposed {
+                if self.outside_game_card_entry(*entry_ref).is_none() {
+                    return Err(format!(
+                        "outside-game entry has no matching projection {entry_ref:?}"
+                    ));
+                }
+            }
+            Ok(())
+        };
+        if let Some(pending) = &self.pending_replacement {
+            validate_proposal(&pending.proposed)?;
+        }
+        if let Some(DeferredLifeCostResume::PayAmount {
+            pending_entry: Some(pending),
+            ..
+        }) = &self.pending_deferred_life_cost_resume
+        {
+            validate_proposal(&pending.proposed)?;
+        }
+        if let Some(PendingLiminalEntryResume::OutsideGameCard {
+            source_id,
+            event,
+            boundary,
+            ..
+        }) = &self.pending_liminal_entry_resume
+        {
+            validate_proposal(event)?;
+            if !matches!(event, ProposedEvent::OutsideGameCardEntry { entry_ref, .. } if entry_ref == source_id)
+                || !matches!(self.outside_game_card_entry(*source_id).map(|entry| &entry.kind),
+                    Some(LiminalEntryKind::OutsideGameCard { boundary: entry_boundary, .. })
+                        if boundary == entry_boundary)
+            {
+                return Err("outside-game entry resume disagrees with its proposal".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn outside_game_entry_resume_is_due(&self) -> bool {
+        matches!(
+            self.pending_liminal_entry_resume.as_ref(),
+            Some(PendingLiminalEntryResume::OutsideGameCard { boundary, .. })
+                if boundary.is_retired(&self.resolution_stack)
+        )
+    }
+
+    /// The random draft may park before its written tail is put below its child.
+    pub(crate) fn rebase_outside_game_entry_boundary(
+        &mut self,
+        producer: ObjectId,
+        outer_depth: usize,
+    ) {
+        let entry = self
+            .liminal_entries
+            .iter_mut()
+            .find_map(|(entry_ref, entry)| {
+                let LiminalEntryKind::OutsideGameCard { boundary, .. } = &mut entry.kind else {
+                    return None;
+                };
+                if entry.source_id != producer || boundary.resolution_depth != outer_depth {
+                    return None;
+                }
+                boundary.resolution_depth += 1;
+                Some((*entry_ref, *boundary))
+            });
+        if let Some((entry_ref, rebased)) = entry {
+            if let Some(PendingLiminalEntryResume::OutsideGameCard {
+                source_id,
+                boundary,
+                ..
+            }) = self.pending_liminal_entry_resume.as_mut()
+            {
+                if *source_id == entry_ref {
+                    *boundary = rebased;
+                }
+            }
+        }
+    }
+}
+
 impl EnclosingPostReplacementFrame {
     fn is_retired(self, stack: &ResolutionStack) -> bool {
         let drains_now = match self.frame {
@@ -11665,6 +11785,11 @@ pub enum PendingCounterPostAction {
         sacrifice_at: Option<Duration>,
         source_id: ObjectId,
         controller: PlayerId,
+    },
+    FinalizeOutsideGameCardEntry {
+        object_id: ObjectId,
+        source_id: ObjectId,
+        name: String,
     },
     ContinueTokenCreation {
         owner: PlayerId,
@@ -28408,15 +28533,8 @@ pub enum LiminalEntrant {
     /// so CR 303.4g's zone-phrased dispositions cannot apply to it — only the
     /// rule's token clause can.
     Token(TokenProjection),
-    /// CR 701.42: a card-backed projection. It always enters from a real prior
-    /// zone through `ProposedEvent::ZoneChange`, so CR 303.4g's card
-    /// dispositions ("remains in its current zone", or the stack's
-    /// owner's-graveyard placement) are decided on that path — which
-    /// re-proposes the graveyard placement as a fresh, replacement-consulted
-    /// event (CR 614.6). Also carries the [`LiminalEntryKind::TransformedEntry`]
-    /// back-face projection of a double-faced card entering transformed
-    /// (CR 614.12); that entrant's prior zone is the stack or wherever the
-    /// effect moves it from.
+    /// CR 614.12: a card-backed projection. Meld and transformed entries have
+    /// a real prior zone. Outside-game cards have no prior zone (CR 400.11).
     Card(GameObject),
 }
 
@@ -28565,6 +28683,13 @@ pub enum LiminalEntryKind {
     /// `replacement::replace_event` / `continue_replacement`; never present
     /// at delivery.
     TransformedEntry,
+    OutsideGameCard {
+        boundary: ReplacementSubtreeBoundary,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        original: Option<Box<GameObject>>,
+        #[serde(default)]
+        superseded_replacements: usize,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28581,6 +28706,12 @@ pub enum PendingLiminalEntryResume {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attack_target: Option<AttackTarget>,
     },
+    OutsideGameCard {
+        source_id: ObjectId,
+        player: PlayerId,
+        event: ProposedEvent,
+        boundary: ReplacementSubtreeBoundary,
+    },
 }
 
 #[derive(Deserialize)]
@@ -28596,6 +28727,12 @@ enum TaggedPendingLiminalEntryResume {
         context: MeldSelection,
         #[serde(default)]
         attack_target: Option<AttackTarget>,
+    },
+    OutsideGameCard {
+        source_id: ObjectId,
+        player: PlayerId,
+        event: ProposedEvent,
+        boundary: ReplacementSubtreeBoundary,
     },
 }
 
@@ -28645,6 +28782,19 @@ impl<'de> Deserialize<'de> for PendingLiminalEntryResume {
                     player,
                     context,
                     attack_target,
+                },
+                PendingLiminalEntryResumeCompat::Tagged(
+                    TaggedPendingLiminalEntryResume::OutsideGameCard {
+                        source_id,
+                        player,
+                        event,
+                        boundary,
+                    },
+                ) => Self::OutsideGameCard {
+                    source_id,
+                    player,
+                    event,
+                    boundary,
                 },
             },
         )
@@ -34770,6 +34920,7 @@ impl GameStateDecode {
         // The PERSISTED half of the projection gate; `decode` below carries the other.
         // See the pairing comment there for why one site is not enough.
         reject_viewer_projection_as_authority(&state)?;
+        state.validate_restored_outside_game_card_entries()?;
         validate_trigger_firing_coherence(&state)?;
         validate_owed_spell_final_part_coherence(&state)?;
         validate_return_result_occurrence_coherence(&state)?;
@@ -41697,25 +41848,36 @@ impl GameState {
         counter_type: CounterType,
         count: u32,
     ) -> bool {
-        let Some(entry) = self
-            .liminal_entries
-            .get_mut(&id)
-            .filter(|entry| entry.object.is_token_projection())
-        else {
+        let Some(entry) = self.liminal_entries.get_mut(&id).filter(|entry| {
+            entry.object.is_token_projection()
+                || matches!(entry.kind, LiminalEntryKind::OutsideGameCard { .. })
+        }) else {
             return false;
         };
         // CR 702.82a: counters earned by this entrant's own replacement belong to
         // its entry event, not the pristine batch payload used by later entrants.
-        if let Some(PendingLiminalEntryResume::Token {
-            source_id,
-            event:
-                crate::types::proposed_event::ProposedEvent::TokenEntry {
-                    entry_ref,
-                    enter_with_counters,
-                    ..
-                },
-            ..
-        }) = self.pending_liminal_entry_resume.as_mut()
+        if let Some(
+            PendingLiminalEntryResume::Token {
+                source_id,
+                event:
+                    crate::types::proposed_event::ProposedEvent::TokenEntry {
+                        entry_ref,
+                        enter_with_counters,
+                        ..
+                    },
+                ..
+            }
+            | PendingLiminalEntryResume::OutsideGameCard {
+                source_id,
+                event:
+                    ProposedEvent::OutsideGameCardEntry {
+                        entry_ref,
+                        enter_with_counters,
+                        ..
+                    },
+                ..
+            },
+        ) = self.pending_liminal_entry_resume.as_mut()
         {
             if *source_id == id && *entry_ref == id {
                 enter_with_counters.push((counter_type, count));

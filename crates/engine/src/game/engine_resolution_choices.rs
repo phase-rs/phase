@@ -9630,7 +9630,13 @@ pub(super) fn handle_resolution_choice(
                 events,
             )
             .map_err(|e| EngineError::InvalidAction(format!("spellbook draft: {e:?}")))?;
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    finish_with_continuation(state, player, events)
+                } else {
+                    state.waiting_for.clone()
+                },
+            )
         }
         (
             WaitingFor::DamageSourceChoice {

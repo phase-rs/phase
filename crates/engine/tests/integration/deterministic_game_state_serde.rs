@@ -982,6 +982,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "MoveCounter",
         "CreateToken",
         "TokenEntry",
+        "OutsideGameCardEntry",
         "Discard",
         "Tap",
         "Untap",

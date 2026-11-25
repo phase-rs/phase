@@ -890,6 +890,19 @@ fn apply_pending_counter_post_action(
     events: &mut Vec<GameEvent>,
 ) -> bool {
     match action {
+        PendingCounterPostAction::FinalizeOutsideGameCardEntry {
+            object_id,
+            source_id,
+            name,
+        } => {
+            crate::game::zone_pipeline::finalize_outside_game_card_entry(
+                state,
+                Some((object_id, name)),
+                source_id,
+                events,
+            );
+            true
+        }
         PendingCounterPostAction::EmitEffectResolved { kind, source_id } => {
             events.push(GameEvent::EffectResolved {
                 kind,

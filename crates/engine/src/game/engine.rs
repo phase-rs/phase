@@ -9388,6 +9388,12 @@ fn resume_pending_continuation_pass(
         // Inert unless a `Token` resume with a live liminal entry is parked.
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             super::life_safety::observe_boundary_carrier(state);
+            if state.outside_game_entry_resume_is_due() {
+                super::engine_replacement::resume_pending_outside_game_card_entry(state, events);
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    effects::drain_pending_continuation(state, events);
+                }
+            }
             if let Some(waiting_for) =
                 super::engine_replacement::resume_pending_liminal_token_entry(state, events)
             {
@@ -15899,6 +15905,40 @@ fn apply_non_priority_pass_action(
             let returned = *returned_id;
             let active_player = *player;
             let action_event_start = events.len();
+            if let Some(crate::types::game_state::PendingLiminalEntryResume::OutsideGameCard {
+                source_id,
+                player,
+                ..
+            }) = state.pending_liminal_entry_resume.as_ref()
+            {
+                if *source_id == returned && *player == active_player {
+                    let Some(
+                        crate::types::game_state::PendingLiminalEntryResume::OutsideGameCard {
+                            event,
+                            ..
+                        },
+                    ) = state.pending_liminal_entry_resume.take()
+                    else {
+                        unreachable!()
+                    };
+                    state.waiting_for = WaitingFor::Priority {
+                        player: active_player,
+                    };
+                    super::zone_pipeline::deliver_outside_game_card_entry(
+                        state,
+                        event,
+                        Some(chosen),
+                        &mut events,
+                    );
+                    resume_pending_continuation_if_priority(state, &mut events)?;
+                    triggers::collect_and_drain_entry_observer_triggers_if_settled(
+                        state,
+                        &mut events,
+                        action_event_start,
+                    );
+                    return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+                }
+            }
             let (filter, grants) = match &pending.effect {
                 crate::types::ability::Effect::ReturnAsAura {
                     enchant_filter,

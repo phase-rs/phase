@@ -698,7 +698,9 @@ pub(crate) fn drain_pending_copy_token_resolution(
             .liminal_entries
             .get(source_id)
             .map(|entry| entry.source_id),
-        Some(PendingLiminalEntryResume::Meld { .. }) | None => None,
+        Some(PendingLiminalEntryResume::Meld { .. })
+        | Some(PendingLiminalEntryResume::OutsideGameCard { .. })
+        | None => None,
     };
     if state
         .active_copy_token()

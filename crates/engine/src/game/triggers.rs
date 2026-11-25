@@ -12794,6 +12794,9 @@ pub(crate) fn battlefield_entry_in_progress(state: &GameState) -> bool {
 fn parked_replacement_modifies_an_entry(state: &GameState, proposed: &ProposedEvent) -> bool {
     match proposed {
         ProposedEvent::ZoneChange { to, .. } => *to == Zone::Battlefield,
+        ProposedEvent::OutsideGameCardEntry { destination, .. } => {
+            *destination == Zone::Battlefield
+        }
         ProposedEvent::TokenEntry { .. } | ProposedEvent::CreateToken { .. } => true,
         other => other
             .affected_object_id()
