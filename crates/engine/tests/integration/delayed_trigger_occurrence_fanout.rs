@@ -670,6 +670,17 @@ fn thunder_chapter(lore: u32) {
         .add_artifact_to_hand_from_oracle(P0, "Plain artifact", "")
         .with_mana_cost(ManaCost::zero())
         .id();
+    // Grant flash so P1 can cast the Aura during the watcher's turn.
+    let steal = scenario
+        .add_enchantment_to_hand_from_oracle(P1, "Steal Enchantment", "")
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(
+            &["Enchant"],
+            "Enchant enchantment\nYou control enchanted enchantment.",
+        )
+        .with_keyword(Keyword::Flash)
+        .with_mana_cost(ManaCost::zero())
+        .id();
     let mut runner = scenario.build();
     let initial = thunder_life(&runner);
     advance_sagas(&mut runner);
@@ -702,16 +713,20 @@ fn thunder_chapter(lore: u32) {
         resolve_top(runner);
         assert_eq!(zone(runner, card), Zone::Battlefield);
         assert_eq!(runner.state().objects[&card].controller, player);
+        let firings: Vec<_> = runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == saga)
+            .collect();
         assert_eq!(
-            runner
-                .state()
-                .stack
-                .iter()
-                .filter(|entry| entry.source_id == saga && entry.controller == P0)
-                .count(),
+            firings.len(),
             usize::from(expected != [0; 3]),
-            "delayed firings for the entry of {card:?}"
+            "delayed firings for the entry of {card:?} under {player:?}"
         );
+        for firing in firings {
+            assert_eq!(firing.controller, P0);
+        }
         settle(runner, &[]);
         assert!(runner.state().stack.is_empty());
         assert!(matches!(
@@ -723,9 +738,6 @@ fn thunder_chapter(lore: u32) {
             std::array::from_fn(|i| before[i] + expected[i])
         );
     };
-    assert_entry(&mut runner, first, P0, [1, -1, -1]);
-    assert_entry(&mut runner, second, P0, [1, -1, -1]);
-
     if lore == 1 {
         runner
             .act(GameAction::PassPriority)
@@ -734,7 +746,27 @@ fn thunder_chapter(lore: u32) {
             runner.state().waiting_for,
             WaitingFor::Priority { player: P1 }
         ));
+        let theft = runner.cast(steal).target_object(saga).resolve();
+        theft.assert_zone(&[steal, saga], Zone::Battlefield);
+        assert!(theft.state().stack.is_empty());
+        assert!(matches!(
+            theft.final_waiting_for(),
+            WaitingFor::Priority { player: P0 }
+        ));
+        assert_eq!(theft.state().objects[&saga].controller, P1);
+        assert_eq!(thunder_life(&runner), initial);
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass to the Aura's controller");
+        // CR 109.5 and CR 603.7e: the resolved chapter ability fixes who
+        // "you" refers to for the delayed ability, even after the Saga changes hands.
         assert_entry(&mut runner, opponent, P1, [0; 3]);
+    }
+
+    assert_entry(&mut runner, first, P0, [1, -1, -1]);
+    assert_entry(&mut runner, second, P0, [1, -1, -1]);
+
+    if lore == 1 {
         assert_entry(&mut runner, noncreature, P0, [0; 3]);
     } else {
         drive_until(&mut runner, |r| {
