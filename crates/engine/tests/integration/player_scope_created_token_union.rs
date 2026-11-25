@@ -25,10 +25,12 @@ use engine::types::ability::{
     TypedFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -40,6 +42,13 @@ const P2: PlayerId = PlayerId(2);
 
 const WAR_GAMES: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after IV.)\nI — Each player creates three tapped 1/1 white Warrior creature tokens. The tokens are goaded for as long as this Saga remains on the battlefield.\nII, III — Put a +1/+1 counter on each Warrior creature.\nIV — You may exile a nontoken creature you control. When you do, exile all Warriors.";
 const RENDMAW: &str = "Reach, menace\nWhen Rendmaw enters and whenever you play a card with two or more card types, each player creates a tapped 2/2 black Bird creature token with flying. The tokens are goaded for the rest of the game. (They attack each combat if able and attack a player other than you if able.)";
+const NYX_ORACLE: &str = "Trample\nIf you tap a permanent for mana, it produces three times as much of that mana instead.";
+const ORNITHOPTER_ORACLE: &str = "Flying";
+const SEAT_ORACLE: &str = "{T}: Add {U}.";
+const FOREST_ORACLE: &str = "({T}: Add {G}.)";
+const MYSTIC_ORACLE: &str = "{T}: Add {G}.";
+const ISAMARU_ORACLE: &str = "";
+const OUTCAST_ORACLE: &str = "Changeling (This card is every creature type.)\nThis creature can't block and can't be blocked.";
 const LIFE_OF_THE_PARTY: &str = "First strike, trample, haste\nWhenever this creature attacks, it gets +X/+0 until end of turn, where X is the number of creatures you control.\nWhen this creature enters, if it's not a token, each opponent creates a token that's a copy of it. The tokens are goaded for the rest of the game. (They attack each combat if able and attack a player other than you if able.)";
 const PARALLEL_LIVES: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.";
 const HALVING_SEASON: &str = "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
@@ -205,6 +214,29 @@ fn assert_every_token_goaded(state: &GameState, source: ObjectId, name: &str) ->
         );
     }
     all.len()
+}
+
+/// Every goad registration `source` holds must be `Duration::Permanent` — a
+/// presence-only check would pass an `UntilEndOfTurn` misparse identically.
+/// Returns how many there are.
+fn assert_goad_registrations_permanent(state: &GameState, source: ObjectId) -> usize {
+    let mut count = 0;
+    for effect in state.transient_continuous_effects.iter().filter(|effect| {
+        effect.source_id == source
+            && effect
+                .modifications
+                .contains(&ContinuousModification::AddStaticMode {
+                    mode: StaticMode::Goaded,
+                })
+    }) {
+        assert_eq!(
+            effect.duration,
+            Duration::Permanent,
+            "the goad grant must be rest-of-game, not end-of-turn"
+        );
+        count += 1;
+    }
+    count
 }
 
 /// V1 — synchronous union: all nine Warriors are "the tokens".
@@ -1791,4 +1823,221 @@ fn paused_redirected_fan_out_binds_each_seats_counters_to_its_own_fractal() {
 #[test]
 fn paused_redirected_fan_out_survives_save_and_load_at_the_generated_leg_prompt() {
     paused_redirected_fan_out(true);
+}
+
+fn rendmaw_in_hand(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_hand(P0, "Rendmaw, Creaking Nest", 5, 5)
+        .as_artifact_creature()
+        .as_legendary()
+        .with_subtypes(vec!["Scarecrow"])
+        .from_oracle_text_with_keywords(&["Reach", "Menace"], RENDMAW)
+        .id()
+}
+
+/// V5 — Rendmaw's play trigger, cast half: casting a two-type spell creates a
+/// Bird per seat, all goaded for the rest of the game (CR 601.1a: casting is
+/// playing; CR 603.2: the trigger fires; CR 205.2a: two card types;
+/// CR 701.15b: goaded attacks each combat if able).
+#[test]
+fn rendmaw_play_trigger_cast_two_type_spell_creates_goaded_birds() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let rendmaw = rendmaw_in_hand(&mut scenario);
+    let thopter = scenario
+        .add_creature_to_hand(P0, "Ornithopter", 0, 2)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Thopter"])
+        .from_oracle_text_with_keywords(&["Flying"], ORNITHOPTER_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(rendmaw).commit();
+    drive(&mut runner, &mut no_replacement, &no_optional);
+    // Three, not six: the play trigger cannot fire for Rendmaw's own cast —
+    // its source is not on the battlefield yet.
+    assert_eq!(all_tokens(runner.state(), "Bird").len(), 3);
+    runner.cast(thopter).commit();
+    drive(&mut runner, &mut no_replacement, &no_optional);
+    let state = runner.state();
+    assert!(state.stack.is_empty());
+    for player in [P0, P1, P2] {
+        assert_eq!(tokens(state, player, "Bird").len(), 2, "{player:?}'s Birds");
+    }
+    assert_eq!(assert_every_token_goaded(state, rendmaw, "Bird"), 6);
+    assert_eq!(assert_goad_registrations_permanent(state, rendmaw), 6);
+}
+
+/// V5-negative — single-type casts resolve but create no Birds: a two-subtype
+/// creature (subtypes must not count, CR 205.3), a Legendary (supertypes must
+/// not count, CR 205.4a), and a Changeling (CR 702.73a grants subtypes, not
+/// card types). Each cast permanent on the battlefield is the reach-guard.
+#[test]
+fn rendmaw_play_trigger_ignores_single_type_casts() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let rendmaw = rendmaw_in_hand(&mut scenario);
+    let mystic = scenario
+        .add_creature_to_hand(P0, "Elvish Mystic", 1, 1)
+        .with_subtypes(vec!["Elf", "Druid"])
+        .from_oracle_text(MYSTIC_ORACLE)
+        .id();
+    let isamaru = scenario
+        .add_creature_to_hand(P0, "Isamaru, Hound of Konda", 2, 2)
+        .as_legendary()
+        .with_subtypes(vec!["Dog"])
+        .from_oracle_text(ISAMARU_ORACLE)
+        .id();
+    let outcast = scenario
+        .add_creature_to_hand(P0, "Changeling Outcast", 1, 1)
+        .with_subtypes(vec!["Shapeshifter"])
+        .from_oracle_text_with_keywords(&["Changeling"], OUTCAST_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(rendmaw).commit();
+    drive(&mut runner, &mut no_replacement, &no_optional);
+    assert_eq!(all_tokens(runner.state(), "Bird").len(), 3);
+
+    runner.cast(mystic).commit();
+    drive(&mut runner, &mut no_replacement, &no_optional);
+    let state = runner.state();
+    assert!(state.battlefield.contains(&mystic));
+    let mut mystic_subtypes = state.objects[&mystic].card_types.subtypes.clone();
+    mystic_subtypes.sort();
+    assert_eq!(
+        mystic_subtypes,
+        vec!["Druid".to_string(), "Elf".to_string()]
+    );
+    assert_eq!(
+        all_tokens(state, "Bird").len(),
+        3,
+        "one card type: no trigger"
+    );
+
+    runner.cast(isamaru).commit();
+    drive(&mut runner, &mut no_replacement, &no_optional);
+    let state = runner.state();
+    assert!(state.battlefield.contains(&isamaru));
+    assert!(state.objects[&isamaru]
+        .card_types
+        .supertypes
+        .contains(&Supertype::Legendary));
+    assert_eq!(
+        all_tokens(state, "Bird").len(),
+        3,
+        "a supertype is not a card type"
+    );
+
+    runner.cast(outcast).commit();
+    drive(&mut runner, &mut no_replacement, &no_optional);
+    let state = runner.state();
+    assert!(state.battlefield.contains(&outcast));
+    assert!(state.objects[&outcast].has_keyword(&Keyword::Changeling));
+    assert_eq!(
+        state.objects[&outcast].card_types.core_types,
+        vec![CoreType::Creature]
+    );
+    assert_eq!(
+        all_tokens(state, "Bird").len(),
+        3,
+        "changeling grants no card type"
+    );
+}
+
+/// Reported repro (issue #7727): casting Nyxbloom Ancient (Enchantment
+/// Creature) with Rendmaw out creates a Bird per seat.
+#[test]
+fn rendmaw_play_trigger_reported_nyxbloom_repro() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let rendmaw = rendmaw_in_hand(&mut scenario);
+    let nyx = scenario
+        .add_creature_to_hand(P0, "Nyxbloom Ancient", 5, 5)
+        .as_enchantment()
+        .as_creature()
+        .with_subtypes(vec!["Elemental"])
+        .from_oracle_text_with_keywords(&["Trample"], NYX_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(rendmaw).commit();
+    drive(&mut runner, &mut no_replacement, &no_optional);
+    assert_eq!(all_tokens(runner.state(), "Bird").len(), 3);
+    runner.cast(nyx).commit();
+    drive(&mut runner, &mut no_replacement, &no_optional);
+    let state = runner.state();
+    assert!(state.stack.is_empty());
+    assert_eq!(assert_every_token_goaded(state, rendmaw, "Bird"), 6);
+}
+
+/// V6 — Rendmaw's play trigger, land half: playing a two-type land creates a
+/// Bird per seat, all goaded for the rest of the game (CR 305.1 + CR 601.1a).
+#[test]
+fn rendmaw_play_trigger_two_type_land_creates_goaded_birds() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let rendmaw = rendmaw_in_hand(&mut scenario);
+    let seat = scenario
+        .add_land_to_hand(P0, "Seat of the Synod")
+        .as_artifact_land()
+        .from_oracle_text(SEAT_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(rendmaw).commit();
+    drive(&mut runner, &mut no_replacement, &no_optional);
+    assert_eq!(all_tokens(runner.state(), "Bird").len(), 3);
+    let card_id = runner.state().objects[&seat].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: seat,
+            card_id,
+        })
+        .expect("the land is playable");
+    drive(&mut runner, &mut no_replacement, &no_optional);
+    let state = runner.state();
+    assert!(state.stack.is_empty());
+    for player in [P0, P1, P2] {
+        assert_eq!(tokens(state, player, "Bird").len(), 2, "{player:?}'s Birds");
+    }
+    assert_eq!(assert_every_token_goaded(state, rendmaw, "Bird"), 6);
+    assert_eq!(assert_goad_registrations_permanent(state, rendmaw), 6);
+}
+
+/// V6-negative — playing a single-type land creates no Birds.
+#[test]
+fn rendmaw_play_trigger_ignores_single_type_land() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let rendmaw = rendmaw_in_hand(&mut scenario);
+    let forest = scenario
+        .add_land_to_hand(P0, "Forest")
+        .with_subtypes(vec!["Forest"])
+        .from_oracle_text(FOREST_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    // Stage the Basic supertype (no hand-land builder sets it).
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&forest)
+        .expect("Forest staged")
+        .card_types
+        .supertypes
+        .push(Supertype::Basic);
+    runner.cast(rendmaw).commit();
+    drive(&mut runner, &mut no_replacement, &no_optional);
+    assert_eq!(all_tokens(runner.state(), "Bird").len(), 3);
+    let card_id = runner.state().objects[&forest].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: forest,
+            card_id,
+        })
+        .expect("the land is playable");
+    drive(&mut runner, &mut no_replacement, &no_optional);
+    let state = runner.state();
+    assert!(state.battlefield.contains(&forest));
+    assert_eq!(
+        all_tokens(state, "Bird").len(),
+        3,
+        "one card type: no trigger"
+    );
 }

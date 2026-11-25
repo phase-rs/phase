@@ -16930,6 +16930,7 @@ fn latched_property_kind(
         | FilterProp::HasColor { .. }
         | FilterProp::NotColor { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::WithKeyword { .. }
         | FilterProp::WithoutKeyword { .. }
@@ -19611,6 +19612,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp, reader: BindingReader) -> boo
         | FilterProp::HasSupertype { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::ManaCostIn { .. }
         | FilterProp::HasXInManaCost

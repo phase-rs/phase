@@ -15278,6 +15278,7 @@ impl<'a> SpellCostView<'a> {
                 | FilterProp::HasColor { .. }
                 | FilterProp::PowerGTSource
                 | FilterProp::ColorCount { .. }
+                | FilterProp::CardTypeCount { .. }
                 | FilterProp::ManaSymbolCount { .. }
                 | FilterProp::HasSupertype { .. }
                 | FilterProp::IsChosenCreatureType
@@ -34933,6 +34934,7 @@ fn parsed_condition_reads_targets(condition: &ParsedCondition, read: TargetRead)
         | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { .. }
         | ParsedCondition::HasCityBlessing
         | ParsedCondition::HasEnduringStory
+        | ParsedCondition::IsMonarch
         | ParsedCondition::CompletedDungeon { .. }
         | ParsedCondition::HasMaxSpeed
         | ParsedCondition::IsYourTurn
@@ -35433,6 +35435,7 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType

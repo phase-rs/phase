@@ -27,7 +27,7 @@ use crate::types::counter::{parse_counter_type, CounterMatch};
 use crate::types::zones::Zone;
 
 pub use crate::types::text_grammar::{
-    parse_color_property, parse_property_filter, parse_zone_filter,
+    parse_card_type_count_property, parse_color_property, parse_property_filter, parse_zone_filter,
 };
 
 /// CR 201.2 + CR 201.2a: "not named <name>" — a NAME predicate, lowered to
@@ -1483,6 +1483,43 @@ mod tests {
             }
         );
         assert_eq!(rest3, "");
+    }
+
+    #[test]
+    fn test_parse_card_type_count_property() {
+        // Positive (reach-guard for the rejections below): the printed form.
+        let (rest, p) = parse_card_type_count_property("with two or more card types").unwrap();
+        assert_eq!(
+            p,
+            FilterProp::CardTypeCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }
+        );
+        assert_eq!(rest, "");
+
+        // The digit form parses identically (same `parse_number` axis).
+        let (rest, p) = parse_card_type_count_property("with 2 or more card types").unwrap();
+        assert_eq!(
+            p,
+            FilterProp::CardTypeCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }
+        );
+        assert_eq!(rest, "");
+
+        // Trailing text is left unconsumed for the caller (the play-subject
+        // arm's effect-comma check relies on this).
+        let (rest, _) =
+            parse_card_type_count_property("with two or more card types, draw a card").unwrap();
+        assert_eq!(rest, ", draw a card");
+
+        // Unprinted forms are rejected (fail closed, never partial).
+        assert!(parse_card_type_count_property("with two card types").is_err());
+        assert!(parse_card_type_count_property("with exactly two card types").is_err());
+        assert!(parse_card_type_count_property("with two or fewer card types").is_err());
+        assert!(parse_card_type_count_property("with two or more card type").is_err());
     }
 
     /// V-FORMS (SHAPE) — CR 105.4. The printed chosen-colour qualifier must
