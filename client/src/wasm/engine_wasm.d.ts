@@ -484,7 +484,7 @@ export function has_replay_recording(): boolean;
 /**
  * Infers a commander from counted main-deck rows.
  */
-export function inferCommander(main: any): any;
+export function inferCommander(main: any, selected_format?: string | null): any;
 
 /**
  * Initialize panic hook for better error messages in WASM.
@@ -976,7 +976,7 @@ export interface InitOutput {
     readonly get_viewer_snapshot_js: (a: number) => any;
     readonly get_viewer_transition_snapshot_js: (a: number, b: any) => any;
     readonly has_replay_recording: () => number;
-    readonly inferCommander: (a: any) => [number, number, number];
+    readonly inferCommander: (a: any, b: number, c: number) => [number, number, number];
     readonly init_panic_hook: () => void;
     readonly initialize_draft_match_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number, h: number) => any;
     readonly initialize_draft_match_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number, h: number) => any;

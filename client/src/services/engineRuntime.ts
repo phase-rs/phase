@@ -221,8 +221,11 @@ export async function commanderCandidates(
 }
 
 /** Asks the engine to infer a commander from the unmarked main deck. */
-export async function inferCommander(main: readonly CommanderInferenceRow[]): Promise<string | null> {
-  return engine().query("inferCommander", main);
+export async function inferCommander(
+  main: readonly CommanderInferenceRow[],
+  ...format: [selectedFormat?: GameFormat]
+): Promise<string | null> {
+  return engine().query("inferCommander", main, ...format);
 }
 
 /** Returns the engine-approved Commander-family companion candidates. */

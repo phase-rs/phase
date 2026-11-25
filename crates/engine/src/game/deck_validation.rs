@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::database::legality::{LegalityFormat, LegalityStatus};
+use crate::database::synthesis::{commander_qualification, CommanderQualification};
 use crate::database::CardDatabase;
 use crate::game::ante::face_uses_ante;
 use crate::game::companion::{
@@ -234,16 +235,31 @@ where
 }
 
 /// Infers a commander from the counted main deck of an unmarked import.
-pub fn infer_commander(db: &CardDatabase, main: &[CommanderInferenceRow]) -> Option<String> {
+pub fn infer_commander(
+    db: &CardDatabase,
+    main: &[CommanderInferenceRow],
+    selected_format: Option<GameFormat>,
+) -> Option<String> {
     let format = FormatConfig::commander();
     // CR 903.5a: the potential commander is still included in the main deck.
     let total = main
         .iter()
         .map(|row| row.count)
         .fold(0, u64::saturating_add);
-    if !format.deck_size.accepts(usize::try_from(total).ok()?) {
+    let total = usize::try_from(total).ok()?;
+    if !format.deck_size.accepts(total) {
         return None;
     }
+    let selected = match selected_format {
+        Some(tag)
+            if tag.commander_pairing().admits_count(1)
+                && tag.deck_size_subject() == DeckSizeSubject::MainDeckAndCommanders =>
+        {
+            Some(FormatConfig::for_format(tag).ok()?)
+        }
+        Some(_) => return None,
+        None => None,
+    };
 
     let mut positive_rows = main.iter().filter(|row| row.count > 0);
     // The size check bounds every positive row and bucket to 100 cards.
@@ -255,23 +271,39 @@ pub fn infer_commander(db: &CardDatabase, main: &[CommanderInferenceRow]) -> Opt
     );
     // CR 100.2a / CR 903.5b / CR 101.1: basic lands and printed copy
     // limits are exceptions to the ordinary Commander singleton cap.
-    if counts
-        .iter()
-        .any(|(key, &count)| match max_deck_copies(db, key, &format) {
-            DeckCopyLimit::Unlimited => false,
-            DeckCopyLimit::UpTo(limit) => count > limit,
-        })
-    {
+    if counts.iter().any(|(key, &count)| {
+        let exceeds_limit = |rules| {
+            matches!(max_deck_copies(db, key, rules), DeckCopyLimit::UpTo(limit) if count > limit)
+        };
+        exceeds_limit(&format) || selected.as_ref().is_some_and(exceeds_limit)
+    }) {
         return None;
     }
 
-    // Import heuristic: pick the first single copy accepted by the broad
-    // Commander picker. This can promote a lone Background, which requires a
-    // second commander with choose a Background under CR 702.124k.
     positive_rows.find_map(|row| {
         let key = canonical_deck_count_key(db, &row.name);
         let face = db.get_face_by_name(&row.name)?;
-        (counts[&key] == 1 && is_commander_eligible(face)).then(|| row.name.clone())
+        // CR 702.124k: a pairing-only Background cannot fill a lone slot.
+        if counts[&key] != 1
+            || commander_qualification(face)
+                == CommanderQualification::OnlyAlongsideChooseABackground
+        {
+            return None;
+        }
+        let eligible = match selected_format {
+            Some(GameFormat::PauperCommander) => {
+                (CommanderVariantRules::pauper_commander().eligible)(face)
+            }
+            Some(tag) => {
+                is_commander_eligible(face) && is_card_commander_eligible_for_format(face, tag)
+            }
+            None => is_commander_eligible(face),
+        };
+        let fits_selected_size = selected.as_ref().is_none_or(|rules| {
+            effective_deck_size_rule(db, rules.deck_size, std::slice::from_ref(&row.name))
+                .accepts(total)
+        });
+        (eligible && fits_selected_size).then(|| row.name.clone())
     })
 }
 

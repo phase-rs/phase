@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use engine::database::CardDatabase;
 use engine::game::{
     can_pair_commanders, commander_candidates, evaluate_deck_compatibility, infer_commander,
-    is_card_commander_eligible_for_format, is_commander_eligible,
+    is_card_commander_eligible_for_format, is_commander_eligible, validate_deck_for_format,
     validate_name_deck_for_format_full,
     CommanderDeckComposition::{CommandersInside, CommandersOutside},
     CommanderInferenceRow, DeckCompatibilityRequest,
@@ -996,15 +996,152 @@ fn commander_candidates_horde_uses_resolved_rules_before_challenge() {
     assert!(commander_candidates(&db, &request, CommandersOutside).is_empty());
 }
 
-fn infer_from_rows(db: &CardDatabase, rows: &[(&str, u64)]) -> Option<String> {
-    let rows: Vec<_> = rows
-        .iter()
+fn inference_rows(rows: &[(&str, u64)]) -> Vec<CommanderInferenceRow> {
+    rows.iter()
         .map(|&(name, count)| CommanderInferenceRow {
             name: name.into(),
             count,
         })
-        .collect();
-    infer_commander(db, &rows)
+        .collect()
+}
+
+fn infer_from_rows(db: &CardDatabase, rows: &[(&str, u64)]) -> Option<String> {
+    infer_commander(db, &inference_rows(rows), None)
+}
+
+fn inference_black_deck_db() -> CardDatabase {
+    // Printed faces from the card export. Only metadata used by deck
+    // validation is needed here, including both faces of the Adventure.
+    CardDatabase::from_json_str(r#"
+{
+  "gollum, silent slinker": {
+    "name": "Gollum, Silent Slinker",
+    "mana_cost": {"type": "Cost", "shards": ["Black"], "generic": 3},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Halfling", "Horror"]},
+    "oracle_text": "Menace (This creature can't be blocked except by two or more creatures.)",
+    "rarities": ["common"], "legalities": {"commander": "legal", "paupercommander": "legal"},
+    "is_commander": true, "color_identity": ["Black"], "layout": "adventure", "face_index": 0,
+    "scryfall_oracle_id": "0296d57e-e5b9-456f-bb21-eb584adefb4c", "keywords": ["Menace"],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  },
+  "meager meal": {
+    "name": "Meager Meal",
+    "mana_cost": {"type": "Cost", "shards": ["Black"], "generic": 0},
+    "card_type": {"supertypes": [], "core_types": ["Sorcery"], "subtypes": ["Adventure"]},
+    "oracle_text": "Put a +1/+1 counter on up to one target creature. Target player gains 2 life. (Then exile this card. You may cast the creature later from exile.)",
+    "rarities": ["common"], "legalities": {"commander": "legal", "paupercommander": "legal"},
+    "color_identity": ["Black"], "layout": "adventure", "face_index": 1,
+    "scryfall_oracle_id": "0296d57e-e5b9-456f-bb21-eb584adefb4c", "keywords": [],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  },
+  "sengir vampire": {
+    "name": "Sengir Vampire",
+    "mana_cost": {"type": "Cost", "shards": ["Black", "Black"], "generic": 3},
+    "card_type": {"supertypes": [], "core_types": ["Creature"], "subtypes": ["Vampire"]},
+    "oracle_text": "Flying (This creature can't be blocked except by creatures with flying or reach.)\nWhenever a creature dealt damage by this creature this turn dies, put a +1/+1 counter on this creature.",
+    "rarities": ["uncommon", "rare"], "legalities": {"commander": "legal", "paupercommander": "legal"},
+    "color_identity": ["Black"], "keywords": ["Flying"],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  },
+  "relentless rats": {
+    "name": "Relentless Rats",
+    "mana_cost": {"type": "Cost", "shards": ["Black", "Black"], "generic": 1},
+    "card_type": {"supertypes": [], "core_types": ["Creature"], "subtypes": ["Rat"]},
+    "oracle_text": "This creature gets +1/+1 for each other creature on the battlefield named Relentless Rats.\nA deck can have any number of cards named Relentless Rats.",
+    "rarities": ["common", "uncommon", "rare", "special"], "legalities": {"commander": "legal", "paupercommander": "legal"},
+    "color_identity": ["Black"], "deck_copy_limit": {"type": "Unlimited"}, "keywords": [],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  },
+  "swamp": {
+    "name": "Swamp",
+    "mana_cost": {"type": "NoCost"},
+    "card_type": {"supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Swamp"]},
+    "oracle_text": "({T}: Add {B}.)",
+    "rarities": ["common", "rare"], "legalities": {"commander": "legal", "paupercommander": "legal"},
+    "color_identity": ["Black"], "keywords": [],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  },
+  "agent of the shadow thieves": {
+    "name": "Agent of the Shadow Thieves",
+    "mana_cost": {"type": "Cost", "shards": ["Black"], "generic": 1},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Enchantment"], "subtypes": ["Background"]},
+    "oracle_text": "Commander creatures you own have \"Whenever this creature attacks a player, if no opponent has more life than that player, put a +1/+1 counter on this creature. It gains deathtouch and indestructible until end of turn.\"",
+    "rarities": ["uncommon"], "legalities": {"commander": "legal"},
+    "is_commander": true, "color_identity": ["Black"], "keywords": [],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  },
+  "sarevok, deathbringer": {
+    "name": "Sarevok, Deathbringer",
+    "mana_cost": {"type": "Cost", "shards": ["Black"], "generic": 3},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Human", "Knight"]},
+    "oracle_text": "At the beginning of each player's end step, if no permanents left the battlefield this turn, that player loses X life, where X is Sarevok's power.\nChoose a Background (You can have a Background as a second commander.)",
+    "rarities": ["uncommon"], "legalities": {"commander": "legal"},
+    "is_commander": true, "color_identity": ["Black"], "keywords": [{"Partner": {"type": "ChooseABackground"}}],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  }
+}
+    "#).unwrap()
+}
+
+#[test]
+fn inference_uses_the_selected_pauper_commander_validator_role() {
+    use GameFormat::{Commander, PauperCommander, Standard};
+
+    let db = inference_black_deck_db();
+    let gollum = "Gollum, Silent Slinker";
+    let sengir = "Sengir Vampire";
+    let rats = "Relentless Rats";
+    let rows = inference_rows(&[(gollum, 1), (sengir, 1), (rats, 58), ("Swamp", 40)]);
+    for format in [None, Some(Commander)] {
+        assert_eq!(infer_commander(&db, &rows, format).as_deref(), Some(gollum));
+    }
+    assert_eq!(infer_commander(&db, &rows, Some(Standard)), None);
+
+    let chosen = infer_commander(&db, &rows, Some(PauperCommander)).unwrap();
+    assert_eq!(chosen, sengir);
+    let mut request = DeckCompatibilityRequest {
+        main_deck: [
+            vec![gollum.into()],
+            vec![rats.into(); 58],
+            vec!["Swamp".into(); 40],
+        ]
+        .concat(),
+        commander: vec![chosen],
+        selected_format: Some(SelectedFormat::Tag(PauperCommander)),
+        ..Default::default()
+    };
+    assert_eq!(validate_deck_for_format(&db, &request), Ok(()));
+    request.main_deck[0] = sengir.into();
+    request.commander[0] = gollum.into();
+    assert!(validate_deck_for_format(&db, &request)
+        .unwrap_err()
+        .iter()
+        .any(|reason| reason.contains("must be an uncommon creature")));
+
+    let no_candidate = inference_rows(&[(gollum, 1), (rats, 58), ("Swamp", 41)]);
+    assert_eq!(
+        infer_commander(&db, &no_candidate, Some(PauperCommander)),
+        None
+    );
+}
+
+#[test]
+fn inference_skips_a_lone_background_without_changing_pair_eligibility() {
+    let db = inference_black_deck_db();
+    let agent = "Agent of the Shadow Thieves";
+    let sarevok = "Sarevok, Deathbringer";
+    let rats = "Relentless Rats";
+    assert!(is_card_commander_eligible_for_format(
+        db.get_face_by_name(agent).unwrap(),
+        GameFormat::Commander,
+    ));
+    assert!(can_pair_commanders(&db, sarevok, agent, None));
+    let rows = [(agent, 1), (sarevok, 1), (rats, 58), ("Swamp", 40)];
+    assert_eq!(infer_from_rows(&db, &rows).as_deref(), Some(sarevok));
+    assert_eq!(
+        infer_from_rows(&db, &[(agent, 1), (rats, 58), ("Swamp", 41)]),
+        None
+    );
 }
 
 #[test]
@@ -1026,6 +1163,12 @@ fn inference_requires_exact_size_and_handles_oversized_counts() {
         infer_from_rows(&db, &[(ISAMARU, 1), ("Plains", 99)]).as_deref(),
         Some(ISAMARU)
     );
+    let rows = inference_rows(&[(ISAMARU, 1), ("Plains", 99)]);
+    assert!(is_card_commander_eligible_for_format(
+        db.get_face_by_name(ISAMARU).unwrap(),
+        GameFormat::Brawl,
+    ));
+    assert_eq!(infer_commander(&db, &rows, Some(GameFormat::Brawl)), None);
 }
 
 #[test]

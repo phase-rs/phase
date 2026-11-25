@@ -81,8 +81,11 @@ export const ENGINE_QUERIES = {
   },
   inferCommander: {
     needsCardDb: true,
-    run: (engine: EngineModule, main: readonly CommanderInferenceRow[]): string | null =>
-      engine.inferCommander(main),
+    run: (
+      engine: EngineModule,
+      main: readonly CommanderInferenceRow[],
+      ...format: [selectedFormat?: GameFormat]
+    ): string | null => engine.inferCommander(main, ...format),
   },
   companionCandidates: {
     needsCardDb: true,

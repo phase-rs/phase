@@ -11,7 +11,7 @@ import {
   evaluateDeckCompatibility,
   type DeckCompatibilityResult,
 } from "../../../services/deckCompatibility";
-import { STORAGE_KEY_PREFIX, loadSavedDeck } from "../../../constants/storage";
+import { STORAGE_KEY_PREFIX, loadSavedDeck, loadSavedDeckFormat } from "../../../constants/storage";
 
 import {
   installFifoWebLocks,
@@ -19,7 +19,10 @@ import {
   uninstallWebLocks,
 } from "../../../test/helpers/webLocks";
 
-const inference = vi.fn<(rows: readonly Pick<DeckEntry, "name" | "count">[]) => Promise<string | null>>();
+const inference = vi.fn<(
+  rows: readonly Pick<DeckEntry, "name" | "count">[],
+  format?: GameFormat,
+) => Promise<string | null>>();
 const canonicalCardNames = vi.fn(async (names: string[]) => names);
 
 const eligible = new Set<string>();
@@ -46,7 +49,7 @@ vi.mock("../../../services/engineRuntime", () => ({
   commanderPartnerCandidates: (...args: unknown[]) =>
     (partnerCandidates as unknown as (...a: unknown[]) => Promise<string[]>)(...args),
   companionCandidates: () => companionQuery(),
-  inferCommander: (rows: Parameters<typeof inference>[0]) => inference(rows),
+  inferCommander: (...args: Parameters<typeof inference>) => inference(...args),
   maxDeckCopies: vi.fn(async (name: string) => name === "Forest"
     ? { type: "Unlimited" }
     : { type: "Limited", data: 1 }),
@@ -518,7 +521,7 @@ describe("useDeckBuilder — counted Commander inference", () => {
     inference.mockRejectedValueOnce(new Error("engine initialization failed"));
 
     await act(async () => expect(await result.current.handleSave()).toBe("saved"));
-    expect(inference.mock.calls).toEqual([[plains]]);
+    expect(inference.mock.calls).toEqual([[plains, "Commander"]]);
     const saved = loadSavedDeck(name);
     expect(saved?.main).toEqual(plains);
     expect(saved?.commander).toBeUndefined();
@@ -569,7 +572,50 @@ describe("useDeckBuilder — counted Commander inference", () => {
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + name)).toBe(raw);
 
     await act(async () => expect(await result.current.handleSave()).toBe("saved"));
-    expect(inference.mock.calls).toEqual([[main]]);
+    expect(inference.mock.calls).toEqual([[main, "Commander"]]);
     expect(loadSavedDeck(name)).toMatchObject({ main: main.slice(1), commander: [commander] });
+  });
+
+  it("uses the loaded Pauper Commander format to infer and persist a valid commander", async () => {
+    const name = "Unmarked Pauper Commander";
+    const gollum = "Gollum, Silent Slinker";
+    const sengir = "Sengir Vampire";
+    const rows = [
+      { name: gollum, count: 1 },
+      { name: sengir, count: 1 },
+      { name: "Relentless Rats", count: 58 },
+      { name: "Swamp", count: 40 },
+    ];
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify({ main: rows, sideboard: [], format: "PauperCommander" }));
+    const { result } = openStandardBuilder();
+    inference.mockImplementation(async (_rows, format) => format === "PauperCommander" ? sengir : gollum);
+
+    await act(async () => expect(await result.current.handleLoad(name)).toBe(true));
+    expect(result.current.format).toBe("PauperCommander");
+    expect(result.current.deck.main).toEqual(rows);
+    expect(result.current.commanders).toEqual([]);
+    expect(inference).not.toHaveBeenCalled();
+
+    await act(async () => expect(await result.current.handleSave()).toBe("saved"));
+    expect(loadSavedDeckFormat(name)).toBe("PauperCommander");
+    expect(loadSavedDeck(name)).toMatchObject({
+      main: [rows[0], ...rows.slice(2)],
+      commander: [sengir],
+    });
+    expect(inference.mock.calls).toEqual([[rows, "PauperCommander"]]);
+  });
+
+  it("saves an explicitly marked Background pair without inferring a replacement", async () => {
+    const name = "Marked Background pair";
+    const pair = ["Sarevok, Deathbringer", "Agent of the Shadow Thieves"];
+    const rows = [{ name: "Relentless Rats", count: 58 }, { name: "Swamp", count: 40 }];
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify({ main: rows, sideboard: [], commander: pair, format: "Commander" }));
+    const { result } = openStandardBuilder();
+
+    await act(async () => expect(await result.current.handleLoad(name)).toBe(true));
+    expect(result.current.commanders).toEqual(pair);
+    await act(async () => expect(await result.current.handleSave()).toBe("saved"));
+    expect(inference).not.toHaveBeenCalled();
+    expect(loadSavedDeck(name)).toMatchObject({ main: rows, commander: pair });
   });
 });

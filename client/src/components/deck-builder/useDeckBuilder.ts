@@ -586,7 +586,7 @@ export function useDeckBuilder({
     // it should still hold, so a Load of a different deck queued behind this save cannot retarget it.
     const previous = savedDeckRef.current;
     // Ask the engine to infer an unmarked commander at save time, outside the edit flow.
-    const resolved = isCommander ? await resolveCommander(currentDeck) : currentDeck;
+    const resolved = isCommander ? await resolveCommander(currentDeck, format) : currentDeck;
     const inferred =
       (resolved.commander?.length ?? 0) > (currentDeck.commander?.length ?? 0);
     const changed = editorChangedSince(captured);

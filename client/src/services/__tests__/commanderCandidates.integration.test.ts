@@ -48,6 +48,28 @@ describe.skipIf(!INPUTS_PRESENT)("commander candidates over the real engine", ()
     expect(inferCommander([isamaru, plains(100)])).toBeNull();
   });
 
+  const countedBlackFiller = [
+    { name: "Relentless Rats", count: 58 },
+    { name: "Swamp", count: 40 },
+  ];
+
+  it("uses the selected Pauper Commander predicate for a counted deck", () => {
+    const gollum = { name: "Gollum, Silent Slinker", count: 1 };
+    const sengir = { name: "Sengir Vampire", count: 1 };
+    const rows = [gollum, sengir, ...countedBlackFiller];
+    expect(inferCommander(rows)).toBe(gollum.name);
+    expect(inferCommander(rows, "PauperCommander")).toBe(sengir.name);
+    expect(() => inferCommander(rows, "invalid")).toThrow(/Invalid commander inference request/);
+  });
+
+  it("skips a pairing-only Background when inferring a single commander", () => {
+    const agent = { name: "Agent of the Shadow Thieves", count: 1 };
+    const sarevok = { name: "Sarevok, Deathbringer", count: 1 };
+    expect(isCardCommanderEligibleForFormat(agent.name, "Commander")).toBe(true);
+    expect(inferCommander([agent, sarevok, ...countedBlackFiller])).toBe(sarevok.name);
+    expect(inferCommander([agent, countedBlackFiller[0], { name: "Swamp", count: 41 }])).toBeNull();
+  });
+
   it("decodes oversized integer-valued numbers without narrowing the total", () => {
     for (const count of [4294967296, 9007199254740994]) {
       expect(inferCommander([plains(count)])).toBeNull();

@@ -279,6 +279,17 @@ describe("engine worker — requests", () => {
       expect(responseTo(1017)).toEqual({ type: "result", id: 1017, data: name });
       expect(responseTo(1018)).toMatchObject({ type: "error", message: "invalid inference request" });
 
+      const pauperRows = [
+        { name: "Gollum, Silent Slinker", count: 1 },
+        { name: "Sengir Vampire", count: 1 },
+        { name: "Relentless Rats", count: 58 },
+        { name: "Swamp", count: 40 },
+      ];
+      wasm.inferCommander.mockReturnValueOnce("Sengir Vampire");
+      await send({ ...inference, id: 1019, args: [pauperRows, "PauperCommander"] });
+      expect(wasm.inferCommander).toHaveBeenNthCalledWith(4, pauperRows, "PauperCommander");
+      expect(responseTo(1019)).toEqual({ type: "result", id: 1019, data: "Sengir Vampire" });
+
       expect(responseTo(1005)).toEqual({ type: "result", id: 1005, data: 5 });
       expect(wasm.classify_deck_js).toHaveBeenCalledWith(["Forest"]);
       expect(responseTo(1006)).toEqual({ type: "result", id: 1006, data: { archetype: "Ramp" } });

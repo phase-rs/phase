@@ -2017,8 +2017,15 @@ pub fn commander_candidates_js(request: JsValue, composition: JsValue) -> Result
 
 /// Infers a commander from counted main-deck rows.
 #[wasm_bindgen(js_name = inferCommander)]
-pub fn infer_commander_js(main: JsValue) -> Result<JsValue, JsValue> {
+pub fn infer_commander_js(
+    main: JsValue,
+    selected_format: Option<String>,
+) -> Result<JsValue, JsValue> {
     let main: Vec<CommanderInferenceRow> = serde_wasm_bindgen::from_value(main)
+        .map_err(|e| JsValue::from_str(&format!("Invalid commander inference request: {e}")))?;
+    let selected_format = selected_format
+        .map(|tag| tag.parse::<GameFormat>())
+        .transpose()
         .map_err(|e| JsValue::from_str(&format!("Invalid commander inference request: {e}")))?;
     CARD_DB.with(|cell| {
         let db = cell.borrow();
@@ -2027,7 +2034,7 @@ pub fn infer_commander_js(main: JsValue) -> Result<JsValue, JsValue> {
                 "Card database not loaded. Call load_card_database first.",
             ));
         };
-        Ok(to_js(&infer_commander(db, &main)))
+        Ok(to_js(&infer_commander(db, &main, selected_format)))
     })
 }
 
