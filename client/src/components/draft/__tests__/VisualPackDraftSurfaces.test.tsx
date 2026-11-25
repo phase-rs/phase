@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DraftCardInstance, DraftPlayerView } from "../../../adapter/draft-adapter.ts";
+import type { DraftCardInstance, DraftPlayerView, DraftPlayerViewFields } from "../../../adapter/draft-adapter.ts";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { LimitedDeckBuilder } from "../LimitedDeckBuilder.tsx";
 import { PackDisplay, type PackDisplayController } from "../PackDisplay.tsx";
@@ -85,7 +85,7 @@ const PRINTING_B: DraftCardInstance = {
   collector_number: "99",
 };
 
-function view(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
+function view(overrides: Partial<DraftPlayerViewFields> = {}): DraftPlayerView {
   return {
     status: "Drafting",
     kind: "Premier",

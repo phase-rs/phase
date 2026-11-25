@@ -373,7 +373,7 @@ function TouchDragWorkspace({
 }) {
   const [workspace, setWorkspace] = useState(initialWorkspace);
   const [workspacePreferences, setPreferences] = useState(() => preferences({ sideboardCollapsed: true }));
-  const interaction = { interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null } as const;
+  const interaction = { interactionGeneration: 1, interactionGenerationCause: "lifecycle", pickInteractionLocked: false, pendingPickIntent: null } as const;
   const dragController = useDraftWorkspaceDrag({
     enabled: true,
     workspaceProjectionEnabled: false,
@@ -1113,7 +1113,7 @@ describe("draft workspace shell", () => {
       const dragController = useDraftWorkspaceDrag({
         enabled: true,
         workspaceProjectionEnabled: true,
-        readPickInteraction: () => ({ interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null }),
+        readPickInteraction: () => ({ interactionGeneration: 1, interactionGenerationCause: "lifecycle", pickInteractionLocked: false, pendingPickIntent: null }),
         subscribePickInteraction: () => () => undefined,
         onDrop: () => { throw new Error("Workspace drags do not dispatch picks."); },
         resolveCollapsedSideboardColumn: () => 0,
@@ -1460,7 +1460,7 @@ describe("draft workspace shell", () => {
       const dragController = useDraftWorkspaceDrag({
         enabled: true,
         workspaceProjectionEnabled: true,
-        readPickInteraction: () => ({ interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null }),
+        readPickInteraction: () => ({ interactionGeneration: 1, interactionGenerationCause: "lifecycle", pickInteractionLocked: false, pendingPickIntent: null }),
         subscribePickInteraction: () => () => undefined,
         onDrop: () => { throw new Error("Workspace drags do not dispatch picks."); },
         resolveCollapsedSideboardColumn: () => 0,
@@ -1573,7 +1573,7 @@ describe("draft workspace shell", () => {
       const dragController = useDraftWorkspaceDrag({
         enabled: true,
         workspaceProjectionEnabled: true,
-        readPickInteraction: () => ({ interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null }),
+        readPickInteraction: () => ({ interactionGeneration: 1, interactionGenerationCause: "lifecycle", pickInteractionLocked: false, pendingPickIntent: null }),
         subscribePickInteraction: () => () => undefined,
         onDrop: () => { throw new Error("Workspace drags do not dispatch picks."); },
         resolveCollapsedSideboardColumn: () => 0,
@@ -1635,7 +1635,7 @@ describe("draft workspace shell", () => {
       const dragController = useDraftWorkspaceDrag({
         enabled: true,
         workspaceProjectionEnabled: true,
-        readPickInteraction: () => ({ interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null }),
+        readPickInteraction: () => ({ interactionGeneration: 1, interactionGenerationCause: "lifecycle", pickInteractionLocked: false, pendingPickIntent: null }),
         subscribePickInteraction: () => () => undefined,
         onDrop: () => { throw new Error("Workspace drags do not dispatch picks."); },
         resolveCollapsedSideboardColumn: () => 0,
