@@ -353,6 +353,7 @@ mod heartwood_storyteller_opponents_draw;
 mod heated_argument_parent_anaphor;
 mod heist_production_path_handoff;
 mod heralds_horn_changeling_chosen_type;
+mod hercules_and_venus_damage_counters;
 mod heroic_defiance_recipient_color_4590;
 mod heroic_return_enters_this_way;
 mod hit_the_mother_lode;

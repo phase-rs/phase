@@ -1,0 +1,6 @@
+{
+  "surfaces": [
+    "draft"
+  ],
+  "reason": "Carry per-draft sort layouts in workspace snapshots"
+}
