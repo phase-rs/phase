@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
+use crate::game::engine::EngineError;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::TurnWindow;
 pub(crate) use crate::types::ability::{
@@ -48,13 +49,14 @@ use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, ContinuationXAnnouncement,
     CreatedTokenSeatsHandoff, DayNight, DiscardBatchCursor, GameState, LKISnapshot,
     ManaAbilityResume, MayTriggerAutoChoiceKey, MemberOrderPurpose, PendingContinuation,
-    PendingCostMoveResume, PendingDiscardBatchCompletion, PendingPlayerScopeSacrificeChoice,
-    PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
-    PendingPlayerScopeTail, PendingSacrificeMove, PendingSacrificeProvenance,
-    RepeatIterationChoice, RepeatIterationMovement, RepeatProcessRequest,
-    RepeatUntilIterationWitness, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
-    ResolutionPaymentOrigin, ReturnResultOccurrenceId, SeatCreatedTokens, TrackedMemberOrigin,
-    WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
+    PendingCostMoveResume, PendingDiscardBatchCompletion, PendingPlayerScopeReveal,
+    PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
+    PendingPlayerScopeSacrificeFollowUp, PendingPlayerScopeTail, PendingSacrificeMove,
+    PendingSacrificeProvenance, RepeatIterationChoice, RepeatIterationMovement,
+    RepeatProcessRequest, RepeatUntilIterationWitness, RepeatUntilStopWitness,
+    ResolutionOptionalPaymentOption, ResolutionPaymentOrigin, ReturnResultOccurrenceId,
+    SeatCreatedTokens, TrackedMemberOrigin, WaitingFor, ZoneChangeRecord,
+    ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -1599,12 +1601,15 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
     // replacement subtree has retired resumes before any further resolution
     // work; every frame left on top of it is outer work.
-    if state.counter_cost_root_is_due() {
+    if state.counter_cost_root_is_due() || state.outside_game_entry_resume_is_due() {
         return;
     }
     counters::drain_pending_counter_moves(state, events);
     counters::drain_pending_counter_removals(state, events);
     counters::drain_pending_counter_additions(state, events);
+    if state.outside_game_entry_resume_is_due() {
+        return;
+    }
     if waits_for_resolution_choice(&state.waiting_for) {
         state.resolution_stack.note_repeat_until_descendant_choice();
         return;
@@ -2281,7 +2286,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
     // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
     // replacement subtree has retired resumes before any further resolution
     // work; every frame left on top of it is outer work.
-    if state.counter_cost_root_is_due() {
+    if state.counter_cost_root_is_due() || state.outside_game_entry_resume_is_due() {
         return;
     }
 
@@ -8322,6 +8327,23 @@ fn resolve_optional_effect_decision_step(
             return Ok(progress);
         }
         AutoMayChoice::Decline => {
+            // CR 107.1c + CR 608.2c: a declined player-scoped "may reveal any
+            // number" contributes an explicit empty reveal set. Without this
+            // marker, the co-scoped quantity reader would fall back to the
+            // clause-wide union published by an earlier player and create
+            // tokens for cards this player did not reveal.
+            if let Effect::RevealHand {
+                target: TargetFilter::Controller,
+                cardinality: ObjectSelectionCardinality::AnyNumber,
+                ..
+            } = &ability.effect
+            {
+                if let Some(player) = ability.scoped_player {
+                    if record_player_scope_reveal(state, player, Vec::new(), events).is_none() {
+                        publish_scoped_reveal(state, player, Vec::new());
+                    }
+                }
+            }
             let decline_branch = optional_decline_branch(state, &ability);
             // CR 608.2c: Declining the optional return skips its action, but
             // an independent following instruction can still read its named
@@ -18697,6 +18719,11 @@ pub(crate) fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameE
 /// consumer must bind that empty set rather than fall back to a preceding mode's
 /// non-empty one.
 pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<ObjectId>) {
+    if !affected_ids.is_empty() {
+        state.scoped_reveal_sets.clear();
+        state.tracked_set_publication_generation =
+            state.tracked_set_publication_generation.wrapping_add(1);
+    }
     // CR 608.2c: Chain unification. If an ancestor in this
     // resolution chain already published a tracked set, extend that set with
     // the current publish so compound zone-changing effects expose every
@@ -18752,6 +18779,172 @@ pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<Objec
         state.tracked_object_sets.insert(set_id, members);
         state.chain_tracked_set_id = Some(set_id);
     }
+}
+
+/// CR 608.2c + CR 109.5: retain the current seat's contribution to a
+/// player-scoped reveal while the enclosing resolution continues. The ordinary
+/// chain set is still published by [`publish_tracked_set`]; this side ledger is
+/// only for a later co-scoped quantity read.
+pub(crate) fn publish_scoped_reveal(
+    state: &mut GameState,
+    player: PlayerId,
+    revealed_ids: Vec<ObjectId>,
+) {
+    let prior_reveals = std::mem::take(&mut state.scoped_reveal_sets);
+    publish_tracked_set(state, revealed_ids.clone());
+    state.scoped_reveal_sets = prior_reveals
+        .into_iter()
+        .map(|(player, (_, ids))| (player, (state.tracked_set_publication_generation, ids)))
+        .collect();
+    state.scoped_reveal_sets.insert(
+        player,
+        (state.tracked_set_publication_generation, revealed_ids),
+    );
+}
+
+/// CR 101.4 + CR 701.20a: identify the Kamahl-style player-scoped reveal
+/// instruction whose hand selections must remain private until the APNAP poll
+/// is complete. Other RevealHand routes retain their existing immediate
+/// publication behavior.
+fn is_player_scope_any_number_reveal(ability: &ResolvedAbility) -> bool {
+    matches!(
+        &ability.effect,
+        Effect::RevealHand {
+            target: TargetFilter::Controller,
+            cardinality: ObjectSelectionCardinality::AnyNumber,
+            ..
+        }
+    )
+}
+
+/// CR 101.4 + CR 701.20a: begin the private APNAP carrier for a scoped hand
+/// reveal. The generic player-scope continuation remains authoritative for
+/// which prompt is next; this carrier only records the private choices and
+/// delays their public side effects.
+pub(crate) fn begin_player_scope_reveal(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    players: &[PlayerId],
+) {
+    if !is_player_scope_any_number_reveal(ability)
+        || players.is_empty()
+        || state.pending_player_scope_reveal.is_some()
+    {
+        return;
+    }
+    // Empty hands are recorded by `reveal_hand::resolve` as each scoped leg
+    // reaches them; unlike a card prompt, they still participate in the same
+    // APNAP collection boundary.
+    state.pending_player_scope_reveal = Some(PendingPlayerScopeReveal::new(
+        ability.source_id,
+        players.to_vec(),
+    ));
+}
+
+/// CR 101.4 + CR 701.20a: retain one player's private reveal selection. The
+/// return value distinguishes an absent carrier from a carrier that is still
+/// collecting, so legacy RevealChoice routes remain byte-for-byte unchanged.
+pub(crate) fn record_player_scope_reveal(
+    state: &mut GameState,
+    player: PlayerId,
+    selected: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Option<bool> {
+    let pending = state.pending_player_scope_reveal.as_mut()?;
+    if !pending.players.contains(&player) {
+        return None;
+    }
+    if pending
+        .selections
+        .iter()
+        .any(|(selected_player, _)| *selected_player == player)
+    {
+        return Some(false);
+    }
+    pending.selections.push((player, selected));
+    if !pending.is_complete() {
+        return Some(false);
+    }
+
+    publish_completed_player_scope_reveal(state, events);
+    Some(true)
+}
+
+/// CR 101.4 + CR 701.20a: publish a completed carrier whose seats all had an
+/// empty hand and therefore never opened a RevealChoice prompt.
+pub(crate) fn finish_player_scope_reveal_if_complete(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let Some(pending) = state.pending_player_scope_reveal.as_ref() else {
+        return false;
+    };
+    if !pending.is_complete() {
+        return false;
+    }
+    publish_completed_player_scope_reveal(state, events);
+    true
+}
+
+/// CR 800.4a + CR 101.4: answer a departed player's open reveal decision as
+/// an empty selection before the generic elimination repoint changes the wait
+/// to Priority. This keeps the existing resolution continuation authoritative.
+pub(crate) fn settle_player_scope_reveal_after_departure(
+    state: &mut GameState,
+    departed: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if !state
+        .pending_player_scope_reveal
+        .as_ref()
+        .is_some_and(|pending| pending.players.contains(&departed))
+        || state.waiting_for.acting_player() != Some(departed)
+    {
+        return Ok(());
+    }
+    match state.waiting_for.clone() {
+        WaitingFor::OptionalEffectChoice { .. } => {
+            crate::game::engine_payment_choices::handle_optional_effect_choice(
+                state, false, events,
+            )?;
+        }
+        WaitingFor::RevealChoice { .. } => {
+            crate::game::engine_resolution_choices::handle_resolution_choice(
+                state,
+                state.waiting_for.clone(),
+                crate::types::actions::GameAction::SelectCards { cards: Vec::new() },
+                events,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// CR 101.4 + CR 701.20a: settle the private APNAP reveal as one publication.
+/// The public event stream may contain one event per revealing player, but the
+/// tracked population is published exactly once so empty player selections do
+/// not erase or replace the other players' contributions.
+fn publish_completed_player_scope_reveal(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let pending = state
+        .pending_player_scope_reveal
+        .take()
+        .expect("completed player-scope reveal carrier must remain present");
+    let revealed_ids: Vec<ObjectId> = pending
+        .selections
+        .iter()
+        .flat_map(|(_, selected)| selected.iter().copied())
+        .collect();
+    for (player, selected) in &pending.selections {
+        reveal_hand::reveal_selected_hand_cards(state, *player, selected, events);
+    }
+    publish_tracked_set(state, revealed_ids);
+    let generation = state.tracked_set_publication_generation;
+    state.scoped_reveal_sets = pending
+        .selections
+        .into_iter()
+        .map(|(player, selected)| (player, (generation, selected)))
+        .collect();
 }
 
 /// Append `affected` to `members`, skipping any id already there or earlier in
@@ -19384,6 +19577,12 @@ pub(crate) fn publish_fresh_tracked_set(
     state: &mut GameState,
     affected_ids: Vec<ObjectId>,
 ) -> TrackedSetId {
+    // CR 608.2c: a fresh tracked-set publication replaces the prior
+    // resolution-local population, so no player-scoped reveal may remain
+    // eligible for a later co-scoped quantity read.
+    state.scoped_reveal_sets.clear();
+    state.tracked_set_publication_generation =
+        state.tracked_set_publication_generation.wrapping_add(1);
     let set_id = TrackedSetId(state.next_tracked_set_id);
     state.next_tracked_set_id += 1;
     state.tracked_object_sets.insert(set_id, affected_ids);
@@ -26533,6 +26732,7 @@ fn bind_reveal_population(
 /// chain's first instruction.
 fn reset_top_level_resolution_state(state: &mut GameState) {
     state.last_revealed_ids.clear();
+    state.scoped_reveal_sets.clear();
     // CR 608.2c + CR 122.1: `ChooseCounterKind` overwrites this before
     // every instruction, and a new top-level resolution cannot inherit a
     // prior resolution's "that kind" if no such instruction is reached.
@@ -27012,10 +27212,17 @@ fn simultaneous_token_fan_out_applies(
     else {
         return false;
     };
-    // Bare creation only: fixed per-seat count, seat-held ownership, no host,
-    // no counters, no attacking seats. Spec-level characteristics (types,
-    // power/toughness, keywords, tapped) resolve per seat-bound ability.
-    if !matches!(count, QuantityExpr::Fixed { .. }) {
+    // Bare creation only: fixed or scoped tracked-set per-seat count,
+    // seat-held ownership, no host, no counters, no attacking seats.
+    // `TrackedSetSize` is resolved after `bind_scoped_seat`, so each compound
+    // batch retains the seat's own finalized reveal count.
+    if !matches!(
+        count,
+        QuantityExpr::Fixed { .. }
+            | QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize
+            }
+    ) {
         return false;
     }
     // `ScopedPlayer` is the fan-out's own seat binding (the instructed seat
@@ -27369,6 +27576,7 @@ fn resolve_chain_body(
     // value catches the replace case correctly (issue #491).
     let pending_continuation_before = state.active_ability_continuation().cloned();
     let child_stack_start = state.resolution_stack.capture_child_boundary();
+    let outer_resolution_depth = state.resolution_stack.len();
     // CR 118.12: a latched payment origin belongs to this node — the drained
     // chain's head — and to no other. Take it before any fan-out, skip, or
     // descent below can reach another node; only this node's own `PayCost`
@@ -27787,6 +27995,7 @@ fn resolve_chain_body(
             controller,
         );
         let matching_players = player_scope_members(state, scope, ability, apnap);
+        begin_player_scope_reveal(state, ability, &matching_players);
         // CR 608.2e + CR 603.10d: an `Unobservable` scoped control shape fails
         // closed before any coordinator below takes its seats.
         let unobservable =
@@ -28278,6 +28487,7 @@ fn resolve_chain_body(
             &events[scoped_events_before..],
             ledger_before_fan_out,
         );
+        finish_player_scope_reveal_if_complete(state, events);
         if !paused {
             // CR 608.2e: this `player_scope` clause has completed. Clear its
             // frozen values before running any following instruction; if the
@@ -30436,7 +30646,17 @@ fn resolve_chain_body(
     // CR 706.3b + CR 608.2c: a native die instruction owns its entire table
     // process. Its printed tail cannot inspect a partial aggregate or pass a
     // gate until all survivors and every selected branch have completed.
-    if matches!(ability.effect, Effect::RollDie { .. }) && progress.is_pending() {
+    let random_battlefield_draft = matches!(
+        ability.effect,
+        Effect::DraftFromSpellbook {
+            destination: Zone::Battlefield,
+            selection: crate::types::ability::SpellbookSelection::Random,
+            ..
+        }
+    );
+    if (matches!(ability.effect, Effect::RollDie { .. }) || random_battlefield_draft)
+        && progress.is_pending()
+    {
         if let Some(sub) = ability.sub_ability.as_deref() {
             let mut tail = sub.clone();
             if should_propagate_parent_targets(ability, &tail) {
@@ -30453,6 +30673,9 @@ fn resolve_chain_body(
                     .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
             } else {
                 state.park_ability_continuation(pending);
+            }
+            if random_battlefield_draft {
+                state.rebase_outside_game_entry_boundary(ability.source_id, outer_resolution_depth);
             }
         }
         return Ok(progress);

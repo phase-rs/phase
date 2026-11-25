@@ -1800,6 +1800,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // it so no viewer snapshot carries either the seed or its stream position.
     filtered.rng_word_pos = 0;
     filtered.rng = crate::types::game_state::GameRng::seed_from_u64(0);
+    // Reserved outside-game card identities are private continuation state,
+    // like the existing token and meld projections. The chooser's authorized
+    // replacement summaries below carry the displayed candidate information.
     filtered.liminal_entries.clear();
     filtered.pending_liminal_entry_resume = None;
 
@@ -2935,6 +2938,17 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 if !can_view_scoped_search_private(frozen.searcher) {
                     frozen.identity.object_id = ObjectId(0);
                 }
+            }
+        }
+    }
+    // CR 101.4 + CR 701.20a: player-scoped hand-reveal selections remain
+    // private until the APNAP carrier settles. Preserve the participant rows
+    // for protocol shape, but remove each selection's hidden identities and
+    // cardinality from viewers without access to that player's hand.
+    if let Some(pending) = filtered.pending_player_scope_reveal.as_mut() {
+        for (player, selected) in &mut pending.selections {
+            if !can_view_private_for_player(*player) {
+                selected.clear();
             }
         }
     }

@@ -8015,6 +8015,7 @@ fn migrate_legacy_counter_removal_replacement_pause(state: &mut GameState) {
                 | ProposedEvent::MoveCounter { .. }
                 | ProposedEvent::CreateToken { .. }
                 | ProposedEvent::TokenEntry { .. }
+                | ProposedEvent::OutsideGameCardEntry { .. }
                 | ProposedEvent::Discard { .. }
                 | ProposedEvent::Tap { .. }
                 | ProposedEvent::Untap { .. }
