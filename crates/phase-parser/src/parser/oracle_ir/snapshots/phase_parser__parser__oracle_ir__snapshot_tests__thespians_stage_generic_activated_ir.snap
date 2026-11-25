@@ -97,7 +97,6 @@ expression: "&ir"
             },
             "description": "{T}: Add {C}.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
@@ -221,7 +220,6 @@ expression: "&ir"
             },
             "description": "{2}, {T}: ~ becomes a copy of target land, except it has this ability.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

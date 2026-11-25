@@ -150,7 +150,6 @@ expression: "&ir"
             },
             "description": "{T}, Remove a component counter from ~: Add two mana of different colors.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
@@ -252,7 +251,6 @@ expression: "&ir"
             },
             "description": "{T}: Roll a d20.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

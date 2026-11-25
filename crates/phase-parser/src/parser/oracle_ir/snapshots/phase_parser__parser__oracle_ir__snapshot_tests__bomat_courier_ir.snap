@@ -291,7 +291,6 @@ expression: "&ir"
             },
             "description": "{R}, Discard your hand, Sacrifice ~: Put all cards exiled with ~ into their owners' hands.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
