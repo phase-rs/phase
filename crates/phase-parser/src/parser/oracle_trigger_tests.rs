@@ -40794,6 +40794,11 @@ fn dealt_damage_lolth_emblem_quantified_source_parses() {
     );
 }
 
+// Synthetic shape: no printed card is known to combine a collective recipient
+// with a source qualifier. The nearest printed cards are Master of Barbs and
+// Fblthp, Impossibly Lost (collective recipients) and Lolth, Spider Queen's
+// emblem (quantified source). The test checks precedence between those two
+// existing grammar axes.
 #[test]
 fn dealt_damage_collective_recipients_stay_grouped_with_a_qualified_source() {
     for source in ["a creature", "one or more creatures"] {

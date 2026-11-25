@@ -387,6 +387,11 @@ fn lolth_emblem_ignores_noncombat_damage_from_your_creature() {
 // CR 510.2 + CR 603.2c: A collective recipient still fires once when the
 // source qualifier independently uses "one or more". Master of Barbs and
 // Fblthp, Impossibly Lost use collective recipients without a source qualifier.
+// "Collective Damage Watcher" is synthetic: no printed card is known to combine
+// a collective recipient with a quantified source. The nearest printed cards
+// are Master of Barbs and Fblthp, Impossibly Lost (collective recipients) and
+// Lolth, Spider Queen's emblem (quantified source). The test checks precedence
+// between those two existing grammar axes.
 #[test]
 fn qualified_collective_damage_recipients_fire_once_for_the_batch() {
     let mut scenario = GameScenario::new_n_player(3, 42);
