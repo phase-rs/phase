@@ -5348,6 +5348,7 @@ fn scan_trigger_definition(
         counter_filter: _,
         saga_chapter: _,
         batched: _,
+        damage_received_grouping: _,
         die_sides: _,
         gotcha_condition: _,
         expend_threshold: _,

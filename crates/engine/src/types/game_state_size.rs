@@ -213,6 +213,15 @@
 //! The staged parent's inline size fits within the existing bucket's slack;
 //! keep the 16,384 ceiling.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-04-19`) at
+//! 16,416 B when the departed-trigger record (`departed_triggered_abilities`,
+//! an `im::HashMap`, 32 B inline with alignment) landed for #10027: the branch
+//! was green alone under 16,384 and the union crossed it by 32 B. The field is
+//! not a large rarely-populated one — an ordinary heap-shared map exactly like
+//! its `departed_stack_spells` / `departed_activated_abilities` siblings, which
+//! the same rule admitted — so the ceiling moves to
+//! 16,416.next_multiple_of(256) + 256 = 16,768.
+//!
 //! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-11-18`) at
 //! 16,416 B, with a const `size_of` probe, when the CR 508.5 removed-attacker
 //! defender record landed: `CombatState::removed_attacker_defenders`, a 24 B
@@ -221,6 +230,12 @@
 //! plus padding. It is not a large
 //! rarely-populated struct, so the ceiling moves by the rule to
 //! 16,416.next_multiple_of(256) + 256 = 16,896.
+//!
+//! With both records merged (`departed_triggered_abilities` and
+//! `removed_attacker_defenders`), `GameState` re-measured on
+//! x86_64-pc-windows-msvc (`nightly-2026-11-18`) at 16,432 B with a const
+//! `size_of` probe; the rule keeps the ceiling at
+//! 16,432.next_multiple_of(256) + 256 = 16,896.
 //!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.

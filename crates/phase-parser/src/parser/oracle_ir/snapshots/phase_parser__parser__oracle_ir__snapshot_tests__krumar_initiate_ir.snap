@@ -131,7 +131,6 @@ expression: "&ir"
             ],
             "description": "{X}{B}, {T}, Pay X life: ~ endures X. Activate only as a sorcery.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

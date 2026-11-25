@@ -80,8 +80,9 @@ fn drive_to_declare_attackers(runner: &mut GameRunner) {
         match runner.state().waiting_for {
             WaitingFor::DeclareAttackers { .. } => return,
             WaitingFor::Priority { .. } => {
+                // CR 805.5b: the holding team passes together.
                 runner
-                    .act(GameAction::PassPriority)
+                    .pass_holding_team()
                     .expect("passing priority should reach declare attackers");
             }
             ref other => panic!("expected priority or declare attackers, got {other:?}"),
@@ -130,10 +131,11 @@ fn pass_until_fblthp_trigger(
         {
             return;
         }
-        let result = runner
-            .act(GameAction::PassPriority)
-            .expect("pass priority through combat");
-        events.extend(result.events);
+        events.extend(
+            runner
+                .pass_holding_team()
+                .expect("pass priority through combat"),
+        );
     }
     panic!("Fblthp's trigger never reached the stack");
 }
@@ -282,10 +284,11 @@ fn owner_shuffle_follows_fblthps_owner_after_it_leaves() {
             reached_trigger = true;
             break;
         }
-        let result = runner
-            .act(GameAction::PassPriority)
-            .expect("pass priority through combat");
-        events.extend(result.events);
+        events.extend(
+            runner
+                .pass_holding_team()
+                .expect("pass priority through combat"),
+        );
     }
     assert!(
         reached_trigger,
@@ -310,10 +313,11 @@ fn owner_shuffle_follows_fblthps_owner_after_it_leaves() {
         {
             break;
         }
-        let result = runner
-            .act(GameAction::PassPriority)
-            .expect("pass priority to resolve the trigger");
-        events.extend(result.events);
+        events.extend(
+            runner
+                .pass_holding_team()
+                .expect("pass priority to resolve the trigger"),
+        );
     }
 
     assert_eq!(
@@ -469,10 +473,11 @@ fn phased_out_fblthp_stays_on_battlefield_and_owner_shuffles() {
         {
             break;
         }
-        let result = runner
-            .act(GameAction::PassPriority)
-            .expect("pass priority to resolve the trigger");
-        events.extend(result.events);
+        events.extend(
+            runner
+                .pass_holding_team()
+                .expect("pass priority to resolve the trigger"),
+        );
     }
 
     let f = &runner.state().objects[&fblthp];
@@ -565,10 +570,11 @@ fn departed_owner_skips_the_shuffle_while_the_controller_draws() {
         {
             break;
         }
-        let result = runner
-            .act(GameAction::PassPriority)
-            .expect("pass priority to resolve the trigger");
-        events.extend(result.events);
+        events.extend(
+            runner
+                .pass_holding_team()
+                .expect("pass priority to resolve the trigger"),
+        );
     }
 
     assert!(

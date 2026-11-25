@@ -128,7 +128,6 @@ expression: "&ir"
             },
             "description": "Remove two +1/+1 counters from ~: Regenerate it.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

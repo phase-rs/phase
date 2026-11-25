@@ -300,7 +300,7 @@ fn drive_wave_through_combat(
         }
         match &runner.state().waiting_for {
             WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
+                runner.pass_holding_team().expect("pass priority");
             }
             WaitingFor::DeclareAttackers {
                 valid_attacker_ids, ..
@@ -417,8 +417,8 @@ fn drive_wave_with_answers_collecting(
             break;
         }
         match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } => match runner.act(GameAction::PassPriority) {
-                Ok(result) => events.extend(result.events),
+            WaitingFor::Priority { .. } => match runner.pass_holding_team() {
+                Ok(passed) => events.extend(passed),
                 Err(_) => break,
             },
             WaitingFor::HeroEventChoice { .. } => {
@@ -1074,7 +1074,7 @@ fn mayhem_prevented_destroy_resumes_remaining_steps() {
         }
         match &runner.state().waiting_for {
             WaitingFor::Priority { .. } => {
-                if runner.act(GameAction::PassPriority).is_err() {
+                if runner.pass_holding_team().is_err() {
                     break;
                 }
             }
@@ -1304,7 +1304,7 @@ fn drive_wave_with_artist(
                 drain_order_triggers_with_identity(runner.state_mut());
             }
             WaitingFor::Priority { .. } => {
-                if runner.act(GameAction::PassPriority).is_err() {
+                if runner.pass_holding_team().is_err() {
                     break;
                 }
             }
@@ -1592,7 +1592,7 @@ fn drive_token_counter_wave(runner: &mut GameRunner, second: ObjectId) -> u32 {
         }
         match &runner.state().waiting_for {
             WaitingFor::Priority { .. } => {
-                if runner.act(GameAction::PassPriority).is_err() {
+                if runner.pass_holding_team().is_err() {
                     break;
                 }
             }

@@ -14,6 +14,7 @@ mod source_census;
 
 mod abdel_adrian_animate_dead_altar_board;
 mod abigale_integration;
+mod ability_triggered_observer;
 mod active_damage_trigger_recipient_anaphor;
 mod adapter_contract_fixtures;
 mod additional_cost_declaration_tail;
@@ -274,6 +275,7 @@ mod pugnacious_hammerskull_another_dinosaur;
 mod purged_source_intervening_if_lki;
 mod queen_parser_near_misses;
 mod random_result_source_identity;
+mod raw_resolution_stack_restore;
 mod replacement_choice_trigger_gating;
 mod resolve_all_consent;
 mod rev_tithe_extractor_facedown_cast;

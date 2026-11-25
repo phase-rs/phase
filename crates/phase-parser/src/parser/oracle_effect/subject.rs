@@ -16,6 +16,7 @@ use super::imperative;
 use super::lower::BOUNDED_TARGET_CARDINALITIES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::context::DeclaredSlotRegistry;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenSubtypeKind, ColorChangeMode,
     ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient, Duration,
@@ -3298,11 +3299,41 @@ pub(super) fn owner_subject_seed(
         {
             return None;
         }
-        let target = ctx.chain_declared_object_target.as_ref()?;
-        if !matches!(target, TargetFilter::Typed(_))
-            || super::target_filter_can_target_player(target)
-        {
-            return None;
+        if let Some(target) = &ctx.chain_declared_object_target {
+            if !matches!(target, TargetFilter::Typed(_))
+                || super::target_filter_can_target_player(target)
+            {
+                return None;
+            }
+        } else {
+            // CR 115.1 + CR 608.2c: a disjunction in one declared slot gives
+            // both pronouns the same object. The pending resolution-time bare
+            // choice admits only a single Typed filter, never this Or.
+            let target @ TargetFilter::Or { filters } = ctx.chain_prior_chosen_target.as_ref()?
+            else {
+                return None;
+            };
+            if filters.is_empty()
+                || !filters.iter().all(|filter| {
+                    matches!(filter, TargetFilter::Typed(_))
+                        && !super::target_filter_can_target_player(filter)
+                })
+                || ctx
+                    .object_pronoun_ref
+                    .as_ref()
+                    .is_some_and(|target| *target != TargetFilter::ParentTarget)
+            {
+                return None;
+            }
+            let DeclaredSlotRegistry::Known(entries) = &ctx.chain_declared_slots else {
+                return None;
+            };
+            let [slot] = entries.as_slice() else {
+                return None;
+            };
+            if slot.index != Some(0) || &slot.filter != target {
+                return None;
+            }
         }
         Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
     })
@@ -10019,6 +10050,189 @@ mod tests {
         ctx.token_created_in_chain = false;
         ctx.chain_declared_object_target = Some(TargetFilter::Player);
         assert_eq!(owner_subject_seed(&subject, &ctx), None);
+    }
+
+    #[test]
+    fn owner_anaphor_requires_one_numbered_object_disjunction() {
+        use crate::parser::oracle_ir::context::DeclaredSlotEntry;
+        use crate::types::ability::TargetChoiceTiming;
+
+        let app = parse_subject_application("its owner", &mut ParseContext::default())
+            .expect("owner subject");
+        let subject = subject_phrase_ast(Some(app));
+        let (target, rest) = parse_target_with_ctx(
+            "creature or planeswalker an opponent controls",
+            &mut ParseContext::default(),
+        );
+        assert!(rest.is_empty());
+        assert!(matches!(&target, TargetFilter::Or { filters } if filters.len() == 2));
+        let slot = DeclaredSlotEntry {
+            index: Some(0),
+            filter: target.clone(),
+        };
+        let ctx = ParseContext {
+            chain_prior_chosen_target: Some(target),
+            chain_declared_slots: DeclaredSlotRegistry::Known(vec![slot.clone()]),
+            ..ParseContext::default()
+        };
+        assert_eq!(
+            owner_subject_seed(&subject, &ctx),
+            Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
+        );
+
+        let mixed = TargetFilter::Or {
+            filters: vec![
+                parse_target_with_ctx("creature", &mut ParseContext::default()).0,
+                TargetFilter::Player,
+            ],
+        };
+        let bare = "choose a creature you control";
+        let mut bare_ctx = ParseContext::default();
+        let Some(ChooseImperativeAst::TargetOnly {
+            target: bare_target,
+        }) = imperative::parse_choose_ast(bare, bare, &mut bare_ctx)
+        else {
+            panic!("bare choice must reach the TargetOnly producer");
+        };
+        assert_eq!(
+            bare_ctx.declared_target_choice_timing,
+            Some(TargetChoiceTiming::Resolution)
+        );
+        for (label, target) in [
+            ("player alternative", mixed),
+            ("pending bare choice", bare_target),
+        ] {
+            let adverse = ParseContext {
+                chain_prior_chosen_target: Some(target.clone()),
+                chain_declared_slots: DeclaredSlotRegistry::Known(vec![DeclaredSlotEntry {
+                    filter: target,
+                    ..slot.clone()
+                }]),
+                ..ctx.clone()
+            };
+            assert_eq!(owner_subject_seed(&subject, &adverse), None, "{label}");
+        }
+
+        for registry in [
+            DeclaredSlotRegistry::Known(vec![]),
+            DeclaredSlotRegistry::Known(vec![DeclaredSlotEntry {
+                index: None,
+                ..slot.clone()
+            }]),
+            DeclaredSlotRegistry::Known(vec![
+                slot.clone(),
+                DeclaredSlotEntry {
+                    index: Some(1),
+                    ..slot
+                },
+            ]),
+            DeclaredSlotRegistry::Indeterminate,
+        ] {
+            let adverse = ParseContext {
+                chain_declared_slots: registry,
+                ..ctx.clone()
+            };
+            assert_eq!(
+                owner_subject_seed(&subject, &adverse),
+                None,
+                "{:?}",
+                adverse.chain_declared_slots
+            );
+        }
+        for adverse in [
+            ParseContext {
+                chain_prior_chosen_target: None,
+                ..ctx.clone()
+            },
+            ParseContext {
+                token_created_in_chain: true,
+                ..ctx.clone()
+            },
+            ParseContext {
+                object_pronoun_ref: Some(TargetFilter::SelfRef),
+                ..ctx
+            },
+        ] {
+            assert_eq!(owner_subject_seed(&subject, &adverse), None);
+        }
+    }
+
+    /// SHAPE: a printed disjunction declares one stack target and its owner
+    /// uses that exact object in the move and terminal shuffle.
+    #[test]
+    fn disjunctive_owner_shuffle_keeps_one_stack_target() {
+        use crate::types::ability::{
+            LibraryInstructionActor, LibraryShuffleMode, TargetChoiceTiming,
+        };
+        use crate::types::zones::Zone;
+
+        const SPELL: &str =
+            "Choose target artifact or enchantment. Its owner shuffles it into their library.";
+        let living_library_types = ["Artifact".to_string(), "Creature".to_string()];
+        let living_library_subtypes = ["Book".to_string(), "Illusion".to_string()];
+        let instant_types = ["Instant".to_string()];
+        for (name, oracle, card_types, subtypes, expected_kind, types, controller) in [
+            (
+                "Living Library",
+                "{6}, Sacrifice this creature: Choose target creature or planeswalker an opponent controls. Its owner shuffles it into their library.",
+                living_library_types.as_slice(),
+                living_library_subtypes.as_slice(),
+                AbilityKind::Activated,
+                [TypeFilter::Creature, TypeFilter::Planeswalker],
+                Some(ControllerRef::Opponent),
+            ),
+            (
+                "Deglamer",
+                SPELL,
+                instant_types.as_slice(),
+                &[],
+                AbilityKind::Spell,
+                [TypeFilter::Artifact, TypeFilter::Enchantment],
+                None,
+            ),
+            (
+                "Unravel the Aether",
+                SPELL,
+                instant_types.as_slice(),
+                &[],
+                AbilityKind::Spell,
+                [TypeFilter::Artifact, TypeFilter::Enchantment],
+                None,
+            ),
+        ] {
+            let face = crate::parser::oracle::parse_oracle_text(oracle, name, &[], card_types, subtypes);
+            let [def] = face.abilities.as_slice() else {
+                panic!("expected one ability: {:?}", face.abilities);
+            };
+            assert_eq!(def.kind, expected_kind);
+            assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
+            assert!(!def.optional_targeting);
+            assert!(def.multi_target.is_none());
+            assert_eq!(
+                *def.effect,
+                Effect::TargetOnly {
+                    target: TargetFilter::Or {
+                        filters: types.into_iter().map(|ty| TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![ty],
+                            controller: controller.clone(),
+                            ..TypedFilter::default()
+                        })).collect(),
+                    },
+                }
+            );
+            let movement = def.sub_ability.as_deref().expect("selected object move");
+            assert!(matches!(*movement.effect, Effect::ChangeZoneAll {
+                actor: LibraryInstructionActor::Player { player: TargetFilter::ParentTargetOwner },
+                destination: Zone::Library,
+                target: TargetFilter::ParentTarget,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                ..
+            }), "{movement:?}");
+            let shuffle = movement.sub_ability.as_deref().expect("owner's terminal shuffle");
+            assert_eq!(*shuffle.effect, Effect::Shuffle { target: TargetFilter::ScopedPlayer });
+            assert_eq!(shuffle.player_scope, Some(imperative::owner_library_shuffle_scope()));
+            assert!(shuffle.sub_ability.is_none());
+        }
     }
 
     /// SHAPE: owner actor, object exclusion, and optional count are independent

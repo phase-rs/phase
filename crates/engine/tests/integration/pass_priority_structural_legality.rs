@@ -115,7 +115,7 @@ fn explicit_priority_pass_advances_installed_session_cursor_and_restores_baselin
             .collect(),
         cursor: 0,
         representatives: BTreeSet::from([P0, P1]),
-        verified_pass_representatives: BTreeSet::new(),
+        verified_pass_owners: BTreeSet::new(),
         budget: StackResolutionBudget::from_legacy_max_resolutions(2),
         policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
         auto_pass_overlay: StackResolutionAutoPassOverlay {

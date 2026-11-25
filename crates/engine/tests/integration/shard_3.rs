@@ -433,6 +433,8 @@ mod issue_11132_where_x_pt_adjustment;
 mod issue_11133_where_x_pt_clamp;
 mod issue_1120_warden_of_the_grove;
 mod issue_1128_elrond_scry_counter;
+mod issue_11338_firebender_ascension_parse;
+mod issue_11338_observer_copies;
 mod issue_1135_ents_fury_fight;
 mod issue_1156_coin_of_mastery;
 mod issue_1202_prepared_spell_cast_timing;

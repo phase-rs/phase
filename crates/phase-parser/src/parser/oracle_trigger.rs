@@ -70,6 +70,7 @@ use super::oracle_target::{
     attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase_folding,
     parse_type_phrase_folding_with_ctx, starts_with_type_list_continuation, starts_with_type_word,
 };
+use super::oracle_trigger_cause::classify_trigger_cause;
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
     normalize_card_name_refs, parse_number, parse_ordinal, parse_ordinal_list, parse_subtype,
@@ -89,16 +90,16 @@ use crate::types::ability::{
     CardSelectionMode, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
     CastVariantPaid, CoinFlipResult, CombatRelation, CombatRelationSubject, Comparator,
     ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold,
-    DamageChannel, DamageKindFilter, DelayedTriggerCondition, DestinationConstraint,
-    DieResultFilter, Duration, Effect, EffectScope, FilterProp, GameRestriction,
-    IllegalTargetsDisposition, ManaAbilityProducedFilter, ObjectScope, OriginConstraint,
-    ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope, ProhibitedActivity,
-    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    RestrictionExpiry, RestrictionPlayerScope, SacrificeAggregateStat, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SourceExclusion, SpentColor, StaticCondition,
-    TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TriggerLimitSpend, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause, ZoneRef,
+    DamageChannel, DamageKindFilter, DamageReceivedGrouping, DelayedTriggerCondition,
+    DestinationConstraint, DieResultFilter, Duration, Effect, EffectScope, FilterProp,
+    GameRestriction, IllegalTargetsDisposition, ManaAbilityProducedFilter, ObjectScope,
+    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
+    ProhibitedActivity, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    RenownSubject, RestrictionExpiry, RestrictionPlayerScope, SacrificeAggregateStat,
+    SacrificeCost, SacrificeRequirement, SharedQuality, SourceExclusion, SpentColor,
+    StaticCondition, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypeFilter, TypedFilter,
+    UnlessPayModifier, ZoneChangeClause, ZoneRef,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -106,8 +107,10 @@ use crate::types::event_kinds::{ClashResult, PlayerActionKind};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::{Phase, PhaseGroup};
+use crate::types::statics::TriggerCause;
 use crate::types::triggers::{
-    AbilityLifecyclePoint, AttackTargetFilter, ControlChangeSide, PlaneswalkRole, TriggerMode,
+    AbilityLifecyclePoint, AttackTargetFilter, CausedAbilitySource, ControlChangeSide,
+    PlaneswalkRole, TriggerMode,
 };
 use crate::types::zones::Zone;
 use std::num::NonZeroUsize;
@@ -14578,7 +14581,7 @@ pub fn parse_trigger_condition(
         {
             def.valid_card = def.valid_card.take().map(with_card_qualifier);
         }
-        if is_batched && def.blocker_count.is_none() {
+        if is_batched && def.blocker_count.is_none() && mode != TriggerMode::DamageReceived {
             def.batched = true;
         }
         // CR 603.4: "an opponent who controls F draws a card" — the
@@ -14993,6 +14996,7 @@ fn trigger_condition_objects(
         saga_chapter: _,
         unless_pay: _,
         batched: _,
+        damage_received_grouping: _,
         die_sides: _,
         expend_threshold: _,
         player_actions: _,
@@ -16869,6 +16873,82 @@ fn try_parse_event(
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     let rest = rest.trim_start();
 
+    // CR 603.2 + CR 603.3b: ability-triggering observers — "Whenever [cause]
+    // causes a triggered ability [of that <type>] to trigger" (Firebender
+    // Ascension, Aboleth Spawn, Strict Proctor). First in dispatch: the
+    // `tag("enter")` arm below prefix-matches "entering" (the ChangesZone
+    // mistype) and the attacks arm's `ing`-guard rejects "attacking" (the
+    // Unknown miss). Gate-fail falls through to the compound arms; every
+    // post-gate decline is a hard `return None` so a recognized-but-
+    // untypable observer can never reach a later mistyping arm.
+    if scan_contains(rest, "causes a triggered ability") && scan_contains(rest, "to trigger") {
+        let cause = classify_trigger_cause(full_lower)?;
+        // Only attack- and enter-caused occurrences name subjects in the
+        // engine (`cause_subjects` fails closed otherwise), so any other
+        // classified cause stays a flagged gap rather than a supported-but-
+        // never-firing parse. Exhaustive with no wildcard: a future
+        // `TriggerCause` forces a decision here at compile time.
+        let observable = match cause {
+            TriggerCause::CreatureAttacking | TriggerCause::EntersBattlefield { .. } => true,
+            TriggerCause::Any
+            | TriggerCause::CreatureDying
+            | TriggerCause::ControlledCreature { .. }
+            | TriggerCause::ControllerCastOrCopiedSpell { .. }
+            | TriggerCause::RoomEntered
+            | TriggerCause::BattlefieldTransition { .. }
+            | TriggerCause::PlayerAction { .. }
+            | TriggerCause::TurnedFaceUp => false,
+        };
+        if !observable {
+            return None;
+        }
+        let (_, _, after) = scan_preceded(rest, |i| {
+            tag::<_, _, OracleError<'_>>("causes a triggered ability").parse(i)
+        })?;
+        // "of that <type>" (the causing object's own ability) vs bare "a
+        // triggered ability" (any ability with an admitted cause subject).
+        // `parse_core_type` matches a bare word, so the consuming
+        // `tag(" to trigger")` terminator bounds it (and leaves the tail
+        // check below meaningful). Any other refinement declines.
+        let source = alt((
+            value(
+                CausedAbilitySource::CausingObject,
+                preceded(
+                    tag(" of that "),
+                    terminated(nom_primitives::parse_core_type, tag(" to trigger")),
+                ),
+            ),
+            value(CausedAbilitySource::Any, tag(" to trigger")),
+        ))
+        .parse(after);
+        let Ok((tail, source)) = source else {
+            return None;
+        };
+        // Hard decline on trailing text: only the bare anchor and the `of
+        // that <type>` refinement are modeled. A future observer with
+        // trailing qualifiers declines to an honest gap rather than parsing
+        // with a dropped rider.
+        if !tail.trim_end().is_empty() {
+            return None;
+        }
+        // CR 603.6a: "entering under [whoever]'s control" (Aboleth Spawn)
+        // scopes the cause subject by controller, exactly as the ETB arm
+        // does via `parse_enters_control_rider`. `add_controller` only
+        // fills an absent controller, so subjects that already carry one
+        // ("a creature you control") are untouched.
+        let mut valid_card = subject.clone();
+        if matches!(cause, TriggerCause::EntersBattlefield { .. }) {
+            if let Some(controller) = parse_enters_control_rider(rest) {
+                valid_card = add_controller(valid_card, controller);
+            }
+        }
+        let mode = TriggerMode::AbilityTriggered { cause, source };
+        let mut def = make_base();
+        def.mode = mode.clone();
+        def.valid_card = Some(valid_card);
+        return Some((mode, def));
+    }
+
     // --- Compound triggers (nom alt for prefix matching) ---
     // "enters or attacks" / "enters the battlefield or attacks"
     if tag::<_, _, OracleError<'_>>("enters or attacks")
@@ -17889,7 +17969,7 @@ fn try_parse_event(
             /// CR 120.1 + CR 120.3: optional source qualifier ("by a creature",
             /// "by a red instant or sorcery spell you control", etc.). When present,
             /// the trigger only fires if the damage source matches this filter.
-            source_filter: Option<TargetFilter>,
+            source: Option<(TargetFilter, DamageSourceDeterminer)>,
         },
         BecomesTapped,
         TappedForMana,
@@ -18011,12 +18091,15 @@ fn try_parse_event(
     /// source disjunction becomes the existing `TargetFilter::Or` building
     /// block; any qualifier this grammar cannot represent is left unconsumed so
     /// the caller's tail guard reports the line unsupported instead of dropping
-    /// the restriction. Returns the source `TargetFilter` and the remainder.
-    fn parse_passive_damage_source(input: &str) -> OracleResult<'_, TargetFilter> {
+    /// the restriction. A quantified alternative determines the grouping for
+    /// the disjunction. Otherwise, keep the first source's determiner.
+    fn parse_passive_damage_source(
+        input: &str,
+    ) -> OracleResult<'_, (TargetFilter, DamageSourceDeterminer)> {
         let (rest, _) = preceded(opt(space1), tag("by ")).parse(input)?;
         // Passive voice: no trailing space requirement (we are at the end of
         // the event phrase), and the passive-only source forms are admitted.
-        let (rest, first) =
+        let (rest, (first, determiner)) =
             parse_damage_source_subject_shared(rest, DamageSourceSubjectVoice::Passive)?;
         // CR 120.1 + CR 120.3: "… or by <source>" is a disjunction over the
         // damage source; either branch satisfies the qualifier. Composes the
@@ -18026,13 +18109,23 @@ fn try_parse_event(
             parse_damage_source_subject_shared(i, DamageSourceSubjectVoice::Passive)
         }))
         .parse(rest)?;
-        if additional.is_empty() {
-            return Ok((rest, first));
-        }
-        let mut filters = Vec::with_capacity(additional.len() + 1);
-        filters.push(first);
-        filters.extend(additional);
-        Ok((rest, TargetFilter::Or { filters }))
+        let determiner = if additional
+            .iter()
+            .any(|(_, d)| *d == DamageSourceDeterminer::OneOrMore)
+        {
+            DamageSourceDeterminer::OneOrMore
+        } else {
+            determiner
+        };
+        let filter = if additional.is_empty() {
+            first
+        } else {
+            let filters = std::iter::once(first)
+                .chain(additional.into_iter().map(|(filter, _)| filter))
+                .collect();
+            TargetFilter::Or { filters }
+        };
+        Ok((rest, (filter, determiner)))
     }
     /// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.4b + CR 120.10 + CR 510 + CR 603.2:
     /// Passive-voice damage-received trigger event —
@@ -18106,7 +18199,7 @@ fn try_parse_event(
         // while this qualifier restricts which damage sources can trigger the
         // ability at all (Chandra's Phoenix: "by a red instant or sorcery spell
         // you control or by a red planeswalker you control").
-        let (rest, source_filter) = opt(parse_passive_damage_source).parse(rest)?;
+        let (rest, source) = opt(parse_passive_damage_source).parse(rest)?;
         // CR 603.7a: a trailing "this turn" on a delayed-trigger event
         // ("Whenever that creature is dealt damage by an attacking creature
         // this turn") bounds the delayed ability's duration; the creating
@@ -18119,7 +18212,7 @@ fn try_parse_event(
                 channel,
                 kind,
                 amount,
-                source_filter,
+                source,
             },
         ))
     }
@@ -18460,17 +18553,11 @@ fn try_parse_event(
             // in `DamageAmountThreshold.scope`; `game/triggers.rs` is the only place
             // that reads it.
             //
-            // `batched` is NOT set here, and must not be: no `SimpleEvent` arm touches
-            // it. The caller `parse_trigger_condition` sets it from a `"one or more "`
-            // scan over the subject phrase. CR 603.2c — a batched trigger populates
-            // `current_trigger_match_count`, which outranks the triggering event's own
-            // amount in the `EventContextAmount` cascade (`game/quantity.rs`) and holds
-            // a SUBJECT HEADCOUNT, not a damage amount.
             SimpleEvent::DealtDamage {
                 channel,
                 kind,
                 amount,
-                source_filter,
+                source,
             } => {
                 // CR 603.2 + CR 102.1: a trailing "during <window>" qualifier on a
                 // received-damage head ("… are dealt combat damage during your
@@ -18508,9 +18595,31 @@ fn try_parse_event(
                 };
                 def.damage_kind = kind;
                 def.damage_amount = amount;
-                if let Some(filter) = source_filter {
-                    def.valid_source = Some(filter);
+                // CR 603.2c: The source quantifier groups sources for each
+                // singular player recipient. A recipient quantifier groups all
+                // matching recipients into one occurrence.
+                if channel == DamageChannel::Total {
+                    let quantified_recipients = scan_contains(subject_text, "one or more ");
+                    def.damage_received_grouping = if quantified_recipients {
+                        DamageReceivedGrouping::WholeBatch
+                    } else {
+                        match source.as_ref().map(|(_, determiner)| determiner) {
+                            Some(DamageSourceDeterminer::OneOrMore)
+                                if subject_is_player(subject) =>
+                            {
+                                DamageReceivedGrouping::PerPlayerRecipient
+                            }
+                            Some(DamageSourceDeterminer::OneOrMore) => {
+                                DamageReceivedGrouping::WholeBatch
+                            }
+                            Some(
+                                DamageSourceDeterminer::Article | DamageSourceDeterminer::Another,
+                            )
+                            | None => DamageReceivedGrouping::PerEvent,
+                        }
+                    };
                 }
+                def.valid_source = source.map(|(filter, _)| filter);
                 set_trigger_subject(&mut def, subject);
                 attach_event_window(&mut def, window);
             }
@@ -19462,7 +19571,7 @@ enum DamageSourceDeterminer {
 fn parse_damage_source_subject_shared(
     input: &str,
     voice: DamageSourceSubjectVoice,
-) -> OracleResult<'_, TargetFilter> {
+) -> OracleResult<'_, (TargetFilter, DamageSourceDeterminer)> {
     if voice == DamageSourceSubjectVoice::Active {
         // CR 303.4b + CR 301.5a: Aura/Equipment self-referential
         // damage-source subjects are article-less determiners — "enchanted creature"
@@ -19493,7 +19602,7 @@ fn parse_damage_source_subject_shared(
         ))
         .parse(input)
         {
-            return Ok((rest, filter));
+            return Ok((rest, (filter, DamageSourceDeterminer::Article)));
         }
     }
 
@@ -19711,7 +19820,7 @@ fn parse_damage_source_subject_shared(
     if !props.is_empty() {
         typed.properties = props;
     }
-    Ok((rest, TargetFilter::Typed(typed)))
+    Ok((rest, (TargetFilter::Typed(typed), determiner)))
 }
 
 /// CR 109.4 + CR 120.1: Parse the source subject of a damage trigger up to (but
@@ -19727,7 +19836,11 @@ fn parse_damage_source_subject_shared(
 fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     // Active voice: require the space before "deals" and allow the
     // "enchanted/equipped creature" attached-subject forms.
-    parse_damage_source_subject_shared(input, DamageSourceSubjectVoice::Active)
+    map(
+        |i| parse_damage_source_subject_shared(i, DamageSourceSubjectVoice::Active),
+        |(filter, _)| filter,
+    )
+    .parse(input)
 }
 
 /// CR 120.2a + CR 120.2b: Parse the damage-kind adjective (`"combat "` / `"noncombat "`).

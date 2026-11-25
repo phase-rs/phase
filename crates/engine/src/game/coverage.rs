@@ -4966,6 +4966,18 @@ fn trigger_details(trig: &TriggerDefinition) -> Vec<(String, String)> {
             d.push(("damage kind".into(), "noncombat only".into()));
         }
     }
+    match trig.damage_received_grouping {
+        crate::types::ability::DamageReceivedGrouping::PerEvent => {}
+        crate::types::ability::DamageReceivedGrouping::PerPlayerRecipient => {
+            d.push((
+                "damage received grouping".into(),
+                "per player recipient".into(),
+            ));
+        }
+        crate::types::ability::DamageReceivedGrouping::WholeBatch => {
+            d.push(("damage received grouping".into(), "whole batch".into()));
+        }
+    }
     if let Some(vt) = &trig.valid_target {
         d.push(("valid target".into(), fmt_target(vt)));
     }
@@ -18519,6 +18531,33 @@ mod tests {
             when_followed.iter().any(|(k, _)| k == "duration"),
             "reach guard: the default def still renders its duration: {when_followed:?}"
         );
+    }
+
+    #[test]
+    fn damage_received_grouping_reaches_parse_details() {
+        use crate::types::ability::DamageReceivedGrouping::{
+            PerEvent, PerPlayerRecipient, WholeBatch,
+        };
+
+        let mut trig = TriggerDefinition::new(TriggerMode::DamageReceived);
+        for (grouping, expected) in [
+            (PerEvent, None),
+            (PerPlayerRecipient, Some("per player recipient")),
+            (WholeBatch, Some("whole batch")),
+        ] {
+            trig.damage_received_grouping = grouping;
+            let details = trigger_details(&trig);
+            let projected: Vec<_> = details
+                .iter()
+                .filter(|(key, _)| key == "damage received grouping")
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert_eq!(
+                projected,
+                expected.into_iter().collect::<Vec<_>>(),
+                "{grouping:?}"
+            );
+        }
     }
 
     /// #7406 — a trigger's `attack_target_filter` must reach the parse-diff

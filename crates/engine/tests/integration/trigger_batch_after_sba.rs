@@ -2281,7 +2281,19 @@ fn cleanup_loss_board(commander: bool, seed_older: bool) -> CleanupLossBoard {
             .expect("order the prior two triggers");
         pass_stack_to_choice(&mut runner);
         assert!(runner.state().stack.is_empty());
-        Some(context)
+        // CR 603.3b: the clone came out of a live ordering prompt, so it is
+        // marked as a member of that (now finished) placement process. A real
+        // parked Ordinary leftover was never admitted to placement, so restore
+        // it without the mark, which deserializes as a fresh context.
+        let mut saved = serde_json::to_value(context).expect("serialize setup context");
+        saved
+            .as_object_mut()
+            .expect("a context is a JSON object")
+            .remove(engine::game::triggers::PLACEMENT_PROCESS_FIELD);
+        Some(
+            serde_json::from_value::<PendingTriggerContext>(saved)
+                .expect("deserialize the fresh setup context"),
+        )
     } else {
         None
     };

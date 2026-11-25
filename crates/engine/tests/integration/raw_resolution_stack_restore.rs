@@ -217,7 +217,7 @@ fn capture_with_fingerprint_restored() -> serde_json::Value {
 /// is printed on the card, so it is an ordinary triggered ability rather than a
 /// delayed one. This repair is test-local and is never a production
 /// normalization.
-fn repaired_capture() -> serde_json::Value {
+pub(crate) fn repaired_capture() -> serde_json::Value {
     let mut value = capture_with_fingerprint_restored();
     value
         .as_object_mut()

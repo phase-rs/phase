@@ -619,7 +619,6 @@ mod rally_the_righteous_radiance_pump;
 mod random_discard_cost_replacement_resume;
 mod rankle_and_torbran;
 mod raubahn_bull_of_ala_mhigo;
-mod raw_resolution_stack_restore;
 mod razorkin_needlehead_opponent_draw_damage_2869;
 mod reapers_scythe;
 mod recipient_scoped_discard_filter;

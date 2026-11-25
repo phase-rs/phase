@@ -1,0 +1,64 @@
+---
+source: crates/phase-parser/src/parser/oracle_trigger_snapshot_tests.rs
+assertion_line: 1439
+expression: def
+---
+{
+  "mode": {
+    "AbilityTriggered": {
+      "cause": {
+        "EntersBattlefield": {
+          "core_types": [
+            "Creature"
+          ]
+        }
+      },
+      "source": "CausingObject"
+    }
+  },
+  "execute": {
+    "kind": "Spell",
+    "effect": {
+      "type": "CopySpell",
+      "target": {
+        "type": "ParentTarget"
+      },
+      "retarget": {
+        "type": "MayChooseNewTargets"
+      },
+      "starting_loyalty_from_casualty_sacrifice": false
+    },
+    "cost": null,
+    "sub_ability": null,
+    "duration": null,
+    "description": null,
+    "target_prompt": null,
+    "condition": null,
+    "optional_targeting": false,
+    "optional": true,
+    "forward_result": false
+  },
+  "valid_card": {
+    "type": "Typed",
+    "type_filters": [
+      "Creature"
+    ],
+    "controller": "Opponent",
+    "properties": []
+  },
+  "origin": null,
+  "destination": null,
+  "trigger_zones": [
+    "Battlefield"
+  ],
+  "phase": null,
+  "optional": true,
+  "damage_kind": "Any",
+  "secondary": false,
+  "valid_target": null,
+  "valid_source": null,
+  "description": "Whenever a creature entering under an opponent's control causes a triggered ability of that creature to trigger, you may copy that ability. You may choose new targets for the copy.",
+  "constraint": null,
+  "condition": null,
+  "batched": false
+}
