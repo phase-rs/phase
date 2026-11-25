@@ -324,6 +324,7 @@ mod tidehollow_sculler_exile_return;
 mod tifa_additional_combat;
 mod timely_ward_regression;
 mod timesifter_extra_turn_contest;
+mod tinybones_bauble_burglar;
 mod tinybones_joins_up_multi_target;
 mod tinybones_pocket_nuisance;
 mod tobita_master_of_winds_flying_grant;

@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -259,5 +259,50 @@ describe("DraftLandingPage Commander Draft entry", () => {
 
     // Sibling guard: the label map did not become Commander-specific.
     expect(screen.getByText("Premier Pod")).toBeInTheDocument();
+  });
+
+  describe("the hosted pod card's pick count", () => {
+    // Every assertion reads the hosted pod's resume card itself, not the page
+    // around it.
+    const hostedPodCard = () => within(screen.getByRole("button", { name: /Commander Pod/ }));
+
+    it.each(["drafting", "review"] as const)("shows a %s pod's pick count under the drafting label", (phase) => {
+      mocks.loadActiveDraftPod.mockReturnValue(podMeta({ phase, pickCount: 3 }));
+      renderPage();
+
+      const podCard = hostedPodCard();
+      // Reach guard: the card rendered, under the drafting label.
+      expect(podCard.getByText("Drafting")).toBeInTheDocument();
+      // REVERT-FAILING for `review`: the label read as drafting while the count
+      // was gated on the `drafting` phase alone, so a Review hid it.
+      expect(podCard.getByText("3 cards picked")).toBeInTheDocument();
+    });
+
+    it.each([
+      ["lobby", "Lobby"],
+      ["deckbuilding", "Deck Building"],
+      ["pairing", "Pairing"],
+      ["matchInProgress", "Match In Progress"],
+      ["complete", "Complete"],
+    ] as const)("shows no pick count for a %s pod", (phase, label) => {
+      mocks.loadActiveDraftPod.mockReturnValue(podMeta({ phase, pickCount: 3 }));
+      renderPage();
+
+      const podCard = hostedPodCard();
+      // Reach guard: the card rendered, under this phase's own label.
+      expect(podCard.getByText(label)).toBeInTheDocument();
+      // A nonzero count is saved, so its absence is the presentation's answer.
+      expect(podCard.queryByText("3 cards picked")).toBeNull();
+    });
+
+    it("shows no pick count for a Review pod with no picks yet", () => {
+      mocks.loadActiveDraftPod.mockReturnValue(podMeta({ phase: "review", pickCount: 0 }));
+      renderPage();
+
+      const podCard = hostedPodCard();
+      // Reach guard: the card rendered, under the drafting label.
+      expect(podCard.getByText("Drafting")).toBeInTheDocument();
+      expect(podCard.queryByText(/cards? picked/)).toBeNull();
+    });
   });
 });

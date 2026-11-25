@@ -7836,6 +7836,7 @@ impl ResolutionStateWire {
                 }
                 normalize_legacy_completed_resolution_carrier(&mut legacy);
                 crate::types::game_state::normalize_resolution_cast_offer_allocator(&mut legacy)?;
+                crate::types::game_state::normalize_damage_delivery_owners(&mut legacy)?;
                 let published = legacy.pending_replacement.is_some()
                     || !matches!(legacy.waiting_for, WaitingFor::Priority { .. });
                 legacy
@@ -7906,6 +7907,7 @@ impl ResolutionStateWire {
                 crate::types::game_state::normalize_resolution_cast_offer_allocator(
                     &mut projected,
                 )?;
+                crate::types::game_state::normalize_damage_delivery_owners(&mut projected)?;
                 let canonical = canonicalize_legacy_resolution_state(&projected)?;
                 if canonical != frames {
                     return Err(
@@ -8015,6 +8017,7 @@ fn migrate_legacy_counter_removal_replacement_pause(state: &mut GameState) {
                 | ProposedEvent::MoveCounter { .. }
                 | ProposedEvent::CreateToken { .. }
                 | ProposedEvent::TokenEntry { .. }
+                | ProposedEvent::OutsideGameCardEntry { .. }
                 | ProposedEvent::Discard { .. }
                 | ProposedEvent::Tap { .. }
                 | ProposedEvent::Untap { .. }
@@ -13257,6 +13260,7 @@ mod tests {
             convoked_creatures: Vec::new(),
         };
         spell.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Destroy {
                 object_id: bear,

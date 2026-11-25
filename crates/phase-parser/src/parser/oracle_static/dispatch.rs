@@ -1373,6 +1373,17 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    // CR 406.2 + CR 122.1 + CR 611.3a: Counter-linked exile-play permission —
+    // "[During your turn, ]you may play|cast <filter> with <counter> counters
+    // on them from exile" (Tinybones, Bauble Burglar). Lowers to
+    // `ExileCastPermission { pool: CounterLinked }`. Runs after the
+    // once-per-turn provenance-gated collection arm above (Evelyn keeps its
+    // marker: this constructor declines that line's prefix regardless), and
+    // after the source-anchored persistent arm (disjoint anchors).
+    if let Some(result) = try_parse_counter_linked_exile_play_permission(&text, &lower) {
+        return Some(result);
+    }
+
     // CR 118.9 + CR 601.2b: "[Once during each of your turns, ]you may cast
     // [filter] by paying life equal to its mana value rather than paying its
     // mana cost." Demon of Fate's Design class. Must precede the free-cast

@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import type { DraftCardInstance } from "../../../adapter/draft-adapter";
 import type { PackCompatibilityActivation, PackDragController, PackDropSource } from "../PackDisplay";
 import type {
+  DraftInteractionGenerationCause,
   DraftPickDestination,
   DraftPickOutcome,
   DraftPickPlacementHint,
@@ -17,6 +18,7 @@ const MOVE_THRESHOLD_SQUARED = 100;
 
 export interface DraftPickInteractionSnapshot {
   readonly interactionGeneration: number;
+  readonly interactionGenerationCause: DraftInteractionGenerationCause;
   readonly pickInteractionLocked: boolean;
   readonly pendingPickIntent: PendingDraftPickIntent | null;
 }
@@ -208,7 +210,7 @@ function placementHint(target: TargetResolution): DraftPickPlacementHint {
 function expectedIntent(source: PackDropSource, target: TargetResolution): PendingDraftPickIntent {
   const hint = placementHint(target);
   if (source.kind === "draft-effect") {
-    return { kind: "draft-effect", instanceIds: source.instanceIds as readonly [string, string], destination: target.zone, placementHint: hint };
+    return { kind: "draft-effect", instanceIds: source.instanceIds, destination: target.zone, placementHint: hint };
   }
   return { kind: "pick", instanceIds: source.instanceIds as readonly [string], destination: target.zone, placementHint: hint };
 }
@@ -495,6 +497,25 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
 
     const settlement = settlementRef.current;
     if (settlement === null || settlement.terminal) return;
+    // The observation that releases this drop's own lock ends the drop when it
+    // keeps the drop's generation, or when the store says its new generation is
+    // the prompt an accepted selection installed in the same update. Any other
+    // new generation is a replacement, which conflicts below. The dispatch's
+    // outcome decides how an own unlock settles.
+    if (
+      settlement.admission.kind === "owned"
+      && !observation.pickInteractionLocked
+      && observation.pendingPickIntent === null
+      && observation.order > settlement.admission.lockTrueOrder
+      && (
+        observation.interactionGeneration === settlement.generation
+        || observation.interactionGenerationCause === "accepted-selection"
+      )
+    ) {
+      settlement.unlocked = true;
+      finishSettlement();
+      return;
+    }
     if (observation.interactionGeneration !== settlement.generation) {
       conflictSettlement();
       return;

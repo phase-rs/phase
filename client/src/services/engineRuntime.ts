@@ -1,3 +1,4 @@
+import type { CommanderCandidatesRequest, CommanderDeckComposition, CommanderInferenceRow } from "../adapter/engine-queries";
 import type {
   DeckCopyLimit,
   FormatConfig,
@@ -150,12 +151,6 @@ export async function classifyDeck(cardNames: string[]): Promise<DeckProfileResu
   return (await engine().query("classifyDeck", cardNames)) as DeckProfileResult;
 }
 
-/// CR 903.3: Whether the named card can be a commander
-/// (legendary creature, legendary background, or "can be your commander").
-export async function isCardCommanderEligible(name: string): Promise<boolean> {
-  return engine().query("isCardCommanderEligible", name);
-}
-
 export async function isCardCommanderEligibleForFormat(
   name: string,
   format: GameFormat,
@@ -213,6 +208,24 @@ export async function signatureSpellSelectionPolicy(
   request: unknown,
 ): Promise<SignatureSpellSelectionPolicy> {
   return (await engine().query("signatureSpellSelectionPolicy", request)) as SignatureSpellSelectionPolicy;
+}
+
+export type { CommanderCandidatesRequest, CommanderDeckComposition } from "../adapter/engine-queries";
+
+/** Returns the engine-approved commander candidates in deck order. */
+export async function commanderCandidates(
+  request: CommanderCandidatesRequest,
+  composition: CommanderDeckComposition,
+): Promise<string[]> {
+  return (await engine().query("commanderCandidates", request, composition)) as string[];
+}
+
+/** Asks the engine to infer a commander from the unmarked main deck. */
+export async function inferCommander(
+  main: readonly CommanderInferenceRow[],
+  ...format: [selectedFormat?: GameFormat]
+): Promise<string | null> {
+  return engine().query("inferCommander", main, ...format);
 }
 
 /** Returns the engine-approved Commander-family companion candidates. */

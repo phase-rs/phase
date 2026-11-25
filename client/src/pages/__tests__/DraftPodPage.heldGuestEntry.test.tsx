@@ -130,7 +130,7 @@ function presentHostRecord() {
     meta: hostMeta,
     capture: { id: hostMeta.id, roomCode: hostMeta.roomCode, updatedAt: hostMeta.updatedAt },
   });
-  persist.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: hostSession, raw: hostSession });
+  persist.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: hostSession });
 }
 
 async function arrive(path: string) {

@@ -14,6 +14,8 @@ const wasm = vi.hoisted(() => ({
   resume_multiplayer_host_state: vi.fn(),
   load_card_database: vi.fn(),
   classify_deck_js: vi.fn(),
+  commanderCandidates: vi.fn(),
+  inferCommander: vi.fn(),
   deckSupplyForFormat: vi.fn(),
   submit_action: vi.fn(),
   request_takeback_js: vi.fn(),
@@ -221,11 +223,30 @@ describe("engine worker — requests", () => {
       vi.stubGlobal("fetch", vi.fn(async () => new Response("{}")));
       const classify = { type: "query", name: "classifyDeck", args: [["Forest"]] };
 
+      const request = {
+        main_deck: ["Rograkh, Son of Rohgahh", "Rograkh, Son of Rohgahh", "Isamaru, Hound of Konda"],
+        commander: ["Rograkh, Son of Rohgahh"],
+        sideboard: [],
+        selected_format: "CommanderDraft",
+        draft_set_codes: ["CMM"],
+      };
+      const candidates = { type: "query", name: "commanderCandidates", args: [request, "commanders-inside"] };
+      const name = "Isamaru, Hound of Konda";
+      const rows = [{ name, count: 1 }, { name: "Plains", count: 99 }];
+      const inference = { type: "query", name: "inferCommander", args: [rows] };
+      await send({ ...inference, id: 1015 });
+      expect(responseTo(1015)).toMatchObject({ type: "error", message: expect.stringMatching(/card database/i) });
+      expect(wasm.inferCommander).not.toHaveBeenCalled();
+      await send({ ...candidates, id: 1010 });
       await send({ ...classify, id: 1002 });
       wasm.load_card_database.mockReturnValueOnce(0);
       await send({ type: "loadCardDbFromUrl", id: 1003 });
       await send({ ...classify, id: 1004 });
 
+      await send({ ...candidates, id: 1011 });
+      expect(responseTo(1010)?.type).toBe("error");
+      expect(responseTo(1011)?.type).toBe("error");
+      expect(wasm.commanderCandidates).not.toHaveBeenCalled();
       expect(responseTo(1002)?.type).toBe("error");
       expect(responseTo(1003)).toMatchObject({ type: "error", message: expect.stringContaining("no cards loaded") });
       expect(responseTo(1004)?.type).toBe("error");
@@ -235,6 +256,39 @@ describe("engine worker — requests", () => {
       wasm.classify_deck_js.mockReturnValue({ archetype: "Ramp" });
       await send({ type: "loadCardDbFromUrl", id: 1005 });
       await send({ ...classify, id: 1006 });
+
+      const ordered = ["Rograkh, Son of Rohgahh", "Isamaru, Hound of Konda"];
+      wasm.commanderCandidates.mockReturnValueOnce(ordered).mockReturnValueOnce([])
+        .mockImplementationOnce(() => { throw new Error("invalid composition"); });
+      await send({ ...candidates, id: 1012 });
+      await send({ ...candidates, id: 1013 });
+      await send({ ...candidates, id: 1014 });
+      expect(wasm.commanderCandidates).toHaveBeenCalledTimes(3);
+      expect(wasm.commanderCandidates).toHaveBeenNthCalledWith(1, request, "commanders-inside");
+      expect(responseTo(1012)).toEqual({ type: "result", id: 1012, data: ordered });
+      expect(responseTo(1013)).toEqual({ type: "result", id: 1013, data: [] });
+      expect(responseTo(1014)).toMatchObject({ type: "error", message: "invalid composition" });
+
+      wasm.inferCommander.mockReturnValueOnce(null).mockReturnValueOnce(name)
+        .mockImplementationOnce(() => { throw new Error("invalid inference request"); });
+      await send({ ...inference, id: 1016 });
+      await send({ ...inference, id: 1017 });
+      await send({ ...inference, id: 1018 });
+      expect(wasm.inferCommander.mock.calls).toEqual([[rows], [rows], [rows]]);
+      expect(responseTo(1016)).toEqual({ type: "result", id: 1016, data: null });
+      expect(responseTo(1017)).toEqual({ type: "result", id: 1017, data: name });
+      expect(responseTo(1018)).toMatchObject({ type: "error", message: "invalid inference request" });
+
+      const pauperRows = [
+        { name: "Gollum, Silent Slinker", count: 1 },
+        { name: "Sengir Vampire", count: 1 },
+        { name: "Relentless Rats", count: 58 },
+        { name: "Swamp", count: 40 },
+      ];
+      wasm.inferCommander.mockReturnValueOnce("Sengir Vampire");
+      await send({ ...inference, id: 1019, args: [pauperRows, "PauperCommander"] });
+      expect(wasm.inferCommander).toHaveBeenNthCalledWith(4, pauperRows, "PauperCommander");
+      expect(responseTo(1019)).toEqual({ type: "result", id: 1019, data: "Sengir Vampire" });
 
       expect(responseTo(1005)).toEqual({ type: "result", id: 1005, data: 5 });
       expect(wasm.classify_deck_js).toHaveBeenCalledWith(["Forest"]);

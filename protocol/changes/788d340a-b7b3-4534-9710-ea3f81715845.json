@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "SpellCast carries the finalized mana payment and stack incarnation for cast-trigger resolution"
+}

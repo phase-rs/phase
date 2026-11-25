@@ -5272,6 +5272,7 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         &result,
         &tracks,
     );
+    crate::parser::oracle_effect::reject_unbound_life_loss_difference(&mut result);
     let mut swallow_diagnostics = Vec::new();
     super::swallow_check::check_swallowed_clauses(
         &audit_items,

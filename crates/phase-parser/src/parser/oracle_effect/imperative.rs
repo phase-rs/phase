@@ -1050,7 +1050,7 @@ fn parse_numeric_imperative_ast_with_bare_card_source(
         }
         // CR 119.3: the life amount is the shared count position.
         let slot =
-            super::parse_verb_count_slot(after_lose, ctx).filter(|slot| is_life_noun(slot.noun))?;
+            super::parse_count_slot(after_lose, ctx).filter(|slot| is_life_noun(slot.noun))?;
         return Some(NumericImperativeAst::LoseLife { amount: slot.count });
     }
 
@@ -5092,7 +5092,7 @@ fn parse_hand_reveal_target_and_card_filter(
             return (TargetFilter::Any, TargetFilter::None, cardinality);
         };
         let target = parse_hand_possessive_target(hand_phrase)
-            .map(|(_, target)| target)
+            .map(|(_, target)| resolve_scoped_hand_owner(target, ctx))
             .unwrap_or(TargetFilter::Any);
         if descriptor.trim().is_empty() {
             return (target, TargetFilter::Any, cardinality);
@@ -5120,7 +5120,7 @@ fn parse_hand_reveal_target_and_card_filter(
     };
     if let Ok((hand_phrase, _)) = tag::<_, _, OracleError<'_>>("card from ").parse(after_article) {
         let target = parse_hand_possessive_target(hand_phrase)
-            .map(|(_, target)| target)
+            .map(|(_, target)| resolve_scoped_hand_owner(target, ctx))
             .unwrap_or(TargetFilter::Any);
         return (
             target,
@@ -5140,7 +5140,7 @@ fn parse_hand_reveal_target_and_card_filter(
         );
     };
     let target = parse_hand_possessive_target(hand_phrase)
-        .map(|(_, target)| target)
+        .map(|(_, target)| resolve_scoped_hand_owner(target, ctx))
         .unwrap_or(TargetFilter::Any);
     let singular = format!("{} card", descriptor.trim());
     let (filter, rem) =
@@ -5240,6 +5240,25 @@ fn parse_hand_possessive_target(input: &str) -> nom::IResult<&str, TargetFilter,
         ),
     ))
     .parse(input)
+}
+
+/// CR 608.2c + CR 109.5: inside a player-scope iteration, the relative
+/// possessive "their hand" names the iterating player's hand. The generic
+/// hand-owner parser uses `TriggeringPlayer` for that anaphor because it also
+/// serves event-triggered clauses; a scoped clause has a nearer, explicit
+/// player binding and must resolve it as the scoped controller instead.
+fn resolve_scoped_hand_owner(target: TargetFilter, ctx: &ParseContext) -> TargetFilter {
+    if matches!(
+        (&target, &ctx.relative_player_scope),
+        (
+            TargetFilter::TriggeringPlayer,
+            Some(ControllerRef::ScopedPlayer)
+        )
+    ) {
+        TargetFilter::Controller
+    } else {
+        target
+    }
 }
 
 /// CR 122.1 + CR 115.1: "[a|one|any] counter on <target>" — designate the object

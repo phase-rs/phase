@@ -141,6 +141,11 @@ export function clear_game_state(): void;
 export function clear_replay_playback(): void;
 
 /**
+ * Returns available commander candidates in deck order.
+ */
+export function commanderCandidates(request: any, composition: any): any;
+
+/**
  * CR 702.124: Of `candidates`, which can legally pair with `first_commander`
  * as a co-commander? Applies the full partner family (generic Partner, Partner
  * with [Name], Friends Forever, Character Select, Doctor's Companion, Choose a
@@ -477,6 +482,11 @@ export function get_viewer_transition_snapshot_js(player_id: number, events: any
 export function has_replay_recording(): boolean;
 
 /**
+ * Infers a commander from counted main-deck rows.
+ */
+export function inferCommander(main: any, selected_format?: string | null): any;
+
+/**
  * Initialize panic hook for better error messages in WASM.
  * Called automatically on first use — safe to call multiple times.
  *
@@ -490,11 +500,11 @@ export function init_panic_hook(): void;
 
 /**
  * Initialize the match of an ACCEPTED draft (CR 100.2b): the only entry that
- * confers a draft session's minimum deck size on a Limited game. The generic
+ * confers a draft session's minimum deck size on a Limited or Commander Draft game. The generic
  * initializers take no minimum at all, so an ordinary launch cannot grant
  * itself the session's deck-size authority; the declared format config must
  * still validate as an ordinary game, and `FormatConfig::
- * with_draft_session_minimum` admits Limited only.
+ * with_draft_session_minimum` admits Limited and Commander Draft only.
  */
 export function initialize_draft_match_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count: number | null | undefined, first_player: number | null | undefined, session_min_deck_size: number): any;
 
@@ -509,7 +519,8 @@ export function initialize_draft_match_host_game(deck_data: any, seed: number | 
  * Initialize a new game for local (single-player / AI) play.
  * Accepts deck_data as a DeckList (name-only) or null/undefined for empty libraries.
  * format_config_js: optional FormatConfig JSON — defaults to Standard if null/undefined.
- * match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined.
+ * match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined; an
+ * undecodable one is refused with `{error, reasons}`.
  * player_count: number of players — defaults to 2 if not provided.
  * first_player: 0 = human plays first (CR 103.1), 1 = opponent plays first, None = random.
  * Names are resolved against the card database loaded via load_card_database().
@@ -927,8 +938,11 @@ export interface InitOutput {
     readonly checkDeckPrintingsBounds: (a: any) => [number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
+    readonly clear_replay_playback: () => void;
+    readonly commanderCandidates: (a: any, b: any) => [number, number, number];
     readonly commanderPartnerCandidates: (a: number, b: number, c: any, d: any) => [number, number, number];
     readonly companionCandidates: (a: any) => [number, number, number];
+    readonly create_initial_state: () => any;
     readonly customFormatFromLobbyConfig: (a: number, b: number, c: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
     readonly deckSupplyForFormat: (a: any) => any;
@@ -942,6 +956,8 @@ export interface InitOutput {
     readonly formatConfigForCustomRules: (a: any) => [number, number, number];
     readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number];
     readonly getBracketDifficultyTable: () => [number, number, number];
+    readonly getChallengeDeckRegistry: () => any;
+    readonly getFormatRegistry: () => any;
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
     readonly get_ai_action_proposal_from_scores_with_diagnostics: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
@@ -953,10 +969,15 @@ export interface InitOutput {
     readonly get_card_parse_details: (a: number, b: number) => any;
     readonly get_card_rulings: (a: number, b: number) => any;
     readonly get_filtered_game_state: (a: number) => any;
+    readonly get_game_state: () => any;
     readonly get_legal_actions_for_viewer_js: (a: number) => any;
+    readonly get_legal_actions_js: () => any;
+    readonly get_stack_pressure: () => any;
     readonly get_viewer_snapshot_js: (a: number) => any;
     readonly get_viewer_transition_snapshot_js: (a: number, b: any) => any;
     readonly has_replay_recording: () => number;
+    readonly inferCommander: (a: any, b: number, c: number) => [number, number, number];
+    readonly init_panic_hook: () => void;
     readonly initialize_draft_match_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number, h: number) => any;
     readonly initialize_draft_match_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number, h: number) => any;
     readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
@@ -967,6 +988,8 @@ export interface InitOutput {
     readonly is_multiplayer_mode: () => number;
     readonly legal_targets_for_castable_js: (a: number) => any;
     readonly legal_targets_for_castables_js: (a: any) => any;
+    readonly list_token_presets_js: () => any;
+    readonly llmProviderCatalog: () => any;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly load_combo_table: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
@@ -977,6 +1000,8 @@ export interface InitOutput {
     readonly preview_interaction_js: (a: number, b: any) => any;
     readonly preview_mana_payment_js: (a: number, b: any) => any;
     readonly project_seat_view: (a: number, b: number) => [number, number, number];
+    readonly replay_header_js: () => any;
+    readonly replay_length_js: () => number;
     readonly replay_seek_js: (a: number) => [number, number, number];
     readonly request_takeback_js: (a: number, b: number, c: number) => [number, number, number];
     readonly respond_takeback_js: (a: number, b: number, c: number, d: number) => [number, number, number];
@@ -1004,18 +1029,6 @@ export interface InitOutput {
     readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
     readonly validateLlmProbeResponse: (a: number, b: number, c: number, d: number, e: number) => any;
-    readonly get_game_state: () => any;
-    readonly get_legal_actions_js: () => any;
-    readonly get_stack_pressure: () => any;
-    readonly init_panic_hook: () => void;
-    readonly replay_header_js: () => any;
-    readonly list_token_presets_js: () => any;
-    readonly llmProviderCatalog: () => any;
-    readonly create_initial_state: () => any;
-    readonly getChallengeDeckRegistry: () => any;
-    readonly getFormatRegistry: () => any;
-    readonly clear_replay_playback: () => void;
-    readonly replay_length_js: () => number;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

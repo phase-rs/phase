@@ -4058,14 +4058,17 @@ fn resolve_event_scoped_ref(
                     metric,
                 },
         } => {
+            if *metric == CastManaSpentMetric::Total && matches!(event, GameEvent::SpellCast { .. })
+            {
+                // The ordinary ref resolver reads the explicit detection
+                // override too, including inside composed quantities.
+                return None;
+            }
             let id = crate::game::targeting::extract_source_from_event(event)?;
-            // CR 106.3 + CR 201.5: the payment record is the spell's, but a source
-            // filter is relative to the ability that reads it. "~" names the
-            // listener, never the spell.
+            // The source filter belongs to the listener, while the payment
+            // record belongs to the triggering spell.
             let filter_source =
                 source_context.map_or(id, |source| source.identity.reference.object_id);
-            // No latch routing: the read subject is the triggering SPELL from
-            // the event, never the listener's own latched source.
             resolve_mana_spent_to_cast_metric(
                 state,
                 id,
@@ -4076,6 +4079,12 @@ fn resolve_event_scoped_ref(
         }
         QuantityExpr::Ref {
             qty:
+                QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::EventSource,
+                },
+        } => spell_cast_mana_value_for_event(state, event),
+        QuantityExpr::Ref {
+            qty:
                 QuantityRef::ManaSpentToCast {
                     scope: CastManaObjectScope::AbilityTarget,
                     metric: _,
@@ -4083,6 +4092,76 @@ fn resolve_event_scoped_ref(
         } => None,
         _ => None,
     }
+}
+
+/// CR 601.2h + CR 400.7: The total payment belongs to this cast occurrence.
+/// Legacy events use the pinned live or departed spell's stamp when available.
+fn total_mana_spent_for_cast_event(state: &GameState, event: &GameEvent) -> Option<i32> {
+    let GameEvent::SpellCast {
+        cast_mana_spent,
+        object_id,
+        controller,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if let Some(amount) = cast_mana_spent {
+        return Some(u32_to_i32_saturating(*amount));
+    }
+
+    let pinned =
+        crate::game::targeting::triggering_spell_identity_for_event(state, event).is_some();
+    if !pinned {
+        // Without an incarnation, a departed candidate or a second cast makes
+        // the live object ambiguous. Require corroborating cast history.
+        let mut records =
+            state
+                .spells_cast_this_turn_by_player
+                .iter()
+                .flat_map(|(player, records)| {
+                    records.iter().filter_map(move |record| {
+                        (record.spell_object_id == Some(*object_id)).then_some(player)
+                    })
+                });
+        if records.next() != Some(controller)
+            || records.next().is_some()
+            || state
+                .departed_stack_spells
+                .get(object_id)
+                .is_some_and(|records| !records.is_empty())
+        {
+            return None;
+        }
+    }
+
+    let object = match crate::game::targeting::triggering_spell_for_event(state, event)? {
+        TriggeringSpell::OnStack(entry) => state.objects.get(&entry.id)?,
+        TriggeringSpell::Departed(record) => &record.object,
+        TriggeringSpell::Gone => return None,
+    };
+    (pinned || object.cast_controller.unwrap_or(object.controller) == *controller)
+        .then(|| u32_to_i32_saturating(object.mana_spent_to_cast_amount))
+}
+
+pub(crate) fn trigger_quantity_payment_is_known(
+    state: &GameState,
+    expr: &QuantityExpr,
+    event: Option<&GameEvent>,
+) -> bool {
+    let Some(event @ GameEvent::SpellCast { .. }) = event.or(state.current_trigger_event.as_ref())
+    else {
+        return true;
+    };
+    !expr.any_ref(&mut |qty| {
+        matches!(
+            qty,
+            QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::TriggeringSpell,
+                metric: CastManaSpentMetric::Total,
+            },
+        )
+    }) || total_mana_spent_for_cast_event(state, event).is_some()
 }
 
 pub(crate) fn resolve_mana_spent_to_cast_metric(
@@ -4416,31 +4495,21 @@ pub(crate) fn resolve_quantity_scoped(
     scope_player: PlayerId,
     granting_object: Option<ObjectIncarnationRef>,
 ) -> i32 {
-    resolve_quantity_scoped_in(state, expr, source_id, scope_player, &[], granting_object)
+    resolve_quantity_scoped_in(
+        state,
+        expr,
+        source_id,
+        scope_player,
+        &[],
+        granting_object,
+        None,
+    )
 }
 
-/// Resolve a per-player `DamageEachPlayer` quantity that also references the
-/// resolving ability's object target(s) — e.g. Lady Loki, Agent of Chaos:
-/// "deals damage to each opponent equal to the difference between that spell's
-/// mana value and that nonland card's mana value", where "that nonland card"
-/// (`ObjectManaValue { scope: Target }`) is the exile-until hit injected into
-/// `ability.targets`.
-///
-/// This is the authoritative scoped resolver; [`resolve_quantity_scoped`] is the
-/// no-target wrapper that delegates here with an empty `targets` slice. It binds
-/// `scope_player` for `ControllerRef::ScopedPlayer` (per-recipient scope) and
-/// passes `targets` so the `ObjectManaValue { scope: Target }` leaf (and any
-/// other `Target`-scoped ref nested inside a `Difference`/`Sum`) reads the
-/// injected hit instead of resolving to 0.
-///
-/// CR 120.3: per-player damage scope. CR 202.3e: mana value of an object off the
-/// stack (X = 0). CR 608.2c: object referents follow the instruction order.
-///
-/// `ability` is intentionally kept `None` in the `resolve_ref` call: the
-/// `ObjectScope::Target` arm reads ONLY `targets`, never `ability`, and passing
-/// `Some(ability)` would take `resolve_ref`'s `Some(_)` branch, which never
-/// assigns `scoped_iteration_player` — silently regressing every
-/// `ControllerRef::ScopedPlayer`-relative `DamageEachPlayer` (Acidic Soil et al.).
+/// Resolve a per-player quantity with an explicit target slice and no
+/// resolving ability, binding `scope_player` for `ControllerRef::ScopedPlayer`
+/// (CR 120.3: per-player damage scope) and passing `targets` so a
+/// `Target`-scoped leaf nested in a `Difference`/`Sum` reads its object.
 pub(crate) fn resolve_quantity_scoped_with_targets(
     state: &GameState,
     expr: &QuantityExpr,
@@ -4448,7 +4517,28 @@ pub(crate) fn resolve_quantity_scoped_with_targets(
     scope_player: PlayerId,
     targets: &[TargetRef],
 ) -> i32 {
-    resolve_quantity_scoped_in(state, expr, source_id, scope_player, targets, None)
+    resolve_quantity_scoped_in(state, expr, source_id, scope_player, targets, None, None)
+}
+
+/// Resolve a per-player quantity for a resolving ability: its original
+/// controller ("you", CR 109.5), targets, chosen X and chain bindings.
+/// CR 400.7j lets a later instruction find a moved card, while a read about
+/// the spell keeps its stack value or last known information (CR 202.3e + CR 608.2h).
+pub(crate) fn resolve_quantity_scoped_for_ability(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+    scope_player: PlayerId,
+) -> i32 {
+    resolve_quantity_scoped_in(
+        state,
+        expr,
+        ability.source_id,
+        scope_player,
+        &ability.targets,
+        None,
+        Some(ability),
+    )
 }
 
 fn resolve_quantity_scoped_in(
@@ -4458,14 +4548,19 @@ fn resolve_quantity_scoped_in(
     scope_player: PlayerId,
     targets: &[TargetRef],
     granting_object: Option<ObjectIncarnationRef>,
+    ability: Option<&ResolvedAbility>,
 ) -> i32 {
     // CR 109.5: "you"/"your" in the quantity remain bound to the ability's
     // controller, not to the current DamageEachPlayer recipient.
-    let ability_controller = state
-        .objects
-        .get(&source_id)
-        .map(|obj| obj.controller)
-        .unwrap_or(scope_player);
+    let ability_controller = ability.map_or_else(
+        || {
+            state
+                .objects
+                .get(&source_id)
+                .map_or(scope_player, |obj| obj.controller)
+        },
+        |ability| ability.original_controller.unwrap_or(ability.controller),
+    );
 
     match expr {
         QuantityExpr::Fixed { value } => *value,
@@ -4476,11 +4571,11 @@ fn resolve_quantity_scoped_in(
             QuantityContext {
                 scoped_player: Some(scope_player),
                 granting_object,
-                ..QuantityContext::new(source_id)
+                ..ability.map_or_else(|| QuantityContext::new(source_id), ability_quantity_context)
             },
             targets,
-            None,
-            None,
+            ability.and_then(|ability| ability.chosen_x),
+            ability,
             None,
         ),
         // Recurse into SELF so `targets` reach a `Target`-scoped leaf nested
@@ -4493,6 +4588,7 @@ fn resolve_quantity_scoped_in(
                 scope_player,
                 targets,
                 granting_object,
+                ability,
             )
         }),
     }
@@ -5125,17 +5221,15 @@ fn resolve_ref(
             a,
             a.original_controller.unwrap_or(a.controller),
         ),
-        None => {
-            let mut fc = trigger_source.as_ref().map_or_else(
+        None => trigger_source
+            .as_ref()
+            .map_or_else(
                 || FilterContext::from_source_with_controller(source_id, controller),
                 |source| FilterContext::from_trigger_source_with_controller(source, controller),
-            );
-            // CR 120.3: DamageEachPlayer binds ControllerRef::ScopedPlayer to
-            // the current recipient while ControllerRef::You stays on `controller`.
-            fc.scoped_iteration_player = ctx.scoped_player;
-            fc.with_granting_object(ctx.granting_object)
-        }
+            )
+            .with_granting_object(ctx.granting_object),
     };
+    filter_ctx.scoped_iteration_player = ctx.scoped_player;
     filter_ctx.recipient_id = ctx.recipient;
     filter_ctx.stack_trigger_context = ctx.stack_trigger_context;
     filter_ctx.ability_targets = ability_targets;
@@ -5715,6 +5809,7 @@ fn resolve_ref(
                     let mut scoped_ctx =
                         FilterContext::from_ability_with_controller(ability, scoped);
                     scoped_ctx.recipient_id = ctx.recipient;
+                    scoped_ctx.scoped_iteration_player = ctx.scoped_player;
                     scoped_ctx
                 })
             });
@@ -6226,12 +6321,26 @@ fn resolve_ref(
         // `effects::publish_tracked_set`. Deliberately not routed through
         // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
         // under mode scoping not skipping is the correct semantics here.
-        QuantityRef::TrackedSetSize => state
-            .tracked_object_sets
-            .iter()
-            .max_by_key(|(id, _)| id.0)
-            .map(|(_, ids)| usize_to_i32_saturating(ids.len()))
-            .unwrap_or(0),
+        QuantityRef::TrackedSetSize => {
+            // CR 608.2c + CR 109.5: a player-scoped reveal fan-out publishes
+            // one clause-wide tracked set, but each seat's later continuation
+            // reads only the cards that seat revealed. The ledger is transient
+            // and populated only by RevealHand's AnyNumber choice path; all
+            // other tracked-set consumers retain the ordinary latest-set read.
+            if let Some(player) = ctx.scoped_player {
+                if let Some((generation, ids)) = state.scoped_reveal_sets.get(&player) {
+                    if *generation == state.tracked_set_publication_generation {
+                        return usize_to_i32_saturating(ids.len());
+                    }
+                }
+            }
+            state
+                .tracked_object_sets
+                .iter()
+                .max_by_key(|(id, _)| id.0)
+                .map(|(_, ids)| usize_to_i32_saturating(ids.len()))
+                .unwrap_or(0)
+        }
         // CR 608.2c + CR 400.7: Count only the members of the most recent tracked
         // set that also satisfy the inner filter. Used for "for each nontoken
         // creature you controlled that was destroyed this way" — the tracked set
@@ -6254,10 +6363,35 @@ fn resolve_ref(
             if crate::types::ability::member_filter_has_unsupported_selected_ref(filter) {
                 return 0;
             }
-            let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
-            else {
-                return 0;
+            let scoped_ids = if caused_by.is_none() && destination.is_none() {
+                ctx.scoped_player.and_then(|player| {
+                    state
+                        .scoped_reveal_sets
+                        .get(&player)
+                        .filter(|(generation, _)| {
+                            *generation == state.tracked_set_publication_generation
+                        })
+                        .map(|(_, ids)| ids.as_slice())
+                })
+            } else {
+                None
             };
+            let (set_id, ids): (crate::types::identifiers::TrackedSetId, &[ObjectId]) =
+                if let Some(ids) = scoped_ids {
+                    let Some((set_id, _)) =
+                        state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+                    else {
+                        return 0;
+                    };
+                    (*set_id, ids)
+                } else {
+                    let Some((set_id, ids)) =
+                        state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+                    else {
+                        return 0;
+                    };
+                    (*set_id, ids.as_slice())
+                };
             let count = ids
                 .iter()
                 .filter(|&&oid| {
@@ -6270,7 +6404,7 @@ fn resolve_ref(
                         None => true,
                         Some(cause) => state
                             .tracked_set_member_causes
-                            .get(set_id)
+                            .get(&set_id)
                             .and_then(|causes| causes.get(&oid))
                             .is_some_and(|member_cause| member_cause == cause),
                     };
@@ -6294,7 +6428,7 @@ fn resolve_ref(
                         )
                     };
                     let matches_filter =
-                        match tracked_member_read_authority(state, Some(*set_id), oid) {
+                        match tracked_member_read_authority(state, Some(set_id), oid) {
                             TrackedMemberRead::Snapshot(lki) => read_snapshot(oid, lki),
                             TrackedMemberRead::Live => read_live(oid),
                             TrackedMemberRead::Legacy
@@ -6381,6 +6515,22 @@ fn resolve_ref(
         // queries do not depend on the producing permanent still existing or
         // retaining the same type.
         QuantityRef::ManaSpentToCast { scope, metric } => {
+            if *scope == CastManaObjectScope::TriggeringSpell
+                && *metric == CastManaSpentMetric::Total
+            {
+                let cast_total = DETECTION_TRIGGER_EVENT.with(|slot| {
+                    let detection = slot.borrow();
+                    match detection.as_ref().or(state.current_trigger_event.as_ref()) {
+                        Some(event @ GameEvent::SpellCast { .. }) => {
+                            Some(total_mana_spent_for_cast_event(state, event).unwrap_or_default())
+                        }
+                        _ => None,
+                    }
+                });
+                if let Some(total) = cast_total {
+                    return total;
+                }
+            }
             let cast_object = match scope {
                 CastManaObjectScope::SelfObject => Some(ctx.self_object()),
                 CastManaObjectScope::TriggeringSpell => state
@@ -7302,7 +7452,12 @@ fn resolve_ref(
                         Some(ControllerRef::You) => snap.controller == controller,
                         Some(ControllerRef::Opponent) => snap.controller != controller,
                         Some(ControllerRef::ScopedPlayer) => {
-                            snap.controller == scoped_player_or_controller(ability, controller)
+                            snap.controller
+                                == scoped_player_or_controller(
+                                    ctx.scoped_player,
+                                    ability,
+                                    controller,
+                                )
                         }
                         // CR 109.4: TargetOpponent reads identically to TargetPlayer.
                         Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => {
@@ -7383,11 +7538,12 @@ fn resolve_ref(
 }
 
 fn scoped_player_or_controller(
+    iteration_player: Option<PlayerId>,
     ability: Option<&ResolvedAbility>,
     controller: PlayerId,
 ) -> PlayerId {
-    ability
-        .and_then(|ability| ability.scoped_player)
+    iteration_player
+        .or_else(|| ability.and_then(|ability| ability.scoped_player))
         .unwrap_or(controller)
 }
 
@@ -7402,7 +7558,9 @@ fn damage_source_controller_matches(
     match expected {
         ControllerRef::You => actual == controller,
         ControllerRef::Opponent => actual != controller,
-        ControllerRef::ScopedPlayer => actual == scoped_player_or_controller(ability, controller),
+        ControllerRef::ScopedPlayer => {
+            actual == scoped_player_or_controller(ctx.scoped_player, ability, controller)
+        }
         // CR 109.4: TargetOpponent reads identically to TargetPlayer.
         ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => ability
             .and_then(|ability| {
@@ -9490,7 +9648,7 @@ fn spell_cast_mana_value_for_event(state: &GameState, event: &GameEvent) -> Opti
     // on the stack (X still counts, and reflects any change made on the stack,
     // CR 107.3c's note). The pinned lookup keeps a same-id recast from answering
     // for an earlier cast (CR 400.7).
-    match crate::game::targeting::triggering_spell(state) {
+    match crate::game::targeting::triggering_spell_for_event(state, event) {
         Some(TriggeringSpell::OnStack(entry)) if entry.id == *object_id => {
             if let Some(obj) = state.objects.get(object_id) {
                 return Some(u32_to_i32_saturating(obj.spell_mana_value()));
@@ -9621,6 +9779,13 @@ fn resolve_object_mana_value(
             // read the live object first, including a spell on the stack.
             if let Some(mana_value) =
                 event_source_mana_value_override(state, ctx.stack_trigger_context)
+            {
+                return mana_value;
+            }
+            if let Some(mana_value) =
+                object_lookback_event(state, ability, ctx.stack_trigger_context)
+                    .as_ref()
+                    .and_then(|event| spell_cast_mana_value_for_event(state, event))
             {
                 return mana_value;
             }
@@ -11703,6 +11868,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         let count_for = |source: ObjectId| {
             let context = crate::game::triggers::trigger_source_context_for_latch(
@@ -18073,6 +18240,43 @@ mod tests {
         assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 5);
     }
 
+    #[test]
+    fn scoped_quantity_preserves_ability_and_overrides_inherited_player() {
+        let (state, source) = asymmetric_creature_board(3, 5);
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        ability.original_controller = Some(PlayerId(0));
+        ability.scoped_player = Some(PlayerId(0));
+        ability.chosen_x = Some(4);
+
+        let count = |controller| QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(controller)),
+            },
+        };
+        let expr = QuantityExpr::Sum {
+            exprs: vec![
+                count(ControllerRef::You),
+                count(ControllerRef::ScopedPlayer),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name: "X".into() },
+                },
+            ],
+        };
+
+        assert_eq!(
+            resolve_quantity_scoped_for_ability(&state, &expr, &ability, PlayerId(1)),
+            3 + 5 + 4,
+        );
+    }
+
     /// CR 109.4 + CR 115.1: runtime-seam companion to
     /// `oracle_quantity::tests::for_each_they_control_threads_target_player`. The
     /// resolver reads a `ControllerRef::TargetPlayer` filter against the first
@@ -20554,6 +20758,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: triggering_spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let expr = QuantityExpr::Ref {
@@ -20993,6 +21199,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell_id,
             cast_mana_value: Some(6),
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         assert_eq!(
             resolve_quantity_with_targets(&state, &expr, &ability),
@@ -21005,6 +21213,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell_id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         assert_eq!(
             resolve_quantity_with_targets(&state, &expr, &ability),
@@ -21092,6 +21302,8 @@ mod tests {
                 Some(GameEvent::SpellCast {
                     object_id,
                     cast_mana_value: Some(2),
+                    cast_mana_spent: Some(2),
+                    cast_incarnation: Some(_),
                     ..
                 }) if *object_id == endless_one
             ),
@@ -21120,7 +21332,14 @@ mod tests {
             entry.ability_mut().unwrap().context.triggering_spell =
                 Some(ObjectIncarnationRef::of(endless_one, incarnation));
             state.resolving_stack_entry = Some(entry.clone());
-            state.current_trigger_event = trigger_event.clone();
+            let mut cast_event = trigger_event.clone();
+            if let Some(GameEvent::SpellCast {
+                cast_incarnation, ..
+            }) = &mut cast_event
+            {
+                *cast_incarnation = Some(incarnation);
+            }
+            state.current_trigger_event = cast_event;
             amounts
                 .iter()
                 .map(|expr| resolve_quantity_with_targets(state, expr, entry.ability().unwrap()))
@@ -21758,6 +21977,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: target,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         let event_source_expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectColorCount {

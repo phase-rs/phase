@@ -1442,6 +1442,7 @@ fn apply_action_boundary_core(
     stack_resolution_limit: Option<u32>,
     authorize_actor: bool,
 ) -> Result<RawActionApplication, EngineError> {
+    let _damage_scope = effects::DamageDeliveryScope::enter(None);
     let lifecycle = super::lifecycle::enter_action_frame();
     if let Err(error) = mana_sources::preflight_tap_land_action(state, authenticated_actor, &action)
     {
@@ -3350,14 +3351,21 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     // mana ability (CR 605.4a). Paying life down to 0 is a legal payment
     // (CR 119.4), so the 0-life check waits until that process ends and a
     // player would next receive priority. Until then that player is still in
-    // the game, so waiting on their choices is not the #962 softlock; prompts
-    // owned by a resolution keep the net. CR 117.2e + CR 121.4: one exception is
+    // the game, so waiting on their choices is not the #962 softlock.
+    // CR 117.2e + CR 121.4: one further exclusion is
     // a parked unless payment of draws: a draw from an empty library loses at the
     // next priority, after the payment's later replacement prompts.
     // CR 510.2 + CR 704.3: a parked combat damage batch is not a point where a
     // player would receive priority; its state-based actions are checked once it
     // completes.
-    if sba::has_pending_player_loss_sba(state)
+    // CR 117.2e + CR 704.4: during a live spell or ability's choice, preserve
+    // the #962 emergency only if a chooser will depart. The loss of another
+    // player must wait until the resolution finishes and priority can return.
+    // Sandbox and priority waits do not have this restriction.
+    let choosing_players = (state.resolving_stack_entry.is_some()
+        && !matches!(state.waiting_for, WaitingFor::Priority { .. }))
+    .then(|| state.waiting_for.acting_players());
+    if sba::has_pending_player_loss_sba(state, choosing_players.as_deref())
         && !state.withholds_priority()
         && !engine_payment_choices::draw_payment_is_parked(state)
         && !state.combat_damage_batch_parked()
@@ -3370,7 +3378,9 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
         // its events (CR 603.10a, CR 603.2c), so the settlement's scan from
         // `departure_start` takes only what happened after it.
         let departure_start = result.events.len();
-        match sba::check_state_based_actions_reporting_departure(state, &mut result.events) {
+        let (resume, departure_queued) =
+            sba::check_state_based_actions_reporting_departure(state, &mut result.events);
+        match resume {
             super::elimination::DepartureResume::ResolutionTail => {
                 settle_resolution_resumed_after_departure(
                     state,
@@ -3383,6 +3393,26 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
             // go on the stack before the next player has priority, as after a
             // concession.
             super::elimination::DepartureResume::Settled => {
+                if state.game_end.is_none() && departure_start < result.events.len() {
+                    // CR 603.2c + CR 117.5: the departure's snapshot already
+                    // claimed its occurrences. Add the unclaimed suffix, including
+                    // later SBA checks, before the one legal trigger placement.
+                    let first_owned = state
+                        .deferred_triggers
+                        .len()
+                        .saturating_sub(departure_queued);
+                    super::triggers::collect_departure_triggers_into_deferred(
+                        state,
+                        &result.events,
+                        departure_start,
+                        None,
+                    );
+                    let origin = engine_priority::parked_batch_origin(&state.waiting_for);
+                    if origin == super::triggers::DeferredTriggerBatchOrigin::StateBasedActionChoice
+                    {
+                        super::triggers::stamp_deferred_triggers_from(state, first_owned, origin);
+                    }
+                }
                 super::elimination::drain_or_clear_deferred_triggers_after_elimination(
                     state,
                     super::elimination::DepartureTriggers::ScannedByCaller,
@@ -9388,6 +9418,12 @@ fn resume_pending_continuation_pass(
         // Inert unless a `Token` resume with a live liminal entry is parked.
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             super::life_safety::observe_boundary_carrier(state);
+            if state.outside_game_entry_resume_is_due() {
+                super::engine_replacement::resume_pending_outside_game_card_entry(state, events);
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    effects::drain_pending_continuation(state, events);
+                }
+            }
             if let Some(waiting_for) =
                 super::engine_replacement::resume_pending_liminal_token_entry(state, events)
             {
@@ -15899,6 +15935,40 @@ fn apply_non_priority_pass_action(
             let returned = *returned_id;
             let active_player = *player;
             let action_event_start = events.len();
+            if let Some(crate::types::game_state::PendingLiminalEntryResume::OutsideGameCard {
+                source_id,
+                player,
+                ..
+            }) = state.pending_liminal_entry_resume.as_ref()
+            {
+                if *source_id == returned && *player == active_player {
+                    let Some(
+                        crate::types::game_state::PendingLiminalEntryResume::OutsideGameCard {
+                            event,
+                            ..
+                        },
+                    ) = state.pending_liminal_entry_resume.take()
+                    else {
+                        unreachable!()
+                    };
+                    state.waiting_for = WaitingFor::Priority {
+                        player: active_player,
+                    };
+                    super::zone_pipeline::deliver_outside_game_card_entry(
+                        state,
+                        event,
+                        Some(chosen),
+                        &mut events,
+                    );
+                    resume_pending_continuation_if_priority(state, &mut events)?;
+                    triggers::collect_and_drain_entry_observer_triggers_if_settled(
+                        state,
+                        &mut events,
+                        action_event_start,
+                    );
+                    return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+                }
+            }
             let (filter, grants) = match &pending.effect {
                 crate::types::ability::Effect::ReturnAsAura {
                     enchant_filter,
@@ -17208,13 +17278,19 @@ fn apply_non_priority_pass_action(
                     state.priority_player = active;
                     match unit {
                         DistributionUnit::Damage => {
-                            effects::deal_damage::resume_resolution_division(
+                            effects::resume_damage_delivery(
                                 state,
-                                &pending_effect,
-                                &distribution,
-                                &mut events,
+                                pending_effect.context.damage_delivery_owner,
+                                |state| {
+                                    effects::deal_damage::resume_resolution_division(
+                                        state,
+                                        &pending_effect,
+                                        &distribution,
+                                        &mut events,
+                                    )
+                                },
                             )
-                            .map_err(|err| EngineError::InvalidAction(err.to_string()))?
+                            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
                         }
                         DistributionUnit::EvenSplitDamage
                         | DistributionUnit::Counters(_)
@@ -25242,6 +25318,122 @@ mod resolving_carrier_settle_tests {
     use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    // CR 810.8a: the P1 chooser departs when P0 cannot draw, but an
+    // opposing P2 chooser can still complete their printed replacement.
+    #[test]
+    fn team_chooser_departure_follows_effective_loss_membership() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::format::FormatConfig;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+
+        let p2 = PlayerId(2);
+        let p3 = PlayerId(3);
+        let db = crate::test_support::load_fixture();
+        for chooser in [P1, p2] {
+            let mut sc = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+            sc.at_phase(Phase::PreCombatMain);
+            let skeins = sc.add_real_card(P0, "Vision Skeins", Zone::Hand, &db);
+            let imp = sc.add_real_card(chooser, "Stinkweed Imp", Zone::Graveyard, &db);
+            for seat in [P1, p2, p3] {
+                for _ in 0..7 {
+                    sc.add_real_card(seat, "Island", Zone::Library, &db);
+                }
+            }
+            sc.with_mana_pool(
+                P0,
+                vec![
+                    ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+                    ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ],
+            );
+            let mut runner = sc.build();
+            assert_eq!(crate::game::players::teammates(runner.state(), P0), [P1]);
+            assert_eq!(crate::game::players::teammates(runner.state(), p2), [p3]);
+            assert!(runner.state().players[0].library.is_empty());
+            assert!(runner
+                .state()
+                .players
+                .iter()
+                .all(|seat| !seat.drew_from_empty_library));
+            drop(runner.cast(skeins).commit());
+
+            let state = runner.state_mut();
+            let mut losses = Vec::new();
+            for _ in 0..8 {
+                let WaitingFor::Priority { player } = state.waiting_for else {
+                    panic!(
+                        "unexpected wait before Vision Skeins resolves: {:?}",
+                        state.waiting_for
+                    );
+                };
+                let raw = super::apply_action_boundary_core(
+                    state,
+                    player,
+                    player,
+                    GameAction::PassPriority,
+                    None,
+                    true,
+                )
+                .expect("normal priority pass reaches the production action boundary");
+                let parked = match &raw.result.waiting_for {
+                    WaitingFor::Priority { .. } => false,
+                    WaitingFor::ReplacementChoice {
+                        player, candidates, ..
+                    } => {
+                        assert_eq!(*player, chooser);
+                        assert_eq!(candidates.len(), 2);
+                        assert!(candidates
+                            .iter()
+                            .all(|candidate| candidate.source_id == imp));
+                        assert!(state.players[0].drew_from_empty_library);
+                        assert!(state
+                            .players
+                            .iter()
+                            .skip(1)
+                            .all(|seat| !seat.drew_from_empty_library));
+                        assert!(state.players.iter().all(|seat| !seat.is_eliminated));
+                        assert!(state.resolving_stack_entry.is_some());
+                        true
+                    }
+                    other => panic!("expected the printed Dredge replacement, got {other:?}"),
+                };
+                let final_result =
+                    super::finish_action_boundary(state, raw, super::PublicFinalizeMode::Immediate)
+                        .expect("finish the production priority boundary");
+                losses.extend(final_result.events.iter().filter_map(|event| match event {
+                    GameEvent::PlayerLost { player_id, .. } => Some(*player_id),
+                    _ => None,
+                }));
+                if parked {
+                    break;
+                }
+            }
+            if chooser == p2 {
+                assert!(losses.is_empty(), "loss waits on the opposing chooser");
+                assert!(state.players.iter().all(|seat| !seat.is_eliminated));
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == p2)
+                );
+                let answer = super::apply(state, p2, GameAction::ChooseReplacement { index: 0 })
+                    .expect("answer the opposing player's printed Dredge");
+                assert!(state.players[2].hand.contains(&imp));
+                losses.extend(answer.events.iter().filter_map(|event| match event {
+                    GameEvent::PlayerLost { player_id, .. } => Some(*player_id),
+                    _ => None,
+                }));
+            }
+            assert_eq!(losses, [P0, P1]);
+            assert!(state.players[0].is_eliminated && state.players[1].is_eliminated);
+            assert!(!state.players[2].is_eliminated && !state.players[3].is_eliminated);
+            assert!(
+                matches!(state.waiting_for, WaitingFor::GameOver { winner: Some(winner) } if [p2, p3].contains(&winner))
+            );
+        }
+    }
 
     const SOURCE: ObjectId = ObjectId(60);
 

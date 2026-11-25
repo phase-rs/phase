@@ -1020,7 +1020,9 @@ function boardChoiceConfirmLabel(
         count: choice.selection.count,
       });
     case "rangeCount":
-      if (selectedIds.length === 0 && choice.selection.min === 0) {
+      // A keep with nothing selected is a real choice (it sacrifices the
+      // rest), so it reads "Confirm (0/N)", never "Skip".
+      if (selectedIds.length === 0 && choice.selection.min === 0 && choice.intent !== "keep") {
         return t("boardChoice.skip");
       }
       if (choice.intent === "sacrifice") {

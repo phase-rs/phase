@@ -1236,35 +1236,11 @@ fn parse_difference_draw_body(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// The optional `they ` subject is the second accepted spelling; see the
-/// widening note at the call site for why the subject-led form is bounded here.
-fn parse_difference_lose_life_body(input: &str) -> OracleResult<'_, ()> {
-    all_consuming(value(
-        (),
-        (
-            opt((tag::<_, _, OracleError<'_>>("they"), space1)),
-            tag("lose life"),
-            space1,
-            parse_equal_to_the_difference,
-        ),
-    ))
-    .parse(input)
-}
-
 /// Normalize an `Unimplemented` description for the combinators above: trim, drop a
 /// trailing period, lowercase. The compares these replace were
 /// `eq_ignore_ascii_case`, so folding case here preserves that and widens nothing.
 fn difference_body_text(desc: Option<&str>) -> Option<String> {
     desc.map(|d| d.trim().trim_end_matches('.').to_ascii_lowercase())
-}
-
-/// Is this gap description the "lose life equal to the difference" body the
-/// trigger-side rewrite would bind to `ParentTarget`? Shared with the effect
-/// layer, which fails a STATED-subject clause closed before it can reach the
-/// rewrite (see `oracle_effect`'s chunk loop).
-pub(crate) fn is_difference_lose_life_gap(desc: &str) -> bool {
-    difference_body_text(Some(desc))
-        .is_some_and(|body| parse_difference_lose_life_body(&body).is_ok())
 }
 
 fn parse_attack_verb(input: &str) -> OracleResult<'_, ()> {
@@ -3352,25 +3328,6 @@ pub(crate) fn lower_trigger_ir_with_provenance(
                     target: TargetFilter::Controller,
                 };
             }
-            // Same discriminator as the draw arm above: the exact description. Dropping
-            // the name guard WIDENS this arm by one text — a fallback node carrying
-            // "they lose life equal to the difference" used to be named `they` and was
-            // refused by the name compare alone. That subject-led text is already owned
-            // earlier by the name-blind effect-layer producer, so no corpus node reaches
-            // here; the exact-text compare is what bounds the widening.
-            // Read the description again rather than reusing the draw arm's: the arm
-            // above may have replaced `execute.effect`, and after that this read is
-            // `None`, which is what makes the two arms mutually exclusive. Hoisting a
-            // single read would quietly remove that.
-            let is_difference_lose =
-                difference_body_text(execute.effect.unimplemented_description())
-                    .is_some_and(|body| parse_difference_lose_life_body(&body).is_ok());
-            if is_difference_lose {
-                *execute.effect = Effect::LoseLife {
-                    amount: count.clone(),
-                    target: Some(TargetFilter::ParentTarget),
-                };
-            }
         }
     }
 
@@ -3387,6 +3344,10 @@ pub(crate) fn lower_trigger_ir_with_provenance(
         crate::parser::oracle_effect::resolve_difference_anaphor_in_ability(
             execute,
             difference_count.as_ref(),
+        );
+        let _ = crate::types::ability_visit::effects_mut::visit_ability_def(
+            execute,
+            &mut crate::parser::oracle_effect::reject_unbound_life_loss_in_effect,
         );
     }
 
@@ -3540,10 +3501,7 @@ pub(crate) fn lower_trigger_ir_with_provenance(
     // resolve immediately, including their non-mana clauses. The mixed-chain
     // resolver cannot do that for a linked paid cast; expose the composition
     // as a gap rather than queueing a supported ordinary triggered ability.
-    if matches!(
-        def.mode,
-        TriggerMode::TapsForMana | TriggerMode::ManaAdded | TriggerMode::ManaAbilityProduced
-    ) {
+    if crate::types::triggers::trigger_mode_observes_mana_event(&def.mode) {
         if let Some(execute) = def.execute.as_deref_mut() {
             if crate::types::ability::could_be_triggered_mana_ability_body(execute) {
                 super::oracle_effect::refuse_linked_paid_cast_in_mana_ability(
