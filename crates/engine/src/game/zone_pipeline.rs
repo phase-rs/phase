@@ -329,7 +329,8 @@ pub(crate) fn finalize_outside_game_card_entry(
         let entry_event_start = events.len();
         crate::game::layers::flush_layers(state);
         if zones::record_and_emit_entry_from_no_zone(state, object_id, events).is_some() {
-            state.last_created_token_ids.push(object_id);
+            // The LastCreated slot also names conjured cards.
+            crate::game::effects::token::record_last_created_token(state, object_id);
             events.push(GameEvent::ObjectConjured { object_id, name });
             zones::settle_battlefield_entry_observations(state, &events[entry_event_start..]);
         }
