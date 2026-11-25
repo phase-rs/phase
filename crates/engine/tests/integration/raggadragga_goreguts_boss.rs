@@ -254,6 +254,40 @@ fn raggadragga_seven_mana_spell_untaps_and_pumps_target() {
     );
 }
 
+/// CR 603.4: six mana spent is one short of the "at least seven" threshold,
+/// so the spell trigger stays silent — the boundary pin from below (seven
+/// fires, six does not). Reach-guards mirror the cheap-spell negative.
+#[test]
+fn raggadragga_silent_for_six_mana_spell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, green_pool(6));
+    add_raggadragga(&mut scenario);
+    let elves = add_elves(&mut scenario);
+    let six_drop = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(ManaCost::generic(6))
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(six_drop).commit();
+    drive_quiet(&mut runner);
+
+    {
+        let state = runner.state();
+        assert!(state.stack.is_empty());
+        assert!(
+            state.battlefield.contains(&six_drop),
+            "reach-guard: the six-mana spell resolved"
+        );
+    }
+    assert_eq!(
+        effective_pt(&mut runner, elves),
+        (3, 3),
+        "reach-guard: the dork keeps exactly its anthem P/T (no pump)"
+    );
+}
+
 /// A two-mana spell resolves with no trigger prompt at all (the negative is
 /// the over-fire discriminator). Reach-guards: the spell resolved onto the
 /// battlefield and the dork keeps exactly its anthem P/T.

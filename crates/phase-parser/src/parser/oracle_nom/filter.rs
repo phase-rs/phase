@@ -190,11 +190,18 @@ pub fn parse_no_abilities(input: &str) -> OracleResult<'_, FilterProp> {
 /// target-suffix scanner (oracle_target.rs) and the search-library filter
 /// scanner (oracle_effect/search.rs); each call site supplies its own
 /// surrounding "with " grammar, so this matches the bare predicate only.
-/// Singular only: the qualifier position is singular in every attested Oracle
-/// printing ("with a mana ability"); plural "mana abilities" appears only in
-/// rulings prose (e.g. Raggadragga rulings 1 and 3).
+/// Both number forms are printed Oracle text: singular "a mana ability"
+/// (Raggadragga clause 2) and plural "mana abilities" (Power Sink: "tap all
+/// lands with mana abilities they control"). The predicate is "has ≥1 mana
+/// ability" regardless of subject number, so both lower to HasManaAbility.
+/// The two heads ("a ..." vs "mana ...") are disjoint, so alt order is
+/// immaterial.
 pub fn parse_mana_ability(input: &str) -> OracleResult<'_, FilterProp> {
-    value(FilterProp::HasManaAbility, tag("a mana ability")).parse(input)
+    alt((
+        value(FilterProp::HasManaAbility, tag("a mana ability")),
+        value(FilterProp::HasManaAbility, tag("mana abilities")),
+    ))
+    .parse(input)
 }
 
 /// Parse the inner content of a "with" clause.
@@ -1045,6 +1052,19 @@ mod tests {
     #[test]
     fn test_parse_mana_ability_failure() {
         assert!(parse_mana_ability("flying").is_err());
+    }
+
+    #[test]
+    fn test_parse_mana_ability_plural() {
+        // CR 605.1: plural "mana abilities" (Power Sink: "tap all lands with
+        // mana abilities they control") lowers to the same HasManaAbility
+        // predicate; trailing grammar is left for the call site's scanner.
+        let (rest, prop) = parse_mana_ability("mana abilities").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, "");
+        let (rest, prop) = parse_mana_ability("mana abilities they control").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, " they control");
     }
 
     #[test]

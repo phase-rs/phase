@@ -4480,12 +4480,13 @@ fn parse_type_phrase_folding_unbound<'a>(
     }
 
     // CR 605.1 + CR 113.1 + CR 113.3: "<type> with a mana ability" (Raggadragga
-    // clause 2: "a creature you control with a mana ability attacks") and
-    // "<type> with no abilities" — the two ability-category object predicates.
-    // The bare predicate combinators live in oracle_nom/filter.rs; this arm
-    // supplies the "with " lead + offset handling, mirroring
-    // parse_counter_suffix. The two predicates have disjoint heads ("a ..."
-    // vs "no ..."), so alt order is immaterial.
+    // clause 2: "a creature you control with a mana ability attacks"),
+    // "<type> with mana abilities" (Power Sink: "tap all lands with mana
+    // abilities they control"), and "<type> with no abilities" — the
+    // ability-category object predicates. The bare predicate combinators live
+    // in oracle_nom/filter.rs; this arm supplies the "with " lead + offset
+    // handling, mirroring parse_counter_suffix. The predicates have disjoint
+    // heads ("a ..."/"mana ..." vs "no ..."), so alt order is immaterial.
     {
         let after_ws = lower[pos..].trim_start();
         let ws = lower[pos..].len() - after_ws.len();
@@ -16150,6 +16151,22 @@ mod tests {
         assert!(
             !tf.properties.contains(&FilterProp::HasManaAbility),
             "keyword suffix must not gain HasManaAbility, got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
+    fn mana_ability_suffix_accepts_plural_head() {
+        // CR 605.1: plural "mana abilities" (Power Sink: "tap all lands with
+        // mana abilities they control") folds to the same HasManaAbility
+        // predicate as the singular.
+        let (f, rest) = parse_type_phrase_folding("lands with mana abilities they control");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::HasManaAbility),
+            "plural head must attach HasManaAbility, got {:?} (rest: '{rest}')",
             tf.properties
         );
     }

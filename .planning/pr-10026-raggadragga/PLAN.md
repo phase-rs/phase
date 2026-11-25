@@ -82,6 +82,12 @@ committed integration fixtures instead (record:
 - `with a mana ability` as an object qualifier in `oracle_text`: 1 card —
   Raggadragga, Goreguts Boss. (Two other raw-text hits are rulings prose, not
   Oracle text: Chandra's Regulator, Spiders-Man.)
+- CORRECTION (impl-review F1): the census above grepped the singular only.
+  Plural `with mana abilities` is also printed Oracle text — Power Sink
+  ("tap all lands with mana abilities they control", fixture `power sink`,
+  `confirmed_misparse: dropped_qualifier`) — and reaches the same seam via
+  TapAll → `parse_target` → folder fallback. The shared combinator accepts
+  both number forms; both lower to `HasManaAbility`.
 - Working sibling precedent through the identical seam: `with no abilities`
   → Jasmine Boreal of the Seven, Muraganda Petroglyphs, Ruxa, Patient
   Professor (same arm, same bare-predicate combinator pattern, same two
@@ -140,11 +146,12 @@ Files read for this plan (body, not grep-only): `oracle_target.rs` §§2998,
 ### Pattern Coverage
 
 Class: Oracle-text object qualifiers naming an ability category —
-`with a mana ability` (CR 605.1) and its sibling `with no abilities`
-(CR 113.1). Fixture census above; record file + generator command in
-`class-fixtures.json`. Bearing rulings: fixture rulings 1 and 3 (mana-ability
-definition, classifier-owned — drive Verification rows 1-2's choice of live
-dork fixtures over synthetic props).
+`with a mana ability` / `with mana abilities` (CR 605.1, both number forms)
+and its sibling `with no abilities` (CR 113.1). Fixture census above;
+record file + generator command in `class-fixtures.json`. Bearing rulings:
+fixture rulings 1 and 3 (mana-ability definition, classifier-owned — drive
+Verification rows 1-2's choice of live dork fixtures over synthetic
+props).
 
 ### Sizing — 1 unit
 

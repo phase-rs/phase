@@ -11060,6 +11060,52 @@ fn paid_unless_reflexive_continuation_keeps_its_condition() {
     }
 }
 
+/// CR 605.1: Power Sink's plural qualifier — "tap all lands with mana abilities
+/// they control" — reaches the shared type-phrase with-arm via TapAll and must
+/// keep HasManaAbility on the tap target instead of silently dropping it
+/// (fixture `power sink` carries `confirmed_misparse: dropped_qualifier`).
+#[test]
+fn power_sink_plural_mana_abilities_keeps_qualifier() {
+    let parsed = parse_card(
+        "Counter target spell unless its controller pays {X}. If that player doesn't, they \
+         tap all lands with mana abilities they control and lose all unspent mana.",
+        "Power Sink",
+        &[],
+        &["Instant"],
+    );
+    let tap = parsed
+        .abilities
+        .iter()
+        .flat_map(chain_defs)
+        .find(|def| {
+            matches!(
+                def.effect.as_ref(),
+                Effect::SetTapState {
+                    scope: EffectScope::All,
+                    state: TapStateChange::Tap,
+                    ..
+                }
+            )
+        })
+        .unwrap_or_else(|| panic!("Power Sink: tap-all clause: {:#?}", parsed.abilities));
+    let Effect::SetTapState { target, .. } = tap.effect.as_ref() else {
+        unreachable!("matcher above guarantees SetTapState");
+    };
+    let TargetFilter::Typed(tf) = target else {
+        panic!("Power Sink: tap target must stay Typed, got {target:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Land),
+        "Power Sink: tap target must stay Land, got {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::HasManaAbility),
+        "Power Sink: tap target must keep HasManaAbility, got {:?}",
+        tf.properties
+    );
+}
+
 /// CR 118.12a + CR 608.2c: the honesty rule is class-level — an unless-outcome head
 /// ("If it deals damage to you this way,") that lowers to no condition fails closed,
 /// instead of tapping the creature every upkeep.
