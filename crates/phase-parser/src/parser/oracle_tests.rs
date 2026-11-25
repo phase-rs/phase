@@ -35258,56 +35258,65 @@ fn promise_of_loyalty_routes_to_the_effect_chain_not_a_whole_line_static() {
 }
 
 /// The routing predicate is the recognizer's own head combinator INCLUDING its
-/// supported-combination gate, so the two cards the gate refuses keep the
-/// routing they had at BASE_SHA rather than being deferred into a recognizer
-/// that will not claim them.
+/// supported-combination gate, so a card the gate refuses keeps the routing it
+/// had at BASE_SHA rather than being deferred into a recognizer that will not
+/// claim it.
 ///
-/// Covetous Elegy's "up to two" keeper cardinality has no `KeeperConstraint`
-/// range variant (CR 609.3 clamping is not the same instruction), and Divine
-/// Reckoning's tail is CR 701.8a destroy rather than CR 701.21a sacrifice.
-/// Both parse to the same single `Effect::TargetOnly` head they did at
-/// BASE_SHA — regenerate with
-/// `jq -c '.["covetous elegy"] | {ab:(.abilities|length),
-/// st:((.static_abilities//[])|length), e0:.abilities[0].effect.type}'
-/// client/public/card-data.json`.
+/// Divine Reckoning's tail is CR 701.8a destroy rather than CR 701.21a
+/// sacrifice, and `Effect::ChooseAndSacrificeRest` is sacrifice-specific down to
+/// its terminal, so the per-player keeper-and-destroy form stays declined. It
+/// parses to the same single `Effect::TargetOnly` head it did at BASE_SHA.
 ///
-/// Both Oracle strings are the FULL printed text, verbatim from
+/// The Oracle string is the FULL printed text, verbatim from
 /// `jq -r '.["divine reckoning"].oracle_text' client/public/card-data.json` —
-/// including Divine Reckoning's flashback line, which is why that row passes
-/// the MTGJSON keyword name the card-data pipeline passes at
-/// `database/synthesis.rs`'s `parse_oracle_text` call.
+/// including its flashback line, which is why the row passes the MTGJSON
+/// keyword name the card-data pipeline passes at `database/synthesis.rs`'s
+/// `parse_oracle_text` call.
 #[test]
 fn gate_refused_keeper_cards_keep_their_base_routing() {
-    for (name, oracle, keyword_names) in [
-        (
-            "Covetous Elegy",
-            "Each player chooses up to two creatures they control, then sacrifices the rest. Then you create a tapped Treasure token for each creature your opponents control.",
-            &[][..],
+    let name = "Divine Reckoning";
+    let oracle = "Each player chooses a creature they control. Destroy the rest.
+Flashback {5}{W}{W} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+    let keyword_names = &["Flashback".to_string()][..];
+    assert!(
+        !crate::parser::oracle_classifier::should_defer_spell_to_effect(&oracle.to_lowercase()),
+        "{name} must not be deferred by the keeper-dispose arm"
+    );
+    let parsed = parse_oracle_text(oracle, name, keyword_names, &["Sorcery".to_string()], &[]);
+    assert!(parsed.statics.is_empty(), "{name}: {:?}", parsed.statics);
+    assert_eq!(parsed.abilities.len(), 1, "{name}");
+    assert!(
+        matches!(
+            parsed.abilities[0].effect.as_ref(),
+            Effect::TargetOnly { .. }
         ),
-        (
-            "Divine Reckoning",
-            "Each player chooses a creature they control. Destroy the rest.\nFlashback {5}{W}{W} (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
-            &["Flashback".to_string()][..],
+        "{name} must keep its BASE_SHA head, got {:?}",
+        parsed.abilities[0].effect
+    );
+}
+
+/// CR 101.4 + CR 701.21a: Covetous Elegy's per-player "chooses up to two …
+/// then sacrifices the rest" is admitted by the keeper gate, so the routing
+/// predicate defers the spell to the effect-chain parser and the full card
+/// lowers to a keeper-and-sacrifice root rather than the base `TargetOnly`.
+#[test]
+fn covetous_elegy_is_deferred_to_the_keeper_recognizer() {
+    let oracle = "Each player chooses up to two creatures they control, then sacrifices the rest. Then you create a tapped Treasure token for each creature your opponents control.";
+    assert!(
+        crate::parser::oracle_classifier::should_defer_spell_to_effect(&oracle.to_lowercase()),
+        "Covetous Elegy must be deferred to the keeper-dispose recognizer"
+    );
+    let parsed = parse_oracle_text(oracle, "Covetous Elegy", &[], &["Sorcery".to_string()], &[]);
+    assert!(parsed.statics.is_empty(), "{:?}", parsed.statics);
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(
+        matches!(
+            parsed.abilities[0].effect.as_ref(),
+            Effect::ChooseAndSacrificeRest { .. }
         ),
-    ] {
-        assert!(
-            !crate::parser::oracle_classifier::should_defer_spell_to_effect(
-                &oracle.to_lowercase()
-            ),
-            "{name} must not be deferred by the keeper-dispose arm"
-        );
-        let parsed = parse_oracle_text(oracle, name, keyword_names, &["Sorcery".to_string()], &[]);
-        assert!(parsed.statics.is_empty(), "{name}: {:?}", parsed.statics);
-        assert_eq!(parsed.abilities.len(), 1, "{name}");
-        assert!(
-            matches!(
-                parsed.abilities[0].effect.as_ref(),
-                Effect::TargetOnly { .. }
-            ),
-            "{name} must keep its BASE_SHA head, got {:?}",
-            parsed.abilities[0].effect
-        );
-    }
+        "Covetous Elegy must resolve as a keeper-and-sacrifice chain, got {:?}",
+        parsed.abilities[0].effect
+    );
 }
 
 // --- RevealUntil pile-disposition / rest-shuffle regressions (PR #8929) ---

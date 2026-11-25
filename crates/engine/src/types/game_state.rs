@@ -25418,21 +25418,26 @@ pub enum WaitingFor {
         #[serde(default)]
         scoped_players: Vec<PlayerId>,
     },
-    /// CR 101.4 + CR 701.21a: The player protects exactly `count` of the
-    /// eligible permanents; every other in-scope permanent is sacrificed after
-    /// all scoped players have chosen. Used by the generic exact keeper
-    /// constraint, not a card-specific choice shape.
+    /// CR 101.4 + CR 701.21a: The player protects exactly, or up to,
+    /// `required_count` of the eligible permanents; every other in-scope
+    /// permanent is sacrificed after all scoped players have chosen. Used by
+    /// the generic keeper-count constraint, not a card-specific choice shape.
     KeepExactPermanentsChoice {
         player: PlayerId,
         target_player: PlayerId,
         eligible: Vec<ObjectId>,
-        /// Exact number of permanents the engine requires the player to keep,
-        /// already capped to this prompt's eligible pool under CR 609.3's
-        /// "do as much as possible" rule. Display clients render this value
-        /// directly; they must not derive a second legality rule from
-        /// `eligible.len()`.
+        /// The most permanents the player may keep: the printed keeper count,
+        /// deliberately NOT capped to `eligible.len()`, because the resume
+        /// hands it unchanged to the next seat. An exact prompt exists only
+        /// when `eligible.len()` exceeds it (CR 609.3 auto-keeps otherwise).
+        /// Display clients render this value directly; they must not derive
+        /// a second legality rule from `eligible.len()`.
         #[serde(alias = "count")]
         required_count: usize,
+        /// The fewest permanents the player may keep; `None` means exactly
+        /// `required_count`. `Some(0)` is an "up to" keeper (Covetous Elegy).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        minimum_count: Option<usize>,
         /// CR 608.2c + CR 122.1: the keeper mark the instruction owes, with its count
         /// already resolved (CR 608.2h). The `ResolvedAbility` is gone by the time
         /// `GameAction::ChooseKeptPermanents` resumes, so the mark rides here.

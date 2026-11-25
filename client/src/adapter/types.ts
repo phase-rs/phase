@@ -3434,6 +3434,8 @@ export type WaitingFor =
       target_player: PlayerId;
       eligible: ObjectId[];
       required_count: number;
+      // Fewest to keep; absent means exactly required_count (an "up to" keeper sends 0).
+      minimum_count?: number | null;
       // CR 608.2c + CR 122.1: the printed keeper mark, already resolved (CR 608.2h).
       keeper_counter?: [CounterType, number] | null;
       choose_filter?: TargetFilter;

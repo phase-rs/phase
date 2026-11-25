@@ -2458,7 +2458,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             if let Some(x) = total_power_cap {
                 acc = acc.or(scan_quantity_expr(x, mode));
             }
-            if let Some(KeeperConstraint::ExactCount { count }) = keeper_constraint {
+            if let Some(KeeperConstraint::Count { count }) = keeper_constraint {
                 acc = acc.or(scan_quantity_expr(count, mode));
             }
             // CR 608.2c + CR 122.1: the printed keeper mark's count.
