@@ -7,13 +7,13 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DamageAmountScope,
-    DamageAmountThreshold, DelayedAbilityOrigin, DelayedTriggerCondition, DurationEvent, Effect,
-    EffectOutcomeSignal, FilterProp, IndicatedActionLimit, ModalChoice, NameStickerSet,
-    ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition, TargetFilter, TargetRef,
-    TributeOutcome, TriggerCondition, TriggerConditionAnchor, TriggerConstraint, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey,
-    TriggerLimitSpend, TypeFilter, TypedFilter,
+    DamageAmountThreshold, DamageReceivedGrouping, DelayedAbilityOrigin, DelayedTriggerCondition,
+    DurationEvent, Effect, EffectOutcomeSignal, FilterProp, IndicatedActionLimit, ModalChoice,
+    NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition, TargetFilter,
+    TargetRef, TributeOutcome, TriggerCondition, TriggerConditionAnchor, TriggerConstraint,
+    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
+    TriggerGrantProducerKey, TriggerLimitSpend, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -1907,17 +1907,25 @@ fn counter_removal_threshold_fires_once_per_recipient(trig_def: &TriggerDefiniti
             .is_some_and(|filter| filter.threshold == Some(0))
 }
 
-/// CR 603.2c: a "one or more … deal damage to a player" trigger fires once for
-/// each player recipient in a simultaneous damage event. Both trigger modes that
-/// carry this wording qualify: the printed "Whenever one or more creatures you
-/// control deal combat damage to a player" lowers to
-/// `DamageDoneOnceByController`, and the same words in a delayed body ("…
-/// to a player this turn" — Jace, Cunning Castaway's +1) lower to `DamageDone`.
-/// Per the 2017-09-29 Jace ruling, damage to two players fires twice. Other
-/// recipient scopes keep their aggregate batching. The normalizer
-/// (`matching_damage_done_once_by_controller_event`) reads only the trigger's
-/// recipient, source, kind and amount fields, so it serves both modes.
+/// CR 603.2c: Whether printed quantifiers group simultaneous event records.
+fn groups_simultaneous_occurrences(trig_def: &TriggerDefinition) -> bool {
+    if trig_def.mode == TriggerMode::DamageReceived {
+        return match trig_def.damage_received_grouping {
+            DamageReceivedGrouping::PerEvent => false,
+            DamageReceivedGrouping::WholeBatch | DamageReceivedGrouping::PerPlayerRecipient => true,
+        };
+    }
+    trig_def.batched
+}
+
+/// CR 603.2c: simultaneous damage can contain one occurrence for each player
+/// recipient. The active form covers "one or more creatures … deal damage to a
+/// player", including delayed triggers such as Jace, Cunning Castaway's +1.
+/// The passive form takes its grouping from the printed quantifiers.
 fn damage_fires_per_player_recipient(trig_def: &TriggerDefinition) -> bool {
+    if trig_def.mode == TriggerMode::DamageReceived {
+        return trig_def.damage_received_grouping == DamageReceivedGrouping::PerPlayerRecipient;
+    }
     trig_def.batched
         && matches!(
             trig_def.mode,
@@ -1931,7 +1939,7 @@ fn damage_fires_per_player_recipient(trig_def: &TriggerDefinition) -> bool {
 /// first-seen recipient order and normalize each candidate before retaining it,
 /// so resolution sees only the source amounts that satisfied the trigger.
 #[allow(clippy::too_many_arguments)] // The shared per-candidate filter chain needs each input.
-fn matching_damage_done_once_by_controller_events_by_player_recipient(
+fn matching_damage_events_by_player_recipient(
     state: &GameState,
     event_batch: &[GameEvent],
     trig_def: &TriggerDefinition,
@@ -1963,14 +1971,19 @@ fn matching_damage_done_once_by_controller_events_by_player_recipient(
         ) {
             continue;
         }
-        let Some(normalized) =
+        let normalized = if trig_def.mode == TriggerMode::DamageReceived {
+            // The passive matcher admitted this original per-source DamageDealt event.
+            candidate.clone()
+        } else if let Some(event) =
             super::trigger_matchers::matching_damage_done_once_by_controller_event(
                 candidate,
                 trig_def,
                 source_context,
                 state,
             )
-        else {
+        {
+            event
+        } else {
             continue;
         };
         match groups
@@ -2100,13 +2113,10 @@ fn matching_damage_received_whole_event_events(
 /// "one or more" subject batching, whole-event damage aggregation, and the
 /// "the last [type] counter is removed" threshold class.
 ///
-/// Deliberately separate from `TriggerDefinition.batched`, which conflates two
-/// concerns: firing granularity (read at the batch-dedup skip) and subject
-/// counting (`subject_match_count`). Whole-event damage aggregation needs the
-/// former and must NOT have the latter — `current_trigger_match_count` holds a
-/// SUBJECT HEADCOUNT and outranks the event amount in the `EventContextAmount`
-/// cascade (`game/quantity.rs`). Setting `trig_def.batched = true` here would
-/// fix the dedup and simultaneously corrupt "that much".
+/// Quantified occurrences may carry a subject count. Whole-event damage
+/// thresholds need batch deduplication to sum simultaneous damage, and
+/// `EventContextAmount` reads a subject count ahead of the summed damage.
+/// Keeping the threshold deduplication independent preserves "that much".
 ///
 /// CR 603.2c + CR 310.12b: the second non-batched member is the "the last
 /// [type] counter is removed" class
@@ -2115,7 +2125,7 @@ fn matching_damage_received_whole_event_events(
 /// last" counter once, so it shares the once-per-batch dedup while
 /// `subject_match_count` stays `None`.
 fn fires_once_per_batch(trig_def: &TriggerDefinition) -> bool {
-    trig_def.batched
+    groups_simultaneous_occurrences(trig_def)
         || damage_received_aggregates_whole_event(trig_def)
         || counter_removal_threshold_fires_once_per_recipient(trig_def)
 }
@@ -2502,7 +2512,8 @@ fn trigger_firing_groups(
     // the defending player from each expanded attack event; the batch-level
     // event is the wrong context, so their check waits for the narrowed firing.
     // CR 805.4d: so does a per-player phase firing, whose "that player" is its own.
-    if !trig_def.batched
+    let grouped = groups_simultaneous_occurrences(trig_def);
+    if !grouped
         && !matches!(trig_def.mode, TriggerMode::Attacks)
         && step_players.is_none()
         && !conditions.hold(state, controller, source_context, event)
@@ -2558,9 +2569,8 @@ fn trigger_firing_groups(
     } else if damage_received_aggregates_whole_event(trig_def) {
         // CR 120.4b: an unscoped received-damage threshold reads the whole
         // simultaneous damage event, grouped by recipient and summed before
-        // the threshold applies. `batched` is never set for this class, so
-        // `subject_match_count` stays `None` and "that much" can't read a
-        // source headcount.
+        // the threshold applies. The threshold's aggregation alone leaves
+        // `subject_match_count` empty so "that much" reads the summed damage.
         indexed_groups(matching_damage_received_whole_event_events(
             state,
             event_batch,
@@ -2571,18 +2581,16 @@ fn trigger_firing_groups(
             conditions,
         ))
     } else if damage_fires_per_player_recipient(trig_def) {
-        indexed_groups(
-            matching_damage_done_once_by_controller_events_by_player_recipient(
-                state,
-                event_batch,
-                trig_def,
-                source_context,
-                controller,
-                matcher,
-                active_suppress_triggers,
-                conditions,
-            ),
-        )
+        indexed_groups(matching_damage_events_by_player_recipient(
+            state,
+            event_batch,
+            trig_def,
+            source_context,
+            controller,
+            matcher,
+            active_suppress_triggers,
+            conditions,
+        ))
     } else if attack_fires_per_defending_player(trig_def) {
         // CR 508.3d + CR 508.5a: the "one or more creatures attack <player>"
         // class fires once per attacked player, with that player's own
@@ -2597,7 +2605,7 @@ fn trigger_firing_groups(
             active_suppress_triggers,
             conditions,
         ))
-    } else if trig_def.batched {
+    } else if grouped {
         let members = matching_batched_trigger_events(
             state,
             event_batch,
@@ -2662,7 +2670,7 @@ fn trigger_firing_groups(
     // the full event, before it was reduced to the resolution context.
     // Rechecking here would make event-count qualifiers read the narrowed
     // context instead of the declaration that caused the trigger.
-    if trig_def.batched {
+    if grouped {
         return groups;
     }
     groups
@@ -3251,7 +3259,7 @@ fn latch_logical_zone_change_group_immediately_before(
             };
             let source_context = trigger_source_context_for_latch(state, source);
             for active in super::functioning_abilities::active_trigger_definitions(state, source) {
-                if active.definition.batched
+                if groups_simultaneous_occurrences(active.definition)
                     && trigger_definition_functions_in_zone(active.definition, zone)
                 {
                     batched_triggers.push(LatchedBatchedTrigger::new(
@@ -3443,7 +3451,7 @@ fn immediately_after_authority(
             };
             let source_context = trigger_source_context_for_latch(state, source);
             for active in super::functioning_abilities::active_trigger_definitions(state, source) {
-                if active.definition.batched
+                if groups_simultaneous_occurrences(active.definition)
                     && trigger_definition_functions_in_zone(active.definition, zone)
                     && observes_retained_event(active.definition)
                 {
@@ -4271,18 +4279,9 @@ fn collect_matching_triggers_inner(
         // settlement. Segment collection must not reach matcher conditions or
         // fire-count ledgers for them first.
         //
-        // Keyed on `fires_once_per_batch`, the SAME firing-granularity authority
-        // as the carrier below — not on `trig_def.batched`. A whole-event damage
-        // def has `batched == false` but fires once per batch, so keying this
-        // gate on `trig_def.batched` would let it reach settlement carrying
-        // `batched: true` and trip the `debug_assert!(!matched.batched)` there.
-        // Unreachable today, and for BOTH collections this gate covers
-        // (`skips_batched_definitions` is `Segment | Settlement`): segments are
-        // built only by `append_and_collect_logical_zone_trigger_segment`,
-        // which filters `events` to `ZoneChanged` before collecting, and
-        // settlement replays those same filtered occurrences. No `DamageDealt`
-        // event reaches either, so no whole-event damage def is skipped here
-        // today. The gate exists so it and the carrier below do not drift apart.
+        // Use the same firing-granularity predicate as the matched carrier
+        // below. Segments and settlement currently collect only ZoneChanged
+        // events. Both would need this same gate if their scope were widened.
         if collection.skips_batched_definitions() && fires_once_per_batch(trig_def) {
             continue;
         }
@@ -4487,7 +4486,7 @@ fn collect_matching_triggers_inner(
                 // attacked, creatures that ETB'd, etc.). `None` for
                 // non-batched triggers and for batched triggers without a
                 // concrete `valid_card` filter.
-                let subject_match_count = if trig_def.batched {
+                let subject_match_count = if groups_simultaneous_occurrences(trig_def) {
                     super::trigger_matchers::count_trigger_subjects_in_batch(
                         state,
                         trig_def.valid_card.as_ref(),
@@ -4562,9 +4561,9 @@ fn collect_matching_triggers_inner(
                     trigger_events,
                     causes,
                     // CR 603.2c + CR 120.4b: must consult the SAME
-                    // firing-granularity authority as the skip above. Note this
-                    // is deliberately NOT `trig_def.batched`, which additionally
-                    // means "count subjects" — see `fires_once_per_batch`.
+                    // firing-granularity authority as the skip above. It also
+                    // accounts for thresholds that group events without counting
+                    // subjects (see `fires_once_per_batch`).
                     //
                     // Widening this field touches every `matched.batched`
                     // reader, i.e. each `batched_this_pass.insert` gated on it,
@@ -20317,7 +20316,11 @@ fn stamp_boon_trigger_batch(
     else {
         return;
     };
-    if !embedded.batched && !or_trigger.as_ref().is_some_and(|t| t.batched) {
+    if !groups_simultaneous_occurrences(embedded)
+        && !or_trigger
+            .as_deref()
+            .is_some_and(groups_simultaneous_occurrences)
+    {
         return;
     }
     let matches = delayed_when_next_event_matches(
@@ -20493,14 +20496,16 @@ fn delayed_trigger_to_context(
         crate::types::ability::DelayedTriggerCondition::WheneverEvent {
             trigger: definition,
             ..
-        } if definition.batched => trigger.ability.trigger_source.as_ref().and_then(|source| {
-            super::trigger_matchers::count_trigger_subjects_in_batch(
-                state,
-                definition.valid_card.as_ref(),
-                source,
-                &trigger_events,
-            )
-        }),
+        } if groups_simultaneous_occurrences(definition) => {
+            trigger.ability.trigger_source.as_ref().and_then(|source| {
+                super::trigger_matchers::count_trigger_subjects_in_batch(
+                    state,
+                    definition.valid_card.as_ref(),
+                    source,
+                    &trigger_events,
+                )
+            })
+        }
         _ => None,
     };
     // CR 603.3c + CR 700.2b: a modal delayed or reflexive trigger ("When you
@@ -27097,7 +27102,7 @@ pub mod tests {
             },
         ];
 
-        let batches = matching_damage_done_once_by_controller_events_by_player_recipient(
+        let batches = matching_damage_events_by_player_recipient(
             &state,
             &event_batch,
             &trigger,
@@ -27231,7 +27236,7 @@ pub mod tests {
             },
         ];
 
-        let batches = matching_damage_done_once_by_controller_events_by_player_recipient(
+        let batches = matching_damage_events_by_player_recipient(
             &state,
             &event_batch,
             &trigger,
@@ -37892,7 +37897,7 @@ pub mod tests {
         trigger.valid_card = Some(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
         ));
-        trigger.batched = true;
+        trigger.damage_received_grouping = DamageReceivedGrouping::WholeBatch;
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },

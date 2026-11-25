@@ -12668,6 +12668,7 @@ fn trigger_matchers_read_filter_population(
         saga_chapter: _,
         unless_pay,
         batched: _,
+        damage_received_grouping: _,
         die_sides: _,
         expend_threshold: _,
         attack_target_filter: _,
