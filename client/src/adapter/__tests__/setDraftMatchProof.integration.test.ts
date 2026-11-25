@@ -6,12 +6,21 @@ import initDraft, { start_quick_cube_draft } from "@wasm/draft";
 import initEngine, { export_game_state_json, initialize_game, load_card_database } from "@wasm/engine";
 
 import fixture from "../../test/fixtures/draftMatchProof.json";
-import { DraftAdapter, type DraftPlayerView, type PoolInput } from "../draft-adapter";
+import {
+  DraftAdapter,
+  draftViewPrompt,
+  withDraftEngineOperation,
+  type DraftPlayerView,
+  type PoolInput,
+  type SetPackSequence,
+} from "../draft-adapter";
 import { P2PDraftHost } from "../p2p-draft-host";
 import type { DraftMatchLaunch } from "../../network/draftProtocol";
 import { formatMetadata } from "../../data/formatRegistry";
 
 const wasmDir = resolve(__dirname, "../../wasm");
+/** The local runtime's explicit time for every call this file makes on it. */
+const PROOF_NOW_MS = 1_700_000_000_000;
 
 function cardData(): string {
   const cards = Object.fromEntries([...fixture.spells, ...fixture.basics].map((name) => [
@@ -42,36 +51,37 @@ function cardData(): string {
   return JSON.stringify(cards);
 }
 
-function setPool(): PoolInput {
+function setSequence(): SetPackSequence {
   const code = fixture.set_code;
   return {
-    type: "Set",
-    data: {
-      pools: [{
-        code,
-        name: "Proof Set",
-        release_date: null,
-        pack_variants: [{
-          contents: [{ slot: "common", count: 4, choices: [{ sheet: "common", weight: 1 }] }],
-          weight: 1,
-        }],
-        pack_variants_total_weight: 1,
-        sheets: {
-          common: {
-            cards: fixture.spells.map((name, index) => ({
-              name, set_code: code, collector_number: String(index + 1), rarity: "common", weight: 1,
-            })),
-            total_weight: fixture.spells.length,
-            foil: false,
-            balance_colors: false,
-          },
-        },
-        prints: [],
-        basic_lands: [],
+    pools: [{
+      code,
+      name: "Proof Set",
+      release_date: null,
+      pack_variants: [{
+        contents: [{ slot: "common", count: 4, choices: [{ sheet: "common", weight: 1 }] }],
+        weight: 1,
       }],
-      sequence: [code],
-    },
+      pack_variants_total_weight: 1,
+      sheets: {
+        common: {
+          cards: fixture.spells.map((name, index) => ({
+            name, set_code: code, collector_number: String(index + 1), rarity: "common", weight: 1,
+          })),
+          total_weight: fixture.spells.length,
+          foil: false,
+          balance_colors: false,
+        },
+      },
+      prints: [],
+      basic_lands: [],
+    }],
+    sequence: [code],
   };
+}
+
+function setPool(): PoolInput {
+  return { type: "Set", data: setSequence() };
 }
 
 function sorted(cards: string[]): string[] {
@@ -103,8 +113,9 @@ describe("Set draft to real bot match", () => {
 
   it("starts an emitted Premier Bot launch while draft CARD_DB is absent", async () => {
     // This reaches the loaded-database guard before any draft session is installed.
-    expect(() => start_quick_cube_draft("1 Forest", "absence probe", "", 0, 1))
-      .toThrow("Card database must be loaded before cube draft");
+    expect(() => start_quick_cube_draft(
+      "1 Forest", "absence probe", "", 0, 1, JSON.stringify("EngineBots"), BigInt(PROOF_NOW_MS),
+    )).toThrow("Card database must be loaded before cube draft");
 
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const draftLoadSpy = vi.spyOn(DraftAdapter.prototype, "loadCardDatabase");
@@ -201,5 +212,29 @@ describe("Set draft to real bot match", () => {
       draftLoadSpy.mockRestore();
       botDeckSpy.mockRestore();
     }
+  }, 300_000);
+
+  it("starts_a_public_quick_set_draft_on_the_local_fifo_runtime", async () => {
+    // No draft card database is loaded in this file: the set start needs none.
+    const started = await new DraftAdapter().initialize(setSequence(), 0, 117, "EngineBots", PROOF_NOW_MS);
+    expect(typeof started.owner).toBe("number");
+    expect(started.view.status).toBe("Drafting");
+    expect(started.view.flow).toBe("FifoAsync");
+
+    let view = started.view;
+    for (let step = 0; step < 15 && view.status === "Drafting"; step += 1) {
+      const prompt = draftViewPrompt(view);
+      const card = view.current_pack?.[0];
+      if (!prompt || !card) throw new Error(`Set draft stalled at selection ${step}: ${view.status}`);
+      view = await withDraftEngineOperation((lease) => lease.localFifoSelect(started.owner, {
+        prompt_id: prompt,
+        picked_card_instance_ids: [card.instance_id],
+        burned_card_instance_ids: [],
+        effect_card_instance_ids: [],
+      }, PROOF_NOW_MS));
+    }
+    // Three 4-card boosters, one card a step.
+    expect(view.status).toBe("Deckbuilding");
+    expect(view.pool).toHaveLength(12);
   }, 300_000);
 });
