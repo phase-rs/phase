@@ -7483,6 +7483,7 @@ mod paused_search_audience_tests {
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
 
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: original.clone(),
             token_substitute: None,

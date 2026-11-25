@@ -7348,6 +7348,7 @@ mod tests {
     fn post_delivery_mana_cost_pause_preserves_its_live_prompt() {
         let mut state = GameState::new_two_player(42);
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),

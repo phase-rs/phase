@@ -108,7 +108,9 @@ fn uba_mask_parses_to_drawer_exile_top_and_each_player_grant() {
         .statics
         .iter()
         .find_map(|s| match &s.mode {
-            StaticMode::ExileCastPermission { grantee, pool, .. } => Some((*grantee, *pool)),
+            // CR 406.2: the pool is Clone-only (`CounterLinked` carries a
+            // `CounterMatch`), so clone it out of the borrowed definition.
+            StaticMode::ExileCastPermission { grantee, pool, .. } => Some((*grantee, pool.clone())),
             _ => None,
         })
         .expect("Uba Mask must parse an ExileCastPermission static");
