@@ -20,6 +20,7 @@ const REQUIRED_LEAF_PATHS = [
   "pack.waitingNext",
   "podError.incompatible",
   "podError.retry",
+  "podError.unreadable",
   "hostControls.pauseDraft",
   "hostControls.resumeDraft",
 ] as const;
