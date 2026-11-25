@@ -217,7 +217,7 @@ mod tests {
                 }
             ),
             "anaphor should rewrite to GenericEffect LastCreated, got {:?}",
-            &*gains.effect
+            *gains.effect
         );
         let delayed = gains.sub_ability.as_ref().expect("delayed trigger sub");
         let (inner_target,) = match &*delayed.effect {

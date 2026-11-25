@@ -25,6 +25,14 @@ interface PhaseRuntimeConfig {
    * Ignored if malformed. The desktop shell always opens the build-time site.
    */
   previewSiteUrl?: string;
+  /**
+   * Supabase project for cloud sync: its `http://`/`https://` URL and public
+   * anon key. Used only as a pair, so a deployment can point sign-in at a
+   * project whose OAuth redirect allow-list includes its own origin. Ignored
+   * unless both are present and the URL is well-formed.
+   */
+  supabaseUrl?: string;
+  supabaseAnonKey?: string;
 }
 
 interface Window {

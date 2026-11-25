@@ -49,10 +49,7 @@ const MIXED_PRINTINGS: &str = r#"[
 const VALID_ELEMENT: &str = r#"{"section":"main_deck","name":"Forest","count":1,"printing":{"set_code":"lea","collector_number":"294"}}"#;
 
 fn lea_294() -> CardPrinting {
-    CardPrinting {
-        set_code: "lea".to_string(),
-        collector_number: "294".to_string(),
-    }
+    CardPrinting::owner("lea", "294")
 }
 
 fn printing(section: DeckSection, name: &str, count: u32, set: &str, number: &str) -> DeckPrinting {
@@ -60,10 +57,7 @@ fn printing(section: DeckSection, name: &str, count: u32, set: &str, number: &st
         section,
         name: name.to_string(),
         count,
-        printing: CardPrinting {
-            set_code: set.to_string(),
-            collector_number: number.to_string(),
-        },
+        printing: CardPrinting::owner(set, number),
     }
 }
 

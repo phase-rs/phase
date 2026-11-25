@@ -1,10 +1,12 @@
-import { type ReactNode, useCallback, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import type { WaitingFor } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { ChoiceOverlay, ConfirmButton } from "../modal/ChoiceOverlay.tsx";
+import { StepperRow, type StepperShortcut } from "../modal/StepperRow.tsx";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 
 type AssignCombatDamage = Extract<WaitingFor, { type: "AssignCombatDamage" }>;
@@ -23,78 +25,72 @@ function useObjectNamer() {
 }
 
 /**
- * One damage-division row: a labelled target with −/value/+ steppers and an
- * "assign the rest here" shortcut. The shortcut is input arithmetic only
- * (`row += remaining`); CR 702.19b legality stays with the engine validator
- * and the modal's existing advisory gate.
+ * The shortcuts every damage-division row carries: "assign the rest here" and
+ * "clear". Both are input arithmetic only (`row += remaining`, `row = 0`);
+ * CR 702.19b legality stays with the engine validator and the modal's existing
+ * advisory gate.
  */
-function StepperRow({
-  children,
-  value,
-  valueClassName,
-  ringClassName,
-  onDecrement,
-  onIncrement,
-  decrementDisabled,
-  incrementDisabled,
-  remaining,
-  onAssignRemaining,
-  assignRemainingLabel,
-}: {
-  children: ReactNode;
-  value: number;
-  valueClassName?: string;
-  ringClassName?: string;
-  onDecrement: () => void;
-  onIncrement: () => void;
-  decrementDisabled: boolean;
-  incrementDisabled: boolean;
-  remaining: number;
-  onAssignRemaining: () => void;
-  assignRemainingLabel: string;
-}) {
-  const { t } = useTranslation("game");
-  return (
-    <div
-      className={`flex items-center justify-between gap-3 rounded-lg bg-gray-800/60 p-3${ringClassName ? ` ${ringClassName}` : ""}`}
-    >
-      <div className="flex items-center gap-2">{children}</div>
-      <div className="flex items-center gap-2">
-        <button
-          className={gameButtonClass({ tone: "neutral", size: "xs" })}
-          onClick={onDecrement}
-          disabled={decrementDisabled}
-        >
-          −
-        </button>
-        <span className={`w-8 text-center text-sm font-bold ${valueClassName ?? "text-white"}`}>
-          {value}
-        </span>
-        <button
-          className={gameButtonClass({ tone: "neutral", size: "xs" })}
-          onClick={onIncrement}
-          disabled={incrementDisabled}
-        >
-          +
-        </button>
-        <button
-          className={gameButtonClass({ tone: "neutral", size: "xs" })}
-          onClick={onAssignRemaining}
-          disabled={remaining <= 0}
-          aria-label={assignRemainingLabel}
-          title={assignRemainingLabel}
-        >
-          {t("combat.assignRemainingButton", { amount: remaining })}
-        </button>
-      </div>
-    </div>
-  );
+function damageShortcuts(
+  t: TFunction<"game">,
+  target: string,
+  value: number,
+  remaining: number,
+  setValue: (value: number) => void,
+): StepperShortcut[] {
+  return [
+    {
+      key: "remaining",
+      label: t("combat.assignRemainingButton", { amount: remaining }),
+      ariaLabel: t("combat.assignRemainingTo", { count: remaining, target }),
+      onClick: () => setValue(value + remaining),
+      disabled: remaining <= 0,
+    },
+    {
+      key: "clear",
+      label: t("combat.clearButton"),
+      ariaLabel: t("combat.clearDamageFor", { target }),
+      onClick: () => setValue(0),
+      disabled: value <= 0,
+    },
+  ];
+}
+
+/** The modal's Confirm gate: mirrors the validator's checks, which stay authoritative. */
+function draftIsConfirmable(
+  data: AssignCombatDamage["data"],
+  amounts: readonly number[],
+  trampleDamage: number,
+  controllerDamage: number,
+): boolean {
+  const isOverPw = data.trample === "OverPlaneswalkers" && data.pw_controller != null;
+  const blockerTotal = amounts.reduce((acc, n) => acc + n, 0);
+  const total = blockerTotal + trampleDamage + controllerDamage;
+  // CR 702.19b: Lethal-to-all-blockers is a precondition only for assigning
+  // excess to the defending player/planeswalker, not an unconditional constraint.
+  // When trampleDamage and controllerDamage are both 0 the player is freely
+  // dividing all damage among blockers, so any split is legal.
+  const trampleLethalMet = data.trample == null ||
+    (trampleDamage === 0 && controllerDamage === 0) ||
+    data.blockers.every((b, i) => amounts[i] >= b.lethal_minimum);
+  // CR 702.19c: Must assign at least PW loyalty before controller spillover.
+  const loyaltyMet = !isOverPw || controllerDamage === 0 ||
+    trampleDamage >= (data.pw_loyalty ?? 0);
+  return total === data.total_damage && trampleLethalMet && loyaltyMet;
 }
 
 export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const { getName, getStats } = useObjectNamer();
+
+  // CR 506.4c: the engine publishes each attacker's live attack target; an
+  // attacker whose planeswalker or battle left combat has no entry.
+  const attackTarget = useGameStore(
+    (s) => s.gameState?.derived?.attack_targets?.[String(data.attacker_id)],
+  );
+  // The engine supplies the complete one-tap draft for this prompt.
+  const suggestion = useGameStore((s) => s.gameState?.derived?.combat_damage_suggestion);
+  const lethalFirstTitle = t("combat.lethalFirstTitle");
 
   const [amounts, setAmounts] = useState<number[]>(() =>
     data.blockers.map(() => 0),
@@ -108,20 +104,24 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
   const blockerTotal = amounts.reduce((acc, n) => acc + n, 0);
   const total = blockerTotal + trampleDamage + controllerDamage;
   const remaining = data.total_damage - total;
-  // CR 702.19b: Lethal-to-all-blockers is a precondition only for assigning
-  // excess to the defending player/planeswalker, not an unconditional constraint.
-  // When trampleDamage and controllerDamage are both 0 the player is freely
-  // dividing all damage among blockers, so any split is legal.
-  const trampleLethalMet = data.trample == null ||
-    (trampleDamage === 0 && controllerDamage === 0) ||
-    data.blockers.every((b, i) => amounts[i] >= b.lethal_minimum);
-  // CR 702.19c: Must assign at least PW loyalty before controller spillover.
-  const loyaltyMet = !isOverPw || controllerDamage === 0 ||
-    trampleDamage >= (data.pw_loyalty ?? 0);
-  const isValid = total === data.total_damage && trampleLethalMet && loyaltyMet;
+  const isValid = draftIsConfirmable(data, amounts, trampleDamage, controllerDamage);
+  // The engine's suggestion as a draft, offered only when the Confirm gate accepts it. The gate
+  // cannot yet accept the empty split of an "as though unblocked" prompt (#10770) or a split
+  // made after a departure left the prompt's loyalty stale, so no fill is offered there.
+  const suggestedAmounts = suggestion &&
+    data.blockers.map(({ blocker_id }) =>
+      suggestion.assignments.find(([id]) => id === blocker_id)?.[1] ?? 0);
+  const suggestedDraft = suggestion && suggestedAmounts &&
+    draftIsConfirmable(data, suggestedAmounts, suggestion.trample_damage, suggestion.controller_damage)
+    ? { amounts: suggestedAmounts, trample: suggestion.trample_damage, controller: suggestion.controller_damage }
+    : undefined;
+  // CR 702.19b: ordinary trample's excess goes to whatever the creature is
+  // attacking, so the row names the engine-reported planeswalker or battle.
   const trampleLabel = isOverPw
     ? t("combat.planeswalkerLoyalty", { loyalty: data.pw_loyalty ?? 0 })
-    : t("combat.defendingPlayerTrample");
+    : attackTarget && attackTarget.type !== "Player"
+      ? t("combat.attackTargetTrample", { name: getName(attackTarget.data) })
+      : t("combat.defendingPlayerTrample");
   const controllerLabel = t("combat.pwControllerTrample");
 
   const setAmount = useCallback((index: number, value: number) => {
@@ -155,6 +155,24 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
       footer={<ConfirmButton onClick={handleConfirm} disabled={!isValid} label={t("combat.assignDamageButton")} />}
     >
       <div className="mb-4 space-y-3">
+        {suggestedDraft && (
+          <button
+            className={gameButtonClass({
+              tone: "neutral",
+              size: "xs",
+              className: "!min-h-11 min-w-11",
+            })}
+            aria-label={lethalFirstTitle}
+            title={lethalFirstTitle}
+            onClick={() => {
+              setAmounts(suggestedDraft.amounts);
+              setTrampleDamage(suggestedDraft.trample);
+              setControllerDamage(suggestedDraft.controller);
+            }}
+          >
+            {t("combat.lethalFirstButton")}
+          </button>
+        )}
         {data.blockers.map((blocker, i) => {
           const isLethal = amounts[i] >= blocker.lethal_minimum;
           const stats = getStats(blocker.blocker_id);
@@ -167,9 +185,18 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
               onIncrement={() => setAmount(i, amounts[i] + 1)}
               decrementDisabled={amounts[i] <= 0}
               incrementDisabled={remaining <= 0}
-              remaining={remaining}
-              onAssignRemaining={() => setAmount(i, amounts[i] + remaining)}
-              assignRemainingLabel={t("combat.assignRemainingTo", { count: remaining, target: name })}
+              decrementLabel="−"
+              incrementLabel="+"
+              shortcuts={[
+                {
+                  key: "lethal",
+                  label: t("combat.lethalButton"),
+                  ariaLabel: t("combat.assignLethalTo", { target: name }),
+                  onClick: () => setAmount(i, Math.min(blocker.lethal_minimum, amounts[i] + remaining)),
+                  disabled: isLethal || remaining <= 0,
+                },
+                ...damageShortcuts(t, name, amounts[i], remaining, (value) => setAmount(i, value)),
+              ]}
             >
               <span className="text-sm font-medium text-gray-200">
                 {name}
@@ -200,9 +227,9 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
             onIncrement={() => setTrampleDamage(trampleDamage + 1)}
             decrementDisabled={trampleDamage <= 0}
             incrementDisabled={remaining <= 0}
-            remaining={remaining}
-            onAssignRemaining={() => setTrampleDamage(trampleDamage + remaining)}
-            assignRemainingLabel={t("combat.assignRemainingTo", { count: remaining, target: trampleLabel })}
+            decrementLabel="−"
+            incrementLabel="+"
+            shortcuts={damageShortcuts(t, trampleLabel, trampleDamage, remaining, setTrampleDamage)}
           >
             <span className="text-sm font-medium text-amber-300">
               {trampleLabel}
@@ -219,9 +246,9 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
             onIncrement={() => setControllerDamage(controllerDamage + 1)}
             decrementDisabled={controllerDamage <= 0}
             incrementDisabled={remaining <= 0}
-            remaining={remaining}
-            onAssignRemaining={() => setControllerDamage(controllerDamage + remaining)}
-            assignRemainingLabel={t("combat.assignRemainingTo", { count: remaining, target: controllerLabel })}
+            decrementLabel="−"
+            incrementLabel="+"
+            shortcuts={damageShortcuts(t, controllerLabel, controllerDamage, remaining, setControllerDamage)}
           >
             <span className="text-sm font-medium text-purple-300">
               {controllerLabel}
@@ -290,9 +317,9 @@ export function BlockerDamageAssignmentModal({ data }: { data: AssignBlockerDama
               onIncrement={() => setAmount(i, amounts[i] + 1)}
               decrementDisabled={amounts[i] <= 0}
               incrementDisabled={remaining <= 0}
-              remaining={remaining}
-              onAssignRemaining={() => setAmount(i, amounts[i] + remaining)}
-              assignRemainingLabel={t("combat.assignRemainingTo", { count: remaining, target: name })}
+              decrementLabel="−"
+              incrementLabel="+"
+              shortcuts={damageShortcuts(t, name, amounts[i], remaining, (value) => setAmount(i, value))}
             >
               <span className="text-sm font-medium text-gray-200">
                 {name}

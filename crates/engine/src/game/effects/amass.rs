@@ -227,6 +227,7 @@ fn create_army_token(
     };
 
     let proposed = ProposedEvent::CreateToken {
+        redirected_to: None,
         owner: controller,
         spec: Box::new(spec),
         copy: None,
@@ -306,8 +307,16 @@ mod tests {
         assert!(army.is_token);
         assert_eq!(army.power, Some(2));
         assert_eq!(army.toughness, Some(2));
-        assert!(army.card_types.subtypes.contains(&"Zombie".to_string()));
-        assert!(army.card_types.subtypes.contains(&"Army".to_string()));
+        assert!(army
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Zombie"));
+        assert!(army
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Army"));
         assert_eq!(army.color, vec![ManaColor::Black]);
         // 2 +1/+1 counters
         assert_eq!(
@@ -376,8 +385,12 @@ mod tests {
             .filter_map(|id| state.objects.get(id))
             .find(|obj| obj.card_types.subtypes.iter().any(|s| s == "Army"))
             .unwrap();
-        assert!(army.card_types.subtypes.contains(&"Zombie".to_string()));
-        assert!(army.card_types.subtypes.contains(&"Orc".to_string()));
+        assert!(army
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Zombie"));
+        assert!(army.card_types.subtypes.iter().any(|i: &String| i == "Orc"));
     }
 
     #[test]

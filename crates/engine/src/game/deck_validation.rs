@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::database::legality::{LegalityFormat, LegalityStatus};
+use crate::database::synthesis::{commander_qualification, CommanderQualification};
 use crate::database::CardDatabase;
 use crate::game::ante::face_uses_ante;
 use crate::game::companion::{
@@ -156,6 +157,154 @@ pub fn signature_spell_selection_policy(
     });
 
     SignatureSpellSelectionPolicy::Required { candidates }
+}
+
+/// Describes where a candidate request lists its designated commander copies.
+/// CR 903.5a counts commanders as part of the deck. CR 903.13f(2)
+/// allows multiple same-name copies from a Commander Draft pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommanderDeckComposition {
+    /// Main-deck occurrences include the designated copies.
+    CommandersInside,
+    /// Designated copies are listed separately from the main-deck occurrences.
+    CommandersOutside,
+}
+
+/// Returns the first available main-deck occurrence of each card eligible for
+/// the selected format, in main-deck order. Counts by resolved card, so two
+/// printing rows or two spellings of one card are two copies. Pairing and
+/// whole-deck legality are left to `can_pair_commanders` and
+/// `evaluate_deck_compatibility`.
+pub fn commander_candidates(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    composition: CommanderDeckComposition,
+) -> Vec<String> {
+    let format = match request.selected_format.as_ref().map(SelectedFormat::tag) {
+        None | Some(GameFormat::Horde) => {
+            if horde_survivor_format(request) != Some(SurvivorDeckFormat::Commander) {
+                return Vec::new();
+            }
+            GameFormat::Horde
+        }
+        Some(format) => format,
+    };
+    let main_counts = resolved_name_counts(db, request.main_deck.iter().map(String::as_str));
+    let designation_counts = resolved_name_counts(db, request.commander.iter().map(String::as_str));
+    let mut seen = HashSet::new();
+    request
+        .main_deck
+        .iter()
+        .filter_map(|name| {
+            let face = db.get_face_by_name(name)?;
+            if !is_card_commander_eligible_for_format(face, format) {
+                return None;
+            }
+            let key = canonical_deck_count_key(db, name);
+            let designated = designation_counts.get(&key).copied().unwrap_or_default();
+            let available = match composition {
+                CommanderDeckComposition::CommandersInside => main_counts[&key] > designated,
+                CommanderDeckComposition::CommandersOutside => designated == 0,
+            };
+            (available && seen.insert(key)).then(|| name.clone())
+        })
+        .collect()
+}
+
+/// A counted main-deck row for unmarked Commander inference.
+#[derive(Deserialize)]
+pub struct CommanderInferenceRow {
+    pub name: String,
+    #[serde(deserialize_with = "deserialize_commander_inference_count")]
+    pub count: u64,
+}
+
+fn deserialize_commander_inference_count<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let count = f64::deserialize(deserializer)?;
+    if count.is_nan() || count < 0.0 || (count.is_finite() && count.fract() != 0.0) {
+        return Err(serde::de::Error::custom(
+            "expected a non-negative integer count",
+        ));
+    }
+    // Rust's saturating float cast also handles oversized parsed quantities.
+    Ok(count as u64)
+}
+
+/// Infers a commander from the counted main deck of an unmarked import.
+pub fn infer_commander(
+    db: &CardDatabase,
+    main: &[CommanderInferenceRow],
+    selected_format: Option<GameFormat>,
+) -> Option<String> {
+    let format = FormatConfig::commander();
+    // CR 903.5a: the potential commander is still included in the main deck.
+    let total = main
+        .iter()
+        .map(|row| row.count)
+        .fold(0, u64::saturating_add);
+    let total = usize::try_from(total).ok()?;
+    if !format.deck_size.accepts(total) {
+        return None;
+    }
+    let selected = match selected_format {
+        Some(tag)
+            if tag.commander_pairing().admits_count(1)
+                && tag.deck_size_subject() == DeckSizeSubject::MainDeckAndCommanders =>
+        {
+            Some(FormatConfig::for_format(tag).ok()?)
+        }
+        Some(_) => return None,
+        None => None,
+    };
+
+    let mut positive_rows = main.iter().filter(|row| row.count > 0);
+    // The size check bounds every positive row and bucket to 100 cards.
+    let counts = weighted_resolved_name_counts(
+        db,
+        positive_rows
+            .clone()
+            .map(|row| (row.name.as_str(), row.count as u32)),
+    );
+    // CR 100.2a / CR 903.5b / CR 101.1: basic lands and printed copy
+    // limits are exceptions to the ordinary Commander singleton cap.
+    if counts.iter().any(|(key, &count)| {
+        let exceeds_limit = |rules| {
+            matches!(max_deck_copies(db, key, rules), DeckCopyLimit::UpTo(limit) if count > limit)
+        };
+        exceeds_limit(&format) || selected.as_ref().is_some_and(exceeds_limit)
+    }) {
+        return None;
+    }
+
+    positive_rows.find_map(|row| {
+        let key = canonical_deck_count_key(db, &row.name);
+        let face = db.get_face_by_name(&row.name)?;
+        // CR 702.124k: a pairing-only Background cannot fill a lone slot.
+        if counts[&key] != 1
+            || commander_qualification(face)
+                == CommanderQualification::OnlyAlongsideChooseABackground
+        {
+            return None;
+        }
+        let eligible = match selected_format {
+            Some(GameFormat::PauperCommander) => {
+                (CommanderVariantRules::pauper_commander().eligible)(face)
+            }
+            Some(tag) => {
+                is_commander_eligible(face) && is_card_commander_eligible_for_format(face, tag)
+            }
+            None => is_commander_eligible(face),
+        };
+        let fits_selected_size = selected.as_ref().is_none_or(|rules| {
+            effective_deck_size_rule(db, rules.deck_size, std::slice::from_ref(&row.name))
+                .accepts(total)
+        });
+        (eligible && fits_selected_size).then(|| row.name.clone())
+    })
 }
 
 /// Returns eligible companion cards that can be used with the deck under the
@@ -362,7 +511,7 @@ pub fn evaluate_deck_compatibility(
     ) && selected_format_reasons == [CUSTOM_FORMAT_UNRESOLVED.to_string()]
     {
         selected_format_compatible = None;
-        selected_format_reasons = Vec::new();
+        selected_format_reasons.clear();
     }
 
     let coverage = evaluate_deck_coverage(db, request);
@@ -4255,16 +4404,32 @@ enum CommandZoneNetting {
     CountVerbatim,
 }
 
+fn resolved_name_counts<'a>(
+    db: &CardDatabase,
+    names: impl IntoIterator<Item = &'a str>,
+) -> HashMap<String, u32> {
+    weighted_resolved_name_counts(db, names.into_iter().map(|name| (name, 1)))
+}
+
+fn weighted_resolved_name_counts<'a>(
+    db: &CardDatabase,
+    rows: impl IntoIterator<Item = (&'a str, u32)>,
+) -> HashMap<String, u32> {
+    let mut counts = HashMap::new();
+    for (name, count) in rows {
+        *counts
+            .entry(canonical_deck_count_key(db, name))
+            .or_insert(0) += count;
+    }
+    counts
+}
+
 fn combined_copy_counts(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
     netting: CommandZoneNetting,
 ) -> HashMap<String, u32> {
-    let mut counts: HashMap<String, u32> = HashMap::new();
-    for name in construction_deck_cards(request) {
-        let canonical = canonical_deck_count_key(db, name);
-        *counts.entry(canonical).or_insert(0) += 1;
-    }
+    let mut counts = resolved_name_counts(db, construction_deck_cards(request));
     if netting == CommandZoneNetting::CountVerbatim {
         return counts;
     }
@@ -4295,22 +4460,16 @@ fn combined_copy_counts(
     // spell name one card — netting two copies away against a single main-deck
     // listing and hiding a genuine CR 903.5b violation. Netting must be the
     // exact CR 903.5a double-listing correction, never a blanket amnesty.
-    let mut main_deck_occurrences: HashMap<String, u32> = HashMap::new();
-    for name in &request.main_deck {
-        *main_deck_occurrences
-            .entry(canonical_deck_count_key(db, name))
-            .or_insert(0) += 1;
-    }
-    let mut command_zone_entries: HashMap<String, u32> = HashMap::new();
-    for entry in request
-        .commander
-        .iter()
-        .chain(request.signature_spell.iter())
-    {
-        *command_zone_entries
-            .entry(canonical_deck_count_key(db, entry))
-            .or_insert(0) += 1;
-    }
+    let main_deck_occurrences =
+        resolved_name_counts(db, request.main_deck.iter().map(String::as_str));
+    let command_zone_entries = resolved_name_counts(
+        db,
+        request
+            .commander
+            .iter()
+            .chain(&request.signature_spell)
+            .map(String::as_str),
+    );
     for (canonical, command_copies) in command_zone_entries {
         let netted = command_copies.min(
             main_deck_occurrences
@@ -4794,6 +4953,74 @@ fn summarize_cards(prefix: &str, cards: &BTreeSet<String>, max_names: usize) -> 
         listed.push(format!("+{} more", cards.len() - max_names));
     }
     format!("{prefix}: {}", listed.join(", "))
+}
+
+/// Returns the modeled per-card picker eligibility for `format`. Ordinary
+/// Commander uses CR 903.3. The per-card export and `commander_candidates`
+/// share this dispatch.
+pub fn is_card_commander_eligible_for_format(face: &CardFace, format: GameFormat) -> bool {
+    // EXHAUSTIVE, deliberately: the `_ => false` this replaced is what made
+    // `GameFormat::CommanderDraft` silently answer "no card can be your
+    // commander" the moment the format became selectable. A wildcard here
+    // re-arms that for the next format, so every arm is named.
+    match format {
+        GameFormat::Commander | GameFormat::DuelCommander => is_commander_eligible(face),
+        // CR 903.3, unchanged by CR 810 seating: 2HG Commander decks
+        // designate commanders under Commander's own predicate.
+        GameFormat::TwoHeadedGiantCommander => is_commander_eligible(face),
+        // CR 904.13a + CR 903.3: Archenemy Commander decks designate
+        // commanders under Commander's own predicate.
+        GameFormat::ArchenemyCommander => is_commander_eligible(face),
+        GameFormat::PauperCommander => is_commander_eligible(face),
+        // CR 903.3, unchanged by CR 903.13f: the CR 903.13f(3) grant
+        // affects PAIRING, not eligibility, so Commander Draft uses
+        // Commander's own predicate.
+        GameFormat::CommanderDraft => is_commander_eligible(face),
+        GameFormat::FreeformCommander => is_freeform_commander_eligible(face),
+        GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
+        GameFormat::Oathbreaker => face.is_oathbreaker,
+        GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
+        // Horde is per-config (Commander-format survivors designate a
+        // standard-EDH-eligible commander; Constructed survivors have no
+        // commander slot and never consult this). Answer the EDH
+        // predicate: the only caller that can exist is the Commander
+        // horde's deck builder, and `false` here would silently tell it
+        // no card can be its commander.
+        GameFormat::Horde => is_commander_eligible(face),
+        // CR 903.3's commander eligibility test applies unchanged —
+        // planar doesn't change eligibility.
+        GameFormat::PlanechaseCommander => is_commander_eligible(face),
+        // Formats without a commander designation: nothing can be designated.
+        GameFormat::Standard
+        | GameFormat::Pioneer
+        | GameFormat::Modern
+        | GameFormat::Premodern
+        | GameFormat::Legacy
+        | GameFormat::Vintage
+        | GameFormat::Historic
+        | GameFormat::Timeless
+        | GameFormat::Pauper
+        | GameFormat::Momir
+        | GameFormat::Planechase
+        | GameFormat::Archenemy
+        | GameFormat::FreeForAll
+        | GameFormat::TwoHeadedGiant
+        | GameFormat::Limited
+        | GameFormat::Freeform
+        | GameFormat::Dandan => false,
+        // Phase 1d wired a real custom-format deck-legality evaluator
+        // (`evaluate_custom_format`), but it is scoped to non-command-zone
+        // (constructed-shaped) custom formats — a command-zone custom
+        // (`CommandZoneMode::Enabled`, the shape a saved Commander/Brawl/
+        // Tiny-Leaders/Oathbreaker lobby produces) fails closed there too.
+        // This function also only ever receives a bare `GameFormat`, never
+        // the resolved `CommanderEligibilityRule` a command-zone custom
+        // format declares, so eligibility genuinely cannot be answered
+        // here regardless. `false` is the fail-closed reading — a
+        // permissive `true` would offer an unvalidated card as a
+        // commander.
+        GameFormat::Custom(_) => false,
+    }
 }
 
 /// CR 903.3: A card is eligible to be a commander if it is a legendary creature
@@ -6950,7 +7177,7 @@ mod tests {
         // The verdict and the candidate list are two surfaces over one rule.
         assert_eq!(
             verdict.selected_format_compatible == Some(true),
-            candidates.contains(&"Yorion, Sky Nomad".to_string()),
+            candidates.iter().any(|i| i == "Yorion, Sky Nomad"),
             "compatibility verdict and candidate list must agree: {:?}",
             verdict.selected_format_reasons
         );
@@ -7076,7 +7303,7 @@ mod tests {
 
         let candidates = companion_candidates(&db, &request);
         assert!(
-            !candidates.contains(&"Lurrus".to_string()),
+            !candidates.iter().any(|i| i == "Lurrus"),
             "Lurrus must not be eligible when a second Lurrus copy remains in the starting main deck"
         );
 

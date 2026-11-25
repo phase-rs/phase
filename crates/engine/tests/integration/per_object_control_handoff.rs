@@ -552,7 +552,11 @@ fn treasures_controlled_by(state: &GameState, player: PlayerId) -> usize {
         .iter()
         .filter_map(|id| state.objects.get(id))
         .filter(|o| {
-            o.card_types.subtypes.contains(&"Treasure".to_string()) && o.controller == player
+            o.card_types
+                .subtypes
+                .iter()
+                .any(|i: &String| i == "Treasure")
+                && o.controller == player
         })
         .count()
 }

@@ -105,12 +105,13 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
 /// CR 704.3 + CR 117.2e: [`check_state_based_actions`] for the player-loss
 /// safety net, which can run while a resolution is paused on a player's
 /// replacement choice. Reports a departure that canceled that pause, so the
-/// caller finishes the resolution before any player receives priority.
+/// caller finishes the resolution before any player receives priority. The
+/// count is the tail of deferred triggers collected by this call's departures.
 pub(crate) fn check_state_based_actions_reporting_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-) -> DepartureResume {
-    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller).0
+) -> (DepartureResume, usize) {
+    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller)
 }
 
 /// CR 704.3 + CR 117.5: [`check_state_based_actions`] inside a post-action pass, which places
@@ -304,7 +305,7 @@ fn run_state_based_action_iterations(
             // CR 704.4 + CR 117.2e: the departure canceled the current pause of a
             // resolution that is still under way. Its remaining state-based
             // actions wait for that resolution to finish; the caller resumes it.
-            if resume == DepartureResume::ParkedZoneChangeTail {
+            if resume == DepartureResume::ResolutionTail {
                 return resume;
             }
         }
@@ -766,13 +767,18 @@ fn cant_lose_active_for(state: &GameState, player_id: PlayerId) -> bool {
 }
 
 /// CR 704.5a/704.5b/704.5c/704.6c: Whether a player-loss SBA would currently
-/// eliminate at least one non-eliminated player, read from the same collectors
-/// the SBA check runs. This is intentionally narrower than running the full SBA
-/// loop: callers that are only trying to avoid waiting on a dead player during a
-/// non-priority continuation should not trigger unrelated SBA choice prompts such
-/// as commander-zone or legend-rule choices.
-pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
-    !player_losses(state).is_empty()
+/// eliminate a living player, or one of the named actors when an actor slice
+/// is present. The check shares the loss reasons and CR 810.8a departure
+/// membership with the SBA loop without applying unrelated SBAs.
+pub(crate) fn has_pending_player_loss_sba(state: &GameState, actors: Option<&[PlayerId]>) -> bool {
+    let losses = player_losses(state);
+    match actors {
+        None => !losses.is_empty(),
+        Some(actors) => losses
+            .into_keys()
+            .flat_map(|root| super::elimination::living_loss_departure_seats(state, root))
+            .any(|seat| actors.contains(&seat)),
+    }
 }
 
 /// Check if a static ability from `source_controller` with the given `affected` filter
@@ -1026,11 +1032,19 @@ fn check_creature_deaths(
         })
         .map(CreatureDeathSba::ZeroToughness)
         .collect();
-    to_die.extend(
-        lethal_damage_candidates(state, battlefield_snapshot)
-            .into_iter()
-            .map(CreatureDeathSba::Destroy),
-    );
+    let lethal = lethal_damage_candidates(state, battlefield_snapshot);
+    // CR 704.5h: this check consumes every deathtouch record but a lethal candidate's, which its
+    // destruction ends, so a check paused on a replacement choice resumes with the candidates it
+    // had not reached.
+    for id in battlefield_snapshot
+        .iter()
+        .filter(|id| !lethal.contains(id))
+    {
+        if let Some(obj) = state.objects.get_mut(id) {
+            obj.dealt_deathtouch_damage = false;
+        }
+    }
+    to_die.extend(lethal.into_iter().map(CreatureDeathSba::Destroy));
 
     perform_creature_deaths(state, events, any_performed, &to_die);
 }
@@ -1044,17 +1058,17 @@ fn lethal_damage_candidates(state: &GameState, battlefield_snapshot: &[ObjectId]
         .filter(|id| {
             live_battlefield_object(state, id).is_some_and(|obj| {
                 obj.card_types.core_types.contains(&CoreType::Creature)
-                    && obj.toughness.is_some_and(|t| {
-                        t > 0
-                            && (
-                                // CR 704.5g: Normal lethal damage requires positive toughness and damage >= toughness.
-                                obj.damage_marked >= t as u32
-                                // CR 704.5h + CR 702.2b: Deathtouch lethal also requires positive toughness.
-                                || (obj.dealt_deathtouch_damage && obj.damage_marked > 0)
-                            )
-                    })
-                    // CR 702.12b: Indestructible creatures are not destroyed by lethal damage.
-                    && !obj.has_keyword(&crate::types::keywords::Keyword::Indestructible)
+                    // CR 704.5g + CR 704.5h + CR 702.12b: the lethal-damage authority, on the
+                    // live battlefield. Lethal damage may be measured against power (CR 613.11);
+                    // the toughness > 0 precondition stays toughness-based. Deathtouch damage was
+                    // dealt marked (CR 120.3e) or as -1/-1 counters (CR 120.3d).
+                    && crate::game::lethal_damage::is_destroyed_by_lethal_damage(
+                        state,
+                        obj,
+                        obj.damage_marked,
+                        obj.dealt_deathtouch_damage,
+                        &[],
+                    )
             })
         })
         .collect()
@@ -2456,11 +2470,7 @@ fn check_saga_sacrifice(
                     } if *object_id == *id
                 )
             });
-            if pending_lore_event {
-                return false;
-            }
-
-            true
+            !pending_lore_event
         })
         .collect();
 
@@ -3039,7 +3049,7 @@ mod tests {
         state.waiting_for = paused_prompt.clone();
 
         let mut events = Vec::new();
-        assert!(has_pending_player_loss_sba(&state));
+        assert!(has_pending_player_loss_sba(&state, None));
         check_state_based_actions(&mut state, &mut events);
 
         assert!(state.players[1].is_eliminated, "CR 704.5a still fires");
@@ -4819,6 +4829,7 @@ mod tests {
         // A replacement choice is pending: resolution is paused mid-event. The
         // proposed event's contents are irrelevant here — only `is_some()` matters.
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
@@ -4826,6 +4837,7 @@ mod tests {
                 stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
@@ -4838,6 +4850,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -5000,6 +5013,7 @@ mod tests {
             remember_identity: None,
         };
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(2),
@@ -5007,6 +5021,7 @@ mod tests {
                 stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
@@ -5019,6 +5034,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -5241,7 +5257,7 @@ mod tests {
         ));
         state.players[0].life = 0;
         assert!(player_losses(&state).is_empty());
-        assert!(!has_pending_player_loss_sba(&state));
+        assert!(!has_pending_player_loss_sba(&state, None));
 
         state.players[0].life = 20;
         state.players[1].life = 0;
@@ -5253,7 +5269,7 @@ mod tests {
                 (PlayerId(2), BTreeSet::from([LossReason::LifeTotal])),
             ])
         );
-        assert!(has_pending_player_loss_sba(&state));
+        assert!(has_pending_player_loss_sba(&state, None));
     }
 
     #[test]

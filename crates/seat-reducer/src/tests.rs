@@ -583,6 +583,6 @@ fn deck_data_and_player_deck_list_serialize_the_same_fields() {
     let deck_data =
         sorted_keys(serde_json::to_value(engine::starter_decks::DeckData::default()).unwrap());
     let player_deck_list = sorted_keys(serde_json::to_value(PlayerDeckList::default()).unwrap());
-    assert!(deck_data.contains(&"companion".to_string()));
+    assert!(deck_data.iter().any(|i| i == "companion"));
     assert_eq!(deck_data, player_deck_list);
 }

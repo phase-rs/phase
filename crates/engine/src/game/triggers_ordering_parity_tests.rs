@@ -220,6 +220,10 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // re-check, and each returns only itself (disjoint graveyard referents).
     // The death-count read × zone-change write conflict is conservative.
     "darklight phoenix",
+    // Spellpyre Phoenix: the hand write conservatively overlaps JournalCards.
+    // Each trigger returns its own card and leaves both players' cycle counts
+    // intact, so the intervening-if rechecks give the same result in either order.
+    "spellpyre phoenix",
     // Control(another nonland) read × self-Sacrifice — self-limiting.
     "reclusive wight",
     // Not(SourceIsTapped) read × untap-ALL write — idempotent.
@@ -325,10 +329,8 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // fire-time gate (evaluated at trigger time; the GE quantity is monotone
     // within the group — each copy's +1/+1 only raises total power, so a
     // fired gate stays fired at any re-check) + PutCounter P1P1 SelfRef
-    // (disjoint) + SetTapState Untap TriggeringSource (AST measured; Oracle
-    // "it" = the officer — mistargeted to the attack event's source, i.e. the
-    // sole attacker or a no-op; separate card-fix; idempotent either way). No
-    // flippable shared state. Commutes.
+    // (disjoint) + SetTapState Untap SelfRef (AST measured; "it" = the
+    // officer, CR 608.2c). No flippable shared state. Commutes.
     "tactical officer",
     // ---- same-event additive shared writes with per-source gates (correct
     // parses) ----
@@ -478,11 +480,13 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
 /// an intended prompt the legacy engine wrongly auto-ordered — not an over-prompt.
 const BATCH_GENUINE_ROWS: &[&str] = &[
     // LTB: Sacrifice{Dragons-you-control, count: ObjectCount{same}} → sub
-    // ChangeZone{TrackedSet(0) → Battlefield, enters_under: You} (AST measured).
-    // Each co-departing member returns ITS OWN tracked exile set, and returned
+    // ChangeZoneAll{origin: Exile, ExiledBySource → Battlefield,
+    // enters_under: You} (AST measured).
+    // Each co-departing member returns ITS OWN linked exile (the cards its ETB exiled), and returned
     // creatures can be Dragons the OTHER member's re-sacrifice then consumes —
     // final state differs by order (CR 603.3b intended prompt). Runtime pin:
-    // b2_dotd_member_bound_pin (reads_member_bound refuses batch-T1).
+    // b2_dotd_member_bound_pin on the pre-change ChangeZone{TrackedSet} twin; this
+    // shape sets the same flag via member_bound_target_filter's ExiledBySource arm.
     "day of the dragons",
     // LTB (self_ref): Discard{count: HandSize{Controller}} → sub Draw{count:
     // Intensity{Source}} gated on EffectOutcome(OptionalEffectPerformed) (AST

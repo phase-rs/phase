@@ -838,7 +838,14 @@
     "lethalBadge": "Letal",
     "planeswalkerLoyalty": "Planeswalker (lealtad: {{loyalty}})",
     "defendingPlayerTrample": "Jugador defensor (Arrollar)",
+    "attackTargetTrample": "{{name}} (Arrollar)",
     "pwControllerTrample": "Controlador del PW (Arrollar sobre el PW)",
+    "lethalButton": "Letal",
+    "clearButton": "Borrar",
+    "assignLethalTo": "Asignar daño letal a {{target}}",
+    "clearDamageFor": "Borrar el daño asignado a {{target}}",
+    "lethalFirstButton": "Daño letal primero",
+    "lethalFirstTitle": "Asigna daño letal a cada criatura bloqueadora en orden y luego asigna el resto",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Asignar los {{count}} de daño restantes a {{target}}",
     "assignRemainingTo_many": "Asignar los {{count}} de daño restantes a {{target}}",
@@ -1351,7 +1358,8 @@
       "title": "{{effect}} a menos que pagues",
       "titleChooseOne": "{{effect}} a menos que pagues uno",
       "dontPay": "No pagar",
-      "takeEffect": "Aceptar el efecto"
+      "takeEffect": "Aceptar el efecto",
+      "priorChoice": "Jugador {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "¿Empalmar con arcano?",
@@ -1555,7 +1563,6 @@
     },
     "search": {
       "title": "Buscar en la biblioteca",
-      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Elige {{count}} carta",
       "subtitleExact_other": "Elige {{count}} cartas",
       "subtitleUpTo_one": "Elige hasta {{count}} carta",
@@ -2026,7 +2033,8 @@
     "scrollLeft": "Desplazar a la izquierda",
     "scrollRight": "Desplazar a la derecha",
     "confirm": "Confirmar",
-    "cancel": "Cancelar"
+    "cancel": "Cancelar",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Aventura",
@@ -2157,6 +2165,13 @@
   "entryController": {
     "title": "Elegir controlador al entrar",
     "subtitle": "Elige qué oponente controla este permanente al entrar."
+  },
+  "replacementDecisionOrder": {
+    "title": "Elige qué decisión tomar primero",
+    "subtitle": "Estas elecciones de reemplazo ocurren a la vez. Elige cuál tomar primero.",
+    "unknownObject": "Objeto desconocido",
+    "attachedTo": "En {{host}}",
+    "attachments": "Con {{names}}"
   },
   "optionalCost": {
     "gift": {
@@ -2324,6 +2339,13 @@
     "creatureFallback": "Criatura {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Asignar los {{count}} restantes a {{target}}",
+    "assignRemainingTo_many": "Asignar los {{count}} restantes a {{target}}",
+    "assignRemainingTo_one": "Asignar el {{count}} restante a {{target}}",
+    "assignRemainingTo_other": "Asignar los {{count}} restantes a {{target}}",
+    "clearButton": "Borrar",
+    "clearTarget": "Borrar la asignación a {{target}}",
     "unitCounter": "contador {{counter}}",
     "unitDamage": "de daño",
     "unitLife": "de vida",
@@ -2451,6 +2473,9 @@
     "entryLabel": "{{source}} — {{decision}}",
     "optionalTriggers": "Habilidades disparadas opcionales ({{count, number}})",
     "replacementChoices": "Decisiones de reemplazo ({{count, number}})"
+  },
+  "choiceModal": {
+    "holdForFullCard": "Mantén pulsado para ver la carta completa"
   },
   "optionalEffect": {
     "sourceFallback": "Efecto",
@@ -2595,6 +2620,9 @@
     "partitionSubtitle": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno.",
     "partitionSubtitleRemaining_one": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno. ({{count}} jugador más después de ti)",
     "partitionSubtitleRemaining_other": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno. ({{count}} jugadores más después de ti)",
+    "partitionInstruction": "{{chooser}} elige uno",
+    "partitionInstructionRemaining_one": "{{chooser}} elige uno ({{count}} jugador más después de ti)",
+    "partitionInstructionRemaining_other": "{{chooser}} elige uno ({{count}} jugadores más después de ti)",
     "pileALabel": "Montón A:",
     "pileBLabel": "Montón B:",
     "pileAria": "{{name}} — montón {{pile}}",

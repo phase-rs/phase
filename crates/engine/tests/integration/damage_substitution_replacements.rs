@@ -14,10 +14,10 @@
 //! - A rider that picks from a population acts on what the player picks, and the spell's next
 //!   instruction follows all of it (CR 608.2c, CR 608.2d): Lightning Helix's "and you gain 3
 //!   life" under Nefarious Lich.
-//! - Combat damage can't pause for a CR 616.1 order choice yet (Command Zone #140), so the engine
-//!   answers each order park inside a batch with its first candidate instead of dropping the
-//!   damage (CR 510.2). That is not the player's pick, so those rows are strict failures; candidate
-//!   order is scan order, so they assert the set the player could reach, never one member.
+//! - A combat damage batch asks each CR 616.1 order and each prompt a replacement's action or
+//!   rider raises, at the leg or at the aggregate prevention-rider drain (CR 510.2 rules out a
+//!   priority window, not these choices); a substitution's action precedes an earlier rider
+//!   there as elsewhere (CR 614.6 + CR 615.5).
 //! - A spell's later instruction runs once, behind its remaining recipients, whichever
 //!   replacement answer reaches it.
 
@@ -420,6 +420,10 @@ fn combat_events(
         );
     }
     for _ in 0..8 {
+        // H0, CR 510.2: no priority window while the combat damage batch is parked.
+        super::unpreventable_damage_prevention_effects::assert_no_priority_inside_the_batch(
+            runner.state(),
+        );
         if matches!(
             runner.state().phase,
             Phase::EndCombat | Phase::PostCombatMain
@@ -3192,11 +3196,9 @@ fn a_paused_rider_keeps_the_batchs_later_riders_behind_it() {
         assert_eq!(orders, vec![0, 4]);
         // strict-failure: the order between Dralnu's substitution and the Bear's counters is not
         // asserted: by CR 614.6 + CR 615.5 the substitution comes first, which the engine doesn't
-        // yet do in every creation order (Command Zone #172). That order decides what P1 can
-        // sacrifice (Hardened Scales before or after the Bear's counters). Dralnu's sacrifice is a
-        // choice, so the card reports unsupported
-        // (`ResolverFeature:structural:damage_replacement_choice_unasked_in_combat`), which keeps
-        // this order outside the claimed coverage.
+        // yet do in every creation order (Command Zone #348). That order decides what P1 can
+        // sacrifice (Hardened Scales before or after the Bear's counters). Coverage does not see
+        // this order.
         assert!(sacrificed_at.is_some());
         assert_eq!(plus_counters(&runner, bear), 8);
         assert_eq!(zone(&runner, id), Zone::Battlefield);
@@ -3855,8 +3857,8 @@ pub(super) fn cast_temper_at_one(runner: &mut GameRunner, temper: ObjectId, targ
 /// are ordered by P1 (CR 616.1). Test of Faith first prevents 3 and puts 3 counters, and
 /// Phytohydra replaces the last 1 with 1 more: 4. Phytohydra first replaces all 4 with 4
 /// counters and leaves the shield unused. Phytohydra is dealt no damage, and no rider is left.
-/// In combat Test of Faith's counters are put before Phytohydra's; by CR 614.6 + CR 615.5
-/// Phytohydra's come first (strict-failure, Command Zone #267).
+/// Phytohydra's counter is the modified event (CR 614.6), and Test of Faith's follow it
+/// immediately afterward (CR 615.5).
 #[test]
 fn a_resident_rider_from_another_recipient_is_not_lost() {
     let mut scenario = scenario();
@@ -3896,6 +3898,40 @@ fn a_resident_rider_from_another_recipient_is_not_lost() {
             ),
             "one order prompt"
         );
+        if faith_first {
+            // CR 614.6 + CR 615.5: Phytohydra's counter (its controller P1's) is put before every
+            // one of Test of Faith's (its controller P0's).
+            let actors: Vec<(u32, PlayerId)> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::CounterAdded {
+                        object_id,
+                        counter_type: CounterType::Plus1Plus1,
+                        count,
+                        actor,
+                    } if *object_id == hydra => Some((*count, *actor)),
+                    _ => None,
+                })
+                .collect();
+            let phytohydras = actors
+                .iter()
+                .position(|&(_, actor)| actor == P1)
+                .expect("Phytohydra's counter is put");
+            assert_eq!(actors[phytohydras], (1, P1), "{actors:?}");
+            let test_of_faiths: Vec<usize> = actors
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, actor))| *actor == P0)
+                .map(|(position, _)| position)
+                .collect();
+            assert!(!test_of_faiths.is_empty(), "{actors:?}");
+            assert!(
+                test_of_faiths
+                    .iter()
+                    .all(|&position| position > phytohydras),
+                "{actors:?}"
+            );
+        }
         assert_eq!(plus_counters(&runner, hydra), 4);
         assert_eq!(damage(&runner, hydra), 0);
         assert!(!runner.state().has_post_replacement_drain());
@@ -4155,136 +4191,170 @@ fn a_substitution_and_a_redirect_ask_their_order() {
     }
 }
 
+/// The candidate for protection's prevention (CR 702.16e), offered beside the other replacements
+/// that apply to the same damage (CR 616.1).
+fn is_protection(candidate: &ReplacementCandidateSummary) -> bool {
+    candidate
+        .description
+        .starts_with("Prevent damage with protection")
+}
+
 /// Pyroclasm at a Phytohydra with protection from everything. Protection's prevention
 /// (CR 702.16e: "Any damage that would be dealt by sources that have the stated quality to a
 /// permanent or player with protection is prevented.") and Phytohydra's substitution both apply,
-/// so its controller chooses one (CR 616.1).
-///
-/// strict-failure: protection prevents the damage before the substitution is offered, so P0 is
-/// never asked and gets no counters; choosing Phytohydra first gives 2. Phytohydra reports
-/// unsupported for it (`ResolverFeature:structural:damage_substitution_choice_incomplete`).
+/// so its controller chooses one (CR 616.1): protection first prevents the 2, Phytohydra first
+/// turns it into two +1/+1 counters and leaves nothing to prevent.
 #[test]
-fn protection_prevents_ahead_of_a_substitutions_choice() {
-    let mut scenario = scenario();
-    let hydra = scenario
-        .add_creature_from_oracle(P0, "Phytohydra", 1, 1, PHYTOHYDRA)
-        .with_keyword(Keyword::Protection(ProtectionTarget::Everything))
-        .id();
-    let spell = sorcery(&mut scenario, "Pyroclasm", PYROCLASM);
-    let mut runner = scenario.build();
-    let events = cast(&mut runner, spell, vec![]);
+fn protection_and_a_substitution_are_ordered_by_the_affected_player() {
+    for protection_first in [true, false] {
+        let mut scenario = scenario();
+        let hydra = scenario
+            .add_creature_from_oracle(P0, "Phytohydra", 1, 1, PHYTOHYDRA)
+            .with_keyword(Keyword::Protection(ProtectionTarget::Everything))
+            .id();
+        let spell = sorcery(&mut scenario, "Pyroclasm", PYROCLASM);
+        let mut runner = scenario.build();
+        let mut events = cast(&mut runner, spell, vec![]);
 
-    assert!(!events
-        .iter()
-        .any(|e| matches!(e, GameEvent::ReplacementApplied { .. })));
-    assert_eq!(prevented(&events), 1);
-    assert_eq!(plus_counters(&runner, hydra), 0);
-    assert_eq!(damage(&runner, hydra), 0);
-    assert_at_rest(&runner);
+        let (chooser, sources) = replacement_prompt(&runner);
+        assert_eq!(chooser, P0);
+        assert!(sources.contains(&hydra), "{sources:?}");
+        if protection_first {
+            choose(&mut runner, &mut events, is_protection);
+        } else {
+            choose_source(&mut runner, &mut events, hydra);
+        }
+
+        if protection_first {
+            assert_eq!(prevented(&events), 1);
+            assert_eq!(plus_counters(&runner, hydra), 0);
+        } else {
+            assert!(events.iter().any(|e| matches!(
+                e,
+                GameEvent::ReplacementApplied { source_id, .. } if *source_id == hydra
+            )));
+            assert_eq!(prevented(&events), 0);
+            assert_eq!(plus_counters(&runner, hydra), 2);
+        }
+        assert_eq!(damage(&runner, hydra), 0);
+        assert_at_rest(&runner);
+    }
 }
 
 /// Pyroclasm (red, CR 202.2) at P1's Silver Knight ("First strike, protection from red") under
 /// P0's Soul-Scar Mage. Protection's prevention (CR 702.16e) and Soul-Scar Mage's substitution
 /// both apply, so P1 chooses one (CR 616.1, CR 616.1e): Soul-Scar Mage first puts two -1/-1
-/// counters on the Knight, protection first none. P1's Hill Giant, with no protection, is the
-/// reach guard: Soul-Scar Mage applies in the same cast, and it survives as a 1/1.
-///
-/// strict-failure: protection prevents the damage at the pre-replacement gate, before the
-/// substitution is offered, so P1 is never asked and the Knight gets no counters. Soul-Scar Mage
-/// reports unsupported for it
-/// (`ResolverFeature:structural:damage_substitution_choice_incomplete`).
+/// counters on the Knight (a 2/2, so it dies, CR 704.5f), protection first none. P1's Hill Giant,
+/// with no protection, is the reach guard: Soul-Scar Mage applies to it alone in the same cast, and
+/// it survives as a 1/1.
 #[test]
-fn protection_prevents_ahead_of_soul_scar_mages_choice() {
-    let mut scenario = scenario();
-    let mage = soul_scar_mage(&mut scenario, P0);
-    let knight = scenario
-        .add_creature(P1, "Silver Knight", 2, 2)
-        .with_subtypes(vec!["Human", "Knight"])
-        .from_oracle_text_with_keywords(&["First strike", "Protection"], SILVER_KNIGHT)
-        .id();
-    let giant = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Pyroclasm", false, PYROCLASM)
-        .with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::Red],
-            generic: 1,
-        })
-        .id();
-    for _ in 0..2 {
-        scenario.add_basic_land(P0, ManaColor::Red);
-    }
-    let mut runner = scenario.build();
-    assert!(runner.state().objects[&knight]
-        .keywords
-        .contains(&Keyword::Protection(ProtectionTarget::Color(
-            ManaColor::Red
-        ))));
-    let events = cast(&mut runner, spell, vec![]);
+fn protection_and_soul_scar_mage_are_ordered_by_the_affected_player() {
+    for protection_first in [true, false] {
+        let mut scenario = scenario();
+        let mage = soul_scar_mage(&mut scenario, P0);
+        let knight = scenario
+            .add_creature(P1, "Silver Knight", 2, 2)
+            .with_subtypes(vec!["Human", "Knight"])
+            .from_oracle_text_with_keywords(&["First strike", "Protection"], SILVER_KNIGHT)
+            .id();
+        let giant = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Pyroclasm", false, PYROCLASM)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            })
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P0, ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        assert!(runner.state().objects[&knight]
+            .keywords
+            .contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::Red
+            ))));
+        let mut events = cast(&mut runner, spell, vec![]);
 
-    assert!(events.iter().any(|e| matches!(
-        e,
-        GameEvent::ReplacementApplied { source_id, .. } if *source_id == mage
-    )));
-    assert_eq!(counters(&runner, giant, &CounterType::Minus1Minus1), 2);
-    assert_eq!(zone(&runner, giant), Zone::Battlefield);
-    assert!(events.iter().any(|e| matches!(
-        e,
-        GameEvent::DamagePrevented { target: TargetRef::Object(id), .. } if *id == knight
-    )));
-    assert_eq!(counters(&runner, knight, &CounterType::Minus1Minus1), 0);
-    assert_eq!(damage(&runner, knight), 0);
-    assert_at_rest(&runner);
+        let (chooser, sources) = replacement_prompt(&runner);
+        assert_eq!(chooser, P1);
+        assert!(sources.contains(&mage), "{sources:?}");
+        if protection_first {
+            choose(&mut runner, &mut events, is_protection);
+        } else {
+            choose_source(&mut runner, &mut events, mage);
+        }
+
+        assert_eq!(counters(&runner, giant, &CounterType::Minus1Minus1), 2);
+        assert_eq!(zone(&runner, giant), Zone::Battlefield);
+        if protection_first {
+            assert!(events.iter().any(|e| matches!(
+                e,
+                GameEvent::DamagePrevented { target: TargetRef::Object(id), .. } if *id == knight
+            )));
+            assert_eq!(counters(&runner, knight, &CounterType::Minus1Minus1), 0);
+            assert_eq!(zone(&runner, knight), Zone::Battlefield);
+        } else {
+            assert_eq!(zone(&runner, knight), Zone::Graveyard);
+        }
+        assert_at_rest(&runner);
+    }
 }
 
 /// Szadek, Lord of Secrets attacks P1, who cast Teferi's Protection ("you gain protection from
 /// everything"). Protection's prevention (CR 702.16e) and Szadek's substitution both apply to the
 /// combat damage to P1, who chooses one (CR 616.1, CR 616.1e): Szadek first puts five +1/+1
 /// counters on Szadek and mills five, protection first does neither.
-///
-/// strict-failure: protection prevents the damage at the pre-replacement gate, before the
-/// substitution is offered, so P1 is never asked: no counter and no mill. Szadek reports
-/// unsupported for it (`ResolverFeature:structural:damage_substitution_choice_incomplete`).
 #[test]
-fn protection_prevents_ahead_of_szadeks_choice() {
-    let mut scenario = scenario();
-    let szadek = szadek(&mut scenario);
-    scenario.with_library_top(P1, &["C1", "C2", "C3", "C4", "C5", "C6", "C7"]);
-    let protection = scenario
-        .add_spell_to_hand_from_oracle(P1, "Teferi's Protection", true, TEFERIS_PROTECTION)
-        .id();
-    let mut runner = scenario.build();
-    // P0 passes in precombat main, and P1 casts Teferi's Protection with priority.
-    runner.act(GameAction::PassPriority).expect("P0 passes");
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::Priority { player: P1 }
-        ),
-        "got {:?}",
-        runner.state().waiting_for
-    );
-    cast(&mut runner, protection, vec![]);
-    assert_eq!(runner.state().active_player, P0);
+fn protection_and_szadek_are_ordered_by_the_affected_player() {
+    for protection_first in [true, false] {
+        let mut scenario = scenario();
+        let szadek = szadek(&mut scenario);
+        scenario.with_library_top(P1, &["C1", "C2", "C3", "C4", "C5", "C6", "C7"]);
+        let protection = scenario
+            .add_spell_to_hand_from_oracle(P1, "Teferi's Protection", true, TEFERIS_PROTECTION)
+            .id();
+        let mut runner = scenario.build();
+        // P0 passes in precombat main, and P1 casts Teferi's Protection with priority.
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player: P1 }
+            ),
+            "got {:?}",
+            runner.state().waiting_for
+        );
+        cast(&mut runner, protection, vec![]);
+        assert_eq!(runner.state().active_player, P0);
 
-    let events = combat_events(&mut runner, vec![szadek], vec![]);
+        let mut events = combat_events(&mut runner, vec![szadek], vec![]);
 
-    assert!(
-        !matches!(
-            runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. }
-        ),
-        "P1 is never asked"
-    );
-    assert!(events.iter().any(|e| matches!(
-        e,
-        GameEvent::DamagePrevented { source_id, target: TargetRef::Player(player), .. }
-            if *source_id == szadek && *player == P1
-    )));
-    assert_eq!(plus_counters(&runner, szadek), 0);
-    assert_eq!(library_and_graveyard(&runner, P1), (7, 0));
-    assert_eq!(life(&runner, P1), 20);
-    assert_at_rest(&runner);
-    assert!(runner.state().pending_combat_lifelink.is_none());
+        let (chooser, sources) = replacement_prompt(&runner);
+        assert_eq!(chooser, P1);
+        assert!(sources.contains(&szadek), "{sources:?}");
+        if protection_first {
+            choose(&mut runner, &mut events, is_protection);
+        } else {
+            choose_source(&mut runner, &mut events, szadek);
+        }
+
+        if protection_first {
+            assert!(events.iter().any(|e| matches!(
+                e,
+                GameEvent::DamagePrevented { target: TargetRef::Player(player), .. }
+                    if *player == P1
+            )));
+            assert_eq!(plus_counters(&runner, szadek), 0);
+            assert_eq!(library_and_graveyard(&runner, P1), (7, 0));
+        } else {
+            assert_eq!(plus_counters(&runner, szadek), 5);
+            assert_eq!(library_and_graveyard(&runner, P1), (2, 5));
+        }
+        assert_eq!(life(&runner, P1), 20);
+        assert!(runner.state().pending_combat_lifelink.is_none());
+        assert_at_rest(&runner);
+    }
 }
 
 /// "dealt to you" and "dealt to this creature" name only their recipient (CR 614.1a).
@@ -4721,8 +4791,8 @@ fn combat_order_answer_drains_in_its_own_portion() {
 /// where the card gives one.
 /// This gap is Force Bubble's own ruling. CR 700.1 ("The text of triggered abilities and
 /// replacement effects defines the event they're looking for") keeps it from carrying over to a
-/// source-qualified substitution, so `damage_substitution_choice_incomplete` does not claim it
-/// for the class. Force Bubble reports unsupported through that fence's protection gap.
+/// source-qualified substitution, so no coverage marker claims it for the class, and none
+/// records it for Force Bubble either: its coverage reports supported.
 #[test]
 fn two_force_bubbles_take_all_of_a_combat_batch_on_one() {
     let mut scenario = scenario();
@@ -4760,8 +4830,8 @@ fn two_force_bubbles_take_all_of_a_combat_batch_on_one() {
 /// two prompts where the card gives one.
 /// This gap is Force Bubble's own ruling. CR 700.1 ("The text of triggered abilities and
 /// replacement effects defines the event they're looking for") keeps it from carrying over to a
-/// source-qualified substitution, so `damage_substitution_choice_incomplete` does not claim it
-/// for the class. Force Bubble reports unsupported through that fence's protection gap.
+/// source-qualified substitution, so no coverage marker claims it for the class, and none
+/// records it for Force Bubble either: its coverage reports supported.
 #[test]
 fn a_repeated_answer_puts_a_noncombat_batch_on_one_force_bubble() {
     let mut scenario = scenario();
@@ -4861,15 +4931,19 @@ fn szadeks_substitution_leaves_a_shared_shield_for_the_other_attacker() {
                 _ => None,
             })
             .collect();
+        // CR 615.13: the shield's prevention publishes as one application per recipient, named
+        // by the shield's host (`ObjectId(0)` for Mending Hands' floating shield), since one
+        // application can span several damage sources (`combat_damage::push_prevented_events`).
+        let shield_host = ObjectId(0);
         if szadek_first {
             assert_eq!(plus_counters(&runner, szadek), 5);
             assert_eq!(library_and_graveyard(&runner, P1), (2, 5));
-            assert_eq!(prevented_from, vec![(ogre, 4)]);
+            assert_eq!(prevented_from, vec![(shield_host, 4)]);
             assert_eq!(life(&runner, P1), 20);
         } else {
             assert_eq!(plus_counters(&runner, szadek), 1);
             assert_eq!(library_and_graveyard(&runner, P1), (6, 1));
-            assert_eq!(prevented_from, vec![(szadek, 4)]);
+            assert_eq!(prevented_from, vec![(shield_host, 4)]);
             assert_eq!(life(&runner, P1), 16);
         }
         assert_at_rest(&runner);

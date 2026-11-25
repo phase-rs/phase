@@ -838,7 +838,14 @@
     "lethalBadge": "Tödlich",
     "planeswalkerLoyalty": "Planeswalker (Loyalität: {{loyalty}})",
     "defendingPlayerTrample": "Verteidigender Spieler (Trampelschaden)",
+    "attackTargetTrample": "{{name}} (Trampelschaden)",
     "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)",
+    "lethalButton": "Tödlich",
+    "clearButton": "Zurücksetzen",
+    "assignLethalTo": "{{target}} tödlichen Schaden zuweisen",
+    "clearDamageFor": "Schadenszuweisung für {{target}} zurücksetzen",
+    "lethalFirstButton": "Tödlicher Schaden zuerst",
+    "lethalFirstTitle": "Weise der Reihe nach jedem Blocker tödlichen Schaden zu, dann den restlichen Schaden",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Die verbleibenden {{count}} Schaden {{target}} zuteilen",
     "assignRemainingTo_many": "Die verbleibenden {{count}} Schaden {{target}} zuteilen",
@@ -1351,7 +1358,8 @@
       "title": "{{effect}}, sofern du nicht bezahlst",
       "titleChooseOne": "{{effect}}, sofern du nicht eines bezahlst",
       "dontPay": "Nicht bezahlen",
-      "takeEffect": "Den Effekt hinnehmen"
+      "takeEffect": "Den Effekt hinnehmen",
+      "priorChoice": "Spieler {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "An Arkan koppeln?",
@@ -1555,7 +1563,6 @@
     },
     "search": {
       "title": "Bibliothek durchsuchen",
-      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Wähle {{count}} Karte",
       "subtitleExact_other": "Wähle {{count}} Karten",
       "subtitleUpTo_one": "Wähle bis zu {{count}} Karte",
@@ -2026,7 +2033,8 @@
     "scrollLeft": "Nach links scrollen",
     "scrollRight": "Nach rechts scrollen",
     "confirm": "Bestätigen",
-    "cancel": "Abbrechen"
+    "cancel": "Abbrechen",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Abenteuer",
@@ -2157,6 +2165,13 @@
   "entryController": {
     "title": "Kontrolleur beim Eintreten wählen",
     "subtitle": "Wähle, welcher Gegner diese bleibende Karte beim Eintreten kontrolliert."
+  },
+  "replacementDecisionOrder": {
+    "title": "Wähle die erste Entscheidung",
+    "subtitle": "Diese Ersetzungsentscheidungen fallen gleichzeitig an. Wähle, welche du zuerst triffst.",
+    "unknownObject": "Unbekanntes Objekt",
+    "attachedTo": "An {{host}}",
+    "attachments": "Mit {{names}}"
   },
   "optionalCost": {
     "gift": {
@@ -2324,6 +2339,13 @@
     "creatureFallback": "Kreatur {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Die verbleibenden {{count}} Punkte {{target}} zuweisen",
+    "assignRemainingTo_many": "Die verbleibenden {{count}} Punkte {{target}} zuweisen",
+    "assignRemainingTo_one": "Den verbleibenden {{count}} Punkt {{target}} zuweisen",
+    "assignRemainingTo_other": "Die verbleibenden {{count}} Punkte {{target}} zuweisen",
+    "clearButton": "Zurücksetzen",
+    "clearTarget": "Zuweisung für {{target}} zurücksetzen",
     "unitCounter": "{{counter}}-Marke",
     "unitDamage": "Schaden",
     "unitLife": "Leben",
@@ -2451,6 +2473,9 @@
     "entryLabel": "{{source}} – {{decision}}",
     "optionalTriggers": "Optionale ausgelöste Fähigkeiten ({{count, number}})",
     "replacementChoices": "Ersetzungsentscheidungen ({{count, number}})"
+  },
+  "choiceModal": {
+    "holdForFullCard": "Gedrückt halten, um die ganze Karte zu sehen"
   },
   "optionalEffect": {
     "sourceFallback": "Effekt",
@@ -2595,6 +2620,9 @@
     "partitionSubtitle": "Teile deine Kreaturen in zwei Stapel auf. {{chooser}} wird einen wählen.",
     "partitionSubtitleRemaining_one": "Teile deine Kreaturen in zwei Stapel auf. {{chooser}} wird einen wählen. ({{count}} weiterer Spieler nach dir)",
     "partitionSubtitleRemaining_other": "Teile deine Kreaturen in zwei Stapel auf. {{chooser}} wird einen wählen. ({{count}} weitere Spieler nach dir)",
+    "partitionInstruction": "{{chooser}} wählt einen",
+    "partitionInstructionRemaining_one": "{{chooser}} wählt einen ({{count}} weiterer Spieler nach dir)",
+    "partitionInstructionRemaining_other": "{{chooser}} wählt einen ({{count}} weitere Spieler nach dir)",
     "pileALabel": "Stapel A:",
     "pileBLabel": "Stapel B:",
     "pileAria": "{{name}} — Stapel {{pile}}",

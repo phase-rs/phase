@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 
 import type { ScryfallCard } from "../../services/scryfall";
+import type { CommanderDeckComposition } from "../../adapter/engine-queries";
 import type { DeckEntry } from "../../services/deckParser";
 import type { DeckSizeRule } from "../../adapter/types";
 import {
@@ -20,23 +21,6 @@ const COLOR_PIP_STYLES: Record<string, string> = {
 };
 
 /**
- * CR 903.5a: does the `deck` this panel was handed already CONTAIN the
- * designated commander cards, or are they held beside it?
- *
- * The two callers genuinely differ and neither is wrong. Constructed Commander
- * is commanders-OUTSIDE — `useDeckBuilder.handleSetCommander` filters the
- * chosen card out of `main`, so the 99 plus the commander make 100. A drafted
- * Commander pool is commanders-INSIDE — `validate_limited_deck` step 5 requires
- * a copy of every designated name IN `main_deck`, so the designation is a LABEL
- * on a deck card, never an extra card beside the deck.
- *
- * Declared rather than inferred: a panel that guesses gets one caller's count
- * wrong by exactly `commanders.length`, which is silent, plausible, and off by
- * a legal-vs-illegal margin.
- */
-export type CommanderDeckComposition = "commanders-inside" | "commanders-outside";
-
-/**
  * How many of `commanders` are NOT already counted by `deck`. Exhaustive with
  * no `default`, so a third composition is a compile error here rather than a
  * silently-wrong total.
@@ -50,19 +34,6 @@ function commandersNotInDeck(
       return 0;
     case "commanders-outside":
       return commanders.length;
-  }
-}
-
-function hasCommanderCopyAvailable(
-  composition: CommanderDeckComposition,
-  entry: DeckEntry,
-  selectedCount: number,
-): boolean {
-  switch (composition) {
-    case "commanders-inside":
-      return selectedCount < entry.count;
-    case "commanders-outside":
-      return selectedCount === 0;
   }
 }
 
@@ -93,7 +64,7 @@ interface CommanderPanelProps {
    * 61-card deck as not-yet-valid.
    */
   deckSizeRule: DeckSizeRule;
-  isCommanderEligible: (name: string) => boolean;
+  commanderCandidates: string[] | null;
   onSetCommander: (cardName: string) => void;
   onRemoveCommander: (cardName: string) => void;
   signatureSpell?: string;
@@ -118,7 +89,7 @@ export function CommanderPanel({
   deckComposition,
   cardDataCache,
   deckSizeRule,
-  isCommanderEligible,
+  commanderCandidates,
   onSetCommander,
   onRemoveCommander,
   signatureSpell,
@@ -141,18 +112,6 @@ export function CommanderPanel({
   const totalCards = deck.reduce((sum, e) => sum + e.count, 0)
     + commandersNotInDeck(deckComposition, commanders)
     + (signatureSpell ? 1 : 0);
-
-  // Cards in deck that could become a commander. The handler decides whether
-  // clicking adds (free slot or partner pair) or swaps (replaces existing).
-  const eligibleCommanders = deck
-    .filter((entry) => {
-      if (!isCommanderEligible(entry.name)) return false;
-      // CR 903.13f(2): Commander Draft may use any number of same-name cards
-      // from the pool, so inside-deck designations consume copies, not names.
-      const selectedCount = commanders.filter((name) => name === entry.name).length;
-      return hasCommanderCopyAvailable(deckComposition, entry, selectedCount);
-    })
-    .map((e) => e.name);
 
   return (
     <div className="space-y-3">
@@ -210,10 +169,10 @@ export function CommanderPanel({
       )}
 
       {/* Set as commander buttons */}
-      {eligibleCommanders.length > 0 && (
+      {commanderCandidates && commanderCandidates.length > 0 && (
         <div className="space-y-1">
           <span className="text-[10px] text-gray-500">{t("commanderPanel.setAsCommander")}</span>
-          {eligibleCommanders.map((name) => (
+          {commanderCandidates.map((name) => (
             <button
               key={name}
               onClick={() => onSetCommander(name)}

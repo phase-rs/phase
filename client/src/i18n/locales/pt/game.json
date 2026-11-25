@@ -838,7 +838,14 @@
     "lethalBadge": "Letal",
     "planeswalkerLoyalty": "Planeswalker (lealdade: {{loyalty}})",
     "defendingPlayerTrample": "Jogador Defensor (Atropelar)",
+    "attackTargetTrample": "{{name}} (Atropelar)",
     "pwControllerTrample": "Controlador do PW (Atropelar Sobre PW)",
+    "lethalButton": "Letal",
+    "clearButton": "Limpar",
+    "assignLethalTo": "Atribuir dano letal a {{target}}",
+    "clearDamageFor": "Limpar o dano atribuído a {{target}}",
+    "lethalFirstButton": "Dano letal primeiro",
+    "lethalFirstTitle": "Atribua dano letal a cada criatura bloqueadora na ordem e depois atribua o restante",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Atribuir os {{count}} de dano restantes a {{target}}",
     "assignRemainingTo_many": "Atribuir os {{count}} de dano restantes a {{target}}",
@@ -1351,7 +1358,8 @@
       "title": "{{effect}} a Menos Que Você Pague",
       "titleChooseOne": "{{effect}} a Menos Que Você Pague Um",
       "dontPay": "Não Pagar",
-      "takeEffect": "Aceitar o Efeito"
+      "takeEffect": "Aceitar o Efeito",
+      "priorChoice": "Jogador {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Unir com Arcano?",
@@ -1555,7 +1563,6 @@
     },
     "search": {
       "title": "Procurar no Grimório",
-      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Escolha {{count}} carta",
       "subtitleExact_other": "Escolha {{count}} cartas",
       "subtitleUpTo_one": "Escolha até {{count}} carta",
@@ -2026,7 +2033,8 @@
     "scrollLeft": "Rolar para a esquerda",
     "scrollRight": "Rolar para a direita",
     "confirm": "Confirmar",
-    "cancel": "Cancelar"
+    "cancel": "Cancelar",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Aventura",
@@ -2157,6 +2165,13 @@
   "entryController": {
     "title": "Escolher controlador ao entrar",
     "subtitle": "Escolha qual oponente controla esta permanente ao entrar."
+  },
+  "replacementDecisionOrder": {
+    "title": "Escolha qual decisão tomar primeiro",
+    "subtitle": "Estas escolhas de substituição acontecem ao mesmo tempo. Escolha qual fazer primeiro.",
+    "unknownObject": "Objeto desconhecido",
+    "attachedTo": "Em {{host}}",
+    "attachments": "Com {{names}}"
   },
   "optionalCost": {
     "gift": {
@@ -2324,6 +2339,13 @@
     "creatureFallback": "Criatura {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Atribuir os {{count}} restantes a {{target}}",
+    "assignRemainingTo_many": "Atribuir os {{count}} restantes a {{target}}",
+    "assignRemainingTo_one": "Atribuir o {{count}} restante a {{target}}",
+    "assignRemainingTo_other": "Atribuir os {{count}} restantes a {{target}}",
+    "clearButton": "Limpar",
+    "clearTarget": "Limpar a atribuição a {{target}}",
     "unitCounter": "marcador {{counter}}",
     "unitDamage": "dano",
     "unitLife": "vida",
@@ -2451,6 +2473,9 @@
     "entryLabel": "{{source}} — {{decision}}",
     "optionalTriggers": "Habilidades desencadeadas opcionais ({{count, number}})",
     "replacementChoices": "Escolhas de substituição ({{count, number}})"
+  },
+  "choiceModal": {
+    "holdForFullCard": "Mantenha pressionado para ver a carta inteira"
   },
   "optionalEffect": {
     "sourceFallback": "Efeito",
@@ -2595,6 +2620,9 @@
     "partitionSubtitle": "Separe suas criaturas em duas pilhas. {{chooser}} escolherá uma.",
     "partitionSubtitleRemaining_one": "Separe suas criaturas em duas pilhas. {{chooser}} escolherá uma. ({{count}} jogador a mais depois de você)",
     "partitionSubtitleRemaining_other": "Separe suas criaturas em duas pilhas. {{chooser}} escolherá uma. ({{count}} jogadores a mais depois de você)",
+    "partitionInstruction": "{{chooser}} escolhe uma",
+    "partitionInstructionRemaining_one": "{{chooser}} escolhe uma ({{count}} jogador a mais depois de você)",
+    "partitionInstructionRemaining_other": "{{chooser}} escolhe uma ({{count}} jogadores a mais depois de você)",
     "pileALabel": "Pilha A:",
     "pileBLabel": "Pilha B:",
     "pileAria": "{{name}} — pilha {{pile}}",

@@ -1109,9 +1109,8 @@ mod tests {
     fn frame_with_invalid_annotations_is_admitted_and_only_malformed_elements_dropped() {
         use crate::protocol::parse_lobby_client_message;
         use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
-        let printing = |set_code: &str, collector_number: &str| CardPrinting {
-            set_code: set_code.to_string(),
-            collector_number: collector_number.to_string(),
+        let printing = |set_code: &str, collector_number: &str| {
+            CardPrinting::owner(set_code, collector_number)
         };
         let e1 = serde_json::json!({"section":"main_deck","name":"Plains","count":1,
             "printing":{"set_code":"M21","collector_number":"1"}});

@@ -11,7 +11,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore";
 import { formatMetadata } from "../../data/formatRegistry";
 import {
   commanderPartnerCandidates,
-  isCardCommanderEligibleForFormat,
+  commanderCandidates,
   isCardCompanion,
 } from "../../services/engineRuntime";
 import { menuButtonClass } from "../menu/buttonStyles";
@@ -20,8 +20,7 @@ import { CommanderPanel } from "../deck-builder/CommanderPanel";
 import { ExportDeckControl } from "../deck-builder/ExportDeckControl";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import type { GameFormat } from "../../adapter/types";
-import type { DeckEntry } from "../../services/deckParser";
-import type { ParsedDeck } from "../../services/deckParser";
+import { countDeckEntriesByName, expandParsedDeck, type DeckEntry, type ParsedDeck } from "../../services/deckParser";
 import {
   evaluateDeckCompatibility,
   type DeckCompatibilityResult,
@@ -286,12 +285,24 @@ function useCommanderDesignation({
   draftSetCodes: readonly string[];
 }) {
   const [commanders, setCommanders] = useState<string[]>([]);
-  const [commanderEligibleNames, setCommanderEligibleNames] = useState<Set<string> | null>(null);
-  const [eligibilityFailed, setEligibilityFailed] = useState(false);
+  const candidateRequest = useMemo(() => commandersRequired === 0 || !deckFormat
+    ? null
+    : {
+        ...expandParsedDeck({ main: deckEntries, sideboard: [], commander: commanders }),
+        selected_format: deckFormat,
+        draft_set_codes: draftSetCodes,
+      }, [commandersRequired, deckFormat, deckEntries, commanders, draftSetCodes]);
+  const [candidateAnswer, setCandidateAnswer] = useState<{
+    request: NonNullable<typeof candidateRequest>;
+    result: { names: string[] } | { failed: true };
+  } | null>(null);
+  const result = candidateAnswer?.request === candidateRequest ? candidateAnswer.result : null;
+  const commanderCandidateNames = result && "names" in result ? result.names : null;
+  const eligibilityFailed = result !== null && "failed" in result;
   const commandersRef = useRef(commanders);
   const requestGenerationRef = useRef(0);
   const deckCounts = useMemo(
-    () => new Map(deckEntries.map((entry) => [entry.name, entry.count])),
+    () => countDeckEntriesByName(deckEntries),
     [deckEntries],
   );
   const deckCountsRef = useRef(deckCounts);
@@ -312,39 +323,25 @@ function useCommanderDesignation({
       requestGenerationRef.current += 1;
       commandersRef.current = [];
       setCommanders((current) => current.length === 0 ? current : []);
-      setCommanderEligibleNames(null);
-      setEligibilityFailed(false);
-      return;
+      setCandidateAnswer(null);
     }
+  }, [commandersRequired, deckFormat]);
+
+  useEffect(() => {
+    if (!candidateRequest) return;
     let cancelled = false;
-    const names = [...new Set(deckEntries.map((entry) => entry.name))];
-    Promise.all(names.map(async (name) => (
-      [name, await isCardCommanderEligibleForFormat(name, deckFormat)] as const
-    )))
-      .then((results) => {
-        if (cancelled) return;
-        setCommanderEligibleNames(
-          new Set(results.filter(([, eligible]) => eligible).map(([name]) => name)),
-        );
-        setEligibilityFailed(false);
+    commanderCandidates(candidateRequest, "commanders-inside")
+      .then((names) => {
+        if (!cancelled) setCandidateAnswer({ request: candidateRequest, result: { names } });
       })
       .catch(() => {
-        if (cancelled) return;
-        setCommanderEligibleNames(null);
-        setEligibilityFailed(true);
+        if (!cancelled) setCandidateAnswer({ request: candidateRequest, result: { failed: true } });
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [commandersRequired, deckFormat, deckEntries]);
-
-  const isCommanderEligible = useCallback(
-    (name: string) => commanderEligibleNames?.has(name) ?? false,
-    [commanderEligibleNames],
-  );
+    return () => { cancelled = true; };
+  }, [candidateRequest]);
 
   const handleSetCommander = useCallback((cardName: string) => {
-    if (!commanderEligibleNames?.has(cardName)) return;
+    if (!commanderCandidateNames?.includes(cardName)) return;
     const premise = [...commandersRef.current];
     const generation = ++requestGenerationRef.current;
     void (async () => {
@@ -376,7 +373,7 @@ function useCommanderDesignation({
         return next;
       });
     })();
-  }, [commanderEligibleNames, draftSetCodes]);
+  }, [commanderCandidateNames, draftSetCodes]);
 
   const handleRemoveCommander = useCallback((cardName: string) => {
     requestGenerationRef.current += 1;
@@ -408,7 +405,7 @@ function useCommanderDesignation({
   return {
     commanders,
     eligibilityFailed,
-    isCommanderEligible,
+    commanderCandidateNames,
     handleSetCommander,
     handleRemoveCommander,
     designationSatisfied: commanders.length >= commandersRequired,
@@ -984,7 +981,7 @@ function ControlledDeckBuilder({
   const {
     commanders,
     eligibilityFailed,
-    isCommanderEligible,
+    commanderCandidateNames,
     handleSetCommander,
     handleRemoveCommander,
     designationSatisfied,
@@ -1275,7 +1272,7 @@ function ControlledDeckBuilder({
                 deckComposition="commanders-inside"
                 cardDataCache={cardDataCache}
                 deckSizeRule={deckFormatConfig.deck_size}
-                isCommanderEligible={isCommanderEligible}
+                commanderCandidates={commanderCandidateNames}
                 onSetCommander={handleSetCommander}
                 onRemoveCommander={handleRemoveCommander}
                 companion={companion ?? undefined}
@@ -1431,7 +1428,7 @@ function WorkspaceDeckBuilder({
   const {
     commanders,
     eligibilityFailed,
-    isCommanderEligible,
+    commanderCandidateNames,
     handleSetCommander,
     handleRemoveCommander,
     designationSatisfied,
@@ -1813,7 +1810,7 @@ function WorkspaceDeckBuilder({
         deckComposition="commanders-inside"
         cardDataCache={cardDataCache}
         deckSizeRule={deckFormatConfig.deck_size}
-        isCommanderEligible={isCommanderEligible}
+        commanderCandidates={commanderCandidateNames}
         onSetCommander={handleSetCommander}
         onRemoveCommander={handleRemoveCommander}
         companion={companionDesignationEnabled ? (companion ?? undefined) : undefined}

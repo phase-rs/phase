@@ -113,10 +113,16 @@ source is prevented this way, Comeuppance deals that much damage to the source's
 // V11's fixture const is deleted with the row (see the "V11 — WITHDRAWN" block below).
 // The claim's surviving venue-S row carries its own copy of the guard sentence.
 
-/// V12 — Hallowed Moonlight, verbatim.
-const HALLOWED_MOONLIGHT: &str =
-    "Until end of turn, if a creature would enter and it wasn't cast, exile it instead.\nDraw a \
-card.";
+/// V12 — **DECLARED SYNTHETIC, two real donors, one composed pairing** (the V7s / V17
+/// convention). The frame — the leading "Until end of turn," window, the head EVENT guard
+/// with its "exile it instead" rider, and the following "Draw a card." line — is Hallowed
+/// Moonlight's printed text; the guard's gate "and it wasn't cast or no mana was spent to
+/// cast it" is Primeval Spawn's printed one. It keeps V12's routing (leading window, head
+/// EVENT guard with an exile rider, no parent, a following clause) while the resolution-
+/// install front door `parse_windowed_enter_wasnt_cast_exile_install` declines it: the
+/// shared builder's `all_consuming` grammar fails at " or no mana…".
+const UNOWNED_HEAD_ENTER_RIDER: &str = "Until end of turn, if a creature would enter and it \
+wasn't cast or no mana was spent to cast it, exile it instead.\nDraw a card.";
 
 /// V13p — Phyrexian Vindicator, verbatim.
 const PHYREXIAN_VINDICATOR: &str = "Flying\nIf damage would be dealt to this creature, prevent \
@@ -349,7 +355,9 @@ fn v4_o1a_body_under_a_non_consuming_head_gaps() {
         "V4 reach-guard: the GrantCastingPermission head must be present"
     );
     assert!(
-        gap_names(&parsed).contains(&"unparsed_replacement".to_string()),
+        gap_names(&parsed)
+            .iter()
+            .any(|i| i == "unparsed_replacement"),
         "V4: the EVENT guard's body must be recorded as an unparsed_replacement, got {:?}",
         gaps(&parsed)
     );
@@ -715,11 +723,25 @@ fn v9_o2_is_an_ancestor_test_so_the_second_rider_survives() {
 // V12 — an unowned rider with no parent at all.
 // ---------------------------------------------------------------------------
 
-/// V12. Hallowed Moonlight's rider is the chain's *head*, so it has no parent effect to
-/// be owned by. Any fall-through keeps it.
+/// V12. The rider is the chain's *head*, so it has no parent effect to be owned by. Any
+/// fall-through keeps it.
+///
+/// Rehomed from Hallowed Moonlight, which the resolution-install front door now lowers to a
+/// floating replacement (see `tests/integration/mistcaller_enter_wasnt_cast_exile.rs`). No
+/// printed card can host the claim any more: at the base of that change the only card with a
+/// leading-window `unparsed_replacement` exile-rider gap followed by a sibling clause was
+/// Hallowed Moonlight. Census: python over `client/public/card-data.json`, selecting
+/// abilities whose `effect` is `Unimplemented { name: "unparsed_replacement" }` with
+/// "exile it instead" in its description, `duration` set and a `sub_ability` present (base
+/// result: Hallowed Moonlight only). Hence the declared-synthetic fixture.
 #[test]
 fn v12_unowned_rider_with_no_parent_gaps_and_keeps_the_following_clause() {
-    let parsed = parse(HALLOWED_MOONLIGHT, "Hallowed Moonlight", &[], &["Instant"]);
+    let parsed = parse(
+        UNOWNED_HEAD_ENTER_RIDER,
+        "Unowned Head Enter Rider",
+        &[],
+        &["Instant"],
+    );
 
     // Reach-guard: line routing still worked and the second printed line is intact.
     assert!(
@@ -729,7 +751,9 @@ fn v12_unowned_rider_with_no_parent_gaps_and_keeps_the_following_clause() {
         "V12 reach-guard: the printed \"Draw a card.\" must still be present and lowered"
     );
     assert!(
-        gap_names(&parsed).contains(&"unparsed_replacement".to_string()),
+        gap_names(&parsed)
+            .iter()
+            .any(|i| i == "unparsed_replacement"),
         "V12: the EVENT-guarded rider must gap, got {:?}",
         gaps(&parsed)
     );
@@ -762,7 +786,7 @@ fn v13p_dispatcher_named_gap_is_not_re_derived_as_a_guard_gap() {
 
     let names = gap_names(&parsed);
     assert!(
-        names.contains(&"replacement_structure".to_string()),
+        names.iter().any(|i| i == "replacement_structure"),
         "V13p: the dispatcher must name this gap, got {:?}",
         gaps(&parsed)
     );

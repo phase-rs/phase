@@ -1,3 +1,4 @@
+use crate::game::game_object::GameObject;
 use crate::game::layers::compute_current_copiable_values;
 use crate::game::printed_cards::{apply_card_face_to_object, install_copiable_values_as_base};
 use crate::game::quantity::resolve_quantity_with_targets;
@@ -27,6 +28,41 @@ enum ConjuredIdentity {
     /// copiable values, applied to the conjured card so it has real
     /// characteristics. Boxed to keep the enum small (clippy::large_enum_variant).
     Duplicate(Box<CopiableValues>),
+}
+
+impl ConjuredIdentity {
+    fn named(state: &GameState, name: &str) -> Self {
+        Self::Named {
+            name: name.to_owned(),
+            face: state
+                .card_face_registry
+                .get(&name.to_lowercase())
+                .cloned()
+                .map(Box::new),
+        }
+    }
+
+    fn install(&self, object: &mut GameObject) {
+        object.is_token = false;
+        match self {
+            Self::Named {
+                face: Some(face), ..
+            } => apply_card_face_to_object(object, face),
+            Self::Named { face: None, .. } => {}
+            Self::Duplicate(values) => install_copiable_values_as_base(object, values),
+        }
+    }
+}
+
+pub(crate) fn named_battlefield_entrant(
+    state: &mut GameState,
+    owner: PlayerId,
+    name: &str,
+) -> GameObject {
+    let mut card =
+        zones::new_detached_object(state, CardId(0), owner, name.to_owned(), Zone::Battlefield);
+    ConjuredIdentity::named(state, name).install(&mut card);
+    card
 }
 
 /// Digital-only keyword action (no CR entry): Conjure creates a card from outside
@@ -115,14 +151,7 @@ pub fn resolve(
         //   here because the registry only preloads statically-named conjures.
         // An unresolved reference conjures nothing.
         let identity = match &conjure_card.source {
-            ConjureSource::Named { name } => ConjuredIdentity::Named {
-                name: name.clone(),
-                face: state
-                    .card_face_registry
-                    .get(&name.to_lowercase())
-                    .cloned()
-                    .map(Box::new),
-            },
+            ConjureSource::Named { name } => ConjuredIdentity::named(state, name),
             ConjureSource::Duplicate { duplicate_of } => {
                 match resolve_duplicate_reference(state, ability, duplicate_of)
                     .and_then(|id| compute_current_copiable_values(state, id))
@@ -159,21 +188,7 @@ pub fn resolve(
                     (destination == Zone::Battlefield).then(|| state.next_timestamp());
 
                 if let Some(obj) = state.objects.get_mut(&obj_id) {
-                    // Conjured cards are real cards, not tokens.
-                    obj.is_token = false;
-
-                    // Apply full card characteristics: the printed face for a named
-                    // conjure, or the referenced card's copiable values (CR 707.2) for
-                    // a duplicate conjure.
-                    match &identity {
-                        ConjuredIdentity::Named {
-                            face: Some(face), ..
-                        } => apply_card_face_to_object(obj, face),
-                        ConjuredIdentity::Named { face: None, .. } => {}
-                        ConjuredIdentity::Duplicate(values) => {
-                            install_copiable_values_as_base(obj, values)
-                        }
-                    }
+                    identity.install(obj);
 
                     if destination == Zone::Battlefield {
                         // CR 302.6: A creature entering the battlefield has summoning
@@ -269,7 +284,10 @@ pub fn resolve(
     // routes through. Only the positional-library conjure reorders; other
     // destinations append and never disturb an existing top card.
     if destination == Zone::Library && library_position.is_some() {
-        crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+        crate::game::layers::mark_layers_full_if_dimension_read_live(
+            state,
+            crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+        );
     }
 
     // ASSIGNS `state.last_created_token_ids` (never appended), matching every
@@ -296,9 +314,15 @@ fn resolve_duplicate_reference(
     ability: &ResolvedAbility,
     reference: &TargetFilter,
 ) -> Option<ObjectId> {
-    crate::game::effects::resolved_effect_object_ids(state, ability, reference)
-        .into_iter()
-        .next()
+    // CR 608.2h: only the referent's name is read.
+    crate::game::effects::resolved_effect_object_ids_with(
+        state,
+        ability,
+        reference,
+        crate::game::targeting::ReferentRead::Inform,
+    )
+    .into_iter()
+    .next()
 }
 
 /// Place every just-conjured copy for one recipient into `owner`'s library at the
@@ -948,7 +972,7 @@ mod tests {
     /// Issue #5614 (re-review blocker): repositioning a just-conjured card to the
     /// top of a library (RandomWithinTop with n=1 forces index 0) must route through
     /// the shared top-of-library invalidation seam
-    /// (`mark_layers_full_if_top_of_library_static_live`) so a live
+    /// (`mark_layers_full_if_dimension_read_live` with `TopOfLibrary`) so a live
     /// `TopOfLibraryMatches` static (Vampire Nocturnus class) re-evaluates against
     /// the new top card. Without the seam a cached layer derivation retains the stale
     /// former top. PRODUCTION PATH: runs the real conjure resolver with NO manual

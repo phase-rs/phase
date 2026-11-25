@@ -228,7 +228,7 @@ pub fn resolve_gain(
 
 /// The proposed `LifeGain` event for an entry, or `None` when the change is
 /// vacuous or suppressed before the replacement pipeline.
-fn proposed_life_gain(
+pub(crate) fn proposed_life_gain(
     state: &GameState,
     player_id: PlayerId,
     amount: u32,
@@ -249,9 +249,38 @@ fn proposed_life_gain(
     })
 }
 
+/// CR 616.1: can this gain's replacement pipeline open a choice? CR 614.6 +
+/// CR 616.2: also check whether a substitute's action opens a choice on this
+/// board using the read-only replacement candidate scan.
+/// A zero or prohibited gain (CR 119.7) never reaches the pipeline.
+pub(crate) fn life_gain_may_prompt(state: &GameState, player_id: PlayerId, amount: u32) -> bool {
+    let Some(event) = proposed_life_gain(state, player_id, amount) else {
+        return false;
+    };
+    let causes = replacement::proposed_event_prompt_cause(
+        state,
+        &event,
+        replacement::replacement_registry(),
+    );
+    causes.may_open_player_choice()
+        || causes.contains(replacement::ReplacementPromptCause::LifeGainSubstituteMayPrompt)
+}
+
+/// CR 616.1: can the life-loss event itself open a replacement choice?
+/// CR 119.8: a player who can't lose life never reaches the pipeline.
+pub(crate) fn life_loss_may_prompt(state: &GameState, player_id: PlayerId, amount: u32) -> bool {
+    proposed_life_loss(state, player_id, amount)
+        .is_some_and(|event| proposed_event_may_prompt(state, &event))
+}
+
+fn proposed_event_may_prompt(state: &GameState, event: &ProposedEvent) -> bool {
+    replacement::proposed_event_prompt_cause(state, event, replacement::replacement_registry())
+        .may_open_player_choice()
+}
+
 /// The proposed `LifeLoss` event for an entry, or `None` when the change is
 /// vacuous or suppressed before the replacement pipeline.
-fn proposed_life_loss(
+pub(crate) fn proposed_life_loss(
     state: &GameState,
     player_id: PlayerId,
     amount: u32,
@@ -414,6 +443,78 @@ pub fn apply_life_gain(
         UnrepresentablePolicy::IgnoreImpossible,
         events,
     ))
+}
+
+/// What staging one life gain produced (see [`stage_life_gain`]).
+///
+/// `Final` carries the event inline: every caller matches the result
+/// immediately, so boxing it would add an allocation per staged gain without
+/// saving retained state.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum StagedLifeGain {
+    /// The final post-replacement `ProposedEvent::LifeGain`, NOT yet applied:
+    /// the caller settles it later through [`apply_life_gain_after_replacement`].
+    Final(ProposedEvent),
+    /// Nothing is left to settle: the gain never reached the pipeline (amount
+    /// 0, or CR 119.7 "can't gain life"), was fully replaced, or settled inline
+    /// for this amount because a substitute continuation had to run with it.
+    Settled(u32),
+}
+
+/// CR 101.4 + CR 616.1: run one life gain's replacement pipeline WITHOUT
+/// writing the board, for a caller that settles several simultaneous gains
+/// together once every choice of the batch has been made. Every gain staged
+/// before the first settle reads the same board, so each one's replacement
+/// applicability (a "while you have N or less life" condition) is the
+/// pre-batch state, as CR 101.4 requires ("the actions happen
+/// simultaneously" once all choices are made).
+///
+/// The sibling of [`apply_life_gain`] (whose body is unchanged): the arms are
+/// the same except that a plain `Execute` returns the final event instead of
+/// settling it. Two arms cannot be deferred and finish inline exactly as
+/// [`apply_life_gain`] does: a fully replaced gain (`Prevented`) and an
+/// `Execute` with a resident post-replacement continuation.
+/// CR 614.6 + CR 704.3: the substitute must run in the same step as the root change, and its
+/// continuation stash holds one drain at a time. A CR 616.1 choice parks
+/// exactly as in [`apply_life_gain`]: nothing applied, `state.pending_replacement`
+/// owns the event and `Err(ReplacementChoice)` is returned.
+pub(crate) fn stage_life_gain(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<StagedLifeGain, ReplacementDeferred> {
+    let Some(proposed) = proposed_life_gain(state, player_id, amount) else {
+        return Ok(StagedLifeGain::Settled(0));
+    };
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) if !state.has_post_replacement_drain() => {
+            Ok(StagedLifeGain::Final(event))
+        }
+        ReplacementResult::Execute(event) => {
+            let applied = apply_life_gain_after_replacement(state, event, events);
+            match drain_substitution_continuation(state, events) {
+                SubstitutionDrainOutcome::Completed => Ok(StagedLifeGain::Settled(applied)),
+                SubstitutionDrainOutcome::Deferred => {
+                    Err(ReplacementDeferred::SubstitutionContinuation { applied })
+                }
+            }
+        }
+        // CR 614.1a + CR 614.6: a cross-event substitute (Lich class).
+        ReplacementResult::Prevented => match drain_substitution_continuation(state, events) {
+            SubstitutionDrainOutcome::Completed => Ok(StagedLifeGain::Settled(0)),
+            SubstitutionDrainOutcome::Deferred => {
+                Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
+            }
+        },
+        // CR 616.1: competing replacements, the affected player chooses.
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            Err(ReplacementDeferred::ReplacementChoice)
+        }
+    }
 }
 
 /// Action-ingress life gain: like [`apply_life_gain`], except that a final
@@ -672,7 +773,10 @@ fn settle_life_gain(
         }
     }
     // CR 611.3a + CR 119: gate escalation on a live life-reading static.
-    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::LifeTotal,
+    );
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: gain_amount as i32,
@@ -1016,7 +1120,10 @@ fn settle_life_loss(
     }
     // CR 611.3a + CR 119 + CR 120.3a: gate escalation on a live life-reading
     // static. Also the sink for non-infect player damage (deal_damage.rs).
-    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::LifeTotal,
+    );
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: -(loss_amount as i32),
@@ -1298,7 +1405,7 @@ pub fn resolve_lose(
     Ok(())
 }
 
-pub(super) fn resolve_life_loss_target(
+pub(crate) fn resolve_life_loss_target(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: Option<&TargetFilter>,
@@ -1470,6 +1577,126 @@ mod tests {
             )),
         );
         id
+    }
+
+    /// CR 616.1: `life_gain_may_prompt` / `life_loss_may_prompt` answer "can
+    /// this event's own replacement pipeline open a player choice". No
+    /// replacement: false. A lone mandatory "+1" modifier: false (it only
+    /// carries `MandatoryBodyContinuation`, which never prompts; this row is
+    /// what proves the gate is not that cause). "+1" with "twice": true
+    /// (ordering material). An optional replacement: true. The loss twin uses
+    /// Bloodletter of Aclazotz (a lone mandatory doubler on P1's loss during
+    /// P0's turn: false) and a typed optional loss replacement (true).
+    /// "Can't gain/lose life" (CR 119.7 / CR 119.8) and amount 0 never reach
+    /// the pipeline: false, each paired with the same board's positive row as
+    /// its reach-guard.
+    #[test]
+    fn life_change_may_prompt_reads_the_replacement_candidates() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+        use crate::types::replacements::ReplacementEvent;
+
+        const PLUS_ONE: &str = "If you would gain life, you gain that much life plus 1 instead.";
+        const TWICE: &str = "If you would gain life, you gain twice that much life instead.";
+        const BLOODLETTER: &str = "Flying\nIf an opponent would lose life during your turn, they lose twice that much life instead.";
+
+        fn add_optional(state: &mut GameState, event: ReplacementEvent) {
+            let id = create_object(
+                state,
+                CardId(951),
+                P0,
+                "Optional Replacement".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(event)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Optional Replacement".to_string()),
+                );
+        }
+
+        let board = |gain_texts: &[&str], bloodletter: bool, optional: &[ReplacementEvent]| {
+            let mut scenario = GameScenario::new();
+            for text in gain_texts {
+                scenario.add_enchantment_from_oracle(P0, "Modifier", text);
+            }
+            if bloodletter {
+                scenario
+                    .add_creature(P0, "Bloodletter of Aclazotz", 2, 4)
+                    .from_oracle_text_with_keywords(&["Flying"], BLOODLETTER);
+            }
+            for event in optional {
+                add_optional(&mut scenario.state, event.clone());
+            }
+            let mut runner = scenario.build();
+            runner.state_mut().active_player = P0;
+            runner
+        };
+
+        let none = board(&[], false, &[]);
+        assert!(!life_gain_may_prompt(none.state(), P0, 2));
+        assert!(!life_loss_may_prompt(none.state(), P1, 2));
+
+        let lone = board(&[PLUS_ONE], true, &[]);
+        assert_eq!(
+            lone.state()
+                .objects
+                .values()
+                .filter(|obj| !obj.replacement_definitions.is_empty())
+                .count(),
+            2,
+            "reach-guard: both lone modifiers parsed into replacements"
+        );
+        assert!(!life_gain_may_prompt(lone.state(), P0, 2), "lone +1 gain");
+        assert!(!life_loss_may_prompt(lone.state(), P1, 2), "lone x2 loss");
+
+        let competing = board(&[PLUS_ONE, TWICE], true, &[ReplacementEvent::LoseLife]);
+        assert!(
+            life_gain_may_prompt(competing.state(), P0, 2),
+            "+1 and x2 gain"
+        );
+        assert!(
+            !life_gain_may_prompt(competing.state(), P0, 0),
+            "amount 0 gain"
+        );
+        assert!(
+            life_loss_may_prompt(competing.state(), P0, 2),
+            "optional loss (its controller's)"
+        );
+        assert!(
+            !life_loss_may_prompt(competing.state(), P0, 0),
+            "amount 0 loss"
+        );
+
+        // CR 119.7 / CR 119.8: "can't gain/lose life" short-circuits before
+        // the pipeline even with the choice-capable replacements present.
+        let mut locked = competing.state().clone();
+        add_life_lock_permanent(
+            &mut locked,
+            P0,
+            StaticMode::CantGainLife,
+            ControllerRef::You,
+        );
+        add_life_lock_permanent(
+            &mut locked,
+            P0,
+            StaticMode::CantLoseLife,
+            ControllerRef::You,
+        );
+        assert!(!life_gain_may_prompt(&locked, P0, 2), "can't gain life");
+        assert!(!life_loss_may_prompt(&locked, P0, 2), "can't lose life");
+
+        // A typed optional life-gain replacement opens a choice on its own.
+        let optional = board(&[], false, &[ReplacementEvent::GainLife]);
+        assert!(
+            life_gain_may_prompt(optional.state(), P0, 2),
+            "optional gain"
+        );
     }
 
     #[test]
@@ -2350,6 +2577,153 @@ mod tests {
             p2_life_before - 5,
             "opponent B must lose its own life lost (5), not the controller's 99"
         );
+    }
+
+    /// CR 101.4 + CR 616.1: `stage_life_gain` arms. (a) amount 0 and CR 119.7
+    /// "can't gain life" never reach the pipeline: `Settled(0)`, no change.
+    /// (b) a cross-event substitute (Lich: "draw that many cards instead")
+    /// cannot be deferred: it finishes inline (`Settled(0)`, cards drawn), and
+    /// an interactive substitute reports `SubstitutionContinuation`. (c) a
+    /// plain gain under a lone doubler stages its FINAL event and writes
+    /// nothing: no life change and no `LifeChanged` until the caller settles
+    /// it, then the settle applies exactly that event.
+    #[test]
+    fn stage_life_gain_arms() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, PlayerFilter, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        // (a)
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        assert_eq!(
+            stage_life_gain(&mut state, PlayerId(0), 0, &mut events),
+            Ok(StagedLifeGain::Settled(0))
+        );
+        add_life_lock_permanent(
+            &mut state,
+            PlayerId(0),
+            StaticMode::CantGainLife,
+            ControllerRef::You,
+        );
+        assert_eq!(
+            stage_life_gain(&mut state, PlayerId(0), 3, &mut events),
+            Ok(StagedLifeGain::Settled(0))
+        );
+        assert_eq!(state.players[0].life, 20);
+        assert!(events.is_empty());
+
+        // (b) Lich: drawn inline, nothing left to settle.
+        let mut state = GameState::new_two_player(42);
+        let lich = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Lich".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&lich)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::GainLife)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ))]
+        .into();
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(600 + i),
+                PlayerId(0),
+                format!("Library {i}"),
+                Zone::Library,
+            );
+        }
+        let hand_before = state.players[0].hand.len();
+        assert_eq!(
+            stage_life_gain(&mut state, PlayerId(0), 3, &mut Vec::new()),
+            Ok(StagedLifeGain::Settled(0))
+        );
+        assert_eq!(state.players[0].hand.len(), hand_before + 3, "(b) drew 3");
+        assert_eq!(state.players[0].life, 20);
+        assert!(!state.has_post_replacement_drain());
+
+        // (b) interactive substitute: the deferral is reported, not staged.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(702),
+            PlayerId(0),
+            "Interactive Lich".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::GainLife)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    )],
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+            ))]
+        .into();
+        assert_eq!(
+            stage_life_gain(&mut state, PlayerId(0), 4, &mut Vec::new()),
+            Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
+        );
+
+        // (c) a lone doubler: the final event is 6, nothing written yet.
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        scenario.add_enchantment_from_oracle(
+            PlayerId(0),
+            "Twice",
+            "If you would gain life, you gain twice that much life instead.",
+        );
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let mut events = Vec::new();
+        let staged = stage_life_gain(state, PlayerId(0), 3, &mut events);
+        let Ok(StagedLifeGain::Final(event)) = staged else {
+            panic!("(c) expected a staged final event, got {staged:?}");
+        };
+        assert!(
+            matches!(
+                event,
+                ProposedEvent::LifeGain {
+                    player_id: PlayerId(0),
+                    amount: 6,
+                    ..
+                }
+            ),
+            "(c) the doubled final event, got {event:?}"
+        );
+        assert_eq!(state.players[0].life, 20, "(c) staging writes nothing");
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::LifeChanged { .. })));
+        assert_eq!(
+            apply_life_gain_after_replacement(state, event, &mut events),
+            6
+        );
+        assert_eq!(state.players[0].life, 26);
     }
 
     /// Issue #317 (Lich): "If you would gain life, draw that many cards

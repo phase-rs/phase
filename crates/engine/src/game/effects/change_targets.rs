@@ -1,7 +1,6 @@
 use crate::game::ability_utils;
 use crate::game::ability_utils::{RetargetSlotBinding, SlotEnforcement};
 use crate::game::targeting;
-use crate::game::targeting::find_legal_targets;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -150,15 +149,25 @@ pub fn resolve(
     // because the forced path returns before the prompt would be constructed
     // (Invariant SC, `chain_retarget_slots`' doc) — this and the interactive
     // path below are its TWO call sites, both in this file.
-    let base = legal_new_targets_for_entry(state, &state.stack[stack_entry_index]);
-    let pool_controller =
-        retarget_pool_controller(state, &state.stack[stack_entry_index], &stack_ability);
+    let entry = &state.stack[stack_entry_index];
+    let trigger_context = Some(crate::game::targeting::StackTriggerContext::for_entry(
+        state, entry,
+    ));
+    let base = legal_new_targets_for_entry(state, entry, trigger_context);
+    let pool_controller = retarget_pool_controller(state, entry, &stack_ability);
     let mut slot_pools: Vec<Vec<TargetRef>> = exposed
         .iter()
         .map(|b| {
             let node =
                 ability_utils::node_at(&stack_ability, &b.address.path).unwrap_or(&stack_ability);
-            slot_pool(state, node, &b.enforcement, pool_controller, &base)
+            slot_pool(
+                state,
+                node,
+                &b.enforcement,
+                pool_controller,
+                &base,
+                trigger_context,
+            )
         })
         .collect();
     ability_utils::widen_dependent_retarget_pools(
@@ -167,6 +176,7 @@ pub fn resolve(
         exposed,
         &mut slot_pools,
         pool_controller,
+        trigger_context,
     );
 
     if let Some(filter) = forced_to {
@@ -180,7 +190,14 @@ pub fn resolve(
         // the new creature) is not made. The validator's result is written:
         // its pins (a changed occurrence takes the live incarnation, CR 400.7)
         // and its re-derived chain targets.
-        let new_targets = find_legal_targets(state, filter, ability.controller, ability.source_id);
+        let new_targets =
+            targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+                state,
+                filter,
+                ability,
+                ability.controller,
+                trigger_context,
+            );
         let accepted = crate::game::retarget_completion::RetargetSearch::for_stack_entry(
             state,
             stack_entry_index,
@@ -241,8 +258,11 @@ pub(crate) fn retarget_prompt(
         return None;
     }
     let slots: Vec<_> = exposed.iter().map(|b| b.address.clone()).collect();
-    let base = legal_new_targets_for_entry(state, entry);
-    let mut slot_pools = derive_slot_pools(state, entry, stack_ability, exposed);
+    let trigger_context = Some(crate::game::targeting::StackTriggerContext::for_entry(
+        state, entry,
+    ));
+    let base = legal_new_targets_for_entry(state, entry, trigger_context);
+    let mut slot_pools = derive_slot_pools(state, entry, stack_ability, exposed, trigger_context);
     // CR 115.7a + CR 400.7: Single must elect a different target occurrence.
     if matches!(scope, RetargetScope::Single) {
         for (address, pool) in slots.iter().zip(&mut slot_pools) {
@@ -310,6 +330,7 @@ pub(crate) fn retarget_prompt(
     Some(WaitingFor::RetargetChoice {
         player: chooser,
         stack_entry_index,
+        stack_entry_id: Some(state.stack[stack_entry_index].id),
         scope: scope.clone(),
         current_targets,
         slots,
@@ -487,6 +508,7 @@ fn slot_pool(
     enforcement: &SlotEnforcement,
     pool_controller: PlayerId,
     base: &[TargetRef],
+    trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
 ) -> Vec<TargetRef> {
     match enforcement {
         // No per-slot authority exists here, so BASE's cascade IS this
@@ -495,12 +517,15 @@ fn slot_pool(
         SlotEnforcement::Legacy => base.to_vec(),
         // `f` is the whole authority for this slot, so its own legal set IS
         // the candidate set.
-        SlotEnforcement::Filtered(f) => targeting::find_legal_targets_for_ability_with_controller(
-            state,
-            f,
-            node,
-            pool_controller,
-        ),
+        SlotEnforcement::Filtered(f) => {
+            targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+                state,
+                f,
+                node,
+                pool_controller,
+                trigger_context,
+            )
+        }
     }
 }
 
@@ -533,15 +558,23 @@ pub(crate) fn derive_slot_pools(
     entry: &StackEntry,
     stack_ability: &ResolvedAbility,
     bindings: &[RetargetSlotBinding],
+    trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
 ) -> Vec<Vec<TargetRef>> {
-    let base = legal_new_targets_for_entry(state, entry);
+    let base = legal_new_targets_for_entry(state, entry, trigger_context);
     let pool_controller = retarget_pool_controller(state, entry, stack_ability);
     let mut pools: Vec<Vec<TargetRef>> = bindings
         .iter()
         .map(|b| {
             let node =
                 ability_utils::node_at(stack_ability, &b.address.path).unwrap_or(stack_ability);
-            slot_pool(state, node, &b.enforcement, pool_controller, &base)
+            slot_pool(
+                state,
+                node,
+                &b.enforcement,
+                pool_controller,
+                &base,
+                trigger_context,
+            )
         })
         .collect();
     ability_utils::widen_dependent_retarget_pools(
@@ -550,6 +583,7 @@ pub(crate) fn derive_slot_pools(
         bindings,
         &mut pools,
         pool_controller,
+        trigger_context,
     );
     pools
 }
@@ -571,14 +605,30 @@ pub fn legal_new_targets_for_stack_entry(
     state
         .stack
         .get(stack_entry_index)
-        .map(|entry| legal_new_targets_for_entry(state, entry))
+        .map(|entry| {
+            let context = Some(crate::game::targeting::StackTriggerContext::for_entry(
+                state, entry,
+            ));
+            legal_new_targets_for_entry(state, entry, context)
+        })
         .unwrap_or_default()
 }
 
-fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<TargetRef> {
+fn legal_new_targets_for_entry(
+    state: &GameState,
+    entry: &StackEntry,
+    trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
+) -> Vec<TargetRef> {
     let Some(stack_ability) = entry.ability() else {
         return Vec::new();
     };
+    // CR 601.2b + CR 608.2c: A paid "instead" branch re-roots the whole
+    // declaration. Its targets are the ones the cast path announced and the
+    // parent merely mirrors, so the cascade below must read the paid node's
+    // filter/pool — not the unkicked parent's (issue #10266: Bolt Bend could
+    // target kicked Galadriel's Dismissal but was offered its base creature
+    // filter instead of the announced player slot).
+    let active_ability = crate::game::ability_utils::base_exposed_node(stack_ability);
 
     // CR 115.7 + CR 608.2c: enumerate the replacement pool against the spell's
     // CURRENT controller, not the caster. Perplexing Chimera's printed ruling is
@@ -626,7 +676,13 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
     // rejected and no actor could discharge the prompt.
     if matches!(entry.kind, StackEntryKind::Spell { .. }) {
         if let Some(filter) = aura_enchant_filter(state, stack_ability.source_id) {
-            return find_legal_targets(state, &filter, pool_controller, stack_ability.source_id);
+            return targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+                state,
+                &filter,
+                stack_ability,
+                pool_controller,
+                trigger_context,
+            );
         }
     }
 
@@ -648,11 +704,17 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
     // reject different sets. Single-role manas take
     // `mana_multi_role == None` and are served entirely by the standard branch,
     // exactly as before.
-    if let Some(role) = crate::types::ability::mana_multi_role(&stack_ability.effect) {
+    if let Some(role) = crate::types::ability::mana_multi_role(&active_ability.effect) {
         let options: Vec<TargetRef> = role
             .surfaced_filters()
             .flat_map(|(_slot, filter)| {
-                find_legal_targets(state, filter, pool_controller, stack_ability.source_id)
+                targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+                    state,
+                    filter,
+                    active_ability,
+                    pool_controller,
+                    trigger_context,
+                )
             })
             .collect();
         if !options.is_empty() {
@@ -660,48 +722,99 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
         }
     }
 
-    // CR 115.7: Standard targeted spell/ability — re-evaluate its own declared
-    // target filter against current game state.
-    if let Some(filter) = extract_target_filter(&stack_ability.effect) {
-        return find_legal_targets(state, filter, pool_controller, stack_ability.source_id);
+    // CR 115.1 + CR 115.7d: a per-opponent fanout ("for each opponent, choose
+    // up to one target permanent that opponent controls") announces one slot
+    // per opponent, each legal only for the opponent its header names. The
+    // printed filter's controller is the anaphoric `You`/unbound, which the
+    // generic branch below would read against `pool_controller` — i.e. the
+    // retargeting spell's controller — offering the CASTER's permanents. The
+    // flat pool is instead the union of every opponent's own legal set.
+    // Positions themselves are non-exact at the addressing layer, so this
+    // superset cannot authorize an illegal application.
+    // Never fall through when the union is empty: the generic branch below reads
+    // the printed filter against `pool_controller`, which for a fanout is the
+    // retargeting spell's controller and offers the whole table. An empty union
+    // is the honest answer, and `retarget_prompt_is_dischargeable` then resolves
+    // the prompt as a no-change (CR 115.7a: a target that cannot be changed to
+    // another legal target is unchanged).
+    if crate::game::ability_utils::is_per_opponent_target_fanout(active_ability) {
+        return crate::game::ability_utils::per_opponent_fanout_retarget_options(
+            state,
+            active_ability,
+        );
     }
 
-    // CR 109.4: A mass effect that targets a player via a population filter
-    // ("tap all creatures target player controls", "destroy all artifacts that
-    // player controls") surfaces a player target slot, yet its
-    // `Effect::target_filter()` is `None` (the field is a resolution-time scan,
-    // not a targeting filter), so the standard branch above can't reach it.
+    // CR 115.7: Standard targeted spell/ability — re-evaluate its own declared
+    // target filter against current game state. Ask the mass-aware declaration
+    // authority first: a population filter that merely reads a target player
+    // ("each creature target player controls phases out") is not a declared
+    // target, and must fall through to the companion player pool below instead
+    // of being offered as if it were the announced slot (issue #10266: Bolt
+    // Bend was offered the unkicked base creature pool).
+    let declares_primary_target =
+        crate::types::ability::extract_target_filter_from_effect(&active_ability.effect).is_some();
+    if declares_primary_target {
+        if let Some(filter) = extract_target_filter(&active_ability.effect) {
+            return targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+                state,
+                filter,
+                active_ability,
+                pool_controller,
+                trigger_context,
+            );
+        }
+    }
+
+    // CR 109.4 + CR 115.7: A mass effect that targets a player via a population
+    // filter surfaces a player target slot with no primary declared target.
     // Enumerate the legal replacement *players* via the same companion-slot
-    // authority the cast path uses so retargeting offers a real alternative
-    // instead of collapsing to the current target.
+    // authority the cast path uses.
     // The entry's own triggering events, not whichever trigger is constructing.
     // Multi-event batches are stored per entry; a single event stays on the
     // entry, the same fallback resolution uses when binding its scope.
-    let entry_trigger_events = match (
-        state.stack_trigger_event_batches.get(&entry.id),
-        &entry.kind,
-    ) {
-        (Some(batch), _) => batch.as_slice(),
-        (
-            None,
-            StackEntryKind::TriggeredAbility {
-                trigger_event: Some(event),
-                ..
-            },
-        ) => std::slice::from_ref(event),
-        (None, _) => &[],
-    };
     if let Some(players) = crate::game::ability_utils::companion_target_player_retarget_options(
         state,
-        stack_ability,
-        entry_trigger_events,
+        active_ability,
+        trigger_context.map_or(&[][..], |context| context.events),
+        pool_controller,
     ) {
         return players;
     }
 
+    // A paid "instead" branch can inherit the parent's target ("that
+    // permanent", "it") while the base branch owns the real declared target.
+    // The inherited anaphor is not a retargetable filter, so fall back to the
+    // pre-delegation branch's declared primary filter before attempting the
+    // context filter (kicked Rite of Replication, bargained Torch the Tower).
+    if !std::ptr::eq(active_ability, stack_ability) {
+        if let Some(filter) = extract_target_filter(&stack_ability.effect) {
+            if !filter.is_context_ref() {
+                return targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+                    state,
+                    filter,
+                    stack_ability,
+                    pool_controller,
+                    trigger_context,
+                );
+            }
+        }
+    }
+
+    // Shapes whose only target is a context reference (SelfRef, …) still keep
+    // their standard pool when the mass-aware authority was not the decider.
+    if let Some(filter) = extract_target_filter(&active_ability.effect) {
+        return targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+            state,
+            filter,
+            active_ability,
+            pool_controller,
+            trigger_context,
+        );
+    }
+
     // CR 115.7a: No declared or derived target filter (e.g. a placeholder spell
     // effect) — keep the current targets unchanged.
-    stack_ability.targets.clone()
+    active_ability.targets.clone()
 }
 
 /// CR 303.4a: An Aura spell's legal targets are defined by its enchant ability —

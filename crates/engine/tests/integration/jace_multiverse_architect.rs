@@ -402,6 +402,7 @@ fn jace_trigger_clause_parses_to_subtype_defended_restriction() {
                         ProhibitedActivity::Attack {
                             defended,
                             protected_player,
+                            protected_scope: None,
                         },
                     ..
                 },
@@ -1126,6 +1127,7 @@ fn jace_unbound_scoped_player_falls_back_to_controller() {
                     subtype: Some("Jace".to_string()),
                 },
                 protected_player: None,
+                protected_scope: None,
             },
         },
     };

@@ -1,7 +1,9 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1, take_while1};
-use nom::character::complete::{multispace0, one_of, satisfy, space1};
-use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value, verify};
+use nom::character::complete::{multispace0, one_of, satisfy, space0, space1};
+use nom::combinator::{
+    all_consuming, cut, eof, map, map_opt, not, opt, peek, success, value, verify,
+};
 use nom::multi::{many0, many_till};
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -10,10 +12,10 @@ use crate::types::ability::{
     AggregateFunction, AttachmentKind, AttachmentReferent, BlockPairDirection, CardTypeSetSource,
     ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
     ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp,
-    NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter,
-    PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
-    ThisWayCause, TypeFilter, TypedFilter,
+    LinkedExileReturn, NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource,
+    PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -26,8 +28,10 @@ use super::oracle_effect::{
     is_bare_object_pronoun, parse_multi_target_count_expr, parse_search_name_reference_suffix,
     resolve_it_pronoun,
 };
+use super::oracle_ir::ast::AnaphorNumber;
 use super::oracle_ir::context::{
-    bind_controller_phrase, ChosenColorQualifierScope, ParseContext, SpellAnaphorBinding,
+    bind_controller_phrase, ChainPriorPublishers, ChosenColorQualifierScope, ParseContext,
+    SpellAnaphorBinding, TriggerConditionObjects,
 };
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
@@ -47,10 +51,11 @@ use super::oracle_util::{
 use crate::types::text_grammar::{
     parse_color_prefix, parse_color_quality_prefix, parse_core_type, parse_exile_visibility_prefix,
     parse_leading_keyword_match, parse_leading_pt_designation, parse_token_suffix,
-    separator_continues_enclosing_list, starts_with_type_phrase_lead, KeywordMatch,
+    separator_stops_keyword_list, starts_with_type_phrase_lead, KeywordMatch,
 };
 pub(crate) use crate::types::text_grammar::{
-    parse_combat_status_prefix, parse_without_keyword_suffix, starts_with_type_word,
+    parse_combat_status_prefix, parse_property_filter, parse_without_keyword_suffix,
+    starts_with_type_word,
 };
 
 /// CR 115.1: Whether a parsed target phrase used the "target" keyword
@@ -320,7 +325,7 @@ fn parse_card_or_cards_word(input: &str) -> super::oracle_nom::error::OracleResu
 /// CR 608.2c + CR 406.6 + CR 607.2a + CR 707.10 + CR 702.75a: Resolve a
 /// singular "the exiled card" / "copy the exiled card" anaphor to the
 /// correct binding. When an earlier clause in the SAME resolution chain
-/// already exiled a card (`chain_has_prior_exile_producer`), the anaphor
+/// already exiled a card (`ChainPriorPublishers::IncludesExile`), the anaphor
 /// refers to that same-chain exile and keeps its pre-existing binding
 /// (`same_chain_binding`, e.g. `TrackedSet{0}` or `ParentTarget`). Otherwise
 /// the referenced exile happened in an EARLIER, separately-resolved ability
@@ -330,13 +335,118 @@ fn parse_card_or_cards_word(input: &str) -> super::oracle_nom::error::OracleResu
 /// `exile_links` (CR 607.1/607.2a: linked abilities reference the same
 /// object across resolutions).
 pub(crate) fn resolve_singular_exiled_card_target(
-    chain_has_prior_exile_producer: bool,
+    chain: ChainPriorPublishers,
     same_chain_binding: TargetFilter,
 ) -> TargetFilter {
-    if chain_has_prior_exile_producer {
-        same_chain_binding
-    } else {
-        TargetFilter::ExiledBySource
+    match chain {
+        ChainPriorPublishers::IncludesExile => same_chain_binding,
+        ChainPriorPublishers::Absent | ChainPriorPublishers::NonExileOnly => {
+            TargetFilter::ExiledBySource
+        }
+    }
+}
+
+/// CR 607.2a: "the exiled card" / "the exiled cards" as a whole target phrase.
+/// The grammatical number selects how a return binds the linked set: plural
+/// names the whole set (a set-wide move), singular one card. Input is the
+/// trimmed, lowercased target text.
+pub(crate) fn parse_exiled_card_anaphor(input: &str) -> OracleResult<'_, AnaphorNumber> {
+    all_consuming(terminated(
+        alt((
+            value(AnaphorNumber::Plural, tag("the exiled cards")),
+            value(AnaphorNumber::Singular, tag("the exiled card")),
+        )),
+        (space0, eof),
+    ))
+    .parse(input)
+}
+
+/// CR 607.2a: the members the linked exile instruction put into exile — the
+/// chain's tracked set narrowed to the `Exiled`-caused subset.
+pub(crate) fn exiled_caused_tracked_set() -> TargetFilter {
+    TargetFilter::TrackedSetFiltered {
+        id: TrackedSetId(0),
+        filter: Box::new(TargetFilter::Any),
+        caused_by: Some(ThisWayCause::Exiled),
+    }
+}
+
+/// CR 607.2a: the mark a return written "the exiled card(s)" carries when the
+/// phrase is bound to the bare chain sentinel. Any other binding (a same-clause
+/// exile antecedent, `ExiledBySource`, a narrowed sentinel) is not the linked-set
+/// return and carries no mark. Grammatical number selects the move: plural names
+/// the whole set (a set-wide move), singular one card.
+pub(crate) fn linked_exile_return_mark(
+    number: AnaphorNumber,
+    binding: &TargetFilter,
+) -> Option<LinkedExileReturn> {
+    matches!(
+        binding,
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        }
+    )
+    .then_some(match number {
+        AnaphorNumber::Singular => LinkedExileReturn::OneCard,
+        AnaphorNumber::Plural => LinkedExileReturn::WholeSet,
+    })
+}
+
+/// Where the ability holding a marked "the exiled card(s)" return is written: the
+/// axis that decides which linked exile the phrase names.
+///
+/// CR 607.1 / CR 607.1a / CR 607.1d. A CR 607.5 pair (both abilities acquired
+/// from one effect) would bind the grantee's own linked exile; no printed card in
+/// the class reaches it, so it fails closed with the other created-by-effect
+/// returns, as `AbilityProvenance` treats CR 607.1a self-grants conservatively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinkedExileReturnHost {
+    /// CR 607.1 + CR 607.2a: printed on the source (a trigger, replacement or
+    /// spell ability the card prints). The linked exile instruction is another
+    /// ability printed on the same object, so the phrase names the cards that
+    /// object's linked exile put into exile.
+    PrintedOnSource,
+    /// Written inside an ability an effect creates (a granted trigger or ability,
+    /// a granted static's definition, a draw-replacement substitute), so not
+    /// printed on the source (CR 607.1). For Timothar's Bat, a token the
+    /// source's ability created, CR 607.1d links the grant to that ability.
+    /// The phrase names the cards exiled by the resolution that created it
+    /// (Timothar's ruling, 2021-11-19), which only a creation-time binding can
+    /// fix; until #11123 (Timothar's creation-time binding) lands, it narrows the
+    /// resolving chain's set to its `Exiled`-caused members.
+    CreatedByEffect,
+}
+
+/// CR 607.2a + CR 406.6 + CR 608.2c: the binding of a marked "the exiled card(s)"
+/// return, from the prior publishers of its OWN resolution chain and the host
+/// that holds it. Over only non-exile departures (Day of the Dragons' sacrifice,
+/// Timothar's granted sacrifice, The Spot's library put) the phrase names only
+/// the cards the linked exile instruction put into exile, never the chain's own
+/// members:
+/// - printed on the source (CR 607.1, CR 607.2a): the source's linked exile,
+///   `ExiledBySource`, the binding the O-ring class and Tidehollow Sculler use;
+/// - created by an effect (CR 607.1d; Timothar's ruling 2021-11-19, "Timothar's
+///   last ability is linked to the ability it grants the Bat token"): the
+///   creating resolution's `Exiled`-caused members, pending creation-time
+///   binding (#11123).
+///
+/// `None` keeps the sentinel: with no prior publisher (the O-ring LTB shape
+/// `detect_etb_exile_ltb_return` pairs) or over a same-chain exile producer.
+pub(crate) fn linked_exile_return_binding(
+    chain: ChainPriorPublishers,
+    host: LinkedExileReturnHost,
+) -> Option<TargetFilter> {
+    match (chain, host) {
+        (ChainPriorPublishers::NonExileOnly, LinkedExileReturnHost::PrintedOnSource) => {
+            Some(TargetFilter::ExiledBySource)
+        }
+        (ChainPriorPublishers::NonExileOnly, LinkedExileReturnHost::CreatedByEffect) => {
+            Some(exiled_caused_tracked_set())
+        }
+        (
+            ChainPriorPublishers::Absent | ChainPriorPublishers::IncludesExile,
+            LinkedExileReturnHost::PrintedOnSource | LinkedExileReturnHost::CreatedByEffect,
+        ) => None,
     }
 }
 
@@ -1676,11 +1786,7 @@ pub fn parse_target_with_syntax<'a>(
         tag::<_, _, OracleError<'_>>("the rest of the exiled cards").parse(lower.as_str())
     {
         return (
-            TargetFilter::TrackedSetFiltered {
-                id: TrackedSetId(0),
-                filter: Box::new(TargetFilter::Any),
-                caused_by: Some(ThisWayCause::Exiled),
-            },
+            exiled_caused_tracked_set(),
             &text[lower.len() - rest.len()..],
             syntax,
         );
@@ -2112,9 +2218,10 @@ pub fn parse_target_with_syntax<'a>(
         // the tracked set as `TrackedSetFiltered{Not(AttackedThisTurn)}` — the
         // frozen "those creatures" population INTERSECTED with the did-not-attack
         // predicate. Parse the whole typed phrase first; if it carries any
-        // predicate PROPERTY beyond the head type noun, wrap it. A bare noun
-        // ("creatures"/"permanents"/"cards") with no trailing predicate yields
-        // only a head `type_filter` and no properties → the plain `TrackedSet`.
+        // predicate PROPERTY or a controller scope beyond the head type noun
+        // ("each of those creatures you don't control", Lost in the Maze), wrap
+        // it. A bare noun ("creatures"/"permanents"/"cards") with no trailing
+        // qualifier yields only a head `type_filter` → the plain `TrackedSet`.
         let (filter, remainder) = parse_type_phrase_folding_with_ctx(phrase, ctx);
         if target_filter_carries_predicate_property(&filter) {
             return (
@@ -3642,6 +3749,10 @@ fn parse_type_phrase_folding_unbound<'a>(
     // parse_non_prefix uses whitespace as word boundary, but in stacked negation the
     // separator is ", " (comma-space). We must strip the trailing comma from the negated
     // word when the ", non" continuation pattern follows.
+    // CR 406.3: the exile visibility adjectives may lead a `non-` negation
+    // ("face-up exiled nonland card"); read them first so the negation that
+    // follows is still parsed.
+    consume_exile_visibility_adjectives(&lower, &mut pos, &mut properties);
     let mut neg_type_filters: Vec<TypeFilter> = Vec::new();
     loop {
         let remaining = &lower[pos..];
@@ -4313,7 +4424,7 @@ fn parse_type_phrase_folding_unbound<'a>(
     }
 
     // Check "with power N or less/greater" suffix
-    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx) {
+    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx, &mut properties) {
         properties.push(prop);
         pos += consumed;
     }
@@ -4652,8 +4763,10 @@ fn parse_type_phrase_folding_unbound<'a>(
     }
 
     // Check zone suffix: "card from a graveyard", "card in your graveyard", "from exile", etc.
-    if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
-        properties.extend(zone_props);
+    if let Some((zone_props, zone_ctrl, consumed)) =
+        parse_zone_suffix_with_ownership(&lower[pos..], noun_phrase_ownership(&properties))
+    {
+        extend_zone_properties(&mut properties, zone_props);
         pos += consumed;
         // Apply zone-derived controller if we don't already have one
         if controller.is_none() {
@@ -4664,6 +4777,12 @@ fn parse_type_phrase_folding_unbound<'a>(
     if let Some((prop, consumed)) =
         parse_zone_changed_this_turn_suffix(&lower[pos..], zone_for_scope(&properties))
     {
+        properties.push(prop);
+        pos += consumed;
+    }
+
+    // CR 608.2c: "that weren't put there this way" names the complement of the objects the preceding instruction in the same ability moved (Bringer of the Last Gift: "…returns all creature cards from their graveyard that weren't put there this way…"). Lowered to Not(InTrackedSet(0)); the sentinel binds at resolution to the chain set the sacrifice published.
+    if let Some((prop, consumed)) = parse_not_put_there_this_way_suffix(&lower[pos..]) {
         properties.push(prop);
         pos += consumed;
     }
@@ -4770,8 +4889,10 @@ fn parse_type_phrase_folding_unbound<'a>(
     // the chosen type" ("target creature card of the chosen type from your
     // graveyard", From the Rubble). The primary `parse_zone_suffix` arm above
     // runs before this suffix.
-    if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
-        properties.extend(zone_props);
+    if let Some((zone_props, zone_ctrl, consumed)) =
+        parse_zone_suffix_with_ownership(&lower[pos..], noun_phrase_ownership(&properties))
+    {
+        extend_zone_properties(&mut properties, zone_props);
         pos += consumed;
         if controller.is_none() {
             controller = zone_ctrl;
@@ -5061,8 +5182,11 @@ fn parse_type_phrase_folding_unbound<'a>(
             let is_locative =
                 alt((tag::<_, _, OracleError<'_>>("in "), tag("on "))).parse(after_named);
             if is_locative.is_ok() {
-                if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
-                    properties.extend(zone_props);
+                if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix_with_ownership(
+                    &lower[pos..],
+                    noun_phrase_ownership(&properties),
+                ) {
+                    extend_zone_properties(&mut properties, zone_props);
                     pos += consumed;
                     if controller.is_none() {
                         controller = zone_ctrl;
@@ -5534,7 +5658,7 @@ fn starts_with_article_core_type_segment(text: &str) -> bool {
     false
 }
 
-fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
+pub(crate) fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
         TargetFilter::StackSpell
@@ -5600,15 +5724,14 @@ mod declared_damage_source_target_tests {
     }
 }
 
-/// CR 608.2c: True when a typed filter carries a `FilterProp` PREDICATE beyond
-/// the bare head type noun (e.g. `Not(AttackedThisTurn)`, `Untapped`, a
-/// controller-scoping property). Used by the "each of those <noun> that
-/// <predicate>" anaphor to decide whether the trailing predicate must fold into
-/// a `TrackedSetFiltered` (frozen set ∩ predicate) rather than collapsing to a
-/// bare `TrackedSet` that would drop the predicate.
+/// CR 608.2c: True when a typed filter carries a qualifier beyond its bare head
+/// type noun, such as a `FilterProp` predicate or controller scope. Used by the
+/// "each of those <noun> that <predicate>" anaphor to decide whether the
+/// trailing qualifier must fold into a `TrackedSetFiltered` (frozen set ∩
+/// qualifier) rather than collapsing to a bare `TrackedSet` that would drop it.
 fn target_filter_carries_predicate_property(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => !tf.properties.is_empty(),
+        TargetFilter::Typed(tf) => !tf.properties.is_empty() || tf.controller.is_some(),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(target_filter_carries_predicate_property)
         }
@@ -6083,6 +6206,32 @@ fn leading_leg_type_filters(filter: &TargetFilter) -> &[TypeFilter] {
 /// only in filtering. Folding a type-conditional test in here would silently
 /// change which leg is harvested for unrelated cards. See that function's doc
 /// comment for the full argument.
+/// CR 406.3: read a run of exile visibility adjectives ("face-up", "face-down",
+/// "exiled") at `pos`. Face-up exiled cards retain both their zone and
+/// visibility restrictions; these properties are leg-local (see
+/// [`is_adjective_prefix_prop`]).
+fn consume_exile_visibility_adjectives(
+    lower: &str,
+    pos: &mut usize,
+    properties: &mut Vec<FilterProp>,
+) {
+    while let Ok((rest, property)) = alt((
+        value(
+            FilterProp::Not {
+                prop: Box::new(FilterProp::FaceDown),
+            },
+            tag::<_, _, OracleError<'_>>("face-up "),
+        ),
+        value(FilterProp::FaceDown, tag("face-down ")),
+        value(FilterProp::InZone { zone: Zone::Exile }, tag("exiled ")),
+    ))
+    .parse(&lower[*pos..])
+    {
+        properties.push(property);
+        *pos = lower.len() - rest.len();
+    }
+}
+
 pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
     matches!(
         prop,
@@ -6113,6 +6262,9 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // CR 105.1 + CR 205.2: color / supertype adjectives.
             | FilterProp::HasColor { .. }
             | FilterProp::ColorCount { .. }
+            // CR 205.2a: "with <n> or more card types" suffix binds to the leg
+            // whose type phrase parsed it, never retroactively onto earlier legs.
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::NotColor { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::NotSupertype { .. }
@@ -6140,7 +6292,17 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // reaches this distributor, or carry `Named` on every leg and are
             // deduped by `same_kind`), but excluding it future-proofs the guard.
             | FilterProp::Named { .. }
-    )
+            // CR 406.3: the exile visibility adjectives ("face-down",
+            // "exiled") qualify only the noun they precede.
+            | FilterProp::FaceDown
+            | FilterProp::InZone { zone: Zone::Exile }
+    ) || is_face_up_adjective_prop(prop)
+}
+
+/// CR 406.3: "face-up" is read as "not face down"; like its "face-down"
+/// sibling it qualifies only the noun it precedes.
+fn is_face_up_adjective_prop(prop: &FilterProp) -> bool {
+    matches!(prop, FilterProp::Not { prop } if **prop == FilterProp::FaceDown)
 }
 
 /// Returns true when `prop` reads a creature's power and/or toughness.
@@ -6220,6 +6382,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -6268,6 +6431,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::OtherThanTriggerObject
         | FilterProp::HasColor { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -7279,6 +7443,44 @@ pub(crate) fn parse_block_pairing_clause(
     Ok((rest, (form, subject)))
 }
 
+/// CR 509.1g: the prenominal-relative current block pairing "<creatures> it's
+/// blocking" / "<creatures> it is blocking" (Wall of Vapor's "creatures it's
+/// blocking") — the active voice of the passive "blocked by it" clause, so it is
+/// the same `SubjectIsBlocker` relation. Splits the clause off the end of a
+/// lowercase damage-source subject and returns the head noun phrase with the
+/// `CombatRelation` prop to add to it. The bare pronoun binds only to the
+/// ability's own source (`resolve_relation_subject`), so a caller whose context
+/// is not armed for the source gets `None`. Deliberately NOT a form of
+/// `parse_block_pairing_clause`: that clause is a postnominal suffix read by the
+/// swallow audit over whole Oracle lines, and "it's blocking" also heads
+/// conditions ("if it's blocking") that audit must not claim.
+pub(crate) fn split_source_is_blocking_relative<'a>(
+    subject: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, FilterProp)> {
+    let (_, (head, tail)) = nom_primitives::split_once_on(subject, " it's blocking")
+        .or_else(|_| nom_primitives::split_once_on(subject, " it is blocking"))
+        .ok()?;
+    all_consuming(terminated(
+        multispace0,
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(tail)
+    .ok()?;
+    let relation_subject = resolve_relation_subject(
+        CombatRelationSubjectWord::Pronoun,
+        CombatClauseKind::Pairing,
+        ctx,
+    )?;
+    Some((
+        head,
+        FilterProp::CombatRelation {
+            relation: BlockPairingForm::BlockedBy.relation(),
+            subject: relation_subject,
+        },
+    ))
+}
+
 /// One block-history clause: who blocked whom, against which partner, in which window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BlockHistoryClause {
@@ -7935,8 +8137,61 @@ fn parse_attacking_status_clause_boundary(input: &str) -> OracleResult<'_, ()> {
 /// into the byte-offset return contract this call site expects. Used by Arnyn
 /// Deathbloom Botanist, Stern Scolding, Leonardo Sewer Samurai, Warping Wail,
 /// etc.
-fn parse_power_suffix(text: &str, ctx: &mut ParseContext) -> Option<(FilterProp, usize)> {
+fn parse_power_suffix(
+    text: &str,
+    ctx: &mut ParseContext,
+    properties: &mut [FilterProp],
+) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
+
+    // CR 208.1 + CR 603.10a + CR 608.2h: an implicit lesser-power/toughness
+    // suffix is meaningful here only when the enclosing trigger supplies the
+    // event object whose current/LKI characteristic is the comparison value.
+    // Prior target/choice clauses are deliberately declined: ObjectScope::Target
+    // resolves the first object target, while this parser cannot prove that it
+    // is the particular choice named by the printed clause.
+    if let Ok((after, (stat, comparator))) = nom_filter::parse_relative_pt_comparison(trimmed) {
+        let has_prior_object = ctx.chain_declared_object_target.is_some();
+        let has_trigger_event_context = ctx.in_trigger
+            || !matches!(
+                ctx.trigger_condition_objects,
+                TriggerConditionObjects::Unestablished
+            );
+        if !has_trigger_event_context || has_prior_object {
+            return None;
+        }
+        // CR 115.1d: in a triggered ability, "another" in this target noun
+        // phrase excludes the object that caused the trigger, not the ability
+        // source. Preserve the typed exclusion marker used by the runtime
+        // trigger-object authority; leaving `Another` here would incorrectly
+        // exclude Colfenor when another creature dies.
+        if let Some(property) = properties
+            .iter_mut()
+            .find(|property| **property == FilterProp::Another)
+        {
+            *property = FilterProp::OtherThanTriggerObject;
+        }
+        let value = QuantityExpr::Ref {
+            qty: match stat {
+                PtStat::Power => QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                PtStat::Toughness => QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                PtStat::TotalPowerToughness => return None,
+            },
+        };
+        return Some((
+            FilterProp::PtComparison {
+                stat,
+                scope: PtValueScope::Current,
+                comparator,
+                value,
+            },
+            text.len() - after.len(),
+        ));
+    }
 
     // CR 208.1 + CR 509.1b: "with greater power" — relative to the source
     // object. CR 208.1 is the authority for power being the characteristic
@@ -8550,7 +8805,9 @@ pub(crate) fn parse_mana_value_suffix(
             .map(|value| (value, after_punct))
             .or_else(|| {
                 let (phrase, zone_tail) =
-                    nom_primitives::scan_split_at_phrase(raw_phrase, parse_zone_suffix_nom)?;
+                    nom_primitives::scan_split_at_phrase(raw_phrase, |input| {
+                        parse_zone_suffix_nom(input, NounPhraseOwnership::Unestablished)
+                    })?;
                 let offset = raw_phrase.len() - zone_tail.len();
                 parse_value(phrase).map(|value| (value, &after_equal_to[offset..]))
             });
@@ -8565,57 +8822,10 @@ pub(crate) fn parse_mana_value_suffix(
         }
     }
 
-    // Static "N or less" / "N or greater" — also accepts literal X via
-    // `parse_quantity_expr_number`, which emits `QuantityRef::Variable { "X" }`
-    // resolved at effect time against the resolving ability's `chosen_x`.
-    // CR 107.3a + CR 601.2b: X announced at cast, read at resolution.
-    let (after_num_raw, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
-    let after_num = after_num_raw.trim_start();
-
-    let (prop, after) =
-        if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or greater").parse(after_num) {
-            (
-                FilterProp::Cmc {
-                    comparator: Comparator::GE,
-                    value,
-                },
-                a,
-            )
-        } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or less").parse(after_num) {
-            (
-                FilterProp::Cmc {
-                    comparator: Comparator::LE,
-                    value,
-                },
-                a,
-            )
-        } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or ").parse(after_num) {
-            let (after, second_value) = nom_quantity::parse_quantity_expr_number(a).ok()?;
-            (
-                FilterProp::AnyOf {
-                    props: vec![
-                        FilterProp::Cmc {
-                            comparator: Comparator::EQ,
-                            value,
-                        },
-                        FilterProp::Cmc {
-                            comparator: Comparator::EQ,
-                            value: second_value,
-                        },
-                    ],
-                },
-                after,
-            )
-        } else {
-            // CR 202.3: Exact mana value match — "with mana value N" (no "or less"/"or greater").
-            (
-                FilterProp::Cmc {
-                    comparator: Comparator::EQ,
-                    value,
-                },
-                after_num,
-            )
-        };
+    // CR 202.3: Literal/X thresholds and exact-value disjunctions are shared
+    // with zone-card counts; contextual and superlative branches above remain
+    // target-parser-specific.
+    let (after, prop) = nom_filter::parse_mana_value_comparison_tail(rest).ok()?;
     // CR 107.3a + CR 202.3: rebind a bare `X` mana-value gate from a trailing
     // ", where X is <quantity>" clause (As Foretold). No-op for every other caller.
     let (prop, after) = rebind_bare_x_mana_value(prop, after);
@@ -9295,10 +9505,11 @@ fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
-                // A separator followed by a type word rather than a keyword
-                // belongs to the enclosing type list ("creature with disturb,
-                // or enchantment") and stays unconsumed for the caller.
-                if separator_continues_enclosing_list(rest) {
+                // A separator followed by anything other than another keyword
+                // stays unconsumed: it either belongs to the enclosing type
+                // list ("creature with disturb, or enchantment") or opens the
+                // following clause (Jadar, Ghoulcaller of Nephalia).
+                if separator_stops_keyword_list(rest) {
                     break;
                 }
                 if matches!(*sep, ", or " | " or ") {
@@ -9817,7 +10028,7 @@ pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
 ///
 /// CR 608.2c + CR 701.68c: the filter also names an object an earlier
 /// instruction of the same resolution bound, as "the blighted creature" does.
-fn parse_cost_paid_object_reference<'a>(
+pub(crate) fn parse_cost_paid_object_reference<'a>(
     input: &'a str,
     ctx: &ParseContext,
 ) -> nom::IResult<&'a str, TargetFilter, OracleError<'a>> {
@@ -10000,6 +10211,24 @@ pub(crate) fn parse_zone_changed_this_turn_suffix(
     to: Option<Zone>,
 ) -> Option<(FilterProp, usize)> {
     parse_zone_change_provenance(input, to, false)
+}
+
+/// CR 608.2c: "that weren't put there this way" names the complement of the objects the preceding instruction in the same ability moved (Bringer of the Last Gift: "…returns all creature cards from their graveyard that weren't put there this way…"). Lowered to Not(InTrackedSet(0)); the sentinel binds at resolution to the chain set the sacrifice published.
+fn parse_not_put_there_this_way_suffix(input: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = input.trim_start();
+    let offset = input.len() - trimmed.len();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("that weren't put there this way")
+        .parse(trimmed)
+        .ok()?;
+
+    Some((
+        FilterProp::Not {
+            prop: Box::new(FilterProp::InTrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            }),
+        },
+        offset + trimmed.len() - rest.len(),
+    ))
 }
 
 fn zone_for_scope(props: &[FilterProp]) -> Option<Zone> {
@@ -10333,6 +10562,34 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         }
     }
 
+    // CR 701.26a: "that's|that is|that are|that isn't|that aren't <tapped state>"
+    // ("blocking creatures that are tapped", New Master of Arms) — the
+    // relative-clause form of the tapped/untapped adjectives; the shared
+    // `parse_property_filter` word grammar keeps this position and the prefix
+    // position from disagreeing about which adjectives exist. Only the tapped
+    // state is read here: the other status adjectives ("that's attacking") stay
+    // with the suffix arms and callers that already own them. The boundary after
+    // the adjective is deliberately strict (end of clause, a comma, or a period):
+    // a continuation ("that are tapped and attacking") belongs to the token-spec
+    // and battlefield-entry paths that absorb their own qualifier runs.
+    if let Some((after_intro, intro_len, negated)) = parse_relative_clause_intro(trimmed) {
+        if let Ok((rest, prop @ (FilterProp::Tapped | FilterProp::Untapped))) =
+            parse_property_filter(after_intro)
+        {
+            if rest.chars().next().is_none_or(|c| c == '.' || c == ',') {
+                let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+                let prop = if negated {
+                    FilterProp::Not {
+                        prop: Box::new(prop),
+                    }
+                } else {
+                    prop
+                };
+                return Some((vec![prop], consumed));
+            }
+        }
+    }
+
     if let Some(parsed) = parse_color_relative_clause_suffix(trimmed, leading_ws) {
         return Some(parsed);
     }
@@ -10416,10 +10673,17 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     }
 
     // --- CR 115.9b: "that targets [filter]" (.any() semantics) ---
-    // Must come AFTER "targets only" check above (longest match first).
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("targets ").parse(after_that) {
-        let targets_verb_len = "targets ".len();
-        if let Some((props, consumed)) = parse_targets_constraint(rest, that_len + targets_verb_len)
+    // Must come AFTER "targets only" check above (longest match first). The
+    // verb agrees with its subject's number: "that targets" (singular) and
+    // "that target" (plural — "spells that target it", Bronze Horse) are one
+    // predicate in two agreement spellings, like the "was/were dealt damage"
+    // rows below, not two FilterProps.
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("targets "), tag("target "))).parse(after_that)
+    {
+        let targets_verb_len = after_that.len() - rest.len();
+        if let Some((props, consumed)) =
+            parse_targets_constraint(rest, that_len + targets_verb_len, ctx)
         {
             return Some((props, consumed));
         }
@@ -11318,37 +11582,21 @@ pub(crate) fn parse_relative_subtype_list(input: &str) -> Option<(Vec<String>, u
 /// leg, a two-leg "X or Y", or an Oxford-comma list "X, Y, ..., or Z". Returns
 /// the legs and the bytes consumed.
 ///
-/// A list is closed only by an "or" leg, so a comma run that never
-/// closes ("a Demon, Zombies you control ...") is not read as a list: the result
-/// rolls back to the legs up to the last closing conjunction, or to the first leg.
+/// Adapter over the shared [`nom_primitives::parse_or_closed_list`] grammar: a
+/// list is closed only by an "or" leg, so a comma run that never closes ("a
+/// Demon, Zombies you control ...") rolls back to the legs up to the last
+/// closing conjunction, or to the first leg.
 fn parse_relative_list<T>(
     input: &str,
     parse_leg: impl Fn(&str) -> Option<(T, &str)>,
 ) -> Option<(Vec<T>, usize)> {
-    let (first, mut rest) = parse_leg(input)?;
-    let mut legs = vec![first];
-    let mut closed = (1usize, rest);
-    while let Ok((after_separator, closes)) = alt((
-        value(
-            true,
-            alt((tag::<_, _, OracleError<'_>>(", or "), tag(" or "))),
-        ),
-        value(false, tag(", ")),
-    ))
-    .parse(rest)
-    {
-        let Some((next, after_leg)) = parse_leg(after_separator) else {
-            break;
-        };
-        legs.push(next);
-        rest = after_leg;
-        if closes {
-            closed = (legs.len(), rest);
-        }
-    }
-    let (count, end) = closed;
-    legs.truncate(count);
-    Some((legs, input.len() - end.len()))
+    let (rest, legs) = nom_primitives::parse_or_closed_list(|i| {
+        parse_leg(i)
+            .map(|(leg, after)| (after, leg))
+            .ok_or_else(|| oracle_err(i))
+    })(input)
+    .ok()?;
+    Some((legs, input.len() - rest.len()))
 }
 
 fn is_relative_core_type_filter(type_filter: &TypeFilter) -> bool {
@@ -11608,16 +11856,26 @@ fn parse_targets_only_constraint(
     None
 }
 
-/// CR 115.9b: Parse the constraint after "that targets ".
+/// CR 115.9b: Parse the constraint after "that targets " / "that target ".
 /// Returns `(properties_to_add, total_bytes_consumed)`.
 ///
 /// Handles:
 /// - "~" / "it" / "this creature" / "this permanent" → `Targets { SelfRef }`
 /// - "you" → `Targets { Controller }`
-/// - "you or a [type]" → `Targets { Or(Controller, Typed) }`
+/// - "you or a/an [type]" / "an opponent or a/an [type]" → a player filter OR a typed filter
 /// - "one or more [type phrase]" → strip prefix, then parse type phrase
 /// - "a/an [type phrase]" → `Targets { filter }`
-fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<FilterProp>, usize)> {
+///
+/// A bare "it" is ANAPHORIC, unlike the deictic "~" / "this creature": CR 608.2c
+/// lets it name the ability's source only when the parse context binds it there
+/// (`bare_pronoun_names_ability_source`); any other antecedent leaves the
+/// constraint unconsumed so the caller fails closed instead of silently
+/// binding the host.
+fn parse_targets_constraint(
+    text: &str,
+    prefix_len: usize,
+    ctx: &ParseContext,
+) -> Option<(Vec<FilterProp>, usize)> {
     // Strip "one or more " — redundant with .any() semantics
     let (text, extra_len) =
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("one or more ").parse(text) {
@@ -11634,8 +11892,9 @@ fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<Filter
         }];
         return Some((props, prefix_len + 1));
     }
-    // "it" with word boundary
-    if parse_word_bounded(text, "it").is_ok() {
+    // "it" with word boundary — CR 608.2c: bound to the source only when the
+    // parse context says so; otherwise the clause stays unconsumed (fail closed).
+    if parse_word_bounded(text, "it").is_ok() && bare_pronoun_names_ability_source(ctx) {
         let props = vec![FilterProp::Targets {
             filter: Box::new(TargetFilter::SelfRef),
         }];
@@ -11652,23 +11911,31 @@ fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<Filter
         }
     }
 
-    // "you or a [type]" / "you or an [type]" — compound controller + typed filter
+    // "you or a/an [type]" / "an opponent or a/an [type]" — compound player + typed filter
     let lower = text.to_lowercase();
-    let you_or_result =
-        nom::branch::alt((tag::<_, _, OracleError<'_>>("you or an "), tag("you or a ")))
-            .parse(lower.as_str());
-    if let Ok((_, matched)) = you_or_result {
-        let you_or_len = matched.len();
-        let after_you_or = &text[you_or_len..];
-        let (type_filter, remainder) = parse_type_phrase_folding(after_you_or);
-        let consumed = after_you_or.len() - remainder.len();
+    let player_or_type = nom_on_lower(text, lower.as_str(), |input| {
+        let (input, player_filter) = alt((
+            value(TargetFilter::Controller, tag("you")),
+            value(TargetFilter::Opponent, tag("an opponent")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" or ").parse(input)?;
+        let (input, _) = nom_primitives::parse_article(input)?;
+        Ok((input, player_filter))
+    });
+    if let Some((player_filter, after_article)) = player_or_type {
+        let (type_filter, remainder) = parse_type_phrase_folding(after_article);
+        if remainder.len() == after_article.len() {
+            return None;
+        }
+        let consumed = text.len() - remainder.len();
         let combined = TargetFilter::Or {
-            filters: vec![TargetFilter::Controller, type_filter],
+            filters: vec![player_filter, type_filter],
         };
         let props = vec![FilterProp::Targets {
             filter: Box::new(combined),
         }];
-        return Some((props, prefix_len + you_or_len + consumed));
+        return Some((props, prefix_len + consumed));
     }
 
     // "you" — targets the controller (a player), with word boundary
@@ -11931,8 +12198,8 @@ enum ZoneQual {
     /// "the chosen player's " — the player persisted on the source via an earlier
     /// "choose a player" (Haunting Apparition: "green creature cards in the chosen
     /// player's graveyard"). Sets `ControllerRef::SourceChosenPlayer`, mirroring
-    /// how `You` sets `ControllerRef::You`; CR 613.1 resolves it against the
-    /// source's persisted choice.
+    /// how `You` sets `ControllerRef::You`; CR 607.2d makes the printed
+    /// "choose a player" and this "the chosen player's" a linked reference.
     ChosenPlayer,
     /// "a ", "the ", or nothing (e.g., "from exile").
     Plain,
@@ -11946,9 +12213,21 @@ enum ZoneQual {
 /// directly; this scanner is for callers whose input has a subject before the zone
 /// phrase (e.g., conditions like "this creature in your graveyard").
 ///
-/// The returned `Zone` is extracted from the `FilterProp::InZone` entry (always present
-/// in a successful parse), so callers that only need the zone don't have to pattern-match
-/// the returned `Vec<FilterProp>`.
+/// The returned `Zone` is extracted from the `FilterProp::InZone` entry, so callers
+/// that only need the zone don't have to pattern-match the returned
+/// `Vec<FilterProp>`.
+///
+/// SINGLE-ZONE ONLY. A phrase whose zone suffix names a LIST ("in exile and in
+/// your graveyard", "from your graveyard or from exile") carries
+/// `FilterProp::InAnyZone` and no `InZone`, and there is no single `Zone` to
+/// return for it, so this scanner answers `None` — for the whole text, not just
+/// that offset. Declining is the conservative answer and is deliberate: every
+/// caller's return type is one `Zone` (`ParsedCondition::SourceInZone`, a
+/// `ChangeZone` origin), so resuming the scan past the list would find a LATER
+/// single-zone phrase and silently half-read the list. A caller that must handle
+/// a multi-zone phrase reads `TargetFilter::extract_zones` or declines the
+/// phrase. `oracle_condition`'s `scan_source_zone_filter` is itself a
+/// single-zone table and does NOT provide a multi-zone fallback.
 pub(crate) fn scan_zone_phrase(
     text: &str,
 ) -> Option<(Zone, Option<ControllerRef>, Vec<FilterProp>)> {
@@ -11963,16 +12242,24 @@ pub(crate) fn scan_zone_phrase_span(
 ) -> Option<(&str, Zone, Option<ControllerRef>, Vec<FilterProp>)> {
     let mut offset = 0;
     while offset <= text.len() {
-        if let Some((props, ctrl, consumed)) = parse_zone_suffix(&text[offset..]) {
-            let zone = props.iter().find_map(|p| match p {
-                FilterProp::InZone { zone } => Some(*zone),
-                _ => None,
-            })?;
-            // `consumed` counts bytes of the lowercased phrase, so the span is exact
-            // only for text whose lowercase keeps its byte length (callers pass
-            // lowercased text); otherwise it may be empty.
-            let span = text[offset..].get(..consumed).unwrap_or_default();
-            return Some((span, zone, ctrl, props));
+        match parse_zone_suffix_outcome(&text[offset..], NounPhraseOwnership::Unestablished) {
+            ZoneSuffixOutcome::Parsed(props, ctrl, consumed) => {
+                let zone = props.iter().find_map(|p| match p {
+                    FilterProp::InZone { zone } => Some(*zone),
+                    _ => None,
+                })?;
+                // `consumed` counts bytes of the lowercased phrase, so the span is exact
+                // only for text whose lowercase keeps its byte length (callers pass
+                // lowercased text); otherwise it may be empty.
+                let span = text[offset..].get(..consumed).unwrap_or_default();
+                return Some((span, zone, ctrl, props));
+            }
+            // The head is a zone list the grammar deliberately declined (mixed
+            // possession, a committed "or" to a non-zone phrase, or an invalid
+            // preposition). Resuming past it would half-read a later leg, so
+            // the whole scan declines.
+            ZoneSuffixOutcome::DeclinedList => return None,
+            ZoneSuffixOutcome::NoMatch => {}
         }
         match text[offset..].find(' ') {
             Some(i) => offset += i + 1,
@@ -12001,16 +12288,92 @@ pub(crate) fn scan_zone_phrase_span(
 ///   each-player iteration the candidate set is scoped to the iterated player's
 ///   own graveyard (CR 110.1/108.3: membership is owner-keyed).
 /// - Other possessive / indefinite / definite / bare: → `InZone` alone.
+///
+/// CR 400.1 + CR 400.3: whether the caller's noun phrase already established
+/// ownership of the population. A mixed per-player/shared zone list can carry a
+/// possessor only in the `Established` case; `Unestablished` is the decline
+/// boundary that keeps one flat `Owned` from over-restricting a shared leg.
+#[derive(Clone, PartialEq, Eq)]
+enum NounPhraseOwnership {
+    Established(ControllerRef),
+    Unestablished,
+}
+
+/// The single authority for reading ownership off a constructed type phrase.
+fn noun_phrase_ownership(properties: &[FilterProp]) -> NounPhraseOwnership {
+    properties
+        .iter()
+        .find_map(|prop| match prop {
+            FilterProp::Owned { controller } => {
+                Some(NounPhraseOwnership::Established(controller.clone()))
+            }
+            _ => None,
+        })
+        .unwrap_or(NounPhraseOwnership::Unestablished)
+}
+
+/// The owner a zone-list qualifier would apply to, when it names one.
+fn zone_qualifier_owner(qual: &ZoneQual) -> Option<ControllerRef> {
+    match qual {
+        ZoneQual::Owner(owner) => Some(owner.clone()),
+        ZoneQual::You => Some(ControllerRef::You),
+        ZoneQual::ChosenPlayer => Some(ControllerRef::SourceChosenPlayer),
+        // "its owner's" / "that player's" / "each player's" do not bind one
+        // concrete ControllerRef, so a mixed list cannot prove the noun phrase
+        // and the qualifier name the same player.
+        ZoneQual::OtherPoss | ZoneQual::Plain => None,
+    }
+}
+
 pub(crate) fn parse_zone_suffix(
     text: &str,
 ) -> Option<(Vec<FilterProp>, Option<ControllerRef>, usize)> {
+    parse_zone_suffix_with_ownership(text, NounPhraseOwnership::Unestablished)
+}
+
+/// Distinguishes a genuine non-match from a deliberately declined zone list,
+/// so a boundary scanner cannot resume past the list and half-read a later leg.
+enum ZoneSuffixOutcome {
+    Parsed(Vec<FilterProp>, Option<ControllerRef>, usize),
+    DeclinedList,
+    NoMatch,
+}
+
+/// CR 400.1 + CR 400.3: `parse_zone_suffix`, with the caller's noun phrase
+/// ownership provenance.
+///
+/// A mixed per-player/shared zone list can carry a possessor only when the
+/// noun phrase already established whose cards the population is ("creature
+/// card you own in exile and in your graveyard"). Without that provenance the
+/// possessor belongs to the qualified leg alone ("in your graveyard or on the
+/// battlefield"), which one flat `InAnyZone` + `Owned` conjunction cannot
+/// express; the grammar declines rather than over-restricting the shared leg.
+fn parse_zone_suffix_with_ownership(
+    text: &str,
+    ownership: NounPhraseOwnership,
+) -> Option<(Vec<FilterProp>, Option<ControllerRef>, usize)> {
+    match parse_zone_suffix_outcome(text, ownership) {
+        ZoneSuffixOutcome::Parsed(props, ctrl, consumed) => Some((props, ctrl, consumed)),
+        ZoneSuffixOutcome::DeclinedList | ZoneSuffixOutcome::NoMatch => None,
+    }
+}
+
+fn parse_zone_suffix_outcome(text: &str, ownership: NounPhraseOwnership) -> ZoneSuffixOutcome {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let lower = trimmed.to_lowercase();
 
-    let (rest, (props, ctrl, _qual)) = parse_zone_suffix_nom(&lower).ok()?;
-    let consumed = lower.len() - rest.len();
-    Some((props, ctrl, leading_ws + consumed))
+    match parse_zone_suffix_nom(&lower, ownership) {
+        Ok((rest, (props, ctrl, _qual))) => {
+            let consumed = lower.len() - rest.len();
+            ZoneSuffixOutcome::Parsed(props, ctrl, leading_ws + consumed)
+        }
+        Err(nom::Err::Failure(_)) => ZoneSuffixOutcome::DeclinedList,
+        Err(nom::Err::Error(error)) if error.code == nom::error::ErrorKind::Fail => {
+            ZoneSuffixOutcome::DeclinedList
+        }
+        Err(_) => ZoneSuffixOutcome::NoMatch,
+    }
 }
 
 /// Recover a single graveyard source using the shared zone grammar, without
@@ -12022,7 +12385,8 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
     peek(tag::<_, _, OracleError<'_>>("from "))
         .parse(lower.as_str())
         .ok()?;
-    let (rest, (mut props, controller, qualifier)) = parse_zone_suffix_nom(&lower).ok()?;
+    let (rest, (mut props, controller, qualifier)) =
+        parse_zone_suffix_nom(&lower, NounPhraseOwnership::Unestablished).ok()?;
     if !props.iter().any(|prop| {
         matches!(
             prop,
@@ -12084,11 +12448,45 @@ pub fn cast_capable_zones_except(allowed: Zone) -> Vec<Zone> {
         .collect()
 }
 
-fn parse_zone_suffix_nom(
+/// Merge a zone phrase's properties into a type phrase's property conjunction,
+/// keeping one copy of each.
+///
+/// A zone phrase can restate an ownership the subject already carried:
+/// Huskburster Swarm's "creature card you own in exile and in your graveyard"
+/// names the same owner twice, once in "you own" and once in the "your " on the
+/// graveyard. A conjunction of filter properties is idempotent, so the second
+/// copy would be noise in the AST rather than a second constraint. Mirrors the
+/// `!properties.contains(&prop)` guard the other suffix passes in
+/// `parse_type_phrase_folding` already use.
+fn extend_zone_properties(properties: &mut Vec<FilterProp>, zone_props: Vec<FilterProp>) {
+    for prop in zone_props {
+        if !properties.contains(&prop) {
+            properties.push(prop);
+        }
+    }
+}
+
+/// One `prep qual zone` entry of a zone phrase, ending at a word boundary.
+///
+/// Shared by the head of THIS zone suffix and by every continuation of its zone
+/// list, so those two cannot drift on which prepositions, qualifiers or zone
+/// words they accept — the continuation used to carry its own copy of the
+/// grammar and its own copy of the `on`-check. It is not the repo's only zone
+/// phrase grammar: `oracle_nom::condition::parse_zone_phrase` keeps its own
+/// preposition/qualifier table, `oracle_nom::quantity::parse_commander_zone_disjunction`
+/// is a verbatim tag for one phrase, and `oracle_effect::mod`'s
+/// `put_hand_graveyard_origin_zones` is a verbatim table for the
+/// prepositionless list. Consolidating those onto this entry is a separate
+/// change.
+///
+/// Oracle text writes the battlefield with "on" and every other zone with "in"
+/// or "from" — CR 110.1 is why ("a permanent is a card or token ON the
+/// battlefield"), but the preposition itself is a wording convention, not a CR
+/// construct, so no rule is cited for the restriction. "on <other zone>" is
+/// therefore declined here rather than lowered into a misleading filter.
+fn parse_zone_phrase_entry(
     i: &str,
-) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>, ZoneQual)>
-{
-    let (i, _) = opt(alt((tag("cards "), tag("card ")))).parse(i)?;
+) -> super::oracle_nom::error::OracleResult<'_, (ZoneQual, Zone)> {
     let (i, prep) = alt((
         value(ZonePrep::From, tag("from ")),
         value(ZonePrep::In, tag("in ")),
@@ -12099,65 +12497,169 @@ fn parse_zone_suffix_nom(
     let (i, zone) = parse_zone_word(i)?;
     let (i, _) = peek_zone_boundary(i)?;
 
-    // CR 400.1: only the battlefield is referred to with "on"; "on <other zone>" is not
-    // valid Oracle text, so reject it here rather than emitting a misleading filter.
     if prep == ZonePrep::On && zone != Zone::Battlefield {
+        // An invalid first entry, not a deliberately declined zone list: a
+        // boundary scanner may still find a later real zone phrase. A
+        // continuation after a committed "or" is wrapped in `cut`, which turns
+        // this into a hard failure and still stops the scan.
+        return Err(nom::Err::Error(nom::error::Error::new(
+            i,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    Ok((i, (qual, zone)))
+}
+
+/// CR 400.1: the possessor a whole zone list names, or `None` when it names two
+/// different players' zones.
+///
+/// "Each player has their own library, hand, and graveyard. The other zones are
+/// shared by all players." An unqualified shared-zone entry ("in exile") names
+/// no possessor, so the `ZoneQual::Plain` it carries says nothing about whose
+/// cards the list names. Reducing a list absorbs those, which is what
+/// makes the printed possessive asymmetry parse: Huskburster Swarm's "in exile
+/// and in your graveyard" reduces to `You`, Firemane Angel's "in your graveyard
+/// or on the battlefield" likewise, and Aven Interrupter's all-`Plain` "from
+/// graveyards or from exile" stays `Plain`.
+///
+/// Two DIFFERENT possessives still decline (as does a `Plain` on a per-player
+/// zone, which names an unspecified player's copy): those name two distinct
+/// populations and want a `TargetFilter::Or` of separately-owned filters, which
+/// a single `InAnyZone` cannot express. Declining keeps them a loud non-parse
+/// instead of silently binding both to one owner.
+///
+/// `Zone::is_per_player` is the shared authority for the partition — the same
+/// predicate `filter::is_owner_scoped_zone` reads at runtime.
+fn reduce_zone_quals(entries: &[(ZoneQual, Zone)]) -> Option<ZoneQual> {
+    let mut reduced: Option<ZoneQual> = None;
+    for (qual, zone) in entries {
+        if *qual == ZoneQual::Plain && !zone.is_per_player() {
+            continue;
+        }
+        match reduced.as_ref() {
+            None => reduced = Some(qual.clone()),
+            Some(existing) if existing == qual => {}
+            Some(_) => return None,
+        }
+    }
+    Some(reduced.unwrap_or(ZoneQual::Plain))
+}
+
+fn parse_zone_suffix_nom(
+    i: &str,
+    ownership: NounPhraseOwnership,
+) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>, ZoneQual)>
+{
+    let (i, _) = opt(alt((tag("cards "), tag("card ")))).parse(i)?;
+    let (i, head) = parse_zone_phrase_entry(i)?;
+
+    // CR 400.1 + CR 400.7: in THIS position — a zone suffix qualifying a
+    // population noun phrase — a zone list is a union however English joins it.
+    // Each member of the population is one object, an object is in one zone, and
+    // it becomes a new object when it moves to another, so the list can only be
+    // naming alternative places for the same object: "creature card you own in
+    // exile and in your graveyard" (Huskburster Swarm) names the same population
+    // as "in your graveyard or in exile" would.
+    //
+    // THAT IS A POSITION-SCOPED CLAIM, NOT A FACT ABOUT "and". An "<object> is
+    // in X and in Y" PRESENCE predicate over ONE named object is a conjunction,
+    // and this grammar must not be extended until the caller's position is part
+    // of its input:
+    // * Hedron Alignment: "you win the game if you own a card named Hedron
+    //   Alignment in exile, in your hand, in your graveyard, and on the
+    //   battlefield" — four DISTINCT cards, one per zone. It escapes this
+    //   grammar only because its separators are commas; adding ", " to the
+    //   separator set below would silently turn that win condition into "one
+    //   copy in any of the four zones".
+    // * Masterful Ninja (UST/ULST, silver-bordered): "Masterful Ninja is on the
+    //   battlefield and in your hand until end of turn" — simultaneous, which
+    //   CR 400.1 cannot model at all. This grammar does consume that phrase as a
+    //   union today; the value is discarded upstream because the clause head
+    //   does not parse, so no behavior rests on it.
+    //
+    // The two conjunctions differ only in whether a continuation is REQUIRED,
+    // which is how they behave in printed Oracle text:
+    //
+    // * "or" commits. `cut` turns a non-zone continuation into a hard failure of
+    //   the whole suffix, which is exactly what this grammar did before the list
+    //   became a `many0` — so "from your hand or graveyard" (34 printed cards
+    //   whose second zone omits its preposition) keeps declining HERE instead of
+    //   half-reading the hand alone. Only part of that sub-class is covered
+    //   elsewhere: `oracle_effect::mod`'s `put_hand_graveyard_origin_zones` is a
+    //   verbatim-phrase table reaching just the hand/graveyard spellings, 17 of
+    //   the 34 are outside it, and 11 of the 34 are `supported: false` — e.g.
+    //   Soulless Jailer ("Players can't cast noncreature spells from graveyards
+    //   or exile"), whose single coverage gap IS that line. Generalizing the
+    //   continuation's preposition to `opt` would retire that table and cover
+    //   the whole sub-class; that is a separate change with its own 34-card
+    //   measurement, deliberately not folded in here. Declining is still the
+    //   right behavior for THIS grammar — an honest gap beats half a zone list.
+    // * "and" does not commit. After a zone phrase it far more often joins the
+    //   next instruction ("exile target card from a graveyard and put an oil
+    //   counter on this creature") than another zone phrase. Measured over every
+    //   printed face, matching this grammar's own zone words (plurals included)
+    //   and qualifiers: of the 159 cards that write " and " immediately after a
+    //   zone phrase, 149 continue with something that is not a zone phrase and
+    //   10 continue the list — a disjoint partition. So a continuation that is
+    //   not a zone phrase ends the list and leaves the "and" unconsumed for the
+    //   caller.
+    let (i, tail) = many0(alt((
+        preceded(tag(" or "), cut(parse_zone_phrase_entry)),
+        preceded(tag(" and "), parse_zone_phrase_entry),
+    )))
+    .parse(i)?;
+
+    let mut entries = Vec::with_capacity(1 + tail.len());
+    entries.push(head);
+    entries.extend(tail);
+    let Some(qual) = reduce_zone_quals(&entries) else {
         return Err(nom::Err::Error(nom::error::Error::new(
             i,
             nom::error::ErrorKind::Fail,
         )));
-    }
+    };
+    let zones: Vec<Zone> = entries.into_iter().map(|(_, zone)| zone).collect();
 
-    // Check for zone disjunction: "or in <zone>" or "or on <zone>" or "or from <zone>"
-    let (i, zones) = if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(i) {
-        // Parse additional zone phrases
-        let mut zones = vec![zone];
-        let mut rest = rest;
-
-        loop {
-            let (next_rest, next_prep) = alt((
-                value(ZonePrep::From, tag("from ")),
-                value(ZonePrep::In, tag("in ")),
-                value(ZonePrep::On, tag("on ")),
-            ))
-            .parse(rest)?;
-
-            let (next_rest, next_qual) = parse_zone_qual(next_rest)?;
-            let (next_rest, next_zone) = parse_zone_word(next_rest)?;
-            let (next_rest, _) = peek_zone_boundary(next_rest)?;
-
-            // CR 400.1: only the battlefield is referred to with "on"
-            if next_prep == ZonePrep::On && next_zone != Zone::Battlefield {
+    if zones.len() > 1 {
+        let all_per_player = zones.iter().all(|zone| zone.is_per_player());
+        let any_per_player = zones.iter().any(|zone| zone.is_per_player());
+        let any_shared = !all_per_player;
+        let mixed_scope = any_per_player && any_shared;
+        // CR 400.1 + CR 400.3: a mixed per-player/shared list cannot carry one
+        // ownership predicate over the whole union — the shared leg has no
+        // owner-qualified population. Accept it only when the noun phrase
+        // already established ownership (`extend_zone_properties` then dedupes
+        // the possessive), and otherwise decline rather than over-restrict the
+        // shared leg. Plain/no-possessor lists stay union-only.
+        if mixed_scope && qual != ZoneQual::Plain {
+            // CR 400.3: keep the actual owner reference. The noun phrase's
+            // ownership may be discarded only when the zone qualifier names the
+            // SAME player; otherwise the shared leg would silently inherit a
+            // different owner ("card you own in an opponent's graveyard or in
+            // exile" must not become "cards you own anywhere").
+            let Some(zone_owner) = zone_qualifier_owner(&qual) else {
                 return Err(nom::Err::Error(nom::error::Error::new(
-                    next_rest,
+                    i,
                     nom::error::ErrorKind::Fail,
                 )));
-            }
-
-            // Qualifier consistency check: all zones in a disjunction should use the same qualifier
-            if qual != next_qual {
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    next_rest,
-                    nom::error::ErrorKind::Fail,
-                )));
-            }
-
-            zones.push(next_zone);
-            rest = next_rest;
-
-            // Check for another "or" separator
-            if tag::<_, _, OracleError<'_>>(" or ").parse(rest).is_err() {
-                break;
+            };
+            match ownership {
+                NounPhraseOwnership::Established(noun_owner) if noun_owner == zone_owner => {}
+                _ => {
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        i,
+                        nom::error::ErrorKind::Fail,
+                    )));
+                }
             }
         }
+        if mixed_scope || !any_per_player {
+            return Ok((i, (vec![FilterProp::InAnyZone { zones }], None, qual)));
+        }
+    }
 
-        (rest, zones)
-    } else {
-        (i, vec![zone])
-    };
-
-    // A disjunction ("from your graveyard or from your hand") names any
-    // of its zones; a single zone phrase names exactly that zone.
+    // A disjunction names any of its zones; a single phrase names that zone.
     let zone_prop = if let [zone] = zones.as_slice() {
         FilterProp::InZone { zone: *zone }
     } else {
@@ -12189,8 +12691,8 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
             alt((tag("an opponent's "), tag("each opponent's "))),
         ),
         value(ZoneQual::You, tag("your ")),
-        // CR 613.1: must precede the `Plain` "the " arm so "the chosen player's "
-        // isn't consumed as a bare "the " article.
+        // Must precede the `Plain` "the " arm so "the chosen player's " isn't
+        // consumed as a bare "the " article.
         value(ZoneQual::ChosenPlayer, tag("the chosen player's ")),
         value(
             ZoneQual::Owner(ControllerRef::TargetPlayer),
@@ -12272,9 +12774,12 @@ pub(crate) fn parse_zone_word(i: &str) -> super::oracle_nom::error::OracleResult
 pub(crate) fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
     match i.chars().next() {
         None | Some(' ' | ',' | '.') => Ok((i, ())),
+        // An ordinary word-boundary miss, not a deliberately declined zone
+        // list. The distinct kind lets `scan_zone_phrase_span` continue past a
+        // non-zone phrase instead of aborting the whole scan.
         _ => Err(nom::Err::Error(nom::error::Error::new(
             i,
-            nom::error::ErrorKind::Fail,
+            nom::error::ErrorKind::Verify,
         ))),
     }
 }
@@ -12290,6 +12795,116 @@ mod tests {
     use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
     use crate::types::keywords::Keyword;
+
+    const CHAIN_STATES: [ChainPriorPublishers; 3] = [
+        ChainPriorPublishers::Absent,
+        ChainPriorPublishers::NonExileOnly,
+        ChainPriorPublishers::IncludesExile,
+    ];
+
+    /// U1 — CR 607.2a: the anaphor combinator reads the grammatical number of
+    /// a whole "the exiled card(s)" phrase and rejects adjacent grammar.
+    #[test]
+    fn exiled_card_anaphor_reads_number_of_the_whole_phrase() {
+        let number = |text| parse_exiled_card_anaphor(text).ok().map(|(_, n)| n);
+        assert_eq!(number("the exiled card"), Some(AnaphorNumber::Singular));
+        assert_eq!(number("the exiled cards"), Some(AnaphorNumber::Plural));
+        assert_eq!(number("the exiled cards "), Some(AnaphorNumber::Plural));
+        for adjacent in [
+            "the exiled card's owner",
+            "the exiled creature",
+            "the rest of the exiled cards",
+            "those exiled cards",
+        ] {
+            assert_eq!(number(adjacent), None, "{adjacent:?} is not the anaphor");
+        }
+    }
+
+    /// U2 — CR 607.2a + CR 406.6: only the bare chain sentinel carries the
+    /// linked-exile mark, numbered by the anaphor; and only a chain of non-exile
+    /// publishers rebinds a marked return to the `Exiled`-caused subset.
+    #[test]
+    fn linked_exile_mark_and_binding_cover_only_the_bare_sentinel_over_non_exile_chains() {
+        let bindings = [
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(7),
+            },
+            TargetFilter::ExiledBySource,
+            TargetFilter::Any,
+        ];
+        for (number, mark) in [
+            (AnaphorNumber::Singular, LinkedExileReturn::OneCard),
+            (AnaphorNumber::Plural, LinkedExileReturn::WholeSet),
+        ] {
+            for (index, binding) in bindings.iter().enumerate() {
+                assert_eq!(
+                    linked_exile_return_mark(number, binding),
+                    (index == 0).then_some(mark),
+                    "{number:?} × {binding:?}"
+                );
+            }
+        }
+        for chain in CHAIN_STATES {
+            for (host, bound) in [
+                (
+                    LinkedExileReturnHost::PrintedOnSource,
+                    TargetFilter::ExiledBySource,
+                ),
+                (
+                    LinkedExileReturnHost::CreatedByEffect,
+                    exiled_caused_tracked_set(),
+                ),
+            ] {
+                assert_eq!(
+                    linked_exile_return_binding(chain, host),
+                    (chain == ChainPriorPublishers::NonExileOnly).then_some(bound),
+                    "{chain:?} × {host:?}"
+                );
+            }
+        }
+    }
+
+    /// U3 — the chain-state join is a lattice (`Absent` identity,
+    /// `IncludesExile` absorbing), and the singular authority keeps the
+    /// same-chain binding only over an exile producer.
+    #[test]
+    fn chain_prior_publishers_join_and_singular_authority() {
+        for a in CHAIN_STATES {
+            assert_eq!(a.join(a), a, "idempotent: {a:?}");
+            assert_eq!(a.join(ChainPriorPublishers::Absent), a, "identity: {a:?}");
+            assert_eq!(
+                a.join(ChainPriorPublishers::IncludesExile),
+                ChainPriorPublishers::IncludesExile,
+                "absorbing: {a:?}"
+            );
+            for b in CHAIN_STATES {
+                assert_eq!(a.join(b), b.join(a), "commutative: {a:?} {b:?}");
+            }
+        }
+        assert_eq!(
+            ChainPriorPublishers::Absent.join(ChainPriorPublishers::NonExileOnly),
+            ChainPriorPublishers::NonExileOnly
+        );
+        for chain in CHAIN_STATES {
+            assert_eq!(
+                chain.includes_exile(),
+                chain == ChainPriorPublishers::IncludesExile
+            );
+            let expected = if chain == ChainPriorPublishers::IncludesExile {
+                TargetFilter::ParentTarget
+            } else {
+                TargetFilter::ExiledBySource
+            };
+            assert_eq!(
+                resolve_singular_exiled_card_target(chain, TargetFilter::ParentTarget),
+                expected,
+                "{chain:?}"
+            );
+        }
+    }
 
     #[test]
     fn parent_controller_population_requires_a_typed_object_permission() {
@@ -12647,8 +13262,9 @@ mod tests {
     fn superlative_least_toughness_suffix_emits_min_aggregate_pt_comparison() {
         let text = "with the least toughness among creatures you control";
         let mut ctx = ParseContext::default();
-        let (prop, consumed) =
-            parse_power_suffix(text, &mut ctx).expect("least-toughness suffix should parse");
+        let mut properties = Vec::new();
+        let (prop, consumed) = parse_power_suffix(text, &mut ctx, &mut properties)
+            .expect("least-toughness suffix should parse");
         assert_eq!(consumed, text.len(), "the whole suffix must be consumed");
         let FilterProp::PtComparison {
             stat,
@@ -13930,6 +14546,51 @@ mod tests {
             assert!(
                 parse_block_pairing_clause(declined).is_err(),
                 "{declined:?} must not parse as a block-pairing clause"
+            );
+        }
+    }
+
+    /// CR 509.1g: "creatures it's blocking" splits into its head noun phrase and
+    /// the `SubjectIsBlocker` pairing relation only under a context that names the
+    /// ability's source; a blank context, another tail and a window decline.
+    #[test]
+    fn source_is_blocking_relative_binds_only_for_the_source() {
+        let armed = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        let expected = FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: None,
+            },
+            subject: CombatRelationSubject::Source,
+        };
+        for text in [
+            "creatures it's blocking",
+            "creatures it is blocking",
+            "creatures it's blocking.",
+        ] {
+            assert_eq!(
+                split_source_is_blocking_relative(text, &armed),
+                Some(("creatures", expected.clone())),
+                "{text:?}"
+            );
+            assert_eq!(
+                split_source_is_blocking_relative(text, &ParseContext::default()),
+                None,
+                "a blank context must not bind the bare pronoun: {text:?}"
+            );
+        }
+        for text in [
+            "creatures it's blocking this turn",
+            "creatures it's blocking and attacking",
+            "creatures blocking it",
+        ] {
+            assert_eq!(
+                split_source_is_blocking_relative(text, &armed),
+                None,
+                "{text:?}"
             );
         }
     }
@@ -15682,6 +16343,48 @@ mod tests {
         );
     }
 
+    /// CR 202.3: Kozilek's Unsealing — "with mana value 4, 5, or 6" is an
+    /// exact-value list, one EQ comparison per value, consumed up to (not
+    /// including) the clause comma.
+    #[test]
+    fn creature_spell_with_mana_value_4_5_or_6() {
+        let mut ctx = ParseContext::default();
+        let input =
+            "with mana value 4, 5, or 6, create two 0/1 colorless eldrazi spawn creature tokens";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("mana value list parses");
+        assert_eq!(
+            &input[consumed..],
+            ", create two 0/1 colorless eldrazi spawn creature tokens"
+        );
+        let mv_eq = |value| FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value },
+        };
+        assert_eq!(
+            prop,
+            FilterProp::AnyOf {
+                props: vec![mv_eq(4), mv_eq(5), mv_eq(6)],
+            }
+        );
+
+        // Firemind's Foresight: a single number before a clause comma stays an
+        // exact EQ reading and leaves the comma.
+        let input = "with mana value 3, reveal it, and put it into your hand";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("single mana value parses");
+        assert_eq!(&input[consumed..], ", reveal it, and put it into your hand");
+        assert_eq!(prop, mv_eq(3));
+
+        // An "or" tail that is neither a comparator nor a number leg declines
+        // the whole suffix (the pre-list behaviour), instead of keeping EQ 4 and
+        // leaving "or blue" behind. The two positives above are the reach-guard.
+        assert_eq!(
+            parse_mana_value_suffix("with mana value 4 or blue", &mut ctx),
+            None
+        );
+    }
+
     /// CR 107.3a + CR 601.2b: Nature's Rhythm — "creature card with mana value X
     /// or less". The literal X must produce a `QuantityRef::Variable { "X" }`,
     /// resolved at effect time against the spell's announced X.
@@ -16058,8 +16761,10 @@ mod tests {
     fn creature_with_power_x_or_less() {
         // CR 107.3a + CR 601.2b: X is announced at cast; the filter retains the
         // `Variable("X")` marker so it can resolve against `chosen_x` at effect time.
-        let (prop, _) = parse_power_suffix("with power x or less", &mut ParseContext::default())
-            .expect("parses");
+        let mut ctx = ParseContext::default();
+        let mut properties = Vec::new();
+        let (prop, _) =
+            parse_power_suffix("with power x or less", &mut ctx, &mut properties).expect("parses");
         assert_eq!(
             prop,
             FilterProp::PtComparison {
@@ -16077,7 +16782,9 @@ mod tests {
 
     #[test]
     fn creature_with_power_x_or_greater() {
-        let (prop, _) = parse_power_suffix("with power x or greater", &mut ParseContext::default())
+        let mut ctx = ParseContext::default();
+        let mut properties = Vec::new();
+        let (prop, _) = parse_power_suffix("with power x or greater", &mut ctx, &mut properties)
             .expect("parses");
         assert_eq!(
             prop,
@@ -16092,6 +16799,49 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[test]
+    fn parse_power_suffix_relative_pt_requires_trigger_context() {
+        let mut ctx = ParseContext::default();
+        assert!(parse_power_suffix("with lesser power", &mut ctx, &mut Vec::new()).is_none());
+    }
+
+    #[test]
+    fn parse_power_suffix_relative_pt_binds_cost_paid_object() {
+        let mut ctx = ParseContext {
+            in_trigger: true,
+            ..ParseContext::default()
+        };
+        let mut properties = vec![FilterProp::Another];
+        let (prop, consumed) =
+            parse_power_suffix("with equal or lesser toughness.", &mut ctx, &mut properties)
+                .expect("trigger-relative toughness suffix should parse");
+        assert_eq!(consumed, "with equal or lesser toughness".len());
+        assert_eq!(properties, vec![FilterProp::OtherThanTriggerObject]);
+        assert_eq!(
+            prop,
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_power_suffix_relative_pt_declines_prior_choice_context() {
+        let mut ctx = ParseContext {
+            in_trigger: true,
+            chain_declared_object_target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..ParseContext::default()
+        };
+        assert!(parse_power_suffix("with lesser power", &mut ctx, &mut Vec::new()).is_none());
     }
 
     #[test]
@@ -16381,7 +17131,9 @@ mod tests {
     fn card_with_flashback_or_disturb_uses_keyword_kind_filters() {
         let (f, rest) =
             parse_type_phrase_folding("card with flashback or disturb, put it into your graveyard");
-        assert_eq!(rest, "put it into your graveyard");
+        // Preserve the comma that terminates the keyword qualifier so callers
+        // that parse a following clause can validate its boundary.
+        assert_eq!(rest, ", put it into your graveyard");
         let TargetFilter::Or { filters } = f else {
             panic!("expected Or filter, got {f:?}");
         };
@@ -16469,7 +17221,9 @@ mod tests {
         let (f, rest) = parse_type_phrase_folding(
             "creature with deathtouch, hexproof, reach, or trample and reveal it",
         );
-        assert_eq!(rest, "reveal it");
+        // The final "and" is a clause delimiter, not a fifth keyword-list
+        // separator; preserve it for the caller that owns the next clause.
+        assert_eq!(rest, " and reveal it");
         let TargetFilter::Or { filters } = f else {
             panic!("expected Or filter, got {f:?}");
         };
@@ -16777,6 +17531,37 @@ mod tests {
             }
         ));
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn each_of_those_creatures_filters_the_tracked_set_by_controller() {
+        for (text, controller) in [
+            ("each of those creatures you control", ControllerRef::You),
+            (
+                "each of those creatures you don't control",
+                ControllerRef::Opponent,
+            ),
+        ] {
+            let (filter, rest) = parse_target(text);
+            assert_eq!(rest, "", "{text}");
+            match filter {
+                TargetFilter::TrackedSetFiltered {
+                    id,
+                    filter,
+                    caused_by: None,
+                } => {
+                    assert_eq!(id, TrackedSetId(0), "{text}");
+                    assert_eq!(
+                        *filter,
+                        TargetFilter::Typed(TypedFilter::creature().controller(controller)),
+                        "{text}"
+                    );
+                }
+                other => {
+                    panic!("expected a controller-filtered tracked set for {text}, got {other:?}")
+                }
+            }
+        }
     }
 
     /// CR 601.2c: "each of <count> target <type>" must route through "target"
@@ -22465,6 +23250,36 @@ mod tests {
     }
 
     #[test]
+    fn type_phrase_cards_not_put_there_this_way_excludes_tracked_set() {
+        let (filter, rest) = parse_type_phrase_folding(
+            "creature cards from their graveyard that weren't put there this way",
+        );
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+        assert!(
+            tf.properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::Not { prop }
+                    if matches!(
+                        &**prop,
+                        FilterProp::InTrackedSet { id }
+                            if *id == crate::types::identifiers::TrackedSetId(0)
+                    )
+            )),
+            "the negative this-way qualifier must exclude the current tracked set: {tf:?}"
+        );
+        assert!(
+            rest.trim().is_empty(),
+            "expected empty remainder, got: {rest:?}"
+        );
+    }
+
+    #[test]
     fn that_attacked_this_turn() {
         let (filter, rest) = parse_target("target creature that attacked this turn");
         if let TargetFilter::Typed(ref tf) = filter {
@@ -23340,6 +24155,47 @@ mod tests {
     }
 
     #[test]
+    fn targets_player_or_creature_preserves_oracle_remainder() {
+        for (text, expected_remainder, expected_player, expected_controller) in [
+            // Reparations
+            (
+                " that targets you or a creature you control, you may draw a card.",
+                ", you may draw a card.",
+                TargetFilter::Controller,
+                ControllerRef::You,
+            ),
+            // Danitha, Spear of Agony
+            (
+                " that targets an opponent or a creature an opponent controls, put a +1/+1 counter on Danitha.",
+                ", put a +1/+1 counter on Danitha.",
+                TargetFilter::Opponent,
+                ControllerRef::Opponent,
+            ),
+        ] {
+            let (props, consumed) =
+                parse_that_clause_suffix(text, None).expect("constraint parses");
+            assert_eq!(&text[consumed..], expected_remainder, "remainder for {text:?}");
+            let [FilterProp::Targets { filter }] = props.as_slice() else {
+                panic!("expected one Targets property, got {props:?}");
+            };
+            let TargetFilter::Or { filters } = filter.as_ref() else {
+                panic!("expected an Or target filter, got {filter:?}");
+            };
+            assert_eq!(filters.len(), 2, "branches for {text:?}");
+            assert_eq!(filters[0], expected_player, "player leg for {text:?}");
+            let TargetFilter::Typed(typed) = &filters[1] else {
+                panic!("expected a Typed object leg, got {:?}", filters[1]);
+            };
+            assert!(typed.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                typed.controller,
+                Some(expected_controller),
+                "object controller for {text:?}"
+            );
+        }
+    }
+
+    #[test]
     fn that_targets_one_or_more_creatures() {
         // "one or more" prefix is stripped (redundant with .any() semantics)
         let result =
@@ -23381,6 +24237,95 @@ mod tests {
         }
     }
 
+    /// CR 115.9b: the verb of a "that targets [filter]" clause agrees with its
+    /// subject's number — "that target" (plural, Bronze Horse's "spells that
+    /// target it") is the same predicate as "that targets". A bare "it" is
+    /// ANAPHORIC (CR 608.2c): it binds to the source only under a context armed
+    /// with the self-reference, and stays unbound otherwise, so the clause is
+    /// left unconsumed rather than silently naming the host.
+    #[test]
+    fn that_target_plural_agreement_and_ctx_gated_it() {
+        // Plural verb + deictic self-reference: parses under a blank context.
+        let result = parse_that_clause_suffix(" that target this creature,", None);
+        let (props, consumed) = result.expect("should parse");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::Targets { filter } if **filter == TargetFilter::SelfRef
+        ));
+        assert_eq!(consumed, " that target this creature".len());
+
+        // Plural verb + bare "it": binds only under an armed context.
+        let self_ref_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        let (props, consumed) = parse_that_clause_suffix(" that target it.", Some(&self_ref_ctx))
+            .expect("an armed context binds the bare pronoun");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::Targets { filter } if **filter == TargetFilter::SelfRef
+        ));
+        assert_eq!(consumed, " that target it".len());
+
+        // Blank context: the bare "it" leaves the clause unconsumed (fail
+        // closed), for both agreement spellings.
+        for phrase in [" that target it.", " that targets it."] {
+            assert!(
+                parse_that_clause_suffix(phrase, None).is_none(),
+                "{phrase:?} must not bind a bare pronoun under a blank context"
+            );
+        }
+    }
+
+    /// CR 110.5 + CR 509.1a: "that are|that's|that is <status adjective>" — the
+    /// relative-clause form of the status adjectives the prefix position
+    /// accepts (New Master of Arms: "blocking creatures that are tapped"). The
+    /// boundary after the adjective is strict, so a conjunct continuation stays
+    /// unconsumed for the token-spec and attacking-defender arms to own.
+    #[test]
+    fn that_are_status_adjective_relative_clause() {
+        for (phrase, expected) in [
+            (" that are tapped", FilterProp::Tapped),
+            (" that's tapped.", FilterProp::Tapped),
+            (" that is tapped,", FilterProp::Tapped),
+            (" that are untapped.", FilterProp::Untapped),
+        ] {
+            let (props, consumed) = parse_that_clause_suffix(phrase, None)
+                .unwrap_or_else(|| panic!("{phrase:?} must parse"));
+            assert_eq!(props.len(), 1, "{phrase:?}");
+            assert_eq!(props[0], expected, "{phrase:?}");
+            assert_eq!(
+                consumed,
+                phrase.trim_end_matches(['.', ',']).len(),
+                "{phrase:?}"
+            );
+        }
+        // CR 110.5: the negated intro lowers to Not { <adjective> }.
+        let (props, _) = parse_that_clause_suffix(" that aren't tapped", None)
+            .expect("the negated status clause must parse");
+        assert_eq!(
+            props[0],
+            FilterProp::Not {
+                prop: Box::new(FilterProp::Tapped),
+            }
+        );
+        // Continuations belong to the token-spec and attacking-defender arms,
+        // not this one.
+        for declined in [
+            " that are tapped and attacking",
+            " that are attacking you",
+            " that are attacking",
+            " that are blocking",
+            " that are tapped this turn",
+        ] {
+            assert!(
+                parse_that_clause_suffix(declined, None).is_none(),
+                "{declined:?} must stay unconsumed"
+            );
+        }
+    }
     // ── VERB-01: Compound target type patterns ──
 
     #[test]
@@ -25501,9 +26446,10 @@ mod tests {
     #[test]
     fn superlative_power_suffix_emits_aggregate_pt_comparison() {
         let mut ctx = ParseContext::default();
+        let mut properties = Vec::new();
         let input = "with the greatest power among creatures they control";
-        let (prop, consumed) =
-            parse_power_suffix(input, &mut ctx).expect("superlative suffix should parse");
+        let (prop, consumed) = parse_power_suffix(input, &mut ctx, &mut properties)
+            .expect("superlative suffix should parse");
         assert_eq!(consumed, input.len(), "should consume the whole suffix");
         let FilterProp::PtComparison {
             stat,
@@ -25931,6 +26877,19 @@ mod tests {
                 if t.properties.iter().filter(|p| matches!(p, FilterProp::WithKeyword { .. })).count() == 2),
             "{filter:?}"
         );
+    }
+
+    #[test]
+    fn keyword_suffix_preserves_following_clause_delimiter() {
+        let text = "with decayed, create a token";
+        let (suffix, consumed) = parse_keyword_suffix(text).expect("keyword suffix");
+        assert!(matches!(
+            suffix.properties.as_slice(),
+            [FilterProp::WithKeyword {
+                value: Keyword::Decayed
+            }]
+        ));
+        assert_eq!(&text[consumed..], ", create a token");
     }
 
     /// A non-list target followed by an unrelated ", or" clause stays untouched.
@@ -26797,5 +27756,454 @@ mod color_or_type_union {
         }
         assert!(parse_type_phrase_union("Giant", &scope).is_none());
         assert!(parse_type_phrase_union("Goblin or Shaman you know", &scope).is_none());
+    }
+}
+
+#[cfg(test)]
+mod zone_list_grammar {
+    use super::*;
+
+    fn props_of(phrase: &str) -> (Vec<FilterProp>, Option<ControllerRef>, usize) {
+        parse_zone_suffix(phrase).unwrap_or_else(|| panic!("expected a zone suffix for {phrase:?}"))
+    }
+
+    /// CR 400.1 + CR 400.7: every zone-list shape printed on a card, read as the
+    /// union it is. An object occupies one zone and becomes a new object when it
+    /// moves (CR 400.7), so a list of zones naming where one object may be can
+    /// only be read disjunctively — "in exile and in your graveyard" names the
+    /// same population "in your graveyard or in exile" would.
+    ///
+    /// A mixed per-player/shared list carries a possessor only when the noun
+    /// phrase already established ownership ("card you own …"). Without that
+    /// provenance the possessor belongs to the qualified leg alone and the
+    /// grammar declines rather than applying `Owned` to the shared leg. The
+    /// owned rows below therefore go through `parse_type_phrase_folding`, which
+    /// is the production seam that supplies the noun phrase's `Owned` property.
+    ///
+    /// Every phrase is quoted from the named printed card.
+    #[test]
+    fn printed_zone_lists_read_as_one_union_with_one_possessor() {
+        for (phrase, card, zones) in [
+            (
+                "in exile and in your graveyard",
+                "Huskburster Swarm / Sailors' Bane / Crackling Drake",
+                vec![Zone::Exile, Zone::Graveyard],
+            ),
+            (
+                "from the command zone and from your graveyard",
+                "Campfire",
+                vec![Zone::Command, Zone::Graveyard],
+            ),
+            (
+                "from your hand or from the command zone",
+                "Next of Kin",
+                vec![Zone::Hand, Zone::Command],
+            ),
+            (
+                "in your graveyard or on the battlefield",
+                "Firemane Angel / Ichor Aberration",
+                vec![Zone::Graveyard, Zone::Battlefield],
+            ),
+            (
+                // The only printed card with this exact phrase is un-set:
+                // Mzed is `isFunny`, UNK-only, zero format legalities. Kept
+                // because a noun phrase that establishes ownership still has
+                // to read it, and flagged so it is never mistaken for a
+                // black-bordered authority. The black-bordered near-shape —
+                // same two zones, no possessor — is Stinging Study / Imposing
+                // Grandeur, pinned in its own row below.
+                "on the battlefield or in your command zone",
+                "Mzed, Mercenary Leader (UNK, un-set)",
+                vec![Zone::Battlefield, Zone::Command],
+            ),
+            (
+                "in your library or in the command zone",
+                "Worldknit",
+                vec![Zone::Library, Zone::Command],
+            ),
+            (
+                "from your graveyard or from exile",
+                "Mister Immortal / Squee, the Immortal / Doc Aurlock, Grizzled Genius",
+                vec![Zone::Graveyard, Zone::Exile],
+            ),
+        ] {
+            let phrase_with_owner = format!("card you own {phrase}");
+            let (filter, remainder) = parse_type_phrase_folding(&phrase_with_owner);
+            assert_eq!(remainder.trim(), "", "{card}: {phrase:?}");
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("{card}: expected a Typed filter for {phrase:?}");
+            };
+            assert_eq!(
+                typed.controller, None,
+                "{card}: a mixed list carries its owner as a property"
+            );
+            assert_eq!(
+                typed.properties,
+                vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You
+                    },
+                    FilterProp::InAnyZone { zones },
+                ],
+                "{card}: {phrase:?}"
+            );
+        }
+
+        // No possessive anywhere: the plural "graveyards" names every player's,
+        // and exile is shared, so no owner is emitted.
+        for (phrase, card, zones) in [
+            (
+                "from graveyards or from exile",
+                "Aven Interrupter",
+                vec![Zone::Graveyard, Zone::Exile],
+            ),
+            (
+                "in the command zone or on the battlefield",
+                "Edgar Markov / Arahbo, Roar of the World",
+                vec![Zone::Command, Zone::Battlefield],
+            ),
+        ] {
+            let (props, ctrl, consumed) = props_of(phrase);
+            assert_eq!(consumed, phrase.len(), "{card}: {phrase:?}");
+            assert_eq!(ctrl, None, "{card}: {phrase:?}");
+            assert_eq!(
+                props,
+                vec![FilterProp::InAnyZone { zones }],
+                "{card}: {phrase:?}"
+            );
+        }
+
+        // Limit the shared grammar: a mixed list whose possessor is not already
+        // established by the noun phrase declines instead of over-restricting
+        // the shared leg. The reach guard below shows the same phrases parse
+        // once the noun phrase supplies ownership.
+        for phrase in [
+            "in your graveyard or on the battlefield",
+            "in your library or in the command zone",
+        ] {
+            assert_eq!(
+                parse_zone_suffix(phrase),
+                None,
+                "a mixed list without noun-phrase ownership must decline: {phrase:?}"
+            );
+            let phrase_with_owner = format!("card you own {phrase}");
+            let (filter, remainder) = parse_type_phrase_folding(&phrase_with_owner);
+            assert_eq!(remainder.trim(), "", "reach guard: {phrase_with_owner:?}");
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("reach guard: expected Typed for {phrase_with_owner:?}");
+            };
+            assert!(typed
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::InAnyZone { .. })));
+        }
+    }
+
+    /// CR 400.3 + CR 108.4a: a list whose zones are ALL per-player keeps the
+    /// house owner-zone encoding (`TypedFilter.controller`), which
+    /// `filter::typed_filter_is_owner_scoped` re-reads as ownership. Only a list
+    /// that also names a shared zone — which that predicate declines — switches
+    /// to an explicit `Owned` property.
+    ///
+    /// The game-side half of that re-reading is pinned by
+    /// `filter::explicit_you_ownership_zone_encoding_is_local_and_excludes_control_zones`,
+    /// which asserts a `[Hand, Library, Graveyard]` list IS owner-scoped and a
+    /// `[Hand, Exile]` one is not; this test owns only the parser's side of the
+    /// contract — which encoding each list shape gets.
+    ///
+    /// No printed card spells a prepositioned two-zone list whose zones are both
+    /// per-player (the printed lists all name a shared zone; the nearest are
+    /// Huskburster Swarm's "in exile and in your graveyard" and Next of Kin's
+    /// "from your hand or from the command zone"). This phrase is the fixture
+    /// `exile_graveyard_source_shape` already pins, reasserted here so the
+    /// reduction cannot quietly move the possessor off `controller` for it.
+    #[test]
+    fn all_per_player_zone_list_keeps_the_controller_owner_encoding() {
+        let phrase = "from your graveyard or from your hand";
+        let (props, ctrl, consumed) = props_of(phrase);
+        assert_eq!(consumed, phrase.len());
+        assert_eq!(ctrl, Some(ControllerRef::You));
+        assert_eq!(
+            props,
+            vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Graveyard, Zone::Hand]
+            }],
+            "no redundant Owned property when every zone is owner-scoped"
+        );
+    }
+
+    /// "or" commits to a second zone phrase, "and" does not — the asymmetry that
+    /// lets the union read Huskburster Swarm without half-reading the printed
+    /// cards whose "and" introduces the next instruction, nor the ones whose
+    /// "or" introduces a preposition-less second zone.
+    #[test]
+    fn or_commits_to_a_second_zone_phrase_and_and_does_not() {
+        // Armored Scrapgorger: "Whenever this creature becomes tapped, exile
+        // target card from a graveyard and put an oil counter on this creature."
+        let phrase = "from a graveyard and put an oil counter on this creature";
+        let (props, ctrl, consumed) = props_of(phrase);
+        assert_eq!(
+            props,
+            vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }],
+            "the head still parses when the 'and' is not another zone phrase"
+        );
+        assert_eq!(ctrl, None);
+        assert_eq!(
+            &phrase[consumed..],
+            " and put an oil counter on this creature",
+            "an 'and' that ends the list is left for the caller"
+        );
+
+        // Dakkon, Shadow Slayer: "You may put an artifact card from your hand or
+        // graveyard onto the battlefield." The second zone carries no
+        // preposition, so the committed "or" declines the whole suffix rather
+        // than silently reading the hand alone.
+        assert_eq!(parse_zone_suffix("from your hand or graveyard"), None);
+    }
+
+    /// CR 400.1: two DIFFERENT possessives name two players' zones, which one
+    /// `InAnyZone` cannot express, so the suffix declines instead of binding
+    /// both to one owner. A `Plain` on a PER-PLAYER zone is such a possessor —
+    /// an unspecified player's copy — and declines the same way; only a shared
+    /// zone's `Plain`, which can carry no possessor at all, is absorbed.
+    ///
+    /// No printed card spells any of these; the nearest printed shapes are the
+    /// single-possessor lists in
+    /// `printed_zone_lists_read_as_one_union_with_one_possessor`, which this
+    /// test's reach-guard reasserts so the declines below cannot pass because
+    /// the grammar stopped accepting zone lists at all.
+    #[test]
+    fn zone_list_declines_conflicting_possessors() {
+        for phrase in [
+            "in your graveyard or in an opponent's graveyard",
+            "in your graveyard and in an opponent's graveyard",
+            "from a graveyard or from your graveyard",
+            "from their hand or from your hand",
+        ] {
+            assert_eq!(parse_zone_suffix(phrase), None, "{phrase:?}");
+        }
+        // A mixed list with one possessor but no noun-phrase ownership also
+        // declines rather than over-restricting the shared leg.
+        assert_eq!(parse_zone_suffix("in your graveyard or in exile"), None);
+        // Reach-guard: the same two zones parse once the noun phrase supplies
+        // ownership.
+        let (filter, remainder) =
+            parse_type_phrase_folding("card you own in your graveyard or in exile");
+        assert_eq!(remainder.trim(), "");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a Typed filter");
+        };
+        assert_eq!(
+            typed.properties,
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You
+                },
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Graveyard, Zone::Exile]
+                },
+            ]
+        );
+    }
+
+    /// CR 400.3: the noun phrase's ownership must name the SAME player as the
+    /// zone qualifier. "card you own in an opponent's graveyard or in exile"
+    /// cannot discard the opposing possessor and let your Owned predicate apply
+    /// to every leg.
+    #[test]
+    fn mixed_list_declines_when_noun_owner_differs_from_zone_owner() {
+        let (filter, remainder) =
+            parse_type_phrase_folding("card you own in an opponent's graveyard or in exile");
+        assert!(
+            !remainder.trim().is_empty(),
+            "mismatched noun/zone owners must not fold the list"
+        );
+        if let TargetFilter::Typed(typed) = filter {
+            assert!(
+                !typed
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::InAnyZone { .. })),
+                "the mismatched list must not become an ownerless union"
+            );
+        }
+
+        // The matching-owner form still folds: the noun phrase and qualifier
+        // both name the same player.
+        let (filter, remainder) =
+            parse_type_phrase_folding("card you own in your graveyard or in exile");
+        assert_eq!(remainder.trim(), "");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a Typed filter");
+        };
+        assert_eq!(
+            typed.properties,
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You
+                },
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Graveyard, Zone::Exile]
+                },
+            ]
+        );
+    }
+
+    /// `many0` admits a list of three or more zones, which the loop it replaced
+    /// also did; pinned because the reduction and the possessor binding now run
+    /// once over the whole list rather than pairwise.
+    ///
+    /// No printed card spells a prepositioned list of three or more zones — the
+    /// printed three-zone lists are comma-separated and this grammar declines
+    /// them on purpose (see `parse_zone_suffix_nom`: Hedron Alignment). The
+    /// nearest printed shapes are the two-zone lists in
+    /// `printed_zone_lists_read_as_one_union_with_one_possessor`.
+    #[test]
+    fn three_zone_list_reduces_once_over_the_whole_list() {
+        let phrase = "card you own in exile and in your graveyard and in your hand";
+        let (filter, remainder) = parse_type_phrase_folding(phrase);
+        assert_eq!(remainder.trim(), "");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a Typed filter");
+        };
+        assert_eq!(typed.controller, None);
+        assert_eq!(
+            typed.properties,
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You
+                },
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Exile, Zone::Graveyard, Zone::Hand]
+                },
+            ]
+        );
+    }
+
+    /// CR 607.2d: "the chosen player's" is linked to an earlier "choose a
+    /// player" on the same object ("those abilities are linked. The second
+    /// ability refers only to a choice made as a result of the first ability"),
+    /// which is what makes it a possessor at all. An all-per-player list keeps
+    /// the controller encoding; a mixed list without noun-phrase ownership
+    /// declines rather than applying that possessor to the shared leg.
+    ///
+    /// No printed card spells a mixed-zone list with this possessor; the nearest
+    /// printed instance of the qualifier itself is Haunting Apparition's "green
+    /// creature cards in the chosen player's graveyard" (single zone).
+    #[test]
+    fn chosen_player_possessive_keeps_the_all_per_player_encoding() {
+        assert_eq!(
+            parse_zone_suffix("in exile and in the chosen player's graveyard"),
+            None,
+            "mixed list without noun-phrase ownership must decline"
+        );
+        // All-per-player keeps the controller encoding for this possessor too.
+        let (props, ctrl, _) =
+            props_of("in the chosen player's graveyard or in the chosen player's hand");
+        assert_eq!(ctrl, Some(ControllerRef::SourceChosenPlayer));
+        assert_eq!(
+            props,
+            vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Graveyard, Zone::Hand]
+            }]
+        );
+    }
+
+    /// THE COMMA IS NOT A ZONE-LIST SEPARATOR, AND MUST NOT BECOME ONE while
+    /// this grammar is blind to its caller's position.
+    ///
+    /// Hedron Alignment: "you win the game if you own a card named Hedron
+    /// Alignment in exile, in your hand, in your graveyard, and on the
+    /// battlefield" — FOUR distinct cards, one per zone, because an object is in
+    /// one zone (CR 400.7). Adding `", "` to the separator `alt` in
+    /// `parse_zone_suffix_nom` would fold that into a single
+    /// `InAnyZone { [Exile, Hand, Graveyard, Battlefield] }`, turning a
+    /// four-copies-in-four-zones win condition into one-copy-anywhere — and
+    /// every other test in this suite would stay green, which is why the hazard
+    /// is a gate here and not only a comment there.
+    ///
+    /// The assertion is the whole return value, so a change to any part of it
+    /// fails: the head consumes exactly "in exile" (8 bytes) and the comma ends
+    /// the list, leaving a scalar `InZone`.
+    #[test]
+    fn comma_is_not_a_zone_list_separator() {
+        assert_eq!(
+            parse_zone_suffix("in exile, in your hand"),
+            Some((vec![FilterProp::InZone { zone: Zone::Exile }], None, 8)),
+        );
+        // The full Hedron Alignment tail, read from the same position its
+        // enclosing condition would hand over.
+        assert_eq!(
+            parse_zone_suffix("in exile, in your hand, in your graveyard, and on the battlefield"),
+            Some((vec![FilterProp::InZone { zone: Zone::Exile }], None, 8)),
+        );
+    }
+
+    /// Oracle text writes the battlefield with "on" and every other zone with
+    /// "in"/"from" (CR 110.1: "a permanent is a card or token ON the
+    /// battlefield"). A committed "or" continuation that breaks that fails the
+    /// whole suffix; an uncommitted "and" one simply is not part of the list.
+    /// A declined zone list must stop the boundary scanner, not let it resume
+    /// at a later leg and return only that zone.
+    #[test]
+    fn boundary_scanner_declines_a_whole_list() {
+        assert_eq!(
+            scan_zone_phrase("this creature in your graveyard or on the battlefield"),
+            None,
+        );
+        assert_eq!(
+            scan_zone_phrase("this creature in exile and in your graveyard"),
+            None,
+            "the mixed list declines without noun-phrase ownership",
+        );
+        // An ordinary word-boundary miss is not a declined list; the scanner
+        // must continue and find the later real zone phrase.
+        assert_eq!(
+            scan_zone_phrase("on hand-picked cards in your graveyard").map(|(zone, _, _)| zone),
+            Some(Zone::Graveyard),
+        );
+        assert_eq!(
+            scan_zone_phrase("on exile in your graveyard").map(|(zone, _, _)| zone),
+            Some(Zone::Graveyard),
+            "an invalid first entry is not a committed list decline",
+        );
+    }
+
+    #[test]
+    fn zone_list_rejects_on_for_a_non_battlefield_zone() {
+        assert_eq!(parse_zone_suffix("in exile or on exile"), None);
+        let phrase = "in exile and on exile";
+        let (props, _, consumed) = props_of(phrase);
+        assert_eq!(props, vec![FilterProp::InZone { zone: Zone::Exile }]);
+        assert_eq!(&phrase[consumed..], " and on exile");
+    }
+
+    /// The whole Huskburster Swarm noun phrase, through the type-phrase folding
+    /// its cost-reduction parser calls: one `Owned { You }` — the phrase names
+    /// the owner twice, in "you own" and in the "your " on the graveyard — the
+    /// union of both zones, and nothing left over for the caller.
+    #[test]
+    fn huskburster_noun_phrase_folds_to_one_owned_prop_and_the_zone_union() {
+        let (filter, remainder) =
+            parse_type_phrase_folding("creature card you own in exile and in your graveyard");
+        assert_eq!(remainder.trim(), "");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a Typed filter");
+        };
+        assert_eq!(typed.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(typed.controller, None);
+        assert_eq!(
+            typed.properties,
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You
+                },
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Exile, Zone::Graveyard]
+                },
+            ]
+        );
     }
 }

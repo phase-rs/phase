@@ -124,24 +124,5 @@ expression: "&ir"
     }
   ],
   "source_text": "If this creature hasn't been exerted this turn, you may exert it as it attacks. When you do, untap all other creatures you control and after this phase, there is an additional combat phase. (An exerted creature won't untap during your next untap step.)",
-  "card_name": "Combat Celebrant",
-  "diagnostics": [
-    {
-      "type": "SwallowedClause",
-      "detector": "Duration_ThisTurn",
-      "description": "If this creature hasn't been exerted this turn, you may exert it as it attacks. When you do, untap all other creatures you control and after",
-      "line_index": 0,
-      "unit_span": {
-        "first_line": 0,
-        "last_line": 0,
-        "start_byte": 0,
-        "end_byte": 252,
-        "precision": "Exact",
-        "ordinal_within_span": 0
-      },
-      "items": [
-        0
-      ]
-    }
-  ]
+  "card_name": "Combat Celebrant"
 }

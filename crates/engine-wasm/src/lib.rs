@@ -37,14 +37,16 @@ use engine::game::deck_validation::{draft_set_concessions_for, evaluate_deck_for
 use engine::game::visibility::HandDisclosure;
 use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
-    can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket_for_request,
-    evaluate_deck_compatibility, filter_events_for_viewer, filter_state_for_viewer,
-    is_brawl_commander_eligible, is_commander_eligible, is_freeform_commander_eligible,
-    is_tiny_leader_eligible, load_and_hydrate_decks, max_deck_copies,
+    can_pair_commanders, commander_candidates, companion_candidates, deck_copy_limit_for,
+    estimate_bracket_for_request, evaluate_deck_compatibility, filter_events_for_viewer,
+    filter_state_for_viewer, infer_commander,
+    is_card_commander_eligible_for_format as engine_is_card_commander_eligible_for_format,
+    is_commander_eligible, load_and_hydrate_decks, max_deck_copies,
     rehydrate_game_from_card_db_with_finalization, resolve_deck_list,
     signature_spell_selection_policy, start_game, start_game_with_starting_player,
     validate_name_deck_for_format_full, BracketEstimate, BracketEstimateRequest,
-    DeckCompatibilityRequest, DeckList, PlayerDeckList, ReplayPlayer,
+    CommanderDeckComposition, CommanderInferenceRow, DeckCompatibilityRequest, DeckList,
+    PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::{DebugAction, DebugCardCreationKind};
 use engine::types::card_printing::{deserialize_deck_printings, validate_deck_printings_bounds};
@@ -1643,68 +1645,7 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
         let Some(face) = db.get_face_by_name(name) else {
             return false;
         };
-        // EXHAUSTIVE, deliberately: the `_ => false` this replaced is what made
-        // `GameFormat::CommanderDraft` silently answer "no card can be your
-        // commander" the moment the format became selectable. A wildcard here
-        // re-arms that for the next format, so every arm is named.
-        match format {
-            GameFormat::Commander | GameFormat::DuelCommander => is_commander_eligible(face),
-            // CR 903.3, unchanged by CR 810 seating: 2HG Commander decks
-            // designate commanders under Commander's own predicate.
-            GameFormat::TwoHeadedGiantCommander => is_commander_eligible(face),
-            // CR 904.13a + CR 903.3: Archenemy Commander decks designate
-            // commanders under Commander's own predicate.
-            GameFormat::ArchenemyCommander => is_commander_eligible(face),
-            GameFormat::PauperCommander => is_commander_eligible(face),
-            // CR 903.3, unchanged by CR 903.13f: the CR 903.13f(3) grant
-            // affects PAIRING, not eligibility, so Commander Draft uses
-            // Commander's own predicate.
-            GameFormat::CommanderDraft => is_commander_eligible(face),
-            GameFormat::FreeformCommander => is_freeform_commander_eligible(face),
-            GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
-            GameFormat::Oathbreaker => face.is_oathbreaker,
-            GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
-            // Horde is per-config (Commander-format survivors designate a
-            // standard-EDH-eligible commander; Constructed survivors have no
-            // commander slot and never consult this). Answer the EDH
-            // predicate: the only caller that can exist is the Commander
-            // horde's deck builder, and `false` here would silently tell it
-            // no card can be its commander.
-            GameFormat::Horde => is_commander_eligible(face),
-            // CR 903.3's commander eligibility test applies unchanged —
-            // planar doesn't change eligibility.
-            GameFormat::PlanechaseCommander => is_commander_eligible(face),
-            // Formats with no command zone: nothing can be designated.
-            GameFormat::Standard
-            | GameFormat::Pioneer
-            | GameFormat::Modern
-            | GameFormat::Premodern
-            | GameFormat::Legacy
-            | GameFormat::Vintage
-            | GameFormat::Historic
-            | GameFormat::Timeless
-            | GameFormat::Pauper
-            | GameFormat::Momir
-            | GameFormat::Planechase
-            | GameFormat::Archenemy
-            | GameFormat::FreeForAll
-            | GameFormat::TwoHeadedGiant
-            | GameFormat::Limited
-            | GameFormat::Freeform
-            | GameFormat::Dandan => false,
-            // Phase 1d wired a real custom-format deck-legality evaluator
-            // (`evaluate_custom_format`), but it is scoped to non-command-zone
-            // (constructed-shaped) custom formats — a command-zone custom
-            // (`CommandZoneMode::Enabled`, the shape a saved Commander/Brawl/
-            // Tiny-Leaders/Oathbreaker lobby produces) fails closed there too.
-            // This function also only ever receives a bare `GameFormat`, never
-            // the resolved `CommanderEligibilityRule` a command-zone custom
-            // format declares, so eligibility genuinely cannot be answered
-            // here regardless. `false` is the fail-closed reading — a
-            // permissive `true` would offer an unvalidated card as a
-            // commander.
-            GameFormat::Custom(_) => false,
-        }
+        engine_is_card_commander_eligible_for_format(face, format)
     })
 }
 
@@ -2065,6 +2006,47 @@ pub fn signature_spell_selection_policy_js(request: JsValue) -> Result<JsValue, 
             ));
         };
         Ok(to_js(&signature_spell_selection_policy(db, &request)))
+    })
+}
+
+/// Returns available commander candidates in deck order.
+#[wasm_bindgen(js_name = commanderCandidates)]
+pub fn commander_candidates_js(request: JsValue, composition: JsValue) -> Result<JsValue, JsValue> {
+    let request: DeckCompatibilityRequest = serde_wasm_bindgen::from_value(request)
+        .map_err(|e| JsValue::from_str(&format!("Invalid compatibility request: {e}")))?;
+    let composition: CommanderDeckComposition = serde_wasm_bindgen::from_value(composition)
+        .map_err(|e| JsValue::from_str(&format!("Invalid commander deck composition: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        Ok(to_js(&commander_candidates(db, &request, composition)))
+    })
+}
+
+/// Infers a commander from counted main-deck rows.
+#[wasm_bindgen(js_name = inferCommander)]
+pub fn infer_commander_js(
+    main: JsValue,
+    selected_format: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let main: Vec<CommanderInferenceRow> = serde_wasm_bindgen::from_value(main)
+        .map_err(|e| JsValue::from_str(&format!("Invalid commander inference request: {e}")))?;
+    let selected_format = selected_format
+        .map(|tag| tag.parse::<GameFormat>())
+        .transpose()
+        .map_err(|e| JsValue::from_str(&format!("Invalid commander inference request: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        Ok(to_js(&infer_commander(db, &main, selected_format)))
     })
 }
 
@@ -4062,6 +4044,56 @@ mod codec_bridge_tests {
         ] {
             assert!(state_codec_decode_inner(bytes, None).is_err());
         }
+    }
+
+    #[test]
+    fn viewer_codec_carries_marked_art_only_for_disclosed_faces() {
+        let (mut state, [hand, _]) = install_hidden_state();
+        let public = engine::game::zones::create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Forest".into(),
+            Zone::Battlefield,
+        );
+        let marked = serde_json::json!({
+            "set_code":"m21","collector_number":"272","automatic_art_catalog_version":1
+        });
+        let foretold = engine::game::zones::create_object(
+            &mut state,
+            CardId(904),
+            PlayerId(0),
+            "Foretold Forest".into(),
+            Zone::Exile,
+        );
+        let object = state.objects.get_mut(&foretold).unwrap();
+        object.face_down = true;
+        object.foretold = true;
+        for id in [public, hand, foretold] {
+            let printing = serde_json::from_value(marked.clone()).unwrap();
+            let object = state.objects.get_mut(&id).unwrap();
+            object.printing =
+                engine::types::display_only::DisplayOnly::new(Some(std::sync::Arc::new(printing)));
+            object.base_printing = object.printing.clone();
+        }
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+        for viewer in [0, 1] {
+            let wire: serde_json::Value =
+                serde_json::from_str(&live_handle(Some(viewer)).json_inner()).unwrap();
+            for carrier in ["printing", "base_printing"] {
+                assert_eq!(wire["objects"][public.0.to_string()][carrier], marked);
+                for id in [hand, foretold] {
+                    let private = &wire["objects"][id.0.to_string()];
+                    assert!(private.is_object());
+                    if viewer == 0 {
+                        assert_eq!(private[carrier], marked);
+                    } else {
+                        assert!(private.get(carrier).is_none());
+                    }
+                }
+            }
+        }
+        clear_game_state();
     }
 
     #[test]
@@ -7006,6 +7038,166 @@ mod production_restore_owner_regression_tests {
     use engine::types::format::ChallengeDeck;
     use engine::types::phase::Phase;
 
+    fn start_basic_art_restore_fixture(player: Option<PlayerDeckList>) {
+        use engine::types::card_type::{CardType, CoreType, Supertype};
+        use serde_json::json;
+
+        clear_game_state();
+        set_multiplayer_mode(false);
+        let forest = engine::types::card::CardFace {
+            name: "Forest".into(),
+            scryfall_oracle_id: Some("b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6".into()),
+            card_type: CardType {
+                supertypes: vec![Supertype::Basic],
+                core_types: vec![CoreType::Land],
+                subtypes: vec!["Forest".into()],
+            },
+            ..Default::default()
+        };
+        let control = engine::types::card::CardFace {
+            name: "Control".into(),
+            scryfall_oracle_id: Some("uncovered-control".into()),
+            card_type: CardType {
+                core_types: vec![CoreType::Land],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let db =
+            CardDatabase::from_json_str(&json!({"forest": forest, "control": control}).to_string())
+                .unwrap();
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(Arc::new(db)));
+        let seat = PlayerDeckList {
+            main_deck: vec!["Forest".into(); 12],
+            ..Default::default()
+        };
+        initialize_game_inner(
+            Some(Ok(DeckList {
+                player: player.clone().unwrap_or_else(|| seat.clone()),
+                opponent: if player.is_some() {
+                    PlayerDeckList {
+                        main_deck: vec!["Control".into(); 12],
+                        ..Default::default()
+                    }
+                } else {
+                    seat
+                },
+                ..Default::default()
+            })),
+            4910,
+            Some(Ok(serde_json::to_value(FormatConfig::freeform()).unwrap())),
+            MatchConfig::default(),
+            2,
+            Some(0),
+            None,
+            InitSessionKind::Local,
+        )
+        .expect("solo Freeform game starts");
+    }
+
+    #[test]
+    fn owner_printing_trusted_restore_preserves_saved_appearance() {
+        use serde_json::{json, Value};
+
+        start_basic_art_restore_fixture(None);
+        let saved: Value = serde_json::from_str(&export_game_state_json().unwrap()).unwrap();
+        let id = ObjectId(1);
+        let key = id.0.to_string();
+        let card_id = saved["state"]["objects"][&key]["card_id"].clone();
+        assert!(!card_id.is_null());
+        let stamp = json!({
+            "set_code": "m21",
+            "collector_number": "273",
+            "automatic_art_catalog_version": 1,
+        });
+        for expected in [Some(&stamp), None] {
+            let mut input = saved.clone();
+            let object = input["state"]["objects"][&key].as_object_mut().unwrap();
+            for field in ["printing", "base_printing"] {
+                match expected {
+                    Some(stamp) => {
+                        object.insert(field.into(), stamp.clone());
+                    }
+                    None => {
+                        object.remove(field);
+                    }
+                }
+                assert_eq!(object.get(field), expected);
+            }
+            restore_game_state_inner(&input.to_string()).expect("the trusted save restores");
+            let (installed, wire) = with_installed_state(|state| {
+                (
+                    serde_json::to_value(&state.objects[&id]).unwrap(),
+                    serde_json::to_value(local_seat_client_state(state)).unwrap(),
+                )
+            })
+            .unwrap();
+            let visible = &wire["state"]["objects"][&key];
+            for object in [&installed, visible] {
+                assert_eq!(object["name"], "Forest");
+                assert_eq!(object["card_id"], card_id);
+                for field in ["printing", "base_printing"] {
+                    assert_eq!(object.get(field), expected);
+                }
+            }
+        }
+        clear_game_state();
+    }
+
+    #[test]
+    fn owner_printing_trusted_restore_round_trips_automatic_copy_mapping() {
+        use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+        use serde_json::{json, Value};
+
+        start_basic_art_restore_fixture(Some(PlayerDeckList {
+            main_deck: ["Forest", "Forest", "Forest", "Control"]
+                .map(str::to_string)
+                .into(),
+            printings: vec![DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "Forest".into(),
+                count: 1,
+                printing: CardPrinting::owner("m21", "272"),
+            }],
+            ..Default::default()
+        }));
+        let saved = export_game_state_json().unwrap();
+        let envelope: Value = serde_json::from_str(&saved).unwrap();
+        restore_game_state_inner(&saved).expect("the assigned game restores");
+        let wire = with_installed_state(|state| {
+            serde_json::to_value(local_seat_client_state(state)).unwrap()
+        })
+        .unwrap();
+        for (id, name, stamp) in [
+            (
+                1,
+                "Forest",
+                json!({"set_code":"m21", "collector_number":"272", "automatic_art_catalog_version":1}),
+            ),
+            (2, "Control", Value::Null),
+            (
+                3,
+                "Forest",
+                json!({"set_code":"m21", "collector_number":"273", "automatic_art_catalog_version":1}),
+            ),
+            (
+                4,
+                "Forest",
+                json!({"set_code":"m21", "collector_number":"272"}),
+            ),
+        ] {
+            for snapshot in [&envelope, &wire] {
+                let object = &snapshot["state"]["objects"][id.to_string()];
+                assert_eq!(object["name"], name);
+                assert_eq!(object["card_id"], id);
+                for field in ["printing", "base_printing"] {
+                    assert_eq!(object[field], stamp);
+                }
+            }
+        }
+        clear_game_state();
+    }
+
     #[test]
     fn production_restore_owner_repairs_revealed_smackdown_ref_on_first_serialized_snapshot() {
         clear_game_state();
@@ -7419,6 +7611,181 @@ mod combat_prompt_restore_tests {
         .expect("restored state remains available")
         .expect("restored blocker choices reach the declaration reducer");
         clear_game_state();
+    }
+}
+
+/// CR 400.7 + CR 603.7c: released v0.128.0 saves whose triggered ability names its damage
+/// recipient by event context, saved before event-referent identity pins existed.
+#[cfg(test)]
+mod legacy_event_referent_restore_tests {
+    use std::io::Read;
+
+    use super::*;
+    use engine::types::actions::GameAction;
+    use engine::types::zones::Zone;
+
+    /// A save written by the released v0.128.0 engine; see `v0_128_0.provenance`.
+    macro_rules! v128 {
+        ($name:literal) => {{
+            let mut json = String::new();
+            flate2::read::GzDecoder::new(
+                &include_bytes!(concat!(
+                    "../../engine/tests/fixtures/legacy_saves/v0_128_0/",
+                    $name,
+                    ".json.gz"
+                ))[..],
+            )
+            .read_to_string(&mut json)
+            .expect("the fixture inflates");
+            json
+        }};
+    }
+
+    /// Restores through the production decoder and resolves the pending Hunter trigger.
+    fn resolve_saved_trigger(json: &str) -> Zone {
+        assert!(
+            !json.contains("target_incarnations"),
+            "reach: the released save carries no event-referent pin"
+        );
+        load_minimal_test_card_database();
+        let mut state = decode_and_rehydrate_restored_game_state(json, |_| Ok(()))
+            .expect("the released save restores")
+            .state;
+        let dino = state
+            .objects
+            .iter()
+            .find(|(_, o)| o.name == "Colossal Dreadmaw")
+            .map(|(id, _)| *id)
+            .expect("the Dreadmaw is in the save");
+        assert_eq!(state.stack.len(), 1, "reach: Hunter's trigger is pending");
+        while !state.stack.is_empty() {
+            let actor = state
+                .waiting_for
+                .acting_player()
+                .expect("a player holds priority");
+            engine::game::engine::apply(&mut state, actor, GameAction::PassPriority)
+                .expect("pass priority");
+        }
+        state.objects[&dino].zone
+    }
+
+    #[test]
+    fn released_save_hunter_trigger_still_destroys() {
+        assert_eq!(
+            resolve_saved_trigger(&v128!("hunter_trigger_pending")),
+            Zone::Graveyard
+        );
+    }
+
+    /// CR 400.7: the blinked Dreadmaw is a new object; the saved trigger can't find it.
+    #[test]
+    fn released_save_hunter_trigger_spares_blinked_dreadmaw() {
+        assert_eq!(
+            resolve_saved_trigger(&v128!("hunter_trigger_pending_after_blink")),
+            Zone::Battlefield
+        );
+    }
+
+    const RECTOR: &str = "When this creature dies, you may exile it. If you do, search your library for an enchantment card, put that card onto the battlefield, then shuffle.";
+
+    /// CR 603.10a + CR 608.2c: Academy Rector's trigger parks at "you may exile it"; the save
+    /// taken there restores through the decoder with the dead Rector's event pin, and accepting
+    /// exiles that Rector and fetches the enchantment.
+    #[test]
+    fn parked_optional_rector_survives_save_and_resume() {
+        use engine::game::scenario::{GameRunner, GameScenario, P0};
+        use engine::types::card_type::CoreType;
+        use engine::types::mana::{ManaType, ManaUnit};
+        use engine::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let rector = scenario
+            .add_creature_from_oracle(P0, "Academy Rector", 1, 2, RECTOR)
+            .id();
+        let shock = scenario
+            .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
+            .id();
+        let anthem = scenario.add_card_to_library_top(P0, "Glorious Anthem");
+        let mut runner = scenario.build();
+        let card = runner.state_mut().objects.get_mut(&anthem).unwrap();
+        card.card_types.core_types.push(CoreType::Enchantment);
+        card.base_card_types = card.card_types.clone();
+        runner
+            .state_mut()
+            .add_mana_to_pool(P0, ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
+        runner.cast(shock).target_objects(&[rector]).commit();
+        for _ in 0..8 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        }
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "reach: the Rector prompt is parked: {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(runner.state().objects[&rector].zone, Zone::Graveyard);
+        let pin = engine::types::identifiers::ObjectIncarnationRef::of(
+            rector,
+            runner.state().objects[&rector].incarnation,
+        );
+
+        let mut state = runner.state().clone();
+        state.capture_rng_word_pos();
+        let json = serde_json::to_string(&TrustedGameStateEnvelope::capture(state))
+            .expect("the host exports its state");
+        load_minimal_test_card_database();
+        let restored = decode_and_rehydrate_restored_game_state(&json, |_| Ok(()))
+            .expect("the save restores")
+            .state;
+        assert!(
+            restored
+                .active_optional_effect_frame()
+                .expect("the parked optional frame restores")
+                .ability
+                .target_incarnations
+                .contains(&pin),
+            "the parked ability keeps the Rector's event pin after reload"
+        );
+        assert!(matches!(
+            restored.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("P0 accepts");
+        for _ in 0..8 {
+            if let WaitingFor::SearchChoice { cards, .. } = &runner.state().waiting_for {
+                assert_eq!(cards, &vec![anthem], "reach: the enchantment is offered");
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![anthem],
+                    })
+                    .expect("P0 fetches the enchantment");
+                continue;
+            }
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                || runner.state().stack.is_empty()
+            {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        }
+        assert_eq!(runner.state().objects[&rector].zone, Zone::Exile);
+        assert_eq!(runner.state().objects[&anthem].zone, Zone::Battlefield);
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().stack.is_empty());
     }
 }
 
@@ -13433,10 +13800,7 @@ mod deck_list_seat_validation_tests {
             section: DeckSection::MainDeck,
             name: "Plains".to_string(),
             count: 1,
-            printing: CardPrinting {
-                set_code: set_code.to_string(),
-                collector_number: "1".to_string(),
-            },
+            printing: CardPrinting::owner(set_code, "1"),
         }
     }
 
@@ -15197,6 +15561,392 @@ mod teammate_browser_ai_tests {
 
         cancel_takeback_inner(P0).expect("installed");
         set_multiplayer_mode(false);
+        clear_game_state();
+    }
+}
+/// PR #10440 B2: an old save (no `dealt_damage_kinds`, the OLD `Unrecognized`
+/// Ruric static) restored through `restore_game_state_inner`. Rows i, ii, iii,
+/// ix and x of the shared recipe (the engine file
+/// `tests/integration/ruric_thar_magecrusher_hexproof.rs` holds the real-combat
+/// rows); the latch recovery is the engine's `prepare_for_restore` authority,
+/// shared with server-core.
+#[cfg(test)]
+mod ruric_legacy_restore_tests {
+    use super::*;
+    use engine::database::mtgjson::AtomicCard;
+    use engine::database::synthesis::build_oracle_face;
+    use engine::game::keywords::has_hexproof;
+    use engine::game::layers::flush_layers;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::ability::{
+        ContinuousModification, DamageKindFilter, StaticCondition, StaticDefinition, TargetRef,
+    };
+    use engine::types::card::PrintedCardRef;
+    use engine::types::game_state::{DamageRecord, PersistedGameState};
+    use engine::types::keywords::Keyword;
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+    use serde_json::{json, Map, Value};
+
+    /// Verbatim Oracle text of Ruric Thar, Magecrusher.
+    const RURIC_ORACLE_TEXT: &str = "This spell can't be countered.\nReach, vigilance, trample\nRuric Thar has hexproof as long as they haven't dealt combat damage yet. (They can't be the target of spells or abilities your opponents control.)";
+    const RURIC_NAME: &str = "Ruric Thar, Magecrusher";
+    const RURIC_ORACLE_ID: &str = "ruric-thar-test-oracle";
+    /// The condition the pre-PR parser wrote for Ruric's hexproof static.
+    const OLD_RURIC_CONDITION_TEXT: &str = "they haven't dealt combat damage yet";
+
+    fn current_ruric_condition() -> StaticCondition {
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+            }),
+        }
+    }
+
+    fn hexproof_conditions<'a>(
+        defs: impl IntoIterator<Item = &'a StaticDefinition>,
+    ) -> Vec<Option<StaticCondition>> {
+        defs.into_iter()
+            .filter(|def| {
+                def.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Hexproof
+                        }
+                    )
+                })
+            })
+            .map(|def| def.condition.clone())
+            .collect()
+    }
+
+    /// F1: one-face database whose Ruric face comes from the real card-data
+    /// pipeline (`build_oracle_face`), with the current-static face guard.
+    fn ruric_face_db() -> CardDatabase {
+        let atomic: AtomicCard = serde_json::from_value(json!({
+            "name": RURIC_NAME,
+            "manaCost": "{5}{G}{G}",
+            "colors": ["G"],
+            "colorIdentity": ["G"],
+            "power": "7",
+            "toughness": "7",
+            "text": RURIC_ORACLE_TEXT,
+            "layout": "normal",
+            "type": "Legendary Creature — Ogre Warrior",
+            "types": ["Creature"],
+            "subtypes": ["Ogre", "Warrior"],
+            "supertypes": ["Legendary"],
+            "keywords": ["Reach", "Trample", "Vigilance"],
+            "manaValue": 7.0,
+            "identifiers": {
+                "scryfallOracleId": RURIC_ORACLE_ID,
+                "scryfallId": "ruric-thar-test-face"
+            }
+        }))
+        .expect("MTGJSON-shaped Ruric deserializes");
+        let face = build_oracle_face(&atomic, Some(RURIC_ORACLE_ID.to_string()));
+        assert_eq!(
+            hexproof_conditions(&face.static_abilities),
+            vec![Some(current_ruric_condition())],
+            "face guard: the parser emits the current Ruric static"
+        );
+        let face_json = serde_json::to_value(&face).expect("CardFace serializes");
+        assert!(!face_json.to_string().contains("\"Unrecognized\""));
+        let mut export = Map::new();
+        export.insert(face.name.to_lowercase(), face_json);
+        CardDatabase::from_json_str(&Value::Object(export).to_string())
+            .expect("one-face export parses")
+    }
+
+    /// F3: rewrite the object's hexproof static in both static lists to the
+    /// OLD `Unrecognized` condition; returns the patch count.
+    fn patch_old_static(value: &mut Value, id: ObjectId) -> usize {
+        match value {
+            Value::Object(map) => {
+                let mut patched = 0;
+                if map.get("id") == Some(&json!(id)) && map.contains_key("static_definitions") {
+                    for key in ["static_definitions", "base_static_definitions"] {
+                        if let Some(Value::Array(defs)) = map.get_mut(key) {
+                            for def in defs.iter_mut() {
+                                let gated = def.get("condition").is_some_and(|c| {
+                                    c.to_string().contains("SourceHasDealtDamage")
+                                });
+                                if gated {
+                                    def["condition"] = json!({
+                                        "type": "Unrecognized",
+                                        "text": OLD_RURIC_CONDITION_TEXT
+                                    });
+                                    patched += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                for child in map.values_mut() {
+                    patched += patch_old_static(child, id);
+                }
+                patched
+            }
+            Value::Array(items) => items
+                .iter_mut()
+                .map(|item| patch_old_static(item, id))
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    /// Remove `source_incarnation` from every damage record of `source` (a
+    /// save written before that field existed).
+    fn strip_record_incarnation(value: &mut Value, source: ObjectId) -> usize {
+        match value {
+            Value::Object(map) => {
+                let mut removed = 0;
+                if let Some(Value::Array(records)) = map.get_mut("damage_dealt_this_turn") {
+                    for record in records.iter_mut() {
+                        if record.get("source_id") == Some(&json!(source)) {
+                            if let Some(record) = record.as_object_mut() {
+                                removed +=
+                                    usize::from(record.remove("source_incarnation").is_some());
+                            }
+                        }
+                    }
+                }
+                for child in map.values_mut() {
+                    removed += strip_record_incarnation(child, source);
+                }
+                removed
+            }
+            Value::Array(items) => items
+                .iter_mut()
+                .map(|item| strip_record_incarnation(item, source))
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    /// Damage history installed by typed mutation, exactly what an old build
+    /// wrote (the latch is left empty). The record shape is pinned against
+    /// real combat by the engine guard test
+    /// `s_guard_adapter_record_shape_matches_real_combat_record`.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum History {
+        /// Row x control: no damage history.
+        None,
+        /// Rows i and x: combat damage this turn, entered a previous turn.
+        SameTurnCombat,
+        /// Row iii: an Any-set entry from an earlier turn, no record.
+        PreviousTurn,
+        /// Row ii: entered this turn, one trusted noncombat record.
+        SameTurnNoncombatEntrant,
+        /// Row ix: row ii with the record's `source_incarnation` key removed.
+        PreFieldNoncombatEntrant,
+    }
+
+    const HISTORIES: [History; 5] = [
+        History::None,
+        History::SameTurnCombat,
+        History::PreviousTurn,
+        History::SameTurnNoncombatEntrant,
+        History::PreFieldNoncombatEntrant,
+    ];
+
+    impl History {
+        /// `None`: the save cannot prove its combat history and Ruric\'s static
+        /// reads it, so the restore is refused (CR 120.2a + CR 120.2b).
+        /// (combat latch, noncombat latch, hexproof) after restore.
+        fn expected(self) -> Option<(bool, bool, bool)> {
+            match self {
+                History::None => Some((false, false, true)),
+                History::SameTurnCombat => Some((true, false, false)),
+                // Unprovable earlier history is refused, never attributed to a kind.
+                History::PreviousTurn => None,
+                History::SameTurnNoncombatEntrant => Some((false, true, true)),
+                // An incarnation-less record is not trusted: refused.
+                History::PreFieldNoncombatEntrant => None,
+            }
+        }
+    }
+
+    /// F2 + F3: a printed Ruric (`add_real_card`, carrying `printed_ref`) with
+    /// `history`, captured, then rewritten into an old save (no latch key, the
+    /// OLD `Unrecognized` static in both lists). Returns the pre-save state,
+    /// Ruric and the old-format JSON.
+    fn old_save(db: &CardDatabase, history: History) -> (GameState, ObjectId, Value) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let ruric = scenario.add_real_card(P0, RURIC_NAME, Zone::Battlefield, db);
+        let mut state = scenario.build().state().clone();
+        assert_eq!(
+            state.objects[&ruric].printed_ref,
+            Some(PrintedCardRef {
+                oracle_id: RURIC_ORACLE_ID.to_string(),
+                face_name: RURIC_NAME.to_string(),
+            })
+        );
+        assert_eq!(
+            hexproof_conditions(state.objects[&ruric].static_definitions.0.iter()),
+            vec![Some(current_ruric_condition())]
+        );
+        let incarnation = state.objects[&ruric].incarnation;
+        let turn = state.turn_number;
+        if matches!(
+            history,
+            History::SameTurnNoncombatEntrant | History::PreFieldNoncombatEntrant
+        ) {
+            state
+                .objects
+                .get_mut(&ruric)
+                .unwrap()
+                .entered_battlefield_turn = Some(turn);
+        }
+        let record = |is_combat: bool| -> DamageRecord {
+            serde_json::from_value(json!({
+                "source_id": ruric,
+                "source_controller": P0,
+                "target": TargetRef::Player(P1),
+                "amount": 7,
+                "is_combat": is_combat,
+                "source_incarnation": incarnation,
+            }))
+            .expect("old-format damage record decodes")
+        };
+        match history {
+            History::None => {}
+            History::SameTurnCombat => {
+                state.objects_that_dealt_damage.insert(ruric);
+                state.damage_dealt_this_turn.push_back(record(true));
+            }
+            History::PreviousTurn => {
+                state.objects_that_dealt_damage.insert(ruric);
+            }
+            History::SameTurnNoncombatEntrant | History::PreFieldNoncombatEntrant => {
+                state.objects_that_dealt_damage.insert(ruric);
+                state.damage_dealt_this_turn.push_back(record(false));
+            }
+        }
+        state.layers_dirty.mark_full();
+        flush_layers(&mut state);
+        let obj = &state.objects[&ruric];
+        assert!(
+            obj.dealt_damage_kinds.is_empty(),
+            "an old build wrote no latch"
+        );
+        if matches!(
+            history,
+            History::SameTurnNoncombatEntrant | History::PreFieldNoncombatEntrant
+        ) {
+            assert_eq!(obj.entered_battlefield_turn, Some(state.turn_number));
+            assert_eq!(
+                state.damage_dealt_this_turn[0].source_incarnation,
+                Some(obj.incarnation)
+            );
+        } else {
+            assert_ne!(obj.entered_battlefield_turn, Some(state.turn_number));
+        }
+        // The unmigrated live reading: an empty latch leaves the current
+        // static TRUE, so a FALSE after restore comes from the recovery.
+        assert!(
+            has_hexproof(obj),
+            "pre-save: the empty latch reads as hexproof"
+        );
+
+        let mut json = serde_json::to_value(PersistedGameState::capture(state.clone()))
+            .expect("persisted state serializes");
+        assert!(
+            !json.to_string().contains("dealt_damage_kinds"),
+            "old format: the empty latch is elided, no latch key is saved"
+        );
+        assert_eq!(
+            patch_old_static(&mut json, ruric),
+            2,
+            "both static lists patched"
+        );
+        let saved = json.to_string();
+        assert!(
+            !saved.contains("SourceHasDealtDamage"),
+            "only the old static is saved"
+        );
+        assert!(saved.contains(OLD_RURIC_CONDITION_TEXT));
+        assert!(saved.contains("printed_ref"));
+        if history == History::PreFieldNoncombatEntrant {
+            assert_eq!(strip_record_incarnation(&mut json, ruric), 1);
+        }
+        (state, ruric, json)
+    }
+
+    /// The restored-state assertions shared by every adapter row.
+    fn assert_restored(history: History, pre: &GameState, restored: &GameState, ruric: ObjectId) {
+        let obj = &restored.objects[&ruric];
+        assert_eq!(
+            hexproof_conditions(obj.static_definitions.0.iter()),
+            vec![Some(current_ruric_condition())],
+            "{history:?}: reapply replaced the saved Unrecognized static"
+        );
+        assert_eq!(
+            hexproof_conditions(obj.base_static_definitions.iter()),
+            vec![Some(current_ruric_condition())],
+            "{history:?}"
+        );
+        assert_eq!(
+            restored.objects_that_dealt_damage.contains(&ruric),
+            pre.objects_that_dealt_damage.contains(&ruric),
+            "{history:?}: the Any-set entry survives restore"
+        );
+        assert_eq!(
+            restored.damage_dealt_this_turn.len(),
+            pre.damage_dealt_this_turn.len(),
+            "{history:?}: the records survive restore"
+        );
+        if history == History::PreFieldNoncombatEntrant {
+            assert!(restored.damage_dealt_this_turn[0]
+                .source_incarnation
+                .is_none());
+            assert!(!restored.damage_dealt_this_turn[0].is_combat);
+        }
+        assert!(
+            !restored.layers_dirty.is_dirty(),
+            "{history:?}: the restore finalized with layers flushed"
+        );
+        let latch = &obj.dealt_damage_kinds;
+        assert_eq!(
+            (
+                latch.has(DamageKindFilter::CombatOnly),
+                latch.has(DamageKindFilter::NoncombatOnly),
+                has_hexproof(obj),
+            ),
+            history
+                .expected()
+                .expect("a restored history has expectations"),
+            "{history:?}: (combat latch, noncombat latch, hexproof)"
+        );
+    }
+
+    #[test]
+    fn restore_game_state_inner_recovers_old_save_damage_kinds() {
+        let db = std::sync::Arc::new(ruric_face_db());
+        for history in HISTORIES {
+            clear_game_state();
+            set_multiplayer_mode(false);
+            CARD_DB.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::clone(&db)));
+            let (pre, ruric, json) = old_save(&db, history);
+            let result = restore_game_state_inner(&json.to_string());
+            if history.expected().is_none() {
+                let error = result
+                    .err()
+                    .unwrap_or_else(|| panic!("{history:?}: an ambiguous save must be refused"));
+                assert!(
+                    error.to_string().contains("ambiguous"),
+                    "{history:?}: refused for the ambiguity, got: {error}"
+                );
+                continue;
+            }
+            result.unwrap_or_else(|error| panic!("{history:?}: restore failed: {error}"));
+            let restored =
+                with_installed_state(|state| state.clone()).expect("restored state installed");
+            assert_restored(history, &pre, &restored, ruric);
+        }
         clear_game_state();
     }
 }

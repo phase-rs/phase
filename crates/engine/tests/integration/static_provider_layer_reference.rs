@@ -492,20 +492,20 @@ fn coupled_provider_cycles_wait_for_outgoing_dependencies() {
             .collect::<Vec<_>>()
     };
     assert!(
-        descriptions(c).contains(&"D".to_string()),
+        descriptions(c).iter().any(|i: &String| i == "D"),
         "C must receive D"
     );
     assert!(
-        descriptions(a).contains(&"D".to_string()),
+        descriptions(a).iter().any(|i: &String| i == "D"),
         "A must receive D through C"
     );
     let b_descriptions = descriptions(b);
     assert!(
-        b_descriptions.contains(&"C".to_string()),
+        b_descriptions.iter().any(|i: &String| i == "C"),
         "B must receive C through A"
     );
     assert!(
-        b_descriptions.contains(&"D".to_string()),
+        b_descriptions.iter().any(|i: &String| i == "D"),
         "B must receive D through A"
     );
 }

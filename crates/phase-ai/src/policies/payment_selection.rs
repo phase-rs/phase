@@ -371,6 +371,14 @@ fn station_trigger_condition_threshold(condition: &TriggerCondition) -> Option<u
             minimum,
             maximum: None,
         } if is_station_charge_counter(counters) => Some(*minimum),
+        // CR 721.2a: the parser reads a station trigger's gate at the event
+        // (`EventTime`), conjoined with any printed condition. Never look
+        // under `Or` / `Not`, where a counter test is no station milestone.
+        TriggerCondition::EventTime { condition } => station_trigger_condition_threshold(condition),
+        TriggerCondition::And { conditions } => conditions
+            .iter()
+            .filter_map(station_trigger_condition_threshold)
+            .max(),
         _ => None,
     }
 }
@@ -1227,6 +1235,67 @@ mod tests {
         };
 
         assert_eq!(score_for(&state, waiting_for, vec![creature]), 0.0);
+    }
+
+    #[test]
+    fn inspirit_station_milestones_include_event_time_trigger() {
+        use engine::game::scenario::{GameScenario, P0};
+
+        let mut scenario = GameScenario::new();
+        let inspirit = scenario
+            .add_creature(P0, "Inspirit, Flagship Vessel", 5, 5)
+            .as_artifact()
+            .as_legendary()
+            .with_subtypes(vec!["Spacecraft"])
+            .from_oracle_text_with_keywords(
+                &["Station"],
+                "Station (Tap another creature you control: Put charge counters equal to its power on this Spacecraft. Station only as a sorcery. It's an artifact creature at 8+.)\n1+ | At the beginning of combat on your turn, put your choice of a +1/+1 counter or two charge counters on up to one other target artifact.\n8+ | Flying\nOther artifacts you control have hexproof and indestructible.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        assert_eq!(
+            next_station_threshold_remaining(runner.state(), inspirit),
+            Some(1)
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&inspirit)
+            .unwrap()
+            .counters
+            .insert(station_counter(), 1);
+        assert_eq!(
+            next_station_threshold_remaining(runner.state(), inspirit),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn station_trigger_milestone_reads_conjunctive_gates_and_legacy_data() {
+        let legacy = TriggerCondition::HasCounters {
+            counters: CounterMatch::OfType(station_counter()),
+            minimum: 1,
+            maximum: None,
+        };
+        let gate = TriggerCondition::EventTime {
+            condition: Box::new(legacy.clone()),
+        };
+        let other = TriggerCondition::CurrentPhaseIs {
+            phases: vec![Phase::BeginCombat],
+        };
+        assert_eq!(station_trigger_condition_threshold(&legacy), Some(1));
+        assert_eq!(
+            station_trigger_condition_threshold(&TriggerCondition::And {
+                conditions: vec![gate.clone(), other.clone()],
+            }),
+            Some(1)
+        );
+        assert_eq!(
+            station_trigger_condition_threshold(&TriggerCondition::Or {
+                conditions: vec![gate, other],
+            }),
+            None
+        );
     }
 
     #[test]

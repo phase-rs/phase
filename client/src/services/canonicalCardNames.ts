@@ -94,7 +94,7 @@ export async function canonicalNameMap(names: readonly string[]): Promise<Map<st
 
 /**
  * `deck` with each name in `renamed` replaced. Main and sideboard entries that
- * end up with the same name are merged; only fields `deck` has are written.
+ * end up with the same name and printing are merged. Only fields `deck` has are written.
  */
 export function applyCanonicalNames(
   deck: ParsedDeck,

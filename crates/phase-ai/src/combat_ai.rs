@@ -5,6 +5,7 @@ use engine::ai_support::{adversarial_swarm_witness, SwarmWitnessResult};
 use engine::game::combat::{
     can_block_pair, can_block_pair_with_precomputed, collect_block_restriction_statics,
     collect_blocker_allowed_statics, collect_blocker_restriction_statics, AttackTarget,
+    BlockRestrictions,
 };
 use engine::game::commander::commander_lethal_headroom;
 use engine::game::players;
@@ -34,9 +35,9 @@ use crate::zone_eval::available_mana;
 /// through the per-pair `can_block_pair` checks. Hoisting these out of the
 /// O(battlefield²) attacker/blocker loops avoids re-walking the battlefield's
 /// functioning statics for every candidate pair.
-pub(crate) struct BlockLegalitySlices {
+pub(crate) struct BlockLegalitySlices<'a> {
     blocker_restriction: Vec<(ObjectId, StaticDefinition)>,
-    block_restriction: Vec<(ObjectId, StaticDefinition)>,
+    block_restriction: BlockRestrictions<'a>,
     blocker_allowed: Vec<(ObjectId, StaticDefinition)>,
     // CR 604.1: shadow block-lift existence gate (CR 509.1b/609.4/702.28b),
     // hoisted once so per-pair legality skips the O(N) CanBlockShadow sweep.
@@ -65,8 +66,8 @@ impl<'a> AttackTargetingContext<'a> {
     }
 }
 
-impl BlockLegalitySlices {
-    pub(crate) fn collect(state: &GameState) -> Self {
+impl<'a> BlockLegalitySlices<'a> {
+    pub(crate) fn collect(state: &'a GameState) -> Self {
         Self {
             blocker_restriction: collect_blocker_restriction_statics(state),
             block_restriction: collect_block_restriction_statics(state),
@@ -792,22 +793,28 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
                     let damage = if eligible.len() >= required && required <= max {
                         // The defender picks the blocker group, so assume the one
                         // that lets the least damage through: for each legal group
-                        // size, the highest-toughness blockers absorb the most
-                        // trample damage (CR 702.19b), and declining to block is
-                        // never better for the defender than blocking.
-                        // CR 702.19b: rank by the engine's lethal-damage authority so
-                        // damage already marked on a blocker lowers its absorption.
+                        // size, rank blockers by the engine's combat assignment
+                        // minimum to estimate how much trample damage gets through
+                        // (CR 702.19b), and declining to block is never better for
+                        // the defender than blocking.
+                        // CR 702.19b + CR 702.2c: rank by the engine's assignment
+                        // minimum, the amount `combat_damage_to_defender` makes the
+                        // attacker assign before trampling over. Damage already marked
+                        // lowers it, and deathtouch caps it at 1 without raising it.
                         let attacker_has_deathtouch = state
                             .objects
                             .get(&id)
                             .is_some_and(|o| o.has_keyword(&Keyword::Deathtouch));
                         let mut by_toughness = eligible.clone();
                         by_toughness.sort_by_key(|&bid| {
-                            std::cmp::Reverse(engine::game::combat_damage::lethal_damage_needed(
-                                state,
-                                bid,
-                                attacker_has_deathtouch,
-                            ))
+                            std::cmp::Reverse(
+                                engine::game::lethal_damage::combat_lethal_damage_remaining(
+                                    state,
+                                    bid,
+                                    attacker_has_deathtouch,
+                                    engine::game::lethal_damage::AssignedThisStep::default(),
+                                ),
+                            )
                         });
                         let sizes = required.max(1)..=by_toughness.len().min(max);
                         // A token-heavy defender makes the sweep quadratic; past the
@@ -1204,7 +1211,7 @@ struct ExpandedComparisonInput<'a> {
     opponents: &'a [PlayerId],
     candidates: &'a [ObjectId],
     mandatory: &'a [ObjectId],
-    slices: &'a BlockLegalitySlices,
+    slices: &'a BlockLegalitySlices<'a>,
     blockers_by_controller: &'a HashMap<PlayerId, Vec<ObjectId>>,
     valid_attack_targets: Option<&'a [AttackTarget]>,
     valid_attack_targets_by_attacker: Option<&'a HashMap<ObjectId, Vec<AttackTarget>>>,
@@ -2182,7 +2189,7 @@ pub fn choose_blockers_with_profile(
     // The block-restriction statics are collected once here and threaded through
     // the precomputed variant: every pass below reads this per attacker, and the
     // non-precomputed entry point re-walks the battlefield on each call.
-    let block_restriction_statics = engine::game::combat::collect_block_restriction_statics(state);
+    let block_restriction_statics = BlockRestrictions::from_statics(state);
     let required_blockers = |attacker_id: &ObjectId| -> usize {
         engine::game::combat::min_blockers_required_from_precomputed(
             state,
@@ -3486,7 +3493,7 @@ fn defender_best_block(
     attacker_id: ObjectId,
     attacker_value: f64,
     blockers: &[ObjectId],
-    slices: &BlockLegalitySlices,
+    slices: &BlockLegalitySlices<'_>,
 ) -> Option<DefenderBlock> {
     let eligible: Vec<_> = blockers
         .iter()
@@ -8729,6 +8736,104 @@ mod tests {
         assert_eq!(
             attack_target_of(&attacks, trampler),
             Some(AttackTarget::Planeswalker(pw))
+        );
+    }
+
+    /// CR 702.19b + CR 702.2c: the planeswalker forecast ranks blockers by the engine's combat
+    /// assignment minimum, which deathtouch caps at 1 without raising it. War Mammoth
+    /// ("Trample") with deathtouch from Archetype of Finality can't be blocked by more than one
+    /// creature (Familiar Ground). Under the defender's Zilortha, Strength Incarnate, an
+    /// undamaged Yoked Ox (0/4) is owed nothing, while Zilortha is owed 1. The defender blocks
+    /// with Zilortha and holds the Mammoth to 2, short of the 3-loyalty planeswalker, so the
+    /// Mammoth goes face. The CR 120.4a excess reading (`lethal_damage_needed`) is 1 for both
+    /// from a deathtouch source; ranking by it tied them, forecast the Ox block, 3 through, and
+    /// a kill.
+    #[test]
+    fn deathtouch_trample_forecast_ranks_a_zero_power_blocker_last() {
+        const ZILORTHA: &str = "Trample\nLethal damage dealt to creatures you control is \
+             determined by their power rather than their toughness.";
+        const ARCHETYPE_OF_FINALITY: &str = "Creatures you control have deathtouch.\nCreatures \
+             your opponents control lose deathtouch and can't have or gain deathtouch.";
+        const FAMILIAR_GROUND: &str =
+            "Each creature you control can't be blocked by more than one creature.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        scenario
+            .add_creature(PlayerId(0), "Archetype of Finality", 2, 3)
+            .from_oracle_text(ARCHETYPE_OF_FINALITY);
+        scenario.add_enchantment_from_oracle(PlayerId(0), "Familiar Ground", FAMILIAR_GROUND);
+        let mammoth = scenario
+            .add_creature(PlayerId(0), "War Mammoth", 3, 3)
+            .from_oracle_text_with_keywords(&["Trample"], "Trample")
+            .id();
+        // Craw Wurm, a textless 6/4, puts P0 ahead on board, so the objective is not a race (a
+        // race would refuse a kill that takes every connecting attacker).
+        scenario.add_creature(PlayerId(0), "Craw Wurm", 6, 4);
+        let ox = scenario.add_creature(PlayerId(1), "Yoked Ox", 0, 4).id();
+        let zilortha = scenario
+            .add_creature(PlayerId(1), "Zilortha, Strength Incarnate", 7, 3)
+            .as_legendary()
+            .from_oracle_text_with_keywords(&["Trample"], ZILORTHA)
+            .id();
+        let mut runner = scenario.build();
+        let pw = add_planeswalker(runner.state_mut(), PlayerId(1), 3);
+        runner.advance_to_combat();
+
+        let (valid_attacker_ids, valid_attack_targets) = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => (valid_attacker_ids.clone(), valid_attack_targets.clone()),
+            other => panic!("fixture must reach DeclareAttackers, got {other:?}"),
+        };
+        let state = runner.state();
+        assert!(valid_attack_targets.contains(&AttackTarget::Planeswalker(pw)));
+        // Reach guards: the Mammoth has deathtouch and trample, one blocker at most, and the
+        // engine's lethal minimum is 0 for the Ox and 1 for Zilortha.
+        let mammoth_obj = &state.objects[&mammoth];
+        assert!(mammoth_obj.has_keyword(&Keyword::Deathtouch));
+        assert!(mammoth_obj.has_keyword(&Keyword::Trample));
+        assert_eq!(
+            engine::game::combat::max_blockers_allowed(state, mammoth),
+            Some(1)
+        );
+        let minimum = |blocker| {
+            engine::game::lethal_damage::combat_lethal_damage_remaining(
+                state,
+                blocker,
+                true,
+                engine::game::lethal_damage::AssignedThisStep::default(),
+            )
+        };
+        assert_eq!((minimum(ox), minimum(zilortha)), (0, 1));
+        // The excess reading ties them, so only the assignment minimum orders them.
+        assert_eq!(
+            (
+                engine::game::combat_damage::lethal_damage_needed(state, ox, true),
+                engine::game::combat_damage::lethal_damage_needed(state, zilortha, true),
+            ),
+            (1, 1)
+        );
+        assert_eq!(
+            engine::game::combat_damage::combat_damage_to_defender(state, mammoth, &[zilortha]),
+            2
+        );
+
+        let attacks = choose_attackers_with_targets_with_profile(
+            state,
+            PlayerId(0),
+            &AiProfile::default(),
+            CombatLookahead::Disabled,
+            Some(&valid_attacker_ids),
+            Some(&valid_attack_targets),
+            None,
+        );
+        assert_eq!(
+            attack_target_of(&attacks, mammoth),
+            Some(AttackTarget::Player(PlayerId(1))),
+            "a Zilortha block holds the Mammoth to 2, short of the planeswalker: {attacks:?}"
         );
     }
 

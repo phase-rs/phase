@@ -190,6 +190,15 @@ describe("validateFeed", () => {
 });
 
 describe("feedDeckToParsedDeck", () => {
+  it("preserves separately printed rows from feed decks", () => {
+    const main = [
+      { count: 4, name: "Forest", sourcePrinting: { setCode: "one", collectorNumber: "276" } },
+      { count: 3, name: "Forest", sourcePrinting: { setCode: "dmu", collectorNumber: "277" } },
+      { count: 5, name: "Forest", sourcePrinting: { setCode: "neo", collectorNumber: "292" } },
+    ];
+    expect(feedDeckToParsedDeck({ name: "Split Forests", colors: ["G"], main, sideboard: [] }).main).toEqual(main);
+  });
+
   it("removes the commander from main when the feed already identifies it", () => {
     const deck = feedDeckToParsedDeck({
       name: "Zimone, Infinite Analyst",
