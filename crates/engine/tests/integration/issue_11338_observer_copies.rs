@@ -474,6 +474,11 @@ fn aboleth_ignores_noncreature_entering_trigger() {
         "the stack must drain, got {:?}",
         runner.state().waiting_for
     );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must end at Priority, got {:?}",
+        runner.state().waiting_for
+    );
 }
 
 /// V-ABOLETH-SILENT: a triggerless entry (vanilla Bears) triggers NO firing
@@ -549,6 +554,11 @@ fn aboleth_copied_modal_trigger_keeps_chosen_mode() {
     // (mode 3) and tripping on any second one (the copy must not re-prompt).
     let mut mode_prompts = 0;
     for _ in 0..40 {
+        if drained_or_over(&runner) {
+            break;
+        }
+        // Explicit prompt handling (no wildcard): only Priority and ordering
+        // are passed through; anything else fails loudly instead of stalling.
         match runner.state().waiting_for.clone() {
             WaitingFor::AbilityModeChoice { .. } => {
                 mode_prompts += 1;
@@ -561,13 +571,11 @@ fn aboleth_copied_modal_trigger_keeps_chosen_mode() {
                     .expect("mode 3 is accepted");
             }
             WaitingFor::OptionalEffectChoice { .. } => break,
-            _ => {
-                if drained_or_over(&runner) {
-                    break;
-                }
+            WaitingFor::OrderTriggers { .. } => order_identity(&mut runner),
+            WaitingFor::Priority { .. } => {
                 runner.pass_both_players();
-                order_identity(&mut runner);
             }
+            other => panic!("unexpected prompt in modal drive: {other:?}"),
         }
     }
     assert!(
@@ -847,6 +855,11 @@ fn proctor_observes_other_source_trigger() {
         "the stack must drain, got {:?}",
         runner.state().waiting_for
     );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must end at Priority, got {:?}",
+        runner.state().waiting_for
+    );
 }
 
 /// V-NO-REPLACEMENT (R8/R9): a land entering tapped fires no observer
@@ -865,6 +878,12 @@ fn proctor_silent_for_tapped_entry_but_counters_real_trigger() {
     let visionary = scenario
         .add_creature_to_hand_from_oracle(P1, "Elvish Visionary", 1, 1, ELVISH_VISIONARY)
         .id();
+    // Stage P1 draws for the paired positive: without a library card, a
+    // failed counter decks P1 and the hand assertion would pass vacuously
+    // (a decked draw adds nothing).
+    for _ in 0..5 {
+        scenario.add_card_to_library_top(P1, "Island");
+    }
     let mut runner = scenario.build();
 
     // P0 plays the tapped land: no Proctor firing may occur.
@@ -929,6 +948,11 @@ fn proctor_silent_for_tapped_entry_but_counters_real_trigger() {
     assert!(
         runner.state().stack.is_empty(),
         "the stack must drain, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must end at Priority, got {:?}",
         runner.state().waiting_for
     );
 }
