@@ -217,6 +217,44 @@ fn thatcher_revolt_sacrifices_only_its_remaining_controlled_token() {
     assert!(unrelated.iter().all(|id| on_battlefield(&runner, *id)));
 }
 
+#[test]
+fn thatcher_revolt_skips_a_phased_out_token() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let revolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Thatcher Revolt", false, THATCHER)
+        .id();
+    let ripple = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Reality Ripple",
+            true,
+            "Target artifact, creature, or land phases out. (While it's phased out, it's treated as though it doesn't exist. It phases in before its controller untaps during their next untap step.)",
+        )
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(revolt).resolve();
+    assert_priority(&runner);
+    let [phased_out, first, second] = runner.state().last_created_token_ids[..] else {
+        panic!("expected three Humans");
+    };
+    runner.cast(ripple).target_objects(&[phased_out]).resolve();
+    assert_priority(&runner);
+    assert!(runner.state().objects[&phased_out].is_phased_out_permanent());
+    assert!(runner.state().objects[&first].is_phased_in_permanent());
+    assert!(runner.state().objects[&second].is_phased_in_permanent());
+
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    assert_eq!(runner.state().phase, Phase::End);
+    runner.advance_until_stack_empty();
+    assert_priority(&runner);
+    assert!(runner.state().objects[&phased_out].is_phased_out_permanent());
+    assert!(!on_battlefield(&runner, first));
+    assert!(!on_battlefield(&runner, second));
+}
+
 fn mobilize(runner: &mut GameRunner, attacker: ObjectId) -> Vec<ObjectId> {
     runner.advance_to_combat();
     runner
@@ -237,6 +275,47 @@ fn mobilize(runner: &mut GameRunner, attacker: ObjectId) -> Vec<ObjectId> {
         "{installed:?}"
     );
     runner.state().last_created_token_ids.clone()
+}
+
+#[test]
+fn mobilize_sacrifices_original_warriors_after_another_spell_creates_tokens() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario
+        .add_creature(P0, "Avenger of the Fallen", 2, 4)
+        .from_oracle_text_with_keywords(&["deathtouch", "mobilize"], AVENGER)
+        .id();
+    for name in ["Runeclaw Bear", "Grizzly Bears"] {
+        scenario.add_creature_to_graveyard(P0, name, 2, 2);
+    }
+    let alarm = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Raise the Alarm",
+            true,
+            "Create two 1/1 white Soldier creature tokens.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let warriors = mobilize(&mut runner, attacker);
+    assert_eq!(warriors.len(), 2);
+    runner.cast(alarm).resolve();
+    assert_priority(&runner);
+    let soldiers = runner.state().last_created_token_ids.clone();
+    assert_eq!(soldiers.len(), 2);
+    assert!(soldiers.iter().all(|id| !warriors.contains(id)));
+    assert!(warriors
+        .iter()
+        .chain(&soldiers)
+        .all(|id| on_battlefield(&runner, *id)));
+
+    runner.combat_damage();
+    runner.advance_to_end_step();
+    assert_eq!(runner.state().phase, Phase::End);
+    runner.advance_until_stack_empty();
+    assert_priority(&runner);
+    assert!(warriors.iter().all(|id| !on_battlefield(&runner, *id)));
+    assert!(soldiers.iter().all(|id| on_battlefield(&runner, *id)));
 }
 
 #[test]
