@@ -2629,9 +2629,15 @@ pub(super) fn parse_targeted_action_ast(
         // the single authority in `mod.rs` (`target_span_dropped_this_way_anaphor`)
         // owns the bound-anaphor exemptions (payment amounts, reveal choices),
         // so this call site never duplicates the predicate.
-        if super::target_span_dropped_this_way_anaphor(target_text, &target) {
-            return None;
-        }
+        let (target, origin) = if let Ok((_, reader)) = super::graveyard_arrival_return_spec(lower)
+        {
+            (reader.noun, Some(reader.destination))
+        } else {
+            if super::target_span_dropped_this_way_anaphor(target_text, &target) {
+                return None;
+            }
+            (target, origin)
+        };
         // CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel. Whether
         // it names only the cards the linked exile instruction exiled depends on the
         // return's own resolution chain (CR 608.2c), and that chain is fixed only on
@@ -10649,61 +10655,6 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
     }
 }
 
-/// Parse "put that many {type} counter(s) on {target}" — dynamic counter count from event context.
-/// CR 120.1: "that many" references the amount from the triggering event (e.g., damage dealt).
-/// Produces PutCounter with count=0 as a sentinel for event-context resolution.
-fn try_parse_that_many_counters(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("put that many ")
-        .parse(lower)
-        .ok()?;
-    // Counter type (e.g. "+1/+1", "charge", "loyalty", "double strike").
-    // CR 122.1 + CR 122.1b: route through the shared `parse_counter_type_typed`
-    // combinator so multi-word keyword counter names ("first strike", "double
-    // strike") canonicalize to `CounterType::Keyword(...)` instead of being
-    // truncated at the first whitespace.
-    let (after_type, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
-
-    // Skip "counter" or "counters" keyword
-    let after_type = after_type.trim_start();
-    let after_counter = alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
-        .parse(after_type)
-        .map(|(r, _)| r)
-        .unwrap_or(after_type)
-        .trim_start();
-
-    // Parse target after "on"
-    let target = if let Ok((on_rest, _)) = tag::<_, _, OracleError<'_>>("on ").parse(after_counter)
-    {
-        if alt((tag::<_, _, OracleError<'_>>("~"), tag("this ")))
-            .parse(on_rest)
-            .is_ok()
-        {
-            TargetFilter::SelfRef
-        } else if alt((tag::<_, _, OracleError<'_>>("it"), tag("itself")))
-            .parse(on_rest)
-            .is_ok()
-        {
-            // CR 608.2k: Bare pronoun — context-dependent
-            resolve_it_pronoun(ctx)
-        } else {
-            let (t, _) =
-                ctx.with_player_antecedents(|scoped| parse_target_with_ctx(on_rest, scoped));
-            t
-        }
-    } else {
-        TargetFilter::SelfRef
-    };
-
-    // "That many" resolves from trigger event context at runtime.
-    Some(Effect::PutCounter {
-        counter_type,
-        count: QuantityExpr::Ref {
-            qty: QuantityRef::EventContextAmount,
-        },
-        target,
-    })
-}
-
 /// CR 701.60a: Parse the "no longer suspected" un-designation transition into an
 /// `Effect::Unsuspect { target }`. The subject precedes the copula + phrase and
 /// varies by card:
@@ -15763,26 +15714,12 @@ pub(super) fn parse_imperative_family_ast(
     }
 
     if nom_on_lower(first_word, first_word, |i| value((), tag("put")).parse(i)).is_some() {
-        return if nom_primitives::scan_contains(lower, "that many")
-            && nom_primitives::scan_contains(lower, "counter")
-        {
-            try_parse_that_many_counters(lower, ctx)
-                .map(ImperativeFamilyAst::GainKeyword)
-                .or_else(|| {
-                    try_parse_put_sticker_effect(lower, ctx).map(ImperativeFamilyAst::GainKeyword)
-                })
-                .or_else(|| {
-                    parse_zone_counter_family_ast(text, lower, ctx)
-                        .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put))
-                })
-        } else {
-            try_parse_put_sticker_effect(lower, ctx)
-                .map(ImperativeFamilyAst::GainKeyword)
-                .or_else(|| {
-                    parse_zone_counter_family_ast(text, lower, ctx)
-                        .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put))
-                })
-        };
+        return try_parse_put_sticker_effect(lower, ctx)
+            .map(ImperativeFamilyAst::GainKeyword)
+            .or_else(|| {
+                parse_zone_counter_family_ast(text, lower, ctx)
+                    .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put))
+            });
     }
 
     // CR 614.11 + CR 614.6: One-shot "the next time you would draw a card this
@@ -30038,10 +29975,7 @@ mod tests {
     fn that_many_counters_multi_word_keyword() {
         use crate::types::counter::CounterType;
         use crate::types::keywords::KeywordKind;
-        let mut ctx = ParseContext::default();
-        let effect =
-            try_parse_that_many_counters("put that many double strike counters on it", &mut ctx)
-                .expect("clause should parse");
+        let effect = super::super::parse_effect("put that many double strike counters on it");
         match effect {
             Effect::PutCounter {
                 counter_type,

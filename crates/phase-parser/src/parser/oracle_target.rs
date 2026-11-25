@@ -6262,6 +6262,9 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // CR 105.1 + CR 205.2: color / supertype adjectives.
             | FilterProp::HasColor { .. }
             | FilterProp::ColorCount { .. }
+            // CR 205.2a: "with <n> or more card types" suffix binds to the leg
+            // whose type phrase parsed it, never retroactively onto earlier legs.
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::NotColor { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::NotSupertype { .. }
@@ -6428,6 +6431,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::OtherThanTriggerObject
         | FilterProp::HasColor { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType

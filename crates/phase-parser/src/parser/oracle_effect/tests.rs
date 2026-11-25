@@ -34857,8 +34857,10 @@ fn parse_gift_was_promised_condition() {
     let sub = def.sub_ability.as_ref().expect("Expected sub_ability");
     assert_eq!(
         sub.condition,
-        Some(AbilityCondition::additional_cost_paid_any()),
-        "Expected AdditionalCostPaid condition"
+        Some(AbilityCondition::additional_cost_paid_origin(
+            crate::types::ability::AdditionalCostOrigin::Gift
+        )),
+        "Expected a Gift cost condition"
     );
     assert!(
         matches!(
@@ -34950,10 +34952,66 @@ fn parse_gift_wasnt_promised_condition() {
     assert_eq!(
         sub.condition,
         Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::additional_cost_paid_any()),
+            condition: Box::new(AbilityCondition::additional_cost_paid_origin(
+                crate::types::ability::AdditionalCostOrigin::Gift,
+            )),
         }),
-        "Expected Not(AdditionalCostPaid) condition"
+        "Expected a negated Gift cost condition"
     );
+}
+
+#[test]
+fn graveyard_arrival_return_binds_unique_destroy_all_at_resolution() {
+    const RETURN: &str =
+        "Return a creature card put into your graveyard this way to the battlefield under your control.";
+    let chain = parse_effect_chain(
+        &format!("Destroy all creatures. {RETURN}"),
+        AbilityKind::Spell,
+    );
+    assert!(matches!(*chain.effect, Effect::DestroyAll { .. }));
+    let result = chain
+        .declares_return_result
+        .expect("destruction declares its result");
+    let reader = chain
+        .sub_ability
+        .as_deref()
+        .expect("return follows the destruction");
+    assert_eq!(
+        reader.reads_return_result.as_ref().map(|(id, _)| *id),
+        Some(result),
+    );
+    assert_eq!(reader.target_choice_timing, TargetChoiceTiming::Resolution);
+    assert!(matches!(
+        reader.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            enters_under: Some(ControllerRef::You),
+            up_to: false,
+            ..
+        }
+    ));
+    for prefix in [
+        "Draw a card.",
+        "Destroy target creature.",
+        "Destroy all creatures. Destroy all artifact creatures.",
+        "If you control a Plains, destroy all creatures.",
+    ] {
+        let chain = parse_effect_chain(&format!("{prefix} {RETURN}"), AbilityKind::Spell);
+        assert!(
+            !matches!(*chain.effect, Effect::Unimplemented { .. }),
+            "{prefix}"
+        );
+        assert!(ability_chain_has_unimplemented(&chain), "{prefix}");
+        assert!(chain.declares_return_result.is_none(), "{prefix}");
+    }
+    let targeted = parse_effect_chain(
+        "Return target creature card from your graveyard to the battlefield under your control.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(*targeted.effect, Effect::ChangeZone { .. }));
+    assert_eq!(targeted.target_choice_timing, TargetChoiceTiming::Stack);
+    assert!(targeted.reads_return_result.is_none());
 }
 
 #[test]
@@ -74057,6 +74115,7 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType

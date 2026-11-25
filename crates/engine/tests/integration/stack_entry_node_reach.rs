@@ -11,6 +11,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, StackEntry, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
@@ -1900,6 +1901,8 @@ fn entropic_battlecruiser_each_opponent_nodes_act_on_nothing() {
     let ship = scenario
         .add_creature_from_oracle(P0, "Entropic Battlecruiser", 3, 10, ENTROPIC_BATTLECRUISER)
         .id();
+    // CR 721.2a: the attack trigger is printed in the 8+ striation.
+    scenario.with_counter(ship, CounterType::Generic("charge".to_string()), 8);
     let mut runner = scenario.build();
     runner.pass_both_players();
     runner

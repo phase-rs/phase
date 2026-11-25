@@ -13,6 +13,7 @@ use super::context::PlayerAntecedents;
 use super::doc::{OracleDocBuilder, OracleSourceSpan, OracleUnitSource};
 use crate::parser::oracle_effect::lower::strip_trailing_duration;
 use crate::parser::oracle_nom::filter::ChosenColorGrantReference;
+use crate::parser::oracle_nom::primitives::scan_at_word_boundaries;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ChosenGroupId,
@@ -1741,6 +1742,71 @@ impl ClauseDraft<'_> {
         let delayed_result_reader = self.delayed_condition.is_some()
             || self.prefix_delayed_condition.is_some()
             || matches!(&self.parsed.effect, Effect::CreateDelayedTrigger { .. });
+        if let Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target,
+            ..
+        } = &self.parsed.effect
+        {
+            if let Some(spec) = scan_at_word_boundaries(
+                &self.source_text.to_ascii_lowercase(),
+                crate::parser::oracle_effect::graveyard_arrival_return_spec,
+            ) {
+                // CR 400.7j + CR 608.2c: "this way" only reads the exact
+                // earlier destruction instruction in this chain.
+                let mut producers = self
+                    .builder
+                    .clauses
+                    .iter()
+                    .filter(|clause| matches!(clause.parsed.effect, Effect::DestroyAll { .. }));
+                let producer = producers.next().filter(|clause| {
+                    producers.next().is_none()
+                        && matches!(
+                            clause.disposition,
+                            ClauseDisposition::Emit {
+                                followup: None,
+                                intrinsic: None
+                            }
+                        )
+                        && matches!(clause.placement, ClausePlacement::Sibling)
+                        && clause.condition.is_none()
+                        && !clause.is_optional
+                        && clause.opponent_may_scope.is_none()
+                        && clause.repeat_for.is_none()
+                        && clause.player_scope.is_none()
+                        && clause.delayed_condition.is_none()
+                        && clause.prefix_delayed_condition.is_none()
+                        && clause.unless_pay.is_none()
+                        && self
+                            .builder
+                            .repeated_process_end
+                            .is_none_or(|end| clause.id >= end)
+                });
+                if let Some(producer) = producer.filter(|_| {
+                    *target == spec.noun
+                        && matches!(
+                            self.disposition,
+                            ClauseDisposition::Emit {
+                                followup: None,
+                                intrinsic: None
+                            }
+                        )
+                        && matches!(self.placement, ClausePlacement::Sibling)
+                        && !self.is_optional
+                        && self.opponent_may_scope.is_none()
+                        && self.repeat_for.is_none()
+                        && self.player_scope.is_none()
+                        && !delayed_result_reader
+                        && self.unless_pay.is_none()
+                }) {
+                    reads_return_result = Some((producer.id, spec));
+                    self.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
+                } else {
+                    self.parsed.effect = Effect::unimplemented("return", &self.source_text);
+                }
+            }
+        }
         if let Some(parsed_reader) = delayed_result_reader
             .then(|| {
                 crate::parser::oracle_effect::imperative::parse_returned_this_way_quantity(
