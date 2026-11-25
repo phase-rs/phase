@@ -35262,30 +35262,25 @@ fn promise_of_loyalty_routes_to_the_effect_chain_not_a_whole_line_static() {
 /// `parse_oracle_text` call.
 #[test]
 fn gate_refused_keeper_cards_keep_their_base_routing() {
-    for (name, oracle, keyword_names) in [(
-        "Divine Reckoning",
-        "Each player chooses a creature they control. Destroy the rest.
-Flashback {5}{W}{W} (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
-        &["Flashback".to_string()][..],
-    )] {
-        assert!(
-            !crate::parser::oracle_classifier::should_defer_spell_to_effect(
-                &oracle.to_lowercase()
-            ),
-            "{name} must not be deferred by the keeper-dispose arm"
-        );
-        let parsed = parse_oracle_text(oracle, name, keyword_names, &["Sorcery".to_string()], &[]);
-        assert!(parsed.statics.is_empty(), "{name}: {:?}", parsed.statics);
-        assert_eq!(parsed.abilities.len(), 1, "{name}");
-        assert!(
-            matches!(
-                parsed.abilities[0].effect.as_ref(),
-                Effect::TargetOnly { .. }
-            ),
-            "{name} must keep its BASE_SHA head, got {:?}",
-            parsed.abilities[0].effect
-        );
-    }
+    let name = "Divine Reckoning";
+    let oracle = "Each player chooses a creature they control. Destroy the rest.
+Flashback {5}{W}{W} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+    let keyword_names = &["Flashback".to_string()][..];
+    assert!(
+        !crate::parser::oracle_classifier::should_defer_spell_to_effect(&oracle.to_lowercase()),
+        "{name} must not be deferred by the keeper-dispose arm"
+    );
+    let parsed = parse_oracle_text(oracle, name, keyword_names, &["Sorcery".to_string()], &[]);
+    assert!(parsed.statics.is_empty(), "{name}: {:?}", parsed.statics);
+    assert_eq!(parsed.abilities.len(), 1, "{name}");
+    assert!(
+        matches!(
+            parsed.abilities[0].effect.as_ref(),
+            Effect::TargetOnly { .. }
+        ),
+        "{name} must keep its BASE_SHA head, got {:?}",
+        parsed.abilities[0].effect
+    );
 }
 
 /// CR 101.4 + CR 701.21a: Covetous Elegy's per-player "chooses up to two …
