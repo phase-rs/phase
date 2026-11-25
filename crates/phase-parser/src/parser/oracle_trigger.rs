@@ -27387,8 +27387,13 @@ mod two_or_more_card_types_trigger_tests {
                 .is_some_and(chain_has_unimplemented)
     }
 
-    fn play_card_trigger(text: &str, name: &str) -> TriggerDefinition {
-        parse_oracle_text(text, name, &[], &["Creature".into()], &[])
+    fn play_card_trigger(
+        text: &str,
+        name: &str,
+        types: &[String],
+        subtypes: &[String],
+    ) -> TriggerDefinition {
+        parse_oracle_text(text, name, &[], types, subtypes)
             .triggers
             .into_iter()
             .find(|t| matches!(t.mode, TriggerMode::PlayCard))
@@ -27491,11 +27496,16 @@ mod two_or_more_card_types_trigger_tests {
         );
     }
 
+    /// Verbatim Oracle text of Recycle (Urza's Saga).
+    const RECYCLE_ORACLE: &str = "Skip your draw step.\nWhenever you play a card, draw a card.\nYour maximum hand size is two.";
+
+    /// Verbatim Oracle text of Klaw, Master of Sound.
+    const KLAW_ORACLE: &str = "Deathtouch\nWhenever you play a card from exile, Klaw gains indestructible until end of turn.\nWhenever Klaw deals combat damage to a player, look at the top card of that player's library, then exile it face down. You may play it for as long as it remains exiled. Mana of any type can be spent to cast a spell this way.";
+
     /// No-regression: a bare play-a-card trigger gains no `valid_card`.
     #[test]
     fn play_card_trigger_without_qualifier_has_no_valid_card() {
-        let trigger =
-            play_card_trigger("Whenever you play a card, draw a card.", "Test Card Player");
+        let trigger = play_card_trigger(RECYCLE_ORACLE, "Recycle", &["Enchantment".into()], &[]);
         assert!(trigger.valid_card.is_none(), "{:?}", trigger.valid_card);
         assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
     }
@@ -27505,8 +27515,10 @@ mod two_or_more_card_types_trigger_tests {
     #[test]
     fn play_card_trigger_from_exile_keeps_origin_and_no_valid_card() {
         let trigger = play_card_trigger(
-            "Whenever you play a card from exile, draw a card.",
-            "Test Exile Player",
+            KLAW_ORACLE,
+            "Klaw, Master of Sound",
+            &["Legendary".into(), "Creature".into()],
+            &["Elemental".into(), "Rogue".into(), "Villain".into()],
         );
         assert!(trigger.valid_card.is_none(), "{:?}", trigger.valid_card);
         assert!(
@@ -27546,16 +27558,20 @@ mod two_or_more_card_types_trigger_tests {
         );
     }
 
+    /// Verbatim Oracle text of Tome of the Guildpact.
+    const TOME_OF_THE_GUILDPACT_ORACLE: &str =
+        "Whenever you cast a multicolored spell, draw a card.\n{T}: Add one mana of any color.";
+
     /// No-regression: "multicolored" keeps its `ColorCount` reading and gains no
     /// `CardTypeCount` from the neighboring qualifier arm.
     #[test]
     fn multicolored_cast_trigger_keeps_color_count() {
         let parsed = parse_oracle_text(
-            "Whenever you cast a multicolored spell, draw a card.",
-            "Test Multicolored Watcher",
+            TOME_OF_THE_GUILDPACT_ORACLE,
+            "Tome of the Guildpact",
             &[],
-            &["Creature".into()],
-            &[],
+            &["Artifact".into()],
+            &["Book".into()],
         );
         let trigger = parsed
             .triggers
