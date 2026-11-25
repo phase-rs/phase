@@ -649,8 +649,11 @@ docker run -p 8080:8080 \
 | --- | --- | --- |
 | `PHASE_MULTIPLAYER_SERVER_URL` | `multiplayerServerUrl` | `web.defaultMultiplayerServerUrl` |
 | `PHASE_PREVIEW_SITE_URL` | `previewSiteUrl` | `web.previewSiteUrl` |
+| `PHASE_SUPABASE_URL` | `supabaseUrl` | none yet |
+| `PHASE_SUPABASE_ANON_KEY` | `supabaseAnonKey` | none yet |
 
-Each is optional and means what its chart value means. At start,
+Each is optional, and a variable with a chart value means what that value
+means. At start,
 `/docker-entrypoint.d/40-phase-web-config.sh` renders them into
 `/tmp/phase-web/config.js`, which the image's default nginx.conf serves as
 `/config.js`. That nginx.conf is the chart's own, rendered for port 8080;
@@ -660,6 +663,14 @@ same configuration through either path. Unlike the chart, nothing refuses an
 address the client would ignore: a malformed one simply leaves the build-time
 default in place. `/tmp` must be writable, as nginx already requires for its pid
 and temp files.
+
+The two Supabase variables point cloud sync at your own Supabase project
+instead of the one the image was built with; the chart has no value for them
+yet. They name one project, so set both or neither: the client ignores a lone
+one, and the container logs a warning at start when only one is usable. The
+project's auth redirect allow-list must include the site's origin, or sign-in
+returns players to the build's own site. The anon key is public by design, as
+Row-Level Security is the access control.
 
 The [version rule](#serving-the-web-client) applies here too: run the web image
 of the same release as the server it points at.

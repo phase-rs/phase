@@ -11,6 +11,8 @@ set -euo pipefail
 #     yields a /config.js the client reads exactly as it reads the chart's: the
 #     files are evaluated and their window.__PHASE_CONFIG__ objects compared,
 #     because comments and layout are free to differ.
+#   - The Supabase variables, which have no chart value yet, reach /config.js
+#     as a pair, and a lone one is reported at start.
 #
 # Needs helm and node (both on GitHub's ubuntu runners).
 
@@ -158,5 +160,34 @@ expected=$(node -e 'console.log(JSON.stringify({ multiplayerServerUrl: process.a
 [ "$(image_config "PHASE_MULTIPLAYER_SERVER_URL=wss://a.example.test/ws
 x" "PHASE_PREVIEW_SITE_URL=$preview_url")" = "{\"previewSiteUrl\":\"$preview_url\"}" ] ||
   fail "a line break in one variable must drop that key only"
+
+# ── Supabase: image only, the chart has no value for these yet ──────────────
+supabase_url=https://project-ref.example.test
+supabase_key=sb_publishable_example
+[ "$(image_config PHASE_SUPABASE_URL=$supabase_url PHASE_SUPABASE_ANON_KEY=$supabase_key)" = \
+  "{\"supabaseAnonKey\":\"$supabase_key\",\"supabaseUrl\":\"$supabase_url\"}" ] ||
+  fail "the image's config.js does not carry PHASE_SUPABASE_URL and PHASE_SUPABASE_ANON_KEY through"
+
+# What the script says at start, on stderr, for the given VAR=value arguments.
+start_warnings() {
+  env -i PATH="$PATH" PHASE_WEB_CONFIG_DIR="$work_dir/warn-config" "$@" \
+    sh "$image_dir/40-phase-web-config.sh" 2>&1 >/dev/null
+}
+pair_warning='name one project'
+# Positive control first: without it, every "no warning" case below would pass
+# against a script that never warns.
+for lone in "PHASE_SUPABASE_URL=$supabase_url" "PHASE_SUPABASE_ANON_KEY=$supabase_key"; do
+  start_warnings "$lone" | grep -qF "$pair_warning" ||
+    fail "with only $lone set, the script does not report that the client ignores it"
+done
+# A value dropped for its line break leaves the other one alone.
+start_warnings "PHASE_SUPABASE_URL=$supabase_url
+x" "PHASE_SUPABASE_ANON_KEY=$supabase_key" | grep -qF "$pair_warning" ||
+  fail "a Supabase variable dropped for a line break must count as unset in the pair check"
+for complete in "" "PHASE_SUPABASE_URL=$supabase_url PHASE_SUPABASE_ANON_KEY=$supabase_key"; do
+  # shellcheck disable=SC2086
+  ! start_warnings $complete | grep -qF "$pair_warning" ||
+    fail "the script reports a lone Supabase variable with '${complete:-nothing}' set"
+done
 
 echo "assert-web-image-defaults: PASS"
