@@ -4067,24 +4067,11 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // CR 603.2d: Trigger doubling — "triggers/trigger an additional time".
-    //
-    // Cause classification by phrasing:
-    // - "being dealt damage causes" / "dealt damage causes" — Wayta, Trainer
-    //   Prodigy (ControlledCreature { DealtDamage }); "becoming the target of"
-    //   — Valiant Emberkin (BecameTarget); "dealing combat damage to a player
-    //   causes" — Felix Five-Boots (DealsCombatDamageToPlayer).
-    // - "attacking causes" — Isshin, Two Heavens as One (CreatureAttacking).
-    // - "you gaining life causes" / "a player drawing a card causes" — Dr.
-    //   Beverly Crusher, Krang, the All-Powerful (PlayerAction); "turning a
-    //   face-down permanent face up causes" — Panoptic Projektor (TurnedFaceUp).
-    // - "entering" / "enters the battlefield" / "enters" — Panharmonicon-class
-    //   (EntersBattlefield). Panharmonicon itself names "artifact or creature
-    //   entering", so both CoreTypes qualify; narrower wordings ("creature
-    //   entering") collapse to [Creature] only.
-    // - Otherwise (e.g. "If a triggered ability ... triggers, it triggers an
-    //   additional time" — Roaming Throne, Strionic Resonator copies) use the
-    //   unrestricted `Any` cause; the doubler's `affected` filter narrows
-    //   which source's triggers qualify.
+    // Cause classification is the shared
+    // `oracle_trigger_cause::classify_trigger_cause` (see its doc for the
+    // phrasing table); a `None` there declines the line to a flagged gap.
+    // The doubler's `affected` filter below narrows which source's triggers
+    // qualify.
     if nom_primitives::scan_contains(tp.lower, "triggers an additional time")
         || nom_primitives::scan_contains(tp.lower, "trigger an additional time")
     {

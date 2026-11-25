@@ -16863,22 +16863,30 @@ fn try_parse_event(
         })?;
         // "of that <type>" (the causing object's own ability) vs bare "a
         // triggered ability" (any ability with an admitted cause subject).
-        // `parse_core_type` matches a bare word, so the `peek` terminator
-        // bounds it. Any other refinement declines.
+        // `parse_core_type` matches a bare word, so the consuming
+        // `tag(" to trigger")` terminator bounds it (and leaves the tail
+        // check below meaningful). Any other refinement declines.
         let source = alt((
             value(
                 CausedAbilitySource::CausingObject,
                 preceded(
                     tag(" of that "),
-                    terminated(nom_primitives::parse_core_type, peek(tag(" to trigger"))),
+                    terminated(nom_primitives::parse_core_type, tag(" to trigger")),
                 ),
             ),
             value(CausedAbilitySource::Any, tag(" to trigger")),
         ))
         .parse(after);
-        let Ok((_, source)) = source else {
+        let Ok((tail, source)) = source else {
             return None;
         };
+        // Hard decline on trailing text: only the bare anchor and the `of
+        // that <type>` refinement are modeled. A future observer with
+        // trailing qualifiers declines to an honest gap rather than parsing
+        // with a dropped rider.
+        if !tail.trim_end().is_empty() {
+            return None;
+        }
         // CR 603.6a: "entering under [whoever]'s control" (Aboleth Spawn)
         // scopes the cause subject by controller, exactly as the ETB arm
         // does via `parse_enters_control_rider`. `add_controller` only

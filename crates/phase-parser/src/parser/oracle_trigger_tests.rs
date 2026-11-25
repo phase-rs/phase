@@ -48298,6 +48298,31 @@ fn trigger_unlisted_observer_cause_declines_to_unknown() {
     assert_no_unimplemented(execute);
 }
 
+/// Trailing text after the anchor declines: only the bare "to trigger" and
+/// the `of that <type>` refinement are modeled, so an unmodeled rider stays
+/// a flagged gap rather than parsing with dropped text.
+#[test]
+fn trigger_observer_trailing_text_declines_to_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control attacking causes a triggered ability to trigger twice, draw a card.",
+        "Test Observer",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "trailing rider declines, got {:?}",
+        def.mode
+    );
+    // Reach guard: the effect half parsed typed, proving event dispatch was
+    // reached rather than an upstream bail.
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Draw { .. }),
+        "effect parsed, got {:?}",
+        execute.effect
+    );
+    assert_no_unimplemented(execute);
+}
+
 /// The observer source refinement declines non-"that" anaphors: "of a Ninja
 /// ..." names no accepted source, so the line stays a flagged gap.
 #[test]

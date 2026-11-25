@@ -37,9 +37,9 @@ use crate::types::statics::{
 ///   entering", so both CoreTypes qualify; narrower wordings ("creature
 ///   entering") collapse to [Creature] only.
 /// - Otherwise (e.g. "If a triggered ability ... triggers, it triggers an
-///   additional time" — Roaming Throne, Strionic Resonator copies) use the
-///   unrestricted `Any` cause; the doubler's `affected` filter narrows
-///   which source's triggers qualify.
+///   additional time" — Roaming Throne) use the unrestricted `Any` cause;
+///   the doubler's `affected` filter narrows which source's triggers
+///   qualify.
 ///
 /// Returns `None` when a printed "causes a triggered ability" clause matches
 /// no arm — the caller keeps the line a flagged gap instead of degrading to
