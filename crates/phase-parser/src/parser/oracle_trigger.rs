@@ -89,16 +89,16 @@ use crate::types::ability::{
     CardSelectionMode, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
     CastVariantPaid, CoinFlipResult, CombatRelation, CombatRelationSubject, Comparator,
     ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold,
-    DamageChannel, DamageKindFilter, DelayedTriggerCondition, DestinationConstraint,
-    DieResultFilter, Duration, Effect, EffectScope, FilterProp, GameRestriction,
-    IllegalTargetsDisposition, ManaAbilityProducedFilter, ObjectScope, OriginConstraint,
-    ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope, ProhibitedActivity,
-    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    RestrictionExpiry, RestrictionPlayerScope, SacrificeAggregateStat, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SourceExclusion, SpentColor, StaticCondition,
-    TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TriggerLimitSpend, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause, ZoneRef,
+    DamageChannel, DamageKindFilter, DamageReceivedGrouping, DelayedTriggerCondition,
+    DestinationConstraint, DieResultFilter, Duration, Effect, EffectScope, FilterProp,
+    GameRestriction, IllegalTargetsDisposition, ManaAbilityProducedFilter, ObjectScope,
+    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
+    ProhibitedActivity, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    RenownSubject, RestrictionExpiry, RestrictionPlayerScope, SacrificeAggregateStat,
+    SacrificeCost, SacrificeRequirement, SharedQuality, SourceExclusion, SpentColor,
+    StaticCondition, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypeFilter, TypedFilter,
+    UnlessPayModifier, ZoneChangeClause, ZoneRef,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -14535,7 +14535,7 @@ pub fn parse_trigger_condition(
         {
             def.valid_card = def.valid_card.take().map(with_card_qualifier);
         }
-        if is_batched && def.blocker_count.is_none() {
+        if is_batched && def.blocker_count.is_none() && mode != TriggerMode::DamageReceived {
             def.batched = true;
         }
         // CR 603.4: "an opponent who controls F draws a card" — the
@@ -14950,6 +14950,7 @@ fn trigger_condition_objects(
         saga_chapter: _,
         unless_pay: _,
         batched: _,
+        damage_received_grouping: _,
         die_sides: _,
         expend_threshold: _,
         player_actions: _,
@@ -17846,7 +17847,7 @@ fn try_parse_event(
             /// CR 120.1 + CR 120.3: optional source qualifier ("by a creature",
             /// "by a red instant or sorcery spell you control", etc.). When present,
             /// the trigger only fires if the damage source matches this filter.
-            source_filter: Option<TargetFilter>,
+            source: Option<(TargetFilter, bool)>,
         },
         BecomesTapped,
         TappedForMana,
@@ -17968,12 +17969,12 @@ fn try_parse_event(
     /// source disjunction becomes the existing `TargetFilter::Or` building
     /// block; any qualifier this grammar cannot represent is left unconsumed so
     /// the caller's tail guard reports the line unsupported instead of dropping
-    /// the restriction. Returns the source `TargetFilter` and the remainder.
-    fn parse_passive_damage_source(input: &str) -> OracleResult<'_, TargetFilter> {
+    /// the restriction. Returns the filter and whether the source is quantified.
+    fn parse_passive_damage_source(input: &str) -> OracleResult<'_, (TargetFilter, bool)> {
         let (rest, _) = preceded(opt(space1), tag("by ")).parse(input)?;
         // Passive voice: no trailing space requirement (we are at the end of
         // the event phrase), and the passive-only source forms are admitted.
-        let (rest, first) =
+        let (rest, (first, determiner)) =
             parse_damage_source_subject_shared(rest, DamageSourceSubjectVoice::Passive)?;
         // CR 120.1 + CR 120.3: "… or by <source>" is a disjunction over the
         // damage source; either branch satisfies the qualifier. Composes the
@@ -17983,13 +17984,19 @@ fn try_parse_event(
             parse_damage_source_subject_shared(i, DamageSourceSubjectVoice::Passive)
         }))
         .parse(rest)?;
-        if additional.is_empty() {
-            return Ok((rest, first));
-        }
-        let mut filters = Vec::with_capacity(additional.len() + 1);
-        filters.push(first);
-        filters.extend(additional);
-        Ok((rest, TargetFilter::Or { filters }))
+        let quantified = determiner == DamageSourceDeterminer::OneOrMore
+            || additional
+                .iter()
+                .any(|(_, d)| *d == DamageSourceDeterminer::OneOrMore);
+        let filter = if additional.is_empty() {
+            first
+        } else {
+            let filters = std::iter::once(first)
+                .chain(additional.into_iter().map(|(filter, _)| filter))
+                .collect();
+            TargetFilter::Or { filters }
+        };
+        Ok((rest, (filter, quantified)))
     }
     /// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.4b + CR 120.10 + CR 510 + CR 603.2:
     /// Passive-voice damage-received trigger event —
@@ -18063,7 +18070,7 @@ fn try_parse_event(
         // while this qualifier restricts which damage sources can trigger the
         // ability at all (Chandra's Phoenix: "by a red instant or sorcery spell
         // you control or by a red planeswalker you control").
-        let (rest, source_filter) = opt(parse_passive_damage_source).parse(rest)?;
+        let (rest, source) = opt(parse_passive_damage_source).parse(rest)?;
         // CR 603.7a: a trailing "this turn" on a delayed-trigger event
         // ("Whenever that creature is dealt damage by an attacking creature
         // this turn") bounds the delayed ability's duration; the creating
@@ -18076,7 +18083,7 @@ fn try_parse_event(
                 channel,
                 kind,
                 amount,
-                source_filter,
+                source,
             },
         ))
     }
@@ -18417,17 +18424,11 @@ fn try_parse_event(
             // in `DamageAmountThreshold.scope`; `game/triggers.rs` is the only place
             // that reads it.
             //
-            // `batched` is NOT set here, and must not be: no `SimpleEvent` arm touches
-            // it. The caller `parse_trigger_condition` sets it from a `"one or more "`
-            // scan over the subject phrase. CR 603.2c — a batched trigger populates
-            // `current_trigger_match_count`, which outranks the triggering event's own
-            // amount in the `EventContextAmount` cascade (`game/quantity.rs`) and holds
-            // a SUBJECT HEADCOUNT, not a damage amount.
             SimpleEvent::DealtDamage {
                 channel,
                 kind,
                 amount,
-                source_filter,
+                source,
             } => {
                 // CR 603.2 + CR 102.1: a trailing "during <window>" qualifier on a
                 // received-damage head ("… are dealt combat damage during your
@@ -18465,9 +18466,19 @@ fn try_parse_event(
                 };
                 def.damage_kind = kind;
                 def.damage_amount = amount;
-                if let Some(filter) = source_filter {
-                    def.valid_source = Some(filter);
+                // CR 603.2c: The source quantifier groups sources for each
+                // singular player recipient. A recipient quantifier groups all
+                // matching recipients into one occurrence.
+                if channel == DamageChannel::Total {
+                    let quantified_recipients = scan_contains(subject_text, "one or more ");
+                    let quantified_sources =
+                        source.as_ref().is_some_and(|(_, quantified)| *quantified);
+                    def.batched = quantified_recipients || quantified_sources;
+                    if quantified_sources && !quantified_recipients && subject_is_player(subject) {
+                        def.damage_received_grouping = DamageReceivedGrouping::PerPlayerRecipient;
+                    }
                 }
+                def.valid_source = source.map(|(filter, _)| filter);
                 set_trigger_subject(&mut def, subject);
                 attach_event_window(&mut def, window);
             }
@@ -19419,7 +19430,7 @@ enum DamageSourceDeterminer {
 fn parse_damage_source_subject_shared(
     input: &str,
     voice: DamageSourceSubjectVoice,
-) -> OracleResult<'_, TargetFilter> {
+) -> OracleResult<'_, (TargetFilter, DamageSourceDeterminer)> {
     if voice == DamageSourceSubjectVoice::Active {
         // CR 303.4b + CR 301.5a: Aura/Equipment self-referential
         // damage-source subjects are article-less determiners — "enchanted creature"
@@ -19450,7 +19461,7 @@ fn parse_damage_source_subject_shared(
         ))
         .parse(input)
         {
-            return Ok((rest, filter));
+            return Ok((rest, (filter, DamageSourceDeterminer::Article)));
         }
     }
 
@@ -19668,7 +19679,7 @@ fn parse_damage_source_subject_shared(
     if !props.is_empty() {
         typed.properties = props;
     }
-    Ok((rest, TargetFilter::Typed(typed)))
+    Ok((rest, (TargetFilter::Typed(typed), determiner)))
 }
 
 /// CR 109.4 + CR 120.1: Parse the source subject of a damage trigger up to (but
@@ -19684,7 +19695,11 @@ fn parse_damage_source_subject_shared(
 fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     // Active voice: require the space before "deals" and allow the
     // "enchanted/equipped creature" attached-subject forms.
-    parse_damage_source_subject_shared(input, DamageSourceSubjectVoice::Active)
+    map(
+        |i| parse_damage_source_subject_shared(i, DamageSourceSubjectVoice::Active),
+        |(filter, _)| filter,
+    )
+    .parse(input)
 }
 
 /// CR 120.2a + CR 120.2b: Parse the damage-kind adjective (`"combat "` / `"noncombat "`).

@@ -40776,6 +40776,11 @@ fn dealt_damage_lolth_emblem_quantified_source_parses() {
         "Lolth, Spider Queen",
     );
     assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert!(def.batched);
+    assert_eq!(
+        def.damage_received_grouping,
+        DamageReceivedGrouping::PerPlayerRecipient
+    );
     assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
     assert_eq!(
         def.valid_source,
@@ -40784,6 +40789,30 @@ fn dealt_damage_lolth_emblem_quantified_source_parses() {
         )),
         "the emblem's quantified source must not be dropped"
     );
+}
+
+#[test]
+fn dealt_damage_collective_recipients_stay_grouped_with_a_qualified_source() {
+    for source in ["a creature", "one or more creatures"] {
+        let def = parse_trigger_line(
+            &format!(
+                "Whenever one or more opponents are dealt combat damage by {source} you control, you gain 1 life."
+            ),
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageReceived);
+        assert!(def.batched);
+        assert_eq!(
+            def.damage_received_grouping,
+            DamageReceivedGrouping::WholeBatch
+        );
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You)
+            ))
+        );
+    }
 }
 
 #[test]

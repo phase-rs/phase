@@ -1050,7 +1050,7 @@ fn player_matches_filter_as(
 /// `controller` set) that `player_matches_filter` treats as "you"/"an opponent".
 /// A `Typed` filter carrying any type constraint or property is a genuine object
 /// filter (e.g. "to a creature an opponent controls") and is excluded here.
-pub(super) fn is_player_scope_damage_filter(filter: &TargetFilter) -> bool {
+fn is_player_scope_damage_filter(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Player
         | TargetFilter::AllPlayers

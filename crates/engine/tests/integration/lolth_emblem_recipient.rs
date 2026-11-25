@@ -40,14 +40,14 @@ fn lolth_emblem_applies_only_the_damaged_opponents_shortfall() {
     for (prior_loss, final_life) in [(0, 12), (8, 9)] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        let setup = EmblemSetup::stage(&mut scenario);
+        let setup = EmblemSetup::stage_from_oracle(&mut scenario);
         let prior_loss_spell = scenario.add_real_card(P0, "Exsanguinate", Zone::Hand, db);
         let ([attacker], forests) = stage_ram_gangs(&mut scenario, P0);
         let swamps: Vec<_> = (0..if prior_loss > 0 { 10 } else { 0 })
             .map(|_| scenario.add_basic_land(P0, ManaColor::Black))
             .collect();
         let mut runner = scenario.build();
-        setup.create_emblem(&mut runner);
+        let emblem = setup.create_emblem(&mut runner);
 
         if prior_loss > 0 {
             tap_lands(&mut runner, &swamps);
@@ -57,6 +57,21 @@ fn lolth_emblem_applies_only_the_damaged_opponents_shortfall() {
         cast_ram_gangs(&mut runner, &[attacker], &forests);
         let events = combat_to_damage(&mut runner, &[(attacker, AttackTarget::Player(P1))]);
         assert_damage_dealt(&events, attacker, TargetRef::Player(P1), 3, true);
+        // CR 603.4: The threshold prevents the ability from triggering at all.
+        if prior_loss == 8 {
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                GameEvent::AbilityTriggered { source_id, .. } if *source_id == emblem
+            )));
+            assert!(runner
+                .state()
+                .stack
+                .iter()
+                .all(|entry| entry.source_id != emblem));
+        } else {
+            assert_eq!(runner.state().stack.len(), 1);
+            assert_eq!(runner.state().stack[0].source_id, emblem);
+        }
         runner.advance_until_stack_empty();
         assert!(runner.state().stack.is_empty());
         assert_eq!(runner.life(P0), 20 + prior_loss);
@@ -74,9 +89,19 @@ struct EmblemSetup {
 impl EmblemSetup {
     fn stage(scenario: &mut GameScenario) -> Self {
         let db = shared_card_db().expect("printed card fixture");
+        let lolth = scenario.add_real_card(P0, "Lolth, Spider Queen", Zone::Battlefield, db);
+        Self::with_lolth(scenario, lolth)
+    }
+
+    fn stage_from_oracle(scenario: &mut GameScenario) -> Self {
         let lolth = scenario
             .add_planeswalker_from_oracle(P0, "Lolth, Spider Queen", "Lolth", 4, LOLTH)
             .id();
+        Self::with_lolth(scenario, lolth)
+    }
+
+    fn with_lolth(scenario: &mut GameScenario, lolth: ObjectId) -> Self {
+        let db = shared_card_db().expect("printed card fixture");
         let victims = std::array::from_fn(|_| scenario.add_vanilla(P0, 1, 1));
         let sweep = scenario.add_real_card(P0, "Wrath of God", Zone::Hand, db);
         let plains = std::array::from_fn(|_| scenario.add_basic_land(P0, ManaColor::White));
@@ -349,4 +374,47 @@ fn lolth_emblem_ignores_noncombat_damage_from_your_creature() {
         GameEvent::AbilityTriggered { source_id, .. } if *source_id == emblem
     )));
     assert!(outcome.state().stack.is_empty());
+}
+
+// CR 510.2 + CR 603.2c: A collective recipient still fires once when the
+// source qualifier independently uses "one or more". Master of Barbs and
+// Fblthp, Impossibly Lost use collective recipients without a source qualifier.
+#[test]
+fn qualified_collective_damage_recipients_fire_once_for_the_batch() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario
+        .add_enchantment_from_oracle(
+            P0,
+            "Collective Damage Watcher",
+            "Whenever one or more opponents are dealt combat damage by one or more creatures you control, you gain 1 life.",
+        )
+        .id();
+    let ([first, second], forests) = stage_ram_gangs(&mut scenario, P0);
+    let mut runner = scenario.build();
+    cast_ram_gangs(&mut runner, &[first, second], &forests);
+
+    let events = combat_to_damage(
+        &mut runner,
+        &[
+            (first, AttackTarget::Player(P1)),
+            (second, AttackTarget::Player(P2)),
+        ],
+    );
+    assert_damage_dealt(&events, first, TargetRef::Player(P1), 3, true);
+    assert_damage_dealt(&events, second, TargetRef::Player(P2), 3, true);
+    assert_eq!((runner.life(P1), runner.life(P2)), (17, 17));
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the qualified collective trigger must fire once"
+    );
+    assert_eq!(runner.state().stack[0].source_id, watcher);
+    assert!(matches!(
+        runner.state().stack[0].kind,
+        StackEntryKind::TriggeredAbility { .. }
+    ));
+    runner.resolve_top();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.life(P0), 21);
 }

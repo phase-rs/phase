@@ -42172,6 +42172,24 @@ pub enum DieResultFilter {
     AtLeast(u8),
 }
 
+/// CR 603.2c: How a batched passive-voice damage trigger counts occurrences.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DamageReceivedGrouping {
+    /// CR 603.2c: A collective recipient ("one or more opponents") fires once
+    /// for the simultaneous batch.
+    #[default]
+    WholeBatch,
+    /// CR 603.2c: A singular player recipient with a quantified source fires
+    /// once for each matching damaged player.
+    PerPlayerRecipient,
+}
+
+impl DamageReceivedGrouping {
+    fn is_whole_batch(&self) -> bool {
+        matches!(self, Self::WholeBatch)
+    }
+}
+
 /// Trigger definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerDefinition {
@@ -42287,6 +42305,12 @@ pub struct TriggerDefinition {
     /// CR 603.2c: "One or more" triggers fire once per batch of simultaneous events.
     #[serde(default)]
     pub batched: bool,
+    /// CR 603.2c: Occurrence grouping for batched `DamageReceived` triggers.
+    #[serde(
+        default,
+        skip_serializing_if = "DamageReceivedGrouping::is_whole_batch"
+    )]
+    pub damage_received_grouping: DamageReceivedGrouping,
     /// CR 706.2: Optional sides filter for die-roll triggers such as
     /// "Whenever you roll a d20". `None` accepts any die.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43232,6 +43256,7 @@ impl TriggerDefinition {
             saga_chapter: None,
             unless_pay: None,
             batched: false,
+            damage_received_grouping: DamageReceivedGrouping::default(),
             die_sides: None,
             gotcha_condition: None,
             expend_threshold: None,
@@ -50216,6 +50241,7 @@ mod tests {
             saga_chapter: None,
             unless_pay: None,
             batched: false,
+            damage_received_grouping: DamageReceivedGrouping::default(),
             die_sides: None,
             gotcha_condition: None,
             expend_threshold: None,

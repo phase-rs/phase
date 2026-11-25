@@ -7,13 +7,13 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DamageAmountScope,
-    DamageAmountThreshold, DelayedAbilityOrigin, DelayedTriggerCondition, DurationEvent, Effect,
-    EffectOutcomeSignal, FilterProp, IndicatedActionLimit, ModalChoice, NameStickerSet,
-    ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition, TargetFilter, TargetRef,
-    TributeOutcome, TriggerCondition, TriggerConditionAnchor, TriggerConstraint, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey,
-    TriggerLimitSpend, TypeFilter, TypedFilter,
+    DamageAmountThreshold, DamageReceivedGrouping, DelayedAbilityOrigin, DelayedTriggerCondition,
+    DurationEvent, Effect, EffectOutcomeSignal, FilterProp, IndicatedActionLimit, ModalChoice,
+    NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition, TargetFilter,
+    TargetRef, TributeOutcome, TriggerCondition, TriggerConditionAnchor, TriggerConstraint,
+    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
+    TriggerGrantProducerKey, TriggerLimitSpend, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -1865,21 +1865,16 @@ fn counter_removal_threshold_fires_once_per_recipient(trig_def: &TriggerDefiniti
 /// CR 603.2c: simultaneous damage can contain one occurrence for each player
 /// recipient. The active form covers "one or more creatures … deal damage to a
 /// player", including delayed triggers such as Jace, Cunning Castaway's +1.
-/// The passive form batches the sources in "an opponent is dealt damage by
-/// one or more creatures …". A batched passive definition without a source
-/// filter instead batches the recipients, as on Master of Barbs and Fblthp,
-/// Impossibly Lost ("one or more opponents are dealt damage").
+/// The passive form takes its grouping from the printed quantifiers.
 fn damage_fires_per_player_recipient(trig_def: &TriggerDefinition) -> bool {
     if !trig_def.batched {
         return false;
     }
     if trig_def.mode == TriggerMode::DamageReceived {
-        return trig_def.valid_card.is_none()
-            && trig_def.valid_source.is_some()
-            && trig_def
-                .valid_target
-                .as_ref()
-                .is_some_and(super::trigger_matchers::is_player_scope_damage_filter);
+        return match trig_def.damage_received_grouping {
+            DamageReceivedGrouping::WholeBatch => false,
+            DamageReceivedGrouping::PerPlayerRecipient => true,
+        };
     }
     matches!(
         trig_def.mode,
