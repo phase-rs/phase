@@ -710,12 +710,12 @@ describe("draft store workspace authority", () => {
       { ...card("old-manalith", "Manalith"), colors: [] },
     ];
     const kinds = ["white", "multicolor", "colorless"] as const;
-    const previousView = view(pool);
+    const previousView = fifoView({ pool });
     previousView.pool_groups.color_groups = pool.map((card, index) => ({
       kind: kinds[index], total: 1, cards: [{ card, count: 1, instance_ids: [card.instance_id] }],
     }));
     setArrivingCardBoardPreferences(preferences);
-    wasm.start_quick_draft.mockReturnValue(previousView);
+    wasm.start_quick_draft.mockReturnValue({ owner: 11, view: previousView });
     await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
     const previous = useDraftStore.getState();
     previous.setWorkspaceState(rebuildWorkspaceZone(
@@ -725,10 +725,10 @@ describe("draft store workspace authority", () => {
 
     useDraftStore.getState().reset();
     const manalith = { ...pool[2], instance_id: "new-manalith" };
-    wasm.start_quick_draft.mockReturnValue({ ...view(), current_pack: [manalith] });
+    wasm.start_quick_draft.mockReturnValue({ owner: 11, view: fifoView({ currentPack: [manalith] }) });
     await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
     const fresh = useDraftStore.getState();
-    wasm.submit_pick.mockReturnValue(view([manalith]));
+    wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [manalith], promptGeneration: 4 }));
     fresh.selectCard(manalith.instance_id);
     const placement = resolveWorkspacePickPlacement(
       manalith, "deck", fresh.view!.pool, fresh.view!.pool_groups, fresh.workspaceState!, preferences,
