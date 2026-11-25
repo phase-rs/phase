@@ -1975,10 +1975,13 @@ function DraftPodPageContent() {
     const controller = new AbortController();
     retryController.current = controller;
     const routeToken = ++entryGeneration.current;
+    // The explicit retry supersedes a pending automatic entry recovery, the
+    // pod store's own steps included, and clears the failure it would leave.
+    retireHostedPodRecoveryFailure();
     void resumeDraft({ routeToken, signal: controller.signal }).finally(() => {
       if (retryController.current === controller) retryController.current = null;
     });
-  }, [resumeDraft]);
+  }, [resumeDraft, retireHostedPodRecoveryFailure]);
 
   const retryHostedRecovery = useCallback((failure: HostedPodRecoveryFailure | null) => {
     if (!failure || !isHostedPodRecoveryFailureCurrent(failure, entryGeneration.current)) return;

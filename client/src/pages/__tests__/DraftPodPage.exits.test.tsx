@@ -27,6 +27,9 @@ const mocks = vi.hoisted(() => ({
   hostRoom: vi.fn(),
   joinRoom: vi.fn(),
   loadFailure: null as Error | null,
+  /** Holds the saved pod read until released. */
+  loadGate: null as Promise<void> | null,
+  loadCalls: 0,
   hostStartFailure: null as Error | null,
   restoreRefusal: null as unknown,
   restoreGate: null as Promise<void> | null,
@@ -88,6 +91,8 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
   return {
     ...actual,
     loadDraftHostSession: async (id: string) => {
+      mocks.loadCalls += 1;
+      if (mocks.loadGate) await mocks.loadGate;
       if (mocks.loadFailure) throw mocks.loadFailure;
       return actual.loadDraftHostSession(id);
     },
@@ -314,6 +319,8 @@ describe("DraftPodPage exits", () => {
     useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
     mocks.hosts.length = 0;
     mocks.loadFailure = null;
+    mocks.loadGate = null;
+    mocks.loadCalls = 0;
     mocks.hostStartFailure = null;
     mocks.restoreRefusal = null;
     mocks.restoreGate = null;
@@ -339,6 +346,7 @@ describe("DraftPodPage exits", () => {
     mocks.terminateGate = null;
     mocks.hostStartGate = null;
     mocks.revocationGate = null;
+    mocks.loadGate = null;
     leaveSpy.mockRestore();
     disposeSpy.mockRestore();
     await useMultiplayerDraftStore.getState().leave(true).catch(() => undefined);
@@ -1273,6 +1281,13 @@ describe("DraftPodPage exits", () => {
       mocks.hostRoom.mockReset().mockImplementation(() => allocation.promise);
       return { peer, allocation };
     };
+    /** A leave ended the recovery before it built its host: only `running` (if any) was ever built. */
+    const expectRecoveryEndedBeforeItsHost = async (running?: (typeof mocks.hosts)[number]) => {
+      expect(mocks.hosts).toEqual(running ? [running] : []);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
+      expect(inspectActiveDraftPod()).toMatchObject({ type: "present", capture: { id: savedPod.persistenceId } });
+      await expect(loadDraftHostSession(savedPod.persistenceId)).resolves.toMatchObject({ type: "admitted" });
+    };
     const expectRecoveryEndedWithItsSavedPod = async () => {
       const recovered = mocks.hosts[mocks.hosts.length - 1]!;
       expect(recovered.id).toBe(savedPod.persistenceId);
@@ -1286,7 +1301,7 @@ describe("DraftPodPage exits", () => {
     it.each([
       ["a saved pod", savedPod],
       ["a draft in progress", startedPod],
-    ] as const)("ends only the running host when %s takes over during its lobby leave", async (_name, session) => {
+    ] as const)("ends a pending recovery of %s and the running host on the lobby leave", async (_name, session) => {
       const running = await openRunningHost();
       await seedSavedPod(session);
       const { peer, allocation } = holdPeer();
@@ -1298,21 +1313,23 @@ describe("DraftPodPage exits", () => {
 
       await userEvent.setup().click(screen.getByRole("button", { name: /Leave/ }));
       await settle(20);
+      // Reach: the leave is ending the running host.
       expect(running.terminateDraft).toHaveBeenCalledOnce();
 
       await act(async () => { allocation.resolve(peer); });
       await settle(40);
+      expect(peer.destroy).toHaveBeenCalledOnce();
       mocks.terminateGate = null;
       await act(async () => { termination.resolve(); });
       await settle(100);
 
       expect(pathname).toBe("/");
       expect(running.terminateDraft).toHaveBeenCalledOnce();
-      await expectRecoveryEndedWithItsSavedPod();
+      await expectRecoveryEndedBeforeItsHost(running);
       expect(rejections).toEqual([]);
     });
 
-    it("ends only the running host when a saved pod takes over during End Draft", async () => {
+    it("ends a pending recovery and the running host on End Draft", async () => {
       const running = await openRunningHost();
       await seedSavedPod();
       const { peer, allocation } = holdPeer();
@@ -1325,21 +1342,23 @@ describe("DraftPodPage exits", () => {
 
       await userEvent.setup().click(screen.getAllByRole("button", { name: "End Draft" })[0]!);
       await settle(20);
+      // Reach: End Draft is ending the running host.
       expect(running.terminateDraft).toHaveBeenCalledOnce();
 
       await act(async () => { allocation.resolve(peer); });
       await settle(40);
+      expect(peer.destroy).toHaveBeenCalledOnce();
       mocks.terminateGate = null;
       await act(async () => { termination.resolve(); });
       await settle(100);
 
       expect(pathname).toBe("/");
       expect(running.terminateDraft).toHaveBeenCalledOnce();
-      await expectRecoveryEndedWithItsSavedPod();
+      await expectRecoveryEndedBeforeItsHost(running);
       expect(rejections).toEqual([]);
     });
 
-    it("keeps the saved pod that takes over after the host answered a guest's lobby leave", async () => {
+    it("ends a recovery that began before a guest's lobby leave", async () => {
       await openGuest();
       await seedSavedPod();
       const { peer, allocation } = holdPeer();
@@ -1359,17 +1378,50 @@ describe("DraftPodPage exits", () => {
 
       await act(async () => { allocation.resolve(peer); });
       await settle(40);
-      // Reach: the handover has retired the guest and the recovered host is installed.
-      expect(mocks.hosts).toHaveLength(1);
-      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: savedPod.persistenceId });
+      expect(peer.destroy).toHaveBeenCalledOnce();
+      expect(mocks.hosts).toHaveLength(0);
 
       mocks.revocationGate = null;
       await act(async () => { revocation.resolve(); });
       await settle(100);
 
       expect(pathname).toBe("/");
-      await expectRecoveryEndedWithItsSavedPod();
+      await expectRecoveryEndedBeforeItsHost();
       expect(inspectActiveDraftGuest().type).toBe("absent");
+      expect(rejections).toEqual([]);
+    });
+
+    it("takes over from a lobby leave still saving its revocation, and the lobby leaves once", async () => {
+      await openGuest();
+      renderApp(["/", "/draft-pod"]);
+      await settle(40);
+      // Reach: the page shows the held guest's lobby.
+      expect(screen.getByText(LOBBY_TEXT)).toBeInTheDocument();
+      await seedSavedPod();
+      const { peer, allocation } = holdPeer();
+      const revocation = deferred();
+      mocks.revocationGate = revocation.promise;
+
+      await userEvent.setup().click(screen.getByRole("button", { name: /Leave/ }));
+      await settle(20);
+      await act(async () => { await conn().receiveRaw(rawMessage({ type: "draft_leave_ack", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "guest-token" })); });
+      await settle(30);
+      expect(pathname).toBe("/draft-pod");
+
+      await act(async () => { navigateTo!("/draft-pod?entry=host"); });
+      await waitFor(() => expect(mocks.hostRoom).toHaveBeenCalledOnce());
+      await act(async () => { allocation.resolve(peer); });
+      await settle(100);
+      // The recovery's handover overtook the leave, which settled without waiting for its revocation.
+      expect(pathname).toBe("/");
+
+      mocks.revocationGate = null;
+      await act(async () => { revocation.resolve(); });
+      await settle(100);
+
+      expect(leaveSpy).toHaveBeenCalledOnce();
+      expect(mocks.hosts).toHaveLength(1);
+      await expectRecoveryEndedWithItsSavedPod();
       expect(rejections).toEqual([]);
     });
 
@@ -1516,6 +1568,39 @@ describe("DraftPodPage exits", () => {
 
       expect(useMultiplayerDraftStore.getState().role).toBeNull();
       expect(mocks.hosts[0]!.dispose).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("Try Reconnecting during an entry recovery", () => {
+    it("keeps the guest when its retry overtakes an entry still reading the saved pod", { timeout: 15_000 }, async () => {
+      await openGuest();
+      conn().simulateClose();
+      await act(async () => { await new Promise((done) => setTimeout(done, 1_100)); });
+      const dial = conn();
+      await act(async () => { dial.simulateOpen(); });
+      await vi.waitFor(() => expect(dial.sentRaw.length).toBeGreaterThan(0));
+      await act(async () => {
+        await dial.receiveRaw(rawMessage({ type: "draft_reconnect_rejected", kind: "NoReconnectWindow", reason: "Host is restarting" }));
+      });
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", phase: "error" });
+      await seedSavedPod();
+      const read = deferred();
+      mocks.loadGate = read.promise;
+      renderApp(["/", "/draft-pod"]);
+      const retry = await screen.findByRole("button", { name: "Try Reconnecting" });
+      // Reach: the entry is reading the saved pod, and has allocated nothing.
+      expect(mocks.loadCalls).toBe(1);
+      expect(mocks.hostRoom).not.toHaveBeenCalled();
+
+      await userEvent.setup().click(retry);
+      mocks.loadGate = null;
+      await act(async () => { read.resolve(); });
+      await settle(100);
+
+      expect(mocks.hostRoom).not.toHaveBeenCalled();
+      expect(mocks.hosts).toHaveLength(0);
+      expect(useMultiplayerDraftStore.getState().role).toBe("guest");
+      expect(useDraftPodStore.getState().hostRecoveryFailure).toBeNull();
     });
   });
 

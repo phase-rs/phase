@@ -64,12 +64,18 @@ vi.mock("../../adapter/p2p-draft-guest", () => ({
 }));
 
 type HostInstance = { dispose: ReturnType<typeof vi.fn>; emit: (event: unknown) => void };
+/** The part of a host's initialize config a recovery's handover arrives through. */
+type HostInitializeConfig = { recovery?: { handover?: () => Promise<AbortSignal> } };
 const hosts = vi.hoisted(() => ({
   instances: [] as HostInstance[],
-  nextInitialize: [] as Array<() => Promise<void>>,
+  nextInitialize: [] as Array<(config: HostInitializeConfig) => Promise<void>>,
   nextDispose: [] as Array<() => Promise<void>>,
+  /** The lifecycle's recovery check answers this. */
+  preflight: { type: "admitted" } as { type: "admitted" | "incompatible" },
 }));
 vi.mock("../../adapter/draftPodHostAdapter", () => ({
+  preflightDraftPodHostRecovery: async () => hosts.preflight,
+  UnreadableSavedDraftError: class UnreadableSavedDraftError extends Error {},
   DraftPodHostAdapter: vi.fn().mockImplementation(function () {
     const init = hosts.nextInitialize.shift() ?? (async () => {});
     let listener: ((event: unknown) => void) | null = null;
@@ -138,6 +144,51 @@ const hostConfig = {
   podPolicy: "Competitive",
 } as unknown as Parameters<ReturnType<typeof useMultiplayerDraftStore.getState>["hostDraft"]>[0];
 
+type DraftStore = ReturnType<typeof useMultiplayerDraftStore.getState>;
+
+/** A promise the test settles. */
+function held<T = void>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** Records how `promise` settles, so a test can read "still pending" without awaiting it. */
+function track(promise: Promise<unknown>): { state: () => "pending" | "resolved" | "rejected"; error: () => unknown } {
+  let state: "pending" | "resolved" | "rejected" = "pending";
+  let error: unknown;
+  promise.then(
+    () => {
+      state = "resolved";
+    },
+    (reason: unknown) => {
+      state = "rejected";
+      error = reason;
+    },
+  );
+  return { state: () => state, error: () => error };
+}
+
+/** Lets every pending continuation run. */
+async function flush(): Promise<void> {
+  for (let turn = 0; turn < 5; turn++) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** A saved host's recovery; the lifecycle's check answers `hosts.preflight`. */
+function recoveryOf(persistenceId: string, isCurrent: () => boolean = () => true): Parameters<DraftStore["resumeHostedDraft"]>[0] {
+  return {
+    config: { ...hostConfig, persistenceId, recovery: { session: { persistenceId } } },
+    isCurrent,
+  } as unknown as Parameters<DraftStore["resumeHostedDraft"]>[0];
+}
+
+const savedSeat = { roomCode: "OLD", displayName: "A", hostPeerId: "phase2-OLD", timestamp: 1 };
+const LEAVE_UNACKNOWLEDGED = "Draft host did not acknowledge leave";
+
 describe("session-open outcome of a superseded attempt", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -148,6 +199,7 @@ describe("session-open outcome of a superseded attempt", () => {
     hosts.instances = [];
     hosts.nextInitialize = [];
     hosts.nextDispose = [];
+    hosts.preflight = { type: "admitted" };
     persist.inspectActiveDraftGuest.mockReturnValue({ type: "absent" });
     net.joinRoom.mockImplementation((code: string, signal?: AbortSignal) => {
       const next = net.plan.shift();
@@ -507,5 +559,272 @@ describe("session-open outcome of a superseded attempt", () => {
     const after = useMultiplayerDraftStore.getState();
     expect(outcome).toBe("superseded");
     expect({ role: after.role, phase: after.phase, error: after.error }).toEqual(snapshot);
+  });
+
+  it("a leave beside an installed host ends a guest resume still reading its seat", async () => {
+    await expect(useMultiplayerDraftStore.getState().hostDraft(hostConfig)).resolves.toEqual({ status: "opened" });
+    persist.inspectActiveDraftGuest.mockReturnValue({ type: "present", meta: savedSeat, capture: savedSeat });
+    const read = held<{ draftToken: string }>();
+    persist.loadDraftGuestSession.mockImplementationOnce(() => read.promise);
+    const resuming = useMultiplayerDraftStore.getState().resumeDraft();
+    // Reach: the resume is reading its seat.
+    await vi.waitFor(() => expect(persist.loadDraftGuestSession).toHaveBeenCalledTimes(1));
+
+    await useMultiplayerDraftStore.getState().leave(false);
+    read.resolve({ draftToken: "tok" });
+
+    await expect(resuming).resolves.toBe("superseded");
+    expect(net.joinRoom).not.toHaveBeenCalled();
+    expect(guests.instances).toHaveLength(0);
+    expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
+  });
+
+  describe("a leave whose owner ends or is overtaken while it waits", () => {
+    let unhandled: unknown[];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    beforeEach(() => {
+      unhandled = [];
+      process.on("unhandledRejection", onUnhandled);
+    });
+    afterEach(() => {
+      process.off("unhandledRejection", onUnhandled);
+    });
+
+    /** Guest A joined, and its leave parked on the host's acknowledgement, which the test rejects later. */
+    async function parkGuestLeave(signal?: AbortSignal) {
+      const answer = held();
+      guests.nextLeave.push(() => answer.promise);
+      await expect(useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new", roomCode: "OWN", displayName: "A", signal,
+      })).resolves.toEqual({ status: "opened" });
+      const leaving = useMultiplayerDraftStore.getState().leave(false);
+      const leave = track(leaving);
+      // Reach: the leave reached the host's acknowledgement.
+      await vi.waitFor(() => expect(guests.instances[0]!.leave).toHaveBeenCalledTimes(1));
+      return { answer, leave };
+    }
+
+    it("a guest leave waiting for its host's answer settles when a recovered host takes over", async () => {
+      const { answer, leave } = await parkGuestLeave();
+      let handovers = 0;
+      hosts.nextInitialize.push(async (config) => {
+        handovers++;
+        await config.recovery!.handover!();
+      });
+
+      await expect(useMultiplayerDraftStore.getState().resumeHostedDraft(recoveryOf("REC-POD"))).resolves.toBe("resumed");
+      await flush();
+      // Reach: the recovery's handover ran once, on the one host built.
+      expect(handovers).toBe(1);
+      expect(hosts.instances).toHaveLength(1);
+      expect(leave.state()).toBe("resolved");
+
+      answer.reject(new Error(LEAVE_UNACKNOWLEDGED));
+      await flush();
+      expect(leave.state()).toBe("resolved");
+      expect(unhandled).toEqual([]);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "REC-POD" });
+      hosts.instances[0]!.emit({ type: "statusChanged", status: "lobby" });
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", phase: "lobby" });
+    });
+
+    it("a guest leave waiting for its host's answer settles when a newer join takes over", async () => {
+      const { answer, leave } = await parkGuestLeave();
+
+      await expect(useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new", roomCode: "NEWER", displayName: "B",
+      })).resolves.toEqual({ status: "opened" });
+      await flush();
+      expect(leave.state()).toBe("resolved");
+
+      answer.reject(new Error(LEAVE_UNACKNOWLEDGED));
+      await flush();
+      expect(leave.state()).toBe("resolved");
+      expect(unhandled).toEqual([]);
+      guests.instances[1]!.emit({ type: "kicked", reason: "test kick" });
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", phase: "kicked" });
+    });
+
+    it("a leave answered while its owner is still installed rejects as it did", async () => {
+      const { answer, leave } = await parkGuestLeave();
+
+      answer.reject(new Error(LEAVE_UNACKNOWLEDGED));
+      await flush();
+      expect(leave.state()).toBe("rejected");
+      expect(String(leave.error())).toContain(LEAVE_UNACKNOWLEDGED);
+    });
+
+    it("a guest leave waiting for its host's answer keeps waiting when its route ends, and rejects as it did", async () => {
+      const route = new AbortController();
+      const { answer, leave } = await parkGuestLeave(route.signal);
+
+      route.abort();
+      await flush();
+      // Reach: the route's end detached the guest and ended its transport.
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
+      expect(guests.instances[0]!.dispose).toHaveBeenCalledTimes(1);
+      expect(leave.state()).toBe("pending");
+
+      answer.reject(new Error(LEAVE_UNACKNOWLEDGED));
+      await flush();
+      expect(leave.state()).toBe("rejected");
+      expect(String(leave.error())).toContain(LEAVE_UNACKNOWLEDGED);
+    });
+  });
+
+  it("a host leave waiting for its teardown keeps waiting when the recovered host's restore fails", async () => {
+    const teardown = held();
+    hosts.nextDispose.push(() => teardown.promise);
+    const restore = held();
+    hosts.nextInitialize.push(async (config) => {
+      await config.recovery!.handover!();
+      await restore.promise;
+      throw new Error("Invalid draft snapshot: restore refused");
+    });
+    const recovering = useMultiplayerDraftStore.getState().resumeHostedDraft(recoveryOf("R-POD"));
+    const recovery = track(recovering);
+    // Reach: the handover committed the recovered host.
+    await vi.waitFor(() => expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "R-POD" }));
+
+    const leave = track(useMultiplayerDraftStore.getState().leave(false));
+    restore.resolve();
+    // Reach: the failed restore ended the committed host, not an uncommitted one.
+    await vi.waitFor(() => expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" }));
+    await flush();
+    expect(hosts.instances).toHaveLength(1);
+    expect(hosts.instances[0]!.dispose).toHaveBeenCalledTimes(1);
+    expect(leave.state()).toBe("pending");
+
+    teardown.resolve();
+    await flush();
+    expect(leave.state()).toBe("resolved");
+    expect(recovery.state()).toBe("resolved");
+    await expect(recovering).resolves.toBe("initializationFailure");
+  });
+
+  it.each(["hostDraft", "joinDraft"] as const)(
+    "%s: a start superseded by a recovery while it waits for its predecessor's teardown publishes nothing and builds nothing",
+    async (start) => {
+      const teardownA = held();
+      hosts.nextDispose.push(() => teardownA.promise);
+      await expect(useMultiplayerDraftStore.getState().hostDraft({ ...hostConfig, persistenceId: "A-POD" }))
+        .resolves.toEqual({ status: "opened" });
+      const starting = start === "hostDraft"
+        ? useMultiplayerDraftStore.getState().hostDraft(hostConfig)
+        : useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "BJOIN", displayName: "B" });
+      // Reach: B retired A and waits for its teardown.
+      await vi.waitFor(() => expect(hosts.instances[0]!.dispose).toHaveBeenCalledTimes(1));
+
+      const restoreC = held();
+      let handovers = 0;
+      let initializing = false;
+      hosts.nextInitialize.push(async (config) => {
+        initializing = true;
+        await restoreC.promise;
+        handovers++;
+        await config.recovery!.handover!();
+      });
+      const recovering = useMultiplayerDraftStore.getState().resumeHostedDraft(recoveryOf("C-POD"));
+      // Reach: C built its provisional host right after its sweep, before A's release.
+      await vi.waitFor(() => expect(hosts.instances).toHaveLength(2));
+      await vi.waitFor(() => expect(initializing).toBe(true));
+
+      teardownA.resolve();
+      await expect(starting).resolves.toEqual({ status: "superseded" });
+      expect(hosts.instances).toHaveLength(2);
+      expect(guests.instances).toHaveLength(0);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
+
+      restoreC.resolve();
+      await expect(recovering).resolves.toBe("resumed");
+      expect(handovers).toBe(1);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "C-POD" });
+    },
+  );
+
+  it.each([
+    ["a guest resume that finds no seat leaves a waiting host start to open", "no seat"],
+    ["a guest resume whose saved seat is invalid leaves a waiting host start to open", "invalid seat"],
+    ["a guest resume whose saved seat has expired leaves a waiting host start to open", "expired seat"],
+    ["a guest resume whose seat read fails leaves a waiting host start to open", "seat read fails"],
+    ["a host recovery no longer current at entry leaves a waiting host start to open", "recovery not current"],
+    ["a host recovery whose saved session is refused leaves a waiting host start to open", "recovery refused"],
+  ] as const)("%s", async (_title, leg) => {
+    const teardownA = held();
+    hosts.nextDispose.push(() => teardownA.promise);
+    await expect(useMultiplayerDraftStore.getState().hostDraft(hostConfig)).resolves.toEqual({ status: "opened" });
+    const starting = useMultiplayerDraftStore.getState().hostDraft(hostConfig);
+    // Reach: B retired A and waits for its teardown.
+    await vi.waitFor(() => expect(hosts.instances[0]!.dispose).toHaveBeenCalledTimes(1));
+
+    let outcome: string;
+    switch (leg) {
+      case "no seat":
+        persist.inspectActiveDraftGuest.mockReturnValue({ type: "absent" });
+        outcome = await useMultiplayerDraftStore.getState().resumeDraft();
+        expect(outcome).toBe("absent");
+        break;
+      case "invalid seat":
+        persist.inspectActiveDraftGuest.mockReturnValue({ type: "invalid", capture: null });
+        outcome = await useMultiplayerDraftStore.getState().resumeDraft();
+        expect(outcome).toBe("invalid");
+        break;
+      case "expired seat":
+        persist.inspectActiveDraftGuest.mockReturnValue({ type: "present", meta: savedSeat, capture: savedSeat });
+        persist.loadDraftGuestSession.mockResolvedValueOnce(null);
+        outcome = await useMultiplayerDraftStore.getState().resumeDraft();
+        expect(outcome).toBe("invalid");
+        break;
+      case "seat read fails":
+        persist.inspectActiveDraftGuest.mockReturnValue({ type: "present", meta: savedSeat, capture: savedSeat });
+        persist.loadDraftGuestSession.mockRejectedValueOnce(new Error("storage unavailable"));
+        outcome = await useMultiplayerDraftStore.getState().resumeDraft();
+        expect(outcome).toBe("failed");
+        break;
+      case "recovery not current":
+        outcome = await useMultiplayerDraftStore.getState().resumeHostedDraft(recoveryOf("R-POD", () => false));
+        expect(outcome).toBe("superseded");
+        break;
+      case "recovery refused":
+        hosts.preflight = { type: "incompatible" };
+        outcome = await useMultiplayerDraftStore.getState().resumeHostedDraft(recoveryOf("R-POD"));
+        expect(outcome).toBe("incompatible");
+        break;
+    }
+    // Reach: each resume leg read the saved pointer, and the expired-seat and
+    // read-fails legs read the seat itself.
+    if (leg !== "recovery not current" && leg !== "recovery refused") {
+      expect(persist.inspectActiveDraftGuest).toHaveBeenCalled();
+    }
+    expect(persist.loadDraftGuestSession).toHaveBeenCalledTimes(
+      leg === "expired seat" || leg === "seat read fails" ? 1 : 0,
+    );
+
+    teardownA.resolve();
+    await expect(starting).resolves.toEqual({ status: "opened" });
+    expect(hosts.instances).toHaveLength(2);
+    expect(useMultiplayerDraftStore.getState().role).toBe("host");
+  });
+
+  it("a host recovery that finds its host already installed leaves a guest resume reading its seat to resume", async () => {
+    await expect(useMultiplayerDraftStore.getState().hostDraft({ ...hostConfig, persistenceId: "P-POD" }))
+      .resolves.toEqual({ status: "opened" });
+    persist.inspectActiveDraftGuest.mockReturnValue({ type: "present", meta: savedSeat, capture: savedSeat });
+    const read = held<{ draftToken: string }>();
+    persist.loadDraftGuestSession.mockImplementationOnce(() => read.promise);
+    const resuming = useMultiplayerDraftStore.getState().resumeDraft();
+    // Reach: the resume is reading its seat.
+    await vi.waitFor(() => expect(persist.loadDraftGuestSession).toHaveBeenCalledTimes(1));
+
+    await expect(useMultiplayerDraftStore.getState().resumeHostedDraft(recoveryOf("P-POD"))).resolves.toBe("resumed");
+    // Reach: the recovery built no host, so its outcome came from the already-installed return.
+    expect(hosts.instances).toHaveLength(1);
+
+    read.resolve({ draftToken: "tok" });
+    await expect(resuming).resolves.toBe("resumed");
+    expect(guests.instances).toHaveLength(1);
+    expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", phase: "lobby" });
   });
 });

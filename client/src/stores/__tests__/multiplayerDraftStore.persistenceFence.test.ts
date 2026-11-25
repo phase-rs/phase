@@ -564,6 +564,94 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
 
       expect(installedOwner()).toEqual({ role: "host", onOwnSession: true });
     });
+
+    /** Holds the next peer allocation until released, and returns the room it then answers with. */
+    function holdNextRoom() {
+      const room = {
+        roomCode: "BBBBB",
+        peerId: "host-BBBBB-held",
+        peer: { destroy: vi.fn() } as never,
+        onGuestConnected: vi.fn(() => vi.fn()),
+        destroy: vi.fn(),
+      };
+      let release!: () => void;
+      hostRoom.mockImplementationOnce(() => new Promise((resolve) => {
+        release = () => resolve(room);
+      }));
+      return { room, release: () => release() };
+    }
+
+    async function untilRoomRequests(count: number) {
+      for (let turn = 0; turn < 50 && hostRoom.mock.calls.length < count; turn++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+
+    it.each([
+      ["", false],
+      [", keeping its own recovery", true],
+    ] as const)("a leave beside an installed host ends a recovery still allocating its peer%s", async (_label, preserveRecovery) => {
+      await startInstalledHost();
+      const held = holdNextRoom();
+      const outcome = recover();
+      await untilRoomRequests(2);
+      // Reach: A's peer and B's held peer were both requested.
+      expect(hostRoom).toHaveBeenCalledTimes(2);
+
+      await useMultiplayerDraftStore.getState().leave(preserveRecovery);
+      held.release();
+
+      await expect(outcome).resolves.toBe("superseded");
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
+      expect(engine.imports).toEqual([]);
+      expect(held.room.destroy).toHaveBeenCalledOnce();
+    });
+
+    it("a second recovery started during the first's peer allocation supersedes it and keeps the installed host until its own handover", async () => {
+      await startInstalledHost();
+      const held = holdNextRoom();
+      const first = recover();
+      await untilRoomRequests(2);
+      // Reach: B's peer allocation is held.
+      expect(hostRoom).toHaveBeenCalledTimes(2);
+      const disposed = vi.spyOn(DraftPodHostAdapter.prototype, "dispose");
+
+      const second = recover();
+      // Reach: C's sweep ended B, which is disposed while C is still provisional.
+      await vi.waitFor(() => expect(disposed).toHaveBeenCalledTimes(1));
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "installed-owner" });
+
+      held.release();
+      await expect(first).resolves.toBe("superseded");
+      await expect(second).resolves.toBe("resumed");
+      expect(engine.imports).toEqual([recoveredSession]);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "recovered-b", error: null });
+    });
+
+    it("a recovery's commit is seen whole once its synchronous block ends", async () => {
+      await startInstalledHost();
+      const held = holdAfterImport();
+      let sawRecovered = false;
+      let roomCodeAfterCommit: string | null | undefined;
+      const unsubscribe = useMultiplayerDraftStore.subscribe((state) => {
+        if (sawRecovered || state.hostPersistenceId !== "recovered-b") return;
+        sawRecovered = true;
+        queueMicrotask(() => {
+          roomCodeAfterCommit = useMultiplayerDraftStore.getState().roomCode;
+        });
+      });
+      try {
+        const outcome = recover();
+        await held.reached;
+        // Reach: a subscriber saw B installed.
+        expect(sawRecovered).toBe(true);
+        expect(roomCodeAfterCommit).toBe("ABCDE");
+        held.release();
+        await outcome;
+      } finally {
+        unsubscribe();
+      }
+    });
   });
 
   describe("the pod store's recovery of a saved host whose record carries a draft session", () => {
@@ -793,6 +881,40 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "recovered-b" });
       expect(useDraftPodStore.getState()).toMatchObject({ hostRecoveryFailure: null, config: { setCode: "TST" } });
       expect(engine.imports).toEqual([recoveredSession, recoveredSession]);
+    });
+
+    it("a guest reconnect started during a recovery's peer allocation keeps the tab, and neither store records a failure", async () => {
+      let releaseRoom!: () => void;
+      roomGate = new Promise<void>((resolve) => {
+        releaseRoom = resolve;
+      });
+      const pending = useDraftPodStore.getState().resumeHostedPod({ entry: "host", routeToken: 7 });
+      for (let turn = 0; turn < 50 && roomRequests.length === 0; turn++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      // Reach: the recovery's peer was requested for B's room code.
+      expect(roomRequests).toEqual(["BBBBB"]);
+
+      joinRoom.mockImplementationOnce(async () => ({
+        conn: { peer: "host-CCCCC" },
+        peer: { id: "guest-peer", destroy: vi.fn() },
+        closeConn: vi.fn(),
+        destroyPeer: vi.fn(),
+      }));
+      await expect(useMultiplayerDraftStore.getState().joinDraft({
+        kind: "reconnect",
+        roomCode: "CCCCC",
+        displayName: "Alice",
+        hostPeerId: "host-CCCCC",
+        draftToken: "seat-token",
+      })).resolves.toEqual({ status: "opened" });
+      releaseRoom();
+
+      await expect(pending).resolves.toBe("superseded");
+      expect(lifecycleOutcomes).toEqual(["superseded"]);
+      expect(engine.imports).toEqual([]);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", error: null, guestRecoveryFailure: null });
+      expect(useDraftPodStore.getState()).toMatchObject({ hostRecoveryFailure: null, configError: null });
     });
 
     it.each(["released", "rejected"] as const)("supersedes a recovery whose saved pod record is rewritten before the handover, the peer then %s", async (end) => {

@@ -488,7 +488,7 @@ describe("leave(false) of a host finishes ending it when a newer session takes t
     await vi.waitFor(() => expect(probe.gameTerminateEntered).toBe(1));
     await expectParked(leaving);
 
-    // No route abort: X is still `activeHostAdapter` when B's own `hostDraft`
+    // No route abort: X is still the installed host when B's own `hostDraft`
     // call detaches it directly (`hostDraft`'s own entry, not `abortOwner`).
     const hostTerm = hold("host");
     probe.hostRoomCodes.push("DDBBB");
@@ -519,7 +519,7 @@ describe("leave(false) of a host finishes ending it when a newer session takes t
     // X never reaches "opened": its own `P2PDraftHost.initialize()` is parked,
     // then rejects, so this is `hostDraft`'s own initialization-failure
     // `finally` -- not `leave`'s direct dispose and not a route abort -- that
-    // first nulls `activeHostAdapter`/`activeHostPersistenceId` for X.
+    // first detaches X as the installed host.
     probe.hostRoomCodes.push("XXAAA");
     const initGate = gate();
     probe.hostInitializeGate = initGate.promise.then(() => {
