@@ -1400,11 +1400,17 @@ mod tests {
                 source: CausedAbilitySource::CausingObject,
             },
             TriggerMode::AbilityTriggered {
-                cause: TriggerCause::EntersBattlefield { core_types: vec![] },
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
                 source: CausedAbilitySource::CausingObject,
             },
             TriggerMode::AbilityTriggered {
-                cause: TriggerCause::EntersBattlefield { core_types: vec![] },
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
                 source: CausedAbilitySource::Any,
             },
             TriggerMode::FinalSagaChapterAbility {
