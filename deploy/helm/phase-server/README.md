@@ -667,10 +667,11 @@ and temp files.
 The two Supabase variables point cloud sync at your own Supabase project
 instead of the one the image was built with; the chart has no value for them
 yet. They name one project, so set both or neither: the client ignores a lone
-one, and the container logs a warning at start when only one is usable. The
-project's auth redirect allow-list must include the site's origin, or sign-in
-returns players to the build's own site. The anon key is public by design, as
-Row-Level Security is the access control.
+one, and the container logs a warning at start when only one is set (a value
+dropped for a line break counts as unset). The project's auth redirect
+allow-list must include the site's origin, or Supabase sends players to the
+project's Site URL instead of back to this site. The anon key is public by
+design, as Row-Level Security is the access control.
 
 The [version rule](#serving-the-web-client) applies here too: run the web image
 of the same release as the server it points at.

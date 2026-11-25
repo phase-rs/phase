@@ -169,24 +169,31 @@ supabase_key=sb_publishable_example
   fail "the image's config.js does not carry PHASE_SUPABASE_URL and PHASE_SUPABASE_ANON_KEY through"
 
 # What the script says at start, on stderr, for the given VAR=value arguments.
+# Its exit status is checked at every call: a script that exits non-zero would
+# stop the container from starting, and must not read as "no warning".
 start_warnings() {
-  env -i PATH="$PATH" PHASE_WEB_CONFIG_DIR="$work_dir/warn-config" "$@" \
-    sh "$image_dir/40-phase-web-config.sh" 2>&1 >/dev/null
+  { env -i PATH="$PATH" PHASE_WEB_CONFIG_DIR="$work_dir/warn-config" "$@" \
+    sh "$image_dir/40-phase-web-config.sh" >/dev/null; } 2>&1
 }
 pair_warning='name one project'
 # Positive control first: without it, every "no warning" case below would pass
 # against a script that never warns.
 for lone in "PHASE_SUPABASE_URL=$supabase_url" "PHASE_SUPABASE_ANON_KEY=$supabase_key"; do
-  start_warnings "$lone" | grep -qF "$pair_warning" ||
+  warnings=$(start_warnings "$lone") || fail "the script exits non-zero with only $lone set"
+  grep -qF "$pair_warning" <<<"$warnings" ||
     fail "with only $lone set, the script does not report that the client ignores it"
 done
 # A value dropped for its line break leaves the other one alone.
-start_warnings "PHASE_SUPABASE_URL=$supabase_url
-x" "PHASE_SUPABASE_ANON_KEY=$supabase_key" | grep -qF "$pair_warning" ||
+warnings=$(start_warnings "PHASE_SUPABASE_URL=$supabase_url
+x" "PHASE_SUPABASE_ANON_KEY=$supabase_key") ||
+  fail "the script exits non-zero when it drops a Supabase variable for a line break"
+grep -qF "$pair_warning" <<<"$warnings" ||
   fail "a Supabase variable dropped for a line break must count as unset in the pair check"
 for complete in "" "PHASE_SUPABASE_URL=$supabase_url PHASE_SUPABASE_ANON_KEY=$supabase_key"; do
   # shellcheck disable=SC2086
-  ! start_warnings $complete | grep -qF "$pair_warning" ||
+  warnings=$(start_warnings $complete) ||
+    fail "the script exits non-zero with '${complete:-nothing}' set"
+  ! grep -qF "$pair_warning" <<<"$warnings" ||
     fail "the script reports a lone Supabase variable with '${complete:-nothing}' set"
 done
 
