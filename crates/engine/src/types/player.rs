@@ -244,6 +244,16 @@ pub struct Player {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_attributes: Vec<crate::types::ability::ChosenAttribute>,
 
+    /// CR 601.2g-h + CR 118.3: the cards of this player's hand a payment probe
+    /// holds for another leg of the cost it is judging
+    /// (`casting::CardHoldScratch`). A held card can't pay a mana ability's
+    /// cost, but it is still in hand while mana abilities are activated, so a
+    /// reveal still reads it (`mana_sources::reveal_eligible_hand_cards`). Set
+    /// only on a probe's scratch state, so it is empty on every live state;
+    /// never serialized.
+    #[serde(skip)]
+    pub(crate) probe_held_hand_cards: Vec<ObjectId>,
+
     // Derived fields (computed in WASM bridge, not persisted)
     #[serde(skip_deserializing, default)]
     pub can_look_at_top_of_library: bool,
@@ -264,6 +274,7 @@ impl Default for Player {
             id: PlayerId(0),
             life: 20,
             has_no_life_total: false,
+            probe_held_hand_cards: Vec::new(),
             mana_pool: ManaPool::default(),
             library: im::Vector::new(),
             hand: im::Vector::new(),

@@ -13419,7 +13419,7 @@ pub(super) fn reserved_payment_state(
 /// cost, so no mana ability's cost can use it up: it is taken out of its zone
 /// for the probe. CR 601.2g: mana abilities are activated before costs are
 /// paid, so a held hand card is still in hand for an ability that only reads
-/// it (Metalworker's reveal); `GameState::probe_held_hand_cards` carries those.
+/// it (Metalworker's reveal); `Player::probe_held_hand_cards` carries those.
 /// The scratch never reaches a real payment.
 pub(super) struct CardHoldScratch {
     state: GameState,
@@ -13467,11 +13467,15 @@ impl CardHoldScratch {
                 obj.zone = Zone::Exile;
             }
             if zone == Zone::Hand {
-                scratch.probe_held_hand_cards.push(id);
+                if let Some(holder) = scratch.players.iter_mut().find(|p| p.id == owner) {
+                    holder.probe_held_hand_cards.push(id);
+                }
             }
         }
         let answer = probe(scratch);
-        scratch.probe_held_hand_cards.clear();
+        for holder in scratch.players.iter_mut() {
+            holder.probe_held_hand_cards.clear();
+        }
         for &(id, zone, _) in &cards {
             if let Some(obj) = scratch.objects.get_mut(&id) {
                 // allow-raw-zone: releases a held card on the discarded payment-probe scratch; no zone change occurs (CR 118.3)
@@ -41127,13 +41131,13 @@ mod card_hold_scratch_tests {
                 assert_eq!(probe.objects[&in_hand].zone, Zone::Exile);
                 assert_eq!(probe.objects[&in_graveyard].zone, Zone::Exile);
                 assert!(probe.exile.contains(&in_hand) && probe.exile.contains(&in_graveyard));
-                assert_eq!(probe.probe_held_hand_cards, vec![in_hand]);
+                assert_eq!(probe.players[0].probe_held_hand_cards, vec![in_hand]);
             });
             scratch.probe_holding(&[], |probe| {
                 assert_eq!(zones(probe), zones(state));
                 assert_eq!(probe.objects[&in_hand].zone, Zone::Hand);
                 assert_eq!(probe.objects[&in_graveyard].zone, Zone::Graveyard);
-                assert!(probe.probe_held_hand_cards.is_empty());
+                assert!(probe.players[0].probe_held_hand_cards.is_empty());
             });
         }
         assert_eq!(take_cost_snapshot().since(before).state_copies, 1);
