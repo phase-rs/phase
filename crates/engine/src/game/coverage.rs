@@ -1159,6 +1159,11 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 };
                 parts.push(label);
             }
+            // CR 205.2a: no single-word quality names a card-type count, so the
+            // generic fallback (mirroring ColorCount's) is the whole label.
+            FilterProp::CardTypeCount { comparator, count } => {
+                parts.push(format!("card types {comparator:?} {count}").to_lowercase());
+            }
             FilterProp::ManaSymbolCount {
                 color,
                 comparator,
@@ -5277,6 +5282,9 @@ fn fmt_trigger_condition(
         TC::CastVariantPaid { .. } => "cast variant was paid".into(),
         TC::CastVariantPaidPersistent { .. } => "cast variant was paid (persistent)".into(),
         TC::ActivatedAbilityIsNonMana => "activated ability is not a mana ability".into(),
+        TC::LoyaltyCountersRemovedAtLeast { minimum } => {
+            format!("loyalty counters removed ≥ {minimum}")
+        }
         TC::DealtDamageBySourceThisTurn => "dealt damage by source this turn".into(),
         TC::DealtDamageThisTurnBySource { source } => {
             format!("dealt damage this turn by {}", fmt_target(source))
@@ -11699,6 +11707,7 @@ fn extract_trigger_condition_features(
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana
+        | TriggerCondition::LoyaltyCountersRemovedAtLeast { .. }
         | TriggerCondition::DealtDamageBySourceThisTurn
         | TriggerCondition::DealtDamageThisTurnBySource { .. }
         | TriggerCondition::FirstTimeObjectTappedThisTurn
@@ -29797,6 +29806,22 @@ mod swallow_provenance_tests {
         assert_eq!(
             swallow_clause_text(&warning, CUT_SHORT).as_deref(),
             Some(DESTROY)
+        );
+    }
+
+    #[test]
+    fn card_type_count_label_uses_generic_fallback() {
+        let label = super::fmt_typed_filter(&crate::types::ability::TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Card],
+            controller: None,
+            properties: vec![crate::types::ability::FilterProp::CardTypeCount {
+                comparator: crate::types::ability::Comparator::GE,
+                count: 2,
+            }],
+        });
+        assert!(
+            label.contains("card types ge 2"),
+            "unexpected filter label: {label}"
         );
     }
 }

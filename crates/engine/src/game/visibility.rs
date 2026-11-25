@@ -21,11 +21,12 @@ use super::turn_control;
 
 pub const HIDDEN_CARD_NAME: &str = "Hidden Card";
 
-/// Resolution-only look-result provenance is never part of a viewer snapshot.
+/// Resolution-only look and damage provenance is never part of a viewer snapshot.
 /// The engine retains it for the active loop, while clients need only the
 /// public prompt and the card identities they are otherwise allowed to see.
 fn redact_parent_target_iteration_members(ability: &mut crate::types::ability::ResolvedAbility) {
     ability.context.parent_target_iteration_members = None;
+    ability.context.damage_delivery_owner = None;
     for (_, child) in ability.child_links_mut() {
         redact_parent_target_iteration_members(child);
     }
@@ -1715,6 +1716,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     filtered.next_delayed_trigger_token = 0;
     filtered.next_delayed_trigger_instance = 0;
     filtered.next_resolution_cast_offer_id = 0;
+    filtered.next_damage_delivery_owner_id = 0;
     filtered.pending_trigger_firing = None;
     filtered.stack_trigger_firings.clear();
     filtered.resolving_trigger_firing = None;
@@ -1800,6 +1802,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // it so no viewer snapshot carries either the seed or its stream position.
     filtered.rng_word_pos = 0;
     filtered.rng = crate::types::game_state::GameRng::seed_from_u64(0);
+    // Reserved outside-game card identities are private continuation state,
+    // like the existing token and meld projections. The chooser's authorized
+    // replacement summaries below carry the displayed candidate information.
     filtered.liminal_entries.clear();
     filtered.pending_liminal_entry_resume = None;
 
@@ -1817,6 +1822,14 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // submit no replacement action and must not receive its private source IDs.
     if !replacement_choice_authorized {
         filtered.pending_replacement = None;
+    } else if let Some(pending) = &mut filtered.pending_replacement {
+        pending.damage_delivery_owner = None;
+    }
+    if let Some(post) = &mut filtered.pending_damage_post_loss {
+        post.damage_delivery_owner = None;
+    }
+    if let Some(post) = &mut filtered.pending_damage_post_counter {
+        post.damage_delivery_owner = None;
     }
 
     filtered.active_library_searches.retain(|_, search| {
@@ -2935,6 +2948,17 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 if !can_view_scoped_search_private(frozen.searcher) {
                     frozen.identity.object_id = ObjectId(0);
                 }
+            }
+        }
+    }
+    // CR 101.4 + CR 701.20a: player-scoped hand-reveal selections remain
+    // private until the APNAP carrier settles. Preserve the participant rows
+    // for protocol shape, but remove each selection's hidden identities and
+    // cardinality from viewers without access to that player's hand.
+    if let Some(pending) = filtered.pending_player_scope_reveal.as_mut() {
+        for (player, selected) in &mut pending.selections {
+            if !can_view_private_for_player(*player) {
+                selected.clear();
             }
         }
     }

@@ -46,6 +46,11 @@ impl ProtectionReplacementSourceExt for ObjectId {
 #[serde(transparent)]
 pub struct LogicalZoneChangeGroupId(pub u64);
 
+/// Monotonic identity for one damage instruction across its parked deliveries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DamageDeliveryOwnerId(pub u64);
+
 /// Monotonic identity for one operation-owned discard result frame. This is
 /// distinct from an object id: one discard instruction may be replaced or
 /// paused, while the frame remains the sole provenance authority.

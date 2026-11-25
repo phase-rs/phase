@@ -26,10 +26,13 @@ import type {
 import {
   createDraftWorkspaceState,
   makeInteractiveVirtualBasicInstanceId,
+  rebuildWorkspaceZone,
+  resolveWorkspacePickPlacement,
 } from "../../components/draft/workspace/workspacePlacement";
 import {
   createDefaultDraftWorkspacePreferences,
   setArrivingCardBoardPreferences,
+  type DraftBoardPreferences,
 } from "../../components/draft/workspace/workspacePreferences";
 import {
   ACTIVE_QUICK_DRAFT_KEY,
@@ -697,6 +700,42 @@ describe("draft store workspace authority", () => {
     await useDraftStore.getState().pickCard("picked", "deck", { column: 2 });
 
     expect(useDraftStore.getState().workspaceState!.placements.picked.column).toBe(2);
+  });
+
+  it("keeps the first confirmed pick independent of the previous draft's sort", async () => {
+    const preferences: DraftBoardPreferences = { sort: "color", columnCount: 3, rows: "one", showHeaders: true };
+    const pool = [
+      { ...card("pacifism", "Pacifism"), colors: ["W"] },
+      { ...card("satyr", "Satyr Enchanter"), colors: ["G", "W"] },
+      { ...card("old-manalith", "Manalith"), colors: [] },
+    ];
+    const kinds = ["white", "multicolor", "colorless"] as const;
+    const previousView = view(pool);
+    previousView.pool_groups.color_groups = pool.map((card, index) => ({
+      kind: kinds[index], total: 1, cards: [{ card, count: 1, instance_ids: [card.instance_id] }],
+    }));
+    setArrivingCardBoardPreferences(preferences);
+    wasm.start_quick_draft.mockReturnValue(previousView);
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    const previous = useDraftStore.getState();
+    previous.setWorkspaceState(rebuildWorkspaceZone(
+      previous.workspaceState!, "deck", pool, previousView.pool_groups, preferences,
+    ));
+    expect(useDraftStore.getState().workspaceState!.placements["old-manalith"].column).toBe(2);
+
+    useDraftStore.getState().reset();
+    const manalith = { ...pool[2], instance_id: "new-manalith" };
+    wasm.start_quick_draft.mockReturnValue({ ...view(), current_pack: [manalith] });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    const fresh = useDraftStore.getState();
+    wasm.submit_pick.mockReturnValue(view([manalith]));
+    fresh.selectCard(manalith.instance_id);
+    const placement = resolveWorkspacePickPlacement(
+      manalith, "deck", fresh.view!.pool, fresh.view!.pool_groups, fresh.workspaceState!, preferences,
+    );
+    await fresh.confirmPick("deck", placement);
+
+    expect(useDraftStore.getState().workspaceState!.placements[manalith.instance_id].column).toBe(0);
   });
 
   it("places_a_pick_against_the_columns_the_page_published_not_the_module_default", async () => {

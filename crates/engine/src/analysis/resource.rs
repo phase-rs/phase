@@ -27543,6 +27543,7 @@ mod tests {
                         trigger_state: ActivationTriggerState::Pending,
                         stack_entry: Some(activation),
                         activation_cost: BoundActivationCost::Unknown,
+                        loyalty_counters_removed: None,
                     }),
                     description: None,
                     source_name: String::new(),

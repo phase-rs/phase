@@ -1487,8 +1487,13 @@ fn finish_replacement_execute_epilogue(
             .is_some_and(|stashed| !stashed.is_combat)
         && state.active_batch_delivery().is_none()
     {
-        let outcome =
-            crate::game::effects::deal_damage::drain_pending_damage_post_counter(state, events);
+        let owner = state
+            .pending_damage_post_counter
+            .as_ref()
+            .and_then(|stash| stash.damage_delivery_owner);
+        let outcome = effects::resume_damage_delivery(state, owner, |state| {
+            effects::deal_damage::drain_pending_damage_post_counter(state, events)
+        });
         if matches!(
             outcome,
             crate::game::effects::deal_damage::DamagePostCounterDrainOutcome::PausedForReplacement
@@ -1839,6 +1844,45 @@ fn validate_token_substitute_answer(
     Ok(())
 }
 
+/// CR 602.2b + CR 606.4: consume the concrete result of a marked parked root
+/// exactly once into the already-known activation tally. Unknown legacy
+/// contexts remain unknown.
+fn credit_parked_loyalty_cost_receipt(state: &mut GameState, removed: u32) {
+    match state.pending_cost_move_resume.as_mut() {
+        Some(PendingCostMoveResume::CounterCostRemovalPayment {
+            pending: Some(pending),
+            ..
+        }) => {
+            if let Some(tally) = pending.ability.context.loyalty_counters_removed.as_mut() {
+                *tally = tally.saturating_add(removed);
+            }
+        }
+        Some(PendingCostMoveResume::LoyaltyActivation { resolved, .. }) => {
+            if let Some(tally) = resolved.context.loyalty_counters_removed.as_mut() {
+                *tally = tally.saturating_add(removed);
+            }
+        }
+        None
+        | Some(
+            PendingCostMoveResume::Cast { .. }
+            | PendingCostMoveResume::SacrificeForCost { .. }
+            | PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+            | PendingCostMoveResume::Foretell { .. }
+            | PendingCostMoveResume::CollectEvidencePayment { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::CounterCostRemovalPayment { pending: None, .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::TurnFaceUpCostMove { .. }
+            | PendingCostMoveResume::PlayerScopeUnlessSettlement(_),
+        ) => {}
+    }
+}
+
 fn handle_replacement_choice_inner(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -1966,6 +2010,13 @@ fn handle_replacement_choice_inner(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.proposed.affected_object_id());
+    let parked_outside_game_entry = state.pending_replacement.as_ref().and_then(|pending| {
+        if let ProposedEvent::OutsideGameCardEntry { entry_ref, .. } = pending.proposed {
+            Some(entry_ref)
+        } else {
+            None
+        }
+    });
     // The object of a parked zone move, for the `Prevented` arm. No applier
     // prevents a move onto the battlefield today; if one does, a played land's
     // `LandPlayed` stays collectable, as it did before the park recorded state.
@@ -2040,6 +2091,19 @@ fn handle_replacement_choice_inner(
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::RollDice { .. }))
         .then(|| super::pre_entry_view::PreEntryRulesView::of_pending_roll(state))
         .flatten();
+    let parked_damage_owner = state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| {
+            matches!(
+                pending.proposed,
+                ProposedEvent::Damage {
+                    is_combat: false,
+                    ..
+                }
+            )
+        })
+        .and_then(|pending| pending.damage_delivery_owner);
     // CR 616.1 + CR 615.5: an answer a parked damage batch awaits is one of its original
     // choices, so the chosen replacement's action or rider waits with the batch's held work.
     let (result, viewed_choice) = if impossible_parked_draw {
@@ -2063,8 +2127,10 @@ fn handle_replacement_choice_inner(
             // A parked damage batch's answer is never a roll, so only the live
             // board's re-scan can hold riders.
             None => (
-                super::effects::deal_damage::hold_riders_for_awaited_portion(state, |state| {
-                    operation(state, events)
+                effects::resume_damage_delivery(state, parked_damage_owner, |state| {
+                    effects::deal_damage::hold_riders_for_awaited_portion(state, |state| {
+                        operation(state, events)
+                    })
                 }),
                 None,
             ),
@@ -2341,6 +2407,14 @@ fn handle_replacement_choice_inner(
                     }
                     record_parked_land_play_completion(state, object_id);
                 }
+                event @ ProposedEvent::OutsideGameCardEntry { entry_ref, .. } => {
+                    state.waiting_for = WaitingFor::Priority {
+                        player: state.active_player,
+                    };
+                    settle_outside_game_entry(state, entry_ref, event, false, events);
+                    super::engine::resume_pending_continuation_if_priority(state, events)?;
+                    return Ok(state.waiting_for.clone());
+                }
                 event @ ProposedEvent::TokenEntry { entry_ref, .. } => {
                     // Staged copies share the same settlement for ordering
                     // answers and priority-boundary resumes.
@@ -2401,12 +2475,18 @@ fn handle_replacement_choice_inner(
                     // CR 120.4b + CR 120.4c: a portion of a parked two-phase batch rejoins the
                     // batch, which finishes its other portions' replacement before delivering.
                     if !super::effects::deal_damage::return_answered_portion_to_batch(
-                        state, &ctx, &damage,
-                    ) && matches!(
-                        apply_damage_after_replacement(state, &ctx, damage, is_combat, events),
-                        DamageResult::NeedsChoice
+                        state,
+                        &ctx,
+                        &damage,
+                        parked_damage_owner,
                     ) {
-                        {
+                        let result =
+                            effects::resume_damage_delivery(state, parked_damage_owner, |state| {
+                                apply_damage_after_replacement(
+                                    state, &ctx, damage, is_combat, events,
+                                )
+                            });
+                        if matches!(result, DamageResult::NeedsChoice) {
                             // CR 616.1 + CR 616.1f: the resumed hit raised its own
                             // result prompt (poison counters, life loss, the
                             // lifelink gain, or an excess-redirect leg), parked by
@@ -2481,15 +2561,23 @@ fn handle_replacement_choice_inner(
                     object_id,
                     counter_type,
                     count,
+                    loyalty_cost_root,
                     ..
                 } => {
-                    effects::counters::apply_counter_removal(
+                    let removed = effects::counters::apply_counter_removal(
                         state,
                         object_id,
                         counter_type,
                         count,
                         events,
                     );
+                    // CR 602.2b + CR 606.4: the marker belongs only to the
+                    // parked root proposal. Latch its actual delivered result
+                    // into the owning activation before the proposal is
+                    // consumed; identical replacement children remain inert.
+                    if loyalty_cost_root.is_some() {
+                        credit_parked_loyalty_cost_receipt(state, removed);
+                    }
                 }
                 move_counter @ ProposedEvent::MoveCounter { .. } => {
                     if !effects::counters::apply_move_counter_after_replacement(
@@ -3180,6 +3268,9 @@ fn handle_replacement_choice_inner(
             Ok(state.waiting_for.clone())
         }
         super::replacement::ReplacementResult::Prevented => {
+            if let Some(entry_ref) = parked_outside_game_entry {
+                super::zone_pipeline::prevent_outside_game_card_entry(state, entry_ref, events);
+            }
             // CR 608.2f (F1/F2): a fully prevented compound abandons the
             // paused clause — take the record so the deferred publication
             // never runs, and clear the ledger. First, and guarded: the
@@ -3758,7 +3849,14 @@ fn drain_settled_non_combat_damage_stash(
     {
         return None;
     }
-    match effects::deal_damage::drain_pending_damage_post_loss(state, events) {
+    let owner = state
+        .pending_damage_post_loss
+        .as_ref()
+        .and_then(|stash| stash.damage_delivery_owner);
+    let outcome = effects::resume_damage_delivery(state, owner, |state| {
+        effects::deal_damage::drain_pending_damage_post_loss(state, events)
+    });
+    match outcome {
         effects::deal_damage::DamagePostLossDrainOutcome::PausedForReplacement => {
             super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
                 state,
@@ -3858,11 +3956,16 @@ pub(super) fn handle_entry_controller_choice(
     // The logical owner parked on the unanswered event; keep that boundary
     // before the answer changes the proposal.
     pending.pin_delivery_boundary();
-    let ProposedEvent::ZoneChange {
+    let (ProposedEvent::ZoneChange {
         controller_override,
         to: Zone::Battlefield,
         ..
-    } = &mut pending.proposed
+    }
+    | ProposedEvent::OutsideGameCardEntry {
+        controller_override,
+        destination: Zone::Battlefield,
+        ..
+    }) = &mut pending.proposed
     else {
         return Err(EngineError::InvalidAction(
             "entry controller choice does not own a battlefield entry".to_string(),
@@ -3907,12 +4010,8 @@ pub(super) fn handle_entry_named_choice(
         .expect("a live pre-entry choice owns the pending replacement");
     pending.pin_delivery_boundary();
     let rid = pending.candidates[0];
-    let ProposedEvent::ZoneChange {
-        enter_with_choices, ..
-    } = &mut pending.proposed
-    else {
-        unreachable!("a live pre-entry choice parks a battlefield ZoneChange");
-    };
+    let enter_with_choices = super::replacement::proposed_entry_choices_mut(&mut pending.proposed)
+        .expect("a live pre-entry choice parks a battlefield entry");
     enter_with_choices
         .get_or_insert_with(Default::default)
         .0
@@ -4985,6 +5084,79 @@ fn apply_copy_target_choice(
     }
 
     if state.liminal_entries.contains_key(&source_id) {
+        if let Some(crate::types::game_state::PendingLiminalEntryResume::OutsideGameCard {
+            source_id: pending_source,
+            player: pending_player,
+            ..
+        }) = state.pending_liminal_entry_resume.as_ref()
+        {
+            if *pending_source != source_id || *pending_player != player {
+                return Err(EngineError::InvalidAction(
+                    "Mismatched outside-game entry resume".into(),
+                ));
+            }
+            let (duration, modifications) = match copy_effect_for_source(state, source_id)
+                .map(|definition| definition.effect.as_ref())
+            {
+                Some(Effect::BecomeCopy {
+                    duration,
+                    additional_modifications,
+                    ..
+                }) => (duration.clone(), additional_modifications.clone()),
+                _ => (None, Vec::new()),
+            };
+            let target = state.objects.get(&target_id).ok_or_else(|| {
+                EngineError::InvalidAction("Copy target is no longer available".into())
+            })?;
+            let values = super::layers::compute_current_copiable_values(state, target_id)
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("Copy target has no copiable values".into())
+                })?;
+            let copy = crate::types::proposed_event::CopyTokenSpec {
+                values: Box::new(values),
+                display: target.display_identity(),
+                extra_keywords: Vec::new(),
+                additional_modifications: modifications,
+                tapped: false,
+                enters_attacking: false,
+                attack_request: Default::default(),
+                sacrifice_at: duration,
+                source_id,
+                controller: player,
+                donor: Some(ObjectIncarnationRef::from_object(target)),
+                double_faced: None,
+            };
+            let Some(crate::types::game_state::PendingLiminalEntryResume::OutsideGameCard {
+                mut event,
+                ..
+            }) = state.pending_liminal_entry_resume.take()
+            else {
+                unreachable!()
+            };
+            let ProposedEvent::OutsideGameCardEntry {
+                enter_as_copy,
+                enter_with_choices,
+                enter_with_counters,
+                ..
+            } = &mut event
+            else {
+                unreachable!()
+            };
+            super::zone_pipeline::stage_outside_game_entry_copy(state, source_id, &copy);
+            super::replacement::retarget_intrinsic_entry_counters_to_copy(
+                enter_with_counters,
+                &copy,
+                crate::types::proposed_event::EntrantAbilities::of(None),
+            );
+            *enter_with_choices = None;
+            *enter_as_copy = Some(Box::new(copy));
+            state.waiting_for = WaitingFor::Priority {
+                player: state.active_player,
+            };
+            state.finish_active_paused_post_replacement_dispatch();
+            settle_outside_game_entry(state, source_id, event, true, events);
+            return Ok(state.waiting_for.clone());
+        }
         let Some(resume) = state.pending_liminal_entry_resume.take() else {
             return Err(EngineError::InvalidAction(
                 "Missing liminal entry resume".to_string(),
@@ -4999,6 +5171,9 @@ fn apply_copy_target_choice(
             | crate::types::game_state::PendingLiminalEntryResume::Meld {
                 source_id, player, ..
             } => (*source_id, *player),
+            crate::types::game_state::PendingLiminalEntryResume::OutsideGameCard { .. } => {
+                unreachable!("outside-game entry was handled above")
+            }
         };
         if resume_source_id != source_id || resume_player != player {
             return Err(EngineError::InvalidAction(
@@ -7788,13 +7963,22 @@ pub(super) fn apply_post_replacement_effect(
     //
     // Gated on `event == ReplacementEvent::Moved` so the suppression scopes to
     // ETB-style replacements (the Devour shape). Damage riders with the same shape
-    // take `damage_rider_population` below.
+    // take `rider_population` below.
     let sacrifice_typed_scope = is_as_enters_sacrifice_scope_replacement(event, &real_work.effect);
     // CR 614.6 + CR 615.5 + CR 608.2d: a damage rider that picks from a population ("sacrifice that
     // many permanents", "exile that many cards from your graveyard", "sacrifice an
     // Equipment attached to Outfitted Jouster") names no pre-selected object; the injected
     // host would be acted on instead. `event_source` is populated only for damage riders.
-    let damage_rider_population = state.post_replacement_event_source().is_some()
+    // CR 614.6 + CR 608.2d: the same holds for a substitute of an event that affected a
+    // player rather than an object (a replaced draw — Out of the Tombs' "instead return a
+    // creature card from your graveyard to the battlefield"): with no affected object, the
+    // drain's subject is the replacing permanent itself, which the pick must not be bound to.
+    let replaced_player_event = matches!(
+        state.post_replacement_event_target(),
+        Some(TargetRef::Player(_))
+    );
+    let rider_population = (state.post_replacement_event_source().is_some()
+        || replaced_player_event)
         && matches!(
             &*effect_def.effect,
             Effect::Sacrifice {
@@ -7805,7 +7989,7 @@ pub(super) fn apply_post_replacement_effect(
                 ..
             }
         );
-    let targets = if sacrifice_typed_scope || damage_rider_population {
+    let targets = if sacrifice_typed_scope || rider_population {
         Vec::new()
     } else {
         object_id
@@ -8135,7 +8319,10 @@ pub(crate) fn dispatch_pending_post_replacement_effect(
     // scope on its `PendingContinuation` and re-enters it when it resumes
     // (`effects::drain_pending_continuation`).
     let owned_amount = captured_amount.map(crate::game::arithmetic::u32_to_i32_saturating);
-    let waiting_for =
+    let waiting_for = {
+        // CR 615.5: an independent replacement action can deal its own damage,
+        // even with the same source as the delivery it modified.
+        let _damage_scope = effects::DamageDeliveryScope::enter(None);
         crate::game::quantity::with_replacement_action_scope(owned_amount, || match continuation {
             PostReplacementContinuation::Resolved(resolved) => {
                 apply_post_replacement_resolved_effect(
@@ -8157,7 +8344,8 @@ pub(crate) fn dispatch_pending_post_replacement_effect(
                 replacement_applied,
                 events,
             ),
-        });
+        })
+    };
     // CR 614.12a + CR 616.1g: classify by what OWNS the outstanding prompt, never
     // by whether the two-deep positional accessor can currently see this frame.
     // The predecessor asked `active_post_replacement_drains()`, which returns None
@@ -8746,7 +8934,8 @@ pub(crate) fn settle_liminal_token_entry_replacements(
                 ReplacementResult::Prevented => return ReplacementResult::Prevented,
             }
         }
-        let settles_own_entry = replacement::token_entry_awaits_own_entry_settlement(state, &event);
+        let settles_own_entry =
+            replacement::liminal_entry_awaits_own_entry_settlement(state, &event);
         if !state.has_post_replacement_drain() {
             return ReplacementResult::Execute(event);
         }
@@ -8831,6 +9020,93 @@ pub(crate) fn settle_liminal_token_entry_replacements(
         state.pending_liminal_entry_resume = previous_resume;
         rediscover = true;
     }
+}
+
+/// CR 614.12a + CR 616.1f: selected own-entry work completes on its own
+/// resolution subtree before the admission event is consulted again.
+pub(crate) fn settle_outside_game_entry(
+    state: &mut GameState,
+    entry_ref: ObjectId,
+    mut event: ProposedEvent,
+    mut rediscover: bool,
+    events: &mut Vec<GameEvent>,
+) {
+    use super::replacement::{self, ReplacementResult};
+    use crate::types::game_state::{LiminalEntryKind, PendingLiminalEntryResume};
+    let Some(entry) = state.outside_game_card_entry(entry_ref) else {
+        return;
+    };
+    let LiminalEntryKind::OutsideGameCard { boundary, .. } = entry.kind else {
+        return;
+    };
+    loop {
+        if rediscover {
+            match replacement::replace_event(state, event, events) {
+                ReplacementResult::Execute(next) => event = next,
+                ReplacementResult::NeedsChoice(player) => {
+                    state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+                    return;
+                }
+                ReplacementResult::Prevented => {
+                    super::zone_pipeline::prevent_outside_game_card_entry(state, entry_ref, events);
+                    return;
+                }
+            }
+        }
+        if boundary.is_retired(&state.resolution_stack) || !state.has_post_replacement_drain() {
+            super::zone_pipeline::deliver_outside_game_card_entry(state, event, None, events);
+            return;
+        }
+        rediscover = replacement::liminal_entry_awaits_own_entry_settlement(state, &event);
+        let player = event.affected_player(state);
+        state.pending_liminal_entry_resume = Some(PendingLiminalEntryResume::OutsideGameCard {
+            source_id: entry_ref,
+            player,
+            event,
+            boundary,
+        });
+        if let Some(pause) = dispatch_pending_post_replacement_effect(
+            state,
+            Some(entry_ref),
+            None,
+            Some(ReplacementEvent::Moved),
+            events,
+        ) {
+            if let Some(PendingLiminalEntryResume::OutsideGameCard { player, .. }) =
+                state.pending_liminal_entry_resume.as_mut()
+            {
+                *player = pause
+                    .waiting_for
+                    .acting_player()
+                    .unwrap_or(state.active_player);
+            }
+            state.waiting_for = pause.waiting_for;
+            return;
+        }
+        let Some(PendingLiminalEntryResume::OutsideGameCard { event: settled, .. }) =
+            state.pending_liminal_entry_resume.take()
+        else {
+            unreachable!()
+        };
+        event = settled;
+    }
+}
+
+pub(super) fn resume_pending_outside_game_card_entry(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    use crate::types::game_state::PendingLiminalEntryResume;
+    if !state.outside_game_entry_resume_is_due() {
+        return;
+    }
+    let Some(PendingLiminalEntryResume::OutsideGameCard {
+        source_id, event, ..
+    }) = state.pending_liminal_entry_resume.take()
+    else {
+        unreachable!()
+    };
+    settle_outside_game_entry(state, source_id, event, true, events);
 }
 
 /// CR 614.12a + CR 111.1: commit a liminal (decided-but-not-yet-entered) token
@@ -8982,6 +9258,7 @@ mod tests {
                 Zone::Battlefield,
             );
             state.pending_damage_post_loss = Some(Box::new(PendingDamagePostLoss {
+                damage_delivery_owner: None,
                 source_id: source,
                 source_incarnation: None,
                 controller: PlayerId(1),
@@ -9093,6 +9370,7 @@ mod tests {
                 "reach-guard: the observer parsed"
             );
             state.pending_damage_post_loss = Some(Box::new(PendingDamagePostLoss {
+                damage_delivery_owner: None,
                 source_id: specter,
                 source_incarnation: Some(state.objects[&specter].incarnation),
                 controller: P0,
@@ -9474,6 +9752,7 @@ mod tests {
         // the terminal Connive survivor through `handle_replacement_choice`.
         let candidate = install_optional_replacement(&mut state, ReplacementEvent::Connive);
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Connive {
                 object_id: conniver,
@@ -10160,6 +10439,7 @@ mod tests {
             .description("Regenerate".to_string())]
         .into();
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Destroy {
                 object_id: bear,

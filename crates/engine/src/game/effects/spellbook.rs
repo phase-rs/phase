@@ -14,9 +14,9 @@
 //!
 //! * the interactive choice pauses on [`WaitingFor::SpellbookDraft`] (resumed by
 //!   `GameAction::SubmitSpellbookDraft` in `engine.rs`); and
-//! * the card creation delegates to [`super::conjure`] — the chosen name is
-//!   conjured into the destination, reusing the registry lookup, characteristic
-//!   application, summoning-sickness reset and ETB zone-change emission.
+//! * card creation shares the printed-face lookup in [`super::conjure`].
+//!   Battlefield destinations pass through outside-game entry replacement
+//!   consultation before the chosen face enters the game.
 //!
 //! The spellbook list itself is not in the Oracle text — it is carried on the
 //! source object (`GameObject::spellbook`, copied from
@@ -140,8 +140,7 @@ fn draft_offer(state: &mut GameState, spellbook: &[String]) -> Vec<String> {
 }
 
 /// Complete a spellbook draft once the controller has chosen `card`: conjure the
-/// chosen card into `destination`. Reuses [`super::conjure::resolve`] for the
-/// actual card creation. `card` must be one of the offered `options`.
+/// chosen card into `destination`. `card` must be one of the offered `options`.
 #[allow(clippy::too_many_arguments)]
 pub fn complete_draft(
     state: &mut GameState,
@@ -157,6 +156,17 @@ pub fn complete_draft(
         return Err(EffectError::InvalidParam(format!(
             "{card} is not in the offered spellbook"
         )));
+    }
+
+    if matches!(state.waiting_for, WaitingFor::SpellbookDraft { .. }) {
+        state.waiting_for = WaitingFor::Priority { player: controller };
+    }
+    if destination == Zone::Battlefield {
+        let entrant = super::conjure::named_battlefield_entrant(state, controller, card);
+        crate::game::zone_pipeline::propose_outside_game_card_entry(
+            state, source_id, controller, entrant, tapped, events,
+        );
+        return Ok(());
     }
 
     // Conjure the chosen card — one copy — into the destination, reusing the

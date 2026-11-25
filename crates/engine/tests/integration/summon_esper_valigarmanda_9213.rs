@@ -2962,9 +2962,15 @@ fn check_linked_paid_cast_mana_boundary(route: &str) {
                 let text = format!(
                     "{{0}}: Exile target instant or sorcery card from a graveyard.\n{body}"
                 );
+                let keywords: &[&str] = if route == "station" {
+                    &["Station"]
+                } else {
+                    &[]
+                };
                 let source = scenario
-                    .add_artifact_from_oracle(P0, "Linked cast boundary", &text)
+                    .add_artifact_from_oracle(P0, "Linked cast boundary", "")
                     .with_subtypes(vec!["Spacecraft"])
+                    .from_oracle_text_with_keywords(keywords, &text)
                     .id();
                 let child = scenario
                     .add_spell_to_graveyard(P0, "Linked child", true)
