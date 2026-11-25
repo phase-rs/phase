@@ -82,17 +82,23 @@ committed integration fixtures instead (record:
 - `with a mana ability` as an object qualifier in `oracle_text`: 1 card —
   Raggadragga, Goreguts Boss. (Two other raw-text hits are rulings prose, not
   Oracle text: Chandra's Regulator, Spiders-Man.)
-- Sibling ability-qualifier phrases proving the general pattern:
-  `with no abilities` → Jasmine Boreal of the Seven, Muraganda Petroglyphs,
-  Ruxa, Patient Professor; `with a cycling ability` → Spellpyre Phoenix;
-  `with an exhaust ability` → Sala, Deck Boss.
+- Working sibling precedent through the identical seam: `with no abilities`
+  → Jasmine Boreal of the Seven, Muraganda Petroglyphs, Ruxa, Patient
+  Professor (same arm, same bare-predicate combinator pattern, same two
+  call sites).
+- Future class members, NOT working precedent (out of scope, pre-existing
+  gaps): `with a cycling ability` (Spellpyre Phoenix — qualifier currently
+  dropped from the target) and `with an exhaust ability` (Sala, Deck Boss —
+  anthem clause currently unsupported); neither has a `FilterProp`, so each
+  needs its own variant + eval before it can use this seam.
 
 The fix is still class-shaped, not card-shaped: it completes the shared
 type-phrase "with X" qualifier authority (which already owns power, mana value,
 counters, keywords, and "no abilities") so EVERY current and future
 "with a mana ability" subject — trigger subjects, targets, search filters —
 parses through one grammar. The skill's "if the answer is 1, stop" gate is
-satisfied by the sibling qualifier class sharing the identical seam.
+satisfied by the `with no abilities` precedent sharing the identical seam
+plus the all-consumers structural argument.
 
 ## Step 1: applicable skills
 
@@ -211,8 +217,10 @@ copied from the adjacent arm.
 ### Extension vs Creation
 
 Pure extension of the established "bare predicate in `oracle_nom/filter.rs` +
-call-site grammar" pattern (precedent: `parse_no_abilities` with three call
-sites). No new pattern. Precedence audit (implementer must confirm by test):
+call-site grammar" pattern (precedent: `parse_no_abilities` with two
+production call sites — `oracle_target.rs:4489` and `search.rs:2632`; the
+static trailing-strip uses inline tag needles, not the combinator).
+No new pattern. Precedence audit (implementer must confirm by test):
 no earlier arm in the suffix scan claims `with a ...` — mana-value needs
 `mana value`, power needs `power`, counter needs `counter(s)`, keyword needs a
 leading keyword — and the full `phase-parser` suite must stay green.
@@ -256,16 +264,12 @@ N/A — no "this way"/chosen/target-identity binding introduced. The
 parser output (fixture-verified) and names the event subject per CR 603.2
 attacker semantics; the untouched runtime test asserts its effect.
 
-## CR citations (NOT grep-verified — see note)
+## CR citations (grep-verified by the implementer)
 
-NOTE: `docs/MagicCompRules.txt` is gitignored and absent in this checkout
-(only the `docs/MagicCompRules.edition` pin: effective September 25, 2026);
-`scripts/fetch-comp-rules.sh` cannot run it down without network egress this
-step does not assume. Every citation below matches pervasive existing usage in
-the same files (`CR 605.1` cited 30× across `crates/phase-parser/src/parser`,
-incl. the adjacent :4482 arm's `CR 113.1 + CR 113.3` and `filter.rs:11692`'s
-`CR 605.1`). The implementer re-greps after fetching the pinned edition; if a
-renumbering moved any rule, the step migrates the citation text only.
+The implementer fetched the pinned edition (`effective=September 25, 2026`)
+and verified every citation below against `docs/MagicCompRules.txt`
+(113.1, 113.3, 508.1, 603.2, 603.4, 605.1 — all present with matching text);
+no renumbering, no citation migration needed.
 
 - CR 605.1 (mana abilities — what counts): new combinator doc comment, arm
   comment. Precedent: `filter.rs:750,11690`; `shared.rs:5547`; `search.rs`

@@ -4479,14 +4479,23 @@ fn parse_type_phrase_folding_unbound<'a>(
         pos += consumed;
     }
 
-    // CR 113.1 + CR 113.3: "<type> with no abilities" — an object with none of the
-    // four ability categories. Narrow predicate combinator lives in oracle_nom/filter.rs;
-    // this arm supplies the "with " lead + offset handling, mirroring parse_counter_suffix.
+    // CR 605.1 + CR 113.1 + CR 113.3: "<type> with a mana ability" (Raggadragga
+    // clause 2: "a creature you control with a mana ability attacks") and
+    // "<type> with no abilities" — the two ability-category object predicates.
+    // The bare predicate combinators live in oracle_nom/filter.rs; this arm
+    // supplies the "with " lead + offset handling, mirroring
+    // parse_counter_suffix. The two predicates have disjoint heads ("a ..."
+    // vs "no ..."), so alt order is immaterial.
     {
         let after_ws = lower[pos..].trim_start();
         let ws = lower[pos..].len() - after_ws.len();
         if let Ok((with_rest, _)) = (tag::<_, _, OracleError<'_>>("with"), space1).parse(after_ws) {
-            if let Ok((rest, prop)) = nom_filter::parse_no_abilities(with_rest) {
+            if let Ok((rest, prop)) = alt((
+                nom_filter::parse_mana_ability,
+                nom_filter::parse_no_abilities,
+            ))
+            .parse(with_rest)
+            {
                 properties.push(prop);
                 pos += ws + (after_ws.len() - rest.len());
             }
@@ -16095,6 +16104,54 @@ mod tests {
         };
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
         assert!(tf.properties.contains(&FilterProp::HasNoAbilities));
+    }
+
+    #[test]
+    fn mana_ability_suffix_folds_with_empty_rest() {
+        // CR 605.1: Raggadragga clause-2 subject shape — "creature you control
+        // with a mana ability" folds to Typed(Creature, You, [HasManaAbility])
+        // with nothing left over.
+        let (f, rest) = parse_type_phrase_folding("creature you control with a mana ability");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::HasManaAbility));
+    }
+
+    #[test]
+    fn mana_ability_suffix_passes_through_trailing_event() {
+        // Mid-phrase rest passthrough: the event verb after the qualifier stays
+        // in the remainder for try_parse_event's Attacks arm.
+        let (f, rest) =
+            parse_type_phrase_folding("creature you control with a mana ability attacks");
+        assert_eq!(rest.trim(), "attacks", "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(tf.properties.contains(&FilterProp::HasManaAbility));
+    }
+
+    #[test]
+    fn mana_ability_suffix_does_not_shadow_keyword_suffix() {
+        // Adjacent-suffix guard: "creature with flying" still lowers to a
+        // keyword prop, with NO HasManaAbility.
+        let (f, rest) = parse_type_phrase_folding("creature with flying");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(tf
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::WithKeyword { .. })));
+        assert!(
+            !tf.properties.contains(&FilterProp::HasManaAbility),
+            "keyword suffix must not gain HasManaAbility, got {:?}",
+            tf.properties
+        );
     }
 
     #[test]
