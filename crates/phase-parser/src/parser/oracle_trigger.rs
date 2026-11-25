@@ -17847,7 +17847,7 @@ fn try_parse_event(
             /// CR 120.1 + CR 120.3: optional source qualifier ("by a creature",
             /// "by a red instant or sorcery spell you control", etc.). When present,
             /// the trigger only fires if the damage source matches this filter.
-            source: Option<(TargetFilter, bool)>,
+            source: Option<(TargetFilter, DamageSourceDeterminer)>,
         },
         BecomesTapped,
         TappedForMana,
@@ -17969,8 +17969,11 @@ fn try_parse_event(
     /// source disjunction becomes the existing `TargetFilter::Or` building
     /// block; any qualifier this grammar cannot represent is left unconsumed so
     /// the caller's tail guard reports the line unsupported instead of dropping
-    /// the restriction. Returns the filter and whether the source is quantified.
-    fn parse_passive_damage_source(input: &str) -> OracleResult<'_, (TargetFilter, bool)> {
+    /// the restriction. A quantified alternative determines the grouping for
+    /// the disjunction. Otherwise, keep the first source's determiner.
+    fn parse_passive_damage_source(
+        input: &str,
+    ) -> OracleResult<'_, (TargetFilter, DamageSourceDeterminer)> {
         let (rest, _) = preceded(opt(space1), tag("by ")).parse(input)?;
         // Passive voice: no trailing space requirement (we are at the end of
         // the event phrase), and the passive-only source forms are admitted.
@@ -17984,10 +17987,14 @@ fn try_parse_event(
             parse_damage_source_subject_shared(i, DamageSourceSubjectVoice::Passive)
         }))
         .parse(rest)?;
-        let quantified = determiner == DamageSourceDeterminer::OneOrMore
-            || additional
-                .iter()
-                .any(|(_, d)| *d == DamageSourceDeterminer::OneOrMore);
+        let determiner = if additional
+            .iter()
+            .any(|(_, d)| *d == DamageSourceDeterminer::OneOrMore)
+        {
+            DamageSourceDeterminer::OneOrMore
+        } else {
+            determiner
+        };
         let filter = if additional.is_empty() {
             first
         } else {
@@ -17996,7 +18003,7 @@ fn try_parse_event(
                 .collect();
             TargetFilter::Or { filters }
         };
-        Ok((rest, (filter, quantified)))
+        Ok((rest, (filter, determiner)))
     }
     /// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.4b + CR 120.10 + CR 510 + CR 603.2:
     /// Passive-voice damage-received trigger event —
@@ -18471,18 +18478,23 @@ fn try_parse_event(
                 // matching recipients into one occurrence.
                 if channel == DamageChannel::Total {
                     let quantified_recipients = scan_contains(subject_text, "one or more ");
-                    let quantified_sources =
-                        source.as_ref().is_some_and(|(_, quantified)| *quantified);
                     def.damage_received_grouping = if quantified_recipients {
                         DamageReceivedGrouping::WholeBatch
-                    } else if quantified_sources {
-                        if subject_is_player(subject) {
-                            DamageReceivedGrouping::PerPlayerRecipient
-                        } else {
-                            DamageReceivedGrouping::WholeBatch
-                        }
                     } else {
-                        DamageReceivedGrouping::PerEvent
+                        match source.as_ref().map(|(_, determiner)| determiner) {
+                            Some(DamageSourceDeterminer::OneOrMore)
+                                if subject_is_player(subject) =>
+                            {
+                                DamageReceivedGrouping::PerPlayerRecipient
+                            }
+                            Some(DamageSourceDeterminer::OneOrMore) => {
+                                DamageReceivedGrouping::WholeBatch
+                            }
+                            Some(
+                                DamageSourceDeterminer::Article | DamageSourceDeterminer::Another,
+                            )
+                            | None => DamageReceivedGrouping::PerEvent,
+                        }
                     };
                 }
                 def.valid_source = source.map(|(filter, _)| filter);
