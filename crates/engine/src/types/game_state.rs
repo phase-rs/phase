@@ -66017,6 +66017,27 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         );
     }
 
+    #[test]
+    fn scoped_reveal_sets_numeric_map_round_trips_populated() {
+        let mut state = GameState::new_two_player(17);
+        state.tracked_set_publication_generation = 7;
+        state
+            .scoped_reveal_sets
+            .insert(PlayerId(1), (7, vec![ObjectId(41), ObjectId(42)]));
+        state
+            .scoped_reveal_sets
+            .insert(PlayerId(0), (7, vec![ObjectId(31)]));
+
+        let serialized = serde_json::to_string(&state).expect("state should serialize");
+        assert!(serialized.contains("\"scoped_reveal_sets\":{\"0\":[7,[31]],\"1\":[7,[41,42]]}"));
+        let restored: GameState = serde_json::from_str(&serialized).expect("state should restore");
+        assert_eq!(restored.scoped_reveal_sets, state.scoped_reveal_sets);
+        assert_eq!(
+            serde_json::to_string(&restored).expect("restored state should serialize"),
+            serialized
+        );
+    }
+
     /// CR 104.4b confirmation must NOT treat two states as equal when an object's
     /// mutable content differs — guards the `objects.len()`-only `PartialEq` gap
     /// that would otherwise permit a wrongful draw.

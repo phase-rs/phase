@@ -131,6 +131,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::cards_discarded_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::mana_spent_on_spells_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::last_effect_counts_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::scoped_reveal_sets", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::stack_trigger_event_batches", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::stack_trigger_firings", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_cache", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -320,6 +321,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "cards_discarded_this_turn_by_player",
         "mana_spent_on_spells_this_turn",
         "last_effect_counts_by_player",
+        "scoped_reveal_sets",
         "stack_trigger_event_batches",
         "stack_trigger_firings",
         "linked_exile_lki",
@@ -1398,7 +1400,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        63,
+        64,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -2375,7 +2377,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     assert_eq!(
         direct_fields.len(),
         48,
-        "private stack_trigger_firings is covered by its unit test"
+        "private stack_trigger_firings and scoped_reveal_sets have their own unit tests"
     );
     for field in direct_fields {
         let value = &before[field];
