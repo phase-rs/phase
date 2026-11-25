@@ -244,6 +244,7 @@ mod surge_cast_election;
 mod surveil_rest_pile_redirect_continuation;
 mod surveillance_phantasm_scry_or_surveil;
 mod suspect_printed_menace_701_60c;
+mod swallow_carrier_witnesses;
 mod swallow_exemption_witnesses;
 mod swans_prevention_followup;
 mod swarm_combat_witness;
