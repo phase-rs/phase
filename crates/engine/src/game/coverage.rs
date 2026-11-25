@@ -1621,6 +1621,7 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::Target => "target player".to_string(),
         PlayerScope::RecipientController => "recipient's controller".to_string(),
         PlayerScope::DefendingPlayer => "defending player".to_string(),
+        PlayerScope::AttackedPlayer => "the attacked player".to_string(),
         PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
         PlayerScope::AnyTurn => "any turn".to_string(),
         // CR 109.4 + CR 611.2: display label for a snapshotted duration scope.
@@ -1660,6 +1661,7 @@ fn fmt_player_is_poisoned(player: &PlayerScope) -> String {
         }
         PlayerScope::Target
         | PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. }
@@ -28161,6 +28163,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         for scope in [
             PlayerScope::ScopedPlayer,
             PlayerScope::DefendingPlayer,
+            PlayerScope::AttackedPlayer,
             PlayerScope::Target,
             PlayerScope::Opponent {
                 aggregate: AggregateFunction::Max,

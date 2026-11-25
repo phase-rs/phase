@@ -35268,6 +35268,7 @@ fn player_scope_reads_chosen_target(player: &PlayerScope, read: TargetRead) -> b
         | PlayerScope::Opponent { .. }
         | PlayerScope::RecipientController
         | PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => false,

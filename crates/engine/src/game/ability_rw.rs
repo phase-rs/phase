@@ -8242,7 +8242,8 @@ fn rw_player_scope(x: &PlayerScope) -> RwProfile {
         // CR 611.2 + CR 514.2: duration-timing-only, like `AnyTurn` — never reached
         // from a value/quantity/player-selection position.
         | PlayerScope::SpecificPlayer { .. }
-        | PlayerScope::DefendingPlayer => RwProfile::empty(),
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer => RwProfile::empty(),
     }
 }
 
@@ -11595,6 +11596,7 @@ mod poison_condition_rw_tests {
             PlayerScope::Controller,
             PlayerScope::ScopedPlayer,
             PlayerScope::DefendingPlayer,
+            PlayerScope::AttackedPlayer,
             PlayerScope::Opponent {
                 aggregate: AggregateFunction::Max,
             },

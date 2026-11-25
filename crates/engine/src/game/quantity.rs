@@ -1977,6 +1977,7 @@ pub(crate) fn player_scope_is_source_context_previewable(scope: &PlayerScope) ->
         PlayerScope::Controller
         | PlayerScope::Opponent { .. }
         | PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer
         | PlayerScope::SourceChosenPlayer => true,
         PlayerScope::AllPlayers { exclude, .. } => exclude
             .as_deref()
@@ -3707,7 +3708,9 @@ pub(crate) fn resolve_quantity_for_trigger_check(
 /// `resolve_single_player_scope`, the existing single authority for
 /// `PlayerScope` → `PlayerId`. No per-scope logic is re-implemented here, and
 /// `PlayerScope::DefendingPlayer` therefore reaches
-/// `combat::defending_player_cr508_5` on the same path as every other door.
+/// `combat::defending_player_cr508_5` (and `PlayerScope::AttackedPlayer`
+/// reaches `combat::attacked_player_cr508_7a`) on the same path as every other
+/// door.
 ///
 /// Trigger conditions are checked before targets exist at fire time (CR 603.4),
 /// so `targets` is empty and `ability` is `None`; scopes that need either
@@ -3735,7 +3738,7 @@ pub(crate) fn resolve_quantity_for_trigger_check(
 /// intervening-if about the ABILITY CONTROLLER — silently the wrong player, and
 /// with no gate rejection to catch it. This is reachable for any
 /// `ScopedPlayer` anchor the parser's attack-trigger rebind does not convert to
-/// [`PlayerScope::DefendingPlayer`] (a non-`Attacks` mode, or an `Attacks`
+/// [`PlayerScope::AttackedPlayer`] (a non-`Attacks` mode, or an `Attacks`
 /// trigger whose attacked noun is not a player).
 pub(crate) fn resolve_player_scope_for_trigger_check(
     state: &GameState,
@@ -10055,6 +10058,8 @@ pub(crate) fn resolve_single_player_scope(
                 .or_else(|| source_controller_for_context(state, &ctx))
         }
         PlayerScope::DefendingPlayer => defending_player_for_quantity_context(state, ctx),
+        // CR 508.7a: the player the triggering attack declared.
+        PlayerScope::AttackedPlayer => attacked_player_for_quantity_context(state, ctx),
         // CR 109.4: controller of the parent object target.
         PlayerScope::ParentObjectTarget {
             possession: PossessionAxis::Controller,
@@ -10166,6 +10171,10 @@ where
                 .map_or(0, &mut extract)
         }
         PlayerScope::DefendingPlayer => defending_player_for_quantity_context(state, ctx)
+            .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+            .map_or(0, &mut extract),
+        // CR 508.7a: the player the triggering attack declared.
+        PlayerScope::AttackedPlayer => attacked_player_for_quantity_context(state, ctx)
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
             .map_or(0, &mut extract),
         // CR 109.4 + CR 608.2c: controller of the parent object target.
@@ -10288,6 +10297,7 @@ where
         | PlayerScope::Target
         | PlayerScope::RecipientController
         | PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
@@ -10423,6 +10433,17 @@ fn defending_player_for_quantity_context(
     ctx: QuantityContext,
 ) -> Option<PlayerId> {
     crate::game::combat::defending_player_cr508_5(state, ctx.source, ctx.trigger_source.as_ref())
+}
+
+/// CR 508.7a: `PlayerScope::AttackedPlayer` door — the player the triggering
+/// attack declared the referent creature as attacking, read through the single
+/// authority `combat::attacked_player_cr508_7a` (same binding rule as the
+/// `DefendingPlayer` door; a reselection does not change the answer).
+fn attacked_player_for_quantity_context(
+    state: &GameState,
+    ctx: QuantityContext,
+) -> Option<PlayerId> {
+    crate::game::combat::attacked_player_cr508_7a(state, ctx.source, ctx.trigger_source.as_ref())
 }
 
 /// Drive the production `PlayerScope::DefendingPlayer` door from the cross-door

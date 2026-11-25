@@ -9297,6 +9297,7 @@ fn declined_search_player_scope_dependency(
         | PlayerScope::Opponent { .. }
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => false,
@@ -10591,6 +10592,7 @@ fn duration_outlives_declined_gate(duration: &Duration) -> bool {
             }
             | PlayerScope::RecipientController
             | PlayerScope::DefendingPlayer
+            | PlayerScope::AttackedPlayer
             | PlayerScope::ParentObjectTarget { .. }
             | PlayerScope::SourceChosenPlayer
             | PlayerScope::AnyTurn
@@ -36364,6 +36366,7 @@ fn resolve_grant_next_spell_ability(
         // from a value/quantity/player-selection position.
         | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer
         | PlayerScope::SourceChosenPlayer => Some(ability.controller),
         // CR 109.4 + CR 108.3: the controller/owner of the parent object target.
         PlayerScope::ParentObjectTarget { possession } => match possession {

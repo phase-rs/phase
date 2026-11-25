@@ -7459,6 +7459,7 @@ fn ability_condition_from_poisoned_player(player: &PlayerScope) -> Option<Abilit
         PlayerScope::AllPlayers { .. } => CountScope::All,
         // Trigger-specific scopes not supported in static abilities
         PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer
         | PlayerScope::Target
         | PlayerScope::RecipientController
         | PlayerScope::ParentObjectTarget { .. }

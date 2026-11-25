@@ -3257,10 +3257,11 @@ pub(crate) fn lower_trigger_ir_with_provenance(
         }
     }
 
-    // CR 508.5 + CR 603.2 + CR 603.4: resolve the intervening-if's "that player"
+    // CR 508.7a + CR 603.2 + CR 603.4: resolve the intervening-if's "that player"
     // anaphor against the trigger clause's own player nouns. On
     // "Whenever a creature attacks one of your opponents, if that player ...",
-    // the antecedent is the ATTACKED player, but `parse_inner_condition` cannot
+    // the antecedent is the player the attack DECLARED (a reselection does not
+    // change it), but `parse_inner_condition` cannot
     // see the trigger clause and emits the generic `ScopedPlayer` anchor — which
     // `targeting::extract_player_from_event` resolves to the ATTACKING player
     // for an `AttackersDeclared` event. Placed here, after the intervening-if
@@ -3268,9 +3269,9 @@ pub(crate) fn lower_trigger_ir_with_provenance(
     // produced `mode`/`valid_source`/`valid_target`/`attack_target_filter`,
     // because the condition parser can see none of them. Direct sibling of the
     // spell-cast anaphor remap directly above.
-    if attack_intervening_if_anaphor_is_defending_player(&def) {
+    if attack_intervening_if_anaphor_is_attacked_player(&def) {
         if let Some(cond) = def.condition.as_mut() {
-            rebind_attack_anaphor_to_defending_player(cond);
+            rebind_attack_anaphor_to_attacked_player(cond);
         }
     }
 
@@ -7531,11 +7532,11 @@ fn remap_self_cast_scope_in_quantity(expr: &mut QuantityExpr) {
 ///   [`attack_clause_names_attacked_player`], which owns that question.
 ///
 /// When the attacked-player noun is the controller ("attacks you"), the attacked
-/// player IS the controller, so `DefendingPlayer` and the controller name the
+/// player IS the controller, so `AttackedPlayer` and the controller name the
 /// same player and the rebind cannot diverge.
 // pub(crate) so the `AttackTargetFilter` variant matrix in `oracle_tests.rs`
 // can drive the production gate directly rather than a hand-built proxy.
-pub(crate) fn attack_intervening_if_anaphor_is_defending_player(def: &TriggerDefinition) -> bool {
+pub(crate) fn attack_intervening_if_anaphor_is_attacked_player(def: &TriggerDefinition) -> bool {
     def.mode == TriggerMode::Attacks
         && def
             .valid_source
@@ -7590,9 +7591,12 @@ fn attack_clause_names_attacked_player(def: &TriggerDefinition) -> bool {
     }
 }
 
-/// CR 508.5 + CR 603.2: Rebind [`PlayerScope::ScopedPlayer`] to
-/// [`PlayerScope::DefendingPlayer`] throughout an attack trigger's
-/// intervening-if.
+/// CR 508.7a + CR 603.2: Rebind [`PlayerScope::ScopedPlayer`] to
+/// [`PlayerScope::AttackedPlayer`] throughout an attack trigger's
+/// intervening-if. "That player" names the player the attack declared; a
+/// creature whose attack is reselected "is still considered to have attacked
+/// the player or permanent chosen as it was declared" (CR 508.7a), so the
+/// antecedent is not the live CR 508.5 defending player.
 ///
 /// `parse_inner_condition` cannot see the owning trigger, so the generic anaphor
 /// lands as `ScopedPlayer`, which resolves through
@@ -7608,11 +7612,11 @@ fn attack_clause_names_attacked_player(def: &TriggerDefinition) -> bool {
 /// `ControllerRef::ScopedPlayer` inside a nested `TargetFilter` is deliberately
 /// NOT rewritten — no "that player controls …" grammar currently produces one,
 /// and rewriting controller axes inside arbitrary filters would over-reach.
-fn rebind_attack_anaphor_to_defending_player(cond: &mut TriggerCondition) {
+fn rebind_attack_anaphor_to_attacked_player(cond: &mut TriggerCondition) {
     match cond {
         TriggerCondition::IsMonarch {
             player: player @ PlayerScope::ScopedPlayer,
-        } => *player = PlayerScope::DefendingPlayer,
+        } => *player = PlayerScope::AttackedPlayer,
         TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
             rebind_attack_anaphor_in_quantity(lhs);
             rebind_attack_anaphor_in_quantity(rhs);
@@ -7624,11 +7628,11 @@ fn rebind_attack_anaphor_to_defending_player(cond: &mut TriggerCondition) {
         TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
             conditions
                 .iter_mut()
-                .for_each(rebind_attack_anaphor_to_defending_player);
+                .for_each(rebind_attack_anaphor_to_attacked_player);
         }
-        TriggerCondition::Not { condition } => rebind_attack_anaphor_to_defending_player(condition),
+        TriggerCondition::Not { condition } => rebind_attack_anaphor_to_attacked_player(condition),
         TriggerCondition::EventTime { condition } => {
-            rebind_attack_anaphor_to_defending_player(condition)
+            rebind_attack_anaphor_to_attacked_player(condition)
         }
         // All other variants are leaves that carry no `PlayerScope`, which
         // `TriggerCondition::evaluation_anchor` enforces exhaustively
@@ -7638,7 +7642,7 @@ fn rebind_attack_anaphor_to_defending_player(cond: &mut TriggerCondition) {
 }
 
 /// Recursive `QuantityExpr` companion of
-/// [`rebind_attack_anaphor_to_defending_player`]. Exhaustive over `QuantityExpr`
+/// [`rebind_attack_anaphor_to_attacked_player`]. Exhaustive over `QuantityExpr`
 /// — no wildcard — so a new arithmetic wrapper is a compile error rather than a
 /// silently skipped nested [`PlayerScope`]. The leaf question is delegated to
 /// the equally exhaustive [`QuantityRef::player_scope_mut`].
@@ -7646,7 +7650,7 @@ fn rebind_attack_anaphor_in_quantity(expr: &mut QuantityExpr) {
     match expr {
         QuantityExpr::Ref { qty } => {
             if let Some(player @ PlayerScope::ScopedPlayer) = qty.player_scope_mut() {
-                *player = PlayerScope::DefendingPlayer;
+                *player = PlayerScope::AttackedPlayer;
             }
         }
         QuantityExpr::Fixed { .. } => {}

@@ -18720,10 +18720,12 @@ fn player_scope_unbound(scope: &PlayerScope, reader: BindingReader) -> bool {
         PlayerScope::AllPlayers { exclude, .. } => exclude
             .as_deref()
             .is_some_and(|scope| player_scope_unbound(scope, reader)),
-        // CR 508.5: the defending player.
-        PlayerScope::DefendingPlayer => match reader {
+        // CR 508.5: the defending player. CR 508.7a: the attacked player (as
+        // declared), read through the same bound attack event.
+        PlayerScope::DefendingPlayer | PlayerScope::AttackedPlayer => match reader {
             // The fire-time reader binds the attacker through the matched event
-            // (`combat::defending_player_cr508_5`), as the resolution does.
+            // (`combat::defending_player_cr508_5` / `attacked_player_cr508_7a`),
+            // as the resolution does.
             BindingReader::DelayedTriggerFireTime => false,
             // CR 106.7 + CR 508.5: `resolve_defending_player` falls back to the
             // trigger event's attacker when the source is not attacking, and a
@@ -35293,6 +35295,14 @@ pub mod tests {
                 }),
                 (false, true, true),
             ),
+            // CR 508.7a: the attacked player reaches the same trigger event.
+            (
+                "PlayerScope::AttackedPlayer",
+                quantity(QuantityRef::LifeTotal {
+                    player: PlayerScope::AttackedPlayer,
+                }),
+                (false, true, true),
+            ),
             (
                 "ControllerRef::DefendingPlayer",
                 count(controlled_by(ControllerRef::DefendingPlayer)),
@@ -43219,8 +43229,17 @@ pub mod tests {
     /// Revert-failing: an arm that ignores `player` and calls
     /// `eval_is_monarch(state, controller)` answers `false` for the positive
     /// case (P0 is not the monarch) and `true` for the negative one.
+    ///
+    /// CR 508.7a: with no reselection the as-declared `AttackedPlayer` subject
+    /// names the same player, so both scopes are driven through the same rows.
     #[test]
     fn is_monarch_defending_player_subject_reads_the_attacked_player_cr_508_5() {
+        for scope in [PlayerScope::DefendingPlayer, PlayerScope::AttackedPlayer] {
+            is_monarch_attack_subject_reads_the_attacked_player(scope);
+        }
+    }
+
+    fn is_monarch_attack_subject_reads_the_attacked_player(scope: PlayerScope) {
         let (mut state, source) = monarch_setup();
         let attacker = create_object(
             &mut state,
@@ -43229,9 +43248,7 @@ pub mod tests {
             "Attacker".to_string(),
             Zone::Battlefield,
         );
-        let condition = TriggerCondition::IsMonarch {
-            player: PlayerScope::DefendingPlayer,
-        };
+        let condition = TriggerCondition::IsMonarch { player: scope };
 
         state.monarch = Some(PlayerId(2));
         assert!(
@@ -43270,13 +43287,16 @@ pub mod tests {
 
         for scope in [
             PlayerScope::DefendingPlayer,
+            // CR 508.7a: fails closed with no attack in scope — it never falls
+            // back to live combat.
+            PlayerScope::AttackedPlayer,
             PlayerScope::Target,
             // CR 611.2a: serde-reachable duration-timing-only scope; must fail
             // closed rather than hit `resolve_single_player_scope`'s panic.
             PlayerScope::AnyTurn,
             // CR 603.4: the scope `parse_monarch_identity_subject` actually
             // EMITS for "that player is the monarch". Every anchor that the
-            // attack-trigger rebind does not convert to `DefendingPlayer`
+            // attack-trigger rebind does not convert to `AttackedPlayer`
             // arrives here as `ScopedPlayer`, so this is the one row that must
             // not inherit `resolve_single_player_scope`'s value-context
             // `unwrap_or(controller)` fallback.

@@ -30,20 +30,11 @@ pub fn resolve(
     match ids.as_slice() {
         // CR 608.2b: an illegal target leaves nothing to reselect.
         [] => {}
+        // CR 506.4: an object that is not a listed attacking creature has no
+        // destinations (`combat::valid_reselect_attack_targets`), so nothing is
+        // offered or changed.
         [attacker] => {
-            // CR 506.4: only a listed attacker that is still an attacking
-            // creature has an attacked relation to reselect.
-            let is_listed = state
-                .combat
-                .as_ref()
-                .is_some_and(|combat| combat.attackers.iter().any(|a| a.object_id == *attacker));
-            if is_listed && combat::is_attacker_in_play(state, *attacker) {
-                combat::choose_reselected_attack_target_or_apply(
-                    state,
-                    *attacker,
-                    ability.controller,
-                );
-            }
+            combat::choose_reselected_attack_target_or_apply(state, *attacker, ability.controller);
         }
         _ => {
             return Err(EffectError::InvalidParam(

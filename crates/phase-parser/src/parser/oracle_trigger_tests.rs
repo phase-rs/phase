@@ -401,11 +401,11 @@ fn lower_trigger_ir_binds_that_many_after_attack_anaphor_rebind() {
 
     let defending_hand = QuantityExpr::Ref {
         qty: QuantityRef::HandSize {
-            player: PlayerScope::DefendingPlayer,
+            player: PlayerScope::AttackedPlayer,
         },
     };
     // Reach-guard: the attack anaphor rebind ran and rewrote the gate.
-    assert!(attack_intervening_if_anaphor_is_defending_player(&def));
+    assert!(attack_intervening_if_anaphor_is_attacked_player(&def));
     let Some(TriggerCondition::QuantityQuality { quantity, .. }) = def.condition.as_ref() else {
         panic!(
             "gate must lower to QuantityQuality, got {:?}",

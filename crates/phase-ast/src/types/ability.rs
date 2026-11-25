@@ -12411,10 +12411,19 @@ pub enum PlayerScope {
     RecipientController,
     /// CR 508.5 / CR 508.5a: The defending player for the source attacking
     /// creature, resolved per attacker through
-    /// `combat::defending_player_for_attacker`. Used by attack-trigger
-    /// intervening-if quantities such as "no opponent has more life than that
-    /// player."
+    /// `combat::defending_player_cr508_5` (live: a CR 508.7 reselection changes
+    /// it). The printed literal "defending player": Septic Rats ("if defending
+    /// player is poisoned") and Scourge of the Throne ("if it's attacking the
+    /// player with the most life or tied for most life").
     DefendingPlayer,
+    /// CR 508.7a + CR 603.2: the player the triggering attack declared the
+    /// referred-to creature as attacking ("that player"/"that opponent" after an
+    /// attack-declaration head: M'Baku, Jabari Chieftain's "if that player is
+    /// the monarch"; Dethrone). Unlike [`DefendingPlayer`](Self::DefendingPlayer)
+    /// (CR 508.5, live), a reselection does not change it. Resolved only through
+    /// `combat::attacked_player_cr508_7a`. Not `AttackedYouScope::AttackedPlayer`,
+    /// a different enum (turn-history scope).
+    AttackedPlayer,
     /// CR 109.4 + CR 108.3 + CR 608.2c: The controller or owner (per
     /// `possession`) of the first object target of the resolving ability —
     /// "that opponent" anaphoring the controller of a bounced creature, or
@@ -13255,6 +13264,7 @@ fn player_scope_is_selected_dependent(scope: &PlayerScope) -> bool {
         | PlayerScope::Opponent { .. }
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => false,
@@ -17911,7 +17921,7 @@ impl StaticMode {
         match scope {
             PlayerScope::Controller => true,
             PlayerScope::RecipientController => matches!(self, StaticMode::CantUntap),
-            PlayerScope::DefendingPlayer => false,
+            PlayerScope::DefendingPlayer | PlayerScope::AttackedPlayer => false,
             // Engine limitation, not CR-mandated: these scopes have no binding
             // authority in this static enforcement context.
             PlayerScope::ScopedPlayer
@@ -18118,9 +18128,10 @@ pub enum StaticCondition {
     ///   anaphor to the player named by the triggering event)
     /// - [`PlayerScope::RecipientController`] ← the enchanted creature's
     ///   controller in an untap-step clause (CR 303.4m + CR 502.3)
-    /// - [`PlayerScope::DefendingPlayer`] ← the same anaphor once an attack
-    ///   trigger's clause has bound it (CR 508.5; see
-    ///   `parser::oracle_trigger::rebind_attack_anaphor_to_defending_player`)
+    /// - [`PlayerScope::AttackedPlayer`] ← the same anaphor once an attack
+    ///   trigger's clause has bound it to the player the attack declared
+    ///   (CR 508.7a; see
+    ///   `parser::oracle_trigger::rebind_attack_anaphor_to_attacked_player`)
     ///
     /// A scope the evaluation context cannot bind, or a designation no player
     /// currently holds (CR 725.5), makes the static condition UNANSWERABLE.
@@ -29631,6 +29642,7 @@ fn player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::Target
         | PlayerScope::Opponent { .. }
         | PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
@@ -29648,6 +29660,7 @@ fn single_player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::ScopedPlayer
         | PlayerScope::Target
         | PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
@@ -30894,7 +30907,7 @@ impl TargetFilter {
     /// a player attacks you") or an attacking OBJECT (`valid_source_matches`).
     ///
     /// Single authority: the parser's intervening-if anaphor gate
-    /// (`oracle_trigger::attack_intervening_if_anaphor_is_defending_player`)
+    /// (`oracle_trigger::attack_intervening_if_anaphor_is_attacked_player`)
     /// asks the same question and MUST ask it with this method, not with a
     /// `valid_source.is_none()` proxy — that proxy silently excludes every
     /// attack trigger whose attacker filter is an OBJECT filter in
@@ -41111,8 +41124,9 @@ pub enum TriggerCondition {
     /// `player` is the CR 109.5 subject axis; see
     /// [`StaticCondition::IsMonarch`] for the full axis rationale. "if you're
     /// the monarch" is [`PlayerScope::Controller`]; "if that player is the
-    /// monarch" on an attack trigger is [`PlayerScope::DefendingPlayer`]
-    /// (CR 508.5 — the player the triggering creature is attacking).
+    /// monarch" on an attack trigger is [`PlayerScope::AttackedPlayer`]
+    /// (CR 508.7a — the player the triggering creature was declared as
+    /// attacking; a reselection does not change it).
     ///
     /// An unresolvable scope makes the condition UNANSWERABLE, not false:
     /// `triggers::check_trigger_condition_with_source` rejects the whole
@@ -53584,6 +53598,7 @@ mod monarch_subject_axis_tests {
             PlayerScope::Controller,
             PlayerScope::ScopedPlayer,
             PlayerScope::DefendingPlayer,
+            PlayerScope::AttackedPlayer,
         ] {
             assert!(!ok.duration_timing_only(), "{ok:?} must resolve normally");
         }

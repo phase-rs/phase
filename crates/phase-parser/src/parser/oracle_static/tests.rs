@@ -33039,12 +33039,13 @@ fn parse_commander_creatures_you_own_grant_attack_trigger() {
                         QuantityExpr::Ref {
                             qty:
                                 QuantityRef::LifeTotal {
-                                    player: PlayerScope::DefendingPlayer,
+                                    player: PlayerScope::AttackedPlayer,
                                 },
                         },
                     ..
                 }) => {}
-                other => panic!("expected defending-player life condition, got {other:?}"),
+                // CR 508.7a: "that player" is the player the attack declared.
+                other => panic!("expected attacked-player life condition, got {other:?}"),
             }
             let execute = trigger.execute.as_ref().expect("trigger must have effect");
             match execute.effect.as_ref() {

@@ -5120,7 +5120,7 @@ fn is_myriad_attack_trigger(t: &TriggerDefinition) -> bool {
 /// Idempotency-shape predicate for `synthesize_dethrone`. True iff `trigger`
 /// is the synthesized Dethrone attack-trigger shape (`TriggerMode::Attacks`
 /// + `valid_card = SelfRef` + execute = PutCounter(P1P1) on SelfRef
-/// + condition = DefendingPlayer life >= AllPlayers max life).
+/// + condition = AttackedPlayer life >= AllPlayers max life).
 fn is_dethrone_attack_trigger(t: &TriggerDefinition) -> bool {
     if !matches!(t.mode, TriggerMode::Attacks)
         || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
@@ -6484,13 +6484,15 @@ fn build_dethrone_trigger() -> TriggerDefinition {
     .description("Put a +1/+1 counter on this creature".to_string());
 
     // CR 702.105a: "attacks the player with the most life or tied for most
-    // life". The defending player's life total must be >= the maximum life
+    // life". The attacked player's life total must be >= the maximum life
     // total among all players. This is an intervening-if condition checked
-    // at both detection and resolution per CR 603.4.
+    // at both detection and resolution per CR 603.4. CR 508.7a: "the player"
+    // is the one the creature was declared as attacking — a reselection
+    // (CR 508.7) does not change it.
     let condition = TriggerCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::LifeTotal {
-                player: PlayerScope::DefendingPlayer,
+                player: PlayerScope::AttackedPlayer,
             },
         },
         comparator: Comparator::GE,
@@ -16303,7 +16305,7 @@ mod riot_synthesis_tests {
 mod dethrone_tests {
     //! CR 702.105a: Dethrone synthesis tests. The synthesized trigger must be
     //! `TriggerMode::Attacks` with `valid_card = SelfRef`, an intervening-if
-    //! condition comparing the defending player's life total against the maximum
+    //! condition comparing the attacked player's life total against the maximum
     //! life total among all players, and execute body `Effect::PutCounter` with
     //! a single +1/+1 counter on `SelfRef`.
     use super::*;
@@ -16351,9 +16353,27 @@ mod dethrone_tests {
         assert_eq!(*counter_type, CounterType::Plus1Plus1);
         assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
         assert!(matches!(target, TargetFilter::SelfRef));
-        assert!(
-            trigger.condition.is_some(),
-            "dethrone trigger must have an intervening-if condition"
+        // CR 702.105a + CR 508.7a: the left-hand side reads the player the
+        // creature was declared as attacking, not the live defending player.
+        assert_eq!(
+            trigger.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::AttackedPlayer,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Max,
+                            exclude: None,
+                        },
+                    },
+                },
+            }),
+            "dethrone trigger must have the attacked-player intervening-if condition"
         );
     }
 

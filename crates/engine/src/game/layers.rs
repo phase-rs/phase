@@ -639,6 +639,7 @@ fn permission_scope_is_keyable(scope: &PlayerScope) -> bool {
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::RecipientController
         | PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer => false,
     }
@@ -673,6 +674,7 @@ fn permission_scope_selects(
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::RecipientController
         | PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer => false,
     }
@@ -1553,8 +1555,8 @@ impl ConditionContext {
         match scope {
             PlayerScope::Controller => true,
             PlayerScope::RecipientController => self.recipient.is_some(),
-            // No static designation resolver currently binds this subject.
-            PlayerScope::DefendingPlayer => false,
+            // No static designation resolver currently binds these subjects.
+            PlayerScope::DefendingPlayer | PlayerScope::AttackedPlayer => false,
             // Engine limitation, not CR-mandated: no binding authority for
             // these scopes is carried by this layer evaluation context.
             PlayerScope::ScopedPlayer
@@ -1663,6 +1665,7 @@ fn designation_player(
             .and_then(|id| state.objects.get(&id))
             .map(|object| object.controller),
         PlayerScope::DefendingPlayer
+        | PlayerScope::AttackedPlayer
         | PlayerScope::ScopedPlayer
         | PlayerScope::Target
         | PlayerScope::Opponent { .. }

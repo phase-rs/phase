@@ -7073,6 +7073,7 @@ fn scan_player_scope(x: &PlayerScope) -> Axes<'_> {
         }
         PlayerScope::RecipientController => Axes::NONE,
         PlayerScope::DefendingPlayer => Axes::NONE,
+        PlayerScope::AttackedPlayer => Axes::NONE,
         PlayerScope::ParentObjectTarget { .. } => Axes {
             event: true,
             sibling: SiblingReads::None,
@@ -15762,6 +15763,7 @@ mod poison_condition_scan_tests {
             PlayerScope::Controller,
             PlayerScope::ScopedPlayer,
             PlayerScope::DefendingPlayer,
+            PlayerScope::AttackedPlayer,
             PlayerScope::Opponent {
                 aggregate: AggregateFunction::Max,
             },

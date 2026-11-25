@@ -22,10 +22,14 @@ use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{AttackTargetChoicePurpose, GameState, StackEntryKind, WaitingFor};
+use engine::types::game_state::{
+    AttackTargetChoicePurpose, CastPaymentMode, GameState, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
-use engine::types::mana::ManaColor;
+use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::resolved_commands::{
@@ -789,6 +793,20 @@ fn reselect_journal_replays_and_validates() {
             }),
             "combat-membership reselection has incoherent resulting identity",
         ),
+        // V9: CR 508.5 + CR 508.7c — a creature reselected to attack P2 has P2 as its
+        // defending player.
+        (
+            with_edit(&command, |edit| {
+                if let ResolvedCombatMembershipEdit::Reselect {
+                    resulting_defending_player,
+                    ..
+                } = edit
+                {
+                    *resulting_defending_player = P1;
+                }
+            }),
+            "combat-membership reselection has mismatched defending player",
+        ),
     ];
     for (bad, message) in cases {
         let error = decode_with(live, bad).expect_err(message);
@@ -1043,4 +1061,458 @@ fn reselection_ignores_a_cant_attack_restriction() {
 #[test]
 fn reselection_ignores_an_attack_tax() {
     reselect_ignores_declaration_rules(true);
+}
+
+// ---------------------------------------------------------------------------
+// CR 508.7a: "that player" after an attack-declaration head reads the player the attack
+// DECLARED; the literal "defending player" stays live (CR 508.5). Rulings: "that creature is
+// still considered to have attacked the player or permanent as declared, but it is now attacking
+// the new player or permanent"; an ability targeting something the "defending player" controls
+// loses that target when the defending player changes.
+// ---------------------------------------------------------------------------
+
+const MBAKU: &str = "At the beginning of your end step, if there is no monarch, target opponent becomes the monarch.\nWhenever a creature attacks one of your opponents, if that player is the monarch, that creature gets +1/+1 and gains trample until end of turn.";
+const DENETHOR: &str = "When Denethor enters, scry 2.\n{3}{R}, {T}, Sacrifice Denethor: Target player becomes the monarch. Denethor deals 3 damage to any target.";
+const SEPTIC_RATS: &str = "Infect (This creature deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)\nWhenever this creature attacks, if defending player is poisoned, it gets +1/+1 until end of turn.";
+const TREASONOUS_OGRE: &str = "Dethrone (Whenever this creature attacks the player with the most life or tied for most life, put a +1/+1 counter on it.)\nPay 3 life: Add {R}.";
+const TEFERIS_PROTECTION: &str = "Until your next turn, your life total can't change and you gain protection from everything. All permanents you control phase out. (While they're phased out, they're treated as though they don't exist. They phase in before you untap during your untap step.)\nExile Teferi's Protection.";
+
+fn power_toughness(state: &GameState, id: ObjectId) -> (Option<i32>, Option<i32>) {
+    let object = &state.objects[&id];
+    (object.power, object.toughness)
+}
+
+fn has_trample(state: &GameState, id: ObjectId) -> bool {
+    state.objects[&id].keywords.contains(&Keyword::Trample)
+}
+
+fn stack_has_trigger_from(state: &GameState, source: ObjectId) -> bool {
+    state.stack.iter().any(|entry| {
+        entry.source_id == source && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+    })
+}
+
+/// A three-player board: P0 controls M'Baku and Grizzly Bears and holds Misleading Signpost.
+struct MbakuBoard {
+    d: Driver,
+    mbaku: ObjectId,
+    bears: ObjectId,
+    signpost: ObjectId,
+    denethor: Option<ObjectId>,
+}
+
+fn mbaku_board(monarch: PlayerId, with_denethor: bool) -> MbakuBoard {
+    let mut sc = GameScenario::new_n_player(3, 17);
+    sc.at_phase(Phase::PreCombatMain);
+    let mbaku = sc
+        .add_creature_from_oracle(P0, "M'Baku, Jabari Chieftain", 4, 3, MBAKU)
+        .id();
+    let bears = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let signpost = add_card(&mut sc, P0, Card::Signpost);
+    let denethor = with_denethor.then(|| {
+        sc.add_creature_from_oracle(P0, "Denethor, Stone Seer", 1, 3, DENETHOR)
+            .id()
+    });
+    let mut r = sc.build();
+    r.state_mut().monarch = Some(monarch);
+    MbakuBoard {
+        d: Driver::new(r),
+        mbaku,
+        bears,
+        signpost,
+        denethor,
+    }
+}
+
+/// Attack `defender` with the Bears; M'Baku's trigger goes on the stack.
+fn mbaku_attack(b: &mut MbakuBoard, defender: PlayerId) {
+    b.d.advance_to_combat();
+    b.d.declare(b.bears, AttackTarget::Player(defender), None);
+    assert!(
+        stack_has_trigger_from(b.d.state(), b.mbaku),
+        "reach guard: M'Baku's trigger is on the stack (its fire-time check passed)"
+    );
+}
+
+/// P0 casts Signpost targeting the Bears; `reselect` answers the optional question (and the
+/// destination prompt when it is `Some`). M'Baku's trigger then resolves.
+fn mbaku_reselect_and_resolve(b: &mut MbakuBoard, reselect: Option<PlayerId>) {
+    b.d.cast_to_optional_choice(b.signpost, b.bears);
+    assert_optional_choice(b.d.state(), P0);
+    assert!(
+        stack_has_trigger_from(b.d.state(), b.mbaku),
+        "M'Baku's trigger is still on the stack under the reselection"
+    );
+    match reselect {
+        Some(player) => {
+            b.d.decide(true);
+            let offered = reselect_prompt(b.d.state(), P0, b.bears);
+            assert!(
+                offered.contains(&AttackTarget::Player(player)),
+                "{offered:?}"
+            );
+            b.d.choose(AttackTarget::Player(player));
+        }
+        None => b.d.decide(false),
+    }
+    b.d.resolve_stack();
+    b.d.assert_boundary();
+}
+
+/// V1: CR 508.7a + CR 603.4 — M'Baku's "that player is the monarch" is the player the Bears
+/// were declared attacking (P1, the monarch), so the reselection to P2 does not stop the pump.
+#[test]
+fn mbaku_reads_the_declared_player_after_a_reselection() {
+    let mut b = mbaku_board(P1, false);
+    mbaku_attack(&mut b, P1);
+    mbaku_reselect_and_resolve(&mut b, Some(P2));
+    assert_eq!(b.d.attacker(b.bears), (AttackTarget::Player(P2), P2));
+    assert_eq!(b.d.state().monarch, Some(P1));
+    assert_eq!(
+        power_toughness(b.d.state(), b.bears),
+        (Some(3), Some(3)),
+        "the declared player (P1) is the monarch, so the Bears get +1/+1"
+    );
+    assert!(has_trample(b.d.state(), b.bears));
+}
+
+/// V1 paired positive: declining keeps the pump.
+#[test]
+fn mbaku_pumps_when_the_reselection_is_declined() {
+    let mut b = mbaku_board(P1, false);
+    mbaku_attack(&mut b, P1);
+    mbaku_reselect_and_resolve(&mut b, None);
+    assert_eq!(b.d.attacker(b.bears), (AttackTarget::Player(P1), P1));
+    assert_eq!(power_toughness(b.d.state(), b.bears), (Some(3), Some(3)));
+    assert!(has_trample(b.d.state(), b.bears));
+}
+
+/// V1b: CR 508.7a + CR 603.4 — the resolution recheck reads ONLY the declared player. The Bears
+/// were declared attacking P2 (the monarch at fire time); Denethor then makes P1 the monarch and
+/// the Bears are reselected to P1. The declared player (P2) is no longer the monarch, so the
+/// trigger does nothing, even though the player the Bears are now attacking is the monarch.
+#[test]
+fn mbaku_ignores_the_live_defender_after_a_reselection() {
+    let mut b = mbaku_board(P2, true);
+    let denethor = b.denethor.unwrap();
+    mbaku_attack(&mut b, P2);
+
+    // {3}{R}: funded from the pool in the declare attackers step (CR 500.5 empties the pool
+    // between steps, and the activation does not tap sources).
+    for _ in 0..4 {
+        let _ =
+            b.d.r
+                .state_mut()
+                .add_mana_to_pool(P0, ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
+    }
+    // Denethor: "Target player becomes the monarch. Denethor deals 3 damage to any target."
+    b.d.act(GameAction::ActivateAbility {
+        source_id: denethor,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    });
+    let mut player_targets = [P1, P2].into_iter();
+    for _ in 0..8 {
+        match b.d.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                let player = player_targets.next().expect("two target slots");
+                b.d.act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(player)),
+                });
+            }
+            WaitingFor::ManaPayment { .. } => b.d.act(GameAction::PassPriority),
+            WaitingFor::PayCost { .. } => b.d.act(GameAction::SelectCards {
+                cards: vec![denethor],
+            }),
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected prompt while activating Denethor: {other:?}"),
+        }
+    }
+    assert!(
+        player_targets.next().is_none(),
+        "both of Denethor's targets were chosen"
+    );
+    while b.d.state().stack.len() > 1 {
+        b.d.act(GameAction::PassPriority);
+    }
+    assert_eq!(b.d.state().monarch, Some(P1), "Denethor crowned P1");
+    assert_eq!(b.d.life(P2), 17);
+    b.d.pass_to(P0);
+
+    mbaku_reselect_and_resolve(&mut b, Some(P1));
+    assert_eq!(b.d.attacker(b.bears), (AttackTarget::Player(P1), P1));
+    assert_eq!(
+        b.d.state().monarch,
+        Some(P1),
+        "the creature's live defender is the monarch"
+    );
+    assert_eq!(
+        power_toughness(b.d.state(), b.bears),
+        (Some(2), Some(2)),
+        "the declared player (P2) is not the monarch, so the trigger does nothing"
+    );
+    assert!(!has_trample(b.d.state(), b.bears));
+}
+
+/// An `players`-player board: P0 controls the attacker (built by `add`) and holds Signpost.
+struct SoloBoard {
+    d: Driver,
+    attacker: ObjectId,
+    signpost: ObjectId,
+}
+
+fn solo_board(
+    players: u8,
+    add: impl FnOnce(&mut GameScenario) -> ObjectId,
+    setup: impl FnOnce(&mut GameState),
+) -> SoloBoard {
+    let mut sc = GameScenario::new_n_player(players, 23);
+    sc.at_phase(Phase::PreCombatMain);
+    let attacker = add(&mut sc);
+    let signpost = add_card(&mut sc, P0, Card::Signpost);
+    let mut r = sc.build();
+    setup(r.state_mut());
+    SoloBoard {
+        d: Driver::new(r),
+        attacker,
+        signpost,
+    }
+}
+
+/// Attack `defender`, have P0 cast Signpost on the attacker and answer with `reselect`, then
+/// resolve the stack.
+fn solo_reselect_and_resolve(b: &mut SoloBoard, defender: PlayerId, reselect: Option<PlayerId>) {
+    b.d.advance_to_combat();
+    b.d.declare(b.attacker, AttackTarget::Player(defender), None);
+    assert!(
+        stack_has_trigger_from(b.d.state(), b.attacker),
+        "reach guard: the attack trigger is on the stack"
+    );
+    b.d.cast_to_optional_choice(b.signpost, b.attacker);
+    match reselect {
+        Some(player) => {
+            b.d.decide(true);
+            b.d.choose(AttackTarget::Player(player));
+        }
+        None => b.d.decide(false),
+    }
+    b.d.resolve_stack();
+    b.d.assert_boundary();
+}
+
+fn septic_rats_board() -> SoloBoard {
+    solo_board(
+        3,
+        |sc| {
+            sc.add_creature_from_oracle(P0, "Septic Rats", 2, 2, SEPTIC_RATS)
+                .from_oracle_text_with_keywords(&["Infect"], SEPTIC_RATS)
+                .id()
+        },
+        |state| state.players[1].poison_counters = 1,
+    )
+}
+
+/// V2: CR 508.5 + CR 603.4 — the literal "defending player" stays live: after the Rats are
+/// reselected from poisoned P1 to clean P2, the resolution recheck fails.
+#[test]
+fn septic_rats_defending_player_reads_the_reselected_player() {
+    let mut b = septic_rats_board();
+    solo_reselect_and_resolve(&mut b, P1, Some(P2));
+    assert_eq!(b.d.attacker(b.attacker), (AttackTarget::Player(P2), P2));
+    assert_eq!(power_toughness(b.d.state(), b.attacker), (Some(2), Some(2)));
+}
+
+/// V2 paired positive: declining keeps P1 the defending player, and the Rats get +1/+1.
+#[test]
+fn septic_rats_pumps_when_the_reselection_is_declined() {
+    let mut b = septic_rats_board();
+    solo_reselect_and_resolve(&mut b, P1, None);
+    assert_eq!(power_toughness(b.d.state(), b.attacker), (Some(3), Some(3)));
+}
+
+fn treasonous_ogre_board() -> SoloBoard {
+    solo_board(
+        3,
+        |sc| {
+            sc.add_creature_from_oracle(P0, "Treasonous Ogre", 2, 3, TREASONOUS_OGRE)
+                .from_oracle_text_with_keywords(&["Dethrone"], TREASONOUS_OGRE)
+                .id()
+        },
+        |state| state.players[1].life = 25,
+    )
+}
+
+fn plus_counters(state: &GameState, id: ObjectId) -> u32 {
+    state.objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// V5a: CR 702.105a + CR 508.7a — Dethrone's "the player with the most life" is the player the
+/// Ogre was declared attacking (P1, 25 life). Reselecting to P2 (20 life) does not stop the
+/// counter (Dethrone ruling: once it triggers, the counter is put on).
+#[test]
+fn dethrone_reads_the_declared_player_after_a_reselection() {
+    let mut b = treasonous_ogre_board();
+    solo_reselect_and_resolve(&mut b, P1, Some(P2));
+    assert_eq!(b.d.attacker(b.attacker), (AttackTarget::Player(P2), P2));
+    assert_eq!(plus_counters(b.d.state(), b.attacker), 1);
+}
+
+/// V5a hostile pair: attacking P2 (not the player with the most life) does not trigger.
+#[test]
+fn dethrone_does_not_trigger_against_a_player_without_the_most_life() {
+    let mut b = treasonous_ogre_board();
+    b.d.advance_to_combat();
+    b.d.declare(b.attacker, AttackTarget::Player(P2), None);
+    assert!(!stack_has_trigger_from(b.d.state(), b.attacker));
+    b.d.resolve_stack();
+    assert_eq!(plus_counters(b.d.state(), b.attacker), 0);
+}
+
+/// V6: CR 702.26b — a phased-out planeswalker is treated as though it does not exist, so it is
+/// not a reselection destination. P1 casts Teferi's Protection (Jace phases out), then Signpost:
+/// the only destination is P1, which is the current one, so no prompt appears and nothing is
+/// journaled. Without Teferi's Protection, Jace is offered.
+fn phased_out_planeswalker_reselection(protection: bool) {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let cleric = add_cleric(&mut sc);
+    let jace = add_jace(&mut sc, P1);
+    let signpost = add_card(&mut sc, P1, Card::Signpost);
+    let teferi = sc
+        .add_spell_to_hand_from_oracle(P1, "Teferi's Protection", true, TEFERIS_PROTECTION)
+        .id();
+    let mut d = Driver::new(sc.build());
+    d.advance_to_combat();
+    d.declare(cleric, AttackTarget::Player(P1), None);
+    d.resolve_stack();
+    if protection {
+        d.pass_to(P1);
+        d.r.cast(teferi).commit();
+        d.trace.push(d.state().waiting_for.variant_name());
+        d.resolve_stack();
+        assert!(
+            d.state().objects[&jace].is_phased_out(),
+            "reach guard: Jace phased out"
+        );
+    }
+    d.pass_to(P1);
+    d.cast_to_optional_choice(signpost, cleric);
+    assert_optional_choice(d.state(), P1);
+    let journal_start = d.journal_len();
+    d.decide(true);
+    if protection {
+        assert!(
+            !d.trace.contains(&"EntryAttackTargetChoice"),
+            "no prompt: {:?}",
+            d.trace
+        );
+        d.assert_boundary();
+        assert_eq!(d.attacker(cleric), (AttackTarget::Player(P1), P1));
+        assert!(membership_commands(d.state(), journal_start).is_empty());
+        assert!(d.state().objects[&jace].is_phased_out());
+    } else {
+        assert_eq!(
+            as_set(&reselect_prompt(d.state(), P1, cleric)),
+            HashSet::from([AttackTarget::Player(P1), AttackTarget::Planeswalker(jace)])
+        );
+    }
+}
+
+#[test]
+fn a_phased_out_planeswalker_is_not_a_reselection_destination() {
+    phased_out_planeswalker_reselection(true);
+}
+
+#[test]
+fn a_phased_in_planeswalker_is_a_reselection_destination() {
+    phased_out_planeswalker_reselection(false);
+}
+
+/// A `players`-player board: P0's Cleric attacks P2; P0 casts Signpost and accepts, reaching
+/// the reselection prompt; P2 then concedes (CR 104.3a) while the prompt is pending.
+fn conceded_destination_board(players: u8) -> (Driver, ObjectId, usize) {
+    let mut b = solo_board(players, add_cleric, |_| {});
+    b.d.advance_to_combat();
+    b.d.declare(b.attacker, AttackTarget::Player(P2), None);
+    b.d.resolve_stack();
+    b.d.cast_to_optional_choice(b.signpost, b.attacker);
+    let journal_start = b.d.journal_len();
+    b.d.decide(true);
+    let offered = reselect_prompt(b.d.state(), P0, b.attacker);
+    assert!(offered.contains(&AttackTarget::Player(P2)), "{offered:?}");
+    b.d.act(GameAction::Concede { player_id: P2 });
+    assert!(b.d.state().eliminated_players.contains(&P2));
+    // The pending prompt still offers the conceded player.
+    assert_eq!(reselect_prompt(b.d.state(), P0, b.attacker), offered);
+    let offered_actions: Vec<String> = legal_actions(b.d.state())
+        .iter()
+        .map(|action| format!("{action:?}"))
+        .collect();
+    assert!(
+        offered_actions.contains(&format!(
+            "{:?}",
+            GameAction::ChooseEntryAttackTarget {
+                target: AttackTarget::Player(P2)
+            }
+        )),
+        "{offered_actions:?}"
+    );
+    (b.d, b.attacker, journal_start)
+}
+
+/// V7: CR 608.2d + CR 508.7c + CR 800.4a — the chosen destination left the game while the
+/// choice was pending; the one remaining legal destination (P1) is forced.
+fn conceded_destination_single_remaining(choice: PlayerId) {
+    let (mut d, cleric, journal_start) = conceded_destination_board(3);
+    d.choose(AttackTarget::Player(choice));
+    d.assert_boundary();
+    assert_eq!(d.attacker(cleric), (AttackTarget::Player(P1), P1));
+    let commands = membership_commands(d.state(), journal_start);
+    let reselects = commands
+        .iter()
+        .filter(|command| matches!(command.edit, ResolvedCombatMembershipEdit::Reselect { .. }))
+        .count();
+    assert_eq!(reselects, 1, "{commands:?}");
+}
+
+#[test]
+fn a_conceded_destination_resolves_to_the_single_remaining_one() {
+    conceded_destination_single_remaining(P2);
+}
+
+#[test]
+fn choosing_the_remaining_destination_after_a_concession_reselects_it() {
+    conceded_destination_single_remaining(P1);
+}
+
+/// V8: CR 608.2d + CR 508.7c — with several destinations still legal after the chosen one left
+/// the game, the choice is offered again among exactly those.
+#[test]
+fn a_conceded_destination_with_several_remaining_reprompts() {
+    let (mut d, cleric, _) = conceded_destination_board(4);
+    let p3 = PlayerId(3);
+    d.choose(AttackTarget::Player(P2));
+    assert_eq!(
+        as_set(&reselect_prompt(d.state(), P0, cleric)),
+        HashSet::from([AttackTarget::Player(P1), AttackTarget::Player(p3)])
+    );
+    // A destination never offered is rejected and changes nothing.
+    let waiting_before = d.state().waiting_for.clone();
+    let combat_before = combat_json(d.state());
+    assert!(d
+        .r
+        .act(GameAction::ChooseEntryAttackTarget {
+            target: AttackTarget::Player(P0)
+        })
+        .is_err());
+    assert_eq!(d.state().waiting_for, waiting_before);
+    assert_eq!(combat_json(d.state()), combat_before);
+
+    d.choose(AttackTarget::Player(p3));
+    d.assert_boundary();
+    assert_eq!(d.attacker(cleric), (AttackTarget::Player(p3), p3));
 }

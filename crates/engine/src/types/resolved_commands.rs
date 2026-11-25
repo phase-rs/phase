@@ -3911,6 +3911,18 @@ impl ResolvedRulesJournal {
                                 .to_string(),
                         ));
                     }
+                    // CR 508.5 + CR 508.7c: a creature reselected to attack a
+                    // player has that player as its defending player.
+                    ResolvedCombatMembershipEdit::Reselect {
+                        resulting_attack_target: AttackTarget::Player(player),
+                        resulting_defending_player,
+                        ..
+                    } if resulting_defending_player != player => {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership reselection has mismatched defending player"
+                                .to_string(),
+                        ));
+                    }
                     // CR 400.7 + CR 508.7c: a reselected player has no pin; a
                     // reselected permanent is pinned to that exact permanent.
                     ResolvedCombatMembershipEdit::Reselect {

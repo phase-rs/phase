@@ -588,7 +588,7 @@ fn parse_source_controlled_or_your_commander(input: &str) -> OracleResult<'_, St
 fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_opponent_poison_conditions,
-        parse_defending_player_more_life_than_another_opponent,
+        parse_attack_player_more_life_than_another_opponent,
         parse_defending_player_comparison_conditions,
         parse_that_player_controls_more_comparison,
         parse_no_opponent_comparison_conditions,
@@ -2003,9 +2003,9 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
 /// player"/"that opponent" is the anaphoric event-scoped player; this
 /// combinator cannot see the owning trigger, so it emits the generic
 /// [`PlayerScope::ScopedPlayer`] anchor, which an attack trigger rebinds to
-/// [`PlayerScope::DefendingPlayer`] when its clause supplies a more specific
-/// antecedent (CR 508.5 — see
-/// `oracle_trigger::rebind_attack_anaphor_to_defending_player`).
+/// [`PlayerScope::AttackedPlayer`] when its clause supplies a more specific
+/// antecedent (CR 508.7a — see
+/// `oracle_trigger::rebind_attack_anaphor_to_attacked_player`).
 ///
 /// Mirrors `parse_that_player_has_conditions` in this module, which already
 /// maps the same two anaphors to [`PlayerScope::ScopedPlayer`].
@@ -11690,21 +11690,25 @@ fn parse_that_player_controls_more_comparison(input: &str) -> OracleResult<'_, S
 /// comparing the defending player's permanents to the trigger controller's.
 /// The object-count machinery already handles `ControllerRef::You`; this arm
 /// adds the combat-context controller axis for the LHS.
-/// CR 508.5 + CR 603.4: "that opponent has more life than another of your
-/// opponents" — defending player's life exceeds the lowest life total among
-/// the source controller's opponents (Breena, the Demagogue).
-fn parse_defending_player_more_life_than_another_opponent(
+/// CR 508.7a + CR 603.4: "that opponent has more life than another of your
+/// opponents" — the attacked player's life exceeds the lowest life total among
+/// the source controller's opponents (Breena, the Demagogue). "That opponent"
+/// is the player the attack declared (CR 508.7a: a reselection does not change
+/// it); the literal "defending player" is the live CR 508.5 defending player.
+fn parse_attack_player_more_life_than_another_opponent(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("that opponent "), tag("defending player "))).parse(input)?;
+    let (rest, player) = alt((
+        value(PlayerScope::AttackedPlayer, tag("that opponent ")),
+        value(PlayerScope::DefendingPlayer, tag("defending player ")),
+    ))
+    .parse(input)?;
     let (rest, _) = tag("has more life than another of your opponents").parse(rest)?;
     Ok((
         rest,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal {
-                    player: PlayerScope::DefendingPlayer,
-                },
+                qty: QuantityRef::LifeTotal { player },
             },
             comparator: Comparator::GT,
             rhs: QuantityExpr::Ref {
@@ -11754,13 +11758,18 @@ fn parse_defending_player_comparison_conditions(input: &str) -> OracleResult<'_,
 /// Parse "no opponent has more life than that/defending player".
 ///
 /// This is the negated form of the cross-player life comparison used on attack
-/// triggers such as Guild Artisan. The referenced player is the defending
-/// player from the attack event, so the condition composes as:
-/// max(opponent life) <= defending-player life.
+/// triggers such as Guild Artisan, so the condition composes as:
+/// max(opponent life) <= referenced-player life. CR 508.7a: "that player" is
+/// the player the attack declared (a reselection does not change it); CR 508.5:
+/// the literal "defending player" is the live defending player.
 fn parse_no_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("no opponent ").parse(input)?;
     let (rest, _) = tag("has more life than ").parse(rest)?;
-    let (rest, _) = alt((tag("that player"), tag("defending player"))).parse(rest)?;
+    let (rest, player) = alt((
+        value(PlayerScope::AttackedPlayer, tag("that player")),
+        value(PlayerScope::DefendingPlayer, tag("defending player")),
+    ))
+    .parse(rest)?;
     Ok((
         rest,
         StaticCondition::QuantityComparison {
@@ -11773,9 +11782,7 @@ fn parse_no_opponent_comparison_conditions(input: &str) -> OracleResult<'_, Stat
             },
             comparator: Comparator::LE,
             rhs: QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal {
-                    player: PlayerScope::DefendingPlayer,
-                },
+                qty: QuantityRef::LifeTotal { player },
             },
         },
     ))
@@ -21567,7 +21574,7 @@ mod tests {
                     QuantityExpr::Ref {
                         qty:
                             QuantityRef::LifeTotal {
-                                player: PlayerScope::DefendingPlayer,
+                                player: PlayerScope::AttackedPlayer,
                             },
                     },
                 comparator: Comparator::GT,
@@ -21582,12 +21589,14 @@ mod tests {
                             },
                     },
             } => {}
-            other => panic!("expected defending life GT min opponent life, got {other:?}"),
+            other => panic!("expected attacked-player life GT min opponent life, got {other:?}"),
         }
     }
 
     #[test]
     fn test_no_opponent_has_more_life_than_that_player() {
+        // Guild Artisan's clause: "that player" is the player the attack
+        // declared (CR 508.7a).
         let (rest, c) =
             parse_inner_condition("no opponent has more life than that player").unwrap();
         assert_eq!(rest, "");
@@ -21608,12 +21617,12 @@ mod tests {
                     QuantityExpr::Ref {
                         qty:
                             QuantityRef::LifeTotal {
-                                player: PlayerScope::DefendingPlayer,
+                                player: PlayerScope::AttackedPlayer,
                             },
                     },
             } => {}
             other => {
-                panic!("expected OpponentLifeTotal LE DefendingPlayerLifeTotal, got {other:?}")
+                panic!("expected OpponentLifeTotal LE AttackedPlayerLifeTotal, got {other:?}")
             }
         }
     }
