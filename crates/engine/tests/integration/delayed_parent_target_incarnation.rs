@@ -1073,7 +1073,6 @@ fn time_to_feed_watches_the_opposing_fighter() {
         .add_spell_to_hand_from_oracle(P0, "Printed fight watcher", false, TIME_TO_FEED)
         .id();
     let mut runner = scenario.build();
-    let announced = runner.state().objects[&enemy].incarnation;
     let outcome = runner
         .cast(spell)
         .target_object(enemy)
@@ -1082,15 +1081,7 @@ fn time_to_feed_watches_the_opposing_fighter() {
     assert_eq!(outcome.zone_of(enemy), Zone::Graveyard);
     assert_eq!(outcome.zone_of(friendly), Zone::Battlefield);
     assert_eq!(outcome.life_delta(P0), 3);
-    let [watcher] = outcome.state().delayed_triggers.as_slice() else {
-        panic!("the windowed watcher remains installed through its firing");
-    };
-    let pin = watcher
-        .ability
-        .context
-        .delayed_watch_incarnation
-        .expect("watch pin");
-    assert_eq!((pin.object_id, pin.incarnation), (enemy, announced));
+    assert!(outcome.state().delayed_triggers.is_empty());
     assert!(outcome.state().stack.is_empty());
     assert!(matches!(
         outcome.final_waiting_for(),
@@ -1662,6 +1653,8 @@ fn together_forever_returns_the_matched_arrival_and_expires_at_cleanup() {
             assert!(runner.state().delayed_triggers.is_empty());
             assert_eq!(runner.state().objects[&victim].incarnation, announced);
         }
+        let probe_watcher = (!late && !blinked && !move_arrival)
+            .then(|| runner.state().delayed_triggers[0].clone());
         runner.cast(removal).target_object(victim).commit();
         runner
             .act(GameAction::PassPriority)
@@ -1693,9 +1686,11 @@ fn together_forever_returns_the_matched_arrival_and_expires_at_cleanup() {
             assert!(runner.state().stack.is_empty());
         } else {
             assert_eq!(runner.state().stack.len(), 1);
-            if !move_arrival {
+            assert!(runner.state().delayed_triggers.is_empty());
+            if let Some(watcher) = probe_watcher {
                 let mut probe = runner.state().clone();
                 probe.stack.clear();
+                probe.delayed_triggers.push(watcher);
                 let mut malformed = event.clone();
                 let GameEvent::ZoneChanged { record, .. } = &mut malformed else {
                     unreachable!("cloned a zone change");
@@ -1716,12 +1711,12 @@ fn together_forever_returns_the_matched_arrival_and_expires_at_cleanup() {
                 );
                 engine::game::triggers::check_delayed_triggers(
                     &mut probe,
-                    std::slice::from_ref(event),
+                    &[event.clone(), event.clone()],
                 );
                 assert_eq!(
                     probe.stack.len(),
                     1,
-                    "the same collector admits the coherent record"
+                    "duplicate records of the same coherent departure produce one firing"
                 );
             }
             let queued = runner.state().stack[0].ability().expect("queued return");

@@ -15898,7 +15898,6 @@ pub(crate) fn collect_activation_event_at_boundary(
             seed,
             raw_batch,
             DelayedTriggerEventScope::Any,
-            None,
         );
     // Anything irreversible the observation did binds it: an admitted trigger
     // (even one later pruned), a collected context, or a one-shot delayed
@@ -17943,8 +17942,8 @@ pub(crate) fn collect_state_triggers(
 }
 
 /// CR 603.7: Check if any delayed triggers should fire based on recent events.
-/// One-shot triggers are removed after firing; multi-fire (WheneverEvent) triggers
-/// persist until end-of-turn cleanup (CR 603.7b).
+/// Fired one-shots and incarnation-pinned watchers are removed. Unpinned
+/// duration-bearing watchers can trigger again while installed (CR 603.7b).
 pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Vec<GameEvent> {
     // CR 603.7 + CR 603.12: this is a closing `Any` boundary. Its contract is
     // "match, then terminalize, then dispatch": the unmatched-reflexive pass must
@@ -20591,15 +20590,15 @@ fn delayed_trigger_to_context(
     context
 }
 
-/// One firing of a multi-fire delayed `WheneverEvent` generator.
-struct DelayedWheneverFiring {
+/// One firing of a delayed trigger.
+struct DelayedEventFiring {
     /// Raw batch indices this firing consumes. A raw index shared by several
     /// firings of one generator (two sources in one aggregate combat-damage
     /// event) is recorded once.
     consume: Vec<usize>,
     events: Vec<GameEvent>,
-    /// The firing group's cause record (charter D4).
-    causes: Vec<GameEvent>,
+    /// The firing group's cause record, when supplied by the group collector.
+    causes: Option<Vec<GameEvent>>,
 }
 
 fn recorded_battlefield_departure_pin(event: &GameEvent) -> Option<ObjectIncarnationRef> {
@@ -20624,7 +20623,7 @@ fn delayed_whenever_event_firings(
     scope: DelayedTriggerEventScope,
     scan: AsEntersRollScan,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
-) -> Option<Vec<DelayedWheneverFiring>> {
+) -> Option<Vec<DelayedEventFiring>> {
     let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger, .. } =
         &delayed.condition
     else {
@@ -20649,6 +20648,7 @@ fn delayed_whenever_event_firings(
         trigger_definition: delayed.ability.trigger_definition_ref.as_ref(),
     };
     let once_per_batch = fires_once_per_batch(trigger);
+    let watched_incarnation = delayed.ability.context.delayed_watch_incarnation;
     let mut consumed = HashSet::new();
     let mut firings = Vec::new();
     for (index, event) in events.iter().enumerate() {
@@ -20661,10 +20661,7 @@ fn delayed_whenever_event_firings(
         }
         // CR 400.7 + CR 603.7c: Admission uses the occurrence that left the
         // battlefield. The payload separately follows the death's arrival.
-        if delayed
-            .ability
-            .context
-            .delayed_watch_incarnation
+        if watched_incarnation
             .is_some_and(|watched| recorded_battlefield_departure_pin(event) != Some(watched))
         {
             continue;
@@ -20714,11 +20711,16 @@ fn delayed_whenever_event_firings(
                 .copied()
                 .filter(|raw| consumed.insert(*raw))
                 .collect();
-            firings.push(DelayedWheneverFiring {
+            firings.push(DelayedEventFiring {
                 consume,
                 events: group.events,
-                causes: group.causes,
+                causes: Some(group.causes),
             });
+            // CR 400.7 + CR 603.2c: the watched incarnation departs once.
+            // Repeated records of that departure cannot add another firing.
+            if watched_incarnation.is_some() {
+                return Some(firings);
+            }
         }
         // CR 603.2c: a "one or more" shape reads the whole batch, so it is
         // asked once, at the first admitted event that fires it.
@@ -20730,10 +20732,10 @@ fn delayed_whenever_event_firings(
 }
 
 /// CR 603.7 + CR 603.7b: Match-only delayed-trigger collection. It fires
-/// matching instances, removes fired one-shots, keeps duration-bearing
-/// multi-fire sources installed, synthesizes Epic upkeep copies, records
-/// delayed-due provenance and consumed raw identities, and returns the batch in
-/// APNAP order.
+/// matching instances, removes fired one-shots and incarnation-pinned
+/// watchers, keeps recurring sources installed, synthesizes Epic upkeep copies,
+/// records delayed-due provenance and consumed raw identities, and returns the
+/// batch in APNAP order.
 ///
 /// It deliberately performs no unmatched-reflexive lifetime closure. CR 603.12
 /// expires a reflexive against its *creating* resolution/batch, so a partial
@@ -20765,7 +20767,7 @@ fn collect_matching_delayed_triggers_with(
     }
 
     // Separate "abilities to fire" from "indices to remove".
-    // One-shot triggers are removed; multi-fire triggers are cloned and left in place.
+    // Fired one-shots and incarnation-pinned watchers are removed here.
     // Each firing carries the raw batch indices it consumes and its event group.
     // The trailing `usize` on the fire/remove tuples is the matched
     // `or_trigger` alternative (0 = primary); it threads to the carried
@@ -20782,7 +20784,7 @@ fn collect_matching_delayed_triggers_with(
         Option<Vec<GameEvent>>,
     );
     let mut to_fire: Vec<FiringTuple> = Vec::new();
-    let mut to_remove: Vec<(usize, usize, GameEvent, usize)> = Vec::new();
+    let mut to_remove: Vec<(usize, DelayedEventFiring, usize)> = Vec::new();
     let mut to_discard: Vec<(usize, super::lifecycle::DelayedTerminalDisposition)> = Vec::new();
     let active_suppress_triggers = if state.delayed_triggers.iter().any(|delayed| {
         matches!(
@@ -20807,16 +20809,20 @@ fn collect_matching_delayed_triggers_with(
             scan,
             &active_suppress_triggers,
         ) {
-            for DelayedWheneverFiring {
-                consume,
-                events,
-                causes,
-            } in firings
-            {
-                // Alternative 0: a multi-fire `WheneverEvent` never carries an
-                // `or_trigger` (only `WhenNextEvent` does), and boons are
-                // one-shot, so this path never fires a boon.
-                to_fire.push((delayed.clone(), consume, events, false, 0, Some(causes)));
+            // Only WhenNextEvent has an or_trigger, so the alternative is 0.
+            for firing in firings {
+                if delayed.ability.context.delayed_watch_incarnation.is_some() {
+                    to_remove.push((idx, firing, 0));
+                } else {
+                    to_fire.push((
+                        delayed.clone(),
+                        firing.consume,
+                        firing.events,
+                        false,
+                        0,
+                        firing.causes,
+                    ));
+                }
             }
             continue;
         }
@@ -20924,7 +20930,15 @@ fn collect_matching_delayed_triggers_with(
                 }
             }
             if delayed.one_shot {
-                to_remove.push((idx, event_index, trigger_event, matched_alternative));
+                to_remove.push((
+                    idx,
+                    DelayedEventFiring {
+                        consume: vec![event_index],
+                        events: vec![trigger_event],
+                        causes: None,
+                    },
+                    matched_alternative,
+                ));
             } else {
                 // Duration-bearing `WheneverEvent` generators are handled above;
                 // any other multi-fire shape fires once on its matched event,
@@ -20978,39 +20992,37 @@ fn collect_matching_delayed_triggers_with(
         }
     }
 
-    // Remove fired one-shot triggers from `delayed_triggers` in a descending-index
+    // Remove fired single-use triggers from `delayed_triggers` in a descending-index
     // pass so every index stays valid. Unmatched-reflexive lifetime closure is
     // deliberately NOT performed here: it belongs to the batch's creating
     // resolution boundary and is owned by
     // `terminalize_unmatched_reflexives_for_closed_batch`, so a partial
     // frame-local batch (a nested mana payment) cannot expire an outer reflexive.
-    let mut fired_events: std::collections::HashMap<usize, (usize, GameEvent, usize)> = to_remove
-        .iter()
-        .map(|(idx, event_index, event, alternative)| {
-            (*idx, (*event_index, event.clone(), *alternative))
-        })
+    let mut fired_events: HashMap<_, _> = to_remove
+        .into_iter()
+        .map(|(idx, firing, alternative)| (idx, (firing, alternative)))
         .collect();
     let mut unfired_dispositions: std::collections::HashMap<
         usize,
         super::lifecycle::DelayedTerminalDisposition,
     > = to_discard.iter().copied().collect();
     let terminalized_unfired = to_discard.len();
-    let mut combined: Vec<usize> = to_remove
-        .iter()
-        .map(|(idx, _, _, _)| *idx)
+    let mut combined: Vec<usize> = fired_events
+        .keys()
+        .copied()
         .chain(to_discard.iter().map(|(idx, _)| *idx))
         .collect();
     combined.sort_unstable();
     for idx in combined.into_iter().rev() {
         let trigger = state.delayed_triggers.remove(idx);
-        if let Some((event_index, trigger_event, alternative)) = fired_events.remove(&idx) {
+        if let Some((firing, alternative)) = fired_events.remove(&idx) {
             to_fire.push((
                 trigger,
-                vec![event_index],
-                vec![trigger_event],
+                firing.consume,
+                firing.events,
                 true,
                 alternative,
-                None,
+                firing.causes,
             ));
         } else if let Some(disposition) = unfired_dispositions.remove(&idx) {
             super::lifecycle::record_delayed_terminal(trigger.provenance.firing(), disposition);
@@ -21240,7 +21252,6 @@ fn collect_pending_and_delayed_triggers_for_batch(
         normal_pending,
         delayed_events,
         delayed_scope,
-        None,
     )
     .0
 }
@@ -21253,20 +21264,13 @@ fn collect_pending_and_delayed_triggers_reporting_terminalized(
     normal_pending: Vec<PendingTriggerContext>,
     delayed_events: &[GameEvent],
     delayed_scope: DelayedTriggerEventScope,
-    admits_watcher: Option<&dyn Fn(&DelayedTrigger) -> bool>,
 ) -> (CollectedTriggerContextBatch, usize) {
     let normal_was_non_empty = !normal_pending.is_empty();
     let DelayedTriggerMatch {
         contexts: delayed_pending,
         consumed: delayed_consumed,
         terminalized_unfired,
-    } = collect_matching_delayed_triggers_with(
-        state,
-        delayed_events,
-        delayed_scope,
-        AsEntersRollScan::Held,
-        admits_watcher,
-    );
+    } = collect_matching_delayed_triggers(state, delayed_events, delayed_scope);
     let mut contexts = normal_pending;
     contexts.extend(delayed_pending);
     // CR 603.3b + CR 101.4: placement part, then APNAP order.
@@ -21329,7 +21333,6 @@ pub(crate) fn process_collected_triggers_with_delayed_phase_events(
         normal_pending,
         delayed_events,
         DelayedTriggerEventScope::PhaseChangedOnly,
-        None,
         events_out,
     )
 }
@@ -21347,26 +21350,6 @@ pub(crate) fn process_collected_triggers_with_delayed_events(
         normal_pending,
         delayed_events,
         DelayedTriggerEventScope::Any,
-        None,
-        events_out,
-    )
-}
-
-/// CR 603.2c + CR 603.7b: incarnation-pinned watchers already observed the
-/// answer through the logical owner or the action's occurrence journal. The
-/// raw SBA answer scan still delivers its events to legacy watchers.
-pub(super) fn process_sba_answer_trigger_batch(
-    state: &mut GameState,
-    pending: Vec<PendingTriggerContext>,
-    answer: &[GameEvent],
-    events_out: &mut Vec<GameEvent>,
-) -> TriggerBatchOutcome {
-    process_collected_triggers_with_delayed_events_scoped(
-        state,
-        pending,
-        answer,
-        DelayedTriggerEventScope::Any,
-        Some(&|delayed| delayed.ability.context.delayed_watch_incarnation.is_none()),
         events_out,
     )
 }
@@ -21376,7 +21359,6 @@ fn process_collected_triggers_with_delayed_events_scoped(
     normal_pending: Vec<PendingTriggerContext>,
     delayed_events: &[GameEvent],
     delayed_scope: DelayedTriggerEventScope,
-    admits_watcher: Option<&dyn Fn(&DelayedTrigger) -> bool>,
     events_out: &mut Vec<GameEvent>,
 ) -> TriggerBatchOutcome {
     let stack_before = state.stack.len();
@@ -21394,7 +21376,6 @@ fn process_collected_triggers_with_delayed_events_scoped(
         normal_pending,
         delayed_events,
         delayed_scope,
-        admits_watcher,
     )
     .0;
     terminalize_unmatched_reflexives_for_closed_batch(state, delayed_events, delayed_scope);
@@ -21471,7 +21452,6 @@ pub(crate) fn process_triggers_with_delayed_declaration_events(
         normal_pending,
         events,
         DelayedTriggerEventScope::DeclarationSettlement,
-        None,
         events_out,
     )
 }
