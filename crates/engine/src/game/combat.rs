@@ -308,6 +308,20 @@ pub struct BlockHistoryPair {
     pub attacker: ObjectIncarnationRef,
 }
 
+/// CR 508.5 (last clause) + CR 506.4 + CR 400.7: the defending player an
+/// attacking creature had when it was removed from combat, pinned to the exact
+/// incarnation that was removed. A creature removed from combat while it stays
+/// on the battlefield as the same object (an effect, a controller change,
+/// phasing out, regeneration, ceasing to be a creature) has no `AttackerInfo`
+/// and no departure row; this is the record its "defending player" reads. If it
+/// later leaves the battlefield, its departure row records no defender (it was
+/// no longer listed), and this record, keyed by the same incarnation, answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedAttackerDefender {
+    pub attacker: ObjectIncarnationRef,
+    pub defending_player: PlayerId,
+}
+
 /// Tracks the state of the current combat phase.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CombatState {
@@ -397,6 +411,15 @@ pub struct CombatState {
         serialize_with = "crate::types::deterministic_serde::hash_set"
     )]
     pub removed_attackers_this_combat: HashSet<ObjectId>,
+    /// CR 508.5 (last clause) + CR 506.4: for each attacker removed from combat
+    /// this combat, the defending player its `AttackerInfo` held at removal,
+    /// one entry per exact incarnation (CR 400.7). Written only by
+    /// `prune_object_from_combat`; read by the CR 508.5 authority for a creature
+    /// that is still that exact object but no longer attacking, or that left the
+    /// battlefield after being removed in place. Lives with this
+    /// `CombatState` (CR 511.3).
+    #[serde(default)]
+    pub removed_attacker_defenders: Vec<RemovedAttackerDefender>,
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub damage_assignments: HashMap<ObjectId, Vec<DamageAssignment>>,
     pub first_strike_done: bool,
@@ -432,6 +455,8 @@ impl PartialEq for CombatState {
             && self.creature_blocked_attackers_this_combat
                 == other.creature_blocked_attackers_this_combat
             && self.removed_attackers_this_combat == other.removed_attackers_this_combat
+            // CR 104.4b: compared on loop frames (ranked by canonicalize_lki_incarnations_for_loop).
+            && self.removed_attacker_defenders == other.removed_attacker_defenders
             && self.first_strike_done == other.first_strike_done
             && self.first_strike_participants == other.first_strike_participants
     }
@@ -799,14 +824,39 @@ mod blocking_wire {
 /// and the CR 733 replay applier, so a replayed prune cannot drift from the
 /// prune the game actually performed.
 pub(crate) fn prune_object_from_combat(state: &mut GameState, oid: ObjectId) -> bool {
+    // CR 400.7: the exact incarnation being removed. Every zone-exit route runs
+    // this cleanup before the incarnation bump, so this is the one that attacked.
+    let removed_incarnation = state
+        .objects
+        .get(&oid)
+        .map(ObjectIncarnationRef::from_object);
     let Some(combat) = state.combat.as_mut() else {
         return false;
     };
+    let departing_defender = combat
+        .attackers
+        .iter()
+        .find(|a| a.object_id == oid)
+        .map(|a| a.defending_player);
     let attackers_before = combat.attackers.len();
     combat.attackers.retain(|a| a.object_id != oid);
     let mut changed = combat.attackers.len() != attackers_before;
     if changed {
         combat.removed_attackers_this_combat.insert(oid);
+        // CR 508.5 (last clause) + CR 506.4: a creature removed from combat keeps,
+        // as its defending player, the one it had before it was removed.
+        if let (Some(attacker), Some(defending_player)) = (removed_incarnation, departing_defender)
+        {
+            combat
+                .removed_attacker_defenders
+                .retain(|r| r.attacker != attacker);
+            combat
+                .removed_attacker_defenders
+                .push(RemovedAttackerDefender {
+                    attacker,
+                    defending_player,
+                });
+        }
     }
     changed |= combat.attacked_permanents.remove(&oid).is_some();
     let edges_before = combat.attacked_permanents.len();
@@ -8907,6 +8957,67 @@ fn attack_entries(event: &GameEvent) -> Option<(&[(ObjectId, AttackTarget)], Pla
     }
 }
 
+/// CR 508.5 (last clause) + CR 506.4: the defending player the exact incarnation
+/// `removed` had when it was removed from combat. Keyed by incarnation
+/// (CR 400.7: a same-id return is a new object and matches nothing), so it
+/// answers both for a creature still on the battlefield as that object and for
+/// one that has since left (its departure row names the same incarnation).
+fn removed_attacker_defender(state: &GameState, removed: ObjectIncarnationRef) -> Option<PlayerId> {
+    state
+        .combat
+        .as_ref()?
+        .removed_attacker_defenders
+        .iter()
+        .find(|record| record.attacker == removed)
+        .map(|record| record.defending_player)
+}
+
+/// CR 508.5: the defending player of `attacker` as the rule defines it at this
+/// moment, or `None` when no record answers. While it is the exact live
+/// object: its live one while it is attacking (CR 508.5 first sentence +
+/// CR 508.7a); once it was removed from combat while staying that object, the
+/// one it had at removal (CR 508.5 last clause + CR 506.4), read from the
+/// removal record, or, for a creature that stopped being a creature and is not
+/// yet pruned, from its still-listed `AttackerInfo`. Once that object has left
+/// the battlefield: the one recorded on its exact departure row as it left, or,
+/// when it had already been removed in place before leaving, the removal record
+/// of that departed incarnation (CR 508.5 last clause; CR 400.7 + CR 608.2h).
+fn current_attacker_defender(
+    state: &GameState,
+    attacker: ObjectId,
+    is_asker: bool,
+    source: Option<&crate::types::game_state::TriggerSourceContext>,
+    event: Option<&GameEvent>,
+) -> Option<PlayerId> {
+    if attacker_is_exact_live(state, attacker, is_asker, source, event) {
+        // CR 508.5 first sentence + CR 508.7a + CR 506.4: a listed attacker's
+        // stored defending player: the one it is attacking (the reselected one
+        // after a reselection; kept when a planeswalker or battle relation is
+        // retired, CR 506.4c), or, for one that stopped being a creature and is
+        // not yet pruned, the one it had before it was removed.
+        defending_player_for_attacker(state, attacker).or_else(|| {
+            // CR 508.5 last clause + CR 506.4: removed from combat in place and
+            // pruned; the record of this exact incarnation answers.
+            let live = state
+                .objects
+                .get(&attacker)
+                .map(ObjectIncarnationRef::from_object)?;
+            removed_attacker_defender(state, live)
+        })
+    } else {
+        let row = departed_attack_row(state, attacker, source, is_asker, event)?;
+        row.combat_status.defending_player.or_else(|| {
+            // CR 508.5 last clause: removed from combat in place, THEN left the
+            // battlefield — the row recorded no defender (it was no longer
+            // listed), so the record of that departed incarnation answers.
+            removed_attacker_defender(
+                state,
+                row.trigger_source_context.as_ref()?.identity.reference,
+            )
+        })
+    }
+}
+
 /// CR 508.5 first clause: the ASKER's own entry in the bound event.
 ///
 /// Uses `find` (not `find_map`) deliberately: the pre-existing `find_map`
@@ -8916,29 +9027,42 @@ fn attack_entries(event: &GameEvent) -> Option<(&[(ObjectId, AttackTarget)], Pla
 /// coarse global field. Resolving the matched entry through
 /// [`defending_player_for_target_or`] answers with the planeswalker's
 /// controller or the battle's protector (CR 310.9d) instead.
+///
+/// CR 508.5 + CR 508.7a: the creature's current defending player (`current`:
+/// live, recorded at removal, or recorded as it left the battlefield) answers
+/// before its declared entry; the entry answers only when no such record exists.
 fn entry_defender(
     state: &GameState,
     entries: &[(ObjectId, AttackTarget)],
     global: PlayerId,
     entry_id: ObjectId,
+    current: &impl Fn(ObjectId, bool) -> Option<PlayerId>,
 ) -> Option<PlayerId> {
     entries
         .iter()
         .find(|(attacker_id, _)| *attacker_id == entry_id)
-        .map(|(_, target)| defending_player_for_target_or(state, *target, global))
+        .map(|(_, target)| {
+            current(entry_id, true)
+                .unwrap_or_else(|| defending_player_for_target_or(state, *target, global))
+        })
 }
 
 /// CR 508.5 second clause + CR 508.5a: when every attacking creature the bound
 /// event names has the same defending player, that player answers, even when
-/// the asker is attacking someone else.
+/// the asker is attacking someone else. Each creature's defending player is
+/// individually its current one (live, recorded at removal, or recorded as it
+/// left the battlefield; CR 508.7a), else its declared entry's.
 fn single_event_defender(
     state: &GameState,
     entries: &[(ObjectId, AttackTarget)],
     global: PlayerId,
+    entry_id: ObjectId,
+    current: &impl Fn(ObjectId, bool) -> Option<PlayerId>,
 ) -> Option<PlayerId> {
-    let mut defenders = entries
-        .iter()
-        .map(|(_, target)| defending_player_for_target_or(state, *target, global));
+    let mut defenders = entries.iter().map(|(attacker, target)| {
+        current(*attacker, *attacker == entry_id)
+            .unwrap_or_else(|| defending_player_for_target_or(state, *target, global))
+    });
     let first = defenders.next()?;
     defenders.all(|defender| defender == first).then_some(first)
 }
@@ -8993,13 +9117,20 @@ fn single_event_defender(
 ///
 /// # Precedence
 ///
-/// 1. The asker's OWN entry in the bound event's `attacks` list. CR 508.5 first
+/// 1. The asker's current defending player (`current_attacker_defender`: while
+///    it is the exact live attacker, its live one, else the one recorded when
+///    it was removed from combat (`CombatState::removed_attacker_defenders`),
+///    else, while it is still listed but no longer a creature, its stored one;
+///    once it has left the battlefield, the one recorded on its exact departure
+///    row, else the removal record of that departed incarnation), else its OWN
+///    entry in the bound event's `attacks` list. CR 508.5 first
 ///    clause — "an ability of an attacking creature refers to a defending
 ///    player". Resolved through [`defending_player_for_target_or`], so a
 ///    planeswalker target answers with its controller and a battle target with
 ///    its protector (CR 310.9d) instead of being skipped.
-/// 2. The defending player of the bound event's attackers, when they all have
-///    the same one.
+/// 2. The defending player of the bound event's attackers (each named
+///    creature's current defending player, else its entry's), when they all
+///    have the same one.
 ///
 ///    **THIS STEP EXISTS TO OUTRANK THE LATCH (step 3), NOT TO RESOLVE THE
 ///    ATTACK TARGET. DO NOT COLLAPSE IT INTO STEP 4.**
@@ -9017,7 +9148,10 @@ fn single_event_defender(
 ///    on the production path. The only thing step 2 adds is its POSITION —
 ///    ahead of the latch. Merging it into step 4 restores latch-before-event
 ///    and re-breaks the observer-trigger anaphor.
-/// 3. The latch. Reached when the bound event names neither the asker nor
+/// 3. The asker's current defending player (only inside a triggered ability's
+///    scope; with no trigger source this step and the latch are both skipped
+///    and step 5 answers, as before), then the latch. Reached when the bound
+///    event names neither the asker nor
 ///    attackers with one defending player, or when there is no bound event at
 ///    all. Not dead code — `raw_batch_without_asker_falls_back_to_latch` pins it.
 /// 4. The bound event's declared global `defending_player` (CR 508.1b). The
@@ -9037,6 +9171,18 @@ fn single_event_defender(
 /// that leak removal is deliberate, and on the trigger side the designation
 /// boundary gate turns the resulting `None` into a non-firing condition in both
 /// polarities.
+///
+/// The per-attacker sub-step changes the answer only when the creature's live,
+/// listed, removal-recorded or departure-recorded defender differs from its
+/// declared entry read against current state, or, in step 3 and with no bound
+/// attack event, when the latch is `None` because the trigger was collected
+/// after the creature had already been removed from combat in place. That
+/// happens after a CR 508.7 reselection, or after a CR 506.4c-retired
+/// planeswalker or battle relation. In those cases the entry would read the
+/// permanent's CURRENT controller (for example the attacking player after Word
+/// of Seizing), while the record keeps the defending player recorded with the
+/// relation (CR 506.2 in a two-player game). A reference with no trigger source
+/// never consults the sub-step and is unchanged.
 pub(crate) fn defending_player_cr508_5(
     state: &GameState,
     asker_id: ObjectId,
@@ -9047,12 +9193,26 @@ pub(crate) fn defending_player_cr508_5(
 
     // The ONE binding rule, evaluated in the ONE place it may be evaluated.
     with_bound_attack_event(state, trigger_source, |event| {
+        // CR 508.5 + CR 508.7a: the defending player is the one the creature IS
+        // attacking (a reselected creature's reselected one), or, once it has been
+        // removed from combat (in place or by leaving the battlefield), the one it
+        // was attacking before it was removed (CR 508.5 last clause + CR 506.4).
+        // Each record outranks the declaration-time entry and latch.
+        let current = |attacker: ObjectId, is_asker: bool| {
+            current_attacker_defender(state, attacker, is_asker, trigger_source, event)
+        };
         match event.and_then(attack_entries) {
-            Some((entries, global)) => entry_defender(state, entries, global, entry_id)
-                .or_else(|| single_event_defender(state, entries, global))
+            Some((entries, global)) => entry_defender(state, entries, global, entry_id, &current)
+                .or_else(|| single_event_defender(state, entries, global, entry_id, &current))
+                .or_else(|| current(entry_id, true))
                 .or(latch)
                 .or(Some(global)),
-            None => latch,
+            // CR 608.2k binding rule: the per-attacker sub-step answers only inside
+            // a triggered ability's scope. With no trigger source this arm returns
+            // `latch` (itself `None`), so tier 5 answers byte-identically to base.
+            None => trigger_source
+                .and_then(|_| current(entry_id, true))
+                .or(latch),
         }
     })
     .or_else(|| resolve_defending_player(state, asker_id))
@@ -9115,6 +9275,39 @@ fn departed_attack_row<'a>(
     }
 }
 
+/// CR 400.7 + CR 608.2k: whether `attacker` is still the exact object an attack
+/// anaphor is about. The asker form reads the triggered ability's own source
+/// identity (`TriggerSourceRead::ExactLive` on the battlefield; a same-id return
+/// is a new object), or the object by id on the battlefield when there is no
+/// trigger source. The observer form requires the object on the battlefield and,
+/// when an event is bound, the incarnation that event stamped for it.
+fn attacker_is_exact_live(
+    state: &GameState,
+    attacker: ObjectId,
+    is_asker: bool,
+    source: Option<&crate::types::game_state::TriggerSourceContext>,
+    event: Option<&GameEvent>,
+) -> bool {
+    if is_asker {
+        match source {
+            Some(source) => matches!(source.source_read(state),
+                crate::types::game_state::TriggerSourceRead::ExactLive(object)
+                    if object.zone == Zone::Battlefield),
+            None => state
+                .objects
+                .get(&attacker)
+                .is_some_and(|object| object.zone == Zone::Battlefield),
+        }
+    } else {
+        state.objects.get(&attacker).is_some_and(|object| {
+            object.zone == Zone::Battlefield
+                && event.is_none_or(|event| {
+                    crate::game::targeting::event_source_is_live_incarnation(event, object)
+                })
+        })
+    }
+}
+
 /// CR 608.2k + CR 400.7: select the bound attacker and determine whether that
 /// exact object is still live. Explicit-event users share the resolution policy.
 pub(crate) fn selected_attacked_referent(
@@ -9129,24 +9322,7 @@ pub(crate) fn selected_attacked_referent(
     let entry_id = source.map_or(asker_id, |source| source.identity.reference.object_id);
     let referent = referent_attacker(event, entry_id);
     let is_asker = referent == entry_id;
-    let live = if is_asker {
-        match source {
-            Some(source) => matches!(source.source_read(state),
-                crate::types::game_state::TriggerSourceRead::ExactLive(object)
-                    if object.zone == Zone::Battlefield),
-            None => state
-                .objects
-                .get(&referent)
-                .is_some_and(|object| object.zone == Zone::Battlefield),
-        }
-    } else {
-        state.objects.get(&referent).is_some_and(|object| {
-            object.zone == Zone::Battlefield
-                && event.is_none_or(|event| {
-                    crate::game::targeting::event_source_is_live_incarnation(event, object)
-                })
-        })
-    };
+    let live = attacker_is_exact_live(state, referent, is_asker, source, event);
     (referent, is_asker, live)
 }
 
@@ -10741,6 +10917,393 @@ mod tests {
                 &state, source, None
             ),
             resolve_defending_player(&state, source)
+        );
+    }
+
+    /// Row P1-A board: `source` (a creature) attacks P1 (latch P1), then its
+    /// `AttackerInfo` is rewritten to attack P2, as phase 2's reselection writer
+    /// will. Returns the state, the asker, its latch context and the declaration
+    /// event (which still names Player(P1)).
+    fn rewritten_board() -> (
+        GameState,
+        ObjectId,
+        crate::types::game_state::TriggerSourceContext,
+        GameEvent,
+    ) {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        declare_targets(&mut state, &[(source, AttackTarget::Player(PlayerId(1)))]);
+        let ctx = latch_context(&state, source);
+        assert_eq!(ctx.combat_status.defending_player, Some(PlayerId(1)));
+        let event = declared_event(&state, source, AttackTarget::Player(PlayerId(1)));
+        let info = &mut state.combat.as_mut().unwrap().attackers[0];
+        info.attack_target = AttackTarget::Player(PlayerId(2));
+        info.defending_player = PlayerId(2);
+        (state, source, ctx, event)
+    }
+
+    /// The four tiers a triggered "defending player" reference can be answered
+    /// from on a P1-A board: (a) the asker's own entry in the bound event,
+    /// (b) an observer asker whose bound event names `source`, (c) a raw batch of
+    /// two non-combat attackers that disagree and omit the asker (ahead of the
+    /// latch), and (d) no bound event (ahead of the latch).
+    fn four_tier_answers(
+        state: &mut GameState,
+        source: ObjectId,
+        ctx: &crate::types::game_state::TriggerSourceContext,
+        event: &GameEvent,
+    ) -> [Option<PlayerId>; 4] {
+        state.current_trigger_event = Some(event.clone());
+        let own = defending_player_cr508_5(state, source, Some(ctx));
+
+        let observer = spawn(state, 70, "Observer");
+        let observer_ctx = latch_context(state, observer);
+        let observed = defending_player_cr508_5(state, observer, Some(&observer_ctx));
+
+        let a = spawn(state, 71, "Raw batch A");
+        let b = spawn(state, 72, "Raw batch B");
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![a, b],
+            defending_player: PlayerId(2),
+            attacks: vec![
+                (a, AttackTarget::Player(PlayerId(2))),
+                (b, AttackTarget::Player(PlayerId(1))),
+            ],
+            declaration_records: Vec::new(),
+        });
+        let raw_batch = defending_player_cr508_5(state, source, Some(ctx));
+
+        state.current_trigger_event = None;
+        let unbound = defending_player_cr508_5(state, source, Some(ctx));
+        [own, observed, raw_batch, unbound]
+    }
+
+    /// Row P1-A. CR 508.5 + CR 508.7a (rulings on Misleading Signpost / Portal
+    /// Mage: the defending player follows a reselection), and CR 508.5 last
+    /// clause after the creature leaves the battlefield, is removed from combat
+    /// in place (CR 506.4), is removed in place and then leaves, or stops being a
+    /// creature. With no trigger source the answer stays `resolve_defending_player`'s.
+    #[test]
+    fn current_relation_outranks_declared_entry_and_latch_cr_508_7a() {
+        let p2 = Some(PlayerId(2));
+
+        // Reach guard: before the rewrite every tier answers the declaration's P1.
+        {
+            let (mut state, source) = anchor_state();
+            make_creature(&mut state, source);
+            declare_targets(&mut state, &[(source, AttackTarget::Player(PlayerId(1)))]);
+            let ctx = latch_context(&state, source);
+            let event = declared_event(&state, source, AttackTarget::Player(PlayerId(1)));
+            assert_eq!(
+                four_tier_answers(&mut state, source, &ctx, &event),
+                [Some(PlayerId(1)); 4],
+                "reach guard: unrewritten, every tier answers the declared P1"
+            );
+        }
+
+        // Live: the stored relation outranks the declared entry and the latch.
+        let (mut state, source, ctx, event) = rewritten_board();
+        assert_eq!(
+            four_tier_answers(&mut state, source, &ctx, &event),
+            [p2; 4],
+            "live: (a) own entry, (b) observer, (c) raw batch, (d) unbound"
+        );
+
+        // (e) Departed: the exact departure row answers.
+        let (mut state, source, ctx, event) = rewritten_board();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        assert_eq!(state.objects[&source].zone, Zone::Graveyard);
+        assert!(!state
+            .combat
+            .as_ref()
+            .unwrap()
+            .attackers
+            .iter()
+            .any(|info| info.object_id == source));
+        assert_eq!(
+            crate::types::game_state::exact_battlefield_departure_row(
+                &state,
+                ctx.identity.reference
+            )
+            .expect("the departed asker's exact row")
+            .combat_status
+            .defending_player,
+            p2
+        );
+        assert_eq!(
+            four_tier_answers(&mut state, source, &ctx, &event),
+            [p2; 4],
+            "departed: CR 508.5 last clause"
+        );
+
+        // (f) Removed from combat in place (case B at unit level).
+        let (mut state, source, ctx, event) = rewritten_board();
+        crate::game::effects::remove_from_combat::remove_object_from_combat(&mut state, source);
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&source].incarnation,
+            ctx.identity.reference.incarnation
+        );
+        let combat = state.combat.as_ref().unwrap();
+        assert!(!combat.attackers.iter().any(|info| info.object_id == source));
+        assert!(combat.removed_attackers_this_combat.contains(&source));
+        assert_eq!(
+            combat.removed_attacker_defenders,
+            vec![RemovedAttackerDefender {
+                attacker: ObjectIncarnationRef::from_object(&state.objects[&source]),
+                defending_player: PlayerId(2),
+            }]
+        );
+        assert_eq!(
+            four_tier_answers(&mut state, source, &ctx, &event),
+            [p2; 4],
+            "removed in place: CR 508.5 last clause + CR 506.4"
+        );
+
+        // (g) Removed in place, then departed (route R-i).
+        let (mut state, source, ctx, event) = rewritten_board();
+        crate::game::effects::remove_from_combat::remove_object_from_combat(&mut state, source);
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        assert_eq!(state.objects[&source].zone, Zone::Graveyard);
+        let row = crate::types::game_state::exact_battlefield_departure_row(
+            &state,
+            ctx.identity.reference,
+        )
+        .expect("the departed asker's exact row");
+        assert!(!row.combat_status.attacking);
+        assert_eq!(row.combat_status.defending_player, None);
+        assert_eq!(
+            row.trigger_source_context
+                .as_ref()
+                .unwrap()
+                .identity
+                .reference,
+            ctx.identity.reference
+        );
+        assert_eq!(
+            state.combat.as_ref().unwrap().removed_attacker_defenders,
+            vec![RemovedAttackerDefender {
+                attacker: ctx.identity.reference,
+                defending_player: PlayerId(2),
+            }]
+        );
+        assert_eq!(
+            four_tier_answers(&mut state, source, &ctx, &event),
+            [p2; 4],
+            "removed in place, then departed: the removal record of that incarnation"
+        );
+
+        // (h) Stopped being a creature, not yet pruned (route R-g).
+        let (mut state, source, ctx, event) = rewritten_board();
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .retain(|core_type| *core_type != CoreType::Creature);
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&source].incarnation,
+            ctx.identity.reference.incarnation
+        );
+        assert!(state
+            .combat
+            .as_ref()
+            .unwrap()
+            .attackers
+            .iter()
+            .any(|info| info.object_id == source));
+        assert!(!is_attacker_in_play(&state, source));
+        assert!(state
+            .combat
+            .as_ref()
+            .unwrap()
+            .removed_attacker_defenders
+            .is_empty());
+        assert!(crate::types::game_state::exact_battlefield_departure_row(
+            &state,
+            ctx.identity.reference
+        )
+        .is_none());
+        assert_eq!(
+            four_tier_answers(&mut state, source, &ctx, &event),
+            [p2; 4],
+            "no longer a creature, still listed: its stored defending player"
+        );
+
+        // (i) No trigger source: byte-identical to `resolve_defending_player`.
+        let (mut state, source, _, _) = rewritten_board();
+        state.current_trigger_event = None;
+        assert_eq!(
+            defending_player_for_attacker(&state, source),
+            p2,
+            "reach guard: the live board lists the rewritten attacker"
+        );
+        assert_eq!(
+            defending_player_cr508_5(&state, source, None),
+            resolve_defending_player(&state, source),
+            "no trigger source, live"
+        );
+
+        let (mut state, source, _, _) = rewritten_board();
+        crate::game::effects::remove_from_combat::remove_object_from_combat(&mut state, source);
+        state.current_trigger_event = None;
+        assert_eq!(
+            current_attacker_defender(&state, source, true, None, None),
+            p2,
+            "reach guard: the ungated sub-step would answer the removal record"
+        );
+        assert_eq!(
+            resolve_defending_player(&state, source),
+            None,
+            "reach guard: today's tier 5 answers nothing for an unlisted asker"
+        );
+        assert_eq!(
+            defending_player_cr508_5(&state, source, None),
+            resolve_defending_player(&state, source),
+            "no trigger source, removed in place: the gate keeps base's answer"
+        );
+
+        let (mut state, source, ctx, _) = rewritten_board();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        state.current_trigger_event = None;
+        assert_eq!(
+            crate::types::game_state::exact_battlefield_departure_row(
+                &state,
+                ctx.identity.reference
+            )
+            .expect("the departed asker's exact row")
+            .combat_status
+            .defending_player,
+            p2
+        );
+        assert_eq!(
+            defending_player_cr508_5(&state, source, None),
+            resolve_defending_player(&state, source),
+            "no trigger source, departed"
+        );
+    }
+
+    /// Row P1-A hostile (f'). CR 400.7: the removal record names the exact
+    /// incarnation removed; the object that returns at the same id is a new
+    /// object and matches nothing.
+    #[test]
+    fn removed_attacker_record_names_only_the_removed_incarnation_cr_400_7() {
+        let (mut state, source, ctx, _) = rewritten_board();
+        crate::game::effects::remove_from_combat::remove_object_from_combat(&mut state, source);
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Battlefield, &mut Vec::new());
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        let returned = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        assert_ne!(returned, ctx.identity.reference, "a new incarnation");
+        assert_eq!(removed_attacker_defender(&state, returned), None);
+        assert_eq!(
+            removed_attacker_defender(&state, ctx.identity.reference),
+            Some(PlayerId(2))
+        );
+        assert_eq!(
+            state.combat.as_ref().unwrap().removed_attacker_defenders,
+            vec![RemovedAttackerDefender {
+                attacker: ctx.identity.reference,
+                defending_player: PlayerId(2),
+            }]
+        );
+    }
+
+    /// Row P1-B. CR 506.2 + CR 506.4 + CR 506.4c + CR 508.5: a creature whose
+    /// planeswalker relation was retired is still an attacking creature, and its
+    /// defending player stays the one recorded with the relation; in a two-player
+    /// game that is the nonactive player. Word of Seizing (the attacking player
+    /// gains control of the attacked planeswalker) and Murder (the attacker
+    /// leaves the battlefield) are the real cards that produce these boards.
+    #[test]
+    fn retired_relation_keeps_the_recorded_defender_cr_506_4c() {
+        /// Two players: P0's creature attacks P1's planeswalker; then the
+        /// relation is retired. `owner` owns the walker; P1 controls it.
+        fn retired_board(
+            owner: PlayerId,
+        ) -> (
+            GameState,
+            ObjectId,
+            ObjectId,
+            crate::types::game_state::TriggerSourceContext,
+            GameEvent,
+        ) {
+            let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Attacker".to_string(),
+                Zone::Battlefield,
+            );
+            make_creature(&mut state, source);
+            let walker = spawn_planeswalker(&mut state, 9, owner);
+            {
+                let object = state.objects.get_mut(&walker).unwrap();
+                object.controller = PlayerId(1);
+                object.base_controller = Some(PlayerId(1));
+            }
+            declare_targets(&mut state, &[(source, AttackTarget::Planeswalker(walker))]);
+            let ctx = latch_context(&state, source);
+            let event = declared_event(&state, source, AttackTarget::Planeswalker(walker));
+            state.current_trigger_event = Some(event.clone());
+            // Reach guard: before retirement the relation is active and answers P1.
+            let info = state.combat.as_ref().unwrap().attackers[0].clone();
+            assert!(active_attack_target(&state, &info).is_some());
+            assert_eq!(
+                defending_player_cr508_5(&state, source, Some(&ctx)),
+                Some(PlayerId(1))
+            );
+            let pin = state.combat.as_ref().unwrap().attacked_permanents[&source];
+            retire_incoming_attack_relations(&mut state, pin);
+            let combat = state.combat.as_ref().unwrap();
+            assert!(combat.attackers.iter().any(|info| info.object_id == source));
+            assert!(!combat.attacked_permanents.contains_key(&source));
+            (state, source, walker, ctx, event)
+        }
+
+        // (a) D1: the attacking player now controls the walker.
+        let (mut state, source, walker, ctx, _) = retired_board(PlayerId(1));
+        state.objects.get_mut(&walker).unwrap().controller = PlayerId(0);
+        assert_eq!(
+            defending_player_cr508_5(&state, source, Some(&ctx)),
+            Some(PlayerId(1)),
+            "D1: the recorded defender, not the walker's new controller"
+        );
+
+        // (c) D3: then the attacker leaves the battlefield.
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        assert_eq!(
+            crate::types::game_state::exact_battlefield_departure_row(
+                &state,
+                ctx.identity.reference
+            )
+            .expect("the departed attacker's exact row")
+            .combat_status
+            .defending_player,
+            Some(PlayerId(1))
+        );
+        assert_eq!(
+            defending_player_cr508_5(&state, source, Some(&ctx)),
+            Some(PlayerId(1)),
+            "D3: the departure row's recorded defender"
+        );
+        state.current_trigger_event = None;
+        assert_eq!(
+            defending_player_cr508_5(&state, source, Some(&ctx)),
+            Some(PlayerId(1)),
+            "D3 unbound"
+        );
+
+        // (b) D2: the walker (owned by P0, controlled by P1) leaves the battlefield.
+        let (mut state, source, walker, ctx, _) = retired_board(PlayerId(0));
+        crate::game::zones::move_to_zone(&mut state, walker, Zone::Graveyard, &mut Vec::new());
+        assert_eq!(
+            defending_player_cr508_5(&state, source, Some(&ctx)),
+            Some(PlayerId(1)),
+            "D2: the recorded defender, not the departed walker's owner"
         );
     }
 

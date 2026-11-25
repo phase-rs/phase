@@ -213,6 +213,14 @@
 //! The staged parent's inline size fits within the existing bucket's slack;
 //! keep the 16,384 ceiling.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-11-18`) at
+//! 16,416 B, with a const `size_of` probe, when the CR 508.5 removed-attacker
+//! defender record landed: `CombatState::removed_attacker_defenders`, a 24 B
+//! `Vec` held inline in `GameState::combat` and written only when an attacker
+//! is removed from combat in place, plus padding. It is not a large
+//! rarely-populated struct, so the ceiling moves by the rule to
+//! 16,416.next_multiple_of(256) + 256 = 16,896.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!
@@ -222,7 +230,7 @@
 const _: () = {
     use core::mem::size_of;
     assert!(
-        size_of::<crate::types::game_state::GameState>() <= 16_384,
+        size_of::<crate::types::game_state::GameState>() <= 16_896,
         "GameState grew past its stack budget. It is moved by value through the \
          phase-server action + AI path, so an overrun is an uncatchable \
          guard-page abort, not a panic. Re-run the -Zprint-type-sizes command in \

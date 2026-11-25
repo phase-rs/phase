@@ -36,6 +36,7 @@ mod declaring_clause_no_one;
 mod decline_branch_not_graveyard_rider;
 mod defending_player_controls_combat_anchor;
 mod defending_player_graveyard_target;
+mod defending_player_retired_planeswalker_relation;
 mod deferred_spell_tap_cost;
 mod deferred_target_cost_determination;
 mod delayed_declare_attackers_return;

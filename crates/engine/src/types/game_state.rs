@@ -44986,6 +44986,12 @@ impl GameState {
                 .attacking_incarnations_this_combat
                 .iter()
                 .chain(combat.attacked_permanents.values())
+                .chain(
+                    combat
+                        .removed_attacker_defenders
+                        .iter()
+                        .map(|record| &record.attacker),
+                )
             {
                 present
                     .entry(reference.object_id)
@@ -45334,6 +45340,9 @@ impl GameState {
             );
             for reference in combat.attacked_permanents.values_mut() {
                 rank_incarnation(reference);
+            }
+            for record in combat.removed_attacker_defenders.iter_mut() {
+                rank_incarnation(&mut record.attacker);
             }
         }
         self.crew_activated_this_turn = rank_hash_set(
@@ -45971,6 +45980,7 @@ impl GameState {
                 attacking_incarnations_this_combat: _,
                 attacked_permanents: _,
                 creature_blocked_attackers_this_combat: _,
+                removed_attacker_defenders: _,
                 // NOT THIS CLASS — stable ids only:
                 attackers: _,
                 attacked_permanent_kinds: _,
@@ -61783,6 +61793,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
     enum CarrierKind {
         Attacking,
         AttackedPermanent,
+        /// CR 508.5 (last clause) + CR 506.4: the removed-attacker defender record.
+        RemovedAttackerDefender,
         CrewActivated,
         CrewResolved,
         CrewHistory,
@@ -62063,6 +62075,17 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     ..CombatState::default()
                 });
             }
+            CarrierKind::RemovedAttackerDefender => {
+                state.combat = Some(CombatState {
+                    removed_attacker_defenders: vec![
+                        crate::game::combat::RemovedAttackerDefender {
+                            attacker: reference,
+                            defending_player: PlayerId(1),
+                        },
+                    ],
+                    ..CombatState::default()
+                });
+            }
             CarrierKind::CrewActivated => {
                 state.crew_activated_this_turn = HashSet::from([reference]);
             }
@@ -62292,6 +62315,19 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 carrier_naming(CarrierKind::AttackedPermanent, incarnation, incarnation)
             },
             merge: |carrier, live| carrier_naming(CarrierKind::AttackedPermanent, live, carrier),
+        },
+        CarrierCase {
+            name: "removed_attacker_defenders",
+            split: |incarnation| {
+                carrier_naming(
+                    CarrierKind::RemovedAttackerDefender,
+                    incarnation,
+                    incarnation,
+                )
+            },
+            merge: |carrier, live| {
+                carrier_naming(CarrierKind::RemovedAttackerDefender, live, carrier)
+            },
         },
         CarrierCase {
             name: "crew_activated_this_turn",
