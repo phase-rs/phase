@@ -13021,6 +13021,19 @@ fn apply_non_priority_pass_action(
             let resolution_permission = casting::current_resolution_cast_permission_index(
                 state, *player, *object_id, *card_id,
             );
+            if resolution_permission.is_none()
+                && casting::library_spell_face_choice(state, *object_id)
+                && !casting::library_spell_face_is_granted(
+                    state,
+                    *player,
+                    *object_id,
+                    casting::ModalCardFace::from_back_face(back_face),
+                )
+            {
+                return Err(EngineError::InvalidAction(
+                    "The library permission does not allow casting that face".to_string(),
+                ));
+            }
             // Validate the exact indexed paid-cleanup root before changing the
             // visible face or its election flags. A forged receipt must leave
             // the prompt, object, permissions, triggers, journal, and events
@@ -19305,13 +19318,6 @@ fn handle_play_land(
         object_id,
         crate::types::ability::CardPlayMode::Play,
     )
-    .filter(|_| {
-        state.objects.get(&object_id).is_some_and(|obj| {
-            obj.card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Land)
-        })
-    })
     .map(|grant| (grant.source, grant.frequency));
     let in_library_with_permission = library_permission_src.is_some();
     // CR 116.2a: a land is put onto the battlefield "from the zone it was in", so

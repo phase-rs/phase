@@ -44,16 +44,15 @@
 //! 3. Where a test's claim is that two branches differ, drive both and write the
 //!    ACCEPT branch first, as the test's own positive control.
 //!
-//! Every card here is built from VERBATIM Oracle text (`/card-test`), never a
-//! paraphrase and never `add_real_card` — none of these cards is in
-//! `integration_cards/` except Memory Vessel and Mondo Gecko, and expanding
-//! that fixture is not this PR's business.
+//! Duration scenarios use verbatim Oracle text. The library play regression
+//! also uses the card export to load the paired printed faces of an MDFC.
 
 use engine::ai_support::legal_actions;
 use engine::game::combat::{creature_cant_attack, AttackTarget};
 use engine::game::keywords::has_keyword;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::{filter_state_for_viewer, HIDDEN_CARD_NAME};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
@@ -1807,6 +1806,61 @@ fn xanathar_foreign_land_requires_main_phase_and_uses_one_land_drop() {
     assert!(runner.act(land_action(runner.state(), second)).is_err());
 }
 
+#[test]
+fn top_of_library_play_permission_admits_a_modal_land_face() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    for owner in [P0, P1] {
+        let mut scenario = if owner == P0 {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_real_card(P0, "Future Sight", Zone::Battlefield, db);
+            scenario
+        } else {
+            xanathar_scenario(2).0
+        };
+        let shelter = scenario.add_real_card(owner, "Sejiri Shelter", Zone::Library, db);
+        let mut runner = scenario.build();
+        if owner == P1 {
+            announce_xanathar_trigger(&mut runner);
+            resolve_xanathar_trigger(&mut runner);
+            runner.advance_to_phase(Phase::PreCombatMain);
+        }
+        assert_eq!(runner.state().library_of(owner).front(), Some(&shelter));
+        assert!(can_play_land(runner.state(), shelter));
+        let card_id = runner.state().objects[&shelter].card_id;
+        runner
+            .act(land_action(runner.state(), shelter))
+            .expect("play the modal land face directly from the library");
+        let glacier = runner
+            .state()
+            .battlefield
+            .iter()
+            .find_map(|id| {
+                let obj = &runner.state().objects[id];
+                (obj.card_id == card_id).then_some(obj)
+            })
+            .expect("land face entered");
+        assert_eq!(glacier.name, "Sejiri Glacier");
+        assert_eq!(glacier.owner, owner);
+        assert_eq!(glacier.controller, P0);
+        assert!(glacier.tapped);
+        assert_eq!(runner.state().players[0].lands_played_this_turn, 1);
+    }
+}
+
+#[test]
+fn top_of_library_cast_only_permission_does_not_admit_a_modal_land_face() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Mystic Forge", Zone::Battlefield, db);
+    let shelter = scenario.add_real_card(P0, "Sejiri Shelter", Zone::Library, db);
+    let mut runner = scenario.build();
+    assert!(!can_play_land(runner.state(), shelter));
+    assert!(runner.act(land_action(runner.state(), shelter)).is_err());
+    assert_eq!(runner.state().library_of(P0).front(), Some(&shelter));
+}
+
 fn add_test_mana(runner: &mut GameRunner, player: PlayerId, kind: ManaType, count: usize) {
     for _ in 0..count {
         runner
@@ -1848,7 +1902,7 @@ fn xanathar_repeatedly_casts_from_the_live_top_with_its_payment_concession() {
     assert_eq!(runner.state().library_of(P1).front(), Some(&blue));
     assert_eq!(runner.state().objects[&blue].zone, Zone::Library);
 
-    add_test_mana(&mut runner, P0, ManaType::Red, 2);
+    add_test_mana(&mut runner, P0, ManaType::Red, 3);
     assert!(legal_actions(runner.state()).iter().any(|action| {
         matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == blue)
     }));

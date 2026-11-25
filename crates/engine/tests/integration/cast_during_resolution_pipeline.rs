@@ -1847,7 +1847,12 @@ fn cancelled_ripple_cast_retires_foreign_library_look_before_bottom_order() {
             ["foreign_library_look_snapshot"]
             .clone()
     };
+    let assert_visible = |state: &GameState, id| {
+        let view = engine::game::visibility::filter_state_for_viewer(state, P0);
+        assert_eq!(view.objects[&id].name, state.objects[&id].name);
+    };
     let original_top = *runner.state().library_of(P1).front().unwrap();
+    assert_visible(runner.state(), original_top);
     assert_eq!(
         snapshot(runner.state())["tops"],
         serde_json::json!([[P1, original_top]])
@@ -1886,6 +1891,7 @@ fn cancelled_ripple_cast_retires_foreign_library_look_before_bottom_order() {
             .expect("resolve Temple Bell");
     }
     assert_eq!(runner.state().library_of(P1).front(), Some(&next_top));
+    assert_visible(runner.state(), next_top);
 
     let card_id = runner.state().objects[&later_shock].card_id;
     runner
@@ -1900,6 +1906,7 @@ fn cancelled_ripple_cast_retires_foreign_library_look_before_bottom_order() {
         runner.state().waiting_for,
         WaitingFor::TargetSelection { player: P0, .. }
     ));
+    assert_visible(runner.state(), next_top);
     assert_eq!(
         snapshot(runner.state())["tops"],
         serde_json::json!([[P1, next_top]])

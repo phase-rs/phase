@@ -1676,10 +1676,12 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
             .map(|grant| grant.object_id)
             .filter(|id| seen_library_cards.insert(*id))
             .filter(|id| {
-                state
-                    .objects
-                    .get(id)
-                    .is_some_and(object_may_enter_cast_path)
+                state.objects.get(id).is_some_and(|obj| {
+                    object_may_enter_cast_path(obj)
+                        && (top_of_library_grant_for_object(state, player, *id, CardPlayMode::Cast)
+                            .is_some()
+                            || cast_spell_face_choice_offered_from_zone(state, player, obj))
+                })
             }),
     );
 
@@ -7537,6 +7539,7 @@ fn graveyard_printed_cast_terms_state(
 pub(crate) struct TopOfLibraryGrant<'a> {
     library_owner: PlayerId,
     object_id: ObjectId,
+    affected: &'a TargetFilter,
     pub(crate) source: ObjectId,
     pub(crate) frequency: CastFrequency,
     pub(crate) alt_cost: Option<&'a crate::types::ability::AbilityCost>,
@@ -7544,6 +7547,23 @@ pub(crate) struct TopOfLibraryGrant<'a> {
 }
 
 impl TopOfLibraryGrant<'_> {
+    fn matches_face(
+        &self,
+        state: &GameState,
+        player: PlayerId,
+        projected_face: Option<&GameObject>,
+    ) -> bool {
+        let ctx = super::filter::FilterContext::from_source_with_controller(self.source, player);
+        match projected_face {
+            Some(face) => {
+                super::filter::matches_target_filter_on_object(state, face, self.affected, &ctx)
+            }
+            None => {
+                super::filter::matches_target_filter(state, self.object_id, self.affected, &ctx)
+            }
+        }
+    }
+
     fn latch(&self) -> crate::types::game_state::TopOfLibraryCastLatch {
         crate::types::game_state::TopOfLibraryCastLatch {
             spell_id: self.object_id,
@@ -7608,22 +7628,21 @@ fn top_of_library_grants(
             {
                 return None;
             }
-            let library_owner = super::static_abilities::concrete_library_owner(library, player)?;
+            let library_owner =
+                super::static_abilities::concrete_library_owner(library, Some(player))?;
             if !state.players.iter().any(|seat| seat.id == library_owner) {
                 return None;
             }
             let object_id = *state.library_of(library_owner).front()?;
-            let ctx = super::filter::FilterContext::from_source_with_controller(source, player);
-            super::filter::matches_target_filter(state, object_id, affected, &ctx).then_some(
-                TopOfLibraryGrant {
-                    library_owner,
-                    object_id,
-                    source,
-                    frequency: *frequency,
-                    alt_cost: alt_cost.as_ref(),
-                    mana_spend_permission: *mana_spend_permission,
-                },
-            )
+            Some(TopOfLibraryGrant {
+                library_owner,
+                object_id,
+                affected,
+                source,
+                frequency: *frequency,
+                alt_cost: alt_cost.as_ref(),
+                mana_spend_permission: *mana_spend_permission,
+            })
         })
 }
 
@@ -7637,16 +7656,37 @@ pub(crate) fn top_of_library_grant_for_object(
     action: CardPlayMode,
 ) -> Option<TopOfLibraryGrant<'_>> {
     let obj = state.objects.get(&object_id)?;
+    // CR 712.12: evaluate a land play using the face the special action elects.
+    let projected_land = if action == CardPlayMode::Play {
+        super::engine::land_face_played(obj)
+    } else {
+        None
+    };
+    let face = projected_land.as_ref().unwrap_or(obj);
+    if action == CardPlayMode::Play && object_may_enter_cast_path(face) {
+        return None;
+    }
+    top_of_library_grant_for_face(state, player, obj, action, projected_land.as_ref())
+}
+
+fn top_of_library_grant_for_face<'a>(
+    state: &'a GameState,
+    player: PlayerId,
+    obj: &GameObject,
+    action: CardPlayMode,
+    projected_face: Option<&GameObject>,
+) -> Option<TopOfLibraryGrant<'a>> {
     if obj.zone != Zone::Library
         || !state.players.iter().any(|seat| seat.id == obj.owner)
-        || state.library_of(obj.owner).front() != Some(&object_id)
+        || state.library_of(obj.owner).front() != Some(&obj.id)
     {
         return None;
     }
     let mut selected = None;
     for grant in top_of_library_grants(state, player, action).filter(|grant| {
-        grant.object_id == object_id
+        grant.object_id == obj.id
             && state.object_in_players_zone(obj, Zone::Library, grant.library_owner)
+            && grant.matches_face(state, player, projected_face)
     }) {
         if grant.frequency.is_unlimited() {
             return Some(grant);
@@ -7761,11 +7801,7 @@ pub(crate) fn top_of_library_lands_playable_by_permission(
         .map(|grant| grant.object_id)
         .filter(move |id| seen.insert(*id))
         .filter(move |id| {
-            state.objects.get(id).is_some_and(|obj| {
-                obj.card_types
-                    .core_types
-                    .contains(&crate::types::card_type::CoreType::Land)
-            })
+            top_of_library_grant_for_object(state, player, *id, CardPlayMode::Play).is_some()
         })
 }
 
@@ -16964,6 +17000,7 @@ fn cast_face_choice_offered_from_zone(
 /// Unbound).
 fn cast_spell_face_choice_offered_from_zone(
     state: &GameState,
+    player: PlayerId,
     obj: &crate::game::game_object::GameObject,
 ) -> bool {
     if !cast_spell_face_choice_available(obj) {
@@ -16971,6 +17008,41 @@ fn cast_spell_face_choice_offered_from_zone(
     }
     cast_face_choice_offered_from_zone(state, obj)
         || matches!(obj.zone, Zone::Graveyard | Zone::Exile)
+        || (obj.zone == Zone::Library
+            && [ModalCardFace::Front, ModalCardFace::Back]
+                .into_iter()
+                .any(|face| library_spell_face_is_granted(state, player, obj.id, face)))
+}
+
+/// CR 712.11c + CR 709.3: A top-of-library cast grant must admit the
+/// characteristics of the chosen spell face.
+pub(crate) fn library_spell_face_is_granted(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    face: ModalCardFace,
+) -> bool {
+    match face {
+        ModalCardFace::Front => {
+            top_of_library_grant_for_object(state, player, object_id, CardPlayMode::Cast).is_some()
+        }
+        ModalCardFace::Back => {
+            let Some(obj) = state.objects.get(&object_id) else {
+                return false;
+            };
+            let mut back = obj.clone();
+            simulate_chosen_split_spell_back_face(&mut back);
+            top_of_library_grant_for_face(state, player, obj, CardPlayMode::Cast, Some(&back))
+                .is_some()
+        }
+    }
+}
+
+pub(crate) fn library_spell_face_choice(state: &GameState, object_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| obj.zone == Zone::Library && cast_spell_face_choice_available(obj))
 }
 
 fn casting_variant_for_alternative_spell(layout: LayoutKind) -> CastingVariant {
@@ -19969,14 +20041,10 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 712.11b + CR 903.8: Spell//spell Modal DFCs from hand — or from the
-    // command zone when the card is the player's commander — require choosing
-    // which face to cast (Esika, God of the Tree // The Prismatic Bridge, etc.).
-    // The `ChooseModalFace` handler swaps to the chosen face (if back) and
-    // re-enters this function; the swap clears the back face's Modal
-    // `layout_kind`, so the re-entry casts the chosen face without re-prompting.
+    // CR 712.11b + CR 709.3: Choose the spell face before announcing it.
+    // The committed-face flag suppresses this prompt when the choice re-enters casting.
     if let Some(obj) = state.objects.get(&object_id) {
-        if cast_spell_face_choice_offered_from_zone(state, obj) {
+        if cast_spell_face_choice_offered_from_zone(state, player, obj) {
             return Ok(WaitingFor::ModalFaceChoice {
                 player,
                 object_id,
@@ -22372,7 +22440,7 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
         // preview exists until the face is chosen.
         if (cast_face_choice_offered_from_zone(state, obj)
             && alternative_spell_layout(obj).is_some())
-            || cast_spell_face_choice_offered_from_zone(state, obj)
+            || cast_spell_face_choice_offered_from_zone(state, player, obj)
         {
             return Ok(Vec::new());
         }
@@ -22885,7 +22953,10 @@ pub fn display_back_face_spell_cost(
     object_id: ObjectId,
 ) -> Option<crate::types::mana::ManaCost> {
     let obj = state.objects.get(&object_id)?;
-    if !cast_spell_face_choice_offered_from_zone(state, obj) {
+    if !cast_spell_face_choice_offered_from_zone(state, player, obj)
+        || (obj.zone == Zone::Library
+            && !library_spell_face_is_granted(state, player, object_id, ModalCardFace::Back))
+    {
         return None;
     }
     let mut sim = state.clone();
@@ -22931,8 +23002,7 @@ fn castable_alternative_spell_face_verdict(
     // MDFCs may be castable via the other face even when preparation fails
     // on the current face — e.g. a graveyard permission cast of Life //
     // Death when only Death is affordable (#3987).
-    if cast_spell_face_choice_available(obj) && cast_spell_face_choice_offered_from_zone(state, obj)
-    {
+    if cast_spell_face_choice_offered_from_zone(state, player, obj) {
         let mut transformed_state = state.clone();
         simulate_chosen_split_spell_back_face(transformed_state.objects.get_mut(&object_id)?);
         let mut verdict =
@@ -23017,7 +23087,13 @@ fn castable_spell_verdict_with_probe(
             prepared_cost: None,
         });
     }
-    None
+    // CR 712.11c + CR 709.3a: A permitted back face can be affordable even
+    // when the front face passes preparation and fails the payment check.
+    state
+        .objects
+        .get(&object_id)
+        .filter(|obj| obj.zone == Zone::Library)?;
+    castable_alternative_spell_face_verdict(state, player, object_id)
 }
 
 /// CR 702.180a (issue #1550): Harmonize may tap up to one untapped creature

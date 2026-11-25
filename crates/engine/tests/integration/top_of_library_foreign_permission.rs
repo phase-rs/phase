@@ -3,13 +3,15 @@
 use engine::ai_support::legal_actions;
 use engine::game::casting::spell_objects_available_to_cast;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::visibility::{filter_state_for_viewer, HIDDEN_CARD_NAME};
 use engine::types::ability::{
     CardPlayMode, ContinuousModification, ControllerRef, Duration, ManaSpendPermission,
-    TargetFilter,
+    StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -86,8 +88,27 @@ fn foreign_top_plays_land_and_repeatedly_casts_only_with_its_own_spend_rider() {
             mana_spend_permission: Some(ManaSpendPermission::AnyColor),
         },
     );
+    install_foreign_library_grant(
+        runner.state_mut(),
+        source,
+        P1,
+        StaticMode::MayLookAtTopOfLibrary {
+            library: ControllerRef::SpecificPlayer { id: P1 },
+        },
+    );
+    let assert_private_top = |state: &GameState, top| {
+        assert_eq!(state.library_of(P1).front(), Some(&top));
+        assert_eq!(
+            filter_state_for_viewer(state, P0).objects[&top].name,
+            state.objects[&top].name
+        );
+        assert_eq!(
+            filter_state_for_viewer(state, P1).objects[&top].name,
+            HIDDEN_CARD_NAME
+        );
+    };
     let land_card_id = runner.state().objects[&land].card_id;
-    assert_eq!(runner.state().library_of(P1).front(), Some(&land));
+    assert_private_top(runner.state(), land);
     assert!(legal_actions(runner.state()).iter().any(|action| {
         matches!(action, GameAction::PlayLand { object_id, .. } if *object_id == land)
     }));
@@ -122,7 +143,7 @@ fn foreign_top_plays_land_and_repeatedly_casts_only_with_its_own_spend_rider() {
     let available = spell_objects_available_to_cast(runner.state(), P0);
     assert!(available.contains(&own) && available.contains(&blue));
     assert!(!available.contains(&colorless));
-    assert_eq!(runner.state().library_of(P1).front(), Some(&blue));
+    assert_private_top(runner.state(), blue);
     assert!(runner.state().exile.is_empty());
 
     add_mana(runner.state_mut(), P0, ManaType::Red, 2);
@@ -149,7 +170,7 @@ fn foreign_top_plays_land_and_repeatedly_casts_only_with_its_own_spend_rider() {
             ..
         }
     )));
-    assert_eq!(runner.state().library_of(P1).front(), Some(&colorless));
+    assert_private_top(runner.state(), colorless);
     assert!(
         runner.cast(colorless).try_resolve().is_err(),
         "colored mana cannot pay {{C}}"
@@ -167,4 +188,114 @@ fn foreign_top_plays_land_and_repeatedly_casts_only_with_its_own_spend_rider() {
         .cast(own)
         .try_resolve()
         .expect("Future Sight remains usable");
+}
+
+#[test]
+fn library_cast_elects_only_spell_faces_admitted_by_its_grant() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let planeswalkers = TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker));
+    for filter in [None, Some(TargetFilter::Any), Some(planeswalkers)] {
+        let has_permission = filter.is_some();
+        let front_granted = filter == Some(TargetFilter::Any);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        if front_granted {
+            scenario.add_real_card(P0, "Future Sight", Zone::Battlefield, db);
+        } else if let Some(filter) = filter {
+            scenario
+                .add_creature(P0, "Planeswalker cast grant", 1, 1)
+                .with_static_definition(
+                    StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+                        library: ControllerRef::You,
+                        play_mode: CardPlayMode::Cast,
+                        frequency: CastFrequency::Unlimited,
+                        alt_cost: None,
+                        mana_spend_permission: None,
+                    })
+                    .affected(filter),
+                );
+        }
+        let valki = scenario.add_real_card(P0, "Valki, God of Lies", Zone::Library, db);
+        let mut runner = scenario.build();
+        add_mana(runner.state_mut(), P0, ManaType::Black, 1);
+        add_mana(runner.state_mut(), P0, ManaType::Red, 6);
+        let card_id = runner.state().objects[&valki].card_id;
+        let announce = GameAction::CastSpell {
+            object_id: valki,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        };
+        assert_eq!(
+            legal_actions(runner.state()).contains(&announce),
+            has_permission
+        );
+        let result = runner.act(announce);
+        if !has_permission {
+            assert!(result.is_err());
+            assert_eq!(runner.state().library_of(P0).front(), Some(&valki));
+            continue;
+        }
+        assert!(matches!(
+            result.expect("announce from library").waiting_for,
+            WaitingFor::ModalFaceChoice { player: P0, object_id, .. } if object_id == valki
+        ));
+        let choose_front = GameAction::ChooseModalFace { back_face: false };
+        let choose_back = GameAction::ChooseModalFace { back_face: true };
+        let actions = legal_actions(runner.state());
+        assert_eq!(actions.contains(&choose_front), front_granted);
+        assert!(actions.contains(&choose_back));
+        if !front_granted {
+            assert!(runner.act(choose_front).is_err());
+            assert_eq!(runner.state().objects[&valki].name, "Valki, God of Lies");
+        }
+        runner
+            .act(choose_back)
+            .expect("cast Tibalt from the library");
+        let spell = runner.state().stack.back().expect("Tibalt on the stack");
+        assert_eq!(
+            runner.state().objects[&spell.id].name,
+            "Tibalt, Cosmic Impostor"
+        );
+        assert!(runner.state().library_of(P0).is_empty());
+    }
+}
+
+#[test]
+fn library_cast_offers_an_affordable_back_face_when_the_front_cost_is_unpayable() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Future Sight", Zone::Battlefield, db);
+    let halvar = scenario.add_real_card(P0, "Halvar, God of Battle", Zone::Library, db);
+    let mut runner = scenario.build();
+    add_mana(runner.state_mut(), P0, ManaType::White, 1);
+    add_mana(runner.state_mut(), P0, ManaType::Red, 1);
+    let card_id = runner.state().objects[&halvar].card_id;
+    let announce = GameAction::CastSpell {
+        object_id: halvar,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(legal_actions(runner.state()).contains(&announce));
+    assert!(matches!(
+        runner
+            .act(announce)
+            .expect("announce from library")
+            .waiting_for,
+        WaitingFor::ModalFaceChoice { .. }
+    ));
+    runner
+        .act(GameAction::ChooseModalFace { back_face: true })
+        .expect("cast Sword of the Realms for {1}{W}");
+    let spell = runner
+        .state()
+        .stack
+        .back()
+        .expect("Sword of the Realms on the stack");
+    assert_eq!(
+        runner.state().objects[&spell.id].name,
+        "Sword of the Realms"
+    );
 }

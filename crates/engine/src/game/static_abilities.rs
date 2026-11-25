@@ -1120,12 +1120,25 @@ pub(crate) fn transient_grants_static_mode_to_player(
 /// at resolution already names a concrete player.
 pub(crate) fn concrete_library_owner(
     library: &ControllerRef,
-    controller: PlayerId,
+    controller: Option<PlayerId>,
 ) -> Option<PlayerId> {
     match library {
-        ControllerRef::You => Some(controller),
+        ControllerRef::You => controller,
         ControllerRef::SpecificPlayer { id } => Some(*id),
-        _ => None,
+        ControllerRef::Opponent
+        | ControllerRef::ScopedPlayer
+        | ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::ChosenPlayer { .. }
+        | ControllerRef::DeclaredPlayer { .. }
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer => None,
     }
 }
 
@@ -1145,19 +1158,18 @@ pub(crate) fn top_of_library_look_owners(
                     return None;
                 };
                 static_ability_match_applies(state, &definition.mode, &context, source, definition)
-                    .then(|| concrete_library_owner(library, player))
+                    .then(|| concrete_library_owner(library, Some(player)))
                     .flatten()
             })
         })
         .into_iter()
         .flatten();
-    let transient =
-        player_transient_static_modes(state, player).filter_map(|(_, mode)| match mode {
-            StaticMode::MayLookAtTopOfLibrary {
-                library: ControllerRef::SpecificPlayer { id },
-            } => Some(*id),
-            _ => None,
-        });
+    let transient = player_transient_static_modes(state, player).filter_map(|(_, mode)| {
+        let StaticMode::MayLookAtTopOfLibrary { library } = mode else {
+            return None;
+        };
+        concrete_library_owner(library, None)
+    });
     printed.chain(transient)
 }
 

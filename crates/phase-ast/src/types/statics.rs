@@ -2436,6 +2436,8 @@ pub enum StaticMode {
         kind: CrewContributionKind,
         actions: Vec<CrewAction>,
     },
+    /// CR 401.5 + CR 701.20e: The grantee may privately look at the top card
+    /// of the library belonging to the player named by `library`.
     MayLookAtTopOfLibrary {
         library: ControllerRef,
     },

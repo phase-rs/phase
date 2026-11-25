@@ -2837,10 +2837,19 @@ pub fn candidate_actions_broad_with_probe(
                         _ => None,
                     })
             });
+            let library_spell_choice = resolution_permission.is_none()
+                && crate::game::casting::library_spell_face_choice(state, *object_id);
             let mut actions: Vec<_> = [false, true]
                 .into_iter()
                 .filter(|back_face| {
                     legal_faces.is_none_or(|faces| faces.face(*back_face).is_some())
+                        && (!library_spell_choice
+                            || crate::game::casting::library_spell_face_is_granted(
+                                state,
+                                *player,
+                                *object_id,
+                                crate::game::casting::ModalCardFace::from_back_face(*back_face),
+                            ))
                 })
                 .map(|back_face| {
                     candidate(
