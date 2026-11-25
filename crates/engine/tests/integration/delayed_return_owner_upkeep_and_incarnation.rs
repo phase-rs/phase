@@ -46,6 +46,7 @@
 //!   * CR 730.3 / CR 730.3c: a merged permanent that leaves becomes several
 //!     objects; an effect that finds the new object finds all of them.
 
+use engine::database::card_db::CardDatabase;
 use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -219,9 +220,10 @@ fn board<T>(
 /// permanent is a 7/2 with both cards' abilities. `extra` adds the row's
 /// other permanents. Returns `(runner, phytotitan, gemrazer, spells)`.
 fn merged_board(extra: impl FnOnce(&mut GameScenario)) -> (GameRunner, ObjectId, ObjectId, Spells) {
-    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
     let (mut runner, phytotitan, spells, gemrazer) = board(Phase::PreCombatMain, |scenario| {
-        let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, db);
+        let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
         // Gemrazer's mutate cost is {1}{G}{G}.
         scenario.with_mana_pool(
             P0,
@@ -232,19 +234,25 @@ fn merged_board(extra: impl FnOnce(&mut GameScenario)) -> (GameRunner, ObjectId,
         extra(scenario);
         gemrazer
     });
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
     assert!(
         !runner.state().objects[&phytotitan]
             .trigger_definitions
             .is_empty(),
         "reach-guard: the Oracle-built Phytotitan keeps its dies trigger through the rehydrate"
     );
+    mutate_gemrazer_under(&mut runner, gemrazer, phytotitan);
+    assert_eq!(runner.state().objects[&phytotitan].power, Some(7));
+    assert_eq!(runner.state().objects[&phytotitan].toughness, Some(2));
+    (runner, phytotitan, gemrazer, spells)
+}
 
+fn mutate_gemrazer_under(runner: &mut GameRunner, gemrazer: ObjectId, host: ObjectId) {
     runner
         .cast(gemrazer)
         .casting_variant(CastingVariant::Mutate)
         .alternative_cast(AlternativeCastDecision::Alternative)
-        .target_object(phytotitan)
+        .target_object(host)
         .commit();
     runner.advance_until_stack_empty();
     assert!(
@@ -259,18 +267,13 @@ fn merged_board(extra: impl FnOnce(&mut GameScenario)) -> (GameRunner, ObjectId,
         .act(GameAction::ChooseMutateMergeSide {
             side: engine::game::merge::MergeSide::Bottom,
         })
-        .expect("Gemrazer goes under Phytotitan");
+        .expect("Gemrazer goes under the host");
     // Gemrazer's mutate trigger has no legal target (P1 controls no artifact or
     // enchantment), so nothing waits on the stack.
     runner.advance_until_stack_empty();
-    let merged = runner.state().objects[&phytotitan]
-        .merged_components
-        .clone();
+    let merged = &runner.state().objects[&host].merged_components;
     assert_eq!(merged.len(), 2, "reach-guard: one merged permanent");
     assert!(merged.contains(&gemrazer), "Gemrazer is a component");
-    assert_eq!(runner.state().objects[&phytotitan].power, Some(7));
-    assert_eq!(runner.state().objects[&phytotitan].toughness, Some(2));
-    (runner, phytotitan, gemrazer, spells)
 }
 
 // ------------------------------------------------------------------ drivers
@@ -881,6 +884,87 @@ fn merged_phytotitan_survivor_put_back_before_its_trigger_still_returns_its_comp
     assert_returned_tapped_under(&runner, gemrazer, P0);
     assert_eq!(zone(&runner, phytotitan), Zone::Graveyard);
     assert!(runner.state().delayed_triggers.is_empty());
+}
+
+#[test]
+fn together_forever_returns_a_merged_component_after_cremate_exiles_the_survivor() {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let watcher = scenario
+        .add_enchantment_from_oracle(P0, "Together Forever", "When this enchantment enters, support 2. (Put a +1/+1 counter on each of up to two target creatures.)\n{1}: Choose target creature with a counter on it. When that creature dies this turn, return that card to its owner's hand.")
+        .id();
+    let host = scenario
+        .add_creature(P0, "Mutate host", 2, 2)
+        .with_subtypes(vec!["Beast"])
+        .id();
+    scenario.with_counter(host, engine::types::counter::CounterType::Plus1Plus1, 1);
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let murder = add_free_spell(&mut scenario, P0, "Murder", "Destroy target creature.");
+    let cremate = add_free_spell(&mut scenario, P0, "Cremate", CREMATE);
+    scenario.add_card_to_library_top(P0, "Cremate draw");
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+
+    runner.activate(watcher, 0).target_object(host).resolve();
+    let watched = only_delayed(&runner)
+        .ability
+        .context
+        .delayed_watch_incarnation
+        .expect("installed incarnation pin");
+    assert_eq!(watched, incarnation(&runner, host));
+    runner.cast(murder).target_object(host).commit();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pass to Murder");
+    let death = runner
+        .act(GameAction::PassPriority)
+        .expect("resolve Murder");
+    assert_eq!(zone(&runner, host), Zone::Graveyard);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    let departure = death.events.iter().find_map(|event| match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record,
+        } if *object_id == host => record.trigger_source_context(),
+        _ => None,
+    });
+    assert_eq!(
+        departure.map(|context| context.identity.reference),
+        Some(watched),
+        "the firing must see the watched departure"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "death leaves the return on the stack; waiting for {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().stack[0].source_id, watcher);
+
+    cast_and_resolve_only(&mut runner, cremate, TargetRef::Object(host));
+    assert_eq!(zone(&runner, host), Zone::Exile);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    runner.advance_until_stack_empty();
+
+    // CR 400.7e + CR 730.3c + CR 609.3: each still-findable arrival returns.
+    assert_eq!(zone(&runner, host), Zone::Exile);
+    assert!(runner.state().players[0].hand.contains(&gemrazer));
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 /// CR 616.1e: answer a two-way entry tap-state ordering offered to P0.

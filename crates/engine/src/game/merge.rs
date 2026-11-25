@@ -704,8 +704,7 @@ pub(crate) fn restore_pre_merge_tokenness_for_leave(state: &mut GameState, merge
 /// entry.
 ///
 /// This is a no-op unless the effect references a RECORDED DEPARTURE — the
-/// object a merged permanent became when it left the battlefield — and a
-/// resolved object is a former survivor with co-located components. A freshly
+/// objects a merged permanent became when it left the battlefield. A freshly
 /// chosen target (Riftsweeper choosing one exiled card; reanimating one specific
 /// card) carries no departure evidence for that object and must not over-return.
 /// A tracked-set filter expands per resolved referent from the set's recorded
@@ -753,6 +752,19 @@ pub(crate) fn expand_returned_merge_components(
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
     ) {
         return expand_tracked_set_referents(state, ability, resolved, target_filter);
+    }
+    if let (TargetFilter::TriggeringSource, Some(event)) =
+        (target_filter, state.current_trigger_event.as_ref())
+    {
+        // CR 400.7e + CR 730.3c + CR 609.3: use the firing's departure to
+        // find each component, including when the survivor has since moved.
+        let mut expanded = resolved;
+        for component in departure_event_components(state, event) {
+            if !expanded.contains(&component) {
+                expanded.push(component);
+            }
+        }
+        return expanded;
     }
     let mut expanded = resolved.clone();
     for &survivor_id in &resolved {
@@ -901,8 +913,6 @@ fn is_terminal_shuffle_move(effect: &Effect) -> bool {
 ///   is exactly one past the incarnation announced for it (`target_pins`: an
 ///   earlier instruction of this resolution moved it). A pin or result for any
 ///   other object is not evidence for this one.
-/// * `TriggeringSource`: the trigger event is this referent's own departure
-///   from the battlefield.
 /// * `ExiledBySource` is formed by an earlier move in the chain and records a
 ///   departure.
 ///
@@ -945,14 +955,6 @@ fn referent_records_departure(
                 })
         }
         TargetFilter::ExiledBySource => true,
-        TargetFilter::TriggeringSource => matches!(
-            state.current_trigger_event.as_ref(),
-            Some(GameEvent::ZoneChanged {
-                object_id,
-                from: Some(Zone::Battlefield),
-                ..
-            }) if *object_id == referent
-        ),
         _ => false,
     }
 }

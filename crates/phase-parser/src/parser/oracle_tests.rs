@@ -21,6 +21,27 @@ use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
 #[test]
+fn delayed_this_turn_head_requires_a_terminal_word_boundary_and_keeps_body_case() {
+    use crate::parser::oracle_effect::parse_delayed_this_turn_head;
+    use crate::parser::oracle_util::TextPair;
+
+    let original = "When that creature dies  this turn, Create a Wraith.";
+    assert_eq!(
+        parse_delayed_this_turn_head(TextPair::new(original, &original.to_ascii_lowercase())),
+        Some(("that creature dies", "Create a Wraith."))
+    );
+    for text in [
+        "when that creature dies this turn again, draw a card.",
+        "when that creature dies\tthis turn, draw a card.",
+    ] {
+        assert_eq!(
+            parse_delayed_this_turn_head(TextPair::new(text, text)),
+            None
+        );
+    }
+}
+
+#[test]
 fn declared_death_watcher_requires_a_unique_numbered_creature_and_exact_head() {
     use crate::types::ability::{DelayedTriggerCondition, WheneverEventExpiry};
 

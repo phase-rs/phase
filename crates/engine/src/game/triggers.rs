@@ -22,14 +22,14 @@ use crate::types::events::{
     GameEvent, ManaAbilityTriggerState, ManaTapState, TriggeredAbilityOrigin,
 };
 use crate::types::game_state::{
-    AutoMayChoice, CollectedTriggerContextBatch, DamageRecord, DelayedTrigger,
-    DepartingOwnerAfterAuthority, DistributionUnit, GameState, LatchedBatchedTrigger,
-    LatchedSuppressTrigger, LogicalZoneChangeGroup, LogicalZoneChangeTerminalOutcome,
-    MayTriggerAutoChoiceKey, MayTriggerOrigin, PersistedRestoreError, ProductionOverride,
-    StackEntry, StackEntryKind, StackObjectClass, SubjectIncarnationScope,
-    SyntheticTriggerProvenance, TargetSelectionConstraint, TargetSelectionSlot,
-    TriggerObservationTime, TriggerSourceContext, TriggerSourceRead, WaitingFor,
-    ZoneChangeAnnouncement,
+    battlefield_departure_trigger_source_context, AutoMayChoice, BattlefieldDepartureSourceContext,
+    CollectedTriggerContextBatch, DamageRecord, DelayedTrigger, DepartingOwnerAfterAuthority,
+    DistributionUnit, GameState, LatchedBatchedTrigger, LatchedSuppressTrigger,
+    LogicalZoneChangeGroup, LogicalZoneChangeTerminalOutcome, MayTriggerAutoChoiceKey,
+    MayTriggerOrigin, PersistedRestoreError, ProductionOverride, StackEntry, StackEntryKind,
+    StackObjectClass, SubjectIncarnationScope, SyntheticTriggerProvenance,
+    TargetSelectionConstraint, TargetSelectionSlot, TriggerObservationTime, TriggerSourceContext,
+    TriggerSourceRead, WaitingFor, ZoneChangeAnnouncement,
 };
 use crate::types::identifiers::{
     DelayedInstallIdentity, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
@@ -7187,6 +7187,27 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority_for(
                 .flatten()
                 .map(|owned_index| {
                     unclaimed_owned_zone_events.remove(owned_index);
+                    // CR 603.2c + CR 603.7b: this owner collected the ordinary
+                    // triggers. Its claim must leave a watched death available
+                    // to the delayed collector, including a merged departure
+                    // delivered by an owner-controlled component batch.
+                    let scope = if matches!(scope, ConsumedTriggerEventScope::AllCollectors)
+                        && matches!(
+                            event,
+                            GameEvent::ZoneChanged {
+                                to: Zone::Graveyard,
+                                ..
+                            }
+                        )
+                        && recorded_battlefield_departure_pin(event).is_some_and(|pin| {
+                            state.delayed_triggers.iter().any(|delayed| {
+                                delayed.ability.context.delayed_watch_incarnation == Some(pin)
+                            })
+                        }) {
+                        ConsumedTriggerEventScope::OrdinaryCollectorsOnly
+                    } else {
+                        scope
+                    };
                     ConsumedTriggerEventOccurrence {
                         event: event.clone(),
                         occurrence: trigger_event_occurrence(events, index),
@@ -20557,6 +20578,14 @@ struct DelayedWheneverFiring {
     causes: Vec<GameEvent>,
 }
 
+fn recorded_battlefield_departure_pin(event: &GameEvent) -> Option<ObjectIncarnationRef> {
+    match battlefield_departure_trigger_source_context(event) {
+        BattlefieldDepartureSourceContext::Present(source) => Some(source.identity.reference),
+        BattlefieldDepartureSourceContext::Absent
+        | BattlefieldDepartureSourceContext::Malformed => None,
+    }
+}
+
 /// CR 603.7b + CR 603.2c: the firings a duration-bearing ("this turn")
 /// `WheneverEvent` generator makes on one batch, through the same firing-group
 /// authority printed triggers use. Every admitted event is considered, not just
@@ -20608,17 +20637,13 @@ fn delayed_whenever_event_firings(
         }
         // CR 400.7 + CR 603.7c: Admission uses the occurrence that left the
         // battlefield. The payload separately follows the death's arrival.
-        if let Some(watched) = delayed.ability.context.delayed_watch_incarnation {
-            use crate::types::game_state::{
-                battlefield_departure_trigger_source_context, BattlefieldDepartureSourceContext,
-            };
-            if !matches!(
-                battlefield_departure_trigger_source_context(event),
-                BattlefieldDepartureSourceContext::Present(source)
-                    if source.identity.reference == watched
-            ) {
-                continue;
-            }
+        if delayed
+            .ability
+            .context
+            .delayed_watch_incarnation
+            .is_some_and(|watched| recorded_battlefield_departure_pin(event) != Some(watched))
+        {
+            continue;
         }
         // CR 120.4b: a whole-event threshold is decided on the summed batch,
         // so admission uses the threshold-free filters, as printed does.

@@ -6036,21 +6036,22 @@ pub(super) fn parse_delayed_this_turn_head(tp: TextPair<'_>) -> Option<(&str, &s
     )
     .parse(tp.lower)
     .ok()?;
-    let offset = tp.lower.len() - head.len();
-    let comma = offset + super::oracle_trigger::find_effect_boundary(head)?;
-    let (_, event) = recognize(many_till(
-        anychar,
-        peek(all_consuming(pair(
-            space1,
-            pair(
-                tag::<_, _, OracleError<'_>>("this"),
-                preceded(space1, tag("turn")),
-            ),
-        ))),
-    ))
-    .parse(&tp.lower[offset..comma])
-    .ok()?;
-    let ((), body) = nom_on_lower(&tp.original[comma..], &tp.lower[comma..], |input| {
+    let boundary = super::oracle_trigger::find_effect_boundary(head)?;
+    let comma = tp.lower.len() - head.len() + boundary;
+    let head = &head[..boundary];
+    let window = nom_primitives::scan_at_word_boundaries(head, |input| {
+        recognize(all_consuming(pair(
+            tag("this"),
+            preceded(space1, tag("turn")),
+        )))
+        .parse(input)
+    })?;
+    let event = head[..head.len() - window.len()].trim_end();
+    if event.is_empty() {
+        return None;
+    }
+    let body = TextPair::new(&tp.original[comma..], &tp.lower[comma..]);
+    let ((), body) = nom_on_lower(body.original, body.lower, |input| {
         value((), pair(tag(","), space1)).parse(input)
     })?;
     Some((event, body))

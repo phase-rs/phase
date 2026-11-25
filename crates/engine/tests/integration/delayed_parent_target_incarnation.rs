@@ -239,19 +239,103 @@ fn together_forever_queues_on_a_token_death_after_the_token_ceases_to_exist() {
 
 #[test]
 fn watchers_expire_even_when_their_printed_payload_has_a_separate_gap() {
+    exercise_watchers_with_existing_payload_gaps(None);
+}
+
+#[test]
+fn heroic_sacrifice_fires_its_existing_counter_payload_this_turn() {
+    exercise_watchers_with_existing_payload_gaps(Some("Heroic Sacrifice"));
+}
+
+#[test]
+fn reincarnation_fires_its_existing_graveyard_choice_this_turn() {
+    exercise_watchers_with_existing_payload_gaps(Some("Printed reanimation watcher"));
+}
+
+#[test]
+fn rushed_rebirth_fires_its_existing_search_payload_this_turn() {
+    exercise_watchers_with_existing_payload_gaps(Some("Printed search watcher"));
+}
+
+#[test]
+fn end_blaze_epiphany_fires_its_existing_exile_payload_this_turn() {
+    exercise_watchers_with_existing_payload_gaps(Some("End-Blaze Epiphany"));
+}
+
+const HEROIC_SACRIFICE_WATCH: &str = concat!(
+    "Choose target creature you control. Until end of turn, all damage that would be dealt to ",
+    "you and creatures you control is dealt to the chosen creature instead (if it's still on ",
+    "the battlefield). When that creature dies this turn, put its counters on up to one target ",
+    "creature you control and draw a card.",
+);
+const REINCARNATION_WATCH: &str = concat!(
+    "Choose target creature. When that creature dies this turn, return a creature card from ",
+    "its owner's graveyard to the battlefield under the control of that creature's owner.",
+);
+const RUSHED_REBIRTH_WATCH: &str = concat!(
+    "Choose target creature. When that creature dies this turn, search your library for a ",
+    "creature card with lesser mana value, put it onto the battlefield tapped, then shuffle.",
+);
+const END_BLAZE_EPIPHANY_WATCH: &str = concat!(
+    "End-Blaze Epiphany deals X damage to target creature. When that creature dies this turn, ",
+    "exile a number of cards from the top of your library equal to its power, then choose a ",
+    "card exiled this way. Until the end of your next turn, you may play that card.",
+);
+
+fn exercise_watchers_with_existing_payload_gaps(live_card: Option<&str>) {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::ability::CastingPermission;
+    use engine::types::counter::CounterType;
     use engine::types::mana::{ManaCost, ManaCostShard};
 
     for (name, oracle, x, immediate_draw) in [
-        ("Printed redirection watcher", "Choose target creature you control. Until end of turn, all damage that would be dealt to you and creatures you control is dealt to the chosen creature instead (if it's still on the battlefield). When that creature dies this turn, put its counters on up to one target creature you control and draw a card.", None, 1),
-        ("Printed reanimation watcher", "Choose target creature. When that creature dies this turn, return a creature card from its owner's graveyard to the battlefield under the control of that creature's owner.", None, 0),
-        ("Printed search watcher", "Choose target creature. When that creature dies this turn, search your library for a creature card with lesser mana value, put it onto the battlefield tapped, then shuffle.", None, 0),
-        ("End-Blaze Epiphany", "End-Blaze Epiphany deals X damage to target creature. When that creature dies this turn, exile a number of cards from the top of your library equal to its power, then choose a card exiled this way. Until the end of your next turn, you may play that card.", Some(1), 0),
+        ("Heroic Sacrifice", HEROIC_SACRIFICE_WATCH, None, 1),
+        ("Printed reanimation watcher", REINCARNATION_WATCH, None, 0),
+        ("Printed search watcher", RUSHED_REBIRTH_WATCH, None, 0),
+        ("End-Blaze Epiphany", END_BLAZE_EPIPHANY_WATCH, Some(1), 0),
     ] {
+        if live_card.is_some_and(|card| card != name) {
+            continue;
+        }
+        let late = live_card.is_none();
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.with_mana_pool(P0, mana(4));
         stock_libraries(&mut scenario);
-        let victim = scenario.add_creature(P0, "Watched creature", 4, 4).id();
+        let victim = scenario
+            .add_creature(
+                if name == "Printed reanimation watcher" {
+                    P1
+                } else {
+                    P0
+                },
+                "Watched creature",
+                2,
+                4,
+            )
+            .controlled_by(P0)
+            .with_mana_cost(ManaCost::generic(4))
+            .id();
+        scenario.with_counter(victim, CounterType::Plus1Plus1, 1);
+        let recipient = scenario.add_creature(P0, "Counter recipient", 2, 2).id();
+        let other_recipient = scenario
+            .add_creature(P0, "Other counter recipient", 2, 2)
+            .id();
+        let caster_grave = scenario
+            .add_creature_to_graveyard(P0, "Caster's graveyard card", 1, 1)
+            .id();
+        let owner_grave = scenario
+            .add_creature_to_graveyard(P1, "Owner's graveyard card", 1, 1)
+            .id();
+        let unrelated_exile = scenario
+            .add_land_to_exile(P0, "Previously exiled land")
+            .id();
+        let top = scenario.add_card_to_library_top(P0, "Top card");
+        let lesser = (name == "Printed search watcher").then(|| {
+            let db = engine::database::card_db::CardDatabase::from_integration_fixture_typing_faces_on_read()
+                .expect("integration card fixture must load");
+            scenario.add_real_card(P0, "Llanowar Elves", Zone::Library, &db)
+        });
         let mut spell = scenario.add_spell_to_hand_from_oracle(P0, name, true, oracle);
         if x.is_some() {
             spell.with_mana_cost(ManaCost::Cost {
@@ -260,44 +344,222 @@ fn watchers_expire_even_when_their_printed_payload_has_a_separate_gap() {
             });
         }
         let spell = spell.id();
-        let removal = scenario.add_spell_to_hand_from_oracle(P1, "Murder", true, DESTROY_TARGET_CREATURE).id();
+        let removal = scenario
+            .add_spell_to_hand_from_oracle(P1, "Murder", true, DESTROY_TARGET_CREATURE)
+            .id();
         let mut runner = scenario.build();
         let announced = runner.state().objects[&victim].incarnation;
         let cast = runner.cast(spell).target_object(victim);
-        let outcome = if let Some(x) = x { cast.x(x).resolve() } else { cast.resolve() };
+        let outcome = if let Some(x) = x {
+            cast.x(x).resolve()
+        } else {
+            cast.resolve()
+        };
         assert_eq!(outcome.zone_of(victim), Zone::Battlefield);
         assert_eq!(outcome.hand_drawn(P0), immediate_draw);
+        let hand_after_install = outcome.state().players[0].hand.len();
         let [watcher] = outcome.state().delayed_triggers.as_slice() else {
             panic!("{name} must install exactly one watcher");
         };
-        let pin = watcher.ability.context.delayed_watch_incarnation.expect("announced watch pin");
+        let pin = watcher
+            .ability
+            .context
+            .delayed_watch_incarnation
+            .expect("announced watch pin");
         assert_eq!((pin.object_id, pin.incarnation), (victim, announced));
         assert!(matches!(
             &watcher.condition,
-            DelayedTriggerCondition::WheneverEvent { expiry: WheneverEventExpiry::EndOfTurn, .. }
+            DelayedTriggerCondition::WheneverEvent {
+                expiry: WheneverEventExpiry::EndOfTurn,
+                ..
+            }
         ));
-        advance_past_end_of_turn(&mut runner);
-        assert!(runner.state().delayed_triggers.is_empty());
-        assert_eq!(runner.state().objects[&victim].incarnation, announced);
-        let late_death = runner.cast(removal).target_object(victim).resolve();
-        assert_eq!(late_death.zone_of(victim), Zone::Graveyard);
-        assert!(late_death.state().stack.is_empty());
-        assert!(matches!(late_death.final_waiting_for(), WaitingFor::Priority { .. }));
+        if late {
+            advance_past_end_of_turn(&mut runner);
+            assert!(runner.state().delayed_triggers.is_empty());
+            assert_eq!(runner.state().objects[&victim].incarnation, announced);
+        } else {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("give P1 priority");
+        }
+        if !late && name == "Heroic Sacrifice" {
+            runner.cast(removal).target_object(victim).commit();
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass to Murder");
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve Murder");
+            assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+            // Existing payload defects: the draw was already resolved above, and
+            // the counter recipient is required despite the printed "up to one".
+            let WaitingFor::TriggerTargetSelection {
+                player: P0,
+                target_slots,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "expected Heroic Sacrifice's counter target, got {:?}",
+                    runner.state().waiting_for
+                )
+            };
+            assert_eq!(target_slots[0].legal_targets.len(), 2);
+            assert!(target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(recipient)));
+            assert!(target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(other_recipient)));
+            assert!(!target_slots[0].optional);
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(recipient)),
+                })
+                .expect("choose the counter recipient");
+            runner.advance_until_stack_empty();
+            assert_eq!(runner.state().players[0].hand.len(), hand_after_install);
+            assert_eq!(
+                runner.state().objects[&recipient]
+                    .counters
+                    .get(&CounterType::Plus1Plus1),
+                Some(&1)
+            );
+        } else if !late && name == "Printed search watcher" {
+            runner.cast(removal).target_object(victim).commit();
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass to Murder");
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve Murder");
+            assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+            assert_eq!(runner.state().stack.len(), 1);
+            assert_eq!(runner.state().stack[0].source_id, spell);
+            let firing = runner.state().stack[0].id;
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass to the Rushed Rebirth trigger");
+            let resolution = runner
+                .act(GameAction::PassPriority)
+                .expect("resolve the Rushed Rebirth trigger");
+            assert!(resolution.events.iter().any(|event| matches!(
+                event, GameEvent::StackResolved { object_id } if *object_id == firing
+            )));
+            // Existing payload defect: the lesser-MV search uses a cost-object
+            // reference. The trigger settles without offering the eligible creature.
+            assert_eq!(
+                runner.state().objects[&lesser.expect("seed the lesser-MV creature")].zone,
+                Zone::Library
+            );
+        } else {
+            let death = runner.cast(removal).target_object(victim).resolve();
+            assert_eq!(death.zone_of(victim), Zone::Graveyard);
+            match (late, name) {
+                (true, _) => {}
+                (false, "Printed reanimation watcher") => {
+                    // Existing payload defect: the graveyard choice is not restricted to the victim's owner.
+                    let WaitingFor::EffectZoneChoice {
+                        player: P0, cards, ..
+                    } = &runner.state().waiting_for
+                    else {
+                        panic!(
+                            "expected a graveyard choice, got {:?}",
+                            runner.state().waiting_for
+                        )
+                    };
+                    assert!(cards.contains(&caster_grave) && cards.contains(&owner_grave));
+                    runner
+                        .act(GameAction::SelectCards {
+                            cards: vec![caster_grave],
+                        })
+                        .expect("select a graveyard card");
+                    assert_eq!(
+                        runner.state().objects[&caster_grave].zone,
+                        Zone::Battlefield
+                    );
+                    assert_eq!(runner.state().objects[&caster_grave].controller, P0);
+                }
+                (false, "End-Blaze Epiphany") => {
+                    let exiled: Vec<_> = death
+                        .events()
+                        .iter()
+                        .filter_map(|event| match event {
+                            GameEvent::ZoneChanged {
+                                object_id,
+                                from: Some(Zone::Library),
+                                to: Zone::Exile,
+                                ..
+                            } => Some(*object_id),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        exiled.len(),
+                        3,
+                        "use the watched creature's departure power"
+                    );
+                    assert!(exiled.contains(&top));
+                    let WaitingFor::ChooseFromZoneChoice {
+                        player: P0, cards, ..
+                    } = &runner.state().waiting_for
+                    else {
+                        panic!(
+                            "expected an exile choice, got {:?}",
+                            runner.state().waiting_for
+                        )
+                    };
+                    assert_eq!(cards.len(), exiled.len());
+                    assert!(exiled.iter().all(|id| cards.contains(id)));
+                    assert!(!cards.contains(&unrelated_exile));
+                    runner
+                        .act(GameAction::SelectCards { cards: vec![top] })
+                        .expect("select an exiled card");
+                    for id in exiled.into_iter().chain([unrelated_exile]) {
+                        let can_play = runner.state().objects[&id].casting_permissions.iter().any(
+                            |permission| {
+                                matches!(
+                                    permission,
+                                    CastingPermission::PlayFromExile { granted_to: P0, .. }
+                                )
+                            },
+                        );
+                        assert_eq!(can_play, id == top, "permission applies to the chosen card");
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
     }
 }
 
 #[test]
 fn initiate_of_blood_expires_its_watch_on_a_creature_dealt_damage_this_turn() {
+    exercise_initiate_of_blood_watch(true);
+}
+
+#[test]
+fn initiate_of_blood_fires_its_existing_flip_payload_this_turn() {
+    exercise_initiate_of_blood_watch(false);
+}
+
+fn exercise_initiate_of_blood_watch(late: bool) {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::ability::EffectKind;
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     stock_libraries(&mut scenario);
-    let source = scenario.add_creature_from_oracle(
-        P0,
-        "Printed damaged-creature watcher",
-        2,
-        2,
-        "{T}: This creature deals 1 damage to target creature that was dealt damage this turn. When that creature dies this turn, flip this creature.",
-    ).id();
+    let db =
+        engine::database::card_db::CardDatabase::from_integration_fixture_typing_faces_on_read()
+            .expect("integration card fixture must load");
+    let source = scenario.add_real_card(P0, "Initiate of Blood", Zone::Battlefield, &db);
     let victim = scenario.add_creature(P1, "Damaged creature", 4, 4).id();
     let shock = scenario
         .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
@@ -306,6 +568,7 @@ fn initiate_of_blood_expires_its_watch_on_a_creature_dealt_damage_this_turn() {
         .add_spell_to_hand_from_oracle(P1, "Murder", true, DESTROY_TARGET_CREATURE)
         .id();
     let mut runner = scenario.build();
+    assert!(runner.state().objects[&source].back_face.is_some());
     let announced = runner.state().objects[&victim].incarnation;
     let damaged = runner.cast(shock).target_object(victim).resolve();
     assert!(damaged.events().iter().any(|event| matches!(
@@ -322,14 +585,24 @@ fn initiate_of_blood_expires_its_watch_on_a_creature_dealt_damage_this_turn() {
         .delayed_watch_incarnation
         .expect("announced watch pin");
     assert_eq!((pin.object_id, pin.incarnation), (victim, announced));
-    advance_past_end_of_turn(&mut runner);
-    assert!(runner.state().delayed_triggers.is_empty());
-    assert_eq!(runner.state().objects[&victim].incarnation, announced);
-    let late_death = runner.cast(removal).target_object(victim).resolve();
-    assert_eq!(late_death.zone_of(victim), Zone::Graveyard);
-    assert!(late_death.state().stack.is_empty());
+    if late {
+        advance_past_end_of_turn(&mut runner);
+        assert!(runner.state().delayed_triggers.is_empty());
+        assert_eq!(runner.state().objects[&victim].incarnation, announced);
+    } else {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("give P1 priority");
+    }
+    let death = runner.cast(removal).target_object(victim).resolve();
+    assert_eq!(death.zone_of(victim), Zone::Graveyard);
+    assert_eq!(death.events().iter().any(|event| matches!(event,
+        GameEvent::EffectResolved { kind: EffectKind::FlipPermanent, source_id, .. } if *source_id == source)), !late);
+    // Existing payload defect: the flip refers to the dead creature, leaving Initiate unflipped.
+    assert!(!death.state().objects[&source].flipped);
+    assert!(death.state().stack.is_empty());
     assert!(matches!(
-        late_death.final_waiting_for(),
+        death.final_waiting_for(),
         WaitingFor::Priority { .. }
     ));
 }
@@ -548,10 +821,20 @@ fn kelsien_advances_experience_for_the_announced_creatures_death() {
     ).id();
     let victim = scenario.add_creature(P1, "Announced creature", 2, 2).id();
     let bystander = scenario.add_creature(P1, "Unannounced creature", 2, 2).id();
+    let second = scenario
+        .add_creature(P1, "Second announced creature", 2, 2)
+        .id();
+    let elixir = scenario.add_artifact_from_oracle(
+        P0, "Printed untap artifact",
+        "You may activate abilities of creatures you control as though those creatures had haste.\n{1}, {T}: Untap target creature.",
+    ).id();
     let destroy_bystander = scenario
         .add_spell_to_hand_from_oracle(P0, "Murder", true, DESTROY_TARGET_CREATURE)
         .id();
     let removal = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, DESTROY_TARGET_CREATURE)
+        .id();
+    let second_removal = scenario
         .add_spell_to_hand_from_oracle(P0, "Murder", true, DESTROY_TARGET_CREATURE)
         .id();
     let mut runner = scenario.build();
@@ -566,6 +849,23 @@ fn kelsien_advances_experience_for_the_announced_creatures_death() {
         .delayed_watch_incarnation
         .expect("watch pin");
     assert_eq!((pin.object_id, pin.incarnation), (victim, announced));
+    runner.activate(elixir, 0).target_object(source).resolve();
+    let second_occurrence = runner.state().objects[&second].incarnation;
+    runner.activate(source, 0).target_object(second).resolve();
+    let pins: Vec<_> = runner
+        .state()
+        .delayed_triggers
+        .iter()
+        .map(|watcher| {
+            let pin = watcher
+                .ability
+                .context
+                .delayed_watch_incarnation
+                .expect("watch pin");
+            (pin.object_id, pin.incarnation)
+        })
+        .collect();
+    assert_eq!(pins, [(victim, announced), (second, second_occurrence)]);
     let wrong = runner
         .cast(destroy_bystander)
         .target_object(bystander)
@@ -584,6 +884,74 @@ fn kelsien_advances_experience_for_the_announced_creatures_death() {
     assert!(death.state().stack.is_empty());
     assert!(matches!(
         death.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    let second_death = runner.cast(second_removal).target_object(second).resolve();
+    assert_eq!(second_death.zone_of(second), Zone::Graveyard);
+    assert_eq!(
+        second_death.state().players[0].player_counter(&PlayerCounterKind::Experience),
+        2
+    );
+    assert!(second_death.state().stack.is_empty());
+    assert!(matches!(
+        second_death.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn kelsien_does_not_install_when_its_target_dies_in_response() {
+    use engine::types::game_state::CastPaymentMode;
+    use engine::types::player::PlayerCounterKind;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature_from_oracle(
+        P0, "Kelsien", 2, 2,
+        "Vigilance, haste\nKelsien gets +1/+1 for each experience counter you have.\n{T}: Kelsien deals 1 damage to target creature you don't control. When that creature dies this turn, you get an experience counter.",
+    ).id();
+    let victim = scenario
+        .add_creature(P1, "Initially legal target", 2, 2)
+        .id();
+    scenario.add_creature(P1, "Alternative legal target", 2, 2);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, DESTROY_TARGET_CREATURE)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("announce Kelsien's activation");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(victim)),
+        })
+        .expect("target the opposing creature");
+    assert_eq!(runner.state().stack.len(), 1);
+    let activation = &runner.state().stack[0];
+    assert_eq!(activation.source_id, source);
+    assert_eq!(
+        activation.ability().unwrap().targets,
+        [TargetRef::Object(victim)]
+    );
+    let result = runner.cast(murder).target_object(victim).resolve();
+    assert_eq!(result.zone_of(victim), Zone::Graveyard);
+    // CR 608.2b: the activation's only target is now illegal.
+    assert!(result.state().delayed_triggers.is_empty());
+    assert_eq!(
+        result.state().players[0].player_counter(&PlayerCounterKind::Experience),
+        0
+    );
+    assert!(result.state().stack.is_empty());
+    assert!(matches!(
+        result.final_waiting_for(),
         WaitingFor::Priority { .. }
     ));
 }
@@ -906,6 +1274,11 @@ fn cryptek_returns_the_graveyard_arrival_tapped_under_the_creating_controller() 
                 DESTROY_TARGET_CREATURE,
             )
             .id();
+        let steal = (!late).then(|| scenario.add_spell_to_hand_from_oracle(
+            P1, "Act of Aggression",
+            true,
+            "({R/P} can be paid with either {R} or 2 life.)\nGain control of target creature an opponent controls until end of turn. Untap that creature. It gains haste until end of turn.",
+        ).id());
         let mut runner = scenario.build();
         runner.activate(source, 0).target_object(victim).resolve();
         let [watcher] = runner.state().delayed_triggers.as_slice() else {
@@ -932,6 +1305,13 @@ fn cryptek_returns_the_graveyard_arrival_tapped_under_the_creating_controller() 
             assert!(runner.state().delayed_triggers.is_empty());
             assert_eq!(runner.state().objects[&victim].incarnation, pin.incarnation);
         }
+        if let Some(steal) = steal {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("give P1 priority");
+            let stolen = runner.cast(steal).target_object(source).resolve();
+            assert_eq!(stolen.controller(source), P1);
+        }
         let result = runner.cast(removal).target_object(victim).resolve();
         assert!(result.events().iter().any(|event| matches!(
         event,
@@ -942,6 +1322,8 @@ fn cryptek_returns_the_graveyard_arrival_tapped_under_the_creating_controller() 
         if late {
             assert_eq!(result.zone_of(victim), Zone::Graveyard);
         } else {
+            // CR 603.7e: the delayed trigger keeps the creating ability's controller.
+            assert_eq!(result.controller(source), P1);
             assert_eq!(result.zone_of(victim), Zone::Battlefield);
             assert_eq!(result.controller(victim), P0);
             assert!(result.is_tapped(victim));
@@ -952,6 +1334,78 @@ fn cryptek_returns_the_graveyard_arrival_tapped_under_the_creating_controller() 
             WaitingFor::Priority { .. }
         ));
     }
+}
+
+#[test]
+fn cryptek_cannot_target_itself() {
+    use engine::types::game_state::CastPaymentMode;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, mana(2));
+    let source = scenario
+        .add_creature_from_oracle(P0, "Bounded artifact return", 3, 3, CRYPTEK)
+        .as_artifact_creature()
+        .id();
+    let other = scenario
+        .add_creature(P0, "Another artifact creature", 2, 2)
+        .as_artifact_creature()
+        .id();
+    let alternative = scenario
+        .add_creature(P0, "Alternative artifact creature", 2, 2)
+        .as_artifact_creature()
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("announce Cryptek's activation");
+    let WaitingFor::TargetSelection {
+        player: P0,
+        target_slots,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("Cryptek must ask P0 for a target");
+    };
+    // CR 115.1c: the printed target restriction excludes Cryptek.
+    assert_eq!(target_slots[0].legal_targets.len(), 2);
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(other)));
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(alternative)));
+    assert!(runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(source))
+        })
+        .is_err());
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(other)),
+        })
+        .expect("the other artifact creature is legal");
+    runner.advance_until_stack_empty();
+    let [watcher] = runner.state().delayed_triggers.as_slice() else {
+        panic!("the legal selection must install a watcher");
+    };
+    assert_eq!(
+        watcher
+            .ability
+            .context
+            .delayed_watch_incarnation
+            .unwrap()
+            .object_id,
+        other
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 // Flicker supplies the immediate exile and return. A Good Day to Die supplies
