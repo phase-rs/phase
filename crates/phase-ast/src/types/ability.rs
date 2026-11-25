@@ -42172,26 +42172,23 @@ pub enum DieResultFilter {
     AtLeast(u8),
 }
 
-/// CR 603.2c: How a batched passive-voice damage trigger counts occurrences.
+/// CR 603.2c: How a received-damage trigger counts occurrences.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DamageReceivedGrouping {
+    /// CR 603.2c: Each matching damage record is a separate occurrence.
+    #[default]
+    PerEvent,
     /// CR 603.2c: A collective recipient ("one or more opponents") fires once
     /// for the simultaneous batch.
-    #[default]
     WholeBatch,
     /// CR 603.2c: A singular player recipient with a quantified source fires
     /// once for each matching damaged player.
     PerPlayerRecipient,
 }
 
-impl DamageReceivedGrouping {
-    fn is_whole_batch(&self) -> bool {
-        matches!(self, Self::WholeBatch)
-    }
-}
-
 /// Trigger definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct TriggerDefinition {
     pub mode: TriggerMode,
     #[serde(default)]
@@ -42303,14 +42300,13 @@ pub struct TriggerDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unless_pay: Option<UnlessPayModifier>,
     /// CR 603.2c: "One or more" triggers fire once per batch of simultaneous events.
+    /// `DamageReceived` uses `damage_received_grouping` instead.
     #[serde(default)]
     pub batched: bool,
-    /// CR 603.2c: Occurrence grouping for batched `DamageReceived` triggers.
-    #[serde(
-        default,
-        skip_serializing_if = "DamageReceivedGrouping::is_whole_batch"
-    )]
-    pub damage_received_grouping: DamageReceivedGrouping,
+    /// CR 603.2c: Occurrence grouping for `DamageReceived`. Omission defaults to
+    /// `PerEvent`; deserialization first migrates any legacy `batched: true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_received_grouping: Option<DamageReceivedGrouping>,
     /// CR 706.2: Optional sides filter for die-roll triggers such as
     /// "Whenever you roll a d20". `None` accepts any die.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43213,6 +43209,27 @@ impl Default for TriggerOccurrenceState {
     }
 }
 
+impl Serialize for TriggerDefinition {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TriggerDefinition {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut definition = Self::deserialize(deserializer)?;
+        // Only an omitted grouping falls back to the legacy flag. Clear the
+        // flag after migration so old data reserializes in the canonical shape.
+        if definition.mode == TriggerMode::DamageReceived
+            && std::mem::take(&mut definition.batched)
+            && definition.damage_received_grouping.is_none()
+        {
+            definition.damage_received_grouping = Some(DamageReceivedGrouping::WholeBatch);
+        }
+        Ok(definition)
+    }
+}
+
 impl TriggerDefinition {
     /// CR 701.43d: The self-referential exert component grants an optional
     /// attack cost; an actor-filtered exert observer grants no such permission.
@@ -43256,7 +43273,7 @@ impl TriggerDefinition {
             saga_chapter: None,
             unless_pay: None,
             batched: false,
-            damage_received_grouping: DamageReceivedGrouping::default(),
+            damage_received_grouping: None,
             die_sides: None,
             gotcha_condition: None,
             expend_threshold: None,
@@ -50241,7 +50258,7 @@ mod tests {
             saga_chapter: None,
             unless_pay: None,
             batched: false,
-            damage_received_grouping: DamageReceivedGrouping::default(),
+            damage_received_grouping: None,
             die_sides: None,
             gotcha_condition: None,
             expend_threshold: None,
@@ -52808,6 +52825,54 @@ mod modal_ability_tests {
 
         assert!(def.modal.is_some());
         assert_eq!(def.mode_abilities.len(), 2);
+    }
+
+    #[test]
+    fn damage_received_grouping_migrates_legacy_batching() {
+        use serde_json::json;
+
+        for (legacy_batched, explicit_grouping, expected) in [
+            (Some(true), None, Some(DamageReceivedGrouping::WholeBatch)),
+            (Some(false), None, None),
+            (None, None, None),
+            (
+                Some(false),
+                Some(DamageReceivedGrouping::PerPlayerRecipient),
+                Some(DamageReceivedGrouping::PerPlayerRecipient),
+            ),
+            (
+                Some(true),
+                Some(DamageReceivedGrouping::PerEvent),
+                Some(DamageReceivedGrouping::PerEvent),
+            ),
+        ] {
+            let mut input = json!({ "mode": "DamageReceived" });
+            if let Some(batched) = legacy_batched {
+                input["batched"] = json!(batched);
+            }
+            if let Some(grouping) = explicit_grouping {
+                input["damage_received_grouping"] = json!(grouping);
+            }
+            let definition: TriggerDefinition = serde_json::from_value(input).unwrap();
+            assert_eq!(definition.damage_received_grouping, expected);
+            assert!(!definition.batched);
+
+            let serialized = serde_json::to_value(&definition).unwrap();
+            assert_eq!(serialized["batched"], false);
+            assert_eq!(
+                serialized.get("damage_received_grouping").cloned(),
+                expected.map(|grouping| json!(grouping))
+            );
+            assert_eq!(
+                serde_json::from_value::<TriggerDefinition>(serialized).unwrap(),
+                definition
+            );
+        }
+
+        let other: TriggerDefinition =
+            serde_json::from_value(json!({ "mode": "ChangesZone", "batched": true })).unwrap();
+        assert!(other.batched);
+        assert_eq!(other.damage_received_grouping, None);
     }
 
     /// V13 / H8 — CR 603.2 + CR 120.4b: `damage_amount` gained a scope axis, so

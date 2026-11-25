@@ -18473,10 +18473,17 @@ fn try_parse_event(
                     let quantified_recipients = scan_contains(subject_text, "one or more ");
                     let quantified_sources =
                         source.as_ref().is_some_and(|(_, quantified)| *quantified);
-                    def.batched = quantified_recipients || quantified_sources;
-                    if quantified_sources && !quantified_recipients && subject_is_player(subject) {
-                        def.damage_received_grouping = DamageReceivedGrouping::PerPlayerRecipient;
-                    }
+                    def.damage_received_grouping = if quantified_recipients {
+                        Some(DamageReceivedGrouping::WholeBatch)
+                    } else if quantified_sources {
+                        Some(if subject_is_player(subject) {
+                            DamageReceivedGrouping::PerPlayerRecipient
+                        } else {
+                            DamageReceivedGrouping::WholeBatch
+                        })
+                    } else {
+                        None
+                    };
                 }
                 def.valid_source = source.map(|(filter, _)| filter);
                 set_trigger_subject(&mut def, subject);

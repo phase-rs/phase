@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "Carry passive damage trigger occurrence grouping in game state so peers agree on the number of triggers for simultaneous damage"
+  "reason": "Use typed passive damage trigger occurrence grouping for per-event, whole-batch, and per-player firings, migrating legacy batched definitions when decoded"
 }

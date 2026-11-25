@@ -2,7 +2,7 @@ use crate::support::{assert_damage_dealt, shared_card_db};
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::TargetRef;
+use engine::types::ability::{DamageReceivedGrouping, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
@@ -206,6 +206,14 @@ fn lolth_emblem_fires_once_for_each_damaged_opponent() {
     let mountain = scenario.add_basic_land(P0, ManaColor::Red);
     let mut runner = scenario.build();
     let emblem = setup.create_emblem(&mut runner);
+    let triggers = &runner.state().objects[&emblem].trigger_definitions;
+    assert_eq!(triggers.len(), 1);
+    let definition = triggers.first().expect("emblem trigger").definition();
+    assert_eq!(
+        definition.damage_received_grouping,
+        Some(DamageReceivedGrouping::PerPlayerRecipient)
+    );
+    assert!(!definition.batched);
 
     tap_lands(&mut runner, &[mountain]);
     runner
