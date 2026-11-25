@@ -12,7 +12,7 @@ import { draftProcedureFixture } from "../../adapter/__tests__/draftProcedureFix
 import { FakeDraftDataConnection } from "../../network/__tests__/fakeDraftDataConnection";
 import { DRAFT_PROTOCOL_VERSION } from "../../network/draftProtocol";
 import { P2PDraftGuest } from "../../adapter/p2p-draft-guest";
-import type { ActiveDraftPodMeta, PersistedDraftHostSession } from "../../services/draftPersistence";
+import type { ActiveDraftPodMeta, DraftGuestCapability, PersistedDraftHostSession } from "../../services/draftPersistence";
 
 /*
  * The pod page's exits, on the real page, pod store, lifecycle store, both
@@ -91,9 +91,9 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
       if (mocks.loadFailure) throw mocks.loadFailure;
       return actual.loadDraftHostSession(id);
     },
-    clearDraftGuestRecovery: async (hostPeerId: string) => {
+    clearDraftGuestRecovery: async (capability: DraftGuestCapability) => {
       if (mocks.revocationGate) await mocks.revocationGate;
-      return actual.clearDraftGuestRecovery(hostPeerId);
+      return actual.clearDraftGuestRecovery(capability);
     },
   };
 });
@@ -354,8 +354,8 @@ describe("DraftPodPage exits", () => {
   });
 
   async function seedSavedSeat() {
-    await saveDraftGuestSession(HOST_PEER_ID, { draftToken: "guest-token", seatIndex: 2, draftCode: "draft-xyz", roomCode: "ABCDE", displayName: "Alice" });
-    saveActiveDraftGuest({ roomCode: "ABCDE", displayName: "Alice", hostPeerId: HOST_PEER_ID });
+    await saveDraftGuestSession(HOST_PEER_ID, { draftToken: "guest-token", seatIndex: 2, draftCode: "draft-xyz", roomCode: "ABCDE", displayName: "Alice", capabilityId: "saved-seat" });
+    saveActiveDraftGuest({ roomCode: "ABCDE", displayName: "Alice", hostPeerId: HOST_PEER_ID, capabilityId: "saved-seat" });
   }
 
   async function seedSavedPod(session: PersistedDraftHostSession = savedPod) {

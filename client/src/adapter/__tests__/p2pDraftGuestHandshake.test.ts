@@ -1,4 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  clearDraftDeckSubmission,
+  clearDraftGuestRecovery,
+  DraftGuestCapability,
+  loadDraftGuestCapability,
+  saveActiveDraftGuest,
+  saveDraftGuestSession,
+} from "../../services/draftPersistence";
 
 type SavedDeckSubmission = {
   hostPeerId: string;
@@ -21,14 +29,16 @@ const sessionState = vi.hoisted(() => ({
 }));
 
 const persistenceState = vi.hoisted(() => ({
-  clearDraftGuestRecovery: vi.fn(async () => {}),
-  clearDraftDeckSubmission: vi.fn(async () => {}),
+  clearDraftGuestRecovery: vi.fn<typeof clearDraftGuestRecovery>(async () => {}),
+  clearDraftDeckSubmission: vi.fn<typeof clearDraftDeckSubmission>(async () => {}),
   loadDraftDeckSubmission: vi.fn<
     (hostPeerId: string, identity?: { roomCode: string; draftToken: string }) => Promise<SavedDeckSubmission | null>
   >(async () => null),
+  // No stored record owns this token unless a test answers otherwise.
+  loadDraftGuestCapability: vi.fn<typeof loadDraftGuestCapability>(async () => null),
   saveDraftDeckSubmission: vi.fn(async () => {}),
-  saveActiveDraftGuest: vi.fn(),
-  saveDraftGuestSession: vi.fn(async () => {}),
+  saveActiveDraftGuest: vi.fn<typeof saveActiveDraftGuest>(),
+  saveDraftGuestSession: vi.fn<typeof saveDraftGuestSession>(async () => {}),
 }));
 
 vi.mock("../../network/draftPeerSession", () => ({
@@ -66,11 +76,34 @@ const reconnectAck = {
   view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
 };
 
+/** The four fields that name which stored records a token owns. */
+function ownerOf(draftToken: string) {
+  return { hostPeerId: "phase2-ABCDE", draftToken, roomCode: "ABCDE", displayName: "Alice" };
+}
+
+/** The capability name the guest wrote with its first private record. */
+function writtenCapabilityId(): string {
+  const capabilityId = persistenceState.saveDraftGuestSession.mock.calls[0]![1].capabilityId;
+  expect(capabilityId).toEqual(expect.any(String));
+  expect(capabilityId.length).toBeGreaterThan(0);
+  return capabilityId;
+}
+
+/** Asserts the terminal clears named exactly this capability and its outbox owner. */
+function expectTerminalClears(draftToken: string, capabilityId: string): void {
+  expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledWith({ ...ownerOf(draftToken), capabilityId });
+  expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith(ownerOf(draftToken));
+  expect(persistenceState.loadDraftGuestCapability).not.toHaveBeenCalled();
+}
+
 describe("P2P draft guest handshake attempts", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     sessionState.sessions.length = 0;
     persistenceState.loadDraftDeckSubmission.mockResolvedValue(null);
+    // `clearAllMocks` clears calls, not queued once-answers.
+    persistenceState.loadDraftGuestCapability.mockReset();
+    persistenceState.loadDraftGuestCapability.mockResolvedValue(null);
   });
 
   it("keeps an ordered duplicate commander designation in the participant outbox until its matching receipt", async () => {
@@ -123,7 +156,7 @@ describe("P2P draft guest handshake attempts", () => {
     });
     await submitted;
     expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith(
-      "phase2-ABCDE",
+      ownerOf("opaque-token"),
       sent.submissionId,
     );
   });
@@ -206,7 +239,7 @@ describe("P2P draft guest handshake attempts", () => {
     });
     await expect(first).rejects.toThrow("Deck too small");
     expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith(
-      "phase2-ABCDE", firstCommand.submissionId,
+      ownerOf("opaque-token"), firstCommand.submissionId,
     );
   });
 
@@ -241,9 +274,7 @@ describe("P2P draft guest handshake attempts", () => {
       submissionDisposition: "Retryable",
     });
     await expect(submitted).rejects.toThrow("IDB unavailable");
-    expect(persistenceState.clearDraftDeckSubmission).not.toHaveBeenCalledWith(
-      "phase2-ABCDE", command.submissionId,
-    );
+    expect(persistenceState.clearDraftDeckSubmission).not.toHaveBeenCalled();
   });
 
   it("reconnect replay resolves the original deck submission promise", async () => {
@@ -376,11 +407,14 @@ describe("P2P draft guest handshake attempts", () => {
     expect(persistenceState.saveDraftGuestSession).toHaveBeenCalledBefore(
       persistenceState.saveActiveDraftGuest,
     );
+    const capabilityId = writtenCapabilityId();
     expect(persistenceState.saveActiveDraftGuest).toHaveBeenCalledWith({
       roomCode: "ABCDE",
       displayName: "Alice",
       hostPeerId: "phase2-ABCDE",
+      capabilityId,
     });
+    expect(persistenceState.loadDraftGuestCapability).not.toHaveBeenCalled();
   });
 
   it("clears recovery and the deck outbox only after the host acknowledges leave", async () => {
@@ -413,8 +447,7 @@ describe("P2P draft guest handshake attempts", () => {
       type: "draft_leave_ack", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
     });
     await leave;
-    expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledWith("phase2-ABCDE");
-    expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith("phase2-ABCDE");
+    expectTerminalClears("leave-token", writtenCapabilityId());
   });
 
   it("keeps a dropped leave acknowledgement recoverable and permits a later leave", async () => {
@@ -462,7 +495,11 @@ describe("P2P draft guest handshake attempts", () => {
       type: "draft_leave_ack", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
     });
     await laterLeave;
-    expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledWith("phase2-ABCDE");
+    const capabilityId = writtenCapabilityId();
+    // The reconnect acknowledgement reuses the name the welcome bound.
+    expect(persistenceState.saveDraftGuestSession).toHaveBeenCalledTimes(2);
+    expect(persistenceState.saveDraftGuestSession.mock.calls[1]![1].capabilityId).toBe(capabilityId);
+    expectTerminalClears("leave-token", capabilityId);
   });
 
   it("clears recovery and the deck outbox when the host ends the draft", async () => {
@@ -487,9 +524,8 @@ describe("P2P draft guest handshake attempts", () => {
     persistenceState.clearDraftDeckSubmission.mockClear();
 
     sessionState.sessions[0]!.handler!({ type: "draft_host_left", reason: "Host left" });
-    await vi.waitFor(() => expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledWith("phase2-ABCDE"));
-    expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith("phase2-ABCDE");
     await vi.waitFor(() => expect(guest.isRecoveryRevoked).toBe(true));
+    expectTerminalClears("host-left-token", writtenCapabilityId());
   });
 
   it.each([
@@ -553,8 +589,35 @@ describe("P2P draft guest handshake attempts", () => {
 
     await vi.waitFor(() => expect(guest.isRecoveryRevoked).toBe(true));
     expect(events).toContainEqual({ type: "hostLeft", reason: "Host left" });
-    expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledWith("phase2-ABCDE");
-    expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith("phase2-ABCDE");
+    expectTerminalClears("host-left-token", writtenCapabilityId());
+  });
+
+  it("finishes terminal host handling when the capability read fails", async () => {
+    const events: unknown[] = [];
+    persistenceState.loadDraftGuestCapability.mockRejectedValueOnce(new Error("storage unavailable"));
+    const guest = new P2PDraftGuest(
+      {} as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "opaque-token" },
+    );
+    guest.onEvent((event) => events.push(event));
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+    const attempt = privateGuest.handshakeOn({} as never, undefined, true);
+    await Promise.resolve();
+
+    sessionState.sessions[0]!.handler!({ type: "draft_host_left", reason: "Host left" });
+
+    await vi.waitFor(() => expect(guest.isRecoveryRevoked).toBe(true));
+    expect(events).toContainEqual({ type: "hostLeft", reason: "Host left" });
+    expect(persistenceState.loadDraftGuestCapability).toHaveBeenCalledExactlyOnceWith(ownerOf("opaque-token"));
+    expect(persistenceState.clearDraftGuestRecovery).not.toHaveBeenCalled();
+    expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith(ownerOf("opaque-token"));
+
+    sessionState.sessions[0]!.end!();
+    await expect(attempt).rejects.toThrow("disconnected before acknowledging");
   });
 
   it("waits for token persistence before completing a reconnect acknowledgement", async () => {
@@ -575,21 +638,102 @@ describe("P2P draft guest handshake attempts", () => {
       handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
     };
 
+    persistenceState.loadDraftGuestCapability.mockResolvedValueOnce({
+      ...ownerOf("opaque-token"),
+      capabilityId: "stored-cap",
+    });
+
     let settled = false;
     const handshake = privateGuest.handshakeOn({} as never, undefined, true)
       .then(() => { settled = true; });
     await Promise.resolve();
     sessionState.sessions[0]!.handler!(reconnectAck);
-    await Promise.resolve();
+    // The capability read precedes the write, so one microtask no longer reaches it.
+    await vi.waitFor(() => expect(persistenceState.saveDraftGuestSession).toHaveBeenCalledOnce());
 
     expect(persistenceState.saveActiveDraftGuest).not.toHaveBeenCalled();
     expect(settled).toBe(false);
 
     finishIdbWrite();
     await handshake;
+    expect(persistenceState.loadDraftGuestCapability).toHaveBeenCalledExactlyOnceWith(ownerOf("opaque-token"));
+    expect(persistenceState.loadDraftGuestCapability).toHaveBeenCalledBefore(
+      persistenceState.saveDraftGuestSession,
+    );
+    expect(persistenceState.saveDraftGuestSession.mock.calls[0]![1].capabilityId).toBe("stored-cap");
     expect(persistenceState.saveDraftGuestSession).toHaveBeenCalledBefore(
       persistenceState.saveActiveDraftGuest,
     );
+    expect(persistenceState.saveActiveDraftGuest).toHaveBeenCalledWith({
+      roomCode: "ABCDE",
+      displayName: "Alice",
+      hostPeerId: "phase2-ABCDE",
+      capabilityId: "stored-cap",
+    });
+  });
+
+  it.each<[string, DraftGuestCapability | null]>([
+    ["an unnamed stored record", { ...ownerOf("opaque-token"), capabilityId: null }],
+    ["no stored record", null],
+  ])("names an unnamed capability at its first acknowledgement: %s", async (_label, stored) => {
+    persistenceState.loadDraftGuestCapability.mockResolvedValueOnce(stored);
+    const guest = new P2PDraftGuest(
+      {} as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "opaque-token" },
+    );
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+
+    const handshake = privateGuest.handshakeOn({} as never, undefined, true);
+    await Promise.resolve();
+    sessionState.sessions[0]!.handler!(reconnectAck);
+    await handshake;
+
+    expect(persistenceState.loadDraftGuestCapability).toHaveBeenCalledExactlyOnceWith(ownerOf("opaque-token"));
+    const capabilityId = writtenCapabilityId();
+    expect(capabilityId).not.toBe("stored-cap");
+    expect(persistenceState.saveActiveDraftGuest).toHaveBeenCalledWith(expect.objectContaining({ capabilityId }));
+  });
+
+  it.each<[string, "UnknownToken" | "Kicked", DraftGuestCapability | null]>([
+    ["UnknownToken, stored record", "UnknownToken", { ...ownerOf("opaque-token"), capabilityId: "stored-cap" }],
+    ["Kicked, stored record", "Kicked", { ...ownerOf("opaque-token"), capabilityId: "stored-cap" }],
+    ["UnknownToken, no stored record", "UnknownToken", null],
+    ["Kicked, no stored record", "Kicked", null],
+  ])("revokes exactly the capability its token owns when the host refuses it (%s)", async (_label, kind, stored) => {
+    const events: unknown[] = [];
+    persistenceState.loadDraftGuestCapability.mockResolvedValueOnce(stored);
+    const guest = new P2PDraftGuest(
+      {} as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "opaque-token" },
+    );
+    guest.onEvent((event) => events.push(event));
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+
+    const attempt = privateGuest.handshakeOn({} as never, undefined, true);
+    await Promise.resolve();
+    sessionState.sessions[0]!.handler!({ type: "draft_reconnect_rejected", kind, reason: "Refused" });
+
+    await expect(attempt).rejects.toThrow("Refused");
+    await vi.waitFor(() => expect(events).toContainEqual({
+      type: "reconnectFailed",
+      failure: { kind: "invalid", message: "Refused" },
+    }));
+    expect(guest.isRecoveryRevoked).toBe(true);
+    expect(persistenceState.loadDraftGuestCapability).toHaveBeenCalledExactlyOnceWith(ownerOf("opaque-token"));
+    if (stored) {
+      expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledExactlyOnceWith(stored);
+    } else {
+      expect(persistenceState.clearDraftGuestRecovery).not.toHaveBeenCalled();
+    }
+    expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledExactlyOnceWith(ownerOf("opaque-token"));
   });
 
   it("does not publish a locator when the token write fails", async () => {
@@ -673,6 +817,7 @@ describe("P2P draft guest handshake attempts", () => {
     await expect(attempt).rejects.toThrow("Refresh to reconnect");
     expect(privateGuest.terminated).toBe(true);
     expect(persistenceState.clearDraftGuestRecovery).not.toHaveBeenCalled();
+    expect(persistenceState.loadDraftGuestCapability).not.toHaveBeenCalled();
   });
 
   it("cannot let a delayed acknowledgement from a retired NoReconnectWindow attempt promote a newer attempt", async () => {

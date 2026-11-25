@@ -10,7 +10,7 @@
  * draft sessions can be large (8 players x 42 cards each = significant JSON).
  */
 
-import { createStore, del, get, set } from "idb-keyval";
+import { createStore, del, get, promisifyRequest, set } from "idb-keyval";
 
 import { DRAFT_KINDS } from "../adapter/draft-adapter";
 import type { DraftKind, DraftStatus, PoolInput } from "../adapter/draft-adapter";
@@ -116,6 +116,11 @@ export interface PersistedDraftGuestSession {
   roomCode: string;
   displayName: string;
   timestamp: number;
+  /**
+   * Non-secret name this private record shares with its public pointer.
+   * Absent on a record written before records carried one; never written empty.
+   */
+  capabilityId?: string;
 }
 
 /** A participant-owned deck submission retained until the host acknowledges it. */
@@ -147,6 +152,11 @@ export interface ActiveDraftGuestMeta {
   displayName: string;
   hostPeerId: string;
   timestamp: number;
+  /**
+   * Non-secret name of the private record this pointer leads to. Absent on a
+   * pointer written before records carried one; never written empty.
+   */
+  capabilityId?: string;
 }
 
 /** Stable identity of a guest recovery locator read from local storage. */
@@ -155,7 +165,28 @@ export interface ActiveDraftGuestMetaCapture {
   displayName: string;
   hostPeerId: string;
   timestamp: number;
+  /** Null for a pointer without a name. */
+  capabilityId: string | null;
 }
+
+/**
+ * One guest's durable recovery capability: the secret host-issued token and
+ * the non-secret name its private record and public pointer share. The name is
+ * null only for records written before records carried one.
+ */
+export interface DraftGuestCapability {
+  readonly hostPeerId: string;
+  readonly draftToken: string;
+  readonly roomCode: string;
+  readonly displayName: string;
+  readonly capabilityId: string | null;
+}
+
+/** The fields that decide which stored private record a token owns. */
+export type DraftGuestCapabilityOwner = Omit<DraftGuestCapability, "capabilityId">;
+
+/** The fields that decide which stored deck outbox a token owns. */
+export type DraftDeckSubmissionOwner = Pick<DraftGuestCapability, "hostPeerId" | "roomCode" | "draftToken">;
 
 /** Non-mutating classification for guest recovery callers. */
 export type ActiveDraftGuestLoadResult =
@@ -353,15 +384,18 @@ export function clearActiveDraftPod(): void {
  * The room code and display name are enough to reconnect, but never confer a
  * seat. The opaque draft token stays in IndexedDB under the expected host id.
  */
-export function saveActiveDraftGuest(meta: Omit<ActiveDraftGuestMeta, "timestamp">): void {
+export function saveActiveDraftGuest(
+  meta: Omit<ActiveDraftGuestMeta, "timestamp" | "capabilityId"> & { capabilityId: string },
+): void {
   const roomCode = parseRoomCode(meta.roomCode);
   const displayName = meta.displayName.trim();
-  if (!roomCode || !displayName || !meta.hostPeerId.trim()) return;
+  if (!roomCode || !displayName || !meta.hostPeerId.trim() || !isNonEmptyString(meta.capabilityId)) return;
   localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, JSON.stringify({
     roomCode,
     displayName,
     hostPeerId: meta.hostPeerId,
     timestamp: Date.now(),
+    capabilityId: meta.capabilityId,
   }));
 }
 
@@ -372,6 +406,7 @@ function activeDraftGuestCapture(value: unknown): ActiveDraftGuestMetaCapture | 
     displayName: value.displayName,
     hostPeerId: value.hostPeerId,
     timestamp: value.timestamp,
+    capabilityId: value.capabilityId ?? null,
   };
 }
 
@@ -392,11 +427,10 @@ export function inspectActiveDraftGuest(): ActiveDraftGuestLoadResult {
   }
 }
 
+/** Reads the guest recovery locator; malformed or expired storage is left as it is. */
 export function loadActiveDraftGuest(): ActiveDraftGuestMeta | null {
   const active = inspectActiveDraftGuest();
-  if (active.type === "present") return active.meta;
-  if (active.type === "invalid") clearActiveDraftGuest();
-  return null;
+  return active.type === "present" ? active.meta : null;
 }
 
 /** Clears guest metadata only when it still matches a previously inspected locator. */
@@ -410,6 +444,7 @@ export function clearActiveDraftGuestIfCurrent(capture: ActiveDraftGuestMetaCapt
       && currentCapture.displayName === capture.displayName
       && currentCapture.hostPeerId === capture.hostPeerId
       && currentCapture.timestamp === capture.timestamp
+      && currentCapture.capabilityId === capture.capabilityId
     ) {
       clearActiveDraftGuest();
     }
@@ -420,12 +455,6 @@ export function clearActiveDraftGuestIfCurrent(capture: ActiveDraftGuestMetaCapt
 
 export function clearActiveDraftGuest(): void {
   localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
-}
-
-/** Do not erase a newer guest locator when an older adapter is disposed. */
-export function clearActiveDraftGuestForHost(hostPeerId: string): void {
-  const current = loadActiveDraftGuest();
-  if (current?.hostPeerId === hostPeerId) clearActiveDraftGuest();
 }
 
 /** Do not erase a newer pod's host locator when an older pod is ended. */
@@ -499,7 +528,12 @@ function isActiveDraftGuestMeta(value: unknown): value is ActiveDraftGuestMeta {
   return isCanonicalRoomCode(value.roomCode)
     && isNonEmptyString(value.displayName)
     && isNonEmptyString(value.hostPeerId)
-    && isPositiveFiniteNumber(value.timestamp);
+    && isPositiveFiniteNumber(value.timestamp)
+    && isOptionalCapabilityId(value.capabilityId);
+}
+
+function isOptionalCapabilityId(value: unknown): value is string | undefined {
+  return value === undefined || isNonEmptyString(value);
 }
 
 /**
@@ -687,12 +721,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export async function saveDraftGuestSession(
   hostPeerId: string,
-  data: { draftToken: string; seatIndex: number; draftCode: string; roomCode: string; displayName: string },
+  data: {
+    draftToken: string;
+    seatIndex: number;
+    draftCode: string;
+    roomCode: string;
+    displayName: string;
+    capabilityId: string;
+  },
 ): Promise<void> {
   const roomCode = parseRoomCode(data.roomCode);
   const displayName = data.displayName.trim();
   if (!roomCode) throw new Error("Invalid draft room code");
   if (!displayName) throw new Error("Draft display name is required");
+  if (!isNonEmptyString(data.capabilityId)) throw new Error("Draft recovery capability is required");
   const session: PersistedDraftGuestSession = {
     hostPeerId,
     draftToken: data.draftToken,
@@ -701,6 +743,7 @@ export async function saveDraftGuestSession(
     roomCode,
     displayName,
     timestamp: Date.now(),
+    capabilityId: data.capabilityId,
   };
   try {
     await set(DRAFT_GUEST_PREFIX + hostPeerId, session, getDraftStore());
@@ -712,7 +755,7 @@ export async function saveDraftGuestSession(
 
 export async function loadDraftGuestSession(
   hostPeerId: string,
-  identity?: Pick<ActiveDraftGuestMeta, "roomCode" | "displayName">,
+  identity?: Pick<ActiveDraftGuestMeta, "roomCode" | "displayName" | "capabilityId">,
 ): Promise<PersistedDraftGuestSession | null> {
   try {
     const session = await get<PersistedDraftGuestSession>(
@@ -720,29 +763,113 @@ export async function loadDraftGuestSession(
       getDraftStore(),
     );
     if (!session || !isPersistedDraftGuestSession(session) || session.hostPeerId !== hostPeerId) return null;
-    if (Date.now() - session.timestamp > GUEST_SESSION_TTL_MS) {
-      await clearDraftGuestSession(hostPeerId);
-      return null;
-    }
+    // An expired record stays; the next admission at this key replaces it.
+    if (Date.now() - session.timestamp > GUEST_SESSION_TTL_MS) return null;
     if (identity && (session.roomCode !== identity.roomCode || session.displayName !== identity.displayName)) {
       return null;
     }
+    // A pointer that names a capability binds only the record carrying that name.
+    if (identity?.capabilityId !== undefined && session.capabilityId !== identity.capabilityId) return null;
     return session;
   } catch {
     return null;
   }
 }
 
-export async function clearDraftGuestSession(hostPeerId: string): Promise<void> {
-  try {
-    await del(DRAFT_GUEST_PREFIX + hostPeerId, getDraftStore());
-  } catch { /* best-effort */ }
+/**
+ * Whether a stored private record is a live record of this owner's token,
+ * room and display name. Expired and malformed records are owned by nobody.
+ */
+function ownsDraftGuestRecord(value: unknown, owner: DraftGuestCapabilityOwner): value is PersistedDraftGuestSession {
+  return isPersistedDraftGuestSession(value)
+    && Date.now() - value.timestamp <= GUEST_SESSION_TTL_MS
+    && value.hostPeerId === owner.hostPeerId
+    && value.draftToken === owner.draftToken
+    && value.roomCode === parseRoomCode(owner.roomCode)
+    && value.displayName === owner.displayName.trim();
 }
 
-/** Clears both halves of one guest's recovery identity. */
-export async function clearDraftGuestRecovery(hostPeerId: string): Promise<void> {
-  await clearDraftGuestSession(hostPeerId);
-  clearActiveDraftGuestForHost(hostPeerId);
+/**
+ * Reads the capability name the stored private record gives this token, or
+ * null when no live record at the owner's key belongs to it. Read only.
+ */
+export async function loadDraftGuestCapability(
+  owner: DraftGuestCapabilityOwner,
+): Promise<DraftGuestCapability | null> {
+  try {
+    const record = await get<unknown>(DRAFT_GUEST_PREFIX + owner.hostPeerId, getDraftStore());
+    if (!ownsDraftGuestRecord(record, owner)) return null;
+    return {
+      hostPeerId: owner.hostPeerId,
+      draftToken: owner.draftToken,
+      roomCode: owner.roomCode,
+      displayName: owner.displayName,
+      capabilityId: record.capabilityId ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Deletes the record at `key` only if `owns` holds for the value read in the
+ * same read-write transaction, so a record written in between is never erased.
+ * Any failure, including IndexedDB being unavailable, keeps the record.
+ */
+async function removeDraftRecordIf(
+  key: string,
+  owns: (value: unknown) => boolean,
+): Promise<"removed" | "kept"> {
+  try {
+    return await getDraftStore()("readwrite", (store) => new Promise<"removed" | "kept">((resolve, reject) => {
+      const read = store.get(key);
+      read.onerror = () => reject(read.error);
+      read.onsuccess = () => {
+        let owned: boolean;
+        try {
+          owned = owns(read.result);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        if (!owned) {
+          resolve("kept");
+          return;
+        }
+        store.delete(key);
+        promisifyRequest(store.transaction).then(() => resolve("removed"), reject);
+      };
+    }));
+  } catch {
+    return "kept";
+  }
+}
+
+/**
+ * Removes a guest's private record and public pointer only where each
+ * provably belongs to this capability; malformed, expired and ambiguous
+ * storage stays.
+ */
+export async function clearDraftGuestRecovery(capability: DraftGuestCapability): Promise<void> {
+  const removal = await removeDraftRecordIf(
+    DRAFT_GUEST_PREFIX + capability.hostPeerId,
+    (value) => ownsDraftGuestRecord(value, capability)
+      && (value.capabilityId ?? null) === capability.capabilityId,
+  );
+  const active = inspectActiveDraftGuest();
+  if (active.type !== "present") return;
+  const { capture } = active;
+  if (
+    capture.hostPeerId !== capability.hostPeerId
+    || capture.roomCode !== parseRoomCode(capability.roomCode)
+    || capture.displayName !== capability.displayName.trim()
+  ) return;
+  const namesThisCapability = capture.capabilityId !== null
+    ? capture.capabilityId === capability.capabilityId
+    // An unnamed pointer leads to whatever record sits at its key, so it is
+    // this capability's only when this clear has just removed its unnamed record.
+    : capability.capabilityId === null && removal === "removed";
+  if (namesThisCapability) clearActiveDraftGuestIfCurrent(capture);
 }
 
 /**
@@ -777,21 +904,11 @@ export async function loadDraftDeckSubmission(
   try {
     const roomCode = identity && parseRoomCode(identity.roomCode);
     if (identity && !roomCode) return null;
-    const value = await get<PersistedDraftDeckSubmission>(
+    const value = await get<unknown>(
       `${DRAFT_DECK_SUBMISSION_PREFIX}${hostPeerId}`,
       getDraftStore(),
     );
-    if (!value || value.hostPeerId !== hostPeerId || !isNonEmptyString(value.draftCode)
-      || !isCanonicalRoomCode(value.roomCode)
-      || !isNonEmptyString(value.draftToken) || !isNonEmptyString(value.submissionId)
-      || !Array.isArray(value.mainDeck) || !value.mainDeck.every((card) => typeof card === "string")
-      // A record written before the designation existed cannot be replayed:
-      // the host would refuse it. Discarding it is the fail-safe answer — the
-      // guest simply builds a fresh submission.
-      || !Array.isArray(value.commanders)
-      || !value.commanders.every((card) => typeof card === "string")) {
-      return null;
-    }
+    if (!isPersistedDraftDeckSubmission(value) || value.hostPeerId !== hostPeerId) return null;
     if (identity && (value.roomCode !== roomCode || value.draftToken !== identity.draftToken)) {
       return null;
     }
@@ -801,16 +918,37 @@ export async function loadDraftDeckSubmission(
   }
 }
 
-export async function clearDraftDeckSubmission(hostPeerId: string, submissionId?: string): Promise<void> {
-  try {
-    if (submissionId) {
-      const current = await loadDraftDeckSubmission(hostPeerId);
-      if (current?.submissionId !== submissionId) return;
-    }
-    await del(`${DRAFT_DECK_SUBMISSION_PREFIX}${hostPeerId}`, getDraftStore());
-  } catch {
-    /* Retain safely when IndexedDB is unavailable. */
-  }
+/**
+ * Removes the outbox only when it is this owner's and, given a submission id,
+ * only that submission; anything else at the key, malformed storage included,
+ * stays, and so does everything when IndexedDB is unavailable.
+ */
+export async function clearDraftDeckSubmission(
+  owner: DraftDeckSubmissionOwner,
+  submissionId?: string,
+): Promise<void> {
+  await removeDraftRecordIf(
+    `${DRAFT_DECK_SUBMISSION_PREFIX}${owner.hostPeerId}`,
+    (value) => isPersistedDraftDeckSubmission(value)
+      && value.hostPeerId === owner.hostPeerId
+      && value.roomCode === parseRoomCode(owner.roomCode)
+      && value.draftToken === owner.draftToken
+      && (submissionId === undefined || value.submissionId === submissionId),
+  );
+}
+
+function isPersistedDraftDeckSubmission(value: unknown): value is PersistedDraftDeckSubmission {
+  return isRecord(value)
+    && typeof value.hostPeerId === "string"
+    && isNonEmptyString(value.draftCode)
+    && isCanonicalRoomCode(value.roomCode)
+    && isNonEmptyString(value.draftToken) && isNonEmptyString(value.submissionId)
+    && Array.isArray(value.mainDeck) && value.mainDeck.every((card) => typeof card === "string")
+    // A record written before the designation existed cannot be replayed:
+    // the host would refuse it. Discarding it is the fail-safe answer — the
+    // guest simply builds a fresh submission.
+    && Array.isArray(value.commanders)
+    && value.commanders.every((card) => typeof card === "string");
 }
 
 function isPersistedDraftGuestSession(value: unknown): value is PersistedDraftGuestSession {
@@ -821,7 +959,8 @@ function isPersistedDraftGuestSession(value: unknown): value is PersistedDraftGu
     && typeof value.draftCode === "string"
     && isCanonicalRoomCode(value.roomCode)
     && isNonEmptyString(value.displayName)
-    && isPositiveFiniteNumber(value.timestamp);
+    && isPositiveFiniteNumber(value.timestamp)
+    && isOptionalCapabilityId(value.capabilityId);
 }
 
 /** A participant-owned outbox survives a reload until the pod host acks it. */

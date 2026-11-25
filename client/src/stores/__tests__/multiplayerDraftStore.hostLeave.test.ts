@@ -153,6 +153,7 @@ vi.mock("../../adapter/p2p-draft-guest", async () => {
             roomCode: connection?.roomCode ?? "GGGGG",
             displayName: connection?.displayName ?? "G",
             hostPeerId,
+            capabilityId: `capability-${hostPeerId}`,
           });
         }),
         leave: vi.fn(async () => {}),

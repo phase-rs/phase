@@ -3,14 +3,22 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type Peer from "peerjs";
-import type { PersistedDraftDeckSubmission } from "../../services/draftPersistence";
+import type {
+  clearDraftDeckSubmission,
+  clearDraftGuestRecovery,
+  loadDraftGuestCapability,
+  PersistedDraftDeckSubmission,
+  saveDraftGuestSession,
+} from "../../services/draftPersistence";
 
 const persistence = vi.hoisted(() => ({
-  saveDraftGuestSession: vi.fn(async () => {}),
+  saveDraftGuestSession: vi.fn<typeof saveDraftGuestSession>(async () => {}),
   saveActiveDraftGuest: vi.fn(),
-  clearDraftGuestRecovery: vi.fn(async () => {}),
-  clearDraftDeckSubmission: vi.fn(async () => {}),
+  clearDraftGuestRecovery: vi.fn<typeof clearDraftGuestRecovery>(async () => {}),
+  clearDraftDeckSubmission: vi.fn<typeof clearDraftDeckSubmission>(async () => {}),
   loadDraftDeckSubmission: vi.fn(async (): Promise<PersistedDraftDeckSubmission | null> => null),
+  // No stored record owns this token unless a test answers otherwise.
+  loadDraftGuestCapability: vi.fn<typeof loadDraftGuestCapability>(async () => null),
   saveDraftDeckSubmission: vi.fn(async () => {}),
 }));
 
@@ -115,6 +123,9 @@ function firstContact(kind: "new" | "reconnect", initialView: DraftPlayerView): 
       view: initialView,
     };
 }
+
+/** The four fields that name which stored records the guest's token owns. */
+const GUEST_OWNER = { hostPeerId: "phase2-ABCDE", draftToken: "guest-token", roomCode: "ABCDE", displayName: "Alice" };
 
 const flushAsync = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -310,6 +321,9 @@ describe("P2P draft guest receive ordering", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // `clearAllMocks` clears calls, not queued once-answers.
+    persistence.loadDraftGuestCapability.mockReset();
+    persistence.loadDraftGuestCapability.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -394,7 +408,7 @@ describe("P2P draft guest receive ordering", () => {
       view: acknowledgedView,
     }));
     await vi.waitFor(() => expect(persistence.clearDraftDeckSubmission).toHaveBeenCalledWith(
-      "phase2-ABCDE", command.submissionId,
+      GUEST_OWNER, command.submissionId,
     ));
     const nextReceived = conn.receiveRaw(rawMessage({ type: "draft_state_update", view: nextView }));
     await flushAsync();
@@ -481,7 +495,7 @@ describe("P2P draft guest receive ordering", () => {
       type: "draft_deck_submit_ack", submissionId: command.submissionId, view: view(2),
     }));
     await vi.waitFor(() => expect(persistence.clearDraftDeckSubmission).toHaveBeenCalledWith(
-      "phase2-ABCDE", command.submissionId,
+      GUEST_OWNER, command.submissionId,
     ));
 
     conn.simulateError(new Error("Transport failed"));
@@ -573,7 +587,7 @@ describe("P2P draft guest receive ordering", () => {
       type: "draft_deck_submit_ack", submissionId: submission.submissionId, view: acknowledgedView,
     }));
     await vi.waitFor(() => expect(persistence.clearDraftDeckSubmission).toHaveBeenCalledWith(
-      "phase2-ABCDE", submission.submissionId,
+      GUEST_OWNER, submission.submissionId,
     ));
     const nextReceived = conn.receiveRaw(rawMessage({ type: "draft_state_update", view: nextView }));
     conn.simulateClose();
@@ -621,7 +635,7 @@ describe("P2P draft guest receive ordering", () => {
       type: "draft_deck_submit_ack", submissionId: submission.submissionId, view: view(2),
     }));
     await vi.waitFor(() => expect(persistence.clearDraftDeckSubmission).toHaveBeenCalledWith(
-      "phase2-ABCDE", submission.submissionId,
+      GUEST_OWNER, submission.submissionId,
     ));
 
     const leaveResult = guest.leave().then(
@@ -641,7 +655,11 @@ describe("P2P draft guest receive ordering", () => {
 
     await expect(leaveResult).resolves.toEqual({ status: "fulfilled" });
     expect(guest.isRecoveryRevoked).toBe(true);
-    expect(persistence.clearDraftGuestRecovery).toHaveBeenCalledWith("phase2-ABCDE");
+    const capabilityId = persistence.saveDraftGuestSession.mock.calls[0]![1].capabilityId;
+    expect(capabilityId).toEqual(expect.any(String));
+    expect(persistence.clearDraftGuestRecovery).toHaveBeenCalledWith({ ...GUEST_OWNER, capabilityId });
+    expect(persistence.clearDraftDeckSubmission).toHaveBeenCalledWith(GUEST_OWNER);
+    expect(persistence.loadDraftGuestCapability).not.toHaveBeenCalled();
     expect(events.some((event) => event.type === "reconnecting")).toBe(false);
   });
 
@@ -801,7 +819,7 @@ describe("P2P draft guest receive ordering", () => {
     }));
     await vi.advanceTimersByTimeAsync(0);
     expect(persistence.clearDraftDeckSubmission).toHaveBeenCalledExactlyOnceWith(
-      "phase2-ABCDE", submission.submissionId,
+      GUEST_OWNER, submission.submissionId,
     );
     expect(events).toContainEqual({
       type: "deckSubmissionAcknowledged", submissionId: submission.submissionId, view: acknowledgedView,
@@ -965,7 +983,7 @@ describe("P2P draft guest receive ordering", () => {
       type: "draft_deck_submit_ack", submissionId: replay.submissionId, view: acknowledgedView,
     }));
     await vi.waitFor(() => expect(persistence.clearDraftDeckSubmission).toHaveBeenCalledWith(
-      "phase2-ABCDE", replay.submissionId,
+      GUEST_OWNER, replay.submissionId,
     ));
 
     conn.simulateError(new Error("Transport failed"));

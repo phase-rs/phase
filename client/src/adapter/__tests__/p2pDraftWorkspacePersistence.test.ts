@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { loadDraftGuestCapability } from "../../services/draftPersistence";
 
 const persistenceMocks = vi.hoisted(() => ({
   saveDraftHostSession: vi.fn(async () => {}),
@@ -9,7 +10,8 @@ const persistenceMocks = vi.hoisted(() => ({
   saveDraftDeckSubmission: vi.fn(async () => {}),
   clearDraftDeckSubmission: vi.fn(async () => {}),
   clearDraftGuestRecovery: vi.fn(async () => {}),
-  clearDraftGuestSession: vi.fn(async () => {}),
+  // No stored record owns this token unless a test answers otherwise.
+  loadDraftGuestCapability: vi.fn<typeof loadDraftGuestCapability>(async () => null),
 }));
 
 vi.mock("../../services/draftPersistence", () => persistenceMocks);
@@ -162,6 +164,9 @@ type SessionStub = {
 describe("P2P draft workspace persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // `clearAllMocks` clears calls, not queued once-answers.
+    persistenceMocks.loadDraftGuestCapability.mockReset();
+    persistenceMocks.loadDraftGuestCapability.mockResolvedValue(null);
   });
 
   it("serializes guest and host workspace updates with the authoritative mutation queue", async () => {

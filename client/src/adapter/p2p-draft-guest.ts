@@ -43,8 +43,10 @@ import {
   saveActiveDraftGuest,
   clearDraftDeckSubmission,
   loadDraftDeckSubmission,
+  loadDraftGuestCapability,
   saveDraftDeckSubmission,
 } from "../services/draftPersistence";
+import type { DraftGuestCapability, DraftGuestCapabilityOwner } from "../services/draftPersistence";
 import type {
   DraftIntergameCommand,
   DraftIntergameCommandAck,
@@ -118,6 +120,9 @@ type DeckSubmissionOrigin = "caller" | "replay";
  * a caller that retires it after settling the work the session still carries.
  */
 type HandshakeSessionAction = "retire" | "callerRetires";
+
+/** Which host message admitted the guest's durable records. */
+type RecoveryAdmission = "welcome" | "reconnect";
 
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
 const RECONNECT_STEADY_STATE_MS = 60_000;
@@ -199,6 +204,8 @@ export class P2PDraftGuest {
    * transport attempt but should retain recovery for a refreshed client.
    */
   private recoveryRevoked = false;
+  /** The one capability this guest's durable records belong to, bound once its private record is written. */
+  private capability: DraftGuestCapability | null = null;
   private currentView: DraftPlayerView | null = null;
   private handshake: DraftHandshake | null = null;
   private reconnecting = false;
@@ -716,7 +723,7 @@ export class P2PDraftGuest {
             draftToken: msg.draftToken,
             seatIndex: msg.seatIndex,
             draftCode: msg.draftCode,
-          });
+          }, "welcome");
         } catch (err) {
           this.rejectHandshake(session, asError(err), "retire");
           this.emit({ type: "error", message: "Could not save draft recovery details" });
@@ -745,7 +752,7 @@ export class P2PDraftGuest {
               draftToken: this.draftToken,
               seatIndex: msg.seatIndex,
               draftCode: msg.draftCode,
-            });
+            }, "reconnect");
           } catch (err) {
             this.rejectHandshake(session, asError(err), "retire");
             this.emit({ type: "error", message: "Could not save draft recovery details" });
@@ -801,7 +808,8 @@ export class P2PDraftGuest {
       case "draft_deck_submit_ack": {
         if (this.rejectIncompatibleView(msg.view, session)) break;
         this.currentView = msg.view;
-        await clearDraftDeckSubmission(this.hostPeerId, msg.submissionId);
+        const outboxOwner = this.recoveryOwner();
+        if (outboxOwner) await clearDraftDeckSubmission(outboxOwner, msg.submissionId);
         const ackWaiter = this.deckSubmissionWaiters.get(msg.submissionId);
         ackWaiter?.resolve();
         if (ackWaiter && !ackWaiter.acknowledged) {
@@ -846,7 +854,8 @@ export class P2PDraftGuest {
           const waiter = this.deckSubmissionWaiters.get(msg.submissionId);
           if (waiter) {
             if (msg.submissionDisposition !== "Retryable") {
-              await clearDraftDeckSubmission(this.hostPeerId, msg.submissionId);
+              const outboxOwner = this.recoveryOwner();
+              if (outboxOwner) await clearDraftDeckSubmission(outboxOwner, msg.submissionId);
             }
             waiter.reject(new Error(msg.reason));
           }
@@ -1140,23 +1149,74 @@ export class P2PDraftGuest {
   }
 
   private async revokeRecovery(): Promise<void> {
+    const owner = this.recoveryOwner();
+    let capability = this.capability;
+    if (!capability && owner) {
+      // Only a revocation that arrives before any admission was persisted holds
+      // no capability; its token then names the record it owns, if any.
+      try {
+        capability = (await loadDraftGuestCapability(owner)) ?? null;
+      } catch {
+        capability = null;
+      }
+    }
     await Promise.allSettled([
-      clearDraftGuestRecovery(this.hostPeerId),
-      clearDraftDeckSubmission(this.hostPeerId),
+      capability ? clearDraftGuestRecovery(capability) : Promise.resolve(),
+      owner ? clearDraftDeckSubmission(owner) : Promise.resolve(),
     ]);
     this.recoveryRevoked = true;
   }
 
-  private async persistRecoveryIdentity(data: { draftToken: string; seatIndex: number; draftCode: string }): Promise<void> {
+  /** The owner of this guest's durable records, once it holds a token for a parseable room. */
+  private recoveryOwner(): DraftGuestCapabilityOwner | null {
+    if (!this.draftToken || !parseRoomCode(this.connection.roomCode)) return null;
+    return {
+      hostPeerId: this.hostPeerId,
+      draftToken: this.draftToken,
+      roomCode: this.connection.roomCode,
+      displayName: this.connection.displayName,
+    };
+  }
+
+  private async admissionCapabilityId(
+    owner: DraftGuestCapabilityOwner,
+    admission: RecoveryAdmission,
+  ): Promise<string> {
+    switch (admission) {
+      case "welcome":
+        return crypto.randomUUID();
+      case "reconnect": {
+        const held = this.capability;
+        if (held?.draftToken === owner.draftToken && held.capabilityId !== null) return held.capabilityId;
+        // A record written before records carried a name gains one here, once.
+        return (await loadDraftGuestCapability(owner))?.capabilityId ?? crypto.randomUUID();
+      }
+    }
+  }
+
+  private async persistRecoveryIdentity(
+    data: { draftToken: string; seatIndex: number; draftCode: string },
+    admission: RecoveryAdmission,
+  ): Promise<void> {
+    const owner: DraftGuestCapabilityOwner = {
+      hostPeerId: this.hostPeerId,
+      draftToken: data.draftToken,
+      roomCode: this.connection.roomCode,
+      displayName: this.connection.displayName,
+    };
+    const capabilityId = await this.admissionCapabilityId(owner, admission);
     await saveDraftGuestSession(this.hostPeerId, {
       ...data,
-      roomCode: this.connection.roomCode,
-      displayName: this.connection.displayName,
+      roomCode: owner.roomCode,
+      displayName: owner.displayName,
+      capabilityId,
     });
+    this.capability = { ...owner, capabilityId };
     saveActiveDraftGuest({
-      roomCode: this.connection.roomCode,
-      displayName: this.connection.displayName,
-      hostPeerId: this.hostPeerId,
+      roomCode: owner.roomCode,
+      displayName: owner.displayName,
+      hostPeerId: owner.hostPeerId,
+      capabilityId,
     });
   }
 
