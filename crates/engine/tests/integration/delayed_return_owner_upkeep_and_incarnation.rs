@@ -896,6 +896,55 @@ fn together_forever_does_not_open_a_merged_death_to_scarblades_malice() {
     together_forever_merged_death(true);
 }
 
+#[test]
+fn broodmoth_keeps_merged_component_in_graveyard_after_cremate_exiles_the_survivor() {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let broodmoth = scenario.add_real_card(P0, "Luminous Broodmoth", Zone::Battlefield, &db);
+    let host = scenario
+        .add_creature(P0, "Mutate host", 2, 2)
+        .with_subtypes(vec!["Beast"])
+        .id();
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let murder = add_free_spell(&mut scenario, P0, "Murder", "Destroy target creature.");
+    let cremate = add_free_spell(&mut scenario, P0, "Cremate", CREMATE);
+    scenario.add_card_to_library_top(P0, "Cremate draw");
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+
+    cast_and_resolve_only(&mut runner, murder, TargetRef::Object(host));
+    assert_eq!(zone(&runner, host), Zone::Graveyard);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, broodmoth);
+
+    cast_and_resolve_only(&mut runner, cremate, TargetRef::Object(host));
+    assert_eq!(zone(&runner, host), Zone::Exile);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, broodmoth);
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(zone(&runner, host), Zone::Exile);
+
+    // CR 400.7e + CR 730.3c: Broodmoth should return Gemrazer. The ordinary
+    // trigger gap is tracked as a Phase 1 follow-up. This control preserves base behavior.
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+}
+
 fn together_forever_merged_death(with_scarblades_malice: bool) {
     let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
         .expect("integration card fixture must load");

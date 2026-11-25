@@ -20504,7 +20504,7 @@ fn false_gate_consumes_one_shot(condition: &DelayedTriggerCondition) -> bool {
 
 fn delayed_trigger_to_context(
     state: &GameState,
-    mut trigger: DelayedTrigger,
+    trigger: DelayedTrigger,
     trigger_events: Vec<GameEvent>,
     matched_alternative: usize,
     causes: Vec<GameEvent>,
@@ -20557,7 +20557,6 @@ fn delayed_trigger_to_context(
     // on the stack, exactly as a printed modal trigger does.
     let modal = trigger.ability.modal.clone();
     let mode_abilities = trigger.ability.mode_abilities.clone();
-    trigger.ability.context.delayed_watch_incarnation = None;
     let mut context = PendingTriggerContext::delayed(
         PendingTrigger {
             source_id: trigger.source_id,
@@ -20601,7 +20600,9 @@ struct DelayedEventFiring {
     causes: Option<Vec<GameEvent>>,
 }
 
-fn recorded_battlefield_departure_pin(event: &GameEvent) -> Option<ObjectIncarnationRef> {
+pub(crate) fn recorded_battlefield_departure_pin(
+    event: &GameEvent,
+) -> Option<ObjectIncarnationRef> {
     match battlefield_departure_trigger_source_context(event) {
         BattlefieldDepartureSourceContext::Present(source) => Some(source.identity.reference),
         BattlefieldDepartureSourceContext::Absent

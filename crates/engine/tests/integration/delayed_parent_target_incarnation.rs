@@ -1720,18 +1720,14 @@ fn together_forever_returns_the_matched_arrival_and_expires_at_cleanup() {
                 );
             }
             let queued = runner.state().stack[0].ability().expect("queued return");
-            assert!(queued.context.delayed_watch_incarnation.is_none());
+            assert_eq!(queued.context.delayed_watch_incarnation, Some(watched));
             let arrival_pin = engine::types::identifiers::ObjectIncarnationRef::of(victim, arrival);
             assert_eq!(queued.target_incarnations, [arrival_pin]);
             let saved = serde_json::to_vec(runner.state()).expect("save queued return");
             *runner.state_mut() = serde_json::from_slice(&saved).expect("restore queued return");
-            assert_eq!(
-                runner.state().stack[0]
-                    .ability()
-                    .expect("restored return")
-                    .target_incarnations,
-                [arrival_pin],
-            );
+            let restored = runner.state().stack[0].ability().expect("restored return");
+            assert_eq!(restored.context.delayed_watch_incarnation, Some(watched));
+            assert_eq!(restored.target_incarnations, [arrival_pin]);
             if move_arrival {
                 runner.cast(cremate).target_object(victim).commit();
                 runner

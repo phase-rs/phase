@@ -2035,7 +2035,9 @@ pub enum DamageInstructionResult {
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
-    /// CR 400.7 + CR 603.7c: The announced occurrence an installed death watcher names.
+    /// CR 400.7 + CR 603.7c: The announced occurrence a death watcher names.
+    /// The queued firing retains it to follow the recorded departure's split
+    /// components. The move's target pin still names the graveyard arrival.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delayed_watch_incarnation: Option<ObjectIncarnationRef>,
     /// CR 608.2f + CR 700.1: guards read for the simultaneous damage batch this node is a

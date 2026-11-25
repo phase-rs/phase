@@ -753,18 +753,22 @@ pub(crate) fn expand_returned_merge_components(
     ) {
         return expand_tracked_set_referents(state, ability, resolved, target_filter);
     }
-    if let (TargetFilter::TriggeringSource, Some(event)) =
-        (target_filter, state.current_trigger_event.as_ref())
-    {
-        // CR 400.7e + CR 730.3c + CR 609.3: use the firing's departure to
-        // find each component, including when the survivor has since moved.
-        let mut expanded = resolved;
-        for component in departure_event_components(state, event) {
-            if !expanded.contains(&component) {
-                expanded.push(component);
+    if let (TargetFilter::TriggeringSource, Some(watched), Some(event)) = (
+        target_filter,
+        ability.context.delayed_watch_incarnation,
+        state.current_trigger_event.as_ref(),
+    ) {
+        if super::triggers::recorded_battlefield_departure_pin(event) == Some(watched) {
+            // CR 400.7e + CR 730.3c + CR 609.3: the pinned watcher's return
+            // follows each component even if the survivor has since moved.
+            let mut expanded = resolved;
+            for component in departed_identity_components(state, event, watched) {
+                if !expanded.contains(&component) {
+                    expanded.push(component);
+                }
             }
+            return expanded;
         }
-        return expanded;
     }
     let mut expanded = resolved.clone();
     for &survivor_id in &resolved {
@@ -913,6 +917,8 @@ fn is_terminal_shuffle_move(effect: &Effect) -> bool {
 ///   is exactly one past the incarnation announced for it (`target_pins`: an
 ///   earlier instruction of this resolution moved it). A pin or result for any
 ///   other object is not evidence for this one.
+/// * `TriggeringSource`: the trigger event is this referent's own departure
+///   from the battlefield.
 /// * `ExiledBySource` is formed by an earlier move in the chain and records a
 ///   departure.
 ///
@@ -955,6 +961,14 @@ fn referent_records_departure(
                 })
         }
         TargetFilter::ExiledBySource => true,
+        TargetFilter::TriggeringSource => matches!(
+            state.current_trigger_event.as_ref(),
+            Some(GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                ..
+            }) if *object_id == referent
+        ),
         _ => false,
     }
 }
