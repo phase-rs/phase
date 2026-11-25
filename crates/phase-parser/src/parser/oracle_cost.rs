@@ -33,8 +33,8 @@ use crate::types::ability::{
     AbilityCost, AggregateFunction, AttachmentReferent, BeholdCostAction, ChoiceType, Comparator,
     ControllerRef, CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerFilter,
     PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, SacrificeCost, SacrificeRequirement,
-    TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X, REMOVE_COUNTER_COST_ALL,
-    REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
+    TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_ANY_NUMBER, EXILE_COST_X,
+    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
 use crate::types::zones::Zone;
@@ -1230,6 +1230,52 @@ fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
                     count: EXILE_COST_X,
                     zone: Some(Zone::Graveyard),
                     filter: None,
+                };
+            }
+        }
+        // CR 601.2b + CR 602.2b: "Exile any number of <filter>" — the count is
+        // chosen while the spell is cast or the ability activated (March
+        // cycle, Gorex). Lowers to the typed exile cost with the any-number
+        // sentinel so the quantity survives into card data; previously this
+        // fell through to the EffectCost fallback and the engine had to
+        // re-derive "any number" from the ChangeZone shape. Ordered before
+        // the generic typed arm, whose fold cannot consume the "any number
+        // of" prefix. The aggregate-threshold sibling below
+        // (`try_parse_exile_with_aggregate_cost`) still wins its own shape:
+        // its trailing threshold clause leaves a non-empty remainder here.
+        if let Some(((), rest_after_any)) = nom_on_lower(rest, &rest_lower, |i| {
+            value((), tag("any number of ")).parse(i)
+        }) {
+            // CR 118.8: bare-zone sibling first — "card(s) from your
+            // graveyard" without a type filter (Painbringer) lowers with no
+            // filter, mirroring the counted bare-graveyard arm, so the fold
+            // below never sees the bare shape.
+            let after_any_lower = rest_after_any.to_lowercase();
+            if nom_on_lower(rest_after_any, &after_any_lower, |i| {
+                value(
+                    (),
+                    all_consuming(alt((
+                        tag("card from your graveyard"),
+                        tag("cards from your graveyard"),
+                    ))),
+                )
+                .parse(i)
+            })
+            .is_some()
+            {
+                return AbilityCost::Exile {
+                    count: EXILE_COST_ANY_NUMBER,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                };
+            }
+            let (filter, remainder) = parse_type_phrase_folding(rest_after_any);
+            if remainder.trim().is_empty() {
+                let zone = extract_filter_zone(&filter);
+                return AbilityCost::Exile {
+                    count: EXILE_COST_ANY_NUMBER,
+                    zone,
+                    filter: Some(filter),
                 };
             }
         }
@@ -5105,6 +5151,98 @@ mod tests {
             }
             other => panic!("Expected Exile, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn cost_exile_any_number_of_colored_cards_from_hand() {
+        // March of Otherworldly Light's cost phrase, verbatim: the "any
+        // number" quantity must survive as the typed sentinel, not fall
+        // through to the EffectCost fallback.
+        match parse_oracle_cost("Exile any number of white cards from your hand") {
+            AbilityCost::Exile {
+                count,
+                zone,
+                filter,
+            } => {
+                assert_eq!(count, EXILE_COST_ANY_NUMBER);
+                assert_eq!(zone, Some(crate::types::zones::Zone::Hand));
+                let Some(TargetFilter::Typed(typed)) = filter else {
+                    panic!("expected a typed exile filter");
+                };
+                assert_eq!(
+                    typed.controller,
+                    Some(crate::types::ability::ControllerRef::You)
+                );
+                assert!(typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::HasColor {
+                        color: crate::types::mana::ManaColor::White
+                    }
+                )));
+            }
+            other => panic!("Expected Exile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_exile_any_number_of_subtype_cards_from_graveyard() {
+        // Gorex, the Tombshell's cost phrase, verbatim: the graveyard sibling
+        // of the March shape lowers to the same sentinel with its own zone
+        // and filter.
+        match parse_oracle_cost("Exile any number of creature cards from your graveyard") {
+            AbilityCost::Exile {
+                count,
+                zone,
+                filter,
+            } => {
+                assert_eq!(count, EXILE_COST_ANY_NUMBER);
+                assert_eq!(zone, Some(crate::types::zones::Zone::Graveyard));
+                let Some(TargetFilter::Typed(typed)) = filter else {
+                    panic!("expected a typed exile filter");
+                };
+                assert!(typed
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, crate::types::ability::TypeFilter::Creature)));
+            }
+            other => panic!("Expected Exile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_exile_any_number_bare_graveyard() {
+        // Painbringer's cost, verbatim: the bare-zone sibling lowers with no
+        // filter, mirroring the counted bare-graveyard arm.
+        match parse_oracle_cost("{T}, Exile any number of cards from your graveyard") {
+            AbilityCost::Composite { costs } => {
+                assert!(
+                    costs.iter().any(|cost| matches!(
+                        cost,
+                        AbilityCost::Exile {
+                            count,
+                            zone: Some(crate::types::zones::Zone::Graveyard),
+                            filter: None,
+                        } if *count == EXILE_COST_ANY_NUMBER
+                    )),
+                    "expected a bare any-number exile leg, got {costs:?}"
+                );
+            }
+            other => panic!("Expected Composite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_exile_any_number_matches_across_cost_channels() {
+        // The any-number exile production lives in the shared single-cost
+        // authority, so a resolution-time ("unless") phrasing of the March
+        // shape lowers identically rather than falling back to EffectCost.
+        assert_eq!(
+            parse_oracle_cost_in(
+                "Exile any number of white cards from your hand",
+                CostChannel::ResolutionPayment
+            ),
+            parse_oracle_cost("Exile any number of white cards from your hand")
+        );
     }
 
     #[test]

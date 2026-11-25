@@ -2070,6 +2070,53 @@ Trample";
     }
 
     #[test]
+    fn parse_additional_cost_optional_exile_any_number_from_hand() {
+        // March of Otherworldly Light, verbatim: the "any number" quantity
+        // lowers to the typed exile sentinel instead of the EffectCost
+        // fallback, so card data records the quantity the Oracle text prints.
+        let raw = "As an additional cost to cast this spell, you may exile any number of white cards from your hand.";
+        let lower = raw.to_lowercase();
+        match parse_additional_cost_line(&lower, raw) {
+            Some(AdditionalCost::Optional {
+                cost:
+                    AbilityCost::Exile {
+                        count,
+                        zone,
+                        filter,
+                    },
+                repeatability: AdditionalCostRepeatability::Once,
+            }) if count == crate::types::ability::EXILE_COST_ANY_NUMBER => {
+                assert_eq!(zone, Some(crate::types::zones::Zone::Hand));
+                assert!(filter.is_some());
+            }
+            other => panic!("Expected Optional(Exile any number), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_additional_cost_optional_exile_any_number_from_graveyard() {
+        // Gorex, the Tombshell, verbatim: the graveyard sibling of the March
+        // shape lowers to the same sentinel with its own zone and filter.
+        let raw = "As an additional cost to cast this spell, you may exile any number of creature cards from your graveyard.";
+        let lower = raw.to_lowercase();
+        match parse_additional_cost_line(&lower, raw) {
+            Some(AdditionalCost::Optional {
+                cost:
+                    AbilityCost::Exile {
+                        count,
+                        zone,
+                        filter,
+                    },
+                repeatability: AdditionalCostRepeatability::Once,
+            }) if count == crate::types::ability::EXILE_COST_ANY_NUMBER => {
+                assert_eq!(zone, Some(crate::types::zones::Zone::Graveyard));
+                assert!(filter.is_some());
+            }
+            other => panic!("Expected Optional(Exile any number), got {:?}", other),
+        }
+    }
+
+    #[test]
     fn split_rottenmouth_additional_cost_trailing_reduction() {
         let raw = "As an additional cost to cast this spell, you may sacrifice any number of nonland permanents. This spell costs {1} less to cast for each permanent sacrificed this way.";
         let lower = raw.to_lowercase();

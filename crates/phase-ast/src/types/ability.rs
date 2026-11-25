@@ -19701,6 +19701,11 @@ pub const REMOVE_COUNTER_COST_ALL: u32 = u32::MAX - 1;
 pub const REMOVE_COUNTER_COST_ANY_NUMBER: u32 = u32::MAX - 2;
 /// Sentinel for literal `X` in exile costs that use the compact numeric count.
 pub const EXILE_COST_X: u32 = u32::MAX;
+/// Sentinel for "any number of" in exile costs that use the compact numeric
+/// count. CR 601.2b + CR 602.2b: the count is chosen while the spell is cast
+/// or the ability activated, like literal `X`, but is distinct from it for
+/// parser/data clarity (mirrors [`REMOVE_COUNTER_COST_ANY_NUMBER`]).
+pub const EXILE_COST_ANY_NUMBER: u32 = u32::MAX - 1;
 
 pub fn is_chosen_remove_counter_cost_count(count: u32) -> bool {
     matches!(

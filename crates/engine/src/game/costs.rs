@@ -47,7 +47,7 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     is_direct_resolution_optional_payment_branch, supported_at_resolution, AbilityCost, Effect,
     EffectKind, PlayerScope, QuantityExpr, QuantityRef, TargetFilter, TurnUpCostSource,
-    TypedFilter, REMOVE_COUNTER_COST_ALL,
+    TypedFilter, EXILE_COST_ANY_NUMBER, REMOVE_COUNTER_COST_ALL,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -2351,7 +2351,11 @@ fn pay_ability_cost_inner(
         } if !matches!(filter, Some(TargetFilter::SelfRef))
             && matches!(scope, PaymentScope::Resolution { .. }) =>
         {
-            let count = *count as usize;
+            // CR 601.2b + CR 602.2b: the any-number sentinel chooses its
+            // count here — every eligible card is a candidate and zero is
+            // legal, so the forced-choice fast path below must not fire for
+            // it (eligible.len() always "fills" a whole-set maximum).
+            let any_number = *count == EXILE_COST_ANY_NUMBER;
             let effective_zone = zone.unwrap_or(Zone::Graveyard);
             let eligible = find_eligible_exile_targets(
                 state,
@@ -2361,6 +2365,11 @@ fn pay_ability_cost_inner(
                 effective_zone,
                 filter.as_ref(),
             );
+            let count = if any_number {
+                eligible.len()
+            } else {
+                *count as usize
+            };
             if eligible.len() < count {
                 return Ok(payment_failed("not enough cards to exile"));
             }
@@ -2373,7 +2382,8 @@ fn pay_ability_cost_inner(
             // Forced-choice fast path: when the eligible set exactly
             // fills the requirement there is no choice to surface, so the
             // exile executes immediately.
-            if eligible.len() == count
+            if !any_number
+                && eligible.len() == count
                 && matches!(
                     scope,
                     PaymentScope::Resolution {
@@ -2418,7 +2428,7 @@ fn pay_ability_cost_inner(
                     cards: eligible,
                     count,
                     min_count: 0,
-                    up_to: false,
+                    up_to: any_number,
                     source_id,
                     effect_kind: crate::types::ability::EffectKind::PayCost,
                     zone: effective_zone,
@@ -4376,6 +4386,11 @@ fn can_pay_resolution(
             filter,
             ..
         } if !matches!(filter, Some(TargetFilter::SelfRef)) => {
+            // CR 601.2b + CR 602.2b: "any number" always admits zero, so it
+            // is payable with any eligible set (including an empty one).
+            if *count == EXILE_COST_ANY_NUMBER {
+                return true;
+            }
             let count = *count as usize;
             let effective_zone = zone.unwrap_or(Zone::Graveyard);
             let eligible = find_eligible_exile_targets(

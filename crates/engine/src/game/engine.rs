@@ -14115,11 +14115,12 @@ fn apply_non_priority_pass_action(
                         &chosen,
                         &mut events,
                     )?,
-                    // CR 601.2h: A ChangeZone effect-as-cost carries the optional
-                    // any-number exile selection and its cast-time reduction.
+                    // CR 601.2h: An "exile any number" cost — typed or legacy
+                    // ChangeZone shape — carries the optional any-number exile
+                    // selection and its cast-time reduction.
                     PayCostKind::ExileFromZone { zone }
                         if paid_cost.as_ref().is_some_and(|payment| {
-                            casting_costs::is_exile_any_number_effect_cost(payment.cost)
+                            casting_costs::is_exile_any_number_cost(payment.cost)
                         }) =>
                     {
                         casting_costs::handle_exile_any_number_for_cost(
