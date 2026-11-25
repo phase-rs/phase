@@ -31659,6 +31659,36 @@ fn declared_object_target_controller_antecedent(clauses: &[ClauseIr]) -> Option<
     Some(ControllerRef::ParentTargetController)
 }
 
+/// CR 608.2c + CR 118.12a + CR 109.4: the payer an earlier `unless_pay` clause
+/// introduced, as the third-person antecedent for a bare-reflexive-outcome-led
+/// consequence chunk ("Counter target spell unless its controller pays {X}. If
+/// that player doesn't, they tap all lands with mana abilities they control" —
+/// Power Sink). Reads the NEAREST earlier clause carrying `unless_pay`, so the
+/// payer is the player the connector's outcome is about (CR 608.2c: anaphors
+/// resolve in the order written).
+///
+/// The payer mapping is deliberately narrow: only payers naming exactly one
+/// already-bound player map (`ParentTargetController`, the counter/unless
+/// shape; `TriggeringPlayer`, the third-party-voice shape). Every other payer
+/// fails closed to `None` (current behavior): per-player-iteration payers
+/// (`ScopedPlayer`) must fall through to the `ScopedPlayer` rung (Tariff
+/// class), `Controller` would merely restate the `You` fallback, and
+/// `AllPlayers`/`Opponent`/disjunctive payers name no single antecedent. The
+/// declared-target payer shape (`Typed`, "target player pays") likewise fails
+/// closed: no `TargetFilter::TargetPlayer` variant exists, and a `Typed` shape
+/// carries no single-player `ControllerRef` mapping.
+fn unless_payer_controller_antecedent(clauses: &[ClauseIr]) -> Option<ControllerRef> {
+    let payer = clauses
+        .iter()
+        .rev()
+        .find_map(|clause| clause.unless_pay.as_ref().map(|modifier| &modifier.payer))?;
+    match payer {
+        TargetFilter::ParentTargetController => Some(ControllerRef::ParentTargetController),
+        TargetFilter::TriggeringPlayer => Some(ControllerRef::TriggeringPlayer),
+        _ => None,
+    }
+}
+
 /// CR 601.2c + CR 115.1: the single target filter a chain node announces as
 /// exactly one stack-time slot, for the effects whose slot collection is one
 /// plain filter (`ability_utils::collect_target_slot_specs`' generic arm).
@@ -52252,6 +52282,13 @@ fn parse_effect_chain_ir_body(
             } else {
                 (None, text, None, None, None)
             };
+        // CR 608.2c + CR 118.12a: snapshot whether this chunk is led by a BARE
+        // reflexive outcome gate ("If they do" / "If that player doesn't")
+        // BEFORE `if_you_do` is moved into `condition` below — the unless-payer
+        // seed rung reads this snapshot when the chunk context is built.
+        let reflexive_outcome_led = if_you_do
+            .as_ref()
+            .is_some_and(conditions::is_bare_reflexive_outcome_gate);
         // CR 603.12 + CR 608.2c: a `When you do, if <guard>, <body>` guard is
         // stamped on the reflexive body exactly as a leading general conditional
         // is stamped on its instruction, so its route joins the same binding
@@ -53523,6 +53560,13 @@ fn parse_effect_chain_ir_body(
         // those nested delayed/reflexive/continuation parses; the public wrapper
         // restores the caller's value on every return path.
         ctx.chain_prior_publishers = chain_prior_publishers;
+        // CR 608.2c + CR 118.12a: the unless-payer antecedent for a
+        // bare-reflexive-outcome-led consequence chunk (Power Sink). Gated on
+        // the strip-time snapshot: only "If they do / If that player doesn't"
+        // connectors prove the payer is the player the outcome is about.
+        let unless_payer_scope = reflexive_outcome_led
+            .then(|| unless_payer_controller_antecedent(builder.clauses()))
+            .flatten();
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             // CR 608.2k: precedence for a bare object anaphor, nearest antecedent
@@ -53608,8 +53652,14 @@ fn parse_effect_chain_ir_body(
             // CR 608.2c: a chosen-player scope set by an earlier "choose a
             // player" sentence (Gluntch) takes precedence — the "they"/"that
             // player controls" anaphor binds to the most recent choice.
-            relative_player_scope: chain_chosen_player_scope
+            relative_player_scope: unless_payer_scope
                 .clone()
+                // CR 608.2c: the bare reflexive connector proves the unless
+                // payer is the decliner, so the payer outranks every other
+                // third-person rung (nearest introduction wins; zero
+                // choose-a-player+unless pairings per corpus census, and the
+                // declared rung converges where it also fires).
+                .or_else(|| chain_chosen_player_scope.clone())
                 // CR 608.2c (issue #1670): body "its controller may" antecedent
                 // (Star Athlete; issue #3659 Gix — "its controller may pay … if
                 // they do, they draw" must bind "they" to the creature's

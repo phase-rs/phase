@@ -11727,12 +11727,20 @@ fn matches_filter_prop(
             }
             !obj.kickers_paid.is_empty()
         }
-        // CR 605.1: Delegate to the single mana-ability classifier instead of
-        // duplicating the definition at the filter layer.
-        FilterProp::HasManaAbility => obj
-            .abilities
-            .iter()
-            .any(crate::game::mana_abilities::is_mana_ability),
+        // CR 605.1: both mana-ability categories — an activated one (CR 605.1a,
+        // via the single activated classifier) or a triggered one (CR 605.1b,
+        // via the static definition classifier over the live trigger list).
+        // Both arms read live lists, so granted abilities count (R-PS3).
+        FilterProp::HasManaAbility => {
+            obj.abilities
+                .iter()
+                .any(crate::game::mana_abilities::is_mana_ability)
+                || obj.trigger_definitions.iter_all().any(|entry| {
+                    crate::game::mana_abilities::is_triggered_mana_ability_definition(
+                        &entry.definition,
+                    )
+                })
+        }
         // CR 113.1 + CR 113.3: "no abilities" means no keyword abilities and
         // no activated, triggered, replacement, or static abilities.
         FilterProp::HasNoAbilities => object_has_no_abilities(obj),

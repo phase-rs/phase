@@ -1763,7 +1763,6 @@ face = [
   { key = "possessed nomad", class = "missing_effect", clauses = ["is black"] },
   { key = "possibility storm", class = "wrong_player", clauses = ["then exiles cards from the top of their library until they exile a card that shares a card type with it.", "Then they put all cards exiled with this enchantment on the bottom of their library in a random order."] },
   { key = "potential horizon", class = "condition_wrong", clauses = ["If you were the starting player, this land enters tapped."] },
-  { key = "power sink", class = "dropped_qualifier", clauses = ["If that player doesn't, they tap all lands with mana abilities they control", "and lose all unspent mana."] },
   { key = "powerbalance", class = "condition_wrong", clauses = ["If you do, you may cast that card without paying its mana cost if the two spells have the same mana value."] },
   { key = "powerleech", class = "missing_effect", clauses = ["or an opponent activates an artifact's ability without {T} in its activation cost,"] },
   { key = "pox", class = "wrong_player", clauses = ["then discards a third of the cards in their hand"] },
