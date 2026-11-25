@@ -14638,9 +14638,10 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => mana_abilities::resume_mana_ability_root(
+        ) => mana_abilities::cancel_mana_ability_activation(
             state,
             pending_mana_ability.player,
+            pending_mana_ability.source_id,
             pending_mana_ability.resume.clone(),
             &mut events,
         )?,

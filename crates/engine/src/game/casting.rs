@@ -34129,6 +34129,17 @@ pub fn handle_cancel_cast(
     pending: &PendingCast,
     _events: &mut Vec<GameEvent>,
 ) {
+    use crate::types::game_state::ForeignLibraryLookAction;
+
+    let action = match pending.activation_ability_index {
+        Some(_) => ForeignLibraryLookAction::Activate(pending.object_id),
+        None => ForeignLibraryLookAction::Cast,
+    };
+    super::visibility::retire_cancelled_foreign_library_look(
+        state,
+        pending.ability.controller,
+        action,
+    );
     // The owning action restored paid resources before entering this cleanup.
     // Direct declaration-denial callers also retire the matching receipt.
     if state

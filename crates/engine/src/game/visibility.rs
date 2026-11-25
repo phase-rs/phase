@@ -1668,6 +1668,22 @@ pub(super) fn snapshot_foreign_library_tops(
     }));
 }
 
+/// CR 401.5 + CR 733.1: a cancelled announcement no longer holds the old
+/// tops. Preserve a snapshot owned by an enclosing action.
+pub(super) fn retire_cancelled_foreign_library_look(
+    state: &mut GameState,
+    player: PlayerId,
+    action: crate::types::game_state::ForeignLibraryLookAction,
+) {
+    if state
+        .foreign_library_look_snapshot
+        .as_deref()
+        .is_some_and(|snapshot| snapshot.player == player && snapshot.action == action)
+    {
+        state.foreign_library_look_snapshot = None;
+    }
+}
+
 pub(super) fn finish_foreign_library_look_boundary(
     state: &mut GameState,
     result: &crate::types::game_state::ActionResult,

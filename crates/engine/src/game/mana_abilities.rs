@@ -4848,8 +4848,39 @@ pub(super) fn continue_mana_ability_activation(
         *state = before;
         events.truncate(events_before);
         super::play_trace::mana_ability_reversed(state, source_id, place);
-        resume_mana_ability_root(state, player, resume, events)
+        cancel_mana_ability_activation(state, player, source_id, resume, events)
     })
+}
+
+/// CR 401.5 + CR 733.1: retire the cancelled activation before resuming what
+/// it was paying for. An enclosing activation on the same source keeps its look.
+pub(super) fn cancel_mana_ability_activation(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    resume: ManaAbilityResume,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let same_source_is_enclosing = matches!(
+        &resume,
+        ManaAbilityResume::ManaAbilityManaPayment { pending_mana_ability }
+            if pending_mana_ability.suspended_chain().any(|outer| {
+                outer.player == player && outer.source_id == source_id
+            })
+    ) || (resume.resumes_pending_cast()
+        && state.pending_cast.as_deref().is_some_and(|outer| {
+            outer.activation_ability_index.is_some()
+                && outer.ability.controller == player
+                && outer.object_id == source_id
+        }));
+    if !same_source_is_enclosing {
+        super::visibility::retire_cancelled_foreign_library_look(
+            state,
+            player,
+            crate::types::game_state::ForeignLibraryLookAction::Activate(source_id),
+        );
+    }
+    resume_mana_ability_root(state, player, resume, events)
 }
 
 pub(crate) fn resume_mana_ability_root(
