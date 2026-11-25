@@ -616,39 +616,52 @@ fn declaration_offerable_reserving(
                 )
             })
     };
-    if !payable(life_state.as_ref().unwrap_or(state)) {
-        return Ok(false);
-    }
     // CR 601.2f-h + CR 118.3: the additional cost's hand and graveyard cards
     // and the mana abilities' costs are paid from the same finite pool; CR
     // 601.2g: mana abilities are activated before costs are paid, so the held
-    // cards must survive them. The mana is judged again with each assignment
-    // of the declared cost's cards held, where a mana ability could spend them.
-    let Some(residual) = split.residual.as_ref() else {
-        return Ok(true);
-    };
-    let Some((legs, fodder)) =
+    // cards must survive them. Where a mana ability could spend the declared
+    // cost's cards, the mana is judged with each assignment of them held.
+    let contended = split.residual.as_ref().and_then(|residual| {
         contended_declaration_legs(state, player, pending.object_id, residual)
-    else {
-        return Ok(true);
+    });
+    let Some((legs, fodder)) = contended else {
+        return Ok(payable(life_state.as_ref().unwrap_or(state)));
     };
-    // One scratch for the whole search: an assignment is held on it and
-    // released, so no assignment copies the state.
+    // One scratch for the whole search: an assignment is marked on it and
+    // released. Each assignment costs one mana judgment, the same judgment an
+    // uncontended declaration makes once. A hold only narrows what the mana
+    // abilities may spend, so the mana is judged with nothing held only once
+    // an assignment has failed, and when that fails too no further assignment
+    // is judged.
     let scratch = std::cell::RefCell::new(super::casting::CardHoldScratch::new(
         life_state.unwrap_or_else(|| state.clone()),
     ));
+    let unheld = std::cell::OnceCell::new();
+    let payable_unheld =
+        || *unheld.get_or_init(|| scratch.borrow_mut().probe_holding(&[], payable));
     let mut held = Vec::new();
     let mut explored = 0;
-    // A search that runs out of budget stays offered, as the alternative-cost
-    // search does; the real payment decides.
-    Ok(assign_reserved_legs(
+    let found = assign_reserved_legs(
         &legs,
         &|id| !fodder.contains(&id),
         &mut held,
         &mut explored,
         CARD_HOLD_PROBE_BUDGET,
-        &|objects| scratch.borrow_mut().probe_holding(objects, payable),
-    ) != Some(false))
+        &|objects| {
+            if unheld.get() == Some(&false) {
+                return false;
+            }
+            let payable_held = scratch.borrow_mut().probe_holding(objects, payable);
+            if !payable_held {
+                payable_unheld();
+            }
+            payable_held
+        },
+    );
+    // A search that runs out of budget stays offered when the mana is payable
+    // with nothing held, as the alternative-cost search does; the real payment
+    // decides.
+    Ok(found.unwrap_or_else(payable_unheld))
 }
 
 /// CR 118.3 + CR 601.2g-h: whether some hand or graveyard card `cost`, an

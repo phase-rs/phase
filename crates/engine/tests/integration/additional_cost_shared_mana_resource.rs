@@ -13,13 +13,14 @@
 use engine::ai_support::{legal_actions, legal_actions_full};
 use engine::game::casting::can_cast_object_now;
 use engine::game::engine::EngineError;
+use engine::game::perf_counters::take_cost_snapshot;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::AdditionalCost;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -36,6 +37,7 @@ const STITCHED_DRAKE: &str =
     "As an additional cost to cast this spell, exile a creature card from your graveyard.\nFlying";
 const CORPSE_EXPLOSION: &str = "As an additional cost to cast this spell, exile a creature card from your graveyard.\nCorpse Explosion deals damage equal to the exiled card's power to each creature and each planeswalker.";
 const UNEXPECTED_WINDFALL: &str = "As an additional cost to cast this spell, discard a card.\nDraw two cards and create two Treasure tokens. (They're artifacts with \"{T}, Sacrifice this token: Add one mana of any color.\")";
+const CRYPT_OF_AGADEEM: &str = "This land enters tapped.\n{T}: Add {B}.\n{2}, {T}: Add {B} for each black creature card in your graveyard.";
 const METALWORKER: &str = "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.";
 
 fn cost(generic: u32, shards: &[ManaCostShard]) -> ManaCost {
@@ -810,7 +812,7 @@ fn corpse_explosion_board(spare: bool) -> (Board, ObjectId, Option<ObjectId>) {
     )
 }
 
-/// T13. CR 118.9d + CR 118.10, the Required twin of T12: {1}{B}{R} can't be
+/// T14. CR 118.9d + CR 118.10, the Required twin of T13: {1}{B}{R} can't be
 /// paid, and Conspiracy Unraveler's collect evidence 10 is paid with graveyard
 /// cards, as Corpse Explosion's own cost is. One card pays one cost, so the
 /// sole Desolation Twin can't be exiled for both and the cast isn't offered.
@@ -887,7 +889,7 @@ enum WindfallSource {
     Mountain,
 }
 
-/// T14. CR 601.2g: mana abilities are activated before costs are paid, so the
+/// T15. CR 601.2g: mana abilities are activated before costs are paid, so the
 /// Ornithopter held for Unexpected Windfall's discard is still in hand when
 /// Metalworker reveals it for {C}{C}: reading a card doesn't use it up, and the
 /// cast is offered. Skirge Familiar's discard does use it up: with a third
@@ -908,4 +910,161 @@ fn a_held_card_is_still_revealed_for_mana() {
 
     let mut no_artifact = windfall_board(WindfallSource::Metalworker, false);
     assert_not_castable(&mut no_artifact.runner, no_artifact.spell, "an Island");
+}
+
+/// T16. CR 601.2g + CR 605.3a: counted mana beside a contended exile, end to
+/// end. P0 has {B}{B} floating, an untapped Crypt of Agadeem, a Rubble Rouser
+/// tapped from attacking and five black creature cards in the graveyard. P0
+/// activates Crypt for {B}{B}{B}{B}{B}; Redemptor Dreadnought's exile is then
+/// offered and the cast completes with it paid.
+///
+/// This row doesn't judge Crypt's count under a hold: the castability guard
+/// doesn't plan Crypt's counted mana (`mana_payment_class_rows.rs`, row
+/// `m/Crypt of Agadeem`), so the cast is offered only once Crypt has been
+/// activated, with or without the Rouser. That a held card is still counted is
+/// pinned by the unit test `card_hold_scratch_tests::a_held_card_is_still_counted`.
+#[test]
+fn counted_mana_pays_for_a_cast_with_its_exile() {
+    let mut sc = scenario();
+    let spell = sc
+        .add_creature_to_hand_from_oracle(P0, "Redemptor Dreadnought", 4, 4, REDEMPTOR_DREADNOUGHT)
+        .with_mana_cost(cost(5, &[]))
+        .id();
+    let rouser = add_rubble_rouser(&mut sc);
+    let crypt = sc
+        .add_land_from_oracle(P0, "Crypt of Agadeem", CRYPT_OF_AGADEEM)
+        .id();
+    let creatures: Vec<ObjectId> = (0..5)
+        .map(|i| {
+            sc.add_creature_to_graveyard(P0, &format!("Black Creature {i}"), 1, 1)
+                .with_mana_cost(cost(0, &[ManaCostShard::Black]))
+                .with_color(vec![ManaColor::Black])
+                .id()
+        })
+        .collect();
+    sc.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = sc.build();
+    runner.state_mut().objects.get_mut(&rouser).unwrap().tapped = true;
+
+    let (_, _, grouped) = legal_actions_full(runner.state());
+    let counted = grouped
+        .values()
+        .flatten()
+        .find(|action| {
+            matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == crypt && selection.ability_index == Some(1))
+        })
+        .cloned()
+        .expect("Crypt's counted mana ability is offered");
+    runner.act(counted).unwrap();
+    let mut guard = 0;
+    while !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+        guard += 1;
+        assert!(guard < 8, "stuck at {:?}", runner.state().waiting_for);
+        let next = legal_actions(runner.state())
+            .into_iter()
+            .next()
+            .expect("a prompt has an answer");
+        runner.act(next).unwrap();
+    }
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        5,
+        "Crypt adds {{B}} for each of the five black creature cards"
+    );
+
+    let trail = drive(
+        &mut runner,
+        spell,
+        &Answers {
+            optional: CostElection::Pay,
+            ..Answers::default()
+        },
+    );
+    assert!(
+        trail.prompts.contains(&"OptionalCostChoice"),
+        "the exile is offered: {:?}",
+        trail.prompts
+    );
+    assert_cast_completes(&runner, spell, &trail, "cost paid");
+    assert_eq!(
+        creatures
+            .iter()
+            .filter(|&&id| zone(&runner, id) == Zone::Exile)
+            .count(),
+        1,
+        "one creature card is exiled for the cost"
+    );
+}
+
+/// The state copies `legal_actions_full` makes on a board with Rubble Rouser,
+/// `islands` Islands, `graveyard` cards in the graveyard and one {2}{U} spell
+/// in hand: Abhorrent Oculus, or a creature with no additional cost. The cast
+/// is offered exactly when the Islands pay its {U}.
+fn action_generation_copies(oculus: bool, islands: usize, graveyard: usize) -> u64 {
+    let mut sc = scenario();
+    if oculus {
+        sc.add_creature_to_hand_from_oracle(P0, "Abhorrent Oculus", 5, 5, ABHORRENT_OCULUS)
+            .with_mana_cost(cost(2, &[ManaCostShard::Blue]));
+    } else {
+        sc.add_creature_to_hand(P0, "Plain Creature", 5, 5)
+            .with_mana_cost(cost(2, &[ManaCostShard::Blue]));
+    }
+    add_rubble_rouser(&mut sc);
+    for _ in 0..islands {
+        sc.add_basic_land(P0, ManaColor::Blue);
+    }
+    add_graveyard_cards(&mut sc, graveyard);
+    let runner = sc.build();
+
+    let before = take_cost_snapshot();
+    let (actions, _, _) = legal_actions_full(runner.state());
+    let copies = take_cost_snapshot().since(before).state_copies;
+    assert_eq!(
+        actions
+            .iter()
+            .any(|action| matches!(action, GameAction::CastSpell { .. })),
+        islands == 2,
+        "the cast is offered exactly when its mana is payable"
+    );
+    copies
+}
+
+/// T17. The cost of the shared-card judgment in action generation, measured
+/// through `legal_actions_full` with the production mana payer. The six-card
+/// exile has C(n, 6) assignments. On a payable board the first one is payable,
+/// so the copies don't grow with the graveyard and the contended cast costs
+/// less than two casts of a spell with no additional cost: one more mana
+/// judgment. On a board one Island short every assignment fails; the mana is
+/// then judged once with nothing held, and the refusal costs no more than the
+/// payable board whatever the graveyard holds.
+#[test]
+fn a_contended_cast_costs_a_bounded_number_of_state_copies() {
+    let contended = action_generation_copies(true, 2, 7);
+    assert_eq!(
+        contended,
+        action_generation_copies(true, 2, 20),
+        "the search doesn't grow with the cards the cost can choose from"
+    );
+    let plain = action_generation_copies(false, 2, 7);
+    assert!(
+        plain < contended && contended < 2 * plain,
+        "one more mana judgment than a plain cast: contended {contended}, plain {plain}"
+    );
+
+    let refused = action_generation_copies(true, 1, 20);
+    assert_eq!(
+        refused,
+        action_generation_copies(true, 1, 7),
+        "a refusal doesn't grow with the cards the cost can choose from"
+    );
+    assert!(
+        refused <= contended,
+        "an unpayable cast isn't judged once per assignment: refused {refused}, payable {contended}"
+    );
 }

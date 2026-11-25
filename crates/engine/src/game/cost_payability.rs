@@ -390,6 +390,7 @@ pub(crate) fn discard_legs_jointly_payable(
                     .filter(|&id| {
                         id != source
                             && !super::casting::is_spell_being_cast(state, id)
+                            && !super::casting::is_held_by_payment_probe(state, id)
                             && effective_filter
                                 .as_ref()
                                 .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
@@ -1340,7 +1341,11 @@ impl AbilityCostPayability for AbilityCost {
                     return p.hand.contains(&source)
                         && p.hand
                             .iter()
-                            .filter(|&&id| id != source && id != pending_spell)
+                            .filter(|&&id| {
+                                id != source
+                                    && id != pending_spell
+                                    && !super::casting::is_held_by_payment_probe(state, id)
+                            })
                             .count()
                             >= reserved_count;
                 }
@@ -1356,6 +1361,7 @@ impl AbilityCostPayability for AbilityCost {
                     .filter(|&&id| {
                         id != source
                             && id != pending_spell
+                            && !super::casting::is_held_by_payment_probe(state, id)
                             && effective_filter
                                 .as_ref()
                                 .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
@@ -1673,6 +1679,7 @@ impl AbilityCostLegPayability for AbilityCost {
                     .filter(|&&id| {
                         id != source
                             && !super::casting::is_spell_being_cast(state, id)
+                            && !super::casting::is_held_by_payment_probe(state, id)
                             && effective_filter
                                 .as_ref()
                                 .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
@@ -2508,6 +2515,7 @@ pub(super) fn eligible_exile_cost_objects(
     ids.filter(|&id| {
         id != source
             && !super::casting::is_spell_being_cast(state, id)
+            && !super::casting::is_held_by_payment_probe(state, id)
             && filter_ref.is_none_or(|f| matches_target_filter_in_owner_zone(state, id, f, &ctx))
     })
     .collect()
@@ -2546,6 +2554,7 @@ pub(crate) fn eligible_exile_with_aggregate_objects(
             id != source
                 // CR 601.2a: a spell being cast is on the stack, not in `zone`.
                 && !super::casting::is_spell_being_cast(state, id)
+                && !super::casting::is_held_by_payment_probe(state, id)
                 && matches_target_filter_in_owner_zone(state, id, filter, &ctx)
         })
         .collect()

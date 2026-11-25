@@ -13413,14 +13413,13 @@ pub(super) fn reserved_payment_state(
 
 /// CR 118.3 + CR 601.2g-h: one scratch state for a whole search over the hand
 /// and graveyard cards a cost's other legs hold. Each assignment is held on it
-/// and released again, so the search copies the state once.
+/// and released again.
 ///
 /// CR 118.3 + CR 118.10: a held card is committed to another part of the total
-/// cost, so no mana ability's cost can use it up: it is taken out of its zone
-/// for the probe. CR 601.2g: mana abilities are activated before costs are
-/// paid, so a held hand card is still in hand for an ability that only reads
-/// it (Metalworker's reveal); `Player::probe_held_hand_cards` carries those.
-/// The scratch never reaches a real payment.
+/// cost, so no other cost can use it up ([`is_held_by_payment_probe`]). CR
+/// 601.2g: mana abilities are activated before costs are paid, so the card is
+/// still in its zone for everything that only reads it (Metalworker's reveal,
+/// Crypt of Agadeem's count). The scratch never reaches a real payment.
 pub(super) struct CardHoldScratch {
     state: GameState,
 }
@@ -13439,72 +13438,24 @@ impl CardHoldScratch {
         probe: impl FnOnce(&GameState) -> T,
     ) -> T {
         let scratch = &mut self.state;
-        let cards: Vec<(ObjectId, Zone, PlayerId)> = held
-            .iter()
-            .filter_map(|&(id, _)| {
-                let obj = scratch.objects.get(&id)?;
-                matches!(obj.zone, Zone::Hand | Zone::Graveyard)
-                    .then_some((id, obj.zone, obj.owner))
-            })
-            .collect();
-        if cards.is_empty() {
-            return probe(scratch);
-        }
-        // The zones as they stand, restored below so every assignment is
-        // probed on the same state.
-        let zones: Vec<(PlayerId, Zone, im::Vector<ObjectId>)> = cards
-            .iter()
-            .map(|&(_, zone, owner)| (owner, zone, card_zone(scratch, zone, owner).clone()))
-            .collect();
-        let exile = scratch.exile.clone();
-        for &(id, zone, owner) in &cards {
-            // allow-raw-zone: holds a card for another cost leg on the discarded payment-probe scratch; no zone change occurs (CR 118.3)
-            super::zones::remove_from_zone(scratch, id, zone, owner);
-            // allow-raw-zone: holds a card for another cost leg on the discarded payment-probe scratch; no zone change occurs (CR 118.3)
-            super::zones::add_to_zone(scratch, id, Zone::Exile, owner);
-            if let Some(obj) = scratch.objects.get_mut(&id) {
-                // allow-raw-zone: holds a card for another cost leg on the discarded payment-probe scratch; no zone change occurs (CR 118.3)
-                obj.zone = Zone::Exile;
-            }
-            if zone == Zone::Hand {
-                if let Some(holder) = scratch.players.iter_mut().find(|p| p.id == owner) {
-                    holder.probe_held_hand_cards.push(id);
-                }
+        for &(id, _) in held {
+            let Some(owner) = scratch
+                .objects
+                .get(&id)
+                .filter(|obj| matches!(obj.zone, Zone::Hand | Zone::Graveyard))
+                .map(|obj| obj.owner)
+            else {
+                continue;
+            };
+            if let Some(holder) = scratch.players.iter_mut().find(|p| p.id == owner) {
+                holder.probe_held_cards.push(id);
             }
         }
         let answer = probe(scratch);
         for holder in scratch.players.iter_mut() {
-            holder.probe_held_hand_cards.clear();
+            holder.probe_held_cards.clear();
         }
-        for &(id, zone, _) in &cards {
-            if let Some(obj) = scratch.objects.get_mut(&id) {
-                // allow-raw-zone: releases a held card on the discarded payment-probe scratch; no zone change occurs (CR 118.3)
-                obj.zone = zone;
-            }
-        }
-        for (owner, zone, cards) in zones {
-            // allow-raw-zone: releases held cards on the discarded payment-probe scratch; no zone change occurs (CR 118.3)
-            *card_zone(scratch, zone, owner) = cards;
-        }
-        // allow-raw-zone: releases held cards on the discarded payment-probe scratch; no zone change occurs (CR 118.3)
-        scratch.exile = exile;
         answer
-    }
-}
-
-/// `owner`'s hand or graveyard, the zones [`CardHoldScratch`] holds cards in.
-fn card_zone(state: &mut GameState, zone: Zone, owner: PlayerId) -> &mut im::Vector<ObjectId> {
-    match zone {
-        Zone::Graveyard => state.graveyard_of_mut(owner),
-        _ => {
-            // allow-raw-zone: the probe scratch's own hand storage (CR 118.3)
-            &mut state
-                .players
-                .iter_mut()
-                .find(|p| p.id == owner)
-                .expect("owner exists")
-                .hand
-        }
     }
 }
 
@@ -28582,6 +28533,20 @@ pub(crate) fn is_spell_being_cast(state: &GameState, object_id: ObjectId) -> boo
         })
 }
 
+/// CR 118.3 + CR 118.10 + CR 601.2g-h: Whether a payment probe holds
+/// `object_id` for another leg of the cost it is judging
+/// ([`CardHoldScratch`]). The card is committed to that leg, so it can't be
+/// chosen to pay any other cost; it hasn't been paid yet (mana abilities are
+/// activated before costs are paid), so it is still in its zone for everything
+/// that only reads it. Consulted beside [`is_spell_being_cast`] by the hand and
+/// graveyard cost-fodder enumerations. False on every live state.
+pub(crate) fn is_held_by_payment_probe(state: &GameState, object_id: ObjectId) -> bool {
+    state
+        .players
+        .iter()
+        .any(|player| player.probe_held_cards.contains(&object_id))
+}
+
 /// Shared eligibility helper for hand-card cost payments — returns every card
 /// in `player`'s hand matching `filter` (if any), excluding the cast source
 /// and any spell being cast ([`is_spell_being_cast`]).
@@ -28621,6 +28586,23 @@ fn find_eligible_hand_cost_targets(
         .unwrap_or_default()
 }
 
+/// CR 118.3: the hand cards a cost that uses them up (a discard, an exile) can
+/// take: [`find_eligible_hand_cost_targets`] without the cards a payment probe
+/// holds for another cost ([`is_held_by_payment_probe`]). A reveal uses nothing
+/// up and reads held cards too.
+fn find_consumable_hand_cost_targets(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    filter: Option<&TargetFilter>,
+) -> Vec<ObjectId> {
+    let mut targets =
+        find_eligible_hand_cost_targets(state, player, source, granting_object, filter);
+    targets.retain(|&id| !is_held_by_payment_probe(state, id));
+    targets
+}
+
 pub(crate) fn find_eligible_discard_targets(
     state: &GameState,
     player: PlayerId,
@@ -28628,7 +28610,7 @@ pub(crate) fn find_eligible_discard_targets(
     granting_object: Option<ObjectIncarnationRef>,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
-    find_eligible_hand_cost_targets(state, player, source, granting_object, filter)
+    find_consumable_hand_cost_targets(state, player, source, granting_object, filter)
 }
 
 /// CR 118.3 + CR 602.2b: Select the hand cards that can pay an activated
@@ -28653,6 +28635,7 @@ pub(crate) fn find_eligible_discard_targets_for_ability(
                 .filter(|&id| {
                     id != source
                         && !is_spell_being_cast(state, id)
+                        && !is_held_by_payment_probe(state, id)
                         && filter.is_none_or(|filter| {
                             super::filter::matches_target_filter(state, id, filter, &ctx)
                         })
@@ -28692,7 +28675,7 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
     let filter_ref = effective_filter.as_ref();
     match zone {
         ExileCostSourceZone::Hand => {
-            find_eligible_hand_cost_targets(state, player, source, granting_object, filter_ref)
+            find_consumable_hand_cost_targets(state, player, source, granting_object, filter_ref)
         }
         ExileCostSourceZone::Graveyard => {
             // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
@@ -41086,18 +41069,65 @@ mod alternative_keyword_cost_journal_tests {
 
 #[cfg(test)]
 mod card_hold_scratch_tests {
-    use super::{CardHoldScratch, ReservedUse};
-    use crate::game::perf_counters::take_cost_snapshot;
+    use super::{is_held_by_payment_probe, CardHoldScratch, ReservedUse};
+    use crate::game::cost_payability::eligible_exile_cost_objects;
+    use crate::game::quantity::resolve_quantity;
     use crate::game::scenario::{GameScenario, P0};
+    use crate::types::ability::{Effect, ManaProduction};
     use crate::types::identifiers::ObjectId;
+    use crate::types::mana::ManaColor;
     use crate::types::zones::Zone;
 
-    /// CR 118.3 + CR 601.2g-h: a search holds every assignment on one scratch.
-    /// Each hold takes its cards out of hand and graveyard, keeps the hand card
-    /// readable, and is released in full, and the state is copied once however
-    /// many assignments are held.
+    /// CR 601.2g + CR 605.3a: mana abilities are activated before costs are
+    /// paid, so Crypt of Agadeem counts a creature card held for another cost.
     #[test]
-    fn holds_are_released_and_the_state_is_copied_once() {
+    fn a_held_card_is_still_counted() {
+        let mut sc = GameScenario::new();
+        let crypt = sc
+            .add_land_from_oracle(
+                P0,
+                "Crypt of Agadeem",
+                "This land enters tapped.\n{T}: Add {B}.\n{2}, {T}: Add {B} for each black creature card in your graveyard.",
+            )
+            .id();
+        let creatures: Vec<ObjectId> = (0..5)
+            .map(|i| {
+                sc.add_creature_to_graveyard(P0, &format!("Black Creature {i}"), 1, 1)
+                    .with_color(vec![ManaColor::Black])
+                    .id()
+            })
+            .collect();
+        let runner = sc.build();
+        let state = runner.state();
+        let count = state.objects[&crypt]
+            .abilities
+            .iter()
+            .find_map(|ability| match &*ability.effect {
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor { count, .. },
+                    ..
+                } => Some(count.clone()),
+                _ => None,
+            })
+            .expect("Crypt's counted mana ability");
+
+        let mut scratch = CardHoldScratch::new(state.clone());
+        let held = [(creatures[0], ReservedUse::Present)];
+        let (counted, exilable) = scratch.probe_holding(&held, |probe| {
+            (
+                resolve_quantity(probe, &count, P0, crypt),
+                eligible_exile_cost_objects(probe, P0, crypt, None, Zone::Graveyard, None, 1),
+            )
+        });
+        assert_eq!(counted, 5, "the held card is still a card in the graveyard");
+        assert_eq!(exilable.len(), 4, "and no other cost can exile it");
+        assert!(!exilable.contains(&creatures[0]));
+    }
+
+    /// CR 118.3 + CR 601.2g-h: a held card stays in its zone, is reported held
+    /// for the probe only, and every hold is released.
+    #[test]
+    fn a_hold_marks_its_cards_and_is_released() {
         let mut sc = GameScenario::new();
         let hand: Vec<ObjectId> = (0..3)
             .map(|i| sc.add_card_to_hand(P0, &format!("Hand Card {i}")))
@@ -41110,36 +41140,40 @@ mod card_hold_scratch_tests {
             .collect();
         let runner = sc.build();
         let state = runner.state();
-        let zones = |probe: &crate::types::game_state::GameState| {
-            (
-                probe.players[0].hand.clone(),
-                probe.graveyard_of(P0).clone(),
-                probe.exile.clone(),
-            )
-        };
 
-        let before = take_cost_snapshot();
         let mut scratch = CardHoldScratch::new(state.clone());
+        let unheld = scratch.probe_holding(&[], Clone::clone);
         for (&in_hand, &in_graveyard) in hand.iter().zip(&graveyard) {
             let held = [
                 (in_hand, ReservedUse::Present),
                 (in_graveyard, ReservedUse::Present),
             ];
             scratch.probe_holding(&held, |probe| {
-                assert!(!probe.players[0].hand.contains(&in_hand));
-                assert!(!probe.graveyard_of(P0).contains(&in_graveyard));
-                assert_eq!(probe.objects[&in_hand].zone, Zone::Exile);
-                assert_eq!(probe.objects[&in_graveyard].zone, Zone::Exile);
-                assert!(probe.exile.contains(&in_hand) && probe.exile.contains(&in_graveyard));
-                assert_eq!(probe.players[0].probe_held_hand_cards, vec![in_hand]);
+                // CR 601.2g: the held cards are where they were, so a count of
+                // the zone still reads them (Crypt of Agadeem).
+                assert!(probe.players[0].hand.contains(&in_hand));
+                assert!(probe.graveyard_of(P0).contains(&in_graveyard));
+                assert_eq!(probe.objects[&in_graveyard].zone, Zone::Graveyard);
+                // CR 118.3: no other cost can take them.
+                let exilable =
+                    eligible_exile_cost_objects(probe, P0, in_hand, None, Zone::Graveyard, None, 1);
+                for &id in &graveyard {
+                    assert_eq!(exilable.contains(&id), id != in_graveyard);
+                }
+                for &id in hand.iter().chain(&graveyard) {
+                    assert_eq!(
+                        is_held_by_payment_probe(probe, id),
+                        id == in_hand || id == in_graveyard
+                    );
+                }
             });
             scratch.probe_holding(&[], |probe| {
-                assert_eq!(zones(probe), zones(state));
-                assert_eq!(probe.objects[&in_hand].zone, Zone::Hand);
-                assert_eq!(probe.objects[&in_graveyard].zone, Zone::Graveyard);
-                assert!(probe.players[0].probe_held_hand_cards.is_empty());
+                assert_eq!(probe, &unheld);
+                assert!(hand
+                    .iter()
+                    .chain(&graveyard)
+                    .all(|&id| !is_held_by_payment_probe(probe, id)));
             });
         }
-        assert_eq!(take_cost_snapshot().since(before).state_copies, 1);
     }
 }

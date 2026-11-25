@@ -3058,12 +3058,9 @@ pub(crate) fn reveal_eligible_hand_cards(
         .iter()
         .find(|p| p.id == controller)
         .map(|p| {
-            // CR 601.2g: a card a payment probe holds for another cost is
-            // still in hand while mana abilities are activated.
             p.hand
                 .iter()
                 .copied()
-                .chain(p.probe_held_hand_cards.iter().copied())
                 .filter(|&id| Some(id) != casting_spell)
                 .filter(|&id| matches_target_filter(state, id, card_filter, &ctx))
                 .collect()
