@@ -10484,10 +10484,14 @@ fn stack_resolution_session_participant_authorizes_pass(
         // A representative consented to the session. A non-representative's
         // skipped windows are not rechecked for a meaningful action (only its
         // live window is, in `stack_resolution_session_priority_decision`).
-        // CR 117.1: Full Control is the one skipped window consent doesn't cover
-        // (an activated ability, the untap reason's entry, is never skipped), so
-        // the standing-pass ladder isn't read.
-        StackResolutionPolicy::Committed => !priority::holds_full_control(state, participant),
+        // CR 117.1 + CR 732.2b: Full Control is the one skipped window consent
+        // doesn't cover — each other player may shorten the shortcut at their
+        // own window — so every living member's Full Control is checked, not
+        // just the representative's. (An activated ability, the untap reason's
+        // entry, is never skipped, so the standing-pass ladder isn't read.)
+        StackResolutionPolicy::Committed => super::topology::team_members(state, participant)
+            .into_iter()
+            .all(|member| !priority::holds_full_control(state, member)),
         // A verified AI pass authorizes later windows in this exact fenced
         // cohort; CR 117.3d + CR 732.2b: a representative's standing pass over
         // this window's top authorizes this window. CR 805.5b: passing for a
