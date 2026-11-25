@@ -29536,7 +29536,7 @@ declare_game_state! {
     #[serde(default)]
     pub(crate) next_resolution_cast_offer_id: u64,
     /// Persisted allocator for damage instructions that can resume after a pause.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub(crate) next_damage_delivery_owner_id: u64,
     /// Monotonic allocator for [`LogicalZoneChangeGroupId`]. It is pure
     /// identity, so equality intentionally compares the active owner rather
@@ -50541,8 +50541,19 @@ mod tests {
             state
         };
 
-        let trusted = make_state(Some(DamageDeliveryOwnerId(12)));
+        let mut trusted = make_state(Some(DamageDeliveryOwnerId(12)));
+        trusted.next_damage_delivery_owner_id = 23;
         let mut raw = serde_json::to_value(&trusted).unwrap();
+        assert_eq!(raw["next_damage_delivery_owner_id"], 23);
+        let mut restored: GameState = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(
+            restored.allocate_damage_delivery_owner(),
+            DamageDeliveryOwnerId(23)
+        );
+        let viewer = crate::game::visibility::filter_state_for_viewer(&trusted, PlayerId(1));
+        let viewer = serde_json::to_value(viewer).unwrap();
+        assert!(viewer.get("next_damage_delivery_owner_id").is_none());
+
         raw.as_object_mut()
             .unwrap()
             .remove("next_damage_delivery_owner_id");
