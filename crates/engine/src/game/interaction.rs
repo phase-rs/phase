@@ -12433,6 +12433,7 @@ mod tests {
             keep_is_distinct: Vec::new(),
             player: PlayerId(0),
             stack_entry_index: 0,
+            stack_entry_id: None,
             scope: crate::types::game_state::RetargetScope::Single,
             current_targets: vec![object_a.clone()],
             slots: vec![crate::types::game_state::RetargetSlotAddress {
@@ -12464,6 +12465,7 @@ mod tests {
             keep_is_distinct: Vec::new(),
             player: PlayerId(0),
             stack_entry_index: 0,
+            stack_entry_id: None,
             scope: crate::types::game_state::RetargetScope::Single,
             current_targets: vec![object_a.clone()],
             slots: vec![],

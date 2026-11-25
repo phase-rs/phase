@@ -1,47 +1,31 @@
-import {
-  countDeckEntriesByName,
-  looksCommanderSingleton,
-  removeCommandersFromMain,
-  repairParsedDeck,
-  totalCards,
-  type ParsedDeck,
-} from "./deckParser";
-import { isCardCommanderEligible } from "./engineRuntime";
+import type { GameFormat } from "../adapter/types";
+import { removeCommandersFromMain, repairParsedDeck, type ParsedDeck } from "./deckParser";
+import { inferCommander } from "./engineRuntime";
 
 /**
- * Final step in the commander identification waterfall (semantic, async).
- *
- * Steps already applied during sync parsing:
- *   1. Explicit `[Commander]` / `Commander` section header
- *   2. Inline `[Commander]` / `*CMDR*` annotation on a card line
- *   3. 99 main + 1–2 sideboard singletons in a 100-card deck
- *
- * This step:
- *   4. 100-card singleton deck with no commander identified, where the first
- *      commander-eligible card per CR 903.3 (legendary creature, legendary
- *      background, or "can be your commander") is promoted.
- *
- * The eligibility check is delegated to the engine via WASM — the frontend
- * never replicates rules logic.
+ * Final, async step of the commander waterfall: after synchronous
+ * normalization (explicit sections, inline annotations, the 99 + 1–2
+ * sideboard shape), ask the engine to infer a commander for an unmarked list.
+ * Send counted main-deck rows and the selected format, when known, to the
+ * engine's size, copy-limit and eligibility rules.
  */
-export async function resolveCommander(deck: ParsedDeck): Promise<ParsedDeck> {
+export async function resolveCommander(
+  deck: ParsedDeck,
+  ...format: [selectedFormat?: GameFormat]
+): Promise<ParsedDeck> {
   const normalized = repairParsedDeck(deck);
   if (normalized.commander?.length) return normalized;
   if (normalized.sideboard.length > 0) return normalized;
   if (normalized.main.length === 0) return normalized;
-  if (totalCards(normalized.main) !== 100) return normalized;
-  if (!looksCommanderSingleton(normalized.main)) return normalized;
-
-  const counts = countDeckEntriesByName(normalized.main);
-  for (const entry of normalized.main) {
-    if (counts.get(entry.name) !== 1) continue;
-    if (!(await isCardCommanderEligible(entry.name))) continue;
-
-    return removeCommandersFromMain({
-      ...normalized,
-      commander: [entry.name],
-    });
+  const main = normalized.main.map(({ name, count }) => ({ name, count }));
+  let name: string | null;
+  try {
+    name = await inferCommander(main, ...format);
+  } catch {
+    // Inference is best-effort: if the engine cannot answer, keep the deck unmarked.
+    return normalized;
   }
-
-  return normalized;
+  return name === null
+    ? normalized
+    : removeCommandersFromMain({ ...normalized, commander: [name] });
 }

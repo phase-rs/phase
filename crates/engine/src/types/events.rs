@@ -838,6 +838,7 @@ impl EventObjectSnapshot {
             | FilterProp::HasColor { .. }
             | FilterProp::NotColor { .. }
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::NotSupertype { .. }
             | FilterProp::Historic
@@ -1115,6 +1116,12 @@ pub enum GameEvent {
         /// synthetic events that do not carry cast-time characteristics.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_mana_value: Option<u32>,
+        /// CR 601.2h: Total mana actually paid for this cast. Zero is a known payment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_mana_spent: Option<u32>,
+        /// CR 400.7: The incarnation that became cast.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_incarnation: Option<u64>,
     },
     /// CR 702.140c + CR 730.2: A mutating creature spell merged with a target
     /// creature, forming a mutated permanent. Emitted by
@@ -1223,6 +1230,11 @@ pub enum GameEvent {
         /// `Unknown` for an event predating the field; omitted on the wire then.
         #[serde(default, skip_serializing_if = "BoundActivationCost::is_unknown")]
         activation_cost: BoundActivationCost,
+        /// CR 606.4 + CR 602.2b + CR 603.4: loyalty counters actually removed
+        /// to pay this activation, after replacement effects. `None` is unknown
+        /// or inapplicable; a tracked zero is `Some(0)`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loyalty_counters_removed: Option<u32>,
     },
     /// CR 603.6a: Enters-the-battlefield and zone-change triggers fire on this
     /// event. `from` is `None` when an object is created directly in a zone
@@ -2376,6 +2388,21 @@ pub enum GameEvent {
 }
 
 impl GameEvent {
+    /// CR 601.2h + CR 601.2i: Capture the completed cast from its stack object.
+    pub(crate) fn spell_cast(
+        spell: &crate::game::game_object::GameObject,
+        controller: PlayerId,
+    ) -> Self {
+        Self::SpellCast {
+            card_id: spell.card_id,
+            controller,
+            object_id: spell.id,
+            cast_mana_value: Some(spell.spell_mana_value()),
+            cast_mana_spent: Some(spell.mana_spent_to_cast_amount),
+            cast_incarnation: Some(spell.incarnation),
+        }
+    }
+
     /// CR 400.7 + CR 608.2h: a `PermanentTapped` event for `object_id`, stamped
     /// with the incarnation of the permanent that is tapped now, so a later
     /// "that permanent's controller" names this object even if it has left and
@@ -2498,6 +2525,37 @@ mod tests {
     }
 
     #[test]
+    fn spell_cast_facts_preserve_zero_and_accept_legacy_events() {
+        let event = GameEvent::SpellCast {
+            card_id: CardId(1),
+            controller: PlayerId(0),
+            object_id: ObjectId(2),
+            cast_mana_value: Some(4),
+            cast_mana_spent: Some(0),
+            cast_incarnation: Some(7),
+        };
+        let mut json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["data"]["cast_mana_spent"], 0);
+        assert_eq!(
+            serde_json::from_value::<GameEvent>(json.clone()).unwrap(),
+            event
+        );
+        let data = json["data"].as_object_mut().unwrap();
+        data.remove("cast_mana_spent");
+        data.remove("cast_incarnation");
+        let legacy: GameEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            legacy,
+            GameEvent::SpellCast {
+                cast_mana_spent: None,
+                cast_incarnation: None,
+                cast_mana_value: Some(4),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn ability_activated_kind_round_trips() {
         // CR 606.2 + CR 605.1a: the discriminator survives serialization.
         for kind in [
@@ -2513,6 +2571,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             };
             let json = serde_json::to_value(&event).unwrap();
             let back: GameEvent = serde_json::from_value(json).unwrap();
@@ -2521,6 +2580,39 @@ mod tests {
                 other => panic!("expected AbilityActivated, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn ability_activated_loyalty_tally_preserves_zero_and_defaults_for_legacy_events() {
+        let event = |loyalty_counters_removed| GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: ObjectId(9),
+            kind: ActivatedAbilityKind::Loyalty,
+            departed_source_lki: None,
+            trigger_state: ActivationTriggerState::Pending,
+            stack_entry: Some(ObjectId(42)),
+            activation_cost: BoundActivationCost::Unknown,
+            loyalty_counters_removed,
+        };
+        for count in [Some(0), Some(3)] {
+            let original = event(count);
+            let wire = serde_json::to_value(&original).unwrap();
+            assert_eq!(wire["data"]["loyalty_counters_removed"], count.unwrap());
+            assert_eq!(serde_json::from_value::<GameEvent>(wire).unwrap(), original);
+        }
+
+        let mut legacy = serde_json::to_value(event(Some(3))).unwrap();
+        legacy["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("loyalty_counters_removed");
+        assert!(matches!(
+            serde_json::from_value::<GameEvent>(legacy).unwrap(),
+            GameEvent::AbilityActivated {
+                loyalty_counters_removed: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2535,6 +2627,7 @@ mod tests {
             trigger_state: ActivationTriggerState::Pending,
             stack_entry,
             activation_cost: BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         let named = event(Some(ObjectId(42)));
         let json = serde_json::to_value(&named).unwrap();
@@ -2562,6 +2655,7 @@ mod tests {
             trigger_state: ActivationTriggerState::Pending,
             stack_entry: None,
             activation_cost,
+            loyalty_counters_removed: None,
         };
         let x_cost = AbilityCost::Composite {
             costs: vec![

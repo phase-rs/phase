@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Preserve Starfall Invocation destroy-population result publishers through game-state transfer and resume"
+}

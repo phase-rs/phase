@@ -47,7 +47,8 @@ use super::oracle_nom::condition::{parse_source_counters_exist, parse_source_has
 use super::oracle_nom::duration::parse_self_reference_subject;
 use super::oracle_nom::error::{oracle_err, OracleResult};
 use super::oracle_nom::filter::{
-    parse_color_property, parse_enters_origin_zone, parse_property_filter, parse_with_property,
+    parse_card_type_count_property, parse_color_property, parse_enters_origin_zone,
+    parse_property_filter, parse_with_property,
 };
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
@@ -1236,35 +1237,11 @@ fn parse_difference_draw_body(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// The optional `they ` subject is the second accepted spelling; see the
-/// widening note at the call site for why the subject-led form is bounded here.
-fn parse_difference_lose_life_body(input: &str) -> OracleResult<'_, ()> {
-    all_consuming(value(
-        (),
-        (
-            opt((tag::<_, _, OracleError<'_>>("they"), space1)),
-            tag("lose life"),
-            space1,
-            parse_equal_to_the_difference,
-        ),
-    ))
-    .parse(input)
-}
-
 /// Normalize an `Unimplemented` description for the combinators above: trim, drop a
 /// trailing period, lowercase. The compares these replace were
 /// `eq_ignore_ascii_case`, so folding case here preserves that and widens nothing.
 fn difference_body_text(desc: Option<&str>) -> Option<String> {
     desc.map(|d| d.trim().trim_end_matches('.').to_ascii_lowercase())
-}
-
-/// Is this gap description the "lose life equal to the difference" body the
-/// trigger-side rewrite would bind to `ParentTarget`? Shared with the effect
-/// layer, which fails a STATED-subject clause closed before it can reach the
-/// rewrite (see `oracle_effect`'s chunk loop).
-pub(crate) fn is_difference_lose_life_gap(desc: &str) -> bool {
-    difference_body_text(Some(desc))
-        .is_some_and(|body| parse_difference_lose_life_body(&body).is_ok())
 }
 
 fn parse_attack_verb(input: &str) -> OracleResult<'_, ()> {
@@ -3352,25 +3329,6 @@ pub(crate) fn lower_trigger_ir_with_provenance(
                     target: TargetFilter::Controller,
                 };
             }
-            // Same discriminator as the draw arm above: the exact description. Dropping
-            // the name guard WIDENS this arm by one text — a fallback node carrying
-            // "they lose life equal to the difference" used to be named `they` and was
-            // refused by the name compare alone. That subject-led text is already owned
-            // earlier by the name-blind effect-layer producer, so no corpus node reaches
-            // here; the exact-text compare is what bounds the widening.
-            // Read the description again rather than reusing the draw arm's: the arm
-            // above may have replaced `execute.effect`, and after that this read is
-            // `None`, which is what makes the two arms mutually exclusive. Hoisting a
-            // single read would quietly remove that.
-            let is_difference_lose =
-                difference_body_text(execute.effect.unimplemented_description())
-                    .is_some_and(|body| parse_difference_lose_life_body(&body).is_ok());
-            if is_difference_lose {
-                *execute.effect = Effect::LoseLife {
-                    amount: count.clone(),
-                    target: Some(TargetFilter::ParentTarget),
-                };
-            }
         }
     }
 
@@ -3387,6 +3345,10 @@ pub(crate) fn lower_trigger_ir_with_provenance(
         crate::parser::oracle_effect::resolve_difference_anaphor_in_ability(
             execute,
             difference_count.as_ref(),
+        );
+        let _ = crate::types::ability_visit::effects_mut::visit_ability_def(
+            execute,
+            &mut crate::parser::oracle_effect::reject_unbound_life_loss_in_effect,
         );
     }
 
@@ -8763,12 +8725,35 @@ fn extract_if_condition_with_card_name(
     head_enters_battlefield: bool,
     attack_scope: Option<&AttackHeadScope>,
 ) -> IfExtraction {
+    use super::oracle_nom::condition::parse_ge_threshold;
+
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     // Only a proven self-trigger may use the source-bound "it's on the
     // battlefield" shorthand. On a non-self zone-change trigger, "it" is
     // the event object, so the simple source-condition table must not steal it.
     let source_is_self = matches!(dying_subject, Some(TargetFilter::SelfRef));
+
+    // CR 606.4 + CR 603.4: bind the payment-specific threshold to the
+    // activation event. Reuse the shared grammar for both threshold forms;
+    // the clause itself is consumed completely before it is hoisted.
+    let leading_if_start = lower.len() - lower.trim_start().len();
+    let loyalty_threshold = map(
+        delimited(
+            tag("if you removed "),
+            verify(parse_ge_threshold, |minimum| *minimum > 0),
+            (tag("loyalty counters to activate it"), peek(tag(", "))),
+        ),
+        |minimum| TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum },
+    )
+    .parse(&lower[leading_if_start..]);
+    if let Ok((rest, condition)) = loyalty_threshold {
+        let consumed = lower.len() - leading_if_start - rest.len();
+        return IfExtraction::hoisted(
+            strip_condition_clause(text, leading_if_start, consumed),
+            condition,
+        );
+    }
 
     // CR 603.4: Only a true intervening-if is hoisted to the trigger-level condition.
     // A trigger-level `if` is one that IMMEDIATELY follows the trigger condition
@@ -22380,7 +22365,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // both via `match_play_card`. Matched before the land-play arm; the
     // "a card" object cannot match the land-play helper's "a land"/"another land"
     // object, so neither shadows the other.
-    if let Some(origin) = parse_play_card_trigger_subject(lower) {
+    if let Some((origin, card_filter)) = parse_play_card_trigger_subject(lower) {
         let mut def = make_base();
         def.mode = TriggerMode::PlayCard;
         def.valid_target = Some(TargetFilter::Controller);
@@ -22389,6 +22374,10 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         // constraint. `Any` (no "from <zone>" tail) preserves plain play-card
         // triggers unchanged.
         def.spell_cast_origin = origin;
+        // CR 205.2a: the optional played-card qualifier ("a card with two or
+        // more card types", Rendmaw) rides `valid_card`, honored by both
+        // halves of `match_play_card`; `None` preserves existing triggers.
+        def.valid_card = card_filter;
         return Some((TriggerMode::PlayCard, def));
     }
 
@@ -24308,6 +24297,20 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
                     value: 1,
                 }],
             )));
+        }
+    }
+
+    // CR 205.2a + CR 603.2: "with <n> or more card types" (Visitor from Planet
+    // Q — "another spell with two or more card types"). Without this the
+    // qualifier falls through to the type-phrase fallback, which parses "spell"
+    // and silently drops the count, over-firing on every spell. Delegates to
+    // the shared `parse_card_type_count_property` combinator so the cast and
+    // play-a-card subjects recognize one grammar.
+    if let Ok((rest, prop)) = parse_card_type_count_property(modifier) {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![prop]),
+            ));
         }
     }
 
@@ -26904,11 +26907,14 @@ fn is_land_play_filter(tf: &TypedFilter) -> bool {
 /// (Recycle, Null Profusion, Jinxed Ring).
 ///
 /// Decomposed into axes (prefix × verb × object) via nom combinators, mirroring
-/// `parse_land_play_trigger_subject`. Returns `Some(OriginConstraint)` when the
-/// full "you play a card" subject is present, capturing an optional `from <zone>`
-/// tail: "you play a card from exile" yields an exile-origin constraint, while
-/// bare "you play a card" yields the unrestricted (`Any`) origin. The subject
-/// must be followed only by end-of-input, the effect comma, or that zone tail.
+/// `parse_land_play_trigger_subject`. Returns `Some((OriginConstraint,
+/// Option<TargetFilter>))` when the full "you play a card" subject is present,
+/// capturing an optional `from <zone>` tail and an optional `with <n> or more
+/// card types` played-card qualifier (Rendmaw, Creaking Nest — `None` when
+/// absent): "you play a card from exile" yields an exile-origin constraint,
+/// while bare "you play a card" yields the unrestricted (`Any`) origin. The
+/// subject must be followed only by end-of-input, the effect comma, or those
+/// tails.
 ///
 /// CR 601.1a + CR 701.18b: The explicitly-spelled-out "play a land or cast a
 /// spell" is the same event pair as "play a card" — a player plays a card by
@@ -26919,7 +26925,9 @@ fn is_land_play_filter(tf: &TypedFilter) -> bool {
 /// the exact second-person forms. Qualified variants such as "a player plays a
 /// card exiled with ~" need additional linked-card filtering before they can
 /// safely share this parser arm.
-fn parse_play_card_trigger_subject(lower: &str) -> Option<OriginConstraint> {
+fn parse_play_card_trigger_subject(
+    lower: &str,
+) -> Option<(OriginConstraint, Option<TargetFilter>)> {
     let (after_prefix, _) = alt((
         tag::<_, _, OracleError<'_>>("whenever "),
         tag::<_, _, OracleError<'_>>("when "),
@@ -26938,20 +26946,30 @@ fn parse_play_card_trigger_subject(lower: &str) -> Option<OriginConstraint> {
     ))
     .parse(after_verb)
     .ok()?;
+    // CR 205.2a + CR 603.2: an optional "with <n> or more card types" tail
+    // qualifies the played card (Rendmaw, Creaking Nest). The shared
+    // `parse_card_type_count_property` combinator is the single recognition
+    // authority with the cast-subject path; an unrecognized tail fails the end
+    // gate below, declining to `Unknown` rather than parsing without it.
+    let (after_with, card_filter) = opt(parse_card_type_count_property)
+        .parse(after_card.trim_start())
+        .ok()?;
+    let card_filter = card_filter
+        .map(|prop| TargetFilter::Typed(TypedFilter::new(TypeFilter::Card).properties(vec![prop])));
     // CR 601.1a + CR 400.1: An optional "from <zone>" tail restricts the play
     // origin ("whenever you play a card from exile"). The shared cast-origin
     // combinator consumes the "from " prefix and the zone phrase; absent a
     // "from" clause it returns `Any` (plain "whenever you play a card"). This
     // mirrors the Rocco, Street Chef cast-from-zone shape.
     let (after_origin, origin) =
-        parse_origin_constraint_tail(after_card.trim_start(), parse_cast_origin_zone).ok()?;
+        parse_origin_constraint_tail(after_with.trim_start(), parse_cast_origin_zone).ok()?;
     // The subject must be the whole condition: either end-of-input, or the
     // effect comma ("..., draw a card.") follows directly. `eof` / `tag(",")`
     // reject any further qualifier text.
     alt((value((), eof), value((), tag::<_, _, OracleError<'_>>(","))))
         .parse(after_origin.trim_start())
         .ok()?;
-    Some(origin)
+    Some((origin, card_filter))
 }
 
 /// CR 725.1: Parse "whenever/when [subject] become(s) the monarch" trigger.
@@ -27576,6 +27594,243 @@ mod prepared_spell_cast_trigger_tests {
         let props = typed_props(modal_instant.valid_card.as_ref());
         assert!(props.contains(&FilterProp::Modal), "{props:?}");
         assert!(!props.contains(&FilterProp::PrepareSpell), "{props:?}");
+    }
+}
+
+/// CR 205.2a + CR 603.2: "with two or more card types" played-card / cast-spell
+/// qualifiers lower to `FilterProp::CardTypeCount` on the trigger's `valid_card`
+/// (Rendmaw, Creaking Nest; Visitor from Planet Q).
+#[cfg(test)]
+mod two_or_more_card_types_trigger_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{
+        Comparator, Effect, FilterProp, OriginConstraint, TargetFilter, TypeFilter, TypedFilter,
+    };
+    use crate::types::zones::Zone;
+    use crate::types::{TriggerDefinition, TriggerMode};
+
+    /// Verbatim Oracle text of Rendmaw, Creaking Nest.
+    const RENDMAW_ORACLE: &str = "Reach, menace\nWhen Rendmaw enters and whenever you play a card with two or more card types, each player creates a tapped 2/2 black Bird creature token with flying. The tokens are goaded for the rest of the game. (They attack each combat if able and attack a player other than you if able.)";
+
+    /// Verbatim Oracle text of Visitor from Planet Q.
+    const VISITOR_ORACLE: &str = "All creature cards you own with flash are instants in addition to their other types.\nWhenever you cast another spell with two or more card types, you may draw a card, then discard a card.";
+
+    fn chain_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
+        matches!(*def.effect, Effect::Unimplemented { .. })
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(chain_has_unimplemented)
+    }
+
+    fn play_card_trigger(
+        text: &str,
+        name: &str,
+        types: &[String],
+        subtypes: &[String],
+    ) -> TriggerDefinition {
+        parse_oracle_text(text, name, &[], types, subtypes)
+            .triggers
+            .into_iter()
+            .find(|t| matches!(t.mode, TriggerMode::PlayCard))
+            .unwrap_or_else(|| panic!("must parse a PlayCard trigger: {text}"))
+    }
+
+    #[test]
+    fn rendmaw_play_trigger_parses_play_card_with_card_type_count() {
+        let parsed = parse_oracle_text(
+            RENDMAW_ORACLE,
+            "Rendmaw, Creaking Nest",
+            &[],
+            &["Legendary".into(), "Artifact".into(), "Creature".into()],
+            &["Scarecrow".into()],
+        );
+        // The compound trigger splits; the play half is a PlayCard trigger.
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::PlayCard))
+            .expect("Rendmaw must parse a PlayCard trigger");
+        assert_eq!(
+            trigger.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                controller: None,
+                properties: vec![FilterProp::CardTypeCount {
+                    comparator: Comparator::GE,
+                    count: 2,
+                }],
+            })),
+            "CR 205.2a: 'a card with two or more card types' must narrow valid_card"
+        );
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+        assert!(
+            !parsed
+                .triggers
+                .iter()
+                .any(|t| matches!(t.mode, TriggerMode::Unknown(_))),
+            "no trigger half may stay Unknown"
+        );
+        let execute = trigger
+            .execute
+            .as_deref()
+            .expect("the play trigger must have an execute chain");
+        assert!(!chain_has_unimplemented(execute));
+        // The ETB half survives the split unchanged.
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .any(|t| matches!(t.mode, TriggerMode::ChangesZone)
+                    && t.destination == Some(Zone::Battlefield)),
+            "the ETB half must still parse"
+        );
+    }
+
+    #[test]
+    fn visitor_cast_trigger_parses_spell_cast_with_card_type_count() {
+        let parsed = parse_oracle_text(
+            VISITOR_ORACLE,
+            "Visitor from Planet Q",
+            &[],
+            &["Instant".into(), "Creature".into()],
+            &["Alien".into()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("Visitor must parse a SpellCast trigger");
+        assert_eq!(
+            trigger.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: None,
+                properties: vec![
+                    FilterProp::CardTypeCount {
+                        comparator: Comparator::GE,
+                        count: 2,
+                    },
+                    FilterProp::Another,
+                ],
+            })),
+            "CR 205.2a: 'another spell with two or more card types' must narrow valid_card"
+        );
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+        let execute = trigger
+            .execute
+            .as_deref()
+            .expect("the cast trigger must have an execute chain");
+        assert!(!chain_has_unimplemented(execute));
+        // The type-grant static stays honestly unimplemented (out of scope).
+        assert!(
+            parsed.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name == "unrecognized_clause_head"
+            )),
+            "the type-grant line must stay honest-red"
+        );
+    }
+
+    /// Verbatim Oracle text of Recycle (Urza's Saga).
+    const RECYCLE_ORACLE: &str = "Skip your draw step.\nWhenever you play a card, draw a card.\nYour maximum hand size is two.";
+
+    /// Verbatim Oracle text of Klaw, Master of Sound.
+    const KLAW_ORACLE: &str = "Deathtouch\nWhenever you play a card from exile, Klaw gains indestructible until end of turn.\nWhenever Klaw deals combat damage to a player, look at the top card of that player's library, then exile it face down. You may play it for as long as it remains exiled. Mana of any type can be spent to cast a spell this way.";
+
+    /// No-regression: a bare play-a-card trigger gains no `valid_card`.
+    #[test]
+    fn play_card_trigger_without_qualifier_has_no_valid_card() {
+        let trigger = play_card_trigger(RECYCLE_ORACLE, "Recycle", &["Enchantment".into()], &[]);
+        assert!(trigger.valid_card.is_none(), "{:?}", trigger.valid_card);
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+    }
+
+    /// No-regression (Klaw shape): the from-exile origin tail still parses and
+    /// gains no `valid_card`.
+    #[test]
+    fn play_card_trigger_from_exile_keeps_origin_and_no_valid_card() {
+        let trigger = play_card_trigger(
+            KLAW_ORACLE,
+            "Klaw, Master of Sound",
+            &["Legendary".into(), "Creature".into()],
+            &["Elemental".into(), "Rogue".into(), "Villain".into()],
+        );
+        assert!(trigger.valid_card.is_none(), "{:?}", trigger.valid_card);
+        assert!(
+            matches!(
+                trigger.spell_cast_origin,
+                OriginConstraint::Equals(Zone::Exile)
+            ),
+            "{:?}",
+            trigger.spell_cast_origin
+        );
+    }
+
+    /// An unrecognized `with` tail declines the arm (honest `Unknown`), rather
+    /// than parsing the trigger without the qualifier.
+    #[test]
+    fn play_card_trigger_with_unrecognized_qualifier_declines_to_unknown() {
+        let parsed = parse_oracle_text(
+            "Whenever you play a card with flying, draw a card.",
+            "Test Flying Player",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .any(|t| matches!(t.mode, TriggerMode::Unknown(_))),
+            "an unrecognized qualifier must decline, not parse-drop"
+        );
+        assert!(
+            !parsed
+                .triggers
+                .iter()
+                .any(|t| matches!(t.mode, TriggerMode::PlayCard)),
+            "no partial PlayCard may be emitted"
+        );
+    }
+
+    /// Verbatim Oracle text of Tome of the Guildpact.
+    const TOME_OF_THE_GUILDPACT_ORACLE: &str =
+        "Whenever you cast a multicolored spell, draw a card.\n{T}: Add one mana of any color.";
+
+    /// No-regression: "multicolored" keeps its `ColorCount` reading and gains no
+    /// `CardTypeCount` from the neighboring qualifier arm.
+    #[test]
+    fn multicolored_cast_trigger_keeps_color_count() {
+        let parsed = parse_oracle_text(
+            TOME_OF_THE_GUILDPACT_ORACLE,
+            "Tome of the Guildpact",
+            &[],
+            &["Artifact".into()],
+            &["Book".into()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("must parse a SpellCast trigger");
+        let props = match trigger.valid_card.as_ref() {
+            Some(TargetFilter::Typed(tf)) => tf.properties.clone(),
+            other => panic!("expected Typed valid_card, got {other:?}"),
+        };
+        assert!(
+            props.contains(&FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }),
+            "{props:?}"
+        );
+        assert!(
+            !props
+                .iter()
+                .any(|p| matches!(p, FilterProp::CardTypeCount { .. })),
+            "{props:?}"
+        );
     }
 }
 

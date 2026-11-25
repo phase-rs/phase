@@ -56,12 +56,15 @@ expression: "&lowered"
       "description": "Whenever an opponent discards a card, they lose 3 life.",
       "constraint": null,
       "condition": {
-        "type": "HasCounters",
-        "counters": {
-          "type": "OfType",
-          "data": "charge"
-        },
-        "minimum": 1
+        "type": "EventTime",
+        "condition": {
+          "type": "HasCounters",
+          "counters": {
+            "type": "OfType",
+            "data": "charge"
+          },
+          "minimum": 1
+        }
       },
       "batched": false
     },
@@ -147,12 +150,15 @@ expression: "&lowered"
       "description": "Whenever ~ attacks, each opponent discards a card. Each opponent who can't loses 3 life.",
       "constraint": null,
       "condition": {
-        "type": "HasCounters",
-        "counters": {
-          "type": "OfType",
-          "data": "charge"
-        },
-        "minimum": 8
+        "type": "EventTime",
+        "condition": {
+          "type": "HasCounters",
+          "counters": {
+            "type": "OfType",
+            "data": "charge"
+          },
+          "minimum": 8
+        }
       },
       "batched": false
     }

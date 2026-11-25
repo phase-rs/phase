@@ -102,12 +102,17 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
   };
 });
 
-import { DRAFT_OFFLINE_ERROR, useMultiplayerDraftStore } from "../multiplayerDraftStore";
+import {
+  DRAFT_OFFLINE_ERROR,
+  DRAFT_RECOVERY_CONNECTION_ERROR,
+  DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+  useMultiplayerDraftStore,
+} from "../multiplayerDraftStore";
 import { isHostedPodRecoveryFailureCurrent, useDraftPodStore } from "../draftPodStore";
 import { useConnectivityStore } from "../connectivityStore";
 import { DraftPodHostAdapter } from "../../adapter/draftPodHostAdapter";
 import { P2PDraftHost } from "../../adapter/p2p-draft-host";
-import { Draft27IncompatibilityError, admitDraft27GuestView } from "../../adapter/draft-compatibility";
+import { Draft27IncompatibilityError, classifyDraft27Compatibility } from "../../adapter/draft-compatibility";
 import { inspectActiveDraftPod } from "../../services/draftPersistence";
 import type { PersistedDraftHostSession } from "../../services/draftPersistence";
 
@@ -183,7 +188,7 @@ function holdAfterImport(): { release: () => void; reached: Promise<void> } {
 
 /** The typed refusal a restore raises for a draft this client does not admit. */
 function incompatibleRestore(): Draft27IncompatibilityError {
-  const refusal = admitDraft27GuestView({ status: "Review" });
+  const refusal = classifyDraft27Compatibility({ status: "Review" });
   if (refusal.ok) throw new Error("A Review draft must be refused");
   return new Draft27IncompatibilityError(refusal.error);
 }
@@ -305,6 +310,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
   describe("a recovery whose draft engine check refuses or cannot answer", () => {
     afterEach(() => {
       vi.restoreAllMocks();
+      checkRestorableSession.mockReset();
     });
 
     const recovered: PersistedDraftHostSession = {
@@ -349,7 +355,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           podPolicy: recovered.podPolicy,
           persistenceId: recovered.persistenceId,
           preferredRoomCode: recovered.roomCode,
-          recovery: { session: recovered, raw: recovered },
+          recovery: { session: recovered },
         },
         isCurrent: () => true,
       });
@@ -367,6 +373,44 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(installedPeer.destroy).not.toHaveBeenCalled();
       expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "installed-owner" });
       expect(checkRestorableSession).toHaveBeenCalledWith(recovered.draftSessionJson);
+    });
+
+    it("reports an unreadable saved session as unreadable before it builds a host or touches the installed one", async () => {
+      // The draft engine answers one session text alike at every check.
+      checkRestorableSession.mockResolvedValue({ type: "Unreadable" });
+
+      const { outcome, initialize, installedPeer } = await recoverBesideInstalledHost();
+
+      expect(outcome).toBe("unreadable");
+      expect(initialize).not.toHaveBeenCalled();
+      // The installed host's own peer is the only one allocated.
+      expect(hostRoom).toHaveBeenCalledOnce();
+      expect(installedPeer.destroy).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "installed-owner" });
+      expect(checkRestorableSession).toHaveBeenCalledOnce();
+      expect(checkRestorableSession).toHaveBeenCalledWith(recovered.draftSessionJson);
+    });
+
+    it("reports an unreadable answer at the host wrapper's own check as unreadable before it allocates a peer", async () => {
+      // The draft engine's check reads no state, so two answers for one session
+      // text cannot occur in production. This row admits the session at the
+      // lifecycle's check to drive the host wrapper's own check, which is its
+      // own boundary.
+      checkRestorableSession
+        .mockResolvedValueOnce({ type: "Admitted" })
+        .mockResolvedValueOnce({ type: "Unreadable" });
+
+      const { outcome, initialize, installedPeer } = await recoverBesideInstalledHost();
+
+      expect(outcome).toBe("unreadable");
+      // Reach: the host wrapper ran its own check.
+      expect(initialize).toHaveBeenCalledOnce();
+      expect(checkRestorableSession).toHaveBeenCalledTimes(2);
+      expect(checkRestorableSession).toHaveBeenNthCalledWith(2, recovered.draftSessionJson);
+      // The installed host's own peer is the only one allocated.
+      expect(hostRoom).toHaveBeenCalledOnce();
+      expect(installedPeer.destroy).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "installed-owner" });
     });
 
     it("reports an unanswered check as an initialization failure before it builds a host or touches the installed one", async () => {
@@ -409,7 +453,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           persistenceId: recoveredHost.persistenceId,
           preferredRoomCode: recoveredHost.roomCode,
           signal: options.signal,
-          recovery: { session: recoveredHost, raw: recoveredHost },
+          recovery: { session: recoveredHost },
         },
         isCurrent: options.isCurrent ?? (() => true),
         routeSignal: new AbortController().signal,
@@ -560,7 +604,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       checkRestorableSession.mockResolvedValue({ type: "Admitted" });
       loadDraftHostSession.mockImplementation(async (...args: unknown[]) => (
         args[0] === recoveredHost.persistenceId
-          ? { type: "admitted", session: recoveredHost, raw: recoveredHost }
+          ? { type: "admitted", session: recoveredHost }
           : { type: "absent" }
       ));
       hostRoom.mockImplementation(async (_signal: AbortSignal | undefined, options: { preferredRoomCode?: string } = {}) => {
@@ -607,13 +651,17 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       localStorage.clear();
     });
 
-    /** What the pod page reads after a recovery on one route. */
+    /** What a recovery failure records: its kind and the attempt that showed it. */
+    const failureKeys = ["capture", "kind", "orchestrationGeneration", "routeToken"];
+
+    /** What the pod page reads after a recovery on one route, and what the failure records. */
     function afterRecovery(routeToken: number) {
       const pod = useDraftPodStore.getState();
       const record = inspectActiveDraftPod();
       return {
         failureKind: pod.hostRecoveryFailure?.kind ?? null,
         failureCurrent: isHostedPodRecoveryFailureCurrent(pod.hostRecoveryFailure, routeToken),
+        failureKeys: pod.hostRecoveryFailure ? Object.keys(pod.hostRecoveryFailure).sort() : null,
         configError: pod.configError,
         recordNames: record.type === "present" ? record.capture.id : record.type,
       };
@@ -626,7 +674,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           engine.importFailure = new Error("Invalid draft snapshot: restore refused");
         },
         "initializationFailure",
-        "podError.connection",
+        DRAFT_RECOVERY_CONNECTION_ERROR,
       ],
       [
         "the import rejects as incompatible",
@@ -634,7 +682,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           engine.importFailure = incompatibleRestore();
         },
         "incompatible",
-        "podError.incompatible",
+        DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
       ],
       [
         "the host start fails after the restore",
@@ -642,7 +690,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           startFailure = new Error("Host start failed");
         },
         "initializationFailure",
-        "podError.connection",
+        DRAFT_RECOVERY_CONNECTION_ERROR,
       ],
     ] as const)("reports a failure after the handover, with its retry, when %s", async (_label, arrange, kind, configError) => {
       arrange();
@@ -653,7 +701,13 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(engine.imports).toEqual([recoveredSession]);
       expect(outcome).toBe(kind);
       expect(lifecycleOutcomes).toEqual([kind]);
-      expect(afterRecovery(1)).toEqual({ failureKind: kind, failureCurrent: true, configError, recordNames: "recovered-b" });
+      expect(afterRecovery(1)).toEqual({
+        failureKind: kind,
+        failureCurrent: true,
+        failureKeys,
+        configError,
+        recordNames: "recovered-b",
+      });
       expect(useMultiplayerDraftStore.getState().hostPersistenceId).not.toBe("recovered-b");
       expect(clearDraftHostSession).not.toHaveBeenCalled();
     });
@@ -671,6 +725,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(afterRecovery(2)).toEqual({
         failureKind: null,
         failureCurrent: false,
+        failureKeys: null,
         configError: DRAFT_OFFLINE_ERROR,
         recordNames: "recovered-b",
       });
@@ -704,7 +759,8 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(afterRecovery(3)).toEqual({
         failureKind: "initializationFailure",
         failureCurrent: true,
-        configError: "podError.connection",
+        failureKeys,
+        configError: DRAFT_RECOVERY_CONNECTION_ERROR,
         recordNames: "recovered-b",
       });
       expect(useMultiplayerDraftStore.getState().hostPersistenceId).not.toBe("recovered-b");

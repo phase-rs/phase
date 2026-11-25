@@ -5225,6 +5225,7 @@ fn continue_mana_ability_cost_payment_in_node(
         let PausedCounterCostRemoval {
             in_flight,
             remaining,
+            aggregate_credit: _,
             replacement_subtree: _,
         } = *paused;
         let settled =
@@ -5235,6 +5236,7 @@ fn continue_mana_ability_cost_payment_in_node(
                 state,
                 remaining,
                 Some(&mut cursor.cost_removed_counters),
+                None,
                 events,
             )
         {
@@ -5759,6 +5761,7 @@ where
                     state,
                     removals,
                     Some(cost_removed_counters),
+                    None,
                     events,
                 )
             {
@@ -7345,6 +7348,7 @@ mod tests {
     fn post_delivery_mana_cost_pause_preserves_its_live_prompt() {
         let mut state = GameState::new_two_player(42);
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
@@ -13096,6 +13100,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         assert!(!is_triggered_mana_ability(&ability, Some(&ev)));
     }

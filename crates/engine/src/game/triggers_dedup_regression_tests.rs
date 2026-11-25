@@ -245,6 +245,8 @@ fn spell_cast_observer_fires_once_per_event() {
         controller: PlayerId(0),
         object_id: spell,
         cast_mana_value: None,
+        cast_mana_spent: None,
+        cast_incarnation: None,
     };
 
     process_triggers(&mut state, &[event]);
@@ -1434,6 +1436,8 @@ fn veyran_doubles_trigger_caused_by_controller_casting_instant() {
         controller: PlayerId(0),
         object_id: spell,
         cast_mana_value: None,
+        cast_mana_spent: None,
+        cast_incarnation: None,
     };
 
     process_triggers(&mut state, &[event]);
@@ -1532,6 +1536,8 @@ fn veyran_does_not_double_opponent_cast_trigger() {
         controller: PlayerId(1),
         object_id: spell,
         cast_mana_value: None,
+        cast_mana_spent: None,
+        cast_incarnation: None,
     };
 
     process_triggers(&mut state, &[event]);

@@ -22,7 +22,9 @@ use engine::database::legality::LegalityFormat;
 use engine::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload};
 use engine::game::match_flow::handle_submit_sideboard;
 use engine::game::{
-    evaluate_deck_compatibility, validate_name_deck_for_format_full, DeckCompatibilityRequest,
+    evaluate_deck_compatibility, is_card_commander_eligible_for_format, is_commander_eligible,
+    is_freeform_commander_eligible, is_tiny_leader_eligible, validate_name_deck_for_format_full,
+    DeckCompatibilityRequest,
 };
 use engine::types::card::CardFace;
 use engine::types::format::{
@@ -405,17 +407,9 @@ fn count_needle(text: &str, needle: &str) -> usize {
         .count()
 }
 
-/// Establishes separately that the verdict is reached through
-/// the surface the client actually calls — the OTHER client-called surface,
-/// `engine-wasm::is_card_commander_eligible_for_format`. This export takes
-/// `JsValue` and is reachable only from a wasm target, so unlike
-/// `validate_deck_list_seats` (driven natively — see
-/// `crates/engine-wasm/src/lib.rs`'s `deck_list_seat_validation_tests`) this
-/// stays a SOURCE CENSUS: a positive control on the pre-existing
-/// `TinyLeaders` arm proves the extraction reads the real function body
-/// rather than an empty or truncated span. What would establish this more
-/// strongly: a client integration test calling
-/// `isCardCommanderEligibleForFormat` against a freshly built `.wasm`.
+/// The source census pins the client-called WASM export to the engine
+/// delegate. The native assertions exercise that delegate's Freeform
+/// Commander eligibility with a Tiny Leaders positive control.
 #[test]
 fn freeform_commander_eligibility_is_answered_by_the_surface_the_client_calls() {
     const ENGINE_WASM_LIB_RS: &str = include_str!("../../../engine-wasm/src/lib.rs");
@@ -423,28 +417,47 @@ fn freeform_commander_eligibility_is_answered_by_the_surface_the_client_calls() 
         ENGINE_WASM_LIB_RS,
         "pub fn is_card_commander_eligible_for_format(",
     );
-    // `count_needle` (not `str::contains`) so a needle written inside a
-    // comment in this span cannot satisfy the assertion — `fn_span` strips
-    // comments only to find the span's BOUNDARIES; the slice it returns is
-    // raw source. `== 1` rather than `>= 1`: each needle names a single
-    // match arm, so a duplicate arm is itself a defect this assertion
-    // should catch, not tolerate.
     assert_eq!(
         count_needle(
             span,
-            "GameFormat::FreeformCommander => is_freeform_commander_eligible(face)"
+            "engine_is_card_commander_eligible_for_format(face, format)"
         ),
         1,
         "{span}"
     );
     assert_eq!(
-        count_needle(
-            span,
-            "GameFormat::TinyLeaders => is_tiny_leader_eligible(face)"
-        ),
-        1,
+        count_needle(span, "GameFormat::FreeformCommander"),
+        0,
         "{span}"
     );
+
+    let Some(db) = db() else {
+        eprintln!("skipping: card database not available");
+        return;
+    };
+
+    let sol_ring = db.get_face_by_name("Sol Ring").expect("Sol Ring");
+    assert!(!is_commander_eligible(sol_ring));
+    assert!(is_freeform_commander_eligible(sol_ring));
+    assert!(is_card_commander_eligible_for_format(
+        sol_ring,
+        GameFormat::FreeformCommander
+    ));
+
+    let forest = db.get_face_by_name("Forest").expect("Forest");
+    assert!(!is_card_commander_eligible_for_format(
+        forest,
+        GameFormat::FreeformCommander
+    ));
+
+    let tymna = db
+        .get_face_by_name("Tymna the Weaver")
+        .expect("Tymna the Weaver");
+    assert!(is_tiny_leader_eligible(tymna));
+    assert!(is_card_commander_eligible_for_format(
+        tymna,
+        GameFormat::TinyLeaders
+    ));
 }
 
 /// The count boundary: exactly one or two commanders are admitted, three are

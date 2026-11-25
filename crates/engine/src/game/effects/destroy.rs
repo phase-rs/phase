@@ -430,7 +430,7 @@ pub fn resolve_all(
     // simultaneous destruction. A pause must not lose the unprocessed suffix.
     // CR 101.4 + CR 616.1: its replacement decisions are asked in APNAP order
     // by the staged batch's scheduler (`zone_pipeline::drive_staged_approval`).
-    if matching.len() >= 2 {
+    if !matching.is_empty() && (matching.len() >= 2 || ability.declares_return_result.is_some()) {
         let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
             state,
             &ZoneChangeAnnouncement::all(&matching, Zone::Graveyard),
@@ -455,6 +455,12 @@ pub fn resolve_all(
             events,
         );
         return Ok(());
+    }
+    // CR 400.7j + CR 608.2c: a result reader sees this instruction's exact
+    // arrivals. A singleton uses the same settlement as a larger population;
+    // with no eligible subjects, the instruction explicitly publishes empty.
+    if let Some(result_id) = ability.declares_return_result {
+        super::publish_empty_return_result_for_active(state, result_id)?;
     }
 
     let instruction_start = destroy_group_start(state, ability, events.len());

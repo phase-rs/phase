@@ -1379,6 +1379,7 @@ fn scoped_player_member_filter_follows_the_resolution_scope() {
         entering: None,
         source: oak,
         trigger_source: None,
+        stack_trigger_context: None,
         recipient: None,
         scoped_player,
         damage_source: None,

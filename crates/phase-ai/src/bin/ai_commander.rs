@@ -1914,6 +1914,8 @@ mod tests {
                     controller: PlayerId(0),
                     object_id: cast_obj,
                     cast_mana_value: None,
+                    cast_mana_spent: None,
+                    cast_incarnation: None,
                 }],
                 log_entries: Vec::new(),
             },
@@ -2003,6 +2005,8 @@ mod tests {
                     controller: PlayerId(3),
                     object_id,
                     cast_mana_value: None,
+                    cast_mana_spent: None,
+                    cast_incarnation: None,
                 },
                 GameEvent::CardDrawn {
                     player_id: PlayerId(2),
@@ -2015,6 +2019,8 @@ mod tests {
                     controller: PlayerId(0),
                     object_id,
                     cast_mana_value: None,
+                    cast_mana_spent: None,
+                    cast_incarnation: None,
                 },
                 GameEvent::CardDrawn {
                     player_id: PlayerId(1),

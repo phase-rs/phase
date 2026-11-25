@@ -3972,6 +3972,145 @@ fn parse_printed_card(
     parse_oracle_text(text, name, &[], &owned(types), &owned(subtypes)).triggers
 }
 
+fn assert_trigger_relative_pt_source(
+    name: &str,
+    oracle: &str,
+    stat: PtStat,
+    comparator: Comparator,
+    expects_other_than: bool,
+) {
+    let triggers = parse_printed_card(oracle, name, &["Creature"], &[]);
+    let trigger = triggers
+        .iter()
+        .find(|trigger| {
+            matches!(
+                trigger.mode,
+                TriggerMode::ChangesZone | TriggerMode::Attacks
+            ) && trigger_effects(trigger)
+                .into_iter()
+                .any(|effect| match effect {
+                    Effect::ChangeZone { target, .. }
+                    | Effect::GainControl { target, .. }
+                    | Effect::GiveControl { target, .. }
+                    | Effect::SetTapState { target, .. } => {
+                        filter_contains_filter_prop(&target, &|prop| {
+                            matches!(prop, FilterProp::PtComparison { .. })
+                        })
+                    }
+                    _ => false,
+                })
+        })
+        .unwrap_or_else(|| panic!("{name}: expected relative-P/T trigger"));
+    assert_no_unimplemented(trigger.execute.as_deref().expect("trigger effect"));
+    let expected_quantity = match stat {
+        PtStat::Power => Some(QuantityRef::Power {
+            scope: ObjectScope::CostPaidObject,
+        }),
+        PtStat::Toughness => Some(QuantityRef::Toughness {
+            scope: ObjectScope::CostPaidObject,
+        }),
+        // The helper is intentionally exhaustive: cards comparing against a
+        // combined power/toughness value are not witnesses for a single-stat
+        // trigger-relative binding.
+        PtStat::TotalPowerToughness => None,
+    };
+    let expected = |prop: &FilterProp| {
+        let FilterProp::PtComparison {
+            stat: actual_stat,
+            scope,
+            comparator: actual_comparator,
+            value,
+        } = prop
+        else {
+            return false;
+        };
+        *actual_stat == stat
+            && *scope == PtValueScope::Current
+            && *actual_comparator == comparator
+            && expected_quantity.as_ref().is_some_and(|quantity| {
+                value
+                    == &QuantityExpr::Ref {
+                        qty: quantity.clone(),
+                    }
+            })
+    };
+    let mut target_filters =
+        trigger_effects(trigger)
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::ChangeZone { target, .. }
+                | Effect::GainControl { target, .. }
+                | Effect::GiveControl { target, .. }
+                | Effect::SetTapState { target, .. } => Some(target),
+                _ => None,
+            });
+    assert!(
+        target_filters.any(|target| filter_contains_filter_prop(&target, &expected)),
+        "{name}: expected target filter bound to CostPaidObject, got {:?}",
+        trigger_effects(trigger)
+    );
+    if expects_other_than {
+        let mut target_filters =
+            trigger_effects(trigger)
+                .into_iter()
+                .filter_map(|effect| match effect {
+                    Effect::ChangeZone { target, .. }
+                    | Effect::GainControl { target, .. }
+                    | Effect::GiveControl { target, .. }
+                    | Effect::SetTapState { target, .. } => Some(target),
+                    _ => None,
+                });
+        assert!(
+            target_filters.any(|target| {
+                filter_contains_filter_prop(&target, &|prop| {
+                    *prop == FilterProp::OtherThanTriggerObject
+                }) && !filter_contains_filter_prop(&target, &|prop| *prop == FilterProp::Another)
+            }),
+            "{name}: expected 'another' to bind to the trigger object, got {:?}",
+            trigger_effects(trigger)
+        );
+    }
+}
+
+#[test]
+fn relative_pt_trigger_filters_bind_trigger_event_source() {
+    assert_trigger_relative_pt_source(
+        "Colfenor, the Last Yew",
+        "Whenever Colfenor or another creature you control dies, return up to one other target creature card with lesser toughness from your graveyard to your hand.",
+        PtStat::Toughness,
+        Comparator::LT,
+        true,
+    );
+    assert_trigger_relative_pt_source(
+        "Body Launderer",
+        "Deathtouch\nWhenever another nontoken creature you control dies, this creature connives.\nWhen this creature dies, return another target non-Rogue creature card with equal or lesser power from your graveyard to the battlefield.",
+        PtStat::Power,
+        Comparator::LE,
+        true,
+    );
+    assert_trigger_relative_pt_source(
+        "Gyrus, Waker of Corpses",
+        "Gyrus enters with a number of +1/+1 counters on it equal to the amount of mana spent to cast it.\nWhenever Gyrus attacks, you may exile target creature card with lesser power from your graveyard. If you do, create a token that's a copy of that card and that's tapped and attacking. Exile the token at end of combat.",
+        PtStat::Power,
+        Comparator::LT,
+        false,
+    );
+    assert_trigger_relative_pt_source(
+        "Rangers of Ithilien",
+        "Vigilance\nWhen this creature enters, gain control of up to one target creature with lesser power for as long as you control this creature. Then the Ring tempts you.",
+        PtStat::Power,
+        Comparator::LT,
+        false,
+    );
+    assert_trigger_relative_pt_source(
+        "Reverend Mother Jessica",
+        "Prowess, prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn twice.)\nWhenever Reverend Mother Jessica attacks, for each opponent, tap up to one target creature that player controls with lesser power and goad it. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)",
+        PtStat::Power,
+        Comparator::LT,
+        false,
+    );
+}
+
 /// Every effect the trigger reaches, its delayed payloads and modes included.
 fn trigger_effects(trigger: &TriggerDefinition) -> Vec<Effect> {
     let mut effects = Vec::new();
@@ -26686,6 +26825,134 @@ fn unmodeled_ward_discard_line_fails_closed_through_parse_oracle_text() {
 
 // --- CR 606.2: "Whenever you activate a loyalty ability of [pw]" ---
 
+#[test]
+fn way_of_the_mind_sculptor_parses_loyalty_removal_intervening_if() {
+    let face = parse_oracle_text(
+        "When Way of the Mind Sculptor enters, empower Jace 5. (Put five loyalty counters on a Jace token you control. If you don't control one, first create a blue Jace planeswalker token with \"[−1]: Surveil 1\" and \"[−3]: Draw a card.\")\nWhenever you activate a loyalty ability, if you removed two or more loyalty counters to activate it, draw a card.",
+        "Way of the Mind Sculptor",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let [enters, way] = face.triggers.as_slice() else {
+        panic!(
+            "expected both printed Way triggers, got {:?}",
+            face.triggers
+        );
+    };
+    assert_eq!(enters.mode, TriggerMode::ChangesZone);
+    assert!(matches!(
+        *enters.execute.as_ref().expect("empower body").effect,
+        Effect::EmpowerJace {
+            count: QuantityExpr::Fixed { value: 5 }
+        }
+    ));
+    assert_eq!(way.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(
+        way.condition,
+        Some(TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum: 2 })
+    );
+    let body = way.execute.as_ref().expect("draw body");
+    assert!(matches!(
+        *body.effect,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    ));
+    assert!(
+        !face
+            .abilities
+            .iter()
+            .chain(
+                face.triggers
+                    .iter()
+                    .filter_map(|trigger| trigger.execute.as_deref())
+            )
+            .any(has_unimplemented),
+        "the complete Way face must contain zero Unimplemented effects"
+    );
+
+    let paradox = parse_trigger_line(
+        "Whenever you activate a loyalty ability, you gain 1 life. You may play an additional land this turn.",
+        "Way of the Paradox",
+    );
+    assert_eq!(paradox.condition, None);
+    assert!(paradox.execute.is_some());
+}
+
+// Synthetic grammar probe: no printed card carries a later `then if you removed
+// ... loyalty counters` clause. The nearest printed card is Way of the Mind
+// Sculptor, whose condition is the leading intervening-if "if you removed two
+// or more loyalty counters to activate it".
+#[test]
+fn loyalty_removal_condition_in_later_then_clause_is_not_hoisted() {
+    let later = parse_trigger_line(
+        "Whenever you activate a loyalty ability, draw a card, then if you removed two or more loyalty counters to activate it, draw a card.",
+        "Way of the Mind Sculptor",
+    );
+    assert_eq!(later.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(later.condition, None);
+    assert!(
+        later
+            .execute
+            .as_ref()
+            .and_then(|body| body.sub_ability.as_ref())
+            .is_some(),
+        "the later `then if` remains attached to the resolution effect chain"
+    );
+}
+
+#[test]
+fn loyalty_removal_threshold_requires_the_complete_loyalty_clause() {
+    use crate::types::ability_visit::{
+        granter_symbols, granter_symbols_mut, DefinitionNode, DefinitionNodeMut,
+    };
+
+    let digits = parse_trigger_line(
+        "Whenever you activate a loyalty ability, if you removed 4 or more loyalty counters to activate it, draw a card.",
+        "Way of the Mind Sculptor",
+    );
+    let expected = Some(TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum: 4 });
+    assert_eq!(digits.condition, expected);
+    let at_least = parse_trigger_line(
+        "Whenever you activate a loyalty ability, if you removed at least four loyalty counters to activate it, draw a card.",
+        "Way of the Mind Sculptor",
+    );
+    assert_eq!(at_least.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(at_least.condition, expected);
+    assert!(matches!(
+        at_least.execute.as_deref().map(|body| body.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+    let saved = serde_json::to_string(&digits).expect("serialize the alternate threshold");
+    let mut restored: TriggerDefinition = serde_json::from_str(&saved).expect("restore trigger");
+    assert_eq!(restored.condition, expected);
+    granter_symbols::node_fields(DefinitionNode::Trigger(&restored), &mut |_| {
+        panic!("the loyalty threshold has no granter symbol")
+    });
+    granter_symbols_mut::node_fields(DefinitionNodeMut::Trigger(&mut restored), &mut |_| {
+        panic!("the loyalty threshold has no symbol to rewrite")
+    });
+    assert_eq!(restored.condition, expected);
+
+    // Way is the only printed instance of this threshold in the pinned card census.
+    // These synthetic grammar probes each change one part of the printed condition.
+    for malformed in [
+        "Whenever you activate a loyalty ability, if you removed twelvish or more loyalty counters to activate it, draw a card.",
+        "Whenever you activate a loyalty ability, if you removed two or fewer loyalty counters to activate it, draw a card.",
+        "Whenever you activate a loyalty ability, if you removed two or more charge counters to activate it, draw a card.",
+        "Whenever you activate a loyalty ability, if you removed two or more loyalty counters to activate it somehow, draw a card.",
+    ] {
+        let parsed = parse_trigger_line(malformed, "Way of the Mind Sculptor");
+        assert_eq!(parsed.mode, TriggerMode::LoyaltyAbilityActivated);
+        assert!(
+            !matches!(parsed.condition, Some(TriggerCondition::LoyaltyCountersRemovedAtLeast { .. })),
+            "malformed or neighboring counter clause must not become the loyalty predicate: {malformed}"
+        );
+    }
+}
+
 /// CR 606.2: Ajani Unrelenting's unqualified form accepts every loyalty
 /// ability activated by the source controller, so it carries no card filter.
 #[test]
@@ -36233,6 +36500,58 @@ fn non_attack_player_trigger_does_not_emit_target_player() {
     }
 }
 
+// SHAPE: CR 608.2k binds the untargeted recipient to the damage dealer.
+#[test]
+fn aveline_that_many_counters_bind_the_triggering_creature() {
+    assert_event_amount_counter_target(
+        "Whenever a creature you control with deathtouch deals combat damage to a player, put that many +1/+1 counters on that creature.",
+        "Aveline de Grandpré",
+        TargetFilter::TriggeringSource,
+    );
+}
+
+#[test]
+fn westgate_regent_that_many_counters_bind_self() {
+    assert_event_amount_counter_target(
+        "Whenever this creature deals combat damage to a player, put that many +1/+1 counters on it.",
+        "Westgate Regent",
+        TargetFilter::SelfRef,
+    );
+}
+
+#[test]
+fn hercules_that_many_counters_bind_self() {
+    assert_event_amount_counter_target(
+        "Whenever Hercules is dealt damage for the first time each turn, put that many +1/+1 counters on him. (He must survive the damage to get the counters.)",
+        "Hercules, Olympian Hero",
+        TargetFilter::SelfRef,
+    );
+}
+
+#[test]
+fn venus_that_many_counters_bind_self() {
+    assert_event_amount_counter_target(
+        "Whenever Venus is dealt damage, put that many +1/+1 counters on her. (She must survive the damage to get the counters.)",
+        "Venus, Torn Between Worlds",
+        TargetFilter::SelfRef,
+    );
+}
+
+fn assert_event_amount_counter_target(text: &str, name: &str, target: TargetFilter) {
+    let trigger = parse_trigger_line(text, name);
+    assert_eq!(
+        *trigger.execute.expect("counter placement").effect,
+        Effect::PutCounter {
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            },
+            target,
+        },
+        "{name}: {text}"
+    );
+}
+
 /// CR 107.3a + CR 601.2f: Wan Shi Tong's ETB trigger pays `{X}` at cast
 /// and must put X +1/+1 counters on himself. Verify the pronoun "him"
 /// routes through `resolve_it_pronoun` → `SelfRef` (not `ParentTarget`),
@@ -41413,21 +41732,8 @@ fn tawnos_the_toymaker_copy_is_an_artifact() {
     assert_no_unimplemented(execute.as_ref());
 }
 
-// V10 — CR 121.1 + CR 603.4: the trigger-side "equal to the difference" rewrites
-// (`lower_trigger_ir`) discriminate on the gap node's recorded DESCRIPTION, never
-// on its name. Phase 1 names every fallback gap by the sub-grammar verdict that
-// refused it, so the pre-phase `name == "draw"` / `name == "lose"` guards can
-// never be true again — restoring either one makes the rewrite stop firing and
-// this test (and the `draw` arm's `parse_difference_draw_trigger_...` above) go
-// red.
-//
-// The `lose` arm additionally carries a DECLARED widening: the name compare was
-// the only thing refusing `"they lose life equal to the difference"` (a fallback
-// node whose first word was `they`). With the name gone, the exact-text compare is
-// the entire bound, so the negative half below pins it against a different
-// `Unimplemented` description that must NOT convert.
 #[test]
-fn difference_life_loss_rewrite_keys_on_the_description_not_the_gap_name() {
+fn difference_life_loss_binds_only_the_deferred_count() {
     const OTHER_REVEALED_CLASS: &str =
         "lose life equal to the mana value of the card revealed by the other player";
 
@@ -41455,10 +41761,6 @@ fn difference_life_loss_rewrite_keys_on_the_description_not_the_gap_name() {
         def
     }
 
-    // Positive: the migrated `lose` arm converts the anaphoric clause against the
-    // hoisted operands. This is the only test that reaches the arm at all — the two
-    // standing `parse_effect_chain` positives are satisfied by the effect layer and
-    // never enter `lower_trigger_ir`.
     let def = hosted_gate_trigger("lose life equal to the difference");
     let execute = def.execute.as_ref().expect("execute ability");
     let Effect::LoseLife { amount, target } = execute.effect.as_ref() else {
@@ -41468,9 +41770,8 @@ fn difference_life_loss_rewrite_keys_on_the_description_not_the_gap_name() {
         );
     };
     assert_eq!(
-        target,
-        &Some(TargetFilter::ParentTarget),
-        "the rewritten life loss is directed at the trigger's parent target"
+        target, &None,
+        "an imperative without an explicit subject defaults to the controller"
     );
     let QuantityExpr::Difference { left, right } = amount else {
         panic!("expected a Difference amount, got {amount:?}");
@@ -41486,12 +41787,6 @@ fn difference_life_loss_rewrite_keys_on_the_description_not_the_gap_name() {
     );
     assert_eq!(**right, QuantityExpr::Fixed { value: 7 });
 
-    // Negative (multi-authority): a DIFFERENT gap node reaching the same arm with
-    // `difference_count` bound must be refused by the exact-text compare. The
-    // OtherRevealedCard class node is the neighbouring `lose`-flavoured producer
-    // renamed by P1.5 (`other_revealed_card_quantity`); under either name it is only
-    // the description that refuses it. `hosted_gate_trigger` proves the arm was
-    // reachable, so this is not a vacuous negative.
     let def = hosted_gate_trigger(OTHER_REVEALED_CLASS);
     let execute = def.execute.as_ref().expect("execute ability");
     assert_eq!(

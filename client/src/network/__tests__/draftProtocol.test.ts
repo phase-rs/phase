@@ -23,6 +23,11 @@ const validWorkspace = {
   virtualBasics: [{ instanceId: "basic-1", name: "Island" }],
 };
 
+const recordedSortLayouts = {
+  deck: { sort: "color", columnCount: 3, columns: { white: 0, multicolor: 2, colorless: 2 } },
+  sideboard: { sort: "type", columnCount: 6, columns: { creature: 0, land: 5 } },
+} as const;
+
 // v30 requires `distribution`: the draft protocol is compared for EXACT
 // equality at the handshake, so a peer that omits it is malformed, not old.
 /** A well-formed shared-stack projection: every nested v30 shape, populated. */
@@ -1076,6 +1081,26 @@ describe("draftProtocol", () => {
       },
     );
 
+    it.each([
+      ["unexpected zone", { hand: recordedSortLayouts.deck }],
+      ["missing layout fields", { deck: { sort: "color", columnCount: 3 } }],
+      ["unexpected layout fields", { deck: { ...recordedSortLayouts.deck, extra: true } }],
+      ["unknown sort", { deck: { ...recordedSortLayouts.deck, sort: "manual" } }],
+      ["mana value sort", { deck: { ...recordedSortLayouts.deck, sort: "cmc" } }],
+      ["column count below board minimum", { deck: { ...recordedSortLayouts.deck, columnCount: 1 } }],
+      ["column count above board maximum", { deck: { ...recordedSortLayouts.deck, columnCount: 21 } }],
+      ["group from another sort", { deck: { ...recordedSortLayouts.deck, columns: { artifact: 1 } } }],
+      ["unknown group", { deck: { ...recordedSortLayouts.deck, columns: { constructor: 1 } } }],
+      ["column beyond its layout", { deck: { ...recordedSortLayouts.deck, columns: { white: 3 } } }],
+      ["non-integer column", { deck: { ...recordedSortLayouts.deck, columns: { white: 1.5 } } }],
+    ])("rejects recorded sort layouts with %s", (_description, malformedLayouts) => {
+      const message = {
+        type: "draft_workspace_update",
+        workspaceState: { ...validWorkspace, recordedSortLayouts: malformedLayouts },
+      };
+      expect(() => validateDraftMessage(message)).toThrow("invalid recorded sort layouts");
+    });
+
     it("normalizes missing face-up draft arrays while preserving active-pack presence", () => {
       const msg = validateDraftMessage({
         type: "draft_state_update",
@@ -1471,8 +1496,11 @@ describe("draftProtocol", () => {
 
   describe("wire encoding/decoding round-trip", () => {
     it.each([
-      ["raw", { schemaVersion: 1 as const, placements: {}, virtualBasics: [] }],
-      ["gzip", validWorkspace],
+      ["raw", {
+        schemaVersion: 1 as const, placements: {}, virtualBasics: [],
+        recordedSortLayouts: { deck: recordedSortLayouts.deck },
+      }],
+      ["gzip", { ...validWorkspace, recordedSortLayouts }],
     ])("round-trips a non-null workspace update on the %s path", async (format, workspaceState) => {
       const expandedState = format === "gzip"
         ? {

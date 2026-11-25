@@ -31,7 +31,7 @@ use super::oracle_effect::{
 use super::oracle_ir::ast::AnaphorNumber;
 use super::oracle_ir::context::{
     bind_controller_phrase, ChainPriorPublishers, ChosenColorQualifierScope, ParseContext,
-    SpellAnaphorBinding,
+    SpellAnaphorBinding, TriggerConditionObjects,
 };
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
@@ -4433,7 +4433,7 @@ fn parse_type_phrase_folding_unbound<'a>(
     }
 
     // Check "with power N or less/greater" suffix
-    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx) {
+    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx, &mut properties) {
         properties.push(prop);
         pos += consumed;
     }
@@ -6293,6 +6293,9 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // CR 105.1 + CR 205.2: color / supertype adjectives.
             | FilterProp::HasColor { .. }
             | FilterProp::ColorCount { .. }
+            // CR 205.2a: "with <n> or more card types" suffix binds to the leg
+            // whose type phrase parsed it, never retroactively onto earlier legs.
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::NotColor { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::NotSupertype { .. }
@@ -6459,6 +6462,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::OtherThanTriggerObject
         | FilterProp::HasColor { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -8170,8 +8174,61 @@ fn parse_attacking_status_clause_boundary(input: &str) -> OracleResult<'_, ()> {
 /// into the byte-offset return contract this call site expects. Used by Arnyn
 /// Deathbloom Botanist, Stern Scolding, Leonardo Sewer Samurai, Warping Wail,
 /// etc.
-fn parse_power_suffix(text: &str, ctx: &mut ParseContext) -> Option<(FilterProp, usize)> {
+fn parse_power_suffix(
+    text: &str,
+    ctx: &mut ParseContext,
+    properties: &mut [FilterProp],
+) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
+
+    // CR 208.1 + CR 603.10a + CR 608.2h: an implicit lesser-power/toughness
+    // suffix is meaningful here only when the enclosing trigger supplies the
+    // event object whose current/LKI characteristic is the comparison value.
+    // Prior target/choice clauses are deliberately declined: ObjectScope::Target
+    // resolves the first object target, while this parser cannot prove that it
+    // is the particular choice named by the printed clause.
+    if let Ok((after, (stat, comparator))) = nom_filter::parse_relative_pt_comparison(trimmed) {
+        let has_prior_object = ctx.chain_declared_object_target.is_some();
+        let has_trigger_event_context = ctx.in_trigger
+            || !matches!(
+                ctx.trigger_condition_objects,
+                TriggerConditionObjects::Unestablished
+            );
+        if !has_trigger_event_context || has_prior_object {
+            return None;
+        }
+        // CR 115.1d: in a triggered ability, "another" in this target noun
+        // phrase excludes the object that caused the trigger, not the ability
+        // source. Preserve the typed exclusion marker used by the runtime
+        // trigger-object authority; leaving `Another` here would incorrectly
+        // exclude Colfenor when another creature dies.
+        if let Some(property) = properties
+            .iter_mut()
+            .find(|property| **property == FilterProp::Another)
+        {
+            *property = FilterProp::OtherThanTriggerObject;
+        }
+        let value = QuantityExpr::Ref {
+            qty: match stat {
+                PtStat::Power => QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                PtStat::Toughness => QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                PtStat::TotalPowerToughness => return None,
+            },
+        };
+        return Some((
+            FilterProp::PtComparison {
+                stat,
+                scope: PtValueScope::Current,
+                comparator,
+                value,
+            },
+            text.len() - after.len(),
+        ));
+    }
 
     // CR 208.1 + CR 509.1b: "with greater power" — relative to the source
     // object. CR 208.1 is the authority for power being the characteristic
@@ -13254,8 +13311,9 @@ mod tests {
     fn superlative_least_toughness_suffix_emits_min_aggregate_pt_comparison() {
         let text = "with the least toughness among creatures you control";
         let mut ctx = ParseContext::default();
-        let (prop, consumed) =
-            parse_power_suffix(text, &mut ctx).expect("least-toughness suffix should parse");
+        let mut properties = Vec::new();
+        let (prop, consumed) = parse_power_suffix(text, &mut ctx, &mut properties)
+            .expect("least-toughness suffix should parse");
         assert_eq!(consumed, text.len(), "the whole suffix must be consumed");
         let FilterProp::PtComparison {
             stat,
@@ -16752,8 +16810,10 @@ mod tests {
     fn creature_with_power_x_or_less() {
         // CR 107.3a + CR 601.2b: X is announced at cast; the filter retains the
         // `Variable("X")` marker so it can resolve against `chosen_x` at effect time.
-        let (prop, _) = parse_power_suffix("with power x or less", &mut ParseContext::default())
-            .expect("parses");
+        let mut ctx = ParseContext::default();
+        let mut properties = Vec::new();
+        let (prop, _) =
+            parse_power_suffix("with power x or less", &mut ctx, &mut properties).expect("parses");
         assert_eq!(
             prop,
             FilterProp::PtComparison {
@@ -16771,7 +16831,9 @@ mod tests {
 
     #[test]
     fn creature_with_power_x_or_greater() {
-        let (prop, _) = parse_power_suffix("with power x or greater", &mut ParseContext::default())
+        let mut ctx = ParseContext::default();
+        let mut properties = Vec::new();
+        let (prop, _) = parse_power_suffix("with power x or greater", &mut ctx, &mut properties)
             .expect("parses");
         assert_eq!(
             prop,
@@ -16786,6 +16848,49 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[test]
+    fn parse_power_suffix_relative_pt_requires_trigger_context() {
+        let mut ctx = ParseContext::default();
+        assert!(parse_power_suffix("with lesser power", &mut ctx, &mut Vec::new()).is_none());
+    }
+
+    #[test]
+    fn parse_power_suffix_relative_pt_binds_cost_paid_object() {
+        let mut ctx = ParseContext {
+            in_trigger: true,
+            ..ParseContext::default()
+        };
+        let mut properties = vec![FilterProp::Another];
+        let (prop, consumed) =
+            parse_power_suffix("with equal or lesser toughness.", &mut ctx, &mut properties)
+                .expect("trigger-relative toughness suffix should parse");
+        assert_eq!(consumed, "with equal or lesser toughness".len());
+        assert_eq!(properties, vec![FilterProp::OtherThanTriggerObject]);
+        assert_eq!(
+            prop,
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_power_suffix_relative_pt_declines_prior_choice_context() {
+        let mut ctx = ParseContext {
+            in_trigger: true,
+            chain_declared_object_target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..ParseContext::default()
+        };
+        assert!(parse_power_suffix("with lesser power", &mut ctx, &mut Vec::new()).is_none());
     }
 
     #[test]
@@ -26390,9 +26495,10 @@ mod tests {
     #[test]
     fn superlative_power_suffix_emits_aggregate_pt_comparison() {
         let mut ctx = ParseContext::default();
+        let mut properties = Vec::new();
         let input = "with the greatest power among creatures they control";
-        let (prop, consumed) =
-            parse_power_suffix(input, &mut ctx).expect("superlative suffix should parse");
+        let (prop, consumed) = parse_power_suffix(input, &mut ctx, &mut properties)
+            .expect("superlative suffix should parse");
         assert_eq!(consumed, input.len(), "should consume the whole suffix");
         let FilterProp::PtComparison {
             stat,

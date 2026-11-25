@@ -1663,6 +1663,7 @@ pub(crate) fn bind_resolution_scope(
     entry: &StackEntry,
     trigger_event_batch: Option<Vec<GameEvent>>,
 ) -> bool {
+    let pinned_event;
     let rederived: Option<Option<TriggerCondition>>;
     let triggered = match &entry.kind {
         StackEntryKind::TriggeredAbility {
@@ -1679,6 +1680,33 @@ pub(crate) fn bind_resolution_scope(
                 .and(entry.ability())
                 .filter(|ability| !ability.context.outer_declared_players.is_empty())
                 .map(|ability| super::triggers::delayed_intervening_if(state, ability));
+            // CR 603.4: Legacy cast events need the ability's saved occurrence
+            // during the recheck, before the event becomes the resolution scope.
+            pinned_event = match (
+                trigger_event,
+                entry.ability().and_then(|a| a.context.triggering_spell),
+            ) {
+                (
+                    Some(
+                        event @ GameEvent::SpellCast {
+                            object_id,
+                            cast_incarnation: None,
+                            ..
+                        },
+                    ),
+                    Some(pin),
+                ) if *object_id == pin.object_id => {
+                    let mut event = event.clone();
+                    if let GameEvent::SpellCast {
+                        cast_incarnation, ..
+                    } = &mut event
+                    {
+                        *cast_incarnation = Some(pin.incarnation);
+                    }
+                    Some(event)
+                }
+                _ => None,
+            };
             Some(TriggeredResolutionScope {
                 condition: rederived.as_ref().unwrap_or(condition).as_ref(),
                 controller: entry.controller,
@@ -1688,7 +1716,7 @@ pub(crate) fn bind_resolution_scope(
                 trigger_definition: entry
                     .ability()
                     .and_then(|ability| ability.trigger_definition_ref.as_ref()),
-                trigger_event: trigger_event.as_ref(),
+                trigger_event: pinned_event.as_ref().or(trigger_event.as_ref()),
                 subject_match_count: *subject_match_count,
                 die_result: *die_result,
             })

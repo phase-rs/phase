@@ -3570,6 +3570,7 @@ fn is_admissible_zone_card_count_property(property: &FilterProp) -> bool {
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::IsChosenCreatureType
         | FilterProp::MostPrevalentCreatureTypeIn { .. }

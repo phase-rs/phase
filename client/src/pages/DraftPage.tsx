@@ -65,6 +65,7 @@ function readPickInteraction(): DraftPickInteractionSnapshot {
   const state = useDraftStore.getState();
   return {
     interactionGeneration: state.interactionGeneration,
+    interactionGenerationCause: state.interactionGenerationCause,
     pickInteractionLocked: state.pickInteractionLocked,
     pendingPickIntent: state.pendingPickIntent,
   };

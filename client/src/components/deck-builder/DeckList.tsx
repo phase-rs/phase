@@ -1,5 +1,6 @@
-import { useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { GameFormat } from "../../adapter/types";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
 import {
   detectAndParseDeck,
@@ -29,6 +30,7 @@ interface DeckListProps {
   onImport: (deck: ParsedDeck) => void;
   onCardHover?: CardHoverHandler;
   format?: string;
+  commanderInferenceFormat?: GameFormat;
   compatibility?: DeckCompatibilityResult | null;
   onChooseArt?: (cardName: string, x: number, y: number) => void;
   /** When provided, each main-deck row of a commander-eligible card renders a
@@ -67,6 +69,7 @@ export function DeckList({
   onImport,
   onCardHover,
   format,
+  commanderInferenceFormat,
   compatibility,
   onChooseArt,
   onSetAsCommander,
@@ -79,6 +82,11 @@ export function DeckList({
 }: DeckListProps) {
   const { t } = useTranslation(["deck-builder", "common"]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const importContextRevision = useRef(0);
+  useLayoutEffect(() => () => {
+    // A request stays stale even after switching back to its original format.
+    importContextRevision.current += 1;
+  }, [commanderInferenceFormat]);
   const [showPasteModal, setShowPasteModal] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [pasteError, setPasteError] = useState<string | null>(null);
@@ -138,8 +146,14 @@ export function DeckList({
     return map;
   }, [compatibility?.coverage?.unsupported_cards]);
 
-  const importParsedDeck = async (content: string): Promise<boolean> => {
-    const parsed = await resolveCommander(await canonicalizeDeckNames(detectAndParseDeck(content)));
+  const importParsedDeck = async (content: string, revision: number): Promise<boolean> => {
+    if (revision !== importContextRevision.current) return false;
+    const canonical = await canonicalizeDeckNames(detectAndParseDeck(content));
+    if (revision !== importContextRevision.current) return false;
+    const parsed = commanderInferenceFormat === undefined
+      ? await resolveCommander(canonical)
+      : await resolveCommander(canonical, commanderInferenceFormat);
+    if (revision !== importContextRevision.current) return false;
     if (!parsedDeckHasCards(parsed)) {
       setPasteError(t("deckList.parseError"));
       return false;
@@ -154,11 +168,12 @@ export function DeckList({
   const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    const revision = importContextRevision.current;
     setPasteError(null);
     setPasteLoading(true);
     try {
       const content = await file.text();
-      await importParsedDeck(content);
+      await importParsedDeck(content, revision);
     } finally {
       setPasteLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -167,10 +182,11 @@ export function DeckList({
 
   const handlePasteImport = async () => {
     if (!pasteText.trim() || pasteLoading) return;
+    const revision = importContextRevision.current;
     setPasteError(null);
     setPasteLoading(true);
     try {
-      await importParsedDeck(pasteText);
+      await importParsedDeck(pasteText, revision);
     } finally {
       setPasteLoading(false);
     }

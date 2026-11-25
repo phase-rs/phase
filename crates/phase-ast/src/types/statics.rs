@@ -478,13 +478,25 @@ impl FromStr for ExileCastCost {
 ///   ("...from among cards exiled with ~." — The Matrix of Time, the
 ///   Prosper/Tibalt impulse-commander class). Every card still linked to the
 ///   source remains eligible across turns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+/// - `CounterLinked` — CR 406.2 + CR 611.3a + CR 122.1: the counter-keyed,
+///   source-agnostic pool — every card in exile carrying a counter the matcher
+///   counts (Tinybones, Bauble Burglar: "...cards you don't own with stash
+///   counters on them from exile"). Unlike the source-keyed pools above, no
+///   exile-link record is consulted: which permanent put the counter there is
+///   irrelevant (CR 400.1: exile is one shared zone), and the pool is a live
+///   read recomputed at every gate (CR 611.3a), so a removed counter exits the
+///   pool immediately. Clone-only: the `CounterMatch` payload cannot be `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ExileCardPool {
     /// Per-turn rolling pool (`cards_exiled_with_source_this_turn`).
     #[default]
     ThisTurn,
     /// Lifetime per-source `exile_links` pool (`linked_exile_cards_for_source`).
     Persistent,
+    /// Counter-keyed, source-agnostic pool (live `state.exile` scan).
+    CounterLinked {
+        matcher: super::counter::CounterMatch,
+    },
 }
 
 impl fmt::Display for ExileCardPool {
@@ -492,6 +504,15 @@ impl fmt::Display for ExileCardPool {
         match self {
             ExileCardPool::ThisTurn => write!(f, "this_turn"),
             ExileCardPool::Persistent => write!(f, "persistent"),
+            ExileCardPool::CounterLinked { matcher } => match matcher {
+                // CR 122.1: the colon form carries the counter type word;
+                // `counter_any` stays colon-less so a future `Generic("any")`
+                // counter can never collide with the `Any` encoding.
+                super::counter::CounterMatch::OfType(counter_type) => {
+                    write!(f, "counter:{}", counter_type.as_str())
+                }
+                super::counter::CounterMatch::Any => write!(f, "counter_any"),
+            },
         }
     }
 }
@@ -503,7 +524,20 @@ impl FromStr for ExileCardPool {
         match s {
             "this_turn" => Ok(ExileCardPool::ThisTurn),
             "persistent" => Ok(ExileCardPool::Persistent),
-            other => Err(format!("unknown ExileCardPool: {other}")),
+            "counter_any" => Ok(ExileCardPool::CounterLinked {
+                matcher: super::counter::CounterMatch::Any,
+            }),
+            other => match other.strip_prefix("counter:") {
+                // CR 122.1: `parse_counter_type` is total — an unknown name
+                // falls back to `Generic`, so the matcher stays able to match
+                // the counters the exile pipeline actually writes.
+                Some(name) => Ok(ExileCardPool::CounterLinked {
+                    matcher: super::counter::CounterMatch::OfType(
+                        super::counter::parse_counter_type(name),
+                    ),
+                }),
+                None => Err(format!("unknown ExileCardPool: {other}")),
+            },
         }
     }
 }
@@ -3807,7 +3841,10 @@ impl fmt::Display for StaticMode {
                 if matches!(cost, ExileCastCost::WithoutPayingManaCost) {
                     write!(f, ",free")?;
                 }
-                if matches!(pool, ExileCardPool::Persistent) {
+                // CR 406.2: every non-default pool scope (`Persistent`,
+                // `CounterLinked`) is emitted; the `ThisTurn` default stays
+                // elided so the historical 2-/3-segment forms round-trip.
+                if !matches!(pool, ExileCardPool::ThisTurn) {
                     write!(f, ",pool={pool}")?;
                 }
                 if matches!(timing, ExileCastTiming::YourTurnOnly) {
@@ -5495,6 +5532,74 @@ mod tests {
             let s = mode.to_string();
             assert_eq!(StaticMode::from_str(&s).unwrap(), mode);
         }
+    }
+
+    /// CR 406.2 + CR 122.1 (V-pool-type): the counter-keyed pool scope
+    /// round-trips through Display/FromStr, the `Any` matcher keeps its
+    /// colon-less encoding, unknown `counter:` names fall back to `Generic`
+    /// (still matchable), and the historical 2-segment Maralen form keeps
+    /// parsing with the `ThisTurn` default elided.
+    #[test]
+    fn exile_card_pool_counter_linked_round_trips() {
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let stash = ExileCardPool::CounterLinked {
+            matcher: CounterMatch::OfType(CounterType::Generic("stash".to_string())),
+        };
+        assert_eq!(stash.to_string(), "counter:stash");
+        assert_eq!(ExileCardPool::from_str(&stash.to_string()).unwrap(), stash);
+
+        let any = ExileCardPool::CounterLinked {
+            matcher: CounterMatch::Any,
+        };
+        assert_eq!(any.to_string(), "counter_any");
+        assert_eq!(ExileCardPool::from_str("counter_any").unwrap(), any);
+
+        // Unknown counter names stay matchable via the `Generic` fallback.
+        assert_eq!(
+            ExileCardPool::from_str("counter:bauble").unwrap(),
+            ExileCardPool::CounterLinked {
+                matcher: CounterMatch::OfType(CounterType::Generic("bauble".to_string())),
+            }
+        );
+
+        // Reach-guard: the historical 2-segment Maralen form still parses with
+        // the default pool elided.
+        assert_eq!(
+            StaticMode::from_str("ExileCastPermission(Cast,unlimited)").unwrap(),
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                cost: ExileCastCost::PayNormalCost,
+                pool: ExileCardPool::ThisTurn,
+                timing: ExileCastTiming::AnyTime,
+                mana_spend_permission: None,
+                grants_flash: false,
+                extra_cost: None,
+                enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
+            }
+        );
+
+        // The counter-linked scope rides the `pool=` segment of the mode form.
+        let mode = StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: stash,
+            timing: ExileCastTiming::YourTurnOnly,
+            mana_spend_permission: None,
+            grants_flash: false,
+            extra_cost: None,
+            enters_with_counter: None,
+            grantee: ExileCastGrantee::SourceController,
+        };
+        let rendered = mode.to_string();
+        assert!(
+            rendered.contains("pool=counter:stash"),
+            "the non-default pool must be emitted, got {rendered}"
+        );
+        assert_eq!(StaticMode::from_str(&rendered).unwrap(), mode);
     }
 
     #[test]

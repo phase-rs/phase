@@ -283,12 +283,13 @@ pub use deck_loading::{
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,
 };
 pub use deck_validation::{
-    can_pair_commanders, companion_candidates, deck_copy_limit_for, evaluate_deck_compatibility,
-    is_brawl_commander_eligible, is_commander_eligible, is_freeform_commander_eligible,
+    can_pair_commanders, commander_candidates, companion_candidates, deck_copy_limit_for,
+    evaluate_deck_compatibility, infer_commander, is_brawl_commander_eligible,
+    is_card_commander_eligible_for_format, is_commander_eligible, is_freeform_commander_eligible,
     is_tiny_leader_eligible, max_deck_copies, signature_spell_selection_policy,
     validate_deck_for_format, validate_name_deck_for_format, validate_name_deck_for_format_full,
-    CompatibilityCheck, DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage,
-    SignatureSpellSelectionPolicy, UnsupportedCard,
+    CommanderDeckComposition, CommanderInferenceRow, CompatibilityCheck, DeckCompatibilityRequest,
+    DeckCompatibilityResult, DeckCoverage, SignatureSpellSelectionPolicy, UnsupportedCard,
 };
 pub use engine::{
     apply, apply_as_current, apply_with_rejection, new_game, preflight_debug_action,

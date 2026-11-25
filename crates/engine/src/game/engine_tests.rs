@@ -434,6 +434,7 @@ fn choose_new_targets_all_allows_unchanged_illegal_target() {
         keep_is_distinct: Vec::new(),
         player: PlayerId(0),
         stack_entry_index: 0,
+        stack_entry_id: None,
         scope: RetargetScope::All,
         current_targets: vec![unchanged.clone()],
         slots: vec![],

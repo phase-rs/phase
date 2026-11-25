@@ -2338,6 +2338,8 @@ mod tests {
             controller: PlayerId(1),
             object_id: entering,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         let mut ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {

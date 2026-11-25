@@ -6,7 +6,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
 import { resolveCommander } from "../../services/commanderResolution";
-import { addOneCopy, countDeckEntriesByName, deckEntryKey, deduplicateEntries, expandParsedDeck, removeOneCopy } from "../../services/deckParser";
+import { addOneCopy, countDeckEntriesByName, deckEntryKey, deduplicateEntries, expandParsedDeck, removeOneCopy, repairParsedDeck } from "../../services/deckParser";
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
 import {
   STORAGE_KEY_PREFIX,
@@ -48,6 +48,7 @@ import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { useDeckSignals } from "../../hooks/useDeckSignals";
 import { projectSignatureSpellForFormat, serializeSavedDeck } from "../../services/savedDeckProjection";
 import {
+  commanderCandidates,
   commanderPartnerCandidates,
   companionCandidates,
   isCardCommanderEligibleForFormat,
@@ -211,6 +212,14 @@ export function useDeckBuilder({
     ...deck,
     commander: commanders.length > 0 ? commanders : undefined,
   }), [deck, commanders]);
+  const candidateRequest = useMemo(
+    () => ({ ...expandParsedDeck(currentDeck), selected_format: format }),
+    [currentDeck, format],
+  );
+  const [candidateAnswer, setCandidateAnswer] = useState<{
+    request: typeof candidateRequest;
+    names: string[] | null;
+  } | null>(null);
   const formatConfig = formatMetadata(format)?.default_config;
   // This editor offers only the commander family's dedicated companion slot.
   const offersDedicatedCompanion = formatMetadata(format)?.companion_slot.type === "CommanderFamily";
@@ -258,8 +267,7 @@ export function useDeckBuilder({
 
   useEffect(() => {
     let cancelled = false;
-    const request = { ...expandParsedDeck(currentDeck), selected_format: format };
-    Promise.all([signatureSpellSelectionPolicy(request), companionCandidates(request)])
+    Promise.all([signatureSpellSelectionPolicy(candidateRequest), companionCandidates(candidateRequest)])
       .then(([signaturePolicy, companionCandidates]) => {
         if (cancelled) return;
         setSignatureSpellCandidates(
@@ -278,9 +286,26 @@ export function useDeckBuilder({
     return () => {
       cancelled = true;
     };
-  }, [currentDeck, deckKey, format, offersDedicatedCompanion]);
+  }, [candidateRequest, offersDedicatedCompanion]);
 
   const isCommander = formatConfig?.command_zone ?? false;
+  const commanderCandidateNames = isCommander && candidateAnswer?.request === candidateRequest
+    ? candidateAnswer.names
+    : null;
+
+  useEffect(() => {
+    if (!isCommander) return;
+    let cancelled = false;
+    commanderCandidates(candidateRequest, "commanders-outside")
+      .then((names) => {
+        if (!cancelled) setCandidateAnswer({ request: candidateRequest, names });
+      })
+      .catch(() => {
+        if (!cancelled) setCandidateAnswer({ request: candidateRequest, names: null });
+      });
+    return () => { cancelled = true; };
+  }, [candidateRequest, isCommander]);
+
   const deckSizeRule: DeckSizeRule = formatConfig?.deck_size ?? { type: "Minimum", data: 60 };
 
   useEffect(() => {
@@ -560,13 +585,8 @@ export function useDeckBuilder({
     // Fixed now, before any await: the name this save should vacate if renamed, and the bytes
     // it should still hold, so a Load of a different deck queued behind this save cannot retarget it.
     const previous = savedDeckRef.current;
-    // Save-time commander inference: when a Commander-format deck is shaped
-    // like a 100-singleton list with no explicit commander, ask the engine
-    // (via resolveCommander → WASM isCardCommanderEligible) to pick one. This
-    // is the architectural successor to the deleted reactive auto-resolve
-    // effect — running here means the user is never surprised mid-edit, and
-    // every persisted record has a commander when one is derivable.
-    const resolved = isCommander ? await resolveCommander(currentDeck) : currentDeck;
+    // Ask the engine to infer an unmarked commander at save time, outside the edit flow.
+    const resolved = isCommander ? await resolveCommander(currentDeck, format) : currentDeck;
     const inferred =
       (resolved.commander?.length ?? 0) > (currentDeck.commander?.length ?? 0);
     const changed = editorChangedSince(captured);
@@ -667,11 +687,12 @@ export function useDeckBuilder({
     return () => clearTimeout(timer);
   }, [justSaved]);
 
+  // Load opens the deck as stored. Save infers a commander in command-zone formats.
   // Returns whether the load actually replaced the editor. Callers that only fire-and-forget a
   // Load ignore it; resolveSaveConflict's "load" case uses it to tell a genuine load from a bail
   // so it knows whether to continue a pending action.
   const handleLoad = useCallback(async (name: string): Promise<boolean> => {
-    // Captured before the resolveCommander await below: a newer Load/Clone (reloaded) or any edit
+    // Captured before the precon catalog await: a newer Load/Clone (reloaded) or any edit
     // that marks the deck dirty, including an Import (edited), must win over this Load.
     const captured = captureEditor();
     const parsed = loadSavedDeck(name);
@@ -682,7 +703,7 @@ export function useDeckBuilder({
       const found = Object.entries(decks ?? {}).find(([, entry]) => PRECON_PREFIX + `${entry.name} (${entry.code})` === name);
       if (!found) return false;
       const [deckId, deckEntry] = found;
-      const resolved = await resolveCommander(preconDeckEntryToParsedDeck(deckEntry));
+      const resolved = repairParsedDeck(preconDeckEntryToParsedDeck(deckEntry));
       const changedAfterPrecon = editorChangedSince(captured);
       if (changedAfterPrecon.reloaded || changedAfterPrecon.edited) return false;
       applyDeckToEditor(resolved);
@@ -696,37 +717,23 @@ export function useDeckBuilder({
       return true;
     }
     const persisted = JSON.parse(stored.raw) as ParsedDeck & { format?: string };
-    // A rewrite that lands while resolveCommander runs is missed by the hook-level
-    // subscription, which follows savedDeckRef and not this Load.
-    let baseline: SavedDeckSnapshot = stored;
-    const stopAdopting = onSavedDeckRewritten((rewrite) => {
-      baseline = adoptSavedDeckRewrite(baseline, rewrite);
-    });
-    try {
-      const resolved = await resolveCommander(parsed);
-      const changedAfterLoad = editorChangedSince(captured);
-      if (changedAfterLoad.reloaded || changedAfterLoad.edited) {
-        return false;
-      }
-      const savedFormat = persisted.format
-        ? DECK_CONSTRUCTION_FORMATS.find(
-            (metadata) => metadata.format.toLowerCase() === persisted.format!.toLowerCase(),
-          )?.format
-        : undefined;
-      applyDeckToEditor(resolved, savedFormat);
-      setActiveSurface("deck");
-      deckIdentityRevision.current += 1;
-      setDirty(false);
-      if (savedFormat) {
-        onFormatChange(savedFormat);
-      } else if (resolved.commander?.length) {
-        onFormatChange("Commander");
-      }
-      setDeckName(name);
-      savedDeckRef.current = baseline;
-    } finally {
-      stopAdopting();
+    const resolved = repairParsedDeck(parsed);
+    const savedFormat = persisted.format
+      ? DECK_CONSTRUCTION_FORMATS.find(
+          (metadata) => metadata.format.toLowerCase() === persisted.format!.toLowerCase(),
+        )?.format
+      : undefined;
+    applyDeckToEditor(resolved, savedFormat);
+    setActiveSurface("deck");
+    deckIdentityRevision.current += 1;
+    setDirty(false);
+    if (savedFormat) {
+      onFormatChange(savedFormat);
+    } else if (resolved.commander?.length) {
+      onFormatChange("Commander");
     }
+    setDeckName(name);
+    savedDeckRef.current = stored;
     setBracket(loadSavedDeckBracket(name));
     setComboDeclaration(loadSavedDeckComboDeclaration(name));
     return true;
@@ -777,7 +784,14 @@ export function useDeckBuilder({
   const handleSetCommander = useCallback(
     (card: string | DeckEntry) => {
       const cardName = typeof card === "string" ? card : card.name;
-      if (!commanderEligibleNames.has(cardName)) return;
+      // The panel passes a name from the engine's current candidate answer; a
+      // deck row passes its exact entry and answers to per-name eligibility,
+      // so a second copy of a designated card can still be picked from its row.
+      const eligible = typeof card === "string"
+        ? commanderCandidateNames?.includes(cardName)
+        : commanderEligibleNames.has(cardName);
+      if (!eligible) return;
+      const captured = captureEditor();
       // CR 702.124: a second pick joins as a co-commander only when the engine
       // confirms it legally pairs with the existing one; otherwise it swaps. The
       // pairing decision is queried on demand (authoritative at click time) so a
@@ -800,6 +814,8 @@ export function useDeckBuilder({
           } catch {
             return;
           }
+          // A Load or Clone can switch decks while the pairing check is pending.
+          if (editorChangedSince(captured).reloaded) return;
         }
         markDirty();
         const displaced =
@@ -825,7 +841,7 @@ export function useDeckBuilder({
         });
       })();
     },
-    [commanderEligibleNames, commanders, markDirty],
+    [commanderCandidateNames, commanderEligibleNames, commanders, captureEditor, editorChangedSince, markDirty],
   );
 
   // Eligibility predicate consulted by each main-deck row. The set is loaded
@@ -993,6 +1009,7 @@ export function useDeckBuilder({
     resolveSaveConflict,
     handleSetCommander,
     isCommanderEligible,
+    commanderCandidateNames,
     handleRemoveCommander,
     signatureSpellCandidates,
     companionCandidateNames,

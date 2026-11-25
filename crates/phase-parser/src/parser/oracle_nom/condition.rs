@@ -12988,17 +12988,21 @@ pub fn parse_you_put_into_graveyard_this_way_clause(
 pub fn parse_you_put_into_graveyard_this_way_head(
     input: &str,
 ) -> OracleResult<'_, (TargetFilter, bool, ThisWayHead)> {
+    const DESTINATION: &str = " into your graveyard this way";
+
     let (rest, _) = tag("you put ").parse(input)?;
     let (rest, occurrence) = parse_active_this_way_quantifier(rest)?;
-    let (filter, after_filter) = parse_type_phrase_folding(rest);
-    if matches!(filter, TargetFilter::Any) {
+    let (rest, filter_text) = terminated(take_until(DESTINATION), tag(DESTINATION)).parse(rest)?;
+    // Bound the noun phrase before its mana-value quantity can see the destination.
+    let filter_text = filter_text.trim();
+    let (filter, leftover) = parse_type_phrase_folding(filter_text);
+    if filter_text.is_empty() || matches!(filter, TargetFilter::Any) || !leftover.trim().is_empty()
+    {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
     }
-    let after_filter = after_filter.trim_start();
-    let (rest, _) = tag("into your graveyard this way").parse(after_filter)?;
     Ok((
         rest,
         (
@@ -26420,6 +26424,31 @@ mod tests {
                 .unwrap();
         assert_eq!(rest, ", do x");
         assert!(negated);
+    }
+
+    // SHAPE: Enlightened Confidant's graveyard rider after the enclosing "If ".
+    #[test]
+    fn enlightened_confidant_graveyard_rider_keeps_the_mana_value_filter() {
+        let (rest, (filter, negated, head)) = parse_you_put_into_graveyard_this_way_head(concat!(
+            "you put a card with mana value less than or equal to the amount of life you gained ",
+            "this turn into your graveyard this way, put that card into your hand."
+        ))
+        .unwrap();
+        assert_eq!(rest, ", put that card into your hand.");
+        assert!(!negated);
+        assert_eq!(head.verb, ThisWayVerb::PutIntoGraveyard);
+        assert_eq!(head.occurrence, ThisWayOccurrence::Single);
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+            }]))
+        );
     }
 
     /// CR 700.4 + CR 614.6: arrival words bind the rider to the resulting
