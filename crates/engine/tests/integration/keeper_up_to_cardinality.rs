@@ -121,6 +121,21 @@ fn count_in(runner: &GameRunner, ids: &[ObjectId], wanted: Zone) -> usize {
     ids.iter().filter(|id| zone(runner, **id) == wanted).count()
 }
 
+/// CR 117.2e: no player has priority while a spell or ability is resolving, so
+/// an empty stack plus `Priority` proves no keeper continuation is suspended.
+fn assert_resolved(runner: &GameRunner) {
+    let state = runner.state();
+    assert!(
+        state.stack.is_empty(),
+        "resolution finished: the stack is empty"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "resolution finished: expected Priority, got {:?}",
+        state.waiting_for
+    );
+}
+
 /// The `Select` constraint the viewer's projection publishes.
 fn select_constraint(state: &GameState, viewer: PlayerId) -> SelectionConstraint {
     let mut state = state.clone();
@@ -192,7 +207,7 @@ fn covetous_elegy_second_seat_keeps_up_to_two_and_treasures_count_survivors() {
         })
         .expect("P1 keeps two of its three creatures");
     runner.advance_until_stack_empty();
-    assert!(runner.state().stack.is_empty());
+    assert_resolved(&runner);
     assert_eq!(count_in(&runner, &p1, Zone::Graveyard), 1);
     assert_eq!(zone(&runner, p1[2]), Zone::Graveyard);
     assert_eq!(
@@ -239,7 +254,7 @@ fn covetous_elegy_keeps_fewer_or_none_and_prompts_at_exactly_the_max() {
         .act(GameAction::ChooseKeptPermanents { kept: vec![p1[0]] })
         .expect("P1 keeps one of two");
     runner.advance_until_stack_empty();
-    assert!(runner.state().stack.is_empty());
+    assert_resolved(&runner);
 
     assert_eq!(
         count_in(&runner, &p0, Zone::Graveyard),
@@ -271,7 +286,7 @@ fn covetous_elegy_skips_a_seat_with_no_creatures() {
         "P1 controls no creatures and is never prompted"
     );
     runner.advance_until_stack_empty();
-    assert!(runner.state().stack.is_empty());
+    assert_resolved(&runner);
     assert_eq!(zone(&runner, p0[0]), Zone::Battlefield);
     assert_eq!(zone(&runner, p0[1]), Zone::Graveyard);
     assert_eq!(
@@ -337,6 +352,7 @@ fn covetous_elegy_ai_keep_candidates_are_legal() {
             .expect("the AI keep candidate must be legal");
     }
     runner.advance_until_stack_empty();
+    assert_resolved(&runner);
     assert_eq!(count_in(&runner, &p1, Zone::Graveyard), 1);
 }
 
@@ -501,7 +517,7 @@ fn archfiend_prompts_the_active_opponent_to_keep_two_of_seven() {
         })
         .expect("P0 keeps two");
     runner.advance_until_stack_empty();
-    assert!(runner.state().stack.is_empty());
+    assert_resolved(&runner);
     assert_eq!(count_in(&runner, &p0, Zone::Graveyard), 5);
     assert_eq!(count_in(&runner, &p0, Zone::Battlefield), 2);
     assert_eq!(
@@ -527,7 +543,7 @@ fn archfiend_keep_none_sacrifices_all() {
         .act(GameAction::ChooseKeptPermanents { kept: vec![] })
         .expect("an up-to keeper may keep none");
     runner.advance_until_stack_empty();
-    assert!(runner.state().stack.is_empty());
+    assert_resolved(&runner);
     assert_eq!(count_in(&runner, &p0, Zone::Graveyard), 3);
     assert_eq!(count_in(&runner, &p1, Zone::Battlefield), 3);
 }
@@ -547,7 +563,7 @@ fn archfiend_prompts_at_exactly_two_and_skips_an_empty_board() {
         .act(GameAction::ChooseKeptPermanents { kept: vec![p0[0]] })
         .expect("P0 keeps one of two");
     runner.advance_until_stack_empty();
-    assert!(runner.state().stack.is_empty());
+    assert_resolved(&runner);
     assert_eq!(zone(&runner, p0[0]), Zone::Battlefield);
     assert_eq!(zone(&runner, p0[1]), Zone::Graveyard);
 
@@ -565,10 +581,8 @@ fn archfiend_prompts_at_exactly_two_and_skips_an_empty_board() {
             other => panic!("an empty board publishes no prompt, got {other:?}"),
         }
     }
-    assert!(
-        runner.state().stack.is_empty(),
-        "the trigger resolves without a prompt"
-    );
+    // The trigger resolves without a prompt.
+    assert_resolved(&runner);
     assert_eq!(count_in(&runner, &p1, Zone::Battlefield), 3);
 }
 
@@ -609,7 +623,7 @@ fn archfiend_prompts_only_the_active_opponent_in_three_player() {
         "no second keep prompt"
     );
     runner.advance_until_stack_empty();
-    assert!(runner.state().stack.is_empty());
+    assert_resolved(&runner);
     assert_eq!(count_in(&runner, &p0, Zone::Graveyard), 1);
     assert_eq!(
         count_in(&runner, &p2, Zone::Battlefield),
