@@ -2280,7 +2280,9 @@ fn teammate_until_stack_empty_preserves_representative_counterspell_on_bolt_wind
         "reach: P0 holds Counterspell"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.count_color(ManaType::Blue),
+        runner.state().players[0]
+            .mana_pool
+            .count_color(ManaType::Blue),
         2,
         "reach: P0 holds {{U}}{{U}}"
     );
