@@ -4634,7 +4634,7 @@ pub enum Duration {
     UntilEndOfNextTurnOf {
         player: PlayerScope,
     },
-    /// CR 611.2a + CR 500.7 + CR 603.7a: "that turn" on a granted extra turn
+    /// CR 611.2a + CR 500.7: "that turn" on a granted extra turn
     /// (All in Good Time: "Schemes can't be set in motion that turn"). The
     /// window lasts as stated — the granted turn — and names it by
     /// turn identity, never by player, so it is immune to the untap-arming

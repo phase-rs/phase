@@ -396,7 +396,7 @@ fn bind_transient_effect(
     end_permission: Option<&EndEffectPermission>,
     modifications: Vec<ContinuousModification>,
 ) {
-    // CR 603.7a + CR 500.7: "that turn" names the extra turn the preceding
+    // CR 608.2c + CR 500.7: "that turn" names the extra turn the preceding
     // instruction of this resolution granted
     // (`last_granted_extra_turn_ids`). When none was granted (no recipient,
     // a count of zero) no such turn exists and no prohibition is installed.
