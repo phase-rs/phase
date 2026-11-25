@@ -140,18 +140,19 @@ use crate::types::ability::{
     GuardReading, GuessSubject, InstructionJoin, IntensityScope, IterationKindBinding,
     KeeperConstraint, KeeperCounterMark, LibraryPosition, LibraryShuffleMode, ManaProduction,
     ManaSpendPermission, ManaTargetRole, MultiTargetSpec, NameStickerSet, NumberDistinctness,
-    ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
-    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
-    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
-    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatForTiming, ReplacementCondition,
-    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
-    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
-    SkipScope, SpellStackToGraveyardReplacement, SpellbookSelection, StaticCondition,
-    StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
-    TargetReadOrigin, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
-    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
-    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole, ZoneOwner,
+    ObjectProperty, ObjectScope, ObjectSelectionCardinality, OriginConstraint, PerPlayerScope,
+    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
+    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    RepeatForTiming, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
+    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
+    SpellbookSelection, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
+    TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause,
+    TokenAttackDestination, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate,
+    TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject,
+    WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole,
+    ZoneOwner,
 };
 // Imported on its own line rather than folded into the block above: that block
 // is the busiest merge point in this file, and a one-name addition inside it
@@ -56247,11 +56248,22 @@ fn parse_effect_chain_ir_body(
                     Effect::unimplemented("choice_assignment_antecedent", normalized_text);
             }
             // CR 608.2c + CR 109.5: a clause that itself runs per player makes its own
-            // reveal choice as that player; the resolver's reveal chooser inside a
-            // player-scope iteration is the printed controller, so such a choice
-            // cannot be represented — honest gap.
+            // reveal choice as that player. `AnyNumber` is representable only when the
+            // hand owner is established by the player scope; an `any player may` offer
+            // binds `scoped_player` only at acceptance and leaves `Controller` as the
+            // ability controller, so its `their hand` target cannot safely use this
+            // exemption.
+            let scoped_any_number_reveal = player_scope.is_some()
+                && matches!(
+                    &clause.effect,
+                    Effect::RevealHand {
+                        cardinality: ObjectSelectionCardinality::AnyNumber,
+                        ..
+                    }
+                );
             if (player_scope.is_some() || opponent_may_scope.is_some() || is_distributed_chunk)
                 && crate::types::ability::effect_parks_reveal_card_choice(&clause.effect)
+                && !scoped_any_number_reveal
             {
                 clause.effect =
                     Effect::unimplemented("non_controller_reveal_choice", normalized_text);

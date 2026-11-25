@@ -7915,6 +7915,36 @@ pub struct PendingDiscardFanOut {
     pub after_scope_needs_linked_exile: bool,
 }
 
+/// CR 101.4 + CR 701.20a: APNAP state for a player-scoped hand reveal whose
+/// selections stay private until every participating player has answered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingPlayerScopeReveal {
+    pub source_id: ObjectId,
+    pub players: Vec<PlayerId>,
+    pub selections: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
+impl PendingPlayerScopeReveal {
+    pub fn new(source_id: ObjectId, players: Vec<PlayerId>) -> Self {
+        Self {
+            source_id,
+            players,
+            selections: Vec::new(),
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.players.iter().all(|player| {
+            self.selections
+                .iter()
+                .any(|(selected_player, _)| selected_player == player)
+        }) && self
+            .selections
+            .iter()
+            .all(|(player, _)| self.players.contains(player))
+    }
+}
+
 /// CR 101.4 + CR 701.23i: APNAP state for a self-library search instruction
 /// whose selected cards are delivered only after every searching player has
 /// made their private choice. The original spell's controller remains on
@@ -31558,6 +31588,11 @@ declare_game_state! {
     /// so the action phase cannot begin before every player has chosen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_scoped_library_search: Option<PendingScopedLibrarySearch>,
+    /// CR 101.4 + CR 701.20a: Pending private selections for a player-scoped
+    /// hand reveal. The selected cards are not published until every
+    /// participating player has selected or declined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_player_scope_reveal: Option<PendingPlayerScopeReveal>,
     /// Typed cleanup waiting for an ordinary search's leading ChangeZone to
     /// settle. The chain walker consumes it synchronously; the paused
     /// ChangeZone drain consumes the same value after its final member lands.
@@ -31793,6 +31828,21 @@ declare_game_state! {
     /// state equality (a monotonic tally would break AI-search dedup).
     #[serde(skip)]
     pub(crate) revealed_publications: u64,
+
+    /// CR 608.2c + CR 109.5: the cards revealed by each seat's instruction
+    /// inside a player-scoped reveal fan-out. The ordinary tracked set remains
+    /// the clause-wide population; this resolution-local ledger lets a
+    /// co-scoped "for each card revealed this way" consumer read the current
+    /// seat's contribution rather than the fan-out union. Persisted so a
+    /// paused reveal choice can resume after a supported mid-resolution
+    /// save/restore.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
+    pub(crate) scoped_reveal_sets: HashMap<PlayerId, (u64, Vec<ObjectId>)>,
+    /// Monotone publication identity for the current resolution's tracked set.
+    /// A scoped reveal is valid only while this generation remains current.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub(crate) tracked_set_publication_generation: u64,
 
     /// CR 608.2c + CR 609.3 + issue #4950: Set when the most
     /// recently resolved `Dig`/`RevealTop`/`ChooseFromZone`/`RevealHand` reveal-choice/
@@ -41609,6 +41659,7 @@ impl GameState {
             completed_hidden_search_audiences: Vec::new(),
             pending_search_found_batch: None,
             pending_die_roll_instruction: None,
+            pending_player_scope_reveal: None,
             may_trigger_auto_choices: Vec::new(),
             un_actions: Default::default(),
             replacement_auto_choices: Vec::new(),
@@ -41637,6 +41688,8 @@ impl GameState {
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
             revealed_publications: 0,
+            scoped_reveal_sets: HashMap::new(),
+            tracked_set_publication_generation: 0,
             last_parent_target_missing_reason: None,
             private_look_ids: Vec::new(),
             private_look_player: None,
@@ -43052,6 +43105,12 @@ impl GameState {
         // eq-compared (AI-search dedup legitimately reads it), so it is
         // normalized away HERE rather than excluded from `PartialEq`.
         clone.resolving_modal_instruction = None;
+        // CR 104.4b: a scoped reveal generation is meaningful only while its
+        // resolution-local ledger is live.  Once the ledger is empty, erase
+        // the publication history so loop-equivalent positions compare equal.
+        if clone.scoped_reveal_sets.is_empty() {
+            clone.tracked_set_publication_generation = 0;
+        }
         // CR 608.2c + CR 104.4b: the chain tracked-set pointer is that latch's
         // lockstep partner and is resolution-scoped for the same reason — a chain's
         // "those cards" anaphor names only what THIS resolution's instructions
@@ -45316,6 +45375,7 @@ impl GameState {
             // live in one.
             active_library_searches: _,
             pending_scoped_library_search: _,
+            pending_player_scope_reveal: _,
             pending_library_search_delivery: _,
             // Pin-bearing damage/discard pauses drain before Priority is restored;
             // see their existing classification in `_gamestate_partition_is_total`.
@@ -45708,6 +45768,8 @@ impl GameState {
             // are cleared with it by the loop projection.
             instruction_boundary_marks: _,
             batched_zone_change_trigger_fired: _,
+            scoped_reveal_sets: _,
+            tracked_set_publication_generation: _,
         } = s;
         if let Some(combat) = s.combat.as_ref() {
             let crate::game::combat::CombatState {
@@ -47409,6 +47471,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_exile_from_top_until: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
+        pending_player_scope_reveal: _,
         pending_library_search_delivery: _,
         completed_hidden_search_audiences: _,
         pending_search_found_batch: _,
@@ -47425,6 +47488,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     object-growth lives in `objects` (stripped+compared by `eq_except_growable`), so
         //     excluding this single-object identity field cannot hide growth.
         resolution_source_relatch: _,
+        scoped_reveal_sets: _,
+        tracked_set_publication_generation: _,
     } = s;
 }
 
@@ -47776,6 +47841,9 @@ impl PartialEq for GameState {
             && self.tracked_object_sets == other.tracked_object_sets
             && self.next_tracked_set_id == other.next_tracked_set_id
             && self.chain_tracked_set_id == other.chain_tracked_set_id
+            && self.scoped_reveal_sets == other.scoped_reveal_sets
+            && self.tracked_set_publication_generation
+                == other.tracked_set_publication_generation
             && self.return_result_frames == other.return_result_frames
             && self.active_return_result_occurrence == other.active_return_result_occurrence
             && self.next_return_result_occurrence_id == other.next_return_result_occurrence_id
@@ -47941,6 +48009,7 @@ impl PartialEq for GameState {
             && self.pending_mass_library_order_choice
                 == other.pending_mass_library_order_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search
+            && self.pending_player_scope_reveal == other.pending_player_scope_reveal
             && self.pending_library_search_delivery == other.pending_library_search_delivery
             && self.completed_hidden_search_audiences
                 == other.completed_hidden_search_audiences
@@ -66147,6 +66216,27 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         ));
         let restored: GameState = serde_json::from_str(&serialized).expect("state should restore");
         assert_eq!(restored.stack_trigger_firings, state.stack_trigger_firings);
+        assert_eq!(
+            serde_json::to_string(&restored).expect("restored state should serialize"),
+            serialized
+        );
+    }
+
+    #[test]
+    fn scoped_reveal_sets_numeric_map_round_trips_populated() {
+        let mut state = GameState::new_two_player(17);
+        state.tracked_set_publication_generation = 7;
+        state
+            .scoped_reveal_sets
+            .insert(PlayerId(1), (7, vec![ObjectId(41), ObjectId(42)]));
+        state
+            .scoped_reveal_sets
+            .insert(PlayerId(0), (7, vec![ObjectId(31)]));
+
+        let serialized = serde_json::to_string(&state).expect("state should serialize");
+        assert!(serialized.contains("\"scoped_reveal_sets\":{\"0\":[7,[31]],\"1\":[7,[41,42]]}"));
+        let restored: GameState = serde_json::from_str(&serialized).expect("state should restore");
+        assert_eq!(restored.scoped_reveal_sets, state.scoped_reveal_sets);
         assert_eq!(
             serde_json::to_string(&restored).expect("restored state should serialize"),
             serialized

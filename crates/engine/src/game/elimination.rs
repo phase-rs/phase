@@ -1070,6 +1070,7 @@ pub(crate) fn eliminate_players(
         {
             debug_assert!(false, "scoped search elimination resume failed: {error}");
         }
+        super::effects::finish_player_scope_reveal_if_complete(state, events);
 
         // CR 800.4a + CR 800.4g: a copy announcement is reconciled with the
         // players still in the game: its prefix is replayed on the current
@@ -2201,6 +2202,14 @@ fn do_eliminate(
             }
             true
         });
+    if let Err(error) =
+        super::effects::settle_player_scope_reveal_after_departure(state, player, events)
+    {
+        debug_assert!(
+            false,
+            "player-scope reveal elimination resume failed: {error}"
+        );
+    }
     if let Some(pending) = state.pending_scoped_library_search.as_mut() {
         match &mut pending.phase {
             crate::types::game_state::ScopedLibrarySearchPhase::CollectAcceptance {
@@ -2256,6 +2265,12 @@ fn do_eliminate(
                 search_keys.retain(|searcher| *searcher != player);
             }
         }
+    }
+    if let Some(pending) = state.pending_player_scope_reveal.as_mut() {
+        pending.players.retain(|participant| *participant != player);
+        pending
+            .selections
+            .retain(|(participant, _)| *participant != player);
     }
     // CR 800.4a: "all objects … owned by that player leave the game", so a
     // departed seat has no hand left to discard and iterating it can only be a
@@ -3075,6 +3090,7 @@ fn retire_parked_resolution_work(state: &mut GameState) {
     state.pending_damage_post_counter = None;
     state.pending_exile_from_top_until = None;
     state.pending_scoped_library_search = None;
+    state.pending_player_scope_reveal = None;
     state.pending_library_search_delivery = None;
     state.pending_search_found_batch = None;
     state.pending_die_roll_instruction = None;

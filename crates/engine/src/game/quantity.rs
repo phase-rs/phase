@@ -6226,12 +6226,26 @@ fn resolve_ref(
         // `effects::publish_tracked_set`. Deliberately not routed through
         // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
         // under mode scoping not skipping is the correct semantics here.
-        QuantityRef::TrackedSetSize => state
-            .tracked_object_sets
-            .iter()
-            .max_by_key(|(id, _)| id.0)
-            .map(|(_, ids)| usize_to_i32_saturating(ids.len()))
-            .unwrap_or(0),
+        QuantityRef::TrackedSetSize => {
+            // CR 608.2c + CR 109.5: a player-scoped reveal fan-out publishes
+            // one clause-wide tracked set, but each seat's later continuation
+            // reads only the cards that seat revealed. The ledger is transient
+            // and populated only by RevealHand's AnyNumber choice path; all
+            // other tracked-set consumers retain the ordinary latest-set read.
+            if let Some(player) = ctx.scoped_player {
+                if let Some((generation, ids)) = state.scoped_reveal_sets.get(&player) {
+                    if *generation == state.tracked_set_publication_generation {
+                        return usize_to_i32_saturating(ids.len());
+                    }
+                }
+            }
+            state
+                .tracked_object_sets
+                .iter()
+                .max_by_key(|(id, _)| id.0)
+                .map(|(_, ids)| usize_to_i32_saturating(ids.len()))
+                .unwrap_or(0)
+        }
         // CR 608.2c + CR 400.7: Count only the members of the most recent tracked
         // set that also satisfy the inner filter. Used for "for each nontoken
         // creature you controlled that was destroyed this way" — the tracked set
@@ -6254,10 +6268,35 @@ fn resolve_ref(
             if crate::types::ability::member_filter_has_unsupported_selected_ref(filter) {
                 return 0;
             }
-            let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
-            else {
-                return 0;
+            let scoped_ids = if caused_by.is_none() && destination.is_none() {
+                ctx.scoped_player.and_then(|player| {
+                    state
+                        .scoped_reveal_sets
+                        .get(&player)
+                        .filter(|(generation, _)| {
+                            *generation == state.tracked_set_publication_generation
+                        })
+                        .map(|(_, ids)| ids.as_slice())
+                })
+            } else {
+                None
             };
+            let (set_id, ids): (crate::types::identifiers::TrackedSetId, &[ObjectId]) =
+                if let Some(ids) = scoped_ids {
+                    let Some((set_id, _)) =
+                        state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+                    else {
+                        return 0;
+                    };
+                    (*set_id, ids)
+                } else {
+                    let Some((set_id, ids)) =
+                        state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+                    else {
+                        return 0;
+                    };
+                    (*set_id, ids.as_slice())
+                };
             let count = ids
                 .iter()
                 .filter(|&&oid| {
@@ -6270,7 +6309,7 @@ fn resolve_ref(
                         None => true,
                         Some(cause) => state
                             .tracked_set_member_causes
-                            .get(set_id)
+                            .get(&set_id)
                             .and_then(|causes| causes.get(&oid))
                             .is_some_and(|member_cause| member_cause == cause),
                     };
@@ -6294,7 +6333,7 @@ fn resolve_ref(
                         )
                     };
                     let matches_filter =
-                        match tracked_member_read_authority(state, Some(*set_id), oid) {
+                        match tracked_member_read_authority(state, Some(set_id), oid) {
                             TrackedMemberRead::Snapshot(lki) => read_snapshot(oid, lki),
                             TrackedMemberRead::Live => read_live(oid),
                             TrackedMemberRead::Legacy

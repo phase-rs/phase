@@ -34264,6 +34264,42 @@ fn fused_reveal_hand_and_choose_populates_card_filter() {
 }
 
 #[test]
+fn kamahls_summons_binds_each_reveal_to_the_scoped_hand_owner() {
+    let def = parse_effect_chain(
+        "Each player may reveal any number of creature cards from their hand. Then each player creates a 2/2 green Bear creature token for each card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealHand {
+        target,
+        card_filter: TargetFilter::Typed(filter),
+        cardinality,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected per-player RevealHand, got {:?}", def.effect);
+    };
+    assert_eq!(*target, TargetFilter::Controller);
+    assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+    assert_eq!(*cardinality, ObjectSelectionCardinality::AnyNumber);
+    assert_eq!(def.player_scope, Some(PlayerFilter::All));
+
+    let token = def
+        .sub_ability
+        .as_deref()
+        .expect("the Bear instruction should follow the reveal");
+    let Effect::Token { count, .. } = &*token.effect else {
+        panic!("expected Bear token instruction, got {:?}", token.effect);
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize
+        }
+    );
+    assert_eq!(token.player_scope, Some(PlayerFilter::All));
+}
+
+#[test]
 fn parse_optional_reveal_hand_choice_marks_choice_optional() {
     let def = parse_effect_chain(
             "Look at target player's hand. You may choose a nonland card from it. That player discards that card.",
