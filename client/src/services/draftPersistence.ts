@@ -950,7 +950,11 @@ export async function clearDraftGuestRecovery(capability: DraftGuestCapability):
  */
 export function canonicalNativeDraftEndpoint(value: string): string | null {
   const url = parseWebSocketUrl(value.trim());
-  if (!url || url.username !== "" || url.password !== "" || url.search !== "") return null;
+  // The query is tested on `href` rather than `search`, which is "" for a bare
+  // trailing "?" that still serializes. With any fragment already refused, a
+  // literal "?" in the serialized form can only be the query delimiter, since
+  // a "?" in the path or userinfo percent-encodes to %3F.
+  if (!url || url.username !== "" || url.password !== "" || url.href.includes("?")) return null;
   return url.href;
 }
 

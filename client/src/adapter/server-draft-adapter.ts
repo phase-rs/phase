@@ -1535,8 +1535,9 @@ export class ServerDraftAdapter implements EngineAdapter {
         // Ownership of the seat is unknown: retire the incumbent (settling its
         // work) and the candidate. A close or an abort has already settled the
         // initialization; a timeout or a refusal settles it here. Nothing
-        // retries a reattach: this adapter schedules no retry and, as on main,
-        // no product code calls `reconnectDraft`.
+        // retries a reattach: this adapter schedules no retry, and the lifecycle
+        // store's native resume calls `reconnectDraft` once, on a fresh adapter
+        // that it disposes when the reattach fails.
         this.retireSwappedIncumbent(incumbent, sourceSocket, attachment.owner);
         // The server's `Error`, surfaced as the `Error` handler surfaces it on
         // an adopted socket: the reattach rejects with its reason and the same

@@ -671,7 +671,7 @@ describe("guest recovery records", () => {
         expect(output).toBe(canonical);
         expect(canonicalNativeDraftEndpoint(output!)).toBe(output);
       }
-      for (const refused of ["wss://u:p@h/", "wss://h/?t=1", "wss://h/#", "https://h/", " "]) {
+      for (const refused of ["wss://u:p@h/", "wss://h/?t=1", "wss://h/?", "wss://h/#", "https://h/", " "]) {
         expect(canonicalNativeDraftEndpoint(refused)).toBeNull();
       }
     });
