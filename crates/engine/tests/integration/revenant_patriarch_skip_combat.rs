@@ -141,7 +141,9 @@ fn cast_and_resolve(runner: &mut GameRunner, spell: ObjectId, target: PlayerId) 
                     .expect("target accepted");
             }
             WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass");
+                // CR 805.5b: the holding team passes together — and only the
+                // holding team, so a two-player window stays open for the cast.
+                let _ = runner.pass_holding_team();
             }
             other => panic!("unexpected waiting state: {other:?}"),
         }
@@ -205,7 +207,9 @@ fn pass_to(table: &mut Table, active: PlayerId, phase: Phase) -> u32 {
                 table.runner.declare_blockers(&[]).expect("no blocks");
             }
             WaitingFor::Priority { .. } => {
-                table.runner.act(GameAction::PassPriority).expect("pass");
+                // CR 805.5b: the holding team passes together — and only the
+                // holding team, so a two-player window keeps advancing.
+                let _ = table.runner.pass_holding_team();
             }
             other => panic!("unexpected waiting state: {other:?}"),
         }
@@ -324,7 +328,9 @@ fn another_players_combat_does_not_use_up_the_skip() {
 fn skip_created_during_a_combat_leaves_that_combat_untouched() {
     let mut table = table();
     pass_to(&mut table, P1, Phase::BeginCombat);
-    table.runner.act(GameAction::PassPriority).expect("pass");
+    // CR 805.5b: pass the holding team only — passing every seat would
+    // advance out of BeginCombat before the cast below.
+    let _ = table.runner.pass_holding_team();
     assert_eq!(table.runner.state().phase, Phase::BeginCombat);
     assert!(cast_patriarch(&mut table, 1, 4, P1));
     assert_eq!(pending_skips(&table, P1), 1);
@@ -355,7 +361,9 @@ fn skip_lands_on_an_additional_combat_phase_of_the_same_turn() {
         attacker_restriction_source: None,
         id: ExtraPhaseId::default(),
     });
-    table.runner.act(GameAction::PassPriority).expect("pass");
+    // CR 805.5b: pass the holding team only — passing every seat would
+    // advance out of BeginCombat before the cast below.
+    let _ = table.runner.pass_holding_team();
     cast_moment(&mut table, P1);
     assert_eq!(pending_skips(&table, P1), 1);
 
@@ -387,7 +395,9 @@ fn moment_of_silence_expires_at_cleanup_on_another_players_turn() {
 fn moment_of_silence_during_the_only_combat_expires_unused() {
     let mut table = table();
     pass_to(&mut table, P1, Phase::BeginCombat);
-    table.runner.act(GameAction::PassPriority).expect("pass");
+    // CR 805.5b: pass the holding team only — passing every seat would
+    // advance out of BeginCombat before the cast below.
+    let _ = table.runner.pass_holding_team();
     cast_moment(&mut table, P1);
     assert_eq!(pending_skips(&table, P1), 1, "reach guard: the skip armed");
 
@@ -444,7 +454,8 @@ fn pass_to_skip_choice(table: &mut Table) -> Vec<String> {
             );
             return candidates.iter().map(|c| c.description.clone()).collect();
         }
-        table.runner.act(GameAction::PassPriority).expect("pass");
+        // CR 805.5b: the holding team passes together.
+        let _ = table.runner.pass_holding_team();
     }
     panic!("P1 was never asked which skip applies");
 }
@@ -466,9 +477,11 @@ fn choose_skip(table: &mut Table, offered: &[String], label: &str) {
 fn both_skips_on_p1_in_their_main_phase() -> Table {
     let mut table = table();
     pass_to(&mut table, P1, Phase::PreCombatMain);
-    table.runner.act(GameAction::PassPriority).expect("pass");
+    // CR 805.5b: pass the holding team only — passing every seat would
+    // advance out of the main phase before the casts below.
+    let _ = table.runner.pass_holding_team();
     assert!(cast_patriarch(&mut table, 1, 4, P1));
-    table.runner.act(GameAction::PassPriority).expect("pass");
+    let _ = table.runner.pass_holding_team();
     cast_moment(&mut table, P1);
     assert_eq!(pending_skips(&table, P1), 2);
     table
@@ -654,7 +667,8 @@ fn the_affected_player_leaving_at_the_choice_ends_their_turn() {
         ) {
             break;
         }
-        runner.act(GameAction::PassPriority).expect("pass");
+        // CR 805.5b: the holding team passes together.
+        let _ = runner.pass_holding_team();
     }
     assert!(
         matches!(
@@ -704,7 +718,8 @@ fn next_combat_requirement_waits_past_a_skipped_combat_phase() {
         match table.runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } if table.runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => {
-                table.runner.act(GameAction::PassPriority).expect("pass");
+                // CR 805.5b: the holding team passes together.
+                let _ = table.runner.pass_holding_team();
             }
             WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
                 table
@@ -731,7 +746,8 @@ fn next_combat_requirement_waits_past_a_skipped_combat_phase() {
         ) {
             break;
         }
-        table.runner.act(GameAction::PassPriority).expect("pass");
+        // CR 805.5b: the holding team passes together.
+        let _ = table.runner.pass_holding_team();
     }
     assert!(
         table.runner.declare_attackers(&[]).is_err(),
@@ -763,7 +779,8 @@ fn pass_team_turn_to(runner: &mut GameRunner, active: PlayerId, phase: Phase) ->
                 runner.declare_attackers(&[]).expect("no attackers");
             }
             WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass");
+                // CR 805.5b: the holding team passes together.
+                let _ = runner.pass_holding_team();
             }
             other => panic!("unexpected waiting state: {other:?}"),
         }

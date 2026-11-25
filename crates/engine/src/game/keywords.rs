@@ -1652,6 +1652,15 @@ pub fn activate_ninjutsu(
     creature_to_return: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), String> {
+    // CR 702.61a + CR 702.61b: while a spell with split second is on the stack, players can't
+    // activate abilities that aren't mana abilities. CR 702.49a: ninjutsu (and every
+    // ninjutsu-family variant routed here) is an activated ability that isn't a mana ability.
+    if stack_has_split_second(state) {
+        return Err(
+            "Can't activate a Ninjutsu-family ability while a spell with split second is on the stack"
+                .to_string(),
+        );
+    }
     // CR 903.8: Commander tax applies to casting, not to ninjutsu activation.
     let p = &state.players[player.0 as usize];
     if !p.hand.contains(&ninjutsu_obj_id) && !state.command_zone.contains(&ninjutsu_obj_id) {

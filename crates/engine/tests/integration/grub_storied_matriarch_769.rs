@@ -4631,12 +4631,17 @@ fn pass_until(runner: &mut GameRunner, stop: impl Fn(&GameRunner) -> bool) -> Ve
         if stop(runner) {
             return events;
         }
+        // CR 805.5b: a holder-only pass never advances a shared team — pass
+        // the whole holding team through the window.
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            events.extend(runner.pass_holding_team().expect("passing must succeed"));
+            continue;
+        }
         let action = match runner.state().waiting_for {
             WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
                 attacks: vec![],
                 bands: vec![],
             },
-            WaitingFor::Priority { .. } => GameAction::PassPriority,
             _ => return events,
         };
         events.extend(runner.act(action).expect("passing must succeed").events);
@@ -4649,12 +4654,20 @@ fn pass_until(runner: &mut GameRunner, stop: impl Fn(&GameRunner) -> bool) -> Ve
 fn resolve_stack(runner: &mut GameRunner) -> Vec<GameEvent> {
     let mut events = Vec::new();
     for _ in 0..12 {
+        // CR 805.5b: pass the whole holding team through a live stack.
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && !runner.state().stack.is_empty()
+        {
+            events.extend(
+                runner
+                    .pass_holding_team()
+                    .expect("resolving the stack must succeed"),
+            );
+            continue;
+        }
         let action = match runner.state().waiting_for {
             WaitingFor::OptionalEffectChoice { .. } => {
                 GameAction::DecideOptionalEffect { accept: false }
-            }
-            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
-                GameAction::PassPriority
             }
             _ => return events,
         };
@@ -9158,12 +9171,17 @@ fn bow_choice_precedes_the_lore_counter_and_both_triggers_share_one_prompt() {
         let (mut seen, mut tally) = (Vec::new(), Vec::new());
         tally_stack(&branch, &mut seen, &mut tally);
         for _ in 0..12 {
+            // CR 805.5b: pass the whole holding team through a live stack.
+            if matches!(branch.state().waiting_for, WaitingFor::Priority { .. })
+                && !branch.state().stack.is_empty()
+            {
+                branch.pass_holding_team().expect("resolve the batch");
+                tally_stack(&branch, &mut seen, &mut tally);
+                continue;
+            }
             let action = match branch.state().waiting_for {
                 WaitingFor::OptionalEffectChoice { .. } => {
                     GameAction::DecideOptionalEffect { accept: false }
-                }
-                WaitingFor::Priority { .. } if !branch.state().stack.is_empty() => {
-                    GameAction::PassPriority
                 }
                 _ => break,
             };
@@ -10003,6 +10021,13 @@ fn etali_attacks_and_p1_casts(
         .events;
     let mut picks = picks.iter().copied();
     for _ in 0..24 {
+        // CR 805.5b: pass the whole holding team through Etali's stack.
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && !runner.state().stack.is_empty()
+        {
+            events.extend(runner.pass_holding_team().expect("Etali resolves"));
+            continue;
+        }
         let action = match runner.state().waiting_for {
             WaitingFor::CastOffer { player, .. } => {
                 assert_eq!(
@@ -10012,9 +10037,6 @@ fn etali_attacks_and_p1_casts(
                 GameAction::FreeCastWindowChoice {
                     selection: picks.next(),
                 }
-            }
-            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
-                GameAction::PassPriority
             }
             WaitingFor::Priority { .. } => return events,
             ref other => panic!("unexpected prompt while Etali resolves: {other:?}"),

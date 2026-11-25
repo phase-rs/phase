@@ -234,7 +234,9 @@ fn bow_end_step_below_eight_offers_no_payment_and_keeps_bow_face_up() {
                 if runner.state().stack.is_empty() {
                     break;
                 }
-                runner.act(GameAction::PassPriority).unwrap();
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             other => panic!("unexpected prompt {other:?}"),
         }
@@ -358,7 +360,9 @@ fn bow_end_step_at_eight_taps_and_abandons() {
                 if runner.state().stack.is_empty() {
                     break;
                 }
-                runner.act(GameAction::PassPriority).unwrap();
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             other => panic!("unexpected prompt {other:?}"),
         }
@@ -554,7 +558,9 @@ fn bow_end_step_split_power_across_heroes_abandons() {
                 if runner.state().stack.is_empty() {
                     break;
                 }
-                runner.act(GameAction::PassPriority).unwrap();
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             other => panic!("unexpected prompt {other:?}"),
         }
@@ -654,7 +660,9 @@ fn bow_end_step_conceding_current_hero_passes_payment_to_survivors() {
                 if runner.state().stack.is_empty() {
                     break;
                 }
-                runner.act(GameAction::PassPriority).unwrap();
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             other => panic!("unexpected prompt {other:?}"),
         }
@@ -862,7 +870,9 @@ fn bow_end_step_conceded_stolen_creature_pays_nothing() {
                 if runner.state().stack.is_empty() {
                     break;
                 }
-                runner.act(GameAction::PassPriority).unwrap();
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             other => panic!("unexpected prompt {other:?}"),
         }
@@ -1124,7 +1134,9 @@ fn bow_end_step_conceded_animator_artifact_pays_nothing() {
                 if runner.state().stack.is_empty() {
                     break;
                 }
-                runner.act(GameAction::PassPriority).unwrap();
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             other => panic!("unexpected prompt {other:?}"),
         }
@@ -1229,7 +1241,9 @@ fn bow_end_step_split_power_below_eight_taps_nothing_and_keeps_bow() {
                 if runner.state().stack.is_empty() {
                     break;
                 }
-                runner.act(GameAction::PassPriority).unwrap();
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             other => panic!("unexpected prompt {other:?}"),
         }
@@ -1359,7 +1373,9 @@ fn bow_end_step_partial_selection_below_eight_taps_nothing() {
                 if runner.state().stack.is_empty() {
                     break;
                 }
-                runner.act(GameAction::PassPriority).unwrap();
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             other => panic!("unexpected prompt {other:?}"),
         }
@@ -1466,7 +1482,9 @@ fn bow_end_step_negative_power_counts_against_the_total() {
                 if runner.state().stack.is_empty() {
                     break;
                 }
-                runner.act(GameAction::PassPriority).unwrap();
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             other => panic!("unexpected prompt {other:?}"),
         }

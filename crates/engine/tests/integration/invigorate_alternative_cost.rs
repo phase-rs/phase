@@ -221,9 +221,11 @@ fn cast_loop(
                 return trace;
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return trace,
+            // CR 805.5b: pass the whole holding team; a holder-only pass
+            // never advances a shared team.
             WaitingFor::Priority { .. } => {
                 runner
-                    .act(GameAction::PassPriority)
+                    .pass_holding_team()
                     .expect("priority pass should succeed");
             }
             other => panic!("unexpected prompt: {other:?}"),
@@ -757,10 +759,18 @@ fn finish_resolution(runner: &mut GameRunner) {
     for _ in 0..16 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
-            WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+            // CR 805.5b: pass the whole holding team through a live stack. A
+            // ManaPayment PassPriority finalizes payment instead and keeps
+            // its own arm.
+            WaitingFor::Priority { .. } => {
+                runner
+                    .pass_holding_team()
+                    .expect("priority pass should succeed");
+            }
+            WaitingFor::ManaPayment { .. } => {
                 runner
                     .act(GameAction::PassPriority)
-                    .expect("priority pass should succeed");
+                    .expect("mana payment should finalize");
             }
             other => panic!("unexpected prompt while resolving: {other:?}"),
         }
