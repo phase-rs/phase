@@ -9336,9 +9336,9 @@ fn evaluate_replacement_condition(
         // replacement) when this would be the first draw of a turn player
         // in the draw step (`cards_drawn_this_step == 0`); `true` otherwise.
         // CR 805.4 + CR 805.4b: on a shared team turn each player on the
-        // active team draws in that team's draw step, and (CR 805.9) there are
-        // multiple active players, so each of them is exempt, not only
-        // `state.active_player`.
+        // active team draws in that team's draw step, and "your draw step" is
+        // the active team's draw step for each member (CR 805.4a), so each of
+        // them is exempt, not only `state.active_player`.
         ReplacementCondition::ExceptFirstDrawInDrawStep => match event {
             ProposedEvent::Draw { player_id, .. } => {
                 let in_draw_step = state.phase == crate::types::phase::Phase::Draw;
