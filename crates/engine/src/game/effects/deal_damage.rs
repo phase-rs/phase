@@ -12304,8 +12304,8 @@ mod tests {
     /// CR 608.2c + CR 608.2d: When a `DamageTail::Caller` instruction pauses at
     /// `WaitingFor::DistributeAmong` (`ResolutionCandidates`), `resolve_chain_body`
     /// seeds `AwaitingDelivery` on the parked rider. Answering via `apply_as_current`
-    /// routes through `resume_resolution_division` -> `fold_awaited_damage_events` ->
-    /// `publish_awaited_damage_result`, so the rider sees the divided total (5).
+    /// resumes the division under its delivery owner and publishes the owned
+    /// receipts, so the rider sees the divided total (5).
     #[test]
     fn resolution_division_pauses_then_publishes_awaited_damage_result() {
         let mut state = GameState::new_two_player(42);

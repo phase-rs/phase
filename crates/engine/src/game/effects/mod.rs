@@ -30962,7 +30962,7 @@ fn resolve_chain_body(
 
     // CR 608.2c + CR 616.1: a remaining continuation node of an already-paused damage
     // instruction (`ResumeDamageBatch` or `ContinuationPortion`) folds its own
-    // `DamageDealt` events into the awaiting rider, and finalizes it when that
+    // delivery receipts into the awaiting rider and finalizes it when that
     // rider is the immediate child and the instruction has now finished.
     let continuation_damage_owned = if let Some(owner) =
         damage_delivery_owner.filter(|_| is_damage_continuation_node(ability))
