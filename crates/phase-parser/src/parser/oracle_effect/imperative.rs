@@ -1050,7 +1050,7 @@ fn parse_numeric_imperative_ast_with_bare_card_source(
         }
         // CR 119.3: the life amount is the shared count position.
         let slot =
-            super::parse_verb_count_slot(after_lose, ctx).filter(|slot| is_life_noun(slot.noun))?;
+            super::parse_count_slot(after_lose, ctx).filter(|slot| is_life_noun(slot.noun))?;
         return Some(NumericImperativeAst::LoseLife { amount: slot.count });
     }
 

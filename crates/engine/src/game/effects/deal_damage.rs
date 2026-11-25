@@ -5375,15 +5375,8 @@ fn resolve_each_player_portions(
                         comparator,
                         value,
                     } => {
-                        let threshold = crate::game::quantity::resolve_quantity_with_ctx(
-                            state,
-                            value,
-                            ability.controller,
-                            crate::game::quantity::QuantityContext {
-                                scoped_player: Some(p.id),
-                                granting_object: ability.context.granting_object,
-                                ..crate::game::quantity::QuantityContext::new(ability.source_id)
-                            },
+                        let threshold = crate::game::quantity::resolve_quantity_scoped_for_ability(
+                            state, value, ability, p.id,
                         );
                         crate::game::players::matches_relation(
                             state,
@@ -5434,12 +5427,11 @@ fn resolve_each_player_portions(
         // object targets so an `ObjectManaValue { scope: Target }` leaf (Lady
         // Loki's "that nonland card's mana value" — the injected exile-until hit)
         // resolves against the hit rather than to 0.
-        let dmg = crate::game::quantity::resolve_quantity_scoped_with_targets(
+        let dmg = crate::game::quantity::resolve_quantity_scoped_for_ability(
             state,
             amount_expr,
-            ability.source_id,
+            ability,
             *pid,
-            &ability.targets,
         )
         .max(0) as u32;
         if dmg > 0 {
@@ -5457,12 +5449,11 @@ fn resolve_each_player_portions(
                         // opponent AFTER the first (once a replacement pause
                         // occurs) would pre-resolve an `ObjectManaValue
                         // { scope: Target }` leaf to 0.
-                        let next_dmg = crate::game::quantity::resolve_quantity_scoped_with_targets(
+                        let next_dmg = crate::game::quantity::resolve_quantity_scoped_for_ability(
                             state,
                             amount_expr,
-                            ability.source_id,
+                            ability,
                             next_pid,
-                            &ability.targets,
                         )
                         .max(0) as u32;
                         (next_dmg > 0).then_some((TargetRef::Player(next_pid), next_dmg))
@@ -6725,6 +6716,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         // The exile-until hit — Target, mana value 1.
@@ -6882,6 +6875,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         // Two exile-until hits — both bound as object targets on the parent, so the

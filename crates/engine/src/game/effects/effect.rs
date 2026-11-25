@@ -3372,6 +3372,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: cast_spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let static_def = StaticDefinition::continuous()
@@ -3658,6 +3660,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: cast_spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let static_def = StaticDefinition::continuous()
