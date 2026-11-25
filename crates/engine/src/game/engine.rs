@@ -23432,10 +23432,10 @@ mod stage2_injector_tests {
     ///
     /// The next in-test site takes the same route: `game/triggers.rs`'s
     /// `accepted_triggered_mana_pauses` fixture constructs each of the five pauses
-    /// `is_accepted_triggered_mana_pause` admits, for the F1 legacy-save predicate's
-    /// carrier row. It is `#[cfg(test)]`-only and mints no production producer; the
-    /// producer and reader multisets are unchanged, so the partition moves from
-    /// `4 / 9 / 42` to `4 / 9 / 43`.
+    /// `is_accepted_triggered_mana_pause` admits, for the legacy-save placement predicate's
+    /// carrier row (`placement_may_be_under_way_is_each_carrier`). It is `#[cfg(test)]`-only
+    /// and mints no production producer; the producer and reader multisets are unchanged,
+    /// so the partition moves from `4 / 9 / 42` to `4 / 9 / 43`.
     #[test]
     fn the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event() {
         /// Every `.rs` under the crate's `src`.
@@ -23491,8 +23491,8 @@ mod stage2_injector_tests {
              readers (including the two optional-subject projection reads), and 43 \
              `#[cfg(test)]` sites, including the ChooseOneOf, retained optional/outer, \
              retained repeat/choice restore fixtures, and the `phase_out` suspension fixture \
-             that parks a typed prompt on a clone, and the F1 predicate fixture that constructs each
-             accepted triggered-mana pause (both test-only: neither mints a producer).\n\
+             that parks a typed prompt on a clone, and the legacy-placement predicate fixture that \
+             constructs each accepted triggered-mana pause (both test-only: neither mints a producer).\n\
              producers={producers:#?}\nreaders={readers:#?}"
         );
         // The one delta against the first pin, named rather than counted away: the `phase_out`
