@@ -1987,13 +1987,11 @@ fn scoped_player_or_controller(
     source_controller: Option<PlayerId>,
     scoped_iteration_player: Option<PlayerId>,
 ) -> Option<PlayerId> {
-    // CR 109.5 + CR 120.3: `ControllerRef::ScopedPlayer` first uses an
-    // ability-scoped binding, then the per-player binding from
-    // DamageEachPlayer quantity resolution; `source_controller` remains the
-    // fallback for "you"/"your" when no scoped player is active.
-    ability
-        .and_then(|a| a.scoped_player)
-        .or(scoped_iteration_player)
+    // CR 109.5 + CR 120.3: damage quantities can explicitly bind
+    // `ControllerRef::ScopedPlayer` to the current recipient while "you"
+    // stays bound to the ability's controller.
+    scoped_iteration_player
+        .or_else(|| ability.and_then(|a| a.scoped_player))
         .or_else(|| crate::game::quantity::triggering_event_player(state))
         .or(source_controller)
 }
@@ -6055,6 +6053,39 @@ impl BattlefieldEntrantProjection {
         pre_entry: Cow<'_, GameState>,
         body: &GameObject,
     ) -> Option<Self> {
+        Self::from_no_zone_on_pre_entry_board(pre_entry, body, true)
+    }
+
+    pub(crate) fn for_outside_game_card(state: &GameState, event: &ProposedEvent) -> Option<Self> {
+        let ProposedEvent::OutsideGameCardEntry {
+            entry_ref,
+            destination: Zone::Battlefield,
+            enter_tapped,
+            enter_with_choices,
+            controller_override,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        let entry = state.outside_game_card_entry(*entry_ref)?;
+        let mut body = entry.object.projected().clone();
+        body.controller = controller_override.unwrap_or(entry.controller);
+        body.tapped = enter_tapped.resolve(false);
+        body.timestamp = state.next_timestamp;
+        body.chosen_attributes.extend(
+            crate::types::proposed_event::EntryChoices::of(enter_with_choices)
+                .iter()
+                .cloned(),
+        );
+        Self::from_no_zone_on_pre_entry_board(Cow::Borrowed(state), &body, false)
+    }
+
+    fn from_no_zone_on_pre_entry_board(
+        pre_entry: Cow<'_, GameState>,
+        body: &GameObject,
+        token: bool,
+    ) -> Option<Self> {
         let mut placed = body.clone();
         placed.phase_status = crate::game::game_object::PhaseStatus::PhasedIn;
         if placed.zone != Zone::Battlefield {
@@ -6063,22 +6094,27 @@ impl BattlefieldEntrantProjection {
         let entrant = placed.id;
         let pins = crate::game::layers::EntryPopulationRewrites::for_token(&pre_entry, &placed);
         #[cfg(any(test, feature = "test-support"))]
-        TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
-            let mut counts = work.get();
-            counts.projections += 1;
-            counts.projection_state_clones += usize::from(matches!(pre_entry, Cow::Borrowed(_)));
-            work.set(counts);
-        });
+        if token {
+            TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.projections += 1;
+                counts.projection_state_clones +=
+                    usize::from(matches!(pre_entry, Cow::Borrowed(_)));
+                work.set(counts);
+            });
+        }
         let mut scratch = pre_entry.into_owned();
         scratch.liminal_entries.remove(&entrant);
         if scratch.battlefield.contains(&entrant) {
             scratch.objects.insert(entrant, placed);
-        } else {
+        } else if token {
             crate::game::effects::token::place_liminal_token_on_battlefield(
                 &mut scratch,
                 entrant,
                 placed,
             );
+        } else {
+            crate::game::zones::place_new_object(&mut scratch, placed);
         }
         pins.apply(&mut scratch);
         Some(Self::finish(scratch, None, entrant, None))
@@ -6682,6 +6718,10 @@ pub fn matches_target_filter_on_battlefield_entry(
     ctx: &FilterContext<'_>,
 ) -> bool {
     match event {
+        ProposedEvent::OutsideGameCardEntry { .. } => {
+            BattlefieldEntrantProjection::for_outside_game_card(state, event)
+                .is_some_and(|projection| projection.matches(filter, ctx))
+        }
         ProposedEvent::ZoneChange {
             object_id,
             to,
@@ -11687,12 +11727,20 @@ fn matches_filter_prop(
             }
             !obj.kickers_paid.is_empty()
         }
-        // CR 605.1: Delegate to the single mana-ability classifier instead of
-        // duplicating the definition at the filter layer.
-        FilterProp::HasManaAbility => obj
-            .abilities
-            .iter()
-            .any(crate::game::mana_abilities::is_mana_ability),
+        // CR 605.1: both mana-ability categories — an activated one (CR 605.1a,
+        // via the single activated classifier) or a triggered one (CR 605.1b,
+        // via the static definition classifier over the live trigger list).
+        // Both arms read live lists, so granted abilities count (R-PS3).
+        FilterProp::HasManaAbility => {
+            obj.abilities
+                .iter()
+                .any(crate::game::mana_abilities::is_mana_ability)
+                || obj.trigger_definitions.iter_all().any(|entry| {
+                    crate::game::mana_abilities::is_triggered_mana_ability_definition(
+                        &entry.definition,
+                    )
+                })
+        }
         // CR 113.1 + CR 113.3: "no abilities" means no keyword abilities and
         // no activated, triggered, replacement, or static abilities.
         FilterProp::HasNoAbilities => object_has_no_abilities(obj),
@@ -30862,6 +30910,7 @@ mod entry_projection_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         let record = |proposed: ProposedEvent| PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed,
             token_substitute: None,

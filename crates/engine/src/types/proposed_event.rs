@@ -1079,6 +1079,24 @@ pub enum ProposedEvent {
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
+    /// CR 400.11b + CR 614.12: admit a non-token card from outside the game.
+    /// The liminal reference reserves its first in-game identity.
+    OutsideGameCardEntry {
+        entry_ref: ObjectId,
+        destination: Zone,
+        #[serde(default)]
+        enter_tapped: EtbTapState,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, u32)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enter_with_choices: Option<Box<EntryChoices>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller_override: Option<PlayerId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enter_as_copy: Option<Box<CopyTokenSpec>>,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+        applied: HashSet<AppliedReplacementKey>,
+    },
     Discard {
         player_id: PlayerId,
         object_id: ObjectId,
@@ -1526,7 +1544,8 @@ impl ProposedEvent {
         match self {
             ProposedEvent::ZoneChange { enter_tapped, .. }
             | ProposedEvent::CreateToken { enter_tapped, .. }
-            | ProposedEvent::TokenEntry { enter_tapped, .. } => Some(*enter_tapped),
+            | ProposedEvent::TokenEntry { enter_tapped, .. }
+            | ProposedEvent::OutsideGameCardEntry { enter_tapped, .. } => Some(*enter_tapped),
             _ => None,
         }
     }
@@ -1555,6 +1574,7 @@ impl ProposedEvent {
             | ProposedEvent::MoveCounter { .. }
             | ProposedEvent::CreateToken { .. }
             | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::OutsideGameCardEntry { .. }
             | ProposedEvent::Discard { .. }
             | ProposedEvent::Tap { .. }
             | ProposedEvent::Untap { .. }
@@ -1597,6 +1617,7 @@ impl ProposedEvent {
             | ProposedEvent::MoveCounter { .. }
             | ProposedEvent::CreateToken { .. }
             | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::OutsideGameCardEntry { .. }
             | ProposedEvent::Discard { .. }
             | ProposedEvent::Tap { .. }
             | ProposedEvent::Untap { .. }
@@ -1616,7 +1637,8 @@ impl ProposedEvent {
         match self {
             ProposedEvent::ZoneChange { enter_tapped, .. }
             | ProposedEvent::CreateToken { enter_tapped, .. }
-            | ProposedEvent::TokenEntry { enter_tapped, .. } => Some(enter_tapped),
+            | ProposedEvent::TokenEntry { enter_tapped, .. }
+            | ProposedEvent::OutsideGameCardEntry { enter_tapped, .. } => Some(enter_tapped),
             _ => None,
         }
     }
@@ -1641,6 +1663,7 @@ impl ProposedEvent {
             | ProposedEvent::MoveCounter { applied, .. }
             | ProposedEvent::CreateToken { applied, .. }
             | ProposedEvent::TokenEntry { applied, .. }
+            | ProposedEvent::OutsideGameCardEntry { applied, .. }
             | ProposedEvent::Discard { applied, .. }
             | ProposedEvent::Tap { applied, .. }
             | ProposedEvent::Untap { applied, .. }
@@ -1676,6 +1699,7 @@ impl ProposedEvent {
             | ProposedEvent::MoveCounter { applied, .. }
             | ProposedEvent::CreateToken { applied, .. }
             | ProposedEvent::TokenEntry { applied, .. }
+            | ProposedEvent::OutsideGameCardEntry { applied, .. }
             | ProposedEvent::Discard { applied, .. }
             | ProposedEvent::Tap { applied, .. }
             | ProposedEvent::Untap { applied, .. }
@@ -1790,6 +1814,7 @@ impl ProposedEvent {
             | ProposedEvent::RemoveCounter { .. }
             | ProposedEvent::MoveCounter { .. }
             | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::OutsideGameCardEntry { .. }
             | ProposedEvent::Discard { .. }
             | ProposedEvent::Tap { .. }
             | ProposedEvent::Untap { .. }
@@ -1863,6 +1888,7 @@ impl ProposedEvent {
             | ProposedEvent::RemoveCounter { .. }
             | ProposedEvent::MoveCounter { .. }
             | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::OutsideGameCardEntry { .. }
             | ProposedEvent::Discard { .. }
             | ProposedEvent::Tap { .. }
             | ProposedEvent::Untap { .. }
@@ -2064,6 +2090,18 @@ impl ProposedEvent {
                 .get(entry_ref)
                 .map(|entry| entry.object.projected().controller)
                 .unwrap_or(PlayerId(0)),
+            ProposedEvent::OutsideGameCardEntry {
+                entry_ref,
+                controller_override,
+                ..
+            } => controller_override
+                .or_else(|| {
+                    state
+                        .liminal_entries
+                        .get(entry_ref)
+                        .map(|entry| entry.controller)
+                })
+                .unwrap_or(PlayerId(0)),
             // CR 701.3a: The attaching Aura/Equipment's controller is the
             // affected player — they are the one who would choose a
             // replacement order (CR 616.1) and bind any "as it becomes
@@ -2092,7 +2130,8 @@ impl ProposedEvent {
             // CR 614.1a: the conniving permanent is the affected object the
             // `valid_card` filter ("a creature you control") is matched against.
             | ProposedEvent::Connive { object_id, .. } => Some(*object_id),
-            ProposedEvent::TokenEntry { entry_ref, .. } => Some(*entry_ref),
+            ProposedEvent::TokenEntry { entry_ref, .. }
+            | ProposedEvent::OutsideGameCardEntry { entry_ref, .. } => Some(*entry_ref),
             ProposedEvent::AddCounter { placement, .. } => placement.object_id(),
             ProposedEvent::MoveCounter {
                 source_id,

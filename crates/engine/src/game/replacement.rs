@@ -2572,6 +2572,14 @@ pub(crate) fn replacement_event_survives(state: &GameState, proposed: &ProposedE
                 alive(entry.object.projected().owner) && alive(entry.object.projected().controller)
             })
         }
+        ProposedEvent::OutsideGameCardEntry {
+            entry_ref,
+            controller_override,
+            ..
+        } => state.liminal_entries.get(entry_ref).is_some_and(|entry| {
+            alive(entry.object.projected().owner)
+                && alive(controller_override.unwrap_or(entry.controller))
+        }),
         ProposedEvent::CreateToken { owner, .. } => alive(*owner),
         ProposedEvent::Draw { player_id, .. }
         | ProposedEvent::Scry { player_id, .. }
@@ -3000,6 +3008,9 @@ fn change_zone_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameSt
         } | ProposedEvent::TokenEntry {
             redirected_to: None,
             ..
+        } | ProposedEvent::OutsideGameCardEntry {
+            destination: Zone::Battlefield,
+            ..
         }
     ) || matches!(
         event,
@@ -3023,6 +3034,9 @@ fn change_zone_applier(
 fn moved_matcher(event: &ProposedEvent, source: ObjectId, _state: &GameState) -> bool {
     match event {
         ProposedEvent::ZoneChange { .. } => true,
+        ProposedEvent::OutsideGameCardEntry { destination, .. } => {
+            *destination == Zone::Battlefield
+        }
         // CR 614.6: after a redirect, the battlefield entry no longer happens,
         // so the entrant's remaining as-enters replacements do not apply.
         ProposedEvent::TokenEntry {
@@ -6889,7 +6903,7 @@ fn create_entry_copy_spec_for_replacement(
     })
 }
 
-fn retarget_intrinsic_entry_counters_to_copy(
+pub(super) fn retarget_intrinsic_entry_counters_to_copy(
     enter_with_counters: &mut Vec<(CounterType, u32)>,
     copy_spec: &CopyTokenSpec,
     entrant_abilities: crate::types::proposed_event::EntrantAbilities,
@@ -8756,8 +8770,10 @@ fn replacement_valid_card_matches(
         return matches_target_filter_on_event_snapshot(state, subject, filter, ctx);
     }
     if repl_def.event == ReplacementEvent::ChangeZone
-        || (matches!(event, ProposedEvent::TokenEntry { .. })
-            && repl_def.event == ReplacementEvent::Moved)
+        || (matches!(
+            event,
+            ProposedEvent::TokenEntry { .. } | ProposedEvent::OutsideGameCardEntry { .. }
+        ) && repl_def.event == ReplacementEvent::Moved)
     {
         // CR 614.12: another source's entry replacement reads the entrant as it would exist on
         // the battlefield; the entrant's own is checked through that projection separately
@@ -9315,22 +9331,26 @@ fn evaluate_replacement_condition(
             _ => false,
         },
         // CR 121.1 + CR 504.1 + CR 614.6: "except the first one you draw in
-        // each of your draw steps" — applies to every Draw EXCEPT the active
+        // each of your draw steps" — applies to every Draw EXCEPT a turn
         // player's first draw of the draw step. Returns `false` (suppress
-        // replacement) when this would be the first draw of the active player
+        // replacement) when this would be the first draw of a turn player
         // in the draw step (`cards_drawn_this_step == 0`); `true` otherwise.
+        // CR 805.4 + CR 805.4b: on a shared team turn each player on the
+        // active team draws in that team's draw step, and "your draw step" is
+        // the active team's draw step for each member (CR 805.4a), so each of
+        // them is exempt, not only `state.active_player`.
         ReplacementCondition::ExceptFirstDrawInDrawStep => match event {
             ProposedEvent::Draw { player_id, .. } => {
                 let in_draw_step = state.phase == crate::types::phase::Phase::Draw;
-                let drawer_is_active = *player_id == state.active_player;
+                let drawer_is_active = super::players::is_turn_player(state, *player_id);
                 let already_drawn = state
                     .players
                     .iter()
                     .find(|p| p.id == *player_id)
                     .map(|p| p.cards_drawn_this_step)
                     .unwrap_or(0);
-                // Suppress when this would be the FIRST draw of the active
-                // player's draw step.
+                // Suppress when this would be a turn player's FIRST draw of the
+                // draw step.
                 !(in_draw_step && drawer_is_active && already_drawn == 0)
             }
             _ => false,
@@ -9470,6 +9490,7 @@ fn apply_state_level_gates(
                     ReplacementEvent::ChangeZone | ReplacementEvent::Moved
                 ) && *dest_zone == Zone::Battlefield
             }
+            ProposedEvent::OutsideGameCardEntry { destination, .. } => destination == dest_zone,
             _ => false,
         };
         if !matches_dest {
@@ -9598,7 +9619,7 @@ fn replacement_event_keys_for_event(event: &ProposedEvent) -> Vec<ReplacementEve
             push_replacement_event_key(&mut keys, ReplacementEvent::CreateToken);
             push_replacement_event_key(&mut keys, ReplacementEvent::ChangeZone);
         }
-        ProposedEvent::TokenEntry { .. } => {
+        ProposedEvent::TokenEntry { .. } | ProposedEvent::OutsideGameCardEntry { .. } => {
             push_replacement_event_key(&mut keys, ReplacementEvent::ChangeZone);
             push_replacement_event_key(&mut keys, ReplacementEvent::Moved);
         }
@@ -9758,7 +9779,12 @@ fn object_replacement_candidate_applies_on_entry_board(
             to: Zone::Battlefield,
             ..
         } => Some(*object_id),
-        ProposedEvent::TokenEntry { entry_ref, .. } => Some(*entry_ref),
+        ProposedEvent::TokenEntry { entry_ref, .. }
+        | ProposedEvent::OutsideGameCardEntry {
+            entry_ref,
+            destination: Zone::Battlefield,
+            ..
+        } => Some(*entry_ref),
         _ => None,
     };
     let discarding_object_id = match event {
@@ -10030,6 +10056,7 @@ fn object_replacement_candidate_applies_on_entry_board(
                     ReplacementEvent::ChangeZone | ReplacementEvent::Moved
                 ) && *dest_zone == Zone::Battlefield
             }
+            ProposedEvent::OutsideGameCardEntry { destination, .. } => destination == dest_zone,
             _ => false,
         };
         if !matches_dest {
@@ -10427,7 +10454,10 @@ fn object_replacement_candidate_applies_on_entry_board(
     // would exist on the battlefield.
     if is_liminal_source
         && is_entering
-        && matches!(event, ProposedEvent::TokenEntry { .. })
+        && matches!(
+            event,
+            ProposedEvent::TokenEntry { .. } | ProposedEvent::OutsideGameCardEntry { .. }
+        )
         && !entrant_retains_own_entry_replacement_on_entry_board(
             state,
             event,
@@ -10454,6 +10484,12 @@ fn entrant_retains_own_entry_replacement_on_entry_board(
     def: &ReplacementDefinition,
     entry_board: Option<&GameState>,
 ) -> bool {
+    if matches!(event, ProposedEvent::OutsideGameCardEntry { .. }) {
+        return crate::game::filter::BattlefieldEntrantProjection::for_outside_game_card(
+            state, event,
+        )
+        .is_some_and(|projection| projection.retains_replacement(def));
+    }
     let ProposedEvent::TokenEntry { entry_ref, .. } = event else {
         return true;
     };
@@ -10477,7 +10513,12 @@ fn entrant_retains_own_entry_replacement_on_entry_board(
 /// characteristics live in `GameState::liminal_entries`.
 fn liminal_entry_ref(event: &ProposedEvent) -> Option<ObjectId> {
     match event {
-        ProposedEvent::TokenEntry { entry_ref, .. } => Some(*entry_ref),
+        ProposedEvent::TokenEntry { entry_ref, .. }
+        | ProposedEvent::OutsideGameCardEntry {
+            entry_ref,
+            destination: Zone::Battlefield,
+            ..
+        } => Some(*entry_ref),
         ProposedEvent::ZoneChange {
             object_id,
             to: Zone::Battlefield,
@@ -10719,11 +10760,19 @@ fn legacy_object_replacement_candidates(
 pub(super) fn liminal_entry_replacements(
     entry: &crate::types::game_state::LiminalEntry,
 ) -> impl Iterator<Item = (usize, &ReplacementDefinition)> {
-    let superseded = entry
-        .copy_settlement
-        .as_ref()
-        .and_then(|settlement| settlement.superseded_replacements)
-        .unwrap_or(0);
+    let superseded = if let crate::types::game_state::LiminalEntryKind::OutsideGameCard {
+        superseded_replacements,
+        ..
+    } = &entry.kind
+    {
+        *superseded_replacements
+    } else {
+        entry
+            .copy_settlement
+            .as_ref()
+            .and_then(|settlement| settlement.superseded_replacements)
+            .unwrap_or(0)
+    };
     entry
         .object
         .projected()
@@ -12310,6 +12359,7 @@ pub(crate) fn event_is_accounted(event: &ProposedEvent) -> bool {
         // ---- unaccounted: no axis of its own ⇒ the probe refuses. Named, not
         //      wildcarded, so a new variant is a compile error here. ----
         ProposedEvent::TokenEntry { .. }
+        | ProposedEvent::OutsideGameCardEntry { .. }
         | ProposedEvent::SearchFound { .. }
         | ProposedEvent::Scry { .. }
         | ProposedEvent::Mill { .. }
@@ -12512,6 +12562,10 @@ fn extract_etb_counters(
         ProposedEvent::ZoneChange {
             enter_with_choices: Some(choices),
             ..
+        }
+        | ProposedEvent::OutsideGameCardEntry {
+            enter_with_choices: Some(choices),
+            ..
         } => choices.0.iter().find_map(|attr| match attr {
             crate::types::ability::ChosenAttribute::Player(pid) => Some(*pid),
             _ => None,
@@ -12569,6 +12623,7 @@ fn extract_etb_counters_from_effect(
                     ..
                 } => Some(*object_id),
                 ProposedEvent::TokenEntry { entry_ref, .. } => Some(*entry_ref),
+                ProposedEvent::OutsideGameCardEntry { entry_ref, .. } => Some(*entry_ref),
                 _ => None,
             };
             let ctx = crate::game::quantity::QuantityContext {
@@ -12785,7 +12840,7 @@ fn resolve_self_enters_under_controller(
     object_id: ObjectId,
     cref: &ControllerRef,
 ) -> Option<PlayerId> {
-    let entering_controller = state.objects.get(&object_id)?.controller;
+    let entering_controller = state.entering_or_live_object(object_id)?.controller;
     match cref {
         ControllerRef::Opponent => {
             crate::game::players::choosable_opponents(state, entering_controller)
@@ -13213,6 +13268,7 @@ fn entry_group_payment_entrant(proposed: &ProposedEvent) -> Option<ObjectId> {
             ..
         } => Some(*object_id),
         ProposedEvent::ZoneChange { .. }
+        | ProposedEvent::OutsideGameCardEntry { .. }
         | ProposedEvent::Damage { .. }
         | ProposedEvent::Draw { .. }
         | ProposedEvent::SearchFound { .. }
@@ -13275,7 +13331,10 @@ pub(crate) fn entry_group_payment_source(state: &GameState) -> Option<ObjectId> 
 fn battlefield_entry_current_tapped(event: &ProposedEvent) -> Option<bool> {
     match event {
         ProposedEvent::ZoneChange { enter_tapped, .. } => Some(enter_tapped.resolve(false)),
-        ProposedEvent::TokenEntry { enter_tapped, .. } => Some(enter_tapped.resolve(false)),
+        ProposedEvent::TokenEntry { enter_tapped, .. }
+        | ProposedEvent::OutsideGameCardEntry { enter_tapped, .. } => {
+            Some(enter_tapped.resolve(false))
+        }
         ProposedEvent::CreateToken {
             spec, enter_tapped, ..
         } => Some(enter_tapped.resolve(spec.tapped)),
@@ -13290,6 +13349,10 @@ fn battlefield_entry_counters(event: &ProposedEvent) -> Option<&Vec<(CounterType
             ..
         } => Some(enter_with_counters),
         ProposedEvent::TokenEntry {
+            enter_with_counters,
+            ..
+        }
+        | ProposedEvent::OutsideGameCardEntry {
             enter_with_counters,
             ..
         } => Some(enter_with_counters),
@@ -14100,6 +14163,10 @@ fn apply_single_replacement(
                                 object_id,
                                 to: Zone::Battlefield,
                                 ..
+                            } | ProposedEvent::OutsideGameCardEntry {
+                                entry_ref: object_id,
+                                destination: Zone::Battlefield,
+                                ..
                             } if *object_id == rid.source
                         ))
                         // CR 614.12a + CR 707.2: only the PAYMENT half extends
@@ -14119,7 +14186,9 @@ fn apply_single_replacement(
                 let post_effect = post_effect.filter(|_| {
                     !(matches!(
                         proposed,
-                        ProposedEvent::CreateToken { .. } | ProposedEvent::ZoneChange { .. }
+                        ProposedEvent::CreateToken { .. }
+                            | ProposedEvent::ZoneChange { .. }
+                            | ProposedEvent::OutsideGameCardEntry { .. }
                     ) && entry_copy.is_some())
                 });
                 let mut modifiers = event_modifiers_for_ability(
@@ -14291,6 +14360,12 @@ fn apply_single_replacement(
                         to: Zone::Battlefield,
                         controller_override,
                         ..
+                    }
+                    | ProposedEvent::OutsideGameCardEntry {
+                        entry_ref: object_id,
+                        destination: Zone::Battlefield,
+                        controller_override,
+                        ..
                     } = &mut new_event
                     {
                         if let Some(selected_controller) = selected_entry_controller {
@@ -14354,6 +14429,9 @@ fn apply_single_replacement(
                         {
                             *redirected_to = Some(zone);
                         }
+                        ProposedEvent::OutsideGameCardEntry { destination, .. } => {
+                            *destination = zone;
+                        }
                         _ => {}
                     }
                 }
@@ -14382,6 +14460,29 @@ fn apply_single_replacement(
                     );
                     *enter_as_copy = Some(Box::new(copy_spec));
                 }
+                if let (
+                    Some(copy_spec),
+                    ProposedEvent::OutsideGameCardEntry {
+                        entry_ref,
+                        destination: Zone::Battlefield,
+                        enter_as_copy,
+                        enter_with_counters,
+                        enter_with_choices,
+                        ..
+                    },
+                ) = (entry_copy, &mut new_event)
+                {
+                    super::zone_pipeline::stage_outside_game_entry_copy(
+                        state, *entry_ref, &copy_spec,
+                    );
+                    retarget_intrinsic_entry_counters_to_copy(
+                        enter_with_counters,
+                        &copy_spec,
+                        crate::types::proposed_event::EntrantAbilities::of(None),
+                    );
+                    *enter_with_choices = None;
+                    *enter_as_copy = Some(Box::new(copy_spec));
+                }
                 // CR 614.1c: Applied branch carries ETB counter data; add to the zone change.
                 if !modifiers.etb_counters.is_empty() {
                     match &mut new_event {
@@ -14390,6 +14491,10 @@ fn apply_single_replacement(
                             ..
                         } => enter_with_counters.extend(modifiers.etb_counters.iter().cloned()),
                         ProposedEvent::TokenEntry {
+                            enter_with_counters,
+                            ..
+                        }
+                        | ProposedEvent::OutsideGameCardEntry {
                             enter_with_counters,
                             ..
                         } => enter_with_counters.extend(modifiers.etb_counters.iter().cloned()),
@@ -16156,11 +16261,16 @@ fn entry_controller_choice(
     if proposed.already_applied(&rid) {
         return None;
     }
-    let ProposedEvent::ZoneChange {
+    let (ProposedEvent::ZoneChange {
         object_id,
         to: Zone::Battlefield,
         ..
-    } = proposed
+    }
+    | ProposedEvent::OutsideGameCardEntry {
+        entry_ref: object_id,
+        destination: Zone::Battlefield,
+        ..
+    }) = proposed
     else {
         return None;
     };
@@ -16173,7 +16283,7 @@ fn entry_controller_choice(
     {
         return None;
     }
-    let chooser = state.objects.get(object_id)?.controller;
+    let chooser = state.entering_or_live_object(*object_id)?.controller;
     let candidates = crate::game::players::choosable_opponents(state, chooser);
     (candidates.len() >= 2).then_some((chooser, candidates))
 }
@@ -16191,6 +16301,7 @@ fn park_entry_controller_choice(
     candidates: Vec<PlayerId>,
 ) -> ReplacementResult {
     state.pending_replacement = Some(PendingReplacement {
+        damage_delivery_owner: None,
         settled_damage_guards: Vec::new(),
         proposed,
         sacrifice_provenance: None,
@@ -16252,11 +16363,16 @@ fn as_enters_choice_for_entry<'a>(
     proposed: &ProposedEvent,
     rid: ReplacementId,
 ) -> Option<&'a ChoiceType> {
-    let ProposedEvent::ZoneChange {
+    let (ProposedEvent::ZoneChange {
         object_id,
         to: Zone::Battlefield,
         ..
-    } = proposed
+    }
+    | ProposedEvent::OutsideGameCardEntry {
+        entry_ref: object_id,
+        destination: Zone::Battlefield,
+        ..
+    }) = proposed
     else {
         return None;
     };
@@ -16297,11 +16413,16 @@ fn as_enters_named_choice(
         return None;
     }
     let choice_type = as_enters_choice_for_entry(state, proposed, rid)?.clone();
-    let ProposedEvent::ZoneChange {
+    let (ProposedEvent::ZoneChange {
         object_id,
         controller_override,
         ..
-    } = proposed
+    }
+    | ProposedEvent::OutsideGameCardEntry {
+        entry_ref: object_id,
+        controller_override,
+        ..
+    }) = proposed
     else {
         return None;
     };
@@ -16370,6 +16491,7 @@ fn park_as_enters_named_choice(
 ) -> ReplacementResult {
     let object_id = rid.source;
     state.pending_replacement = Some(PendingReplacement {
+        damage_delivery_owner: None,
         settled_damage_guards: Vec::new(),
         proposed,
         sacrifice_provenance: None,
@@ -16465,8 +16587,14 @@ fn as_enters_payment_for_entry<'a>(
             to: Zone::Battlefield,
             ..
         } => *object_id,
-        ProposedEvent::TokenEntry { entry_ref, .. } => *entry_ref,
+        ProposedEvent::TokenEntry { entry_ref, .. }
+        | ProposedEvent::OutsideGameCardEntry {
+            entry_ref,
+            destination: Zone::Battlefield,
+            ..
+        } => *entry_ref,
         ProposedEvent::ZoneChange { .. }
+        | ProposedEvent::OutsideGameCardEntry { .. }
         | ProposedEvent::Damage { .. }
         | ProposedEvent::Draw { .. }
         | ProposedEvent::SearchFound { .. }
@@ -16546,6 +16674,7 @@ fn as_enters_pay_terms_on_entry_board(
             std::borrow::Cow::Borrowed,
         )),
         ProposedEvent::ZoneChange { .. }
+        | ProposedEvent::OutsideGameCardEntry { .. }
         | ProposedEvent::Damage { .. }
         | ProposedEvent::Draw { .. }
         | ProposedEvent::SearchFound { .. }
@@ -16585,7 +16714,8 @@ fn as_enters_pay_terms_on_entry_board(
     // for tokens, so the entrant's controller pays.
     let entrant_id = match proposed {
         ProposedEvent::ZoneChange { object_id, .. } => *object_id,
-        ProposedEvent::TokenEntry { entry_ref, .. } => *entry_ref,
+        ProposedEvent::TokenEntry { entry_ref, .. }
+        | ProposedEvent::OutsideGameCardEntry { entry_ref, .. } => *entry_ref,
         ProposedEvent::Damage { .. }
         | ProposedEvent::Draw { .. }
         | ProposedEvent::SearchFound { .. }
@@ -16618,6 +16748,10 @@ fn as_enters_pay_terms_on_entry_board(
     let entrant = state.entering_or_live_object(entrant_id)?;
     let payer = match proposed {
         ProposedEvent::ZoneChange {
+            controller_override,
+            ..
+        }
+        | ProposedEvent::OutsideGameCardEntry {
             controller_override,
             ..
         } => controller_override.unwrap_or(entrant.owner),
@@ -16703,6 +16837,7 @@ fn park_as_enters_pay_choice(
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     state.pending_replacement = Some(PendingReplacement {
+        damage_delivery_owner: None,
         settled_damage_guards: Vec::new(),
         proposed,
         sacrifice_provenance: None,
@@ -16760,6 +16895,11 @@ pub(crate) fn pending_entry_payment_is_live(state: &GameState) -> bool {
             object_id,
             controller_override,
             ..
+        }
+        | ProposedEvent::OutsideGameCardEntry {
+            entry_ref: object_id,
+            controller_override,
+            ..
         } => {
             let Some(entrant) = state.entering_or_live_object(*object_id) else {
                 return false;
@@ -16807,6 +16947,9 @@ pub(crate) fn proposed_entry_choices_mut(
             enter_with_choices, ..
         }
         | ProposedEvent::TokenEntry {
+            enter_with_choices, ..
+        }
+        | ProposedEvent::OutsideGameCardEntry {
             enter_with_choices, ..
         } => Some(enter_with_choices),
         _ => None,
@@ -16871,7 +17014,8 @@ fn as_enters_choice_changes_applicability(
             to: Zone::Battlefield,
             ..
         } => *object_id,
-        ProposedEvent::TokenEntry { entry_ref, .. } => *entry_ref,
+        ProposedEvent::TokenEntry { entry_ref, .. }
+        | ProposedEvent::OutsideGameCardEntry { entry_ref, .. } => *entry_ref,
         _ => return false,
     };
     if candidates.len() < 2 {
@@ -17037,6 +17181,7 @@ fn replacement_step(def: &ReplacementDefinition, proposed: &ProposedEvent) -> Re
             ..
         } | ProposedEvent::CreateToken { .. }
             | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::OutsideGameCardEntry { .. }
     );
     // CR 616.1c orders an entry copy first among the replacements of the entry it
     // modifies. On a `CreateToken` that entry is the contained one, so CR 616.1g
@@ -17437,11 +17582,17 @@ fn replay_pending_replacement(
 /// CR 614.12 + CR 616.1f: selected own-entry work must finish before discovering
 /// the next replacement. Bind the ready continuation to this exact entrant and an
 /// applied own replacement, not merely to the presence of an unrelated ready drain.
-pub(crate) fn token_entry_awaits_own_entry_settlement(
+pub(crate) fn liminal_entry_awaits_own_entry_settlement(
     state: &GameState,
     proposed: &ProposedEvent,
 ) -> bool {
-    let ProposedEvent::TokenEntry { entry_ref, .. } = proposed else {
+    let (ProposedEvent::TokenEntry { entry_ref, .. }
+    | ProposedEvent::OutsideGameCardEntry {
+        entry_ref,
+        destination: Zone::Battlefield,
+        ..
+    }) = proposed
+    else {
         return false;
     };
     let Some(drain) = state
@@ -17517,7 +17668,7 @@ fn pipeline_loop(
         }
 
         // CR 614.12 + CR 616.1f: finish selected own-entry work before rediscovery.
-        if token_entry_awaits_own_entry_settlement(state, &proposed) {
+        if liminal_entry_awaits_own_entry_settlement(state, &proposed) {
             break;
         }
 
@@ -17601,6 +17752,15 @@ fn pipeline_loop(
                 let search_found_candidates =
                     snapshot_search_found_candidates(state, &proposed, &candidates);
                 state.pending_replacement = Some(PendingReplacement {
+                    damage_delivery_owner: matches!(
+                        proposed,
+                        ProposedEvent::Damage {
+                            is_combat: false,
+                            ..
+                        }
+                    )
+                    .then(super::effects::current_damage_delivery_owner)
+                    .flatten(),
                     settled_damage_guards: settled_damage_guards(state),
                     proposed,
                     sacrifice_provenance: None,
@@ -17694,6 +17854,15 @@ fn pipeline_loop(
                 snapshot_search_found_candidates(state, &proposed, &candidates);
             let recorded_chooser = proposed.has_appended_token_batches().then_some(actor);
             state.pending_replacement = Some(PendingReplacement {
+                damage_delivery_owner: matches!(
+                    proposed,
+                    ProposedEvent::Damage {
+                        is_combat: false,
+                        ..
+                    }
+                )
+                .then(super::effects::current_damage_delivery_owner)
+                .flatten(),
                 settled_damage_guards: settled_damage_guards(state),
                 proposed,
                 sacrifice_provenance: None,
@@ -17781,6 +17950,11 @@ pub(crate) fn replace_event_on_entry_board(
     events: &mut Vec<GameEvent>,
     entry_board: Option<&GameState>,
 ) -> ReplacementResult {
+    if let ProposedEvent::OutsideGameCardEntry { entry_ref, .. } = &proposed {
+        if state.outside_game_card_entry(*entry_ref).is_none() {
+            return ReplacementResult::Prevented;
+        }
+    }
     // A newly proposed (possibly nested) event cannot inherit another event's tail.
     state.replacement_auto_choice_tail = None;
     let registry = replacement_registry();
@@ -19164,6 +19338,7 @@ fn continue_replacement_impl(
                 // `may_cost_remaining`. The carried `Execute` payload is inert — the
                 // flag short-circuits the caller before it is read.
                 let outer_replacement = crate::types::game_state::PendingReplacement {
+                    damage_delivery_owner: None,
                     settled_damage_guards: Vec::new(),
                     proposed: proposed.clone(),
                     sacrifice_provenance: reparked_sacrifice_provenance,
@@ -19949,6 +20124,7 @@ mod tests {
     fn an_optional_replacement_candidate_is_resolved_through_the_authority() {
         let state = GameState::new_two_player(7);
         let mut pending = PendingReplacement {
+            damage_delivery_owner: None,
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
@@ -23242,6 +23418,7 @@ mod tests {
         // single optional replacement produces): candidate 0 is the real Riot
         // replacement, decline is synthetic. This isolates the label builder.
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
             sacrifice_provenance: None,
@@ -23308,6 +23485,7 @@ mod tests {
         ] {
             let mut state = test_state_with_object(commander, Zone::Battlefield, vec![]);
             state.pending_replacement = Some(PendingReplacement {
+                damage_delivery_owner: None,
                 settled_damage_guards: Vec::new(),
                 proposed: ProposedEvent::zone_change(
                     commander,
@@ -23393,6 +23571,7 @@ mod tests {
                 description: "Retain green mana".to_string(),
             }];
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::EmptyManaPool {
                 player_id: PlayerId(0),
@@ -26728,6 +26907,7 @@ mod tests {
             MatchedProtectionQuality::Color(ManaColor::Red),
         ];
         let pending = PendingReplacement {
+            damage_delivery_owner: None,
             proposed: ProposedEvent::Damage {
                 source_id: ObjectId(9),
                 target: TargetRef::Player(PlayerId(0)),
@@ -30672,6 +30852,7 @@ mod tests {
         // ReplacementChoice — covering the non-None branch of the guard.
         let mut state = GameState::new_two_player(42);
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
             sacrifice_provenance: None,
@@ -34120,6 +34301,67 @@ mod tests {
                 &draw_event(PlayerId(1)),
             ),
             "draw step draws by the non-active player must replace"
+        );
+    }
+
+    /// CR 805.4b + CR 805.9 — on a shared team turn (Two-Headed Giant) every
+    /// player on the active team draws in, and is an active player of, that
+    /// team's draw step, so `ExceptFirstDrawInDrawStep` exempts each of their
+    /// first draws, not only `state.active_player`'s. A player on the nonactive
+    /// team is still replaced.
+    #[test]
+    fn except_first_draw_in_draw_step_exempts_each_shared_turn_player() {
+        let condition = ReplacementCondition::ExceptFirstDrawInDrawStep;
+        let source = ObjectId(10);
+        let mut state = GameState::new(crate::types::FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.phase = crate::types::phase::Phase::Draw;
+
+        let draw_event = |player_id: PlayerId| ProposedEvent::Draw {
+            player_id,
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+
+        // P1 is P0's teammate: their first draw of the team's draw step is exempt.
+        assert!(
+            !evaluate_replacement_condition(
+                &condition,
+                PlayerId(1),
+                source,
+                &state,
+                None,
+                &draw_event(PlayerId(1)),
+            ),
+            "the active team's second player's first draw-step draw must NOT replace"
+        );
+
+        // P1's second draw in that step replaces.
+        state.players[1].cards_drawn_this_step = 1;
+        assert!(
+            evaluate_replacement_condition(
+                &condition,
+                PlayerId(1),
+                source,
+                &state,
+                None,
+                &draw_event(PlayerId(1)),
+            ),
+            "a later draw by the active team's second player must replace"
+        );
+
+        // P2 is on the nonactive team: not a turn player, so the draw replaces.
+        assert!(
+            evaluate_replacement_condition(
+                &condition,
+                PlayerId(2),
+                source,
+                &state,
+                None,
+                &draw_event(PlayerId(2)),
+            ),
+            "a nonactive-team player's first draw during the draw step must replace"
         );
     }
 

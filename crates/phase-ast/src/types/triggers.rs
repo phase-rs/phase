@@ -1147,6 +1147,41 @@ impl fmt::Display for TriggerMode {
     }
 }
 
+/// CR 605.1b: whether a trigger mode observes a mana event — the mode half of
+/// triggered-mana-ability classification. The current rule reads: "A triggered
+/// ability is a mana ability if ... it triggers from the activation or
+/// resolution of an activated mana ability (see rule 605.1a) or from mana
+/// being added to a player's mana pool, ...".
+///
+/// Qualifying modes (each observes only mana events, proven by its matcher):
+/// - `TapsForMana`: keyed off `TappedForMana` (CR 106.12a), emitted once per
+///   {T}-cost mana-ability resolution that produces mana.
+/// - `ManaAbilityProduced`: `ManaAbilityProduced` events only.
+/// - `ManaAdded`: `ManaAdded` events only (parser-dormant: the matcher exists
+///   but no parser producer emits the mode; included because it is
+///   mana-exclusive).
+///
+/// Excluded with reasons:
+/// - `AbilityActivated`: no mana-kind qualifier exists (only
+///   `ActivatedAbilityIsNonMana`), and zero printed activation-triggers carry
+///   a mana-adding untargeted body (55-card activation-trigger census; the
+///   sole add-mana hit, Pygmy Hippo, is Attacks-mode). A future mana-kind
+///   qualifier needs a new `TriggerCondition` + matcher axis, not a wider set.
+/// - `ManaExpend`: spend-side, not production.
+/// - `Taps`, `ChangesZone`, `SpellCast`, `Attacks`, and every other mode:
+///   observe non-mana events.
+/// - `Unknown`: fails closed (an unrecognized mode cannot prove it observes a
+///   mana event).
+///
+/// Single authority: the trigger parser's mana-ability admission and the
+/// `HasManaAbility` filter eval both call this, so the two cannot drift.
+pub fn trigger_mode_observes_mana_event(mode: &TriggerMode) -> bool {
+    matches!(
+        mode,
+        TriggerMode::TapsForMana | TriggerMode::ManaAdded | TriggerMode::ManaAbilityProduced
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1666,5 +1701,36 @@ mod tests {
         );
         // Unknown tags still fail: the shim maps exactly one legacy form.
         assert!(serde_json::from_str::<AttackTargetFilter>(r#""NotAFilter""#).is_err());
+    }
+
+    /// CR 605.1b: the mode half of triggered-mana-ability classification admits
+    /// exactly the three mana-event modes. `ManaAdded` is parser-dormant (no
+    /// producer) but mana-exclusive, so it is included; `Unknown` fails closed.
+    #[test]
+    fn mana_event_modes_are_exactly_the_observing_triple() {
+        for mode in [
+            TriggerMode::TapsForMana,
+            TriggerMode::ManaAbilityProduced,
+            TriggerMode::ManaAdded,
+        ] {
+            assert!(
+                trigger_mode_observes_mana_event(&mode),
+                "observes: {mode:?}"
+            );
+        }
+        for mode in [
+            TriggerMode::Unknown("X".to_string()),
+            TriggerMode::AbilityActivated,
+            TriggerMode::ManaExpend,
+            TriggerMode::Taps,
+            TriggerMode::ChangesZone,
+            TriggerMode::SpellCast,
+            TriggerMode::Attacks,
+        ] {
+            assert!(
+                !trigger_mode_observes_mana_event(&mode),
+                "excluded: {mode:?}"
+            );
+        }
     }
 }

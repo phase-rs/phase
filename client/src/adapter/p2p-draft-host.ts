@@ -327,16 +327,13 @@ export type DraftHostEvent =
 type DraftHostEventListener = (event: DraftHostEvent) => void;
 
 /**
- * The deck funnel has three deliberately different callers.  Inbound wire
- * commands own an exact connection/submission pair; the long-standing direct
- * helper is a test/persistence seam which retains the addressed seat's legacy
- * notification; and the public host-local API has no wire recipient at all.
- * Keeping that distinction explicit prevents a seat-zero peer from becoming a
- * synthetic recipient for a host-local reducer failure.
+ * The deck funnel's two callers.  An inbound wire command names the connection
+ * that delivered it; the public host-local API has no wire recipient at all,
+ * so a seat-zero peer can never become a synthetic recipient for a host-local
+ * reducer failure.
  */
 type DeckSubmissionOrigin =
   | { kind: "network"; deliverySession: DraftPeerSession | undefined }
-  | { kind: "legacyDirect" }
   | { kind: "hostLocal" };
 
 /** Default grace window for guest reconnect during draft. */
@@ -612,8 +609,6 @@ export class P2PDraftHost {
   private settlementReceipts = new Map<string, { receiptId: string; revision: number }>();
   /** Submission id → immutable payload receipt. Persisted before its acknowledgement. */
   private deckSubmissionReceipts = new Map<string, { seat: number; payloadFingerprint: string }>();
-  /** The still-delivering command for a live peer session, never a receipt. */
-  private pendingDeckSubmissionBySession = new WeakMap<DraftPeerSession, string>();
   /** Prevent duplicate local visibility while a connected guest retries its receipt. */
   private publishedDeckSubmissions = new Set<string>();
 
@@ -1267,20 +1262,10 @@ export class P2PDraftHost {
           });
           return;
         }
-        // Hold the delivery identity across the reducer-producing await.  A
-        // replacement connection — or a later command on this connection —
-        // must never receive this command's outcome.
-        if (originatingSession) this.pendingDeckSubmissionBySession.set(originatingSession, msg.submissionId);
-        try {
-          await this.handleDeckSubmission(seat, msg.mainDeck, msg.commanders, msg.submissionId, {
-            kind: "network",
-            deliverySession: originatingSession,
-          }, msg.companion);
-        } finally {
-          if (originatingSession && this.pendingDeckSubmissionBySession.get(originatingSession) === msg.submissionId) {
-            this.pendingDeckSubmissionBySession.delete(originatingSession);
-          }
-        }
+        await this.handleDeckSubmission(seat, msg.mainDeck, msg.commanders, msg.submissionId, {
+          kind: "network",
+          deliverySession: originatingSession,
+        }, msg.companion);
         break;
       }
       case "draft_workspace_update": {
@@ -1888,7 +1873,7 @@ export class P2PDraftHost {
     mainDeck: string[],
     commanders: string[],
     submissionId: string,
-    origin: DeckSubmissionOrigin = { kind: "legacyDirect" },
+    origin: DeckSubmissionOrigin,
     companion?: string | null,
   ): Promise<DraftPlayerView> {
     let submissionAccepted = false;
@@ -1936,20 +1921,16 @@ export class P2PDraftHost {
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       const session = this.guestSessions.get(seat);
-      // A network command may receive an outcome only through the exact
-      // connection and pending submission that originated it.  The direct
-      // helper retains its legacy current-seat notification (it is how its
-      // persisted retry seam reports an IDB failure), while the public
+      // A network command may receive an outcome only through the connection
+      // that delivered it, while that connection still holds the seat.  Guest
+      // commands run one at a time through `enqueueAuthoritativeMutation`, so
+      // no later command on that connection can be pending here.  The public
       // host-local API has no network recipient whatsoever.
-      const isExactNetworkDelivery = origin.kind === "network"
+      const notificationSession = origin.kind === "network"
         && origin.deliverySession !== undefined
         && session === origin.deliverySession
-        && this.pendingDeckSubmissionBySession.get(origin.deliverySession) === submissionId;
-      const notificationSession = origin.kind === "legacyDirect"
         ? session
-        : isExactNetworkDelivery
-          ? session
-          : undefined;
+        : undefined;
       if (
         err instanceof Draft27IncompatibilityError
         && notificationSession

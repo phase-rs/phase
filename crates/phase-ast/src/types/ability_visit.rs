@@ -1241,6 +1241,13 @@ macro_rules! exclusive_iter {
 
 define_walk!([]; [FnMut(&Effect) -> ControlFlow<()>]; visit_each_effect; skip_nodes; shared_iter);
 
+/// The exclusive walk of effects reachable from an assembled definition.
+pub mod effects_mut {
+    use super::*;
+
+    define_walk!([mut]; [FnMut(&mut Effect) -> ControlFlow<()>]; visit_each_effect; skip_nodes; exclusive_iter);
+}
+
 /// A definition node surfaced by the exclusive walk.
 pub enum DefinitionNodeMut<'a> {
     Ability(&'a mut AbilityDefinition),

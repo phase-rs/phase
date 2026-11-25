@@ -48,12 +48,16 @@ import {
   saveDraftSettlementOutbox,
 } from "../draftPersistence";
 import { draftIntergameDigest } from "../intergameCommandLedger";
-import type { PersistedDraftHostSession } from "../draftPersistence";
+import type { DraftHostSessionLoadResult, PersistedDraftHostSession } from "../draftPersistence";
 import { P2PDraftHost } from "../../adapter/p2p-draft-host";
-import { preflightDraftPodHostRecovery } from "../../adapter/draftPodHostAdapter";
+import {
+  preflightDraftPodHostRecovery,
+  UnreadableSavedDraftError,
+  type DraftPodHostRecoveryInput,
+} from "../../adapter/draftPodHostAdapter";
 import { DRAFT_KINDS, DraftAdapter, type RestorableDraftSessionVerdict } from "../../adapter/draft-adapter";
 import * as compatibility from "../../adapter/draft-compatibility";
-import { Draft27IncompatibilityError, admitDraft27HostValue } from "../../adapter/draft-compatibility";
+import { Draft27IncompatibilityError, classifyDraft27Compatibility } from "../../adapter/draft-compatibility";
 import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
   validateWorkspaceState,
@@ -129,11 +133,16 @@ describe("draftPersistence", () => {
     it("saves and loads a host session", async () => {
       await saveDraftHostSession("test-draft-1", testSession);
       const loaded = await loadDraftHostSession("test-draft-1");
-      expect(loaded).toMatchObject({
+      expect(loaded).toEqual({
         type: "admitted",
         session: { ...testSession, perSeatWorkspaceSnapshots: {} },
-        raw: testSession,
       });
+    });
+
+    it("types a loaded saved host as its parsed session alone", () => {
+      // @ts-expect-error a loaded saved host carries its parsed session alone
+      const loaded: DraftHostSessionLoadResult = { type: "admitted", session: testSession, raw: testSession };
+      expect(loaded.type).toBe("admitted");
     });
 
     it("retains validated absolute reconnect deadlines", async () => {
@@ -229,10 +238,7 @@ describe("draftPersistence", () => {
     ])("keeps malformed falsy %s as tagged invalid source", async (_label, raw) => {
       idb.get.mockResolvedValueOnce(raw);
 
-      await expect(loadDraftHostSession("falsy-invalid")).resolves.toEqual({
-        type: "invalid",
-        raw,
-      });
+      await expect(loadDraftHostSession("falsy-invalid")).resolves.toEqual({ type: "invalid" });
     });
 
     it.each([
@@ -275,7 +281,9 @@ describe("draftPersistence", () => {
       await saveDraftHostSession("saved-session", raw);
       expect((mockStore.get("phase-draft-host:saved-session") as PersistedDraftHostSession).draftSessionJson).toBe(text);
 
-      await expect(loadDraftHostSession("saved-session")).resolves.toMatchObject({ type, raw });
+      await expect(loadDraftHostSession("saved-session")).resolves.toEqual(
+        type === "invalid" ? { type } : { type, session: { ...raw, perSeatWorkspaceSnapshots: {} } },
+      );
     });
 
     describe("the recovery preflight", () => {
@@ -298,10 +306,10 @@ describe("draftPersistence", () => {
       it("refuses a saved session the draft engine refuses, though the client admits it", async () => {
         const raw = startedHost();
         // Reach: the client's top-level check admits the saved host.
-        expect(admitDraft27HostValue(raw).ok).toBe(true);
+        expect(classifyDraft27Compatibility(raw).ok).toBe(true);
         const check = engineAnswers({ type: "Incompatible" });
 
-        const preflight = await preflightDraftPodHostRecovery({ session: raw, raw });
+        const preflight = await preflightDraftPodHostRecovery({ session: raw });
 
         expect(preflight).toMatchObject({ type: "incompatible", error: { code: "engine_refusal" } });
         expect(preflight.type === "incompatible" && preflight.error).toBeInstanceOf(Draft27IncompatibilityError);
@@ -312,25 +320,25 @@ describe("draftPersistence", () => {
       it("refuses a saved session the draft engine refuses, whatever the client classifier admits", async () => {
         const fifo = savedSession("fifo_drafting");
         const raw = { ...testSession, draftSessionJson: fifo.text };
-        const realAdmission = compatibility.admitDraft27HostValue;
+        const realClassifier = compatibility.classifyDraft27Compatibility;
         // Reach: the client's top-level check admits the saved host.
-        expect(realAdmission(raw).ok).toBe(true);
+        expect(realClassifier(raw).ok).toBe(true);
         // A classifier that admits a FIFO flow value without a session.
-        const admission = vi.spyOn(compatibility, "admitDraft27HostValue").mockImplementation(((value: unknown) => {
+        const classifier = vi.spyOn(compatibility, "classifyDraft27Compatibility").mockImplementation(((value: unknown) => {
           const record = value as Record<string, unknown> | null;
-          if (record?.flow === "FifoAsync" && !("draftSessionJson" in record)) return { ok: true, value };
-          return realAdmission(value);
-        }) as typeof realAdmission);
+          if (record?.flow === "FifoAsync" && !("draftSessionJson" in record)) return { ok: true };
+          return realClassifier(value);
+        }) as typeof realClassifier);
         const check = engineAnswers(fifo.verdict);
 
-        const preflight = await preflightDraftPodHostRecovery({ session: raw, raw });
+        const preflight = await preflightDraftPodHostRecovery({ session: raw });
 
         // Reach: the engine was asked once, with the record's exact session.
         expect(check).toHaveBeenCalledOnce();
         expect(check).toHaveBeenCalledWith(raw.draftSessionJson);
         expect(preflight.type).toBe("incompatible");
         expect(preflight.type === "incompatible" && preflight.error).toBeInstanceOf(Draft27IncompatibilityError);
-        expect(admission.mock.calls.map(([value]) => value)).toEqual([]);
+        expect(classifier.mock.calls.map(([value]) => value)).toEqual([]);
       });
 
       it("names the draft engine's refusal of a legacy-flow session with a burn policy", async () => {
@@ -339,10 +347,10 @@ describe("draftPersistence", () => {
         // Reach: the parsed session has no flow, carries the policy, and the client admits it.
         expect(config.flow).toBeUndefined();
         expect(config.selection_policy).toEqual({ burns_per_pick: 1, discard_threshold: 0 });
-        expect(admitDraft27HostValue(raw).ok).toBe(true);
+        expect(classifyDraft27Compatibility(raw).ok).toBe(true);
         engineAnswers({ type: "Incompatible" });
 
-        const preflight = await preflightDraftPodHostRecovery({ session: raw, raw });
+        const preflight = await preflightDraftPodHostRecovery({ session: raw });
 
         expect(preflight.type).toBe("incompatible");
         const error = preflight.type === "incompatible" ? preflight.error : null;
@@ -357,24 +365,27 @@ describe("draftPersistence", () => {
         engineAnswers({ type: "Admitted" });
         await saveDraftHostSession("engine-checked", raw);
 
-        await expect(loadDraftHostSession("engine-checked")).resolves.toMatchObject({ type: "admitted", raw });
-        expect(await preflightDraftPodHostRecovery({ session: raw, raw })).toEqual({ type: "admitted" });
+        await expect(loadDraftHostSession("engine-checked")).resolves.toEqual({
+          type: "admitted",
+          session: { ...raw, perSeatWorkspaceSnapshots: {} },
+        });
+        expect(await preflightDraftPodHostRecovery({ session: raw })).toEqual({ type: "admitted" });
       });
 
       it("rejects with the check's own error when the draft engine cannot answer", async () => {
         const raw = startedHost();
         // Reach: the client's top-level check admits the saved host.
-        expect(admitDraft27HostValue(raw).ok).toBe(true);
+        expect(classifyDraft27Compatibility(raw).ok).toBe(true);
         engineAnswers(new Error("draft engine unavailable"));
 
-        await expect(async () => preflightDraftPodHostRecovery({ session: raw, raw })).rejects.toThrow("draft engine unavailable");
+        await expect(async () => preflightDraftPodHostRecovery({ session: raw })).rejects.toThrow("draft engine unavailable");
       });
 
       it("asks no engine for a host whose draft has not started", async () => {
         const raw = { ...testSession, draftStarted: false, draftSessionJson: null };
         const check = engineAnswers({ type: "Incompatible" });
 
-        expect(await preflightDraftPodHostRecovery({ session: raw, raw })).toEqual({ type: "admitted" });
+        expect(await preflightDraftPodHostRecovery({ session: raw })).toEqual({ type: "admitted" });
         expect(check).not.toHaveBeenCalled();
       });
 
@@ -391,14 +402,14 @@ describe("draftPersistence", () => {
         expect(verdict).toEqual({ type: "Incompatible" });
         const check = engineAnswers(verdict);
 
-        const preflight = await preflightDraftPodHostRecovery({ session: raw, raw });
+        const preflight = await preflightDraftPodHostRecovery({ session: raw });
 
         expect(preflight).toMatchObject({ type: "incompatible", error: { code: "engine_refusal" } });
         expect(check).toHaveBeenCalledOnce();
         expect(check).toHaveBeenCalledWith(text);
       });
 
-      it("admits a saved session in Review whose flow the draft engine cannot read", async () => {
+      it("refuses as unreadable a saved session in Review whose flow the draft engine cannot read", async () => {
         const { text, verdict } = savedSession("legacy_review_unknown_flow");
         const raw = { ...testSession, draftSessionJson: text };
         const session = JSON.parse(text) as SavedSessionFields;
@@ -409,18 +420,22 @@ describe("draftPersistence", () => {
         expect(verdict).toEqual({ type: "Unreadable" });
         const check = engineAnswers(verdict);
 
-        expect(await preflightDraftPodHostRecovery({ session: raw, raw })).toEqual({ type: "admitted" });
+        const preflight = await preflightDraftPodHostRecovery({ session: raw });
+        expect(preflight.type).toBe("unreadable");
+        expect(preflight.type === "unreadable" && preflight.error).toBeInstanceOf(UnreadableSavedDraftError);
         expect(check).toHaveBeenCalledOnce();
         expect(check).toHaveBeenCalledWith(text);
       });
 
-      it("admits a saved session the client admits and the draft engine cannot read", async () => {
+      it("refuses as unreadable a saved session the client admits and the draft engine cannot read", async () => {
         const raw = startedHost();
         // Reach: the client's top-level check admits the saved host.
-        expect(admitDraft27HostValue(raw).ok).toBe(true);
+        expect(classifyDraft27Compatibility(raw).ok).toBe(true);
         engineAnswers({ type: "Unreadable" });
 
-        expect(await preflightDraftPodHostRecovery({ session: raw, raw })).toEqual({ type: "admitted" });
+        const preflight = await preflightDraftPodHostRecovery({ session: raw });
+        expect(preflight.type).toBe("unreadable");
+        expect(preflight.type === "unreadable" && preflight.error).toBeInstanceOf(UnreadableSavedDraftError);
       });
 
       it.each([
@@ -435,15 +450,26 @@ describe("draftPersistence", () => {
           { clock_policy: { pick: { type: "Off" }, review_duration_ms: 0, extra: 1 } },
           (config: Record<string, unknown>) => (config.clock_policy as Record<string, unknown>).extra === 1,
         ],
-      ] as const)("admits a saved session with %s that the draft engine cannot read", async (_label, config, carried) => {
+      ] as const)("loads a saved session with %s by its status, then refuses it as unreadable once the draft engine cannot read it", async (_label, config, carried) => {
         const raw = startedHost(config);
         // Reach: the saved session carries that configuration.
         expect(carried(JSON.parse(raw.draftSessionJson).config)).toBe(true);
         engineAnswers({ type: "Unreadable" });
         await saveDraftHostSession("engine-checked", raw);
 
-        await expect(loadDraftHostSession("engine-checked")).resolves.toMatchObject({ type: "admitted", raw });
-        expect(await preflightDraftPodHostRecovery({ session: raw, raw })).toEqual({ type: "admitted" });
+        await expect(loadDraftHostSession("engine-checked")).resolves.toEqual({
+          type: "admitted",
+          session: { ...raw, perSeatWorkspaceSnapshots: {} },
+        });
+        const preflight = await preflightDraftPodHostRecovery({ session: raw });
+        expect(preflight.type).toBe("unreadable");
+        expect(preflight.type === "unreadable" && preflight.error).toBeInstanceOf(UnreadableSavedDraftError);
+      });
+
+      it("types the recovery input as the parsed session alone", () => {
+        // @ts-expect-error the recovery input carries the parsed session alone
+        const recovery: DraftPodHostRecoveryInput = { session: testSession, raw: testSession };
+        expect(recovery.session).toBe(testSession);
       });
     });
 
@@ -533,11 +559,11 @@ describe("draftPersistence", () => {
       expect(JSON.parse(stored.draftSessionJson as string)).toEqual(core);
 
       const loaded = await loadDraftHostSession(persistenceId);
-      expect(loaded).toEqual({ type: "admitted", session: stored, raw: stored });
+      expect(loaded).toEqual({ type: "admitted", session: stored });
       const admitted = loaded as Extract<typeof loaded, { type: "admitted" }>;
       // The draft engine's answer through the WASM bridge: it admits this session.
       const check = vi.spyOn(DraftAdapter.prototype, "checkRestorableSession").mockResolvedValue({ type: "Admitted" });
-      expect(await preflightDraftPodHostRecovery({ session: admitted.session, raw: admitted.raw })).toEqual({ type: "admitted" });
+      expect(await preflightDraftPodHostRecovery({ session: admitted.session })).toEqual({ type: "admitted" });
       check.mockRestore();
 
       const restoredView = { status: "Deckbuilding", seats: [], pairings: [], pool: [] };

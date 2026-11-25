@@ -55,9 +55,10 @@ pub use super::game_state_kinds::{
     TargetSelectionConstraint,
 };
 use super::identifiers::{
-    CardId, DelayedInstallIdentity, DelayedTriggerOrigin, EpicEffectId, ExtraPhaseId, ExtraTurnId,
-    LogicalZoneChangeGroupId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef,
-    ReplacementContinuationId, ResolutionCastOfferId, TrackedSetId, TriggerFiring,
+    CardId, DamageDeliveryOwnerId, DelayedInstallIdentity, DelayedTriggerOrigin, EpicEffectId,
+    ExtraPhaseId, ExtraTurnId, LogicalZoneChangeGroupId, ObjectId, ObjectIdentityBinding,
+    ObjectIncarnationRef, ReplacementContinuationId, ResolutionCastOfferId, TrackedSetId,
+    TriggerFiring,
 };
 use super::interaction::{ActiveInteractionSlot, InteractionSessionId};
 use super::keywords::{Keyword, KeywordKind};
@@ -3655,6 +3656,9 @@ pub struct ExploitRecord {
 /// it (mirroring `PendingCombatLifelink`'s deliberately-absent paused source).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDamagePostLoss {
+    /// The instruction whose damage is still being delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_delivery_owner: Option<DamageDeliveryOwnerId>,
     pub source_id: ObjectId,
     /// CR 400.7: the source incarnation captured with the damage context —
     /// authoritative if the source changes zones across the pause.
@@ -3711,6 +3715,9 @@ pub enum DamagePostLossStage {
 /// keywords, and `lifelink_bonus`; the `excess` below rides alongside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDamagePostCounter {
+    /// The instruction whose damage is still being delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_delivery_owner: Option<DamageDeliveryOwnerId>,
     /// CR 400.7: the damage context at pause time (source identity/incarnation,
     /// controller, keywords, `excess_recipient`, `lifelink_bonus`).
     pub ctx: DamageContextSnapshot,
@@ -7915,6 +7922,36 @@ pub struct PendingDiscardFanOut {
     pub after_scope_needs_linked_exile: bool,
 }
 
+/// CR 101.4 + CR 701.20a: APNAP state for a player-scoped hand reveal whose
+/// selections stay private until every participating player has answered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingPlayerScopeReveal {
+    pub source_id: ObjectId,
+    pub players: Vec<PlayerId>,
+    pub selections: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
+impl PendingPlayerScopeReveal {
+    pub fn new(source_id: ObjectId, players: Vec<PlayerId>) -> Self {
+        Self {
+            source_id,
+            players,
+            selections: Vec::new(),
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.players.iter().all(|player| {
+            self.selections
+                .iter()
+                .any(|(selected_player, _)| selected_player == player)
+        }) && self
+            .selections
+            .iter()
+            .all(|(player, _)| self.players.contains(player))
+    }
+}
+
 /// CR 101.4 + CR 701.23i: APNAP state for a self-library search instruction
 /// whose selected cards are delivered only after every searching player has
 /// made their private choice. The original spell's controller remains on
@@ -8769,6 +8806,126 @@ impl ReplacementSubtreeBoundary {
             && self
                 .enclosing
                 .is_none_or(|enclosing| enclosing.is_retired(stack))
+    }
+}
+
+impl GameState {
+    pub(crate) fn outside_game_card_entry(&self, entry_ref: ObjectId) -> Option<&LiminalEntry> {
+        let entry = self.liminal_entries.get(&entry_ref)?;
+        let LiminalEntryKind::OutsideGameCard { original, .. } = &entry.kind else {
+            return None;
+        };
+        let LiminalEntrant::Card(card) = &entry.object else {
+            return None;
+        };
+        (entry_ref != ObjectId(0)
+            && entry_ref.0 < self.next_object_id
+            && card.id == entry_ref
+            && !card.is_token
+            && card.zone == Zone::Battlefield
+            && !self.objects.contains_key(&entry_ref)
+            && original.as_ref().is_none_or(|original| {
+                original.id == entry_ref && !original.is_token && original.owner == card.owner
+            }))
+        .then_some(entry)
+    }
+
+    fn validate_restored_outside_game_card_entries(&self) -> Result<(), String> {
+        for (&entry_ref, entry) in &self.liminal_entries {
+            if matches!(entry.kind, LiminalEntryKind::OutsideGameCard { .. })
+                && (self.outside_game_card_entry(entry_ref).is_none()
+                    || self.battlefield.contains(&entry_ref)
+                    || self.exile.contains(&entry_ref)
+                    || self.stack.iter().any(|entry| entry.id == entry_ref)
+                    || self.players.iter().any(|player| {
+                        player.hand.contains(&entry_ref)
+                            || self.library_of(player.id).contains(&entry_ref)
+                            || self.graveyard_of(player.id).contains(&entry_ref)
+                    }))
+            {
+                return Err(format!(
+                    "invalid outside-game card projection {entry_ref:?}"
+                ));
+            }
+        }
+        let validate_proposal = |proposed: &ProposedEvent| {
+            if let ProposedEvent::OutsideGameCardEntry { entry_ref, .. } = proposed {
+                if self.outside_game_card_entry(*entry_ref).is_none() {
+                    return Err(format!(
+                        "outside-game entry has no matching projection {entry_ref:?}"
+                    ));
+                }
+            }
+            Ok(())
+        };
+        if let Some(pending) = &self.pending_replacement {
+            validate_proposal(&pending.proposed)?;
+        }
+        if let Some(DeferredLifeCostResume::PayAmount {
+            pending_entry: Some(pending),
+            ..
+        }) = &self.pending_deferred_life_cost_resume
+        {
+            validate_proposal(&pending.proposed)?;
+        }
+        if let Some(PendingLiminalEntryResume::OutsideGameCard {
+            source_id,
+            event,
+            boundary,
+            ..
+        }) = &self.pending_liminal_entry_resume
+        {
+            validate_proposal(event)?;
+            if !matches!(event, ProposedEvent::OutsideGameCardEntry { entry_ref, .. } if entry_ref == source_id)
+                || !matches!(self.outside_game_card_entry(*source_id).map(|entry| &entry.kind),
+                    Some(LiminalEntryKind::OutsideGameCard { boundary: entry_boundary, .. })
+                        if boundary == entry_boundary)
+            {
+                return Err("outside-game entry resume disagrees with its proposal".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn outside_game_entry_resume_is_due(&self) -> bool {
+        matches!(
+            self.pending_liminal_entry_resume.as_ref(),
+            Some(PendingLiminalEntryResume::OutsideGameCard { boundary, .. })
+                if boundary.is_retired(&self.resolution_stack)
+        )
+    }
+
+    /// The random draft may park before its written tail is put below its child.
+    pub(crate) fn rebase_outside_game_entry_boundary(
+        &mut self,
+        producer: ObjectId,
+        outer_depth: usize,
+    ) {
+        let entry = self
+            .liminal_entries
+            .iter_mut()
+            .find_map(|(entry_ref, entry)| {
+                let LiminalEntryKind::OutsideGameCard { boundary, .. } = &mut entry.kind else {
+                    return None;
+                };
+                if entry.source_id != producer || boundary.resolution_depth != outer_depth {
+                    return None;
+                }
+                boundary.resolution_depth += 1;
+                Some((*entry_ref, *boundary))
+            });
+        if let Some((entry_ref, rebased)) = entry {
+            if let Some(PendingLiminalEntryResume::OutsideGameCard {
+                source_id,
+                boundary,
+                ..
+            }) = self.pending_liminal_entry_resume.as_mut()
+            {
+                if *source_id == entry_ref {
+                    *boundary = rebased;
+                }
+            }
+        }
     }
 }
 
@@ -11666,6 +11823,11 @@ pub enum PendingCounterPostAction {
         source_id: ObjectId,
         controller: PlayerId,
     },
+    FinalizeOutsideGameCardEntry {
+        object_id: ObjectId,
+        source_id: ObjectId,
+        name: String,
+    },
     ContinueTokenCreation {
         owner: PlayerId,
         /// Its `attack_request` is already advanced past the tokens created so far,
@@ -14027,6 +14189,15 @@ impl GameState {
             .checked_add(1)
             .expect("resolution-cast offer allocator exhausted");
         ResolutionCastOfferId(id)
+    }
+
+    /// Mint the nonzero identity of one damage instruction.
+    pub(crate) fn allocate_damage_delivery_owner(&mut self) -> DamageDeliveryOwnerId {
+        let id = self.next_damage_delivery_owner_id.max(1);
+        self.next_damage_delivery_owner_id = id
+            .checked_add(1)
+            .expect("damage-delivery owner allocator exhausted");
+        DamageDeliveryOwnerId(id)
     }
 
     /// CR 500.7: mint the nonzero identity of one granted extra turn. The
@@ -18934,6 +19105,163 @@ pub(crate) fn live_return_result_occurrences(
         live.extend(frame.return_result_occurrence);
     }
     live
+}
+
+/// Re-establish the allocator bound using the live suspended instruction
+/// carriers. An absent stamp is a legacy ownerless record.
+pub(crate) fn normalize_damage_delivery_owners(state: &mut GameState) -> Result<(), String> {
+    use crate::types::{ability::DamageInstructionResult, Effect};
+    if state.viewer_projection.is_some() {
+        return Ok(());
+    }
+
+    #[derive(Default)]
+    struct Owners {
+        max: u64,
+        readers: HashSet<DamageDeliveryOwnerId>,
+        batches: HashSet<DamageDeliveryOwnerId>,
+        active: HashSet<DamageDeliveryOwnerId>,
+    }
+
+    impl Owners {
+        fn reserve(&mut self, owner: DamageDeliveryOwnerId) -> Result<(), String> {
+            if owner.0 == 0 {
+                return Err("damage-delivery owner is zero".into());
+            }
+            self.max = self.max.max(owner.0);
+            Ok(())
+        }
+
+        fn active(&mut self, owner: DamageDeliveryOwnerId) -> Result<(), String> {
+            self.reserve(owner)?;
+            if !self.active.insert(owner) {
+                return Err("unrelated active damage deliveries share an owner".into());
+            }
+            Ok(())
+        }
+
+        fn parked_chain(&mut self, node: &ResolvedAbility, mirrored: bool) -> Result<(), String> {
+            if let Some(owner) = node.context.damage_delivery_owner {
+                self.reserve(owner)?;
+                match (&node.effect, node.context.direct_damage_result) {
+                    (Effect::ResumeDamageBatch { .. }, _) => {
+                        if !self.batches.insert(owner) {
+                            return Err("unrelated parked damage batches share an owner".into());
+                        }
+                    }
+                    (Effect::ApplyPostReplacementDamage { .. }, _)
+                    | (
+                        Effect::DealDamage { .. },
+                        Some(DamageInstructionResult::ContinuationPortion),
+                    ) => {}
+                    (_, Some(DamageInstructionResult::AwaitingDelivery { .. })) => {
+                        if !mirrored && !self.readers.insert(owner) {
+                            return Err("unrelated waiting damage results share an owner".into());
+                        }
+                    }
+                    _ => {
+                        return Err("damage-delivery owner lives on an unrelated instruction".into())
+                    }
+                }
+            }
+            for (edge, child) in node.child_links() {
+                // The base of an unswapped "instead" override is another
+                // representation of this same next instruction.
+                let mirrored = node.context.damage_delivery_owner.is_some()
+                    && matches!(edge, ChainStep::ElseAbility)
+                    && node
+                        .condition
+                        .as_ref()
+                        .is_some_and(|condition| condition.is_instead_override())
+                    && matches!(
+                        node.context.direct_damage_result,
+                        Some(DamageInstructionResult::AwaitingDelivery { .. })
+                    );
+                if mirrored
+                    && (child.context.damage_delivery_owner != node.context.damage_delivery_owner
+                        || child.context.direct_damage_result != node.context.direct_damage_result)
+                {
+                    return Err("mirrored damage results disagree on the delivery owner".into());
+                }
+                self.parked_chain(child, mirrored)?;
+            }
+            Ok(())
+        }
+    }
+    fn has_owner(node: &ResolvedAbility) -> bool {
+        node.context.damage_delivery_owner.is_some()
+            || node.child_links().any(|(_, child)| has_owner(child))
+    }
+
+    let mut owners = Owners::default();
+    for pending in state.resolution_stack.ability_continuations() {
+        owners.parked_chain(&pending.chain, false)?;
+    }
+    for source in state
+        .stack
+        .iter()
+        .chain(state.resolving_stack_entry.iter())
+        .filter_map(StackEntry::ability)
+    {
+        if has_owner(source) {
+            return Err("unstarted stack instruction carries a damage-delivery owner".into());
+        }
+    }
+    if let Some(pending) = &state.pending_replacement {
+        if let Some(owner) = pending.damage_delivery_owner {
+            if !matches!(
+                pending.proposed,
+                ProposedEvent::Damage {
+                    is_combat: false,
+                    ..
+                }
+            ) {
+                return Err("unrelated replacement carries a damage-delivery owner".into());
+            }
+            owners.active(owner)?;
+        }
+    }
+    if let WaitingFor::DistributeAmong {
+        unit,
+        scope: DistributionScope::ResolutionCandidates { pending_effect },
+        ..
+    } = &state.waiting_for
+    {
+        if let Some(owner) = pending_effect.context.damage_delivery_owner {
+            if *unit != DistributionUnit::Damage
+                || !matches!(pending_effect.effect, Effect::DealDamage { .. })
+            {
+                return Err("unrelated distribution carries a damage-delivery owner".into());
+            }
+            owners.active(owner)?;
+        }
+    }
+    for (owner, combat) in state
+        .pending_damage_post_loss
+        .iter()
+        .map(|post| (post.damage_delivery_owner, post.is_combat))
+        .chain(
+            state
+                .pending_damage_post_counter
+                .iter()
+                .map(|post| (post.damage_delivery_owner, post.is_combat)),
+        )
+    {
+        if let Some(owner) = owner {
+            if combat {
+                return Err("combat residue carries a noncombat damage-delivery owner".into());
+            }
+            owners.active(owner)?;
+        }
+    }
+    let next = owners
+        .max
+        .checked_add(1)
+        .map(|bound| state.next_damage_delivery_owner_id.max(bound))
+        .filter(|next| *next != u64::MAX)
+        .ok_or_else(|| "damage-delivery owner allocator exhausted".to_string())?;
+    state.next_damage_delivery_owner_id = next;
+    Ok(())
 }
 
 pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> Result<(), String> {
@@ -28408,15 +28736,8 @@ pub enum LiminalEntrant {
     /// so CR 303.4g's zone-phrased dispositions cannot apply to it — only the
     /// rule's token clause can.
     Token(TokenProjection),
-    /// CR 701.42: a card-backed projection. It always enters from a real prior
-    /// zone through `ProposedEvent::ZoneChange`, so CR 303.4g's card
-    /// dispositions ("remains in its current zone", or the stack's
-    /// owner's-graveyard placement) are decided on that path — which
-    /// re-proposes the graveyard placement as a fresh, replacement-consulted
-    /// event (CR 614.6). Also carries the [`LiminalEntryKind::TransformedEntry`]
-    /// back-face projection of a double-faced card entering transformed
-    /// (CR 614.12); that entrant's prior zone is the stack or wherever the
-    /// effect moves it from.
+    /// CR 614.12: a card-backed projection. Meld and transformed entries have
+    /// a real prior zone. Outside-game cards have no prior zone (CR 400.11).
     Card(GameObject),
 }
 
@@ -28565,6 +28886,13 @@ pub enum LiminalEntryKind {
     /// `replacement::replace_event` / `continue_replacement`; never present
     /// at delivery.
     TransformedEntry,
+    OutsideGameCard {
+        boundary: ReplacementSubtreeBoundary,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        original: Option<Box<GameObject>>,
+        #[serde(default)]
+        superseded_replacements: usize,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28581,6 +28909,12 @@ pub enum PendingLiminalEntryResume {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attack_target: Option<AttackTarget>,
     },
+    OutsideGameCard {
+        source_id: ObjectId,
+        player: PlayerId,
+        event: ProposedEvent,
+        boundary: ReplacementSubtreeBoundary,
+    },
 }
 
 #[derive(Deserialize)]
@@ -28596,6 +28930,12 @@ enum TaggedPendingLiminalEntryResume {
         context: MeldSelection,
         #[serde(default)]
         attack_target: Option<AttackTarget>,
+    },
+    OutsideGameCard {
+        source_id: ObjectId,
+        player: PlayerId,
+        event: ProposedEvent,
+        boundary: ReplacementSubtreeBoundary,
     },
 }
 
@@ -28645,6 +28985,19 @@ impl<'de> Deserialize<'de> for PendingLiminalEntryResume {
                     player,
                     context,
                     attack_target,
+                },
+                PendingLiminalEntryResumeCompat::Tagged(
+                    TaggedPendingLiminalEntryResume::OutsideGameCard {
+                        source_id,
+                        player,
+                        event,
+                        boundary,
+                    },
+                ) => Self::OutsideGameCard {
+                    source_id,
+                    player,
+                    event,
+                    boundary,
                 },
             },
         )
@@ -29405,6 +29758,9 @@ declare_game_state! {
     /// Persisted producer allocator for paid resolution-cast cleanup authority.
     #[serde(default)]
     pub(crate) next_resolution_cast_offer_id: u64,
+    /// Persisted allocator for damage instructions that can resume after a pause.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub(crate) next_damage_delivery_owner_id: u64,
     /// Monotonic allocator for [`LogicalZoneChangeGroupId`]. It is pure
     /// identity, so equality intentionally compares the active owner rather
     /// than this historical counter.
@@ -31408,6 +31764,11 @@ declare_game_state! {
     /// so the action phase cannot begin before every player has chosen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_scoped_library_search: Option<PendingScopedLibrarySearch>,
+    /// CR 101.4 + CR 701.20a: Pending private selections for a player-scoped
+    /// hand reveal. The selected cards are not published until every
+    /// participating player has selected or declined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_player_scope_reveal: Option<PendingPlayerScopeReveal>,
     /// Typed cleanup waiting for an ordinary search's leading ChangeZone to
     /// settle. The chain walker consumes it synchronously; the paused
     /// ChangeZone drain consumes the same value after its final member lands.
@@ -31643,6 +32004,21 @@ declare_game_state! {
     /// state equality (a monotonic tally would break AI-search dedup).
     #[serde(skip)]
     pub(crate) revealed_publications: u64,
+
+    /// CR 608.2c + CR 109.5: the cards revealed by each seat's instruction
+    /// inside a player-scoped reveal fan-out. The ordinary tracked set remains
+    /// the clause-wide population; this resolution-local ledger lets a
+    /// co-scoped "for each card revealed this way" consumer read the current
+    /// seat's contribution rather than the fan-out union. Persisted so a
+    /// paused reveal choice can resume after a supported mid-resolution
+    /// save/restore.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
+    pub(crate) scoped_reveal_sets: HashMap<PlayerId, (u64, Vec<ObjectId>)>,
+    /// Monotone publication identity for the current resolution's tracked set.
+    /// A scoped reveal is valid only while this generation remains current.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub(crate) tracked_set_publication_generation: u64,
 
     /// CR 608.2c + CR 609.3 + issue #4950: Set when the most
     /// recently resolved `Dig`/`RevealTop`/`ChooseFromZone`/`RevealHand` reveal-choice/
@@ -32338,6 +32714,14 @@ declare_game_state! {
     /// serialized and never part of state equality.
     #[serde(skip)]
     pub(crate) trigger_construction_finisher_ran_this_action: bool,
+    /// True only during the synchronous `resolve_effect_step` window when the
+    /// effect's targets came solely from transient event-context hydration
+    /// (`hydrate_event_context_targets`) rather than declared/parent targets.
+    /// Prevents damage pause stashes (`stashed_tail`) from mirroring those
+    /// transient targets onto a child tail when the synchronous chain walker
+    /// leaves `ability.targets` empty. Never serialized and excluded from equality.
+    #[serde(skip)]
+    pub(crate) current_step_targets_hydrated_from_event_context: bool,
 
     /// CR 601.2h + CR 616.1: Resume a sequential discard cost after a
     /// replacement choice. Cost moves use `pending_cost_move_resume` above.
@@ -34767,9 +35151,11 @@ impl GameStateDecode {
         withhold_unestablished_entry_completion(&mut state);
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
+        normalize_damage_delivery_owners(&mut state)?;
         // The PERSISTED half of the projection gate; `decode` below carries the other.
         // See the pairing comment there for why one site is not enough.
         reject_viewer_projection_as_authority(&state)?;
+        state.validate_restored_outside_game_card_entries()?;
         validate_trigger_firing_coherence(&state)?;
         validate_owed_spell_final_part_coherence(&state)?;
         validate_return_result_occurrence_coherence(&state)?;
@@ -34811,6 +35197,7 @@ impl GameStateDecode {
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
+        normalize_damage_delivery_owners(&mut state)?;
         // NO viewer-projection guard here, deliberately. This is the TRANSPORT decode
         // path as much as a restore path: `ServerMessage::GameStarted { state, .. }`
         // (`server-core/src/protocol.rs`) carries a `filter_state_for_viewer` projection
@@ -36233,6 +36620,9 @@ pub struct PendingSimultaneousTokenClause {
 /// into `proposed` before typed decoding, and this struct ignores the key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
+    /// The instruction whose damage is still being delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_delivery_owner: Option<DamageDeliveryOwnerId>,
     pub proposed: ProposedEvent,
     /// CR 608.2f + CR 700.1: the guards of the simultaneous damage batch this portion
     /// belongs to, read again when the answer re-scans this portion.
@@ -41201,6 +41591,7 @@ impl GameState {
             next_delayed_trigger_token: 1,
             next_delayed_trigger_instance: initial_delayed_trigger_instance_id(),
             next_resolution_cast_offer_id: 1,
+            next_damage_delivery_owner_id: 1,
             next_logical_zone_change_group_id: initial_logical_zone_change_group_id(),
             // CR 118.3a: start at 1 so minted pip ids never collide with the
             // `ManaPipId(0)` unstamped sentinel.
@@ -41458,6 +41849,7 @@ impl GameState {
             completed_hidden_search_audiences: Vec::new(),
             pending_search_found_batch: None,
             pending_die_roll_instruction: None,
+            pending_player_scope_reveal: None,
             may_trigger_auto_choices: Vec::new(),
             un_actions: Default::default(),
             replacement_auto_choices: Vec::new(),
@@ -41486,6 +41878,8 @@ impl GameState {
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
             revealed_publications: 0,
+            scoped_reveal_sets: HashMap::new(),
+            tracked_set_publication_generation: 0,
             last_parent_target_missing_reason: None,
             private_look_ids: Vec::new(),
             private_look_player: None,
@@ -41551,6 +41945,7 @@ impl GameState {
             active_accepted_triggered_mana_node: None,
             mana_subresolution_depth: 0,
             trigger_construction_finisher_ran_this_action: false,
+            current_step_targets_hydrated_from_event_context: false,
             pending_discard_for_cost: None,
             pending_cast: None,
             legacy_unrouted_pending_casts: Vec::new(),
@@ -41697,25 +42092,36 @@ impl GameState {
         counter_type: CounterType,
         count: u32,
     ) -> bool {
-        let Some(entry) = self
-            .liminal_entries
-            .get_mut(&id)
-            .filter(|entry| entry.object.is_token_projection())
-        else {
+        let Some(entry) = self.liminal_entries.get_mut(&id).filter(|entry| {
+            entry.object.is_token_projection()
+                || matches!(entry.kind, LiminalEntryKind::OutsideGameCard { .. })
+        }) else {
             return false;
         };
         // CR 702.82a: counters earned by this entrant's own replacement belong to
         // its entry event, not the pristine batch payload used by later entrants.
-        if let Some(PendingLiminalEntryResume::Token {
-            source_id,
-            event:
-                crate::types::proposed_event::ProposedEvent::TokenEntry {
-                    entry_ref,
-                    enter_with_counters,
-                    ..
-                },
-            ..
-        }) = self.pending_liminal_entry_resume.as_mut()
+        if let Some(
+            PendingLiminalEntryResume::Token {
+                source_id,
+                event:
+                    crate::types::proposed_event::ProposedEvent::TokenEntry {
+                        entry_ref,
+                        enter_with_counters,
+                        ..
+                    },
+                ..
+            }
+            | PendingLiminalEntryResume::OutsideGameCard {
+                source_id,
+                event:
+                    ProposedEvent::OutsideGameCardEntry {
+                        entry_ref,
+                        enter_with_counters,
+                        ..
+                    },
+                ..
+            },
+        ) = self.pending_liminal_entry_resume.as_mut()
         {
             if *source_id == id && *entry_ref == id {
                 enter_with_counters.push((counter_type, count));
@@ -42795,6 +43201,7 @@ impl GameState {
         clone.next_delayed_trigger_token = 0;
         clone.next_delayed_trigger_instance = 0;
         clone.next_resolution_cast_offer_id = 0;
+        clone.next_damage_delivery_owner_id = 0;
         // CR 608.2e + CR 104.4b: fan-out control-change captures are
         // resolution-scoped working memory keyed by a monotone id, not game
         // position.
@@ -42890,6 +43297,12 @@ impl GameState {
         // eq-compared (AI-search dedup legitimately reads it), so it is
         // normalized away HERE rather than excluded from `PartialEq`.
         clone.resolving_modal_instruction = None;
+        // CR 104.4b: a scoped reveal generation is meaningful only while its
+        // resolution-local ledger is live.  Once the ledger is empty, erase
+        // the publication history so loop-equivalent positions compare equal.
+        if clone.scoped_reveal_sets.is_empty() {
+            clone.tracked_set_publication_generation = 0;
+        }
         // CR 608.2c + CR 104.4b: the chain tracked-set pointer is that latch's
         // lockstep partner and is resolution-scoped for the same reason — a chain's
         // "those cards" anaphor names only what THIS resolution's instructions
@@ -43348,18 +43761,41 @@ impl GameState {
         });
     }
 
-    /// CR 104.4b + CR 608.2h: keeps only the `departed_stack_spells` records a spell-cast
-    /// trigger on the stack or resolving can still name, plus every departure whose spell a
+    fn collect_retained_cast_pins(event: &GameEvent, retained: &mut HashSet<ObjectIncarnationRef>) {
+        match event {
+            GameEvent::SpellCast {
+                object_id,
+                cast_incarnation: Some(incarnation),
+                ..
+            } => {
+                retained.insert(ObjectIncarnationRef::of(*object_id, *incarnation));
+            }
+            GameEvent::AbilityTriggered { causes, .. } => {
+                for cause in causes {
+                    Self::collect_retained_cast_pins(cause, retained);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// CR 104.4b + CR 608.2h: keeps only the `departed_stack_spells` records a retained cast
+    /// event can still name, plus every departure whose spell a
     /// `BecomesTarget` targeter still names (`targeting::event_referent_controller` reads
     /// that record), and the `departed_activated_abilities` records an activation trigger on
     /// the stack or resolving still names (CR 602.2a: the event names the activation's own
     /// stack object; `targeting::triggering_activation` reads it); the rest are history, not
     /// position.
-    /// Mirrors `targeting::triggering_spell`: a pinned trigger keeps its pinned record, an
-    /// unpinned one the highest key.
+    /// Mirrors `targeting::triggering_spell`: an event stamp keeps its exact record.
+    /// A legacy on-stack or resolving trigger uses its ability pin or the highest key.
     pub(crate) fn retain_trigger_referenced_departed_stack_records(&mut self) {
         let mut retained: HashSet<ObjectIncarnationRef> = HashSet::new();
         let mut retained_activations: HashSet<ObjectId> = HashSet::new();
+        if !self.departed_stack_spells.is_empty() {
+            self.for_each_trigger_event_carrier_mut(&mut |event| {
+                Self::collect_retained_cast_pins(event, &mut retained)
+            });
+        }
         for entry in self.stack.iter().chain(self.resolving_stack_entry.iter()) {
             if let StackEntryKind::TriggeredAbility {
                 trigger_event:
@@ -43374,7 +43810,12 @@ impl GameState {
             }
             if let StackEntryKind::TriggeredAbility {
                 ability,
-                trigger_event: Some(GameEvent::SpellCast { object_id, .. }),
+                trigger_event:
+                    Some(GameEvent::SpellCast {
+                        object_id,
+                        cast_incarnation: None,
+                        ..
+                    }),
                 ..
             } = &entry.kind
             {
@@ -43524,6 +43965,11 @@ impl GameState {
                     object_id,
                     incarnation: Some(incarnation),
                     ..
+                }
+                | GameEvent::SpellCast {
+                    object_id,
+                    cast_incarnation: Some(incarnation),
+                    ..
                 } => f(*object_id, incarnation),
                 // CR 400.7 + CR 608.2h (#9754): the source stamp a damage event
                 // carries is the same class of pin as a tap stamp.
@@ -43575,7 +44021,10 @@ impl GameState {
                 | GameEvent::PhaseChanged { .. }
                 | GameEvent::PhaseChangedFor { .. }
                 | GameEvent::PriorityPassed { .. }
-                | GameEvent::SpellCast { .. }
+                | GameEvent::SpellCast {
+                    cast_incarnation: None,
+                    ..
+                }
                 | GameEvent::Mutated { .. }
                 | GameEvent::Augmented { .. }
                 | GameEvent::Melded { .. }
@@ -44333,13 +44782,7 @@ impl GameState {
             attachments: &mut [AttachmentSnapshot],
             f: &mut impl FnMut(ObjectId, &mut u64),
         ) {
-            for AttachmentSnapshot {
-                object_id: _,
-                identity,
-                controller: _,
-                kind: _,
-            } in attachments
-            {
+            for AttachmentSnapshot { identity, .. } in attachments {
                 if let Some(reference) = identity {
                     f(reference.object_id, &mut reference.incarnation);
                 }
@@ -44496,7 +44939,12 @@ impl GameState {
         }
         let mut grants: HashMap<ObjectId, Vec<u64>> = HashMap::new();
         let mut carrier_read: HashSet<ObjectIncarnationRef> = HashSet::new();
+        let mut cast_pins = HashSet::new();
+        let has_departed_spells = !self.departed_stack_spells.is_empty();
         let mut collect_event = |event: &mut GameEvent| {
+            if has_departed_spells {
+                Self::collect_retained_cast_pins(event, &mut cast_pins);
+            }
             named_incarnations(event, &mut |object_id, incarnation| {
                 present.entry(object_id).or_default().push(*incarnation);
                 carrier_read.insert(ObjectIncarnationRef::of(object_id, *incarnation));
@@ -44521,6 +44969,24 @@ impl GameState {
         self.for_each_loop_ability_carrier_mut(&mut |_, ability| {
             ability.for_each_creation_lookback_event_mut(&mut collect_event);
         });
+        let ranked_departures: HashSet<_> = cast_pins
+            .into_iter()
+            .filter_map(|pin| {
+                self.departed_stack_spells
+                    .get(&pin.object_id)
+                    .is_some_and(|records| records.contains_key(&pin.incarnation))
+                    .then_some(pin.object_id)
+            })
+            .collect();
+        // CR 400.7 + CR 608.2h: when a cast stamp names a departure, rank that
+        // spell's remaining keys together. Their order still selects the most
+        // recent record for any legacy reader of the same spell.
+        for object_id in &ranked_departures {
+            present
+                .entry(*object_id)
+                .or_default()
+                .extend(self.departed_stack_spells[object_id].keys().copied());
+        }
         // CR 400.7 + CR 603.7c + CR 601.2c: the pins and snapshots captured by every
         // ability that can still resolve. Each carrier's own `source_id` keys its ability's
         // bare source epochs; normalization zeroes only the ability's copy.
@@ -44837,6 +45303,20 @@ impl GameState {
                     (object_id, history)
                 })
                 .collect();
+        for object_id in ranked_departures {
+            let records = self
+                .departed_stack_spells
+                .get_mut(&object_id)
+                .expect("ranked departures have retained records");
+            *records = std::mem::take(records)
+                .into_iter()
+                .map(|(incarnation, mut record)| {
+                    let incarnation = canonical(object_id, incarnation);
+                    record.object.incarnation = incarnation;
+                    (incarnation, record)
+                })
+                .collect();
+        }
         let mut rank_event = |event: &mut GameEvent| {
             named_incarnations(event, &mut |object_id, incarnation| {
                 *incarnation = canonical(object_id, *incarnation);
@@ -45117,12 +45597,10 @@ impl GameState {
             may_trigger_auto_choices: _,
             pending_triggered_mana_resume: _,
             resolution_stack: _,
-            // COMPARED RAW — departed stack records (CR 400.7 last-known information),
-            // pruned to the ones a retained carrier names. `departed_stack_spells` is keyed
-            // by object and raw incarnation, `departed_activated_abilities` by object; both
-            // hold a raw ability. A different key only splits two frames, while the
-            // record's ability pins are not ranked, so a record kept unchanged across a
-            // re-incarnation of an object it pins could merge, in principle.
+            // Departed stack records (CR 400.7) are pruned to the ones a retained
+            // carrier names. A stamped cast ranks its spell's departed record
+            // keys with the event pin. Legacy-only keys and the records' own
+            // abilities retain their existing raw comparison.
             departed_stack_spells: _,
             departed_activated_abilities: _,
             // COMPARED RAW — floating shields and their riders: `pending_shields_loop_eq`
@@ -45154,6 +45632,7 @@ impl GameState {
             // live in one.
             active_library_searches: _,
             pending_scoped_library_search: _,
+            pending_player_scope_reveal: _,
             pending_library_search_delivery: _,
             // Pin-bearing damage/discard pauses drain before Priority is restored;
             // see their existing classification in `_gamestate_partition_is_total`.
@@ -45180,6 +45659,7 @@ impl GameState {
             next_delayed_trigger_token: _,
             next_delayed_trigger_instance: _,
             next_resolution_cast_offer_id: _,
+            next_damage_delivery_owner_id: _,
             next_logical_zone_change_group_id: _,
             next_pip_id: _,
             next_spell_announcement: _,
@@ -45470,6 +45950,7 @@ impl GameState {
             active_accepted_triggered_mana_node: _,
             mana_subresolution_depth: _,
             trigger_construction_finisher_ran_this_action: _,
+            current_step_targets_hydrated_from_event_context: _,
             pending_discard_for_cost: _,
             pending_cast: _,
             legacy_unrouted_pending_casts: _,
@@ -45546,6 +46027,8 @@ impl GameState {
             // are cleared with it by the loop projection.
             instruction_boundary_marks: _,
             batched_zone_change_trigger_fired: _,
+            scoped_reveal_sets: _,
+            tracked_set_publication_generation: _,
         } = s;
         if let Some(combat) = s.combat.as_ref() {
             let crate::game::combat::CombatState {
@@ -46775,6 +47258,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_delayed_trigger_token: _,
         next_delayed_trigger_instance: _,
         next_resolution_cast_offer_id: _,
+        next_damage_delivery_owner_id: _,
         next_logical_zone_change_group_id: _,
         next_pip_id: _,
         next_spell_announcement: _,
@@ -47159,6 +47643,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_accepted_triggered_mana_node: _,
         mana_subresolution_depth: _,
         trigger_construction_finisher_ran_this_action: _,
+        current_step_targets_hydrated_from_event_context: _,
         pending_discard_for_cost: _,
         pending_cast: _,
         legacy_unrouted_pending_casts: _,
@@ -47247,6 +47732,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_exile_from_top_until: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
+        pending_player_scope_reveal: _,
         pending_library_search_delivery: _,
         completed_hidden_search_audiences: _,
         pending_search_found_batch: _,
@@ -47263,6 +47749,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     object-growth lives in `objects` (stripped+compared by `eq_except_growable`), so
         //     excluding this single-object identity field cannot hide growth.
         resolution_source_relatch: _,
+        scoped_reveal_sets: _,
+        tracked_set_publication_generation: _,
     } = s;
 }
 
@@ -47560,6 +48048,7 @@ impl PartialEq for GameState {
             && self.next_delayed_trigger_token == other.next_delayed_trigger_token
             && self.next_delayed_trigger_instance == other.next_delayed_trigger_instance
             && self.next_resolution_cast_offer_id == other.next_resolution_cast_offer_id
+            && self.next_damage_delivery_owner_id == other.next_damage_delivery_owner_id
             && self.next_pip_id == other.next_pip_id
             && self.next_spell_announcement == other.next_spell_announcement
             && self.resolved_rules_journal == other.resolved_rules_journal
@@ -47614,6 +48103,9 @@ impl PartialEq for GameState {
             && self.tracked_object_sets == other.tracked_object_sets
             && self.next_tracked_set_id == other.next_tracked_set_id
             && self.chain_tracked_set_id == other.chain_tracked_set_id
+            && self.scoped_reveal_sets == other.scoped_reveal_sets
+            && self.tracked_set_publication_generation
+                == other.tracked_set_publication_generation
             && self.return_result_frames == other.return_result_frames
             && self.active_return_result_occurrence == other.active_return_result_occurrence
             && self.next_return_result_occurrence_id == other.next_return_result_occurrence_id
@@ -47779,6 +48271,7 @@ impl PartialEq for GameState {
             && self.pending_mass_library_order_choice
                 == other.pending_mass_library_order_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search
+            && self.pending_player_scope_reveal == other.pending_player_scope_reveal
             && self.pending_library_search_delivery == other.pending_library_search_delivery
             && self.completed_hidden_search_audiences
                 == other.completed_hidden_search_audiences
@@ -50354,6 +50847,101 @@ mod tests {
             },
         };
         (state, source, hit_card, constraint, receipt)
+    }
+
+    #[test]
+    fn damage_ownership_restore_reserves_live_ids_and_rejects_invalid_authority() {
+        use crate::types::ability::{QuantityExpr, TargetFilter};
+        use crate::types::Effect;
+
+        let make_state = |owner| {
+            let mut state = GameState::new_two_player(42);
+            let mut effect = ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+                vec![],
+                ObjectId(10),
+                PlayerId(0),
+            );
+            effect.context.damage_delivery_owner = owner;
+            state.waiting_for = WaitingFor::DistributeAmong {
+                player: PlayerId(0),
+                total: 3,
+                targets: vec![TargetRef::Player(PlayerId(1))],
+                unit: DistributionUnit::Damage,
+                scope: DistributionScope::ResolutionCandidates {
+                    pending_effect: Box::new(effect),
+                },
+            };
+            state
+        };
+
+        let mut trusted = make_state(Some(DamageDeliveryOwnerId(12)));
+        trusted.next_damage_delivery_owner_id = 23;
+        let mut raw = serde_json::to_value(&trusted).unwrap();
+        assert_eq!(raw["next_damage_delivery_owner_id"], 23);
+        let mut restored: GameState = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(
+            restored.allocate_damage_delivery_owner(),
+            DamageDeliveryOwnerId(23)
+        );
+        let viewer = crate::game::visibility::filter_state_for_viewer(&trusted, PlayerId(1));
+        let viewer = serde_json::to_value(viewer).unwrap();
+        assert!(viewer.get("next_damage_delivery_owner_id").is_none());
+
+        raw.as_object_mut()
+            .unwrap()
+            .remove("next_damage_delivery_owner_id");
+        let mut decoded: GameState =
+            serde_json::from_value(raw).expect("missing counter is reserved");
+        assert_eq!(
+            decoded.allocate_damage_delivery_owner(),
+            DamageDeliveryOwnerId(13)
+        );
+
+        for (owner, message) in [
+            (DamageDeliveryOwnerId(0), "owner is zero"),
+            (DamageDeliveryOwnerId(u64::MAX), "allocator exhausted"),
+        ] {
+            let raw = serde_json::to_value(make_state(Some(owner))).unwrap();
+            let error = serde_json::from_value::<GameState>(raw)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{error}");
+        }
+
+        let mut legacy = make_state(None);
+        legacy.next_damage_delivery_owner_id = 0;
+        let raw = serde_json::to_value(legacy).unwrap();
+        let mut decoded: GameState =
+            serde_json::from_value(raw).expect("legacy ownerless damage decodes");
+        assert_eq!(
+            decoded.allocate_damage_delivery_owner(),
+            DamageDeliveryOwnerId(1)
+        );
+        assert!(matches!(
+            decoded.waiting_for,
+            WaitingFor::DistributeAmong { scope: DistributionScope::ResolutionCandidates { pending_effect }, .. }
+                if pending_effect.context.damage_delivery_owner.is_none()
+        ));
+
+        let mut unrelated = trusted;
+        let WaitingFor::DistributeAmong { unit, .. } = &mut unrelated.waiting_for else {
+            unreachable!("fixture is a distribution prompt");
+        };
+        *unit = DistributionUnit::Life;
+        let raw = serde_json::to_value(unrelated).unwrap();
+        let error = serde_json::from_value::<GameState>(raw)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unrelated distribution carries a damage-delivery owner"),
+            "{error}"
+        );
     }
 
     fn downgrade_paid_offer_cleanup_to_legacy(state: &mut serde_json::Value) {
@@ -64149,6 +64737,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                         object_id: spell_id,
                         card_id: CardId(1),
                         cast_mana_value: None,
+                        cast_mana_spent: None,
+                        cast_incarnation: None,
                     }),
                     description: None,
                     source_name: String::new(),
@@ -64166,6 +64756,258 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         assert!(
             loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
             "two states differing only in the pinned spell's incarnation must confirm a loop"
+        );
+    }
+
+    fn krark_modern_cast_position(live_incarnation: u64, trigger_incarnation: u64) -> GameState {
+        let spell_id = ObjectId(30);
+        let krark_id = ObjectId(31);
+        let player = PlayerId(0);
+        let card_id = CardId(1);
+        let mut state = GameState::new_two_player(7);
+        let mut spell =
+            GameObject::new(spell_id, card_id, player, "Loop Spell".into(), Zone::Stack);
+        spell.incarnation = live_incarnation;
+        spell.mana_spent_to_cast_amount = 1;
+        let spell_entry = StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: player,
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 1,
+            },
+        };
+        let mut original_spell = spell.clone();
+        original_spell.incarnation = trigger_incarnation;
+        let cast_event = GameEvent::spell_cast(&original_spell, player);
+
+        if trigger_incarnation != live_incarnation {
+            state.departed_stack_spells.insert(
+                spell_id,
+                im::HashMap::from_iter([(
+                    trigger_incarnation,
+                    DepartedStackSpell {
+                        entry: spell_entry.clone(),
+                        object: Box::new(original_spell),
+                    },
+                )]),
+            );
+        }
+
+        state.objects.insert(spell_id, spell);
+        state.stack.push_back(spell_entry);
+        let mut ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::TriggeringSource,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            krark_id,
+            player,
+        );
+        ability.context.triggering_spell =
+            Some(ObjectIncarnationRef::of(spell_id, trigger_incarnation));
+        state.stack.push_back(StackEntry {
+            id: ObjectId(40),
+            source_id: krark_id,
+            controller: player,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: krark_id,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: Some(cast_event),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state
+    }
+
+    fn modern_cast_loop_event(state: &GameState) -> &GameEvent {
+        let StackEntryKind::TriggeredAbility {
+            trigger_event: Some(event),
+            ..
+        } = &state.stack.back().expect("cast trigger").kind
+        else {
+            panic!("expected a cast trigger with an event");
+        };
+        event
+    }
+
+    fn legacy_cast_loop_control(mut state: GameState) -> GameState {
+        let StackEntryKind::TriggeredAbility {
+            trigger_event:
+                Some(GameEvent::SpellCast {
+                    cast_incarnation, ..
+                }),
+            ..
+        } = &mut state.stack.back_mut().expect("cast trigger").kind
+        else {
+            panic!("expected a cast trigger with a spell-cast event");
+        };
+        assert!(cast_incarnation.take().is_some());
+        state
+    }
+
+    #[test]
+    fn modern_cast_loop_equivalent_live_occurrences_compare_equal() {
+        use crate::game::targeting::{triggering_spell_for_event, TriggeringSpell};
+
+        let earlier = krark_modern_cast_position(2, 2);
+        let later = krark_modern_cast_position(4, 4);
+        for state in [&earlier, &later] {
+            assert!(state.is_loop_comparable());
+            assert!(matches!(
+                triggering_spell_for_event(state, modern_cast_loop_event(state)),
+                Some(TriggeringSpell::OnStack(_))
+            ));
+        }
+        let legacy_earlier = legacy_cast_loop_control(earlier.clone()).normalize_for_loop();
+        let legacy_later = legacy_cast_loop_control(later.clone()).normalize_for_loop();
+        assert!(same_position(&legacy_earlier, &legacy_later));
+        assert!(loop_states_equal(&legacy_earlier, &legacy_later));
+
+        let earlier = earlier.normalize_for_loop();
+        let later = later.normalize_for_loop();
+        assert_eq!(
+            (
+                same_position(&earlier, &later),
+                loop_states_equal(&earlier, &later)
+            ),
+            (true, true),
+            "equivalent live casts differ only by a raw incarnation"
+        );
+    }
+
+    #[test]
+    fn modern_cast_loop_stale_and_live_occurrences_compare_unequal() {
+        use crate::game::targeting::{triggering_spell_for_event, TriggeringSpell};
+
+        let stale = krark_modern_cast_position(4, 2);
+        let live = krark_modern_cast_position(4, 4);
+        assert!(stale.is_loop_comparable());
+        assert!(live.is_loop_comparable());
+        assert!(matches!(
+            triggering_spell_for_event(&stale, modern_cast_loop_event(&stale)),
+            Some(TriggeringSpell::Departed(_))
+        ));
+        assert!(matches!(
+            triggering_spell_for_event(&live, modern_cast_loop_event(&live)),
+            Some(TriggeringSpell::OnStack(_))
+        ));
+        let stale = stale.normalize_for_loop();
+        let live = live.normalize_for_loop();
+        assert!(!same_position(&stale, &live));
+        assert!(!loop_states_equal(&stale, &live));
+    }
+
+    #[test]
+    fn modern_cast_loop_retains_the_stamped_departure_from_nested_causes() {
+        use crate::game::targeting::{
+            triggering_spell_for_event, triggering_spell_identity_for_event, TriggeringSpell,
+        };
+        use crate::types::events::TriggeredAbilityOrigin;
+
+        fn nested_position(shift: u64) -> GameState {
+            let older = 2 + shift;
+            let newer = 3 + shift;
+            let mut state = krark_modern_cast_position(4 + shift, older);
+            let spell_id = ObjectId(30);
+            let records = state.departed_stack_spells.get_mut(&spell_id).unwrap();
+            let old_record = records.get_mut(&older).unwrap();
+            old_record.object.mana_spent_to_cast_amount = 3;
+            let cause = GameEvent::spell_cast(&old_record.object, PlayerId(0));
+            let mut new_record = old_record.clone();
+            new_record.object.incarnation = newer;
+            new_record.object.mana_spent_to_cast_amount = 9;
+            records.insert(newer, new_record);
+
+            let trigger = state.stack.back_mut().unwrap();
+            let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut trigger.kind else {
+                panic!("expected a triggered stack entry");
+            };
+            let primary = GameEvent::PhaseChanged {
+                phase: Phase::PreCombatMain,
+            };
+            *trigger_event = Some(primary.clone());
+            state.stack_trigger_event_batches.insert(
+                trigger.id,
+                vec![
+                    primary,
+                    GameEvent::AbilityTriggered {
+                        stack_entry: Some(trigger.id),
+                        source_id: trigger.source_id,
+                        controller: trigger.controller,
+                        origin: TriggeredAbilityOrigin::SourceAbility,
+                        causes: vec![cause],
+                    },
+                ],
+            );
+            state
+        }
+
+        fn nested_casts(state: &GameState) -> &[GameEvent] {
+            let events = &state.stack_trigger_event_batches[&ObjectId(40)];
+            let GameEvent::AbilityTriggered { causes, .. } = &events[1] else {
+                panic!("expected an observed trigger as the second batch event");
+            };
+            causes
+        }
+
+        fn departed_payment(state: &GameState, event: &GameEvent) -> u32 {
+            let Some(TriggeringSpell::Departed(record)) = triggering_spell_for_event(state, event)
+            else {
+                panic!("nested cast must still name its exact departed occurrence");
+            };
+            let pin = triggering_spell_identity_for_event(state, event).unwrap();
+            assert_eq!(record.object.incarnation, pin.incarnation);
+            record.object.mana_spent_to_cast_amount
+        }
+
+        let earlier = nested_position(0);
+        let later = nested_position(10);
+        for state in [&earlier, &later] {
+            assert!(state.is_loop_comparable());
+            assert_eq!(state.departed_stack_spells[&ObjectId(30)].len(), 2);
+            assert_eq!(departed_payment(state, &nested_casts(state)[0]), 3);
+        }
+        let earlier = earlier.normalize_for_loop();
+        let later = later.normalize_for_loop();
+        for state in [&earlier, &later] {
+            assert_eq!(departed_payment(state, &nested_casts(state)[0]), 3);
+            assert_eq!(state.departed_stack_spells[&ObjectId(30)].len(), 1);
+        }
+        assert!(same_position(&earlier, &later));
+        assert!(loop_states_equal(&earlier, &later));
+
+        let mut both = nested_position(0);
+        let newer = &both.departed_stack_spells[&ObjectId(30)][&3].object;
+        let newer_cast = GameEvent::spell_cast(newer, PlayerId(0));
+        let batch = both
+            .stack_trigger_event_batches
+            .get_mut(&ObjectId(40))
+            .unwrap();
+        let GameEvent::AbilityTriggered { causes, .. } = &mut batch[1] else {
+            panic!("expected an observed trigger as the second batch event");
+        };
+        causes.push(newer_cast);
+        let both = both.normalize_for_loop();
+        assert_eq!(both.departed_stack_spells[&ObjectId(30)].len(), 2);
+        assert_eq!(
+            nested_casts(&both)
+                .iter()
+                .map(|event| departed_payment(&both, event))
+                .collect::<Vec<_>>(),
+            [3, 9]
         );
     }
 
@@ -64241,6 +65083,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                         object_id: spell_id,
                         card_id: CardId(1),
                         cast_mana_value: None,
+                        cast_mana_spent: None,
+                        cast_incarnation: None,
                     }),
                     description: None,
                     source_name: String::new(),
@@ -65985,6 +66829,27 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         ));
         let restored: GameState = serde_json::from_str(&serialized).expect("state should restore");
         assert_eq!(restored.stack_trigger_firings, state.stack_trigger_firings);
+        assert_eq!(
+            serde_json::to_string(&restored).expect("restored state should serialize"),
+            serialized
+        );
+    }
+
+    #[test]
+    fn scoped_reveal_sets_numeric_map_round_trips_populated() {
+        let mut state = GameState::new_two_player(17);
+        state.tracked_set_publication_generation = 7;
+        state
+            .scoped_reveal_sets
+            .insert(PlayerId(1), (7, vec![ObjectId(41), ObjectId(42)]));
+        state
+            .scoped_reveal_sets
+            .insert(PlayerId(0), (7, vec![ObjectId(31)]));
+
+        let serialized = serde_json::to_string(&state).expect("state should serialize");
+        assert!(serialized.contains("\"scoped_reveal_sets\":{\"0\":[7,[31]],\"1\":[7,[41,42]]}"));
+        let restored: GameState = serde_json::from_str(&serialized).expect("state should restore");
+        assert_eq!(restored.scoped_reveal_sets, state.scoped_reveal_sets);
         assert_eq!(
             serde_json::to_string(&restored).expect("restored state should serialize"),
             serialized
@@ -72775,6 +73640,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
 
     fn pending_life_gain_replacement(policy: UnrepresentablePolicy) -> PendingReplacement {
         PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::LifeGain {
                 player_id: PlayerId(0),
