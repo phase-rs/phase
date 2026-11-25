@@ -305,6 +305,7 @@ mod conceded_halo_combat_ordering_reproposal;
 mod condition_gates_fail_closed;
 mod conditional_cost_reduction_3223;
 mod conditional_entry_gate_projection;
+mod conditional_instead_mana;
 mod confirmed_misparse_coverage;
 mod connecting_the_dots_return_exiled_with;
 mod connive_draw_pause_tail_completion;

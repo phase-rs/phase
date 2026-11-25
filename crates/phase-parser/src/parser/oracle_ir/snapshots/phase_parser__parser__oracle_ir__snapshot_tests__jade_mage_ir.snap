@@ -123,7 +123,6 @@ expression: "&ir"
             },
             "description": "{2}{G}: Create a 1/1 green Saproling creature token.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
