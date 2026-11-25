@@ -28286,11 +28286,11 @@ fn effect_emblem_trigger_with_subject_predicate_text_stays_emblem() {
         Effect::LoseLife { amount, target } => {
             assert_eq!(
                 *target,
-                Some(TargetFilter::ParentTarget),
+                Some(TargetFilter::TriggeringPlayer),
                 "life loss must hit the damaged player"
             );
             assert!(
-                matches!(amount, QuantityExpr::Difference { .. }),
+                amount == &lolth_difference_amount(),
                 "loss amount must be Difference, got {amount:?}"
             );
         }
@@ -28301,12 +28301,17 @@ fn effect_emblem_trigger_with_subject_predicate_text_stays_emblem() {
 #[test]
 fn lose_life_equal_to_the_difference_from_life_lost_threshold() {
     let def = parse_effect_chain(
-        "If that player lost less than 8 life this turn, they lose life equal to the difference.",
+        "If that player lost less than 8 life this turn, target opponent loses life equal to the difference.",
         AbilityKind::Spell,
     );
     match &*def.effect {
         Effect::LoseLife { amount, target } => {
-            assert_eq!(*target, Some(TargetFilter::ParentTarget));
+            assert_eq!(
+                target,
+                &Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent)
+                ))
+            );
             assert!(matches!(amount, QuantityExpr::Difference { .. }));
         }
         other => panic!("expected LoseLife, got {other:?}"),
@@ -99341,9 +99346,19 @@ fn caller_bound_count_reaches_the_first_chunk_only() {
     );
 }
 
-/// CR 608.2c: "the difference" is accepted only by the carrier the
-/// difference binding rebinds (token creation); the draw / lose verbs keep the
-/// trigger-level rewrite.
+fn lolth_difference_amount() -> QuantityExpr {
+    QuantityExpr::Difference {
+        left: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::LifeLost {
+                player: PlayerScope::ScopedPlayer,
+                window: Default::default(),
+            },
+        }),
+        right: Box::new(QuantityExpr::Fixed { value: 8 }),
+    }
+}
+
+/// CR 608.2c: Draw retains its trigger-level difference rewrite.
 #[test]
 fn difference_draw_keeps_the_trigger_rewrite_contract() {
     let kozilek = parse_oracle_text(
@@ -99396,10 +99411,10 @@ fn difference_draw_keeps_the_trigger_rewrite_contract() {
     let lolth = to_json(&lolth);
     assert!(
         serialized_effects(&lolth, "LoseLife").iter().any(|effect| {
-            effect["amount"]["type"] == "Difference"
-                && effect["target"] == to_json(&TargetFilter::ParentTarget)
+            effect["amount"] == to_json(&lolth_difference_amount())
+                && effect["target"] == to_json(&TargetFilter::TriggeringPlayer)
         }),
-        "Lolth's emblem keeps the difference loss on its parent target: {lolth}"
+        "Lolth's emblem applies the difference to the triggering player: {lolth}"
     );
 }
 
@@ -108305,4 +108320,148 @@ fn assert_goaded_restriction_tail_declined(parsed: &ParsedAbilities) {
         parsed.abilities.first().map(|def| &*def.effect),
         Some(Effect::ChangeZone { .. })
     ));
+}
+
+#[test]
+fn ancient_cellarspawn_difference_keeps_the_stated_opponent() {
+    use crate::types::ability::{CastManaObjectScope, CastManaSpentMetric};
+
+    let parsed = parse_named_face(
+        "Each spell you cast that's a Demon, Horror, or Nightmare costs {1} less to cast.\nWhenever you cast a spell, if the amount of mana spent to cast it was less than its mana value, target opponent loses life equal to the difference.",
+        "Ancient Cellarspawn",
+        &["Enchantment", "Creature"],
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("cast trigger");
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::LoseLife {
+            target: Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            )),
+            amount: QuantityExpr::Difference {
+                left: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::TriggeringSpell,
+                        metric: CastManaSpentMetric::Total,
+                    },
+                }),
+                right: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::EventSource
+                    },
+                }),
+            },
+        }
+    );
+}
+
+#[test]
+fn unbound_life_loss_difference_is_an_explicit_gap() {
+    let parsed = parse_named_face(
+        "Target opponent loses life equal to the difference.",
+        "Unbound Difference",
+        &["Sorcery"],
+    );
+    let effect = &parsed.abilities[0].effect;
+    assert_eq!(
+        effect.unimplemented_description(),
+        Some("life equal to the difference"),
+        "{effect:?}"
+    );
+}
+
+fn assert_unbound_life_loss_difference_gap(
+    parsed: &crate::parser::oracle::ParsedAbilities,
+    visit: impl FnOnce(&mut dyn FnMut(&Effect) -> std::ops::ControlFlow<()>),
+) {
+    let mut gaps = 0;
+    visit(&mut |effect| {
+        if effect.unimplemented_description() == Some("life equal to the difference") {
+            gaps += 1;
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    assert_eq!(gaps, 1, "{parsed:#?}");
+    assert!(
+        !parsed.parse_warnings.iter().any(|warning| matches!(
+            warning,
+            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause { .. }
+        )),
+        "{:#?}",
+        parsed.parse_warnings
+    );
+}
+
+#[test]
+fn unbound_life_loss_difference_in_a_modal_spell() {
+    let parsed = parse_named_face(
+        "Choose one —\n• Draw a card.\n• Target opponent loses life equal to the difference.",
+        "Unbound Difference",
+        &["Sorcery"],
+    );
+    assert!(parsed.modal.is_some(), "{parsed:#?}");
+    assert_unbound_life_loss_difference_gap(&parsed, |visit| {
+        for ability in &parsed.abilities {
+            let _ = crate::types::ability_visit::visit_ability_def(ability, &mut &mut *visit);
+        }
+    });
+}
+
+#[test]
+fn unbound_life_loss_difference_in_a_static_grant() {
+    let parsed = parse_named_face(
+        r#"Creatures you control have "{T}: Target opponent loses life equal to the difference.""#,
+        "Unbound Difference",
+        &["Enchantment"],
+    );
+    assert_unbound_life_loss_difference_gap(&parsed, |visit| {
+        for definition in &parsed.statics {
+            let _ = crate::types::ability_visit::visit_static(definition, &mut &mut *visit);
+        }
+    });
+}
+
+#[test]
+fn unbound_life_loss_difference_in_a_replacement() {
+    let parsed = parse_named_face(
+        "If enchanted land would be destroyed, instead target opponent loses life equal to the difference.",
+        "Unbound Difference",
+        &["Enchantment", "Aura"],
+    );
+    assert_unbound_life_loss_difference_gap(&parsed, |visit| {
+        for replacement in &parsed.replacements {
+            let _ = crate::types::ability_visit::visit_replacement(replacement, &mut &mut *visit);
+        }
+    });
+}
+
+#[test]
+fn unbound_life_loss_difference_in_a_trigger_continuation() {
+    let parsed = parse_named_face(
+        "Whenever you draw a card, you gain 1 life. Target opponent loses life equal to the difference.",
+        "Unbound Difference",
+        &["Enchantment"],
+    );
+    let execute = parsed.triggers[0].execute.as_ref().expect("trigger body");
+    let continuation = execute.sub_ability.as_ref().expect("trigger continuation");
+    assert_unbound_life_loss_difference_gap(&parsed, |visit| {
+        let _ = crate::types::ability_visit::visit_ability_def(continuation, &mut &mut *visit);
+    });
+}
+
+#[test]
+fn unbound_life_loss_difference_in_an_emblem() {
+    let parsed = parse_named_face(
+        r#"[-8]: You get an emblem with "At the beginning of your upkeep, target opponent loses life equal to the difference.""#,
+        "Unbound Difference",
+        &["Planeswalker"],
+    );
+    let Effect::CreateEmblem { triggers, .. } = parsed.abilities[0].effect.as_ref() else {
+        panic!("expected an emblem, got {parsed:#?}");
+    };
+    assert_unbound_life_loss_difference_gap(&parsed, |visit| {
+        for trigger in triggers.iter() {
+            let _ = crate::types::ability_visit::visit_trigger(trigger, &mut &mut *visit);
+        }
+    });
 }

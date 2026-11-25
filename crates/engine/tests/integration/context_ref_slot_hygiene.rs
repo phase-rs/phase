@@ -770,6 +770,8 @@ fn chimera_retarget_subject_binds_to_the_triggering_spell() {
         controller: P1,
         object_id: spell,
         cast_mana_value: None,
+        cast_mana_spent: None,
+        cast_incarnation: None,
     });
     let mut events = Vec::new();
     change_targets::resolve(&mut state, &retarget_ability, &mut events)

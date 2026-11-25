@@ -43761,18 +43761,41 @@ impl GameState {
         });
     }
 
-    /// CR 104.4b + CR 608.2h: keeps only the `departed_stack_spells` records a spell-cast
-    /// trigger on the stack or resolving can still name, plus every departure whose spell a
+    fn collect_retained_cast_pins(event: &GameEvent, retained: &mut HashSet<ObjectIncarnationRef>) {
+        match event {
+            GameEvent::SpellCast {
+                object_id,
+                cast_incarnation: Some(incarnation),
+                ..
+            } => {
+                retained.insert(ObjectIncarnationRef::of(*object_id, *incarnation));
+            }
+            GameEvent::AbilityTriggered { causes, .. } => {
+                for cause in causes {
+                    Self::collect_retained_cast_pins(cause, retained);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// CR 104.4b + CR 608.2h: keeps only the `departed_stack_spells` records a retained cast
+    /// event can still name, plus every departure whose spell a
     /// `BecomesTarget` targeter still names (`targeting::event_referent_controller` reads
     /// that record), and the `departed_activated_abilities` records an activation trigger on
     /// the stack or resolving still names (CR 602.2a: the event names the activation's own
     /// stack object; `targeting::triggering_activation` reads it); the rest are history, not
     /// position.
-    /// Mirrors `targeting::triggering_spell`: a pinned trigger keeps its pinned record, an
-    /// unpinned one the highest key.
+    /// Mirrors `targeting::triggering_spell`: an event stamp keeps its exact record.
+    /// A legacy on-stack or resolving trigger uses its ability pin or the highest key.
     pub(crate) fn retain_trigger_referenced_departed_stack_records(&mut self) {
         let mut retained: HashSet<ObjectIncarnationRef> = HashSet::new();
         let mut retained_activations: HashSet<ObjectId> = HashSet::new();
+        if !self.departed_stack_spells.is_empty() {
+            self.for_each_trigger_event_carrier_mut(&mut |event| {
+                Self::collect_retained_cast_pins(event, &mut retained)
+            });
+        }
         for entry in self.stack.iter().chain(self.resolving_stack_entry.iter()) {
             if let StackEntryKind::TriggeredAbility {
                 trigger_event:
@@ -43787,7 +43810,12 @@ impl GameState {
             }
             if let StackEntryKind::TriggeredAbility {
                 ability,
-                trigger_event: Some(GameEvent::SpellCast { object_id, .. }),
+                trigger_event:
+                    Some(GameEvent::SpellCast {
+                        object_id,
+                        cast_incarnation: None,
+                        ..
+                    }),
                 ..
             } = &entry.kind
             {
@@ -43937,6 +43965,11 @@ impl GameState {
                     object_id,
                     incarnation: Some(incarnation),
                     ..
+                }
+                | GameEvent::SpellCast {
+                    object_id,
+                    cast_incarnation: Some(incarnation),
+                    ..
                 } => f(*object_id, incarnation),
                 // CR 400.7 + CR 608.2h (#9754): the source stamp a damage event
                 // carries is the same class of pin as a tap stamp.
@@ -43988,7 +44021,10 @@ impl GameState {
                 | GameEvent::PhaseChanged { .. }
                 | GameEvent::PhaseChangedFor { .. }
                 | GameEvent::PriorityPassed { .. }
-                | GameEvent::SpellCast { .. }
+                | GameEvent::SpellCast {
+                    cast_incarnation: None,
+                    ..
+                }
                 | GameEvent::Mutated { .. }
                 | GameEvent::Augmented { .. }
                 | GameEvent::Melded { .. }
@@ -44746,13 +44782,7 @@ impl GameState {
             attachments: &mut [AttachmentSnapshot],
             f: &mut impl FnMut(ObjectId, &mut u64),
         ) {
-            for AttachmentSnapshot {
-                object_id: _,
-                identity,
-                controller: _,
-                kind: _,
-            } in attachments
-            {
+            for AttachmentSnapshot { identity, .. } in attachments {
                 if let Some(reference) = identity {
                     f(reference.object_id, &mut reference.incarnation);
                 }
@@ -44909,7 +44939,12 @@ impl GameState {
         }
         let mut grants: HashMap<ObjectId, Vec<u64>> = HashMap::new();
         let mut carrier_read: HashSet<ObjectIncarnationRef> = HashSet::new();
+        let mut cast_pins = HashSet::new();
+        let has_departed_spells = !self.departed_stack_spells.is_empty();
         let mut collect_event = |event: &mut GameEvent| {
+            if has_departed_spells {
+                Self::collect_retained_cast_pins(event, &mut cast_pins);
+            }
             named_incarnations(event, &mut |object_id, incarnation| {
                 present.entry(object_id).or_default().push(*incarnation);
                 carrier_read.insert(ObjectIncarnationRef::of(object_id, *incarnation));
@@ -44934,6 +44969,24 @@ impl GameState {
         self.for_each_loop_ability_carrier_mut(&mut |_, ability| {
             ability.for_each_creation_lookback_event_mut(&mut collect_event);
         });
+        let ranked_departures: HashSet<_> = cast_pins
+            .into_iter()
+            .filter_map(|pin| {
+                self.departed_stack_spells
+                    .get(&pin.object_id)
+                    .is_some_and(|records| records.contains_key(&pin.incarnation))
+                    .then_some(pin.object_id)
+            })
+            .collect();
+        // CR 400.7 + CR 608.2h: when a cast stamp names a departure, rank that
+        // spell's remaining keys together. Their order still selects the most
+        // recent record for any legacy reader of the same spell.
+        for object_id in &ranked_departures {
+            present
+                .entry(*object_id)
+                .or_default()
+                .extend(self.departed_stack_spells[object_id].keys().copied());
+        }
         // CR 400.7 + CR 603.7c + CR 601.2c: the pins and snapshots captured by every
         // ability that can still resolve. Each carrier's own `source_id` keys its ability's
         // bare source epochs; normalization zeroes only the ability's copy.
@@ -45250,6 +45303,20 @@ impl GameState {
                     (object_id, history)
                 })
                 .collect();
+        for object_id in ranked_departures {
+            let records = self
+                .departed_stack_spells
+                .get_mut(&object_id)
+                .expect("ranked departures have retained records");
+            *records = std::mem::take(records)
+                .into_iter()
+                .map(|(incarnation, mut record)| {
+                    let incarnation = canonical(object_id, incarnation);
+                    record.object.incarnation = incarnation;
+                    (incarnation, record)
+                })
+                .collect();
+        }
         let mut rank_event = |event: &mut GameEvent| {
             named_incarnations(event, &mut |object_id, incarnation| {
                 *incarnation = canonical(object_id, *incarnation);
@@ -45530,12 +45597,10 @@ impl GameState {
             may_trigger_auto_choices: _,
             pending_triggered_mana_resume: _,
             resolution_stack: _,
-            // COMPARED RAW — departed stack records (CR 400.7 last-known information),
-            // pruned to the ones a retained carrier names. `departed_stack_spells` is keyed
-            // by object and raw incarnation, `departed_activated_abilities` by object; both
-            // hold a raw ability. A different key only splits two frames, while the
-            // record's ability pins are not ranked, so a record kept unchanged across a
-            // re-incarnation of an object it pins could merge, in principle.
+            // Departed stack records (CR 400.7) are pruned to the ones a retained
+            // carrier names. A stamped cast ranks its spell's departed record
+            // keys with the event pin. Legacy-only keys and the records' own
+            // abilities retain their existing raw comparison.
             departed_stack_spells: _,
             departed_activated_abilities: _,
             // COMPARED RAW — floating shields and their riders: `pending_shields_loop_eq`
@@ -64672,6 +64737,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                         object_id: spell_id,
                         card_id: CardId(1),
                         cast_mana_value: None,
+                        cast_mana_spent: None,
+                        cast_incarnation: None,
                     }),
                     description: None,
                     source_name: String::new(),
@@ -64689,6 +64756,258 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         assert!(
             loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
             "two states differing only in the pinned spell's incarnation must confirm a loop"
+        );
+    }
+
+    fn krark_modern_cast_position(live_incarnation: u64, trigger_incarnation: u64) -> GameState {
+        let spell_id = ObjectId(30);
+        let krark_id = ObjectId(31);
+        let player = PlayerId(0);
+        let card_id = CardId(1);
+        let mut state = GameState::new_two_player(7);
+        let mut spell =
+            GameObject::new(spell_id, card_id, player, "Loop Spell".into(), Zone::Stack);
+        spell.incarnation = live_incarnation;
+        spell.mana_spent_to_cast_amount = 1;
+        let spell_entry = StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: player,
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 1,
+            },
+        };
+        let mut original_spell = spell.clone();
+        original_spell.incarnation = trigger_incarnation;
+        let cast_event = GameEvent::spell_cast(&original_spell, player);
+
+        if trigger_incarnation != live_incarnation {
+            state.departed_stack_spells.insert(
+                spell_id,
+                im::HashMap::from_iter([(
+                    trigger_incarnation,
+                    DepartedStackSpell {
+                        entry: spell_entry.clone(),
+                        object: Box::new(original_spell),
+                    },
+                )]),
+            );
+        }
+
+        state.objects.insert(spell_id, spell);
+        state.stack.push_back(spell_entry);
+        let mut ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::TriggeringSource,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            krark_id,
+            player,
+        );
+        ability.context.triggering_spell =
+            Some(ObjectIncarnationRef::of(spell_id, trigger_incarnation));
+        state.stack.push_back(StackEntry {
+            id: ObjectId(40),
+            source_id: krark_id,
+            controller: player,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: krark_id,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: Some(cast_event),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state
+    }
+
+    fn modern_cast_loop_event(state: &GameState) -> &GameEvent {
+        let StackEntryKind::TriggeredAbility {
+            trigger_event: Some(event),
+            ..
+        } = &state.stack.back().expect("cast trigger").kind
+        else {
+            panic!("expected a cast trigger with an event");
+        };
+        event
+    }
+
+    fn legacy_cast_loop_control(mut state: GameState) -> GameState {
+        let StackEntryKind::TriggeredAbility {
+            trigger_event:
+                Some(GameEvent::SpellCast {
+                    cast_incarnation, ..
+                }),
+            ..
+        } = &mut state.stack.back_mut().expect("cast trigger").kind
+        else {
+            panic!("expected a cast trigger with a spell-cast event");
+        };
+        assert!(cast_incarnation.take().is_some());
+        state
+    }
+
+    #[test]
+    fn modern_cast_loop_equivalent_live_occurrences_compare_equal() {
+        use crate::game::targeting::{triggering_spell_for_event, TriggeringSpell};
+
+        let earlier = krark_modern_cast_position(2, 2);
+        let later = krark_modern_cast_position(4, 4);
+        for state in [&earlier, &later] {
+            assert!(state.is_loop_comparable());
+            assert!(matches!(
+                triggering_spell_for_event(state, modern_cast_loop_event(state)),
+                Some(TriggeringSpell::OnStack(_))
+            ));
+        }
+        let legacy_earlier = legacy_cast_loop_control(earlier.clone()).normalize_for_loop();
+        let legacy_later = legacy_cast_loop_control(later.clone()).normalize_for_loop();
+        assert!(same_position(&legacy_earlier, &legacy_later));
+        assert!(loop_states_equal(&legacy_earlier, &legacy_later));
+
+        let earlier = earlier.normalize_for_loop();
+        let later = later.normalize_for_loop();
+        assert_eq!(
+            (
+                same_position(&earlier, &later),
+                loop_states_equal(&earlier, &later)
+            ),
+            (true, true),
+            "equivalent live casts differ only by a raw incarnation"
+        );
+    }
+
+    #[test]
+    fn modern_cast_loop_stale_and_live_occurrences_compare_unequal() {
+        use crate::game::targeting::{triggering_spell_for_event, TriggeringSpell};
+
+        let stale = krark_modern_cast_position(4, 2);
+        let live = krark_modern_cast_position(4, 4);
+        assert!(stale.is_loop_comparable());
+        assert!(live.is_loop_comparable());
+        assert!(matches!(
+            triggering_spell_for_event(&stale, modern_cast_loop_event(&stale)),
+            Some(TriggeringSpell::Departed(_))
+        ));
+        assert!(matches!(
+            triggering_spell_for_event(&live, modern_cast_loop_event(&live)),
+            Some(TriggeringSpell::OnStack(_))
+        ));
+        let stale = stale.normalize_for_loop();
+        let live = live.normalize_for_loop();
+        assert!(!same_position(&stale, &live));
+        assert!(!loop_states_equal(&stale, &live));
+    }
+
+    #[test]
+    fn modern_cast_loop_retains_the_stamped_departure_from_nested_causes() {
+        use crate::game::targeting::{
+            triggering_spell_for_event, triggering_spell_identity_for_event, TriggeringSpell,
+        };
+        use crate::types::events::TriggeredAbilityOrigin;
+
+        fn nested_position(shift: u64) -> GameState {
+            let older = 2 + shift;
+            let newer = 3 + shift;
+            let mut state = krark_modern_cast_position(4 + shift, older);
+            let spell_id = ObjectId(30);
+            let records = state.departed_stack_spells.get_mut(&spell_id).unwrap();
+            let old_record = records.get_mut(&older).unwrap();
+            old_record.object.mana_spent_to_cast_amount = 3;
+            let cause = GameEvent::spell_cast(&old_record.object, PlayerId(0));
+            let mut new_record = old_record.clone();
+            new_record.object.incarnation = newer;
+            new_record.object.mana_spent_to_cast_amount = 9;
+            records.insert(newer, new_record);
+
+            let trigger = state.stack.back_mut().unwrap();
+            let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut trigger.kind else {
+                panic!("expected a triggered stack entry");
+            };
+            let primary = GameEvent::PhaseChanged {
+                phase: Phase::PreCombatMain,
+            };
+            *trigger_event = Some(primary.clone());
+            state.stack_trigger_event_batches.insert(
+                trigger.id,
+                vec![
+                    primary,
+                    GameEvent::AbilityTriggered {
+                        stack_entry: Some(trigger.id),
+                        source_id: trigger.source_id,
+                        controller: trigger.controller,
+                        origin: TriggeredAbilityOrigin::SourceAbility,
+                        causes: vec![cause],
+                    },
+                ],
+            );
+            state
+        }
+
+        fn nested_casts(state: &GameState) -> &[GameEvent] {
+            let events = &state.stack_trigger_event_batches[&ObjectId(40)];
+            let GameEvent::AbilityTriggered { causes, .. } = &events[1] else {
+                panic!("expected an observed trigger as the second batch event");
+            };
+            causes
+        }
+
+        fn departed_payment(state: &GameState, event: &GameEvent) -> u32 {
+            let Some(TriggeringSpell::Departed(record)) = triggering_spell_for_event(state, event)
+            else {
+                panic!("nested cast must still name its exact departed occurrence");
+            };
+            let pin = triggering_spell_identity_for_event(state, event).unwrap();
+            assert_eq!(record.object.incarnation, pin.incarnation);
+            record.object.mana_spent_to_cast_amount
+        }
+
+        let earlier = nested_position(0);
+        let later = nested_position(10);
+        for state in [&earlier, &later] {
+            assert!(state.is_loop_comparable());
+            assert_eq!(state.departed_stack_spells[&ObjectId(30)].len(), 2);
+            assert_eq!(departed_payment(state, &nested_casts(state)[0]), 3);
+        }
+        let earlier = earlier.normalize_for_loop();
+        let later = later.normalize_for_loop();
+        for state in [&earlier, &later] {
+            assert_eq!(departed_payment(state, &nested_casts(state)[0]), 3);
+            assert_eq!(state.departed_stack_spells[&ObjectId(30)].len(), 1);
+        }
+        assert!(same_position(&earlier, &later));
+        assert!(loop_states_equal(&earlier, &later));
+
+        let mut both = nested_position(0);
+        let newer = &both.departed_stack_spells[&ObjectId(30)][&3].object;
+        let newer_cast = GameEvent::spell_cast(newer, PlayerId(0));
+        let batch = both
+            .stack_trigger_event_batches
+            .get_mut(&ObjectId(40))
+            .unwrap();
+        let GameEvent::AbilityTriggered { causes, .. } = &mut batch[1] else {
+            panic!("expected an observed trigger as the second batch event");
+        };
+        causes.push(newer_cast);
+        let both = both.normalize_for_loop();
+        assert_eq!(both.departed_stack_spells[&ObjectId(30)].len(), 2);
+        assert_eq!(
+            nested_casts(&both)
+                .iter()
+                .map(|event| departed_payment(&both, event))
+                .collect::<Vec<_>>(),
+            [3, 9]
         );
     }
 
@@ -64764,6 +65083,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                         object_id: spell_id,
                         card_id: CardId(1),
                         cast_mana_value: None,
+                        cast_mana_spent: None,
+                        cast_incarnation: None,
                     }),
                     description: None,
                     source_name: String::new(),
