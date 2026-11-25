@@ -39,8 +39,8 @@ use crate::types::identifiers::{LogicalZoneChangeGroupId, ObjectId, ObjectIncarn
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    AppliedReplacementKey, CoEntrants, EnterWithGrants, EntrantAbilities, ProposedEvent,
-    WithEntryEffect,
+    AppliedReplacementKey, CoEntrants, EnterWithGrants, EntrantAbilities, EntryChoices,
+    ProposedEvent, WithEntryEffect,
 };
 use crate::types::resolution::RetainedBatchOwner;
 use crate::types::zones::{EtbTapState, Zone};
@@ -251,7 +251,15 @@ pub(crate) fn deliver_outside_game_card_entry(
     let LiminalEntryKind::OutsideGameCard { original, .. } = entry.kind else {
         unreachable!()
     };
-    let mut card = original.map_or_else(|| entry.object.into_projected(), |card| *card);
+    // CR 607.2d + CR 614.12a: a chained as-enters answer binds to the
+    // liminal entrant. Carry that entrant's choices alongside the proposal's
+    // pre-entry answers across the reset and the copy effect's installation.
+    let mut entrant = entry.object.into_projected();
+    let mut choices = EntryChoices(std::mem::take(&mut entrant.chosen_attributes));
+    choices
+        .0
+        .extend(EntryChoices::of(enter_with_choices).iter().cloned());
+    let mut card = original.map_or(entrant, |card| *card);
     card.zone = *destination;
     card.controller = card.owner;
     if *destination == Zone::Battlefield {
@@ -270,7 +278,7 @@ pub(crate) fn deliver_outside_game_card_entry(
             entry_ref,
             None,
             Default::default(),
-            enter_with_choices.as_deref(),
+            (!choices.0.is_empty()).then_some(&choices),
             enter_as_copy.as_deref(),
             events,
         );
