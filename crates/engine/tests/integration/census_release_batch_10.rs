@@ -4,11 +4,13 @@
 //! loaded through `add_real_card` and driven through public `GameRunner` actions in a three-player
 //! game; the only synthetic setup is a mana pool. Each group picks the second opponent (so a
 //! first-opponent default would fail), checks no other seat gets a token, and has a negative where
-//! the chosen opponent leaves the game after the trigger is on the stack with that target, so the
-//! instruction creates nothing (CR 608.2b).
+//! the chosen opponent responds with Lazotep Plating. The opponent remains in the game but gains
+//! hexproof, so the trigger's sole target becomes illegal and the trigger does not resolve
+//! (CR 702.11c + CR 608.2b).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::static_abilities::player_has_hexproof;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -112,23 +114,44 @@ fn assert_tokens_for_second_opponent(
     ids
 }
 
-// CR 104.3a + CR 608.2b: Concession leaves the committed trigger with no legal target.
-fn concede_second_opponent(runner: &mut GameRunner) {
+// CR 702.11c + CR 608.2b: Hexproof makes the chosen opponent illegal at resolution.
+fn give_second_opponent_hexproof(runner: &mut GameRunner, plating: ObjectId) {
     let trigger = runner.state().stack[0].id;
-    let departure = runner
-        .act(GameAction::Concede { player_id: P2 })
-        .expect("P2 concedes");
-    assert!(runner.state().players[P2.0 as usize].is_eliminated);
+    assert!(!player_has_hexproof(runner.state(), P2));
+    for _ in 0..2 {
+        if runner.state().waiting_for == (WaitingFor::Priority { player: P2 }) {
+            break;
+        }
+        runner.pass_holding_team().expect("pass priority to P2");
+    }
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P2 }
+    );
+    // CR 106.4: Supply {1}{U} in the current step, after pools have emptied.
+    let pool = &mut runner.state_mut().players[P2.0 as usize].mana_pool;
+    for mana in [ManaType::Colorless, ManaType::Blue] {
+        pool.add(ManaUnit::new(mana, ObjectId(0), false, vec![]));
+    }
+    assert_eq!(runner.cast(plating).commit().state().stack.len(), 2);
+    for _ in 0..3 {
+        if runner.state().stack.len() == 1 {
+            break;
+        }
+        runner
+            .pass_holding_team()
+            .expect("pass priority over Plating");
+    }
+    assert_eq!(runner.state().stack.len(), 1);
     assert_eq!(runner.state().stack[0].id, trigger);
+    assert!(player_has_hexproof(runner.state(), P2));
+    assert!(!runner.state().players[P2.0 as usize].is_eliminated);
+
     let resolution = finish_trigger(runner);
-    assert!(resolution.iter().any(|event| matches!(
-        event, GameEvent::StackResolved { object_id } if *object_id == trigger
-    )));
-    assert!(departure
-        .events
+    assert!(!runner.state().players[P2.0 as usize].is_eliminated);
+    assert!(resolution
         .iter()
-        .chain(&resolution)
-        .all(|event| { !matches!(event, GameEvent::TokenCreated { .. }) }));
+        .all(|event| !matches!(event, GameEvent::TokenCreated { .. })));
 }
 
 // CR 106.4: Supply mana for Murder.
@@ -170,14 +193,15 @@ fn hungry_lynx_creates_one_deathtouch_rat_for_second_opponent() {
 }
 
 #[test]
-fn hungry_lynx_creates_no_rat_if_chosen_opponent_leaves() {
+fn hungry_lynx_creates_no_rat_if_chosen_opponent_gains_hexproof() {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PostCombatMain);
     let lynx = card(&mut scenario, P0, "Hungry Lynx", Zone::Battlefield);
+    let plating = card(&mut scenario, P2, "Lazotep Plating", Zone::Hand);
     let mut runner = scenario.build();
 
     lynx_trigger(&mut runner, lynx);
-    concede_second_opponent(&mut runner);
+    give_second_opponent_hexproof(&mut runner, plating);
     assert!(tokens(&runner, "Rat").is_empty());
 }
 
@@ -226,11 +250,12 @@ fn hungry_lynx_protects_its_cats_and_rewards_a_rat_death() {
     ));
 }
 
-fn scoundrels_trigger() -> GameRunner {
+fn scoundrels_trigger() -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let scoundrels = card(&mut scenario, P0, "Wanted Scoundrels", Zone::Battlefield);
     let murder = card(&mut scenario, P0, "Murder", Zone::Hand);
+    let plating = card(&mut scenario, P2, "Lazotep Plating", Zone::Hand);
     fund_murder(&mut scenario);
     let mut runner = scenario.build();
 
@@ -248,12 +273,12 @@ fn scoundrels_trigger() -> GameRunner {
         .any(|id| runner.state().objects[id].name == "Wanted Scoundrels"));
     assert!(tokens(&runner, "Treasure").is_empty());
     choose_second_opponent(&mut runner, scoundrels);
-    runner
+    (runner, plating)
 }
 
 #[test]
 fn wanted_scoundrels_creates_two_treasures_for_second_opponent() {
-    let mut runner = scoundrels_trigger();
+    let (mut runner, _) = scoundrels_trigger();
     finish_trigger(&mut runner);
     // CR 111.10a: The two permanents are Treasure artifacts.
     for id in assert_tokens_for_second_opponent(&runner, "Treasure", 2) {
@@ -264,8 +289,8 @@ fn wanted_scoundrels_creates_two_treasures_for_second_opponent() {
 }
 
 #[test]
-fn wanted_scoundrels_creates_no_treasure_if_chosen_opponent_leaves() {
-    let mut runner = scoundrels_trigger();
-    concede_second_opponent(&mut runner);
+fn wanted_scoundrels_creates_no_treasure_if_chosen_opponent_gains_hexproof() {
+    let (mut runner, plating) = scoundrels_trigger();
+    give_second_opponent_hexproof(&mut runner, plating);
     assert!(tokens(&runner, "Treasure").is_empty());
 }
