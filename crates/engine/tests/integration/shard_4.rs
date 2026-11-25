@@ -611,6 +611,7 @@ mod quick_draw_target_opponent;
 mod quirion_ranger_activation;
 mod raffine_informant_departed_connive;
 mod rage_reflection_double_strike_grant;
+mod raggadragga_goreguts_boss;
 mod ral_crackling_wit_emblem_storm;
 mod rally_the_righteous_radiance_pump;
 mod random_discard_cost_replacement_resume;
