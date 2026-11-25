@@ -2743,7 +2743,6 @@ face = [
   { key = "wu spy", class = "wrong_object", clauses = ["Put one of them into their graveyard."] },
   { key = "wulfgar of icewind dale", class = "dropped_qualifier", clauses = ["Melee", "If a creature you control attacking causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time."] },
   { key = "wyll's reversal", class = "target_wrong", clauses = ["Choose target spell or ability with one or more targets.", "1—14 | You may choose new targets for that spell or ability.", "15+ | You may choose new targets for that spell or ability."] },
-  { key = "xanathar, guild kingpin", class = "missing_effect", clauses = ["you may look at the top card of their library any time,", "you may play the top card of their library,"] },
   { key = "xathrid gorgon", class = "missing_effect", clauses = ["and becomes a colorless artifact in addition to its other types."] },
   { key = "xira, the golden sting", class = "trigger_wrong", clauses = ["When that creature dies, if it has an egg counter on it, draw a card", "and create a 1/1 black Insect creature token with flying."] },
   { key = "yamabushi's flame", class = "dropped_qualifier", clauses = ["If a creature dealt damage this way would die this turn, exile it instead."] },

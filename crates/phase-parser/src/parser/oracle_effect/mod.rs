@@ -6875,6 +6875,97 @@ fn strip_temporary_restriction_duration_prefix(
 /// Handles blanket "can't cast spells" prohibitions from instant/sorcery effects (e.g., Silence).
 /// Must be called AFTER try_parse_cast_only_from_zones_restriction (which handles the more
 /// specific "can't cast spells from anywhere other than" variant).
+/// CR 401.5 + CR 608.2b: an anaphoric library reuses the announced player;
+/// an explicit target phrase declares a player target of its own.
+fn parse_top_library_player_possessive(
+    input: &str,
+) -> OracleResult<'_, (ControllerRef, Option<TargetFilter>)> {
+    terminated(
+        alt((
+            value(
+                (ControllerRef::TargetPlayer, None),
+                alt((tag("their"), tag("that player's"))),
+            ),
+            value(
+                (ControllerRef::TargetOpponent, Some(TargetFilter::Opponent)),
+                tag("target opponent's"),
+            ),
+            value(
+                (ControllerRef::TargetPlayer, Some(TargetFilter::Player)),
+                tag("target player's"),
+            ),
+        )),
+        tag(" library"),
+    )
+    .parse(input)
+}
+
+/// CR 401.5 + CR 611.2c: these permissions follow the current top card
+/// throughout their stated window.
+fn parse_standing_top_library_permission(input: &str) -> OracleResult<'_, Effect> {
+    let (input, (mode, target)) = alt((
+        map(
+            preceded(
+                tag("you may look at the top card of "),
+                terminated(parse_top_library_player_possessive, opt(tag(" any time"))),
+            ),
+            |(library, target)| (StaticMode::MayLookAtTopOfLibrary { library }, target),
+        ),
+        map(
+            (
+                preceded(
+                    tag("you may "),
+                    alt((
+                        value(CardPlayMode::Play, tag("play")),
+                        value(CardPlayMode::Cast, tag("cast")),
+                    )),
+                ),
+                preceded(
+                    tag(" the top card of "),
+                    parse_top_library_player_possessive,
+                ),
+            ),
+            |(play_mode, (library, target))| {
+                (
+                    StaticMode::TopOfLibraryCastPermission {
+                        library,
+                        play_mode,
+                        frequency: CastFrequency::Unlimited,
+                        alt_cost: None,
+                        mana_spend_permission: None,
+                    },
+                    target,
+                )
+            },
+        ),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(mode.clone())
+                .affected(TargetFilter::Any)
+                .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
+            duration: None,
+            target,
+            end_cost: None,
+        },
+    ))
+}
+
+fn try_parse_standing_top_library_permission(
+    text: &str,
+    duration: &Duration,
+) -> Option<ParsedEffectClause> {
+    let (_, effect) = terminated(parse_standing_top_library_permission, eof)
+        .parse(text.trim_end_matches('.'))
+        .ok()?;
+    Some(with_clause_chain_duration(
+        parsed_clause(effect),
+        duration.clone(),
+    ))
+}
+
 fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let (scope_tp, expiry, duration) = strip_temporary_restriction_duration_prefix(tp);
 
@@ -7019,7 +7110,16 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
     let sub_ability = if tail.is_empty() {
         None
     } else {
-        let lowered = parse_effect_chain_with_provenance(tail, AbilityKind::Spell);
+        let mut tail_ctx = ParseContext {
+            stated_clause_duration: duration.clone(),
+            ..ParseContext::default()
+        };
+        let lowered = lower_ability_ir_with_provenance(&parse_ability_ir(
+            tail,
+            AbilityKind::Spell,
+            ChainLoweringMode::Standalone,
+            &mut tail_ctx,
+        ));
         history.extend(lowered.history.into_iter().map(|record| {
             crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
                 record,
@@ -7058,8 +7158,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
     // (`strip_temporary_restriction_duration_prefix`) AND builds its own sub_ability
     // chain from the tail conjuncts, so it must stamp through the single
     // chain-distributing authority. Writing `duration` into the literal reached the head
-    // only — Xanathar's CastFromZone and Abeyance's second AddRestriction were emitted
-    // with `duration: None`.
+    // only, leaving the standing permissions and later prohibitions unstamped.
     Some(match duration {
         Some(d) => with_clause_chain_duration(clause, d),
         None => clause,
@@ -13711,6 +13810,14 @@ fn parse_effect_clause_inner_with_damage_context(
         let body = parse_effect_clause_with_damage_context(rest, ctx, damage_context);
         ctx.stated_clause_duration = restore;
         return with_clause_chain_duration(body, duration);
+    }
+
+    if let Some(clause) = ctx
+        .stated_clause_duration
+        .as_ref()
+        .and_then(|duration| try_parse_standing_top_library_permission(tp.lower, duration))
+    {
+        return clause;
     }
 
     // CR 614.1a + CR 514.2: floating turn-bound zone-change redirect ("if one or
@@ -41089,7 +41196,8 @@ pub(crate) fn starts_mana_spend_rider_conjunct(remainder_lower: &str) -> bool {
 /// graveyard cast permission (Whispersteel Dagger) that carries no
 /// `mana_spend_permission` yet?
 fn effect_awaits_mana_spend_permission(effect: &Effect) -> bool {
-    granted_graveyard_permission_awaits_mana_spend_permission(effect)
+    awaiting_top_library_mana_grant(effect).is_some()
+        || granted_graveyard_permission_awaits_mana_spend_permission(effect)
         || matches!(
             effect,
             Effect::CastFromZone {
@@ -41103,6 +41211,33 @@ fn effect_awaits_mana_spend_permission(effect: &Effect) -> bool {
                 ..
             }
         )
+}
+
+fn awaiting_top_library_mana_grant(effect: &Effect) -> Option<(usize, usize)> {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    else {
+        return None;
+    };
+    static_abilities
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(definition, grant)| {
+            let modification = grant.modifications.iter().rposition(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::TopOfLibraryCastPermission {
+                            mana_spend_permission: None,
+                            ..
+                        },
+                    }
+                )
+            })?;
+            Some((definition, modification))
+        })
 }
 
 /// CR 609.4b: The ONE traversal that picks the grant a mana rider modifies:
@@ -41159,6 +41294,31 @@ pub(crate) fn attach_mana_spend_permission_to_prior_cast_grant(
             return false;
         };
         def = sub;
+    }
+    if let (
+        Some((definition, modification)),
+        Effect::GenericEffect {
+            static_abilities, ..
+        },
+    ) = (
+        awaiting_top_library_mana_grant(&def.effect),
+        &mut *def.effect,
+    ) {
+        let grant = &mut static_abilities[definition];
+        if let ContinuousModification::AddStaticMode {
+            mode: mode @ StaticMode::TopOfLibraryCastPermission { .. },
+        } = &mut grant.modifications[modification]
+        {
+            if let StaticMode::TopOfLibraryCastPermission {
+                mana_spend_permission,
+                ..
+            } = mode
+            {
+                *mana_spend_permission = Some(permission);
+            }
+            grant.mode = mode.clone();
+            return true;
+        }
     }
     match &mut *def.effect {
         Effect::CastFromZone {
@@ -50653,6 +50813,30 @@ fn parse_effect_chain_ir_body(
         builder.set_pending_leading_duration(chunk.leading_duration.clone());
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
         if normalized_text.is_empty() {
+            continue;
+        }
+        if let Some(clause) = chunk
+            .leading_duration
+            .as_ref()
+            .or(ctx.stated_clause_duration.as_ref())
+            .and_then(|duration| {
+                try_parse_standing_top_library_permission(
+                    &normalized_text.to_ascii_lowercase(),
+                    duration,
+                )
+            })
+        {
+            builder
+                .clause(
+                    normalized_text,
+                    clause,
+                    chunk.boundary_after,
+                    ClauseDisposition::Emit {
+                        followup: None,
+                        intrinsic: None,
+                    },
+                )
+                .push();
             continue;
         }
         let chain_parent_target_owner_scope_for_chunk = chain_parent_target_owner_scope.take();
