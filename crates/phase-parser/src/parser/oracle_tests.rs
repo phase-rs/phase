@@ -20,6 +20,45 @@ use crate::types::keywords::{CompanionCondition, Keyword};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
+#[test]
+fn declared_death_watcher_requires_a_unique_numbered_creature_and_exact_head() {
+    use crate::types::ability::{DelayedTriggerCondition, WheneverEventExpiry};
+
+    let exact = "When that creature dies this turn, you draw a card.";
+    for (prefix, head, slot) in [
+        ("Target creature gets +2/+0 until end of turn. ", exact, Some(0)),
+        ("Exile target artifact. Return that card to the battlefield under its owner's control. Target creature gets +2/+0 until end of turn. ", exact, Some(1)),
+        ("Target creature gets +2/+0 until end of turn. Target creature gets +1/+1 until end of turn. ", exact, None),
+        ("Draw a card. ", exact, None),
+        ("Target creature gets +2/+0 until end of turn. ", "When that creature you control dies this turn, you draw a card.", None),
+        ("Target creature gets +2/+0 until end of turn. ", "When that creature dies, you draw a card.", None),
+    ] {
+        let parsed = parse(&format!("{prefix}{head}"), "Watcher grammar", &[], &["Instant"], &[]);
+        let watcher = std::iter::successors(parsed.abilities.first(), |node| node.sub_ability.as_deref())
+            .find_map(|node| match node.effect.as_ref() {
+                Effect::CreateDelayedTrigger { condition, effect, uses_tracked_set } => {
+                    Some((condition, effect, uses_tracked_set))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected a delayed trigger for {prefix}{head}"));
+        assert!(matches!(watcher.1.effect.as_ref(), Effect::Draw { .. }));
+        if let Some(index) = slot {
+            let DelayedTriggerCondition::WheneverEvent { trigger, expiry } = watcher.0 else {
+                panic!("expected the declared death watcher for {prefix}{head}");
+            };
+            assert_eq!(*expiry, WheneverEventExpiry::EndOfTurn);
+            assert_eq!(trigger.origin, Some(Zone::Battlefield));
+            assert_eq!(trigger.destination, Some(Zone::Graveyard));
+            assert_eq!(trigger.valid_card, Some(TargetFilter::ParentTargetSlot { index }));
+            assert!(trigger.execute.is_none());
+            assert!(!watcher.2);
+        } else {
+            assert!(matches!(watcher.0, DelayedTriggerCondition::WhenDies { .. }));
+        }
+    }
+}
+
 // Printed Oracle text and metadata verified against MTGJSON AtomicCards.
 const DIAGNOSTIC_JULIUS: &str = "Dr. Julius Jumblemorph is every creature type (even if this card isn't on the battlefield).\nWhenever a host you control enters, you may search your library and/or graveyard for a card with augment and combine it with that host. If you search your library this way, shuffle.";
 const DIAGNOSTIC_JERMANE: &str = "{G}, {T}: Put two +1/+1 counters on target creature with four or more legs.\n{1}{G}{G}, {T}: Until end of turn, all creatures able to block target creature with four or more legs do so.";

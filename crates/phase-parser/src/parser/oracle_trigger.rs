@@ -24872,6 +24872,25 @@ fn parse_dies_verb_phrase(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 700.4: " dies" after a declared-slot subject is a battlefield-to-graveyard
+/// zone change of the object in that slot.
+pub(super) fn parse_declared_creature_death(
+    input: &str,
+    index: usize,
+) -> Option<TriggerDefinition> {
+    all_consuming(preceded(
+        space1,
+        preceded(peek(tag("dies")), parse_dies_verb_phrase),
+    ))
+    .parse(input)
+    .ok()?;
+    let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+    trigger.origin = Some(Zone::Battlefield);
+    trigger.destination = Some(Zone::Graveyard);
+    trigger.valid_card = Some(TargetFilter::ParentTargetSlot { index });
+    Some(trigger)
+}
+
 /// CR 603.6 + CR 603.2: Parse one clause of a disjunctive zone-change trigger
 /// from `[subject] [verb-phrase]`. Returns the typed `ZoneChangeClause`, or
 /// `None` if the verb phrase is not a recognized zone-change shape.

@@ -6027,6 +6027,57 @@ fn rebind_triggering_source_to_parent_target(ability: &mut AbilityDefinition) {
     }
 }
 
+/// CR 603.7b: Split a delayed "When/Whenever <event> this turn, <body>" head at its
+/// effect boundary, returning the event text before the stated duration and the body.
+pub(super) fn parse_delayed_this_turn_head(tp: TextPair<'_>) -> Option<(&str, &str)> {
+    let (head, _) = terminated(
+        alt((tag::<_, _, OracleError<'_>>("whenever"), tag("when"))),
+        space1,
+    )
+    .parse(tp.lower)
+    .ok()?;
+    let offset = tp.lower.len() - head.len();
+    let comma = offset + super::oracle_trigger::find_effect_boundary(head)?;
+    let (_, event) = recognize(many_till(
+        anychar,
+        peek(all_consuming(pair(
+            space1,
+            pair(
+                tag::<_, _, OracleError<'_>>("this"),
+                preceded(space1, tag("turn")),
+            ),
+        ))),
+    ))
+    .parse(&tp.lower[offset..comma])
+    .ok()?;
+    let ((), body) = nom_on_lower(&tp.original[comma..], &tp.lower[comma..], |input| {
+        value((), pair(tag(","), space1)).parse(input)
+    })?;
+    Some((event, body))
+}
+
+/// CR 603.7b + CR 603.7c: "When that creature dies this turn, ..." naming the single
+/// declared slot "that creature" resolves to; the stated duration keeps the watcher
+/// until cleanup.
+fn parse_declared_creature_death_this_turn<'a>(
+    tp: TextPair<'a>,
+    ctx: &ParseContext,
+) -> Option<(DelayedTriggerCondition, &'a str)> {
+    let (head, body) = parse_delayed_this_turn_head(tp)?;
+    let (verb, _) = tag::<_, _, OracleError<'_>>("that creature")
+        .parse(head)
+        .ok()?;
+    let (slot, _) = resolve_declared_slot_anaphor(head, ctx)?;
+    let trigger = super::oracle_trigger::parse_declared_creature_death(verb, slot)?;
+    Some((
+        DelayedTriggerCondition::WheneverEvent {
+            trigger: Box::new(trigger),
+            expiry: WheneverEventExpiry::EndOfTurn,
+        },
+        body,
+    ))
+}
+
 /// CR 603.7c: Parse inline delayed triggers like "when that creature dies, draw a card".
 /// Returns a `CreateDelayedTrigger` wrapping the parsed inner effect.
 fn try_parse_inline_delayed_trigger(
@@ -6067,6 +6118,8 @@ fn try_parse_inline_delayed_trigger(
     // single-event `scan_delayed_condition_kind` path, which would otherwise
     // drop the second disjunct.
     let mut self_disjunction = false;
+    let mut declared_death = false;
+    let mut effect_text = effect_text;
     let condition = if let Some(trigger) =
         parse_dealt_damage_this_way_dies_trigger(condition_text, ctx)
     {
@@ -6091,6 +6144,10 @@ fn try_parse_inline_delayed_trigger(
             or_trigger: Some(Box::new(or_trigger)),
             lifetime: DelayedTriggerLifetime::Persistent,
         }
+    } else if let Some((condition, body)) = parse_declared_creature_death_this_turn(tp, ctx) {
+        declared_death = true;
+        effect_text = body;
+        condition
     } else {
         match scan_delayed_condition_kind(condition_text) {
             Some(DelayedConditionKind::Dies | DelayedConditionKind::PutIntoGraveyard) => {
@@ -6121,7 +6178,7 @@ fn try_parse_inline_delayed_trigger(
     // "that creature/permanent/token" references the parent spell's target.
     // "the exiled creature/card" and "the targeted creature" also reference
     // the parent's tracked set.
-    let uses_tracked_set = scan_tracked_set_reference(condition_text);
+    let uses_tracked_set = !declared_death && scan_tracked_set_reference(condition_text);
 
     // Throwaway (`ChosenColorQualifierScope` rule 1) — the parsed `inner` is
     // kept, `inner_ctx` is dropped.
@@ -6129,6 +6186,10 @@ fn try_parse_inline_delayed_trigger(
     // CR 603.7 + CR 608.2k: delayed body, no announced parent target.
     inner_ctx.spell_anaphor_binding = SpellAnaphorBinding::EventSource;
     inner_ctx.subject = match &condition {
+        DelayedTriggerCondition::WheneverEvent { trigger, .. } if declared_death => trigger
+            .valid_card
+            .as_ref()
+            .map(|_| TargetFilter::ParentTarget),
         DelayedTriggerCondition::WhenDies { filter }
         | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
         | DelayedTriggerCondition::WhenEntersBattlefield { filter }

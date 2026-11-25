@@ -20460,7 +20460,7 @@ fn false_gate_consumes_one_shot(condition: &DelayedTriggerCondition) -> bool {
 
 fn delayed_trigger_to_context(
     state: &GameState,
-    trigger: DelayedTrigger,
+    mut trigger: DelayedTrigger,
     trigger_events: Vec<GameEvent>,
     matched_alternative: usize,
     causes: Vec<GameEvent>,
@@ -20513,6 +20513,7 @@ fn delayed_trigger_to_context(
     // on the stack, exactly as a printed modal trigger does.
     let modal = trigger.ability.modal.clone();
     let mode_abilities = trigger.ability.mode_abilities.clone();
+    trigger.ability.context.delayed_watch_incarnation = None;
     let mut context = PendingTriggerContext::delayed(
         PendingTrigger {
             source_id: trigger.source_id,
@@ -20604,6 +20605,20 @@ fn delayed_whenever_event_firings(
         // was rolled. Skipped after `enumerate()`, so raw indices hold.
         if scan.withholds(state, event) {
             continue;
+        }
+        // CR 400.7 + CR 603.7c: Admission uses the occurrence that left the
+        // battlefield. The payload separately follows the death's arrival.
+        if let Some(watched) = delayed.ability.context.delayed_watch_incarnation {
+            use crate::types::game_state::{
+                battlefield_departure_trigger_source_context, BattlefieldDepartureSourceContext,
+            };
+            if !matches!(
+                battlefield_departure_trigger_source_context(event),
+                BattlefieldDepartureSourceContext::Present(source)
+                    if source.identity.reference == watched
+            ) {
+                continue;
+            }
         }
         // CR 120.4b: a whole-event threshold is decided on the summed batch,
         // so admission uses the threshold-free filters, as printed does.
