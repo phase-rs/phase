@@ -294,3 +294,81 @@ fn wanted_scoundrels_creates_no_treasure_if_chosen_opponent_gains_hexproof() {
     give_second_opponent_hexproof(&mut runner, plating);
     assert!(tokens(&runner, "Treasure").is_empty());
 }
+
+#[test]
+fn wanted_scoundrels_dies_under_act_of_treason_controller() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::End);
+    let scoundrels = card(&mut scenario, P0, "Wanted Scoundrels", Zone::Battlefield);
+    let treason = card(&mut scenario, P1, "Act of Treason", Zone::Hand);
+    let murder = card(&mut scenario, P1, "Murder", Zone::Hand);
+    card(&mut scenario, P1, "Mountain", Zone::Library);
+    let mut runner = scenario.build();
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P1);
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+
+    let pool = &mut runner.state_mut().players[P1.0 as usize].mana_pool;
+    for mana in [ManaType::Red, ManaType::Colorless, ManaType::Colorless] {
+        pool.add(ManaUnit::new(mana, ObjectId(0), false, vec![]));
+    }
+    runner.cast(treason).target_object(scoundrels).resolve();
+    let creature = &runner.state().objects[&scoundrels];
+    assert_eq!((creature.owner, creature.controller), (P0, P1));
+
+    let pool = &mut runner.state_mut().players[P1.0 as usize].mana_pool;
+    for _ in 0..3 {
+        pool.add(ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]));
+    }
+    assert_eq!(
+        runner
+            .cast(murder)
+            .target_object(scoundrels)
+            .commit()
+            .state()
+            .stack
+            .len(),
+        1
+    );
+    for _ in 0..3 {
+        runner
+            .pass_holding_team()
+            .expect("pass priority over Murder");
+    }
+    assert!(runner.state().players[P0.0 as usize]
+        .graveyard
+        .iter()
+        .any(|id| runner.state().objects[id].name == "Wanted Scoundrels"));
+    assert!(tokens(&runner, "Treasure").is_empty());
+
+    let WaitingFor::TriggerTargetSelection {
+        player,
+        trigger_controller,
+        target_slots,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected a dies-trigger target prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    // CR 603.3a + CR 603.10a: The dies trigger uses the creature's battlefield controller.
+    assert_eq!(*trigger_controller, Some(P1), "dies trigger controller");
+    assert_eq!(*player, P1, "trigger target chooser");
+    assert_eq!(target_slots.len(), 1);
+    let legal = &target_slots[0].legal_targets;
+    assert_eq!(legal.len(), 2);
+    assert!(legal.contains(&TargetRef::Player(P0)));
+    assert!(legal.contains(&TargetRef::Player(P2)));
+    assert!(!legal.contains(&TargetRef::Player(P1)));
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P2)],
+        })
+        .expect("P1 chooses P2");
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].controller, P1);
+    finish_trigger(&mut runner);
+    assert_tokens_for_second_opponent(&runner, "Treasure", 2);
+}
