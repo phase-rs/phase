@@ -413,6 +413,7 @@ mod tests {
 
     fn creature_token_effect(count: QuantityExpr) -> Effect {
         Effect::Token {
+            block_attacker: None,
             name: "Saproling".to_string(),
             power: engine::types::ability::PtValue::Fixed(1),
             toughness: engine::types::ability::PtValue::Fixed(1),
@@ -433,6 +434,7 @@ mod tests {
 
     fn treasure_token_effect() -> Effect {
         Effect::Token {
+            block_attacker: None,
             name: "Treasure".to_string(),
             power: engine::types::ability::PtValue::Fixed(0),
             toughness: engine::types::ability::PtValue::Fixed(0),

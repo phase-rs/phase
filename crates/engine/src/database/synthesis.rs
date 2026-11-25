@@ -874,6 +874,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
     use crate::types::triggers::TriggerMode;
 
     let token_effect = Effect::Token {
+        block_attacker: None,
         name: "Warrior".to_string(),
         power: PtValue::Fixed(1),
         toughness: PtValue::Fixed(1),
@@ -1034,6 +1035,7 @@ fn synthesize_etb_token_attach_keyword(
     types.extend(subtype_list.iter().map(|s| s.to_string()));
 
     let token_effect = Effect::Token {
+        block_attacker: None,
         name: token_name.to_string(),
         power: PtValue::Fixed(power),
         toughness: PtValue::Fixed(toughness),
@@ -3877,6 +3879,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
     let servos_branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Token {
+            block_attacker: None,
             name: "Servo".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -4519,6 +4522,7 @@ fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
     // token with flying. Colors carry both White and Black (CR 105.2b
     // multicolored).
     let token_effect = Effect::Token {
+        block_attacker: None,
         name: "Spirit".to_string(),
         power: PtValue::Fixed(1),
         toughness: PtValue::Fixed(1),
@@ -5524,10 +5528,12 @@ pub(crate) fn enlist_tap_target_filter() -> TargetFilter {
                     ]),
             ),
             TargetFilter::Not {
-                filter: Box::new(TargetFilter::Typed(
-                    TypedFilter::creature()
-                        .properties(vec![FilterProp::Attacking { defender: None }]),
-                )),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature().properties(
+                    vec![FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None,
+                    }],
+                ))),
             },
         ],
     }
@@ -5792,7 +5798,10 @@ fn is_frenzy_trigger(t: &TriggerDefinition, n: u32) -> bool {
 fn battlecry_target_filter() -> TypedFilter {
     let mut tf = TypedFilter::creature();
     tf.properties = vec![
-        FilterProp::Attacking { defender: None },
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        },
         FilterProp::Another,
     ];
     tf
@@ -5989,7 +5998,7 @@ fn is_mentor_trigger(t: &TriggerDefinition) -> bool {
                     counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(tf),
-                } if tf.properties.contains(&FilterProp::Attacking { defender: None })
+                } if tf.properties.contains(&FilterProp::Attacking { scope: Default::default(), defender: None })
                     && tf.properties.iter().any(|prop| matches!(
                         prop,
                         FilterProp::PtComparison {
@@ -6011,7 +6020,10 @@ fn build_mentor_trigger() -> TriggerDefinition {
     let mut target_filter = TypedFilter::creature();
     target_filter.properties = vec![
         // CR 702.134a: only attacking creatures are legal Mentor targets.
-        FilterProp::Attacking { defender: None },
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        },
         // CR 702.134a + CR 208.1: Mentor targets a creature with power
         // strictly less than the source creature's current power.
         FilterProp::PtComparison {
@@ -14915,8 +14927,10 @@ mod mentor_synthesis_tests {
             panic!("counter target must be a TypedFilter");
         };
         assert!(
-            tf.properties
-                .contains(&FilterProp::Attacking { defender: None }),
+            tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }),
             "target must be an attacking creature (CR 702.134a)"
         );
         // CR 702.134a + CR 208.1: power strictly less than this creature's power.
@@ -15338,7 +15352,10 @@ mod battlecry_synthesis_tests {
         assert_eq!(
             tf.properties,
             vec![
-                FilterProp::Attacking { defender: None },
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                },
                 FilterProp::Another
             ]
         );

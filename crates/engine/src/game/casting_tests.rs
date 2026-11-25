@@ -27137,6 +27137,7 @@ fn modal_x_target_legality_chooses_x_before_targets() {
         Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                block_attacker: None,
                 name: "Eldrazi Spawn".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(1),
@@ -54864,7 +54865,10 @@ fn cosmic_cube_dynamic_mv_ceiling_enforced_at_finalize() {
                         filter: TargetFilter::Typed(TypedFilter {
                             type_filters: vec![TypeFilter::Creature],
                             controller: Some(ControllerRef::You),
-                            properties: vec![FilterProp::Attacking { defender: None }],
+                            properties: vec![FilterProp::Attacking {
+                                scope: Default::default(),
+                                defender: None,
+                            }],
                         }),
                     },
                 )

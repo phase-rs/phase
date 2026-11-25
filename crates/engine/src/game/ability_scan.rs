@@ -993,6 +993,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             tapped: _,
             enters_attacking: _,
             attack_destination,
+            block_attacker,
             supertypes: _,
         } => match mode {
             ScanMode::Conservative => Axes::CONSERVATIVE,
@@ -1010,7 +1011,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
                     FilterReadContext::SnapshotOrEvent,
                     mode,
                 ));
-                if let Some(at) = attach_to {
+                for at in [attach_to.as_ref(), block_attacker.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
                     acc = acc.or(scan_target_filter(
                         at,
                         FilterReadContext::SnapshotOrEvent,
@@ -6599,7 +6603,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes<'_> {
         // `scan_controller_ref` outcome is projected:false, so these never lift the
         // projected axis; recursing keeps the classifier honest under future
         // ControllerRef changes.
-        FilterProp::Attacking { defender } => {
+        FilterProp::Attacking { defender , .. } => {
             defender.as_ref().map_or(Axes::NONE, scan_controller_ref)
         }
         FilterProp::ProtectorMatches { controller } => scan_controller_ref(controller),
@@ -11437,6 +11441,7 @@ mod tests {
         attack_destination: crate::types::ability::TokenAttackDestination,
     ) -> Effect {
         Effect::Token {
+            block_attacker: None,
             name: "Elf Warrior".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

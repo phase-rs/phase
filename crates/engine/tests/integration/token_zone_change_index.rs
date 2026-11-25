@@ -108,6 +108,7 @@ fn batched_etb_life_trigger() -> TriggerDefinition {
 fn mint_token_batch(state: &mut GameState, source: ObjectId, count: i32) -> Vec<GameEvent> {
     let ability = ResolvedAbility::new(
         Effect::Token {
+            block_attacker: None,
             name: "Saproling".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -2519,6 +2520,7 @@ fn modification_paused_copy_token_entry_after_a_token_batch_fires_the_batched_tr
 
 fn spec_token_effect(types: Vec<String>, attach_to: Option<TargetFilter>, name: &str) -> Effect {
     Effect::Token {
+        block_attacker: None,
         name: name.to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),

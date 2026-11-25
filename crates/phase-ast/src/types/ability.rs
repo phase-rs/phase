@@ -7349,6 +7349,11 @@ pub enum FilterProp {
     Attacking {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         defender: Option<ControllerRef>,
+        #[serde(
+            default,
+            skip_serializing_if = "AttackDefenderMatch::is_defending_side"
+        )]
+        scope: AttackDefenderMatch,
     },
     /// CR 509.1a: Matches creatures that are blocking.
     Blocking,
@@ -12104,8 +12109,17 @@ fn effect_target_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
             ..
         } if target.is_context_ref() => slots.push(target),
         Effect::Token {
-            attach_to: Some(f), ..
-        } if f.is_context_ref() => slots.push(f),
+            attach_to,
+            block_attacker,
+            ..
+        } => {
+            slots.extend(
+                [attach_to.as_ref(), block_attacker.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .filter(|f| f.is_context_ref()),
+            );
+        }
         Effect::Attach { attachment, .. } if attachment.is_context_ref() => slots.push(attachment),
         Effect::UnattachAll { attachment, .. } if attachment.is_context_ref() => {
             slots.push(attachment)
@@ -23322,6 +23336,20 @@ impl TokenAttackDestination {
     }
 }
 
+/// CR 508.1b and 508.5: distinguish the actual player attacked from the defending side.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttackDefenderMatch {
+    #[default]
+    DefendingSide,
+    DirectPlayer,
+}
+
+impl AttackDefenderMatch {
+    pub fn is_defending_side(&self) -> bool {
+        *self == Self::DefendingSide
+    }
+}
+
 /// CR 508.4: what a named player offers as the destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NamedDefenderScope {
@@ -23775,6 +23803,9 @@ pub enum Effect {
             skip_serializing_if = "TokenAttackDestination::is_controller_chooses"
         )]
         attack_destination: TokenAttackDestination,
+        /// CR 509.4: The particular attacker this token enters blocking.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_attacker: Option<Box<TargetFilter>>,
         /// CR 205.4a: Supertypes for the token (Legendary, Snow, etc.).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         supertypes: Vec<super::card_type::Supertype>,
@@ -32807,10 +32838,11 @@ impl Effect {
             // surface their token-creation target as the `owner` filter — the
             // player who creates the token is its owner. The default
             // `TargetFilter::Controller` preserves "you create ..." semantics.
-            Effect::Token { owner, attach_to, .. } => match attach_to {
-                Some(f) if !f.is_context_ref() => Some(f),
-                _ => Some(owner),
-            },
+            Effect::Token { owner, attach_to, block_attacker, .. } => block_attacker
+                .as_deref()
+                .filter(|f| !f.is_context_ref())
+                .or(attach_to.as_ref().filter(|f| !f.is_context_ref()))
+                .or(Some(owner)),
 
             // GenericEffect and LoseLife have Option<TargetFilter>
             //
@@ -33396,11 +33428,15 @@ impl Effect {
             }
 
             Effect::Token {
-                owner, attach_to, ..
-            } => match attach_to {
-                Some(f) if !f.is_context_ref() => Some(f),
-                _ => Some(owner),
-            },
+                owner,
+                attach_to,
+                block_attacker,
+                ..
+            } => block_attacker
+                .as_deref_mut()
+                .filter(|f| !f.is_context_ref())
+                .or(attach_to.as_mut().filter(|f| !f.is_context_ref()))
+                .or(Some(owner)),
 
             Effect::GenericEffect { target, .. }
             | Effect::LoseLife { target, .. }
@@ -45954,6 +45990,7 @@ mod tests {
 
     fn goblin_token(attack_destination: TokenAttackDestination) -> Effect {
         Effect::Token {
+            block_attacker: None,
             name: "Goblin".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -49138,6 +49175,7 @@ mod tests {
 
         // Token and mass-counter vote tally forms bind through the same count slot.
         let token = Effect::Token {
+            block_attacker: None,
             name: "Treasure".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -51212,6 +51250,7 @@ mod tests {
     #[test]
     fn effect_token_roundtrip() {
         let effect = Effect::Token {
+            block_attacker: None,
             name: "Soldier".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Variable("X".to_string()),
@@ -51242,11 +51281,16 @@ mod tests {
         let props = vec![
             FilterProp::Token,
             FilterProp::RepresentedByCard,
-            FilterProp::Attacking { defender: None },
             FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+            FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You),
             },
             FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::Opponent),
             },
             FilterProp::AttackedThisTurn { defender: None },

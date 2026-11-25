@@ -2876,6 +2876,7 @@ fn fast_loyalty_owner_resumes_after_replacement_child_trigger_retires() {
     let child = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Token {
+            block_attacker: None,
             name: "Soldier Token".into(),
             power: engine::types::ability::PtValue::Fixed(1),
             toughness: engine::types::ability::PtValue::Fixed(1),

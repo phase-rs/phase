@@ -52,6 +52,7 @@ pub fn resolve(
     let mut token_branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Token {
+            block_attacker: None,
             name: String::new(),
             power: PtValue::Fixed(amount as i32),
             toughness: PtValue::Fixed(amount as i32),

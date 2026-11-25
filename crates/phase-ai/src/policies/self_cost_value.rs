@@ -2825,6 +2825,7 @@ mod tests {
     /// so it classifies `Unmodeled`. Benefit-signed.
     fn create_token_rider() -> Effect {
         Effect::Token {
+            block_attacker: None,
             name: "Servo".to_string(),
             power: engine::types::ability::PtValue::Fixed(1),
             toughness: engine::types::ability::PtValue::Fixed(1),

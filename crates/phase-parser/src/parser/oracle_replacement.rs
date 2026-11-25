@@ -14554,6 +14554,7 @@ fn token_description_to_spec(
     }
 
     Some(TokenSpec {
+        block_attacker: None,
         characteristics: crate::types::token_spec::TokenCharacteristics {
             display_name: token.name.clone(),
             power,
@@ -21957,7 +21958,10 @@ mod tests {
                 TypedFilter::new(TypeFilter::Artifact)
                     .with_type(TypeFilter::Creature)
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Attacking { defender: None }])
+                    .properties(vec![FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None
+                    }])
             ))
         );
         assert!(def.damage_target_filter.is_none());

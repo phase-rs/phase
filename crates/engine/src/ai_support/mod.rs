@@ -6616,6 +6616,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::Token {
+                    block_attacker: None,
                     name: "Spirit".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),

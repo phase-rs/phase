@@ -52,6 +52,7 @@ fn draw_for_each_artifact() -> Effect {
 /// `Effect::Token` producing an artifact-typed token (Treasure).
 fn treasure_token_effect() -> Effect {
     Effect::Token {
+        block_attacker: None,
         name: "Treasure".to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),

@@ -6043,7 +6043,10 @@ pub(crate) fn parse_modified_creature_subject_filter(subject: &str) -> Option<Ta
         ("tapped creatures you control", FilterProp::Tapped),
         (
             "attacking creatures you control",
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
         ),
         // CR 700.9: "modified creatures you control" — permanents with
         // counters, equipped, or enchanted by own-controlled Aura.
@@ -6062,9 +6065,12 @@ pub(crate) fn parse_modified_creature_subject_filter(subject: &str) -> Option<Ta
     }
 
     if tp.lower == "attacking creatures" {
-        return Some(TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
-        ));
+        return Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            }],
+        )));
     }
 
     // CR 700.9 + CR 700.4: "modified creature(s)" and "other modified

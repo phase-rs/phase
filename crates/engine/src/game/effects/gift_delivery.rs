@@ -206,6 +206,7 @@ fn create_gift_token(
 ) -> Result<(), EffectError> {
     let creation = ResolvedAbility::new(
         Effect::Token {
+            block_attacker: None,
             name: token.name.to_string(),
             power: PtValue::Fixed(token.power_toughness),
             toughness: PtValue::Fixed(token.power_toughness),

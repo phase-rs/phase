@@ -6266,7 +6266,7 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::IsSaddled
             | FilterProp::ProtectorMatches { .. }
             // CR 509.1h: combat-status prefixes "attacking/blocking/unblocked".
-            | FilterProp::Attacking { defender: None }
+            | FilterProp::Attacking { defender: None , .. }
             | FilterProp::Blocking
             | FilterProp::BlockStatus { .. }
             // CR 105.1 + CR 205.2: color / supertype adjectives.
@@ -7997,6 +7997,7 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
                 None | Some('.') | Some(',') | Some(' ') if rest_trim.is_empty() => {
                     return Some((
                         FilterProp::Attacking {
+                            scope: Default::default(),
                             defender: Some(defender),
                         },
                         text.len() - rest.len(),
@@ -8106,6 +8107,7 @@ fn parse_attacking_defender_anaphor(input: &str) -> OracleResult<'_, FilterProp>
     Ok((
         rest,
         FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::DefendingPlayer),
         },
     ))
@@ -13146,6 +13148,7 @@ mod tests {
             parse_attacking_defender_suffix(text),
             Some((
                 FilterProp::Attacking {
+                    scope: Default::default(),
                     defender: Some(ControllerRef::Opponent),
                 },
                 text.len()
@@ -15242,9 +15245,10 @@ mod tests {
             panic!("expected typed filter");
         };
         assert!(tf.properties.contains(&FilterProp::Another));
-        assert!(tf
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(tf.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(tf.properties.iter().any(|p| matches!(
             p,
             FilterProp::SharesQuality {
@@ -15263,7 +15267,10 @@ mod tests {
             TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Attacking { defender: None }])
+                    .properties(vec![FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None
+                    }])
             )
         );
         assert_eq!(rest, "");
@@ -15280,6 +15287,7 @@ mod tests {
         };
         assert!(typed.type_filters.contains(&TypeFilter::Creature));
         assert!(typed.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::You),
         }));
     }
@@ -15323,6 +15331,7 @@ mod tests {
             panic!("expected typed filter, got {filter:?}");
         };
         assert!(!typed.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::You),
         }));
         assert_eq!(
@@ -15341,6 +15350,7 @@ mod tests {
         };
         assert!(typed.type_filters.contains(&TypeFilter::Creature));
         assert!(typed.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::Opponent),
         }));
     }
@@ -22704,7 +22714,13 @@ mod tests {
         let result2 = parse_combat_status_prefix("attacking creatures");
         assert_eq!(
             result2,
-            Some((FilterProp::Attacking { defender: None }, 10))
+            Some((
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                },
+                10
+            ))
         );
     }
 
@@ -22755,9 +22771,10 @@ mod tests {
             assert!(tf.properties.contains(&FilterProp::BlockStatus {
                 status: AttackerBlockStatus::Unblocked
             }));
-            assert!(tf
-                .properties
-                .contains(&FilterProp::Attacking { defender: None }));
+            assert!(tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }));
             assert_eq!(tf.controller, Some(ControllerRef::You));
         } else {
             panic!("Expected Typed filter, got {filter:?}");
@@ -22776,9 +22793,10 @@ mod tests {
         let second = typed_leg(&filters[1]).expect("second branch should be typed");
         assert!(first.type_filters.contains(&TypeFilter::Creature));
         assert!(second.type_filters.contains(&TypeFilter::Creature));
-        assert!(first
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(first.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(second.properties.contains(&FilterProp::Blocking));
     }
 
@@ -22792,8 +22810,20 @@ mod tests {
         };
         assert_eq!(filters.len(), 4);
         let expected = [
-            (FilterProp::Attacking { defender: None }, Keyword::Flying),
-            (FilterProp::Attacking { defender: None }, Keyword::Vigilance),
+            (
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None,
+                },
+                Keyword::Flying,
+            ),
+            (
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None,
+                },
+                Keyword::Vigilance,
+            ),
             (FilterProp::Blocking, Keyword::Flying),
             (FilterProp::Blocking, Keyword::Vigilance),
         ];
@@ -26001,7 +26031,7 @@ mod tests {
                 assert!(
                     tf.properties
                         .iter()
-                        .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                     "expected Attacking property, got {:?}",
                     tf.properties
                 );
@@ -26794,6 +26824,7 @@ mod tests {
         let tf = typed_leg(&filter).expect("typed filter");
         assert!(
             tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::Opponent),
             }),
             "must carry Attacking{{defender: Opponent}}, got {:?}",

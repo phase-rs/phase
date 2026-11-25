@@ -2654,7 +2654,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::MostPrevalentCreatureTypeIn {
             scope: controller, ..
         } => legacy_controller_ref(controller),
-        FilterProp::Attacking { defender: c }
+        FilterProp::Attacking { defender: c , .. }
         | FilterProp::AttackedThisTurn { defender: c }
         | FilterProp::HasAttachment { controller: c, .. }
         | FilterProp::HasAnyAttachmentOf { controller: c, .. }
@@ -2972,7 +2972,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::MostPrevalentCreatureTypeIn {
             scope: controller, ..
         } => member_bound_controller_ref(controller),
-        FilterProp::Attacking { defender: c }
+        FilterProp::Attacking { defender: c , .. }
         | FilterProp::AttackedThisTurn { defender: c }
         | FilterProp::HasAttachment { controller: c, .. }
         | FilterProp::HasAnyAttachmentOf { controller: c, .. }
@@ -6100,6 +6100,7 @@ fn rw_effect(
             attach_to: _,
             enters_attacking: _,
             attack_destination,
+            block_attacker,
             supertypes: _,
             static_abilities: _,
             enter_with_counters,
@@ -6122,6 +6123,11 @@ fn rw_effect(
             p.merge(rw_pt_value(power));
             p.merge(rw_pt_value(toughness));
             p.merge(rw_token_attack_destination(attack_destination));
+            if let Some(attacker) = block_attacker {
+                p.merge(rw_target_filter(attacker));
+                p.reads_board.set(StateKind::TurnStructure);
+                p.writes_external.set(StateKind::TurnStructure);
+            }
             (p, Some(WriteScope::Created))
         }
         Effect::CopyTokenOf {
@@ -8943,6 +8949,7 @@ mod tests {
     }
     fn token(types: &[&str], count: QuantityExpr) -> Effect {
         Effect::Token {
+            block_attacker: None,
             name: "t".into(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

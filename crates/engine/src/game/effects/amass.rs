@@ -203,6 +203,7 @@ fn create_army_token(
 ) -> Option<ObjectId> {
     let name = format!("{subtype} Army");
     let spec = TokenSpec {
+        block_attacker: None,
         characteristics: TokenCharacteristics {
             display_name: name.clone(),
             power: Some(0),
@@ -399,6 +400,7 @@ mod tests {
         let chatterfang_replacement = ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::You)
             .additional_token_spec(TokenSpec {
+                block_attacker: None,
                 characteristics: TokenCharacteristics {
                     display_name: "Squirrel".to_string(),
                     power: Some(1),

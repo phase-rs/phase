@@ -513,6 +513,9 @@ pub struct CopyTokenSpec {
     /// CR 508.4: the batch's resolved destination.
     #[serde(default, skip_serializing_if = "TokenAttackRequest::is_unspecified")]
     pub attack_request: TokenAttackRequest,
+    /// CR 509.4: the bound attacker when a creation replacement makes a copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_attacker: Option<ObjectIncarnationRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sacrifice_at: Option<Duration>,
     pub source_id: ObjectId,
@@ -2575,6 +2578,7 @@ mod tests {
 
     fn batch_spec(name: &str) -> Box<TokenSpec> {
         Box::new(TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: name.to_string(),
                 power: Some(1),
@@ -2887,6 +2891,7 @@ mod tests {
 
     fn token_spec_with(attack_request: TokenAttackRequest) -> TokenSpec {
         TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Goblin".to_string(),
                 power: Some(1),
@@ -2921,6 +2926,7 @@ mod tests {
             Zone::Battlefield,
         );
         CopyTokenSpec {
+            block_attacker: None,
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
                 &state.objects[&id],
             )),

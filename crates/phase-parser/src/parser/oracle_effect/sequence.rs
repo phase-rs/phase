@@ -13791,6 +13791,7 @@ mod tests {
     #[test]
     fn tokens_goaded_continuation_after_create_token() {
         let token_effect = Effect::Token {
+            block_attacker: None,
             name: "Warrior".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -13825,6 +13826,7 @@ mod tests {
     #[test]
     fn tokens_goaded_continuation_after_create_token_while_host_on_battlefield() {
         let token_effect = Effect::Token {
+            block_attacker: None,
             name: "Warrior".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -13857,6 +13859,7 @@ mod tests {
     #[test]
     fn token_goaded_continuation_after_create_token() {
         let token_effect = Effect::Token {
+            block_attacker: None,
             name: "Goblin".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

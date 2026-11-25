@@ -10681,6 +10681,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
             attach_to,
             enters_attacking: _,
             attack_destination,
+            block_attacker,
             supertypes: _,
             static_abilities,
             enter_with_counters,
@@ -10694,6 +10695,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
                 && keywords.is_empty()
                 && static_abilities.is_empty()
                 && enter_with_counters.is_empty()
+                && block_attacker.is_none()
                 && attack_destination.is_controller_chooses())
             .then(|| std::iter::once(owner).chain(attach_to.as_ref()).collect()),
             match attach_to {
@@ -27634,6 +27636,7 @@ fn simultaneous_token_fan_out_applies(
         attach_to,
         enters_attacking,
         attack_destination,
+        block_attacker,
         enter_with_counters,
         ..
     } = &scoped_template.effect
@@ -27662,7 +27665,8 @@ fn simultaneous_token_fan_out_applies(
     if attach_to.is_some() || !enter_with_counters.is_empty() {
         return false;
     }
-    if *enters_attacking || !attack_destination.is_controller_chooses() {
+    if *enters_attacking || !attack_destination.is_controller_chooses() || block_attacker.is_some()
+    {
         return false;
     }
     // No interactive riders: nothing may pause a seat mid-clause.
@@ -45608,6 +45612,7 @@ mod tests {
         };
         assert!(effect_has_iteration_bound_recipient(&draw_scoped));
         let token_original = Effect::Token {
+            block_attacker: None,
             name: "Treasure".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -47072,6 +47077,7 @@ mod tests {
         });
         let ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Zombie".to_string(),
                 power: tracked_pt.clone(),
                 toughness: tracked_pt,
@@ -47214,6 +47220,7 @@ mod tests {
     fn token_tracked_entry_counter_marks_ability_as_referencing_tracked_set() {
         let ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Zombie".to_string(),
                 power: PtValue::Fixed(2),
                 toughness: PtValue::Fixed(2),
@@ -49444,6 +49451,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Salamander Warrior".to_string(),
                 power: PtValue::Fixed(4),
                 toughness: PtValue::Fixed(3),
@@ -53929,6 +53937,7 @@ mod tests {
 
             let token_sub = ResolvedAbility::new(
                 Effect::Token {
+                    block_attacker: None,
                     name: "Treasure".to_string(),
                     power: PtValue::Fixed(0),
                     toughness: PtValue::Fixed(0),
@@ -54926,6 +54935,7 @@ mod tests {
 
         let token_sub = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Spirit".to_string(),
                 power: PtValue::Fixed(3),
                 toughness: PtValue::Fixed(2),
@@ -59982,6 +59992,7 @@ mod tests {
         let make_chain = |child_effect: Effect, link: SubAbilityLink| {
             let mut token = ResolvedAbility::new(
                 Effect::Token {
+                    block_attacker: None,
                     attack_destination:
                         crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Fractal".to_string(),
@@ -60536,6 +60547,7 @@ mod tests {
     #[test]
     fn mark_co_scoped_created_referent_consumer_requires_the_matching_producer() {
         let token = || Effect::Token {
+            block_attacker: None,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Fractal".to_string(),
             power: PtValue::Fixed(0),
@@ -60638,6 +60650,7 @@ mod tests {
             end_cost: None,
         };
         let elemental = || Effect::Token {
+            block_attacker: None,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Elemental".to_string(),
             power: PtValue::Fixed(1),
@@ -61066,6 +61079,7 @@ mod tests {
             }))
         };
         let token = |static_abilities: Vec<StaticDefinition>| Effect::Token {
+            block_attacker: None,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Soldier".to_string(),
             power: PtValue::Fixed(1),
@@ -61430,6 +61444,7 @@ mod tests {
             end_cost: None,
         };
         let token = |static_def: StaticDefinition| Effect::Token {
+            block_attacker: None,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Soldier".to_string(),
             power: PtValue::Fixed(1),
@@ -62072,6 +62087,7 @@ mod tests {
             target: TargetFilter::LastCreated,
         };
         let token_attached = Effect::Token {
+            block_attacker: None,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Aura".to_string(),
             power: PtValue::Fixed(0),
@@ -62814,6 +62830,7 @@ mod tests {
             (
                 "Token keyword Protection(Filter)",
                 effect_row(Box::new(move |filter| Effect::Token {
+                    block_attacker: None,
                     attack_destination:
                         crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Soldier".to_string(),
@@ -65209,6 +65226,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Illusion".to_string(),
                 power: PtValue::Quantity(QuantityExpr::Ref {
                     qty: QuantityRef::PropertyAggregate(
@@ -65369,6 +65387,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Illusion".to_string(),
                 power: PtValue::Quantity(QuantityExpr::Ref {
                     qty: QuantityRef::PropertyAggregate(
@@ -66762,6 +66781,7 @@ mod tests {
 
         let token_rider = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Treasure".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -69176,6 +69196,7 @@ mod tests {
 
         let token = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Myr".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -71170,6 +71191,7 @@ mod tests {
         );
 
         let make_cat = || Effect::Token {
+            block_attacker: None,
             name: "Cat".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -76144,6 +76166,7 @@ mod resolution_progress_contract_tests {
             );
             let effect = if token {
                 Effect::Token {
+                    block_attacker: None,
                     attack_destination:
                         crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Soldier".into(),

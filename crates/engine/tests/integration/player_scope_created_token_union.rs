@@ -498,6 +498,7 @@ fn war_games_two_pauses_goad_every_seat() {
 /// A tapped 1/1 white creature token effect named `name` (and of that subtype).
 fn vanilla_token(name: &str, count: i32) -> Effect {
     Effect::Token {
+        block_attacker: None,
         attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         name: name.to_string(),
         power: PtValue::Fixed(1),
@@ -984,6 +985,7 @@ fn sync_fan_out_emblem_static_reads_every_seats_tokens() {
 /// An untapped 1/1 green creature token effect named `name` (and of that subtype).
 fn untapped_token(name: &str) -> Effect {
     Effect::Token {
+        block_attacker: None,
         attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         name: name.to_string(),
         power: PtValue::Fixed(1),

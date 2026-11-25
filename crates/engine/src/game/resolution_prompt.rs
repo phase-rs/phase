@@ -268,6 +268,7 @@ pub(crate) fn effect_offers_choice(e: &Effect) -> bool {
             supertypes: _,
             static_abilities: _,
             enter_with_counters: _,
+            block_attacker: _,
         } => {
             quantity_offers_up_to_choice(count)
         }
@@ -1225,6 +1226,7 @@ mod tests {
 
     fn token_effect(count: QuantityExpr) -> Effect {
         Effect::Token {
+            block_attacker: None,
             name: "Servo".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

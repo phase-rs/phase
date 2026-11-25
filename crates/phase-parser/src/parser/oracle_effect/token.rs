@@ -183,6 +183,7 @@ pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Opti
         attach_to: token.attach_to,
         enters_attacking: token.enters_attacking,
         attack_destination: token.attack_destination,
+        block_attacker: token.block_attacker,
         // CR 205.4a: Carry parsed supertypes (e.g. "legendary" for Marit Lage)
         // onto the token so the legend rule (CR 704.5j) applies.
         supertypes: token.supertypes,
@@ -619,6 +620,19 @@ fn parse_token_description_with_context(
         (Some(slot.count), slot.where_x, slot.noun)
     };
 
+    // CR 509.4: strip the named blocking rider before parsing token keywords.
+    let lower = text.to_ascii_lowercase();
+    let outside = nom_primitives::mask_double_quoted_spans_preserving_len(&lower);
+    let entry_block = outside.char_indices().find_map(|(offset, _)| {
+        parse_token_block_attacker(&outside[offset..])
+            .ok()
+            .map(|(_, attacker)| (offset, attacker))
+    });
+    let (text, block_attacker) = match entry_block {
+        Some((offset, attacker)) => (&text[..offset], Some(Box::new(attacker))),
+        None => (text, None),
+    };
+
     // CR 508.4 + CR 506.3a: Strip inline "that's tapped and attacking" /
     // "that is tapped and attacking" / "thats tapped and attacking" /
     // "that are tapped and attacking" / "that are attacking" suffix (singular
@@ -946,7 +960,34 @@ fn parse_token_description_with_context(
         static_abilities,
         enters_attacking,
         attack_destination,
+        block_attacker,
     })
+}
+
+/// CR 509.4: a token entry instruction naming a particular attacking creature.
+fn parse_token_block_attacker(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (input, _) = alt((tag(" that's"), tag(" that is"), tag(" that are"))).parse(input)?;
+    let (input, _) = tag(" blocking ").parse(input)?;
+    let (input, attacker) = alt((
+        value(TargetFilter::ParentTarget, tag("that creature")),
+        value(
+            {
+                use phase_ast::types::ability::{AttackDefenderMatch, FilterProp};
+                TargetFilter::Typed(
+                    phase_ast::types::ability::TypedFilter::creature().properties(vec![
+                        FilterProp::Attacking {
+                            defender: Some(ControllerRef::You),
+                            scope: AttackDefenderMatch::DirectPlayer,
+                        },
+                    ]),
+                )
+            },
+            tag("target creature attacking you"),
+        ),
+    ))
+    .parse(input)?;
+    let (input, _) = nom::combinator::eof.parse(input.trim_end_matches('.').trim_end())?;
+    Ok((input, attacker))
 }
 
 /// CR 508.4: the defender a token instruction names after "attacking":
@@ -2396,9 +2437,10 @@ mod tests {
             panic!("expected typed target, got {target:?}");
         };
         assert!(typed_target.type_filters.contains(&TypeFilter::Creature));
-        assert!(typed_target
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(typed_target.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert_eq!(remainder, " and that's tapped and attacking.");
 
         let oracle = "Create a token that's a copy of another target attacking creature and that's tapped and attacking.";
@@ -2417,9 +2459,10 @@ mod tests {
             panic!("expected typed copy target, got {target:?}");
         };
         assert!(typed_target.type_filters.contains(&TypeFilter::Creature));
-        assert!(typed_target
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(typed_target.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(typed_target.properties.contains(&FilterProp::Another));
         assert!(tapped, "trailing tapped clause must set tapped=true");
         assert!(
@@ -2446,7 +2489,7 @@ mod tests {
         assert!(matches!(
             target,
             TargetFilter::Typed(ref typed)
-                if typed.properties.contains(&FilterProp::Attacking { defender: None })
+                if typed.properties.contains(&FilterProp::Attacking { scope: Default::default(), defender: None })
         ));
         assert!(
             !tapped,
@@ -2487,9 +2530,10 @@ mod tests {
             panic!("expected full attack trigger to start with CopyTokenOf, got {execute:?}");
         };
         assert!(target.type_filters.contains(&TypeFilter::Creature));
-        assert!(target
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(target.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(target.properties.contains(&FilterProp::Another));
         assert!(*tapped && *enters_attacking);
 

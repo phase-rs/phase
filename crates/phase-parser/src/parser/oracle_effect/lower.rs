@@ -4097,6 +4097,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             attach_to,
             enters_attacking,
             attack_destination,
+            block_attacker,
             supertypes,
             static_abilities,
             enter_with_counters,
@@ -4114,6 +4115,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             attach_to: attach_to.clone(),
             enters_attacking: *enters_attacking,
             attack_destination: attack_destination.clone(),
+            block_attacker: block_attacker.clone(),
             supertypes: supertypes.clone(),
             static_abilities: static_abilities.clone(),
             enter_with_counters: enter_with_counters.clone(),
@@ -15537,6 +15539,7 @@ mod tests {
         let mut creator = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                block_attacker: None,
                 name: "Soldier".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -17022,6 +17025,7 @@ mod tests {
         let token_creator = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                block_attacker: None,
                 name: "Warrior".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -19026,6 +19030,7 @@ mod where_x_tests {
     #[test]
     fn apply_where_x_effect_expression_rewrites_token_count_and_pt() {
         let mut effect = Effect::Token {
+            block_attacker: None,
             name: "Ooze".to_string(),
             power: PtValue::Variable("X".to_string()),
             toughness: PtValue::Variable("X".to_string()),
@@ -19543,6 +19548,7 @@ mod token_anaphor_rewrite_tests {
             scope: NamedDefenderScope::Player,
         };
         let antecedent = Effect::Token {
+            block_attacker: None,
             name: "Goblin".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

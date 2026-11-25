@@ -6180,6 +6180,16 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
     // A clone proof resolves every member through the canonical path, so a
     // source-relative copy may join only when its exact sequential trace is
     // still inert at every checkpoint.
+    // CR 509.4: rider-bearing token entries can publish combat events during resolution.
+    if matches!(
+        &ability.effect,
+        Effect::Token {
+            block_attacker: Some(_),
+            ..
+        }
+    ) {
+        return None;
+    }
     let source_axis = if effects::supports_sequential_batch_proof(ability) {
         BatchSourceAxis::SourceIndependent
     } else {
@@ -10727,6 +10737,7 @@ mod tests {
         /// A bare Insect Token effect: 1/1 green Insect, Fixed count.
         fn insect_token_effect() -> Effect {
             Effect::Token {
+                block_attacker: None,
                 name: "Insect".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -11714,11 +11725,12 @@ mod tests {
             assert!(!priority_checkpoint_is_settled(&state));
             state.pending_liminal_entry_resume = None;
 
-            state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+            state.pending_token_battlefield_entry = Some(Box::new(PendingTokenBattlefieldEntry {
+                block_attacker: None,
                 object_id: ObjectId(94),
                 name: "checkpoint token".to_string(),
                 source_id: ObjectId(95),
-            });
+            }));
             assert!(!priority_checkpoint_is_settled(&state));
             state.pending_token_battlefield_entry = None;
 
@@ -12919,6 +12931,7 @@ mod tests {
         #[test]
         fn spec_emits_only_etb_pair_field_exclusions() {
             let base = TokenSpec {
+                block_attacker: None,
                 characteristics: crate::types::proposed_event::TokenCharacteristics {
                     display_name: "Insect".to_string(),
                     power: Some(1),

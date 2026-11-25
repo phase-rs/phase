@@ -328,6 +328,7 @@ mod tests {
                 abilities: vec![AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::Token {
+                        block_attacker: None,
                         name: "Goblin".to_string(),
                         count: QuantityExpr::Fixed { value: 2 },
                         power: PtValue::Fixed(1),

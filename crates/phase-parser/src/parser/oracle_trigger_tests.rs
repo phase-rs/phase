@@ -547,6 +547,7 @@ fn count_gate_rebind_reaches_token_entry_counters_but_not_granted_statics() {
     let mut execute = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Token {
+            block_attacker: None,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Fractal".to_string(),
             power: PtValue::Fixed(0),
@@ -3628,7 +3629,10 @@ fn trigger_attacking_highest_life_player_condition_maps_to_dethrone_shape() {
             target: TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Creature],
                 controller: None,
-                properties: vec![FilterProp::Attacking { defender: None }],
+                properties: vec![FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }],
             }),
             scope: EffectScope::All,
             state: TapStateChange::Untap,
@@ -7630,6 +7634,7 @@ fn opponent_attacks_you_uses_attackers_declared() {
                 ..
             } if typed.type_filters.contains(&TypeFilter::Creature)
                 && typed.properties.contains(&FilterProp::Attacking {
+                    scope: Default::default(),
                     defender: Some(ControllerRef::You),
                 })
         ),
@@ -10877,7 +10882,7 @@ fn parse_cloud_ex_soldier_attack_trigger_structure() {
             && properties
                 == &vec![
                     FilterProp::EquippedBy,
-                    FilterProp::Attacking { defender: None },
+                    FilterProp::Attacking { scope: Default::default(), defender: None },
                 ] => {}
         other => panic!(
             "outer execute must draw for each equipped attacking creature you control, got {other:?}"
@@ -11218,9 +11223,10 @@ fn shared_animosity_attack_pump_for_each_other_attacker_sharing_type() {
                 panic!("filter should be typed, got {filter:?}");
             };
             assert!(tf.properties.contains(&FilterProp::Another));
-            assert!(tf
-                .properties
-                .contains(&FilterProp::Attacking { defender: None }));
+            assert!(tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }));
             let shares = tf.properties.iter().find(|p| {
                 matches!(
                     p,
@@ -13460,7 +13466,7 @@ fn trigger_becomes_blocked_by_two_or_more_creatures_parses_threshold() {
     assert!(matches!(
         def.valid_card,
         Some(TargetFilter::Typed(ref tf)) if tf.type_filters == vec![TypeFilter::Creature]
-            && tf.properties.iter().any(|p| matches!(p, FilterProp::Attacking { defender: Some(ControllerRef::Opponent) }))
+            && tf.properties.iter().any(|p| matches!(p, FilterProp::Attacking { defender: Some(ControllerRef::Opponent) , .. }))
     ));
     let blocker_count = def
         .blocker_count
@@ -28838,7 +28844,7 @@ fn trigger_two_or_more_typed_creatures_attack() {
                 filter,
                 &add_property(
                     def.valid_card.clone().expect("valid_card"),
-                    FilterProp::Attacking { defender: None },
+                    FilterProp::Attacking { scope: Default::default(), defender: None },
                 ),
                 "count = subject + Attacking"
             );
@@ -28929,10 +28935,12 @@ fn trigger_two_or_more_creatures_attack_argent_dais_any_player() {
             condition: Box::new(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::creature()
-                                .properties(vec![FilterProp::Attacking { defender: None }])
-                        ),
+                        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                            FilterProp::Attacking {
+                                scope: Default::default(),
+                                defender: None
+                            }
+                        ])),
                     },
                 },
                 comparator: Comparator::GE,
@@ -29084,7 +29092,10 @@ fn trigger_two_or_more_disjunctive_unscoped_subject_attack() {
                 filter,
                 &add_property(
                     def.valid_card.clone().expect("valid_card"),
-                    FilterProp::Attacking { defender: None },
+                    FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None
+                    },
                 ),
                 "count = subject + Attacking"
             );
@@ -40800,7 +40811,10 @@ fn dealt_damage_attacking_creature_source_parses() {
         Some(TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Creature],
             controller: None,
-            properties: vec![FilterProp::Attacking { defender: None }],
+            properties: vec![FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }],
         }))
     );
 }
@@ -43170,9 +43184,10 @@ fn assert_block_count_shape(condition: &TriggerCondition, minimum: i32, noun: &s
     let TargetFilter::Typed(mut expected) = parse_type_phrase_folding(noun).0 else {
         panic!("expected typed noun");
     };
-    expected
-        .properties
-        .push(FilterProp::Attacking { defender: None });
+    expected.properties.push(FilterProp::Attacking {
+        scope: Default::default(),
+        defender: None,
+    });
     expected.properties.push(FilterProp::CombatRelation {
         relation: CombatRelation::BlockPairing {
             direction: BlockPairDirection::Either,
@@ -44529,7 +44544,7 @@ fn copy_token_continuation_sentence_names_that_player_as_its_attack_destination(
             target,
             TargetFilter::Typed(typed) if typed.properties.iter().any(|prop| matches!(
                 prop,
-                FilterProp::Attacking { defender: Some(ControllerRef::DefendingPlayer) }
+                FilterProp::Attacking { defender: Some(ControllerRef::DefendingPlayer) , .. }
             ))
         ),
         "the choose clause still reads the defending player: {target:?}"

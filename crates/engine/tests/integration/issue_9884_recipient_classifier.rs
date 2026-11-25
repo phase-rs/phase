@@ -263,6 +263,7 @@ fn issue_9884_token_entry_composite_stays_unbound_with_identity_control() {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Token {
+                    block_attacker: None,
                     name: "Classifier token".into(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),

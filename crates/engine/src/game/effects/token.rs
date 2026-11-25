@@ -746,6 +746,7 @@ pub(crate) fn propose_token_batch(
         owner_filter,
         enters_attacking,
         attack_destination,
+        block_attacker,
         fallback_supertypes,
         token_statics,
         etb_counters,
@@ -764,6 +765,7 @@ pub(crate) fn propose_token_batch(
             attach_to,
             enters_attacking,
             attack_destination,
+            block_attacker,
             supertypes,
             static_abilities,
             enter_with_counters,
@@ -779,6 +781,7 @@ pub(crate) fn propose_token_batch(
             owner,
             *enters_attacking,
             attack_destination.clone(),
+            block_attacker.as_deref(),
             supertypes.clone(),
             static_abilities.clone(),
             enter_with_counters.clone(),
@@ -796,6 +799,7 @@ pub(crate) fn propose_token_batch(
             &TargetFilter::Controller,
             false,
             TokenAttackDestination::ControllerChooses,
+            None,
             vec![],
             vec![],
             vec![],
@@ -881,6 +885,7 @@ pub(crate) fn propose_token_batch(
         tapped,
         enters_attacking,
         attack_request,
+        bind_token_block_attacker(state, ability, block_attacker),
         token_statics,
         resolved_etb_counters,
         host_request,
@@ -1119,6 +1124,7 @@ fn build_token_spec(
     tapped: bool,
     enters_attacking: bool,
     attack_request: TokenAttackRequest,
+    block_attacker: Option<ObjectIncarnationRef>,
     mut static_abilities: Vec<crate::types::ability::StaticDefinition>,
     enter_with_counters: Vec<(CounterType, u32)>,
     attach_to: TokenHostRequest,
@@ -1188,6 +1194,7 @@ fn build_token_spec(
         tapped,
         enters_attacking,
         attack_request,
+        block_attacker,
         sacrifice_at: ability.duration.clone(),
         source_id: ability.source_id,
         controller: ability.controller,
@@ -1838,7 +1845,8 @@ fn apply_create_token_batch(
         };
     };
 
-    if let Some(copy) = copy {
+    if let Some(mut copy) = copy {
+        copy.block_attacker = spec.block_attacker.or(copy.block_attacker);
         // CR 608.2c + CR 614.6: a single-batch copy event delivered under its
         // CopyToken owner (the frame a replacement-choice answer left parked)
         // gets the compound event's custody: the owner is detached for the
@@ -2051,6 +2059,7 @@ fn apply_create_token_batch(
                         attach_to: spec.attach_to.bound(),
                         sacrifice_at: spec.sacrifice_at.clone(),
                         source_id: spec.source_id,
+                        block_attacker: spec.block_attacker,
                         controller: spec.controller,
                     },
                     PendingCounterPostAction::ContinueTokenCreation {
@@ -2127,6 +2136,7 @@ fn apply_create_token_batch(
         // event is emitted for token-specific consumers (animation, logging,
         // `LastCreated` target filters). Single authority for both, and for the
         // CR 400.7 zone-change index the batched replay guard keys on.
+        place_token_blocking(state, obj_id, spec.block_attacker, events);
         push_committed_token_entry_events(
             state,
             obj_id,
@@ -3444,6 +3454,7 @@ fn liminal_token_entry_finalization_action(
         controller: entry.controller,
         enters_attacking: entry.enters_attacking,
         attack_destination: entry.attack_destination.clone(),
+        block_attacker: entry.block_attacker,
         attach_to: entry.attach_to,
         sacrifice_at: entry.sacrifice_at.clone(),
         created_ids: entry.created_ids.clone(),
@@ -3468,6 +3479,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
         controller,
         enters_attacking,
         attack_destination,
+        block_attacker,
         attach_to,
         sacrifice_at,
         created_ids,
@@ -3522,6 +3534,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     // state at the moment of the move" from a pre-copy 0/0 Shapeshifter.
     match entry_events {
         TokenEntryEventEmission::Emit => {
+            place_token_blocking(state, object_id, block_attacker, events);
             push_committed_token_entry_events(state, object_id, name, source_id, events);
         }
         TokenEntryEventEmission::Suppress => {
@@ -3547,11 +3560,12 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
                 stranded.is_none(),
                 "CR 400.7: parking a token battlefield entry over a live pending one: {stranded:?}"
             );
-            state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+            state.pending_token_battlefield_entry = Some(Box::new(PendingTokenBattlefieldEntry {
                 object_id,
                 name,
                 source_id,
-            });
+                block_attacker,
+            }));
         }
     }
     if matches!(sacrifice_at, Some(Duration::UntilEndOfCombat)) {
@@ -3862,6 +3876,7 @@ pub(crate) fn flush_pending_token_battlefield_entry(
     else {
         return false;
     };
+    place_token_blocking(state, pending.object_id, pending.block_attacker, events);
     push_committed_token_entry_events(
         state,
         pending.object_id,
@@ -3950,6 +3965,7 @@ pub(crate) fn realize_settled_token_battlefield_entry(
 /// emit no creation-time event beyond the ETB pair.
 pub(crate) fn spec_emits_only_etb_pair(spec: &TokenSpec) -> bool {
     spec.enter_with_counters.is_empty() // no CounterAdded event / AddCounter replacement
+        && spec.block_attacker.is_none() // no additional combat events (CR 509.4)
         && !spec.enters_attacking // no combat-state mutation (CR 508.4)
         && spec.sacrifice_at.is_none() // no delayed trigger (CR 603.7)
         // no host attachment mutation and no CR 303.4i entry verdict to reach
@@ -4119,6 +4135,7 @@ pub(crate) fn token_effect_is_source_independent(ability: &ResolvedAbility) -> b
         attach_to,
         enters_attacking,
         attack_destination: _,
+        block_attacker,
         supertypes: _,
         static_abilities: _,
         enter_with_counters: _,
@@ -4129,6 +4146,7 @@ pub(crate) fn token_effect_is_source_independent(ability: &ResolvedAbility) -> b
     matches!(owner, TargetFilter::Controller)
         && matches!(count, QuantityExpr::Fixed { .. })
         && !*enters_attacking
+        && block_attacker.is_none()
         && attach_to.is_none()
 }
 
@@ -4150,7 +4168,12 @@ fn bulk_token_shape(
     crate::types::proposed_event::EtbTapState,
     u32,
 )> {
-    let Effect::Token { count, .. } = &ability.effect else {
+    let Effect::Token {
+        count,
+        block_attacker: None,
+        ..
+    } = &ability.effect
+    else {
         return None;
     };
     if !matches!(count, QuantityExpr::Fixed { .. })
@@ -4447,6 +4470,7 @@ pub(crate) fn copy_probe_spec_for(
 ) -> TokenSpec {
     use crate::types::proposed_event::TokenCharacteristics;
     TokenSpec {
+        block_attacker: None,
         characteristics: TokenCharacteristics {
             display_name: values.name.clone(),
             power: values.power,
@@ -4519,6 +4543,7 @@ pub(crate) fn resolve_token_spec(
         attach_to,
         enters_attacking,
         attack_destination,
+        block_attacker,
         supertypes,
         static_abilities,
         enter_with_counters,
@@ -4553,6 +4578,7 @@ pub(crate) fn resolve_token_spec(
         *tapped,
         enters_attacking,
         attack_request,
+        bind_token_block_attacker(state, ability, block_attacker.as_deref()),
         static_abilities.clone(),
         resolved_etb_counters,
         host_request,
@@ -4714,6 +4740,33 @@ fn boon_batch_host_candidates(
             .filter(|host| boon_host_passes_projected_legality(state, ability, host))
             .collect(),
     )
+}
+
+fn bind_token_block_attacker(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: Option<&TargetFilter>,
+) -> Option<ObjectIncarnationRef> {
+    let target = crate::game::targeting::resolved_targets(ability, filter?, state)
+        .into_iter()
+        .find_map(|target| match target {
+            TargetRef::Object(id) => state.objects.get(&id),
+            _ => None,
+        })?;
+    Some(ObjectIncarnationRef::from_object(target))
+}
+
+pub(super) fn place_token_blocking(
+    state: &mut GameState,
+    token: ObjectId,
+    attacker: Option<ObjectIncarnationRef>,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 509.4a and CR 400.7: a missing or changed attacker leaves the token unblocking.
+    let Some(attacker) = attacker else { return };
+    if state.battlefield.contains(&token) && attacker.is_current(state) {
+        crate::game::combat::place_blocking(state, token, attacker.object_id, events);
+    }
 }
 
 fn resolve_attach_host(
@@ -6279,6 +6332,7 @@ mod tests {
         attack_destination: crate::types::ability::TokenAttackDestination,
     ) -> Effect {
         Effect::Token {
+            block_attacker: None,
             name: "Goblin".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -6401,6 +6455,7 @@ mod tests {
 
         let (mut state, source) = attacking_token_board();
         let spec = TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Goblin".to_string(),
                 power: Some(1),
@@ -6583,6 +6638,7 @@ mod tests {
     fn token_ability(script: &str) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: script.to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -6654,6 +6710,7 @@ mod tests {
         assert!(finalize_committed_liminal_token_entry_from_action(
             &mut state,
             PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+                block_attacker: None,
                 object_id,
                 name: "Record Probe".to_string(),
                 source_id,
@@ -6696,11 +6753,12 @@ mod tests {
         );
         assert_eq!(
             state.pending_token_battlefield_entry,
-            Some(PendingTokenBattlefieldEntry {
+            Some(Box::new(PendingTokenBattlefieldEntry {
+                block_attacker: None,
                 object_id,
                 name: "Record Probe".to_string(),
                 source_id: ObjectId(1),
-            }),
+            })),
             "the whole entry is parked on GameState so it survives any number of round trips"
         );
     }
@@ -6903,11 +6961,12 @@ mod tests {
     #[test]
     fn pending_token_battlefield_entry_round_trips() {
         let mut state = GameState::new_two_player(42);
-        state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+        state.pending_token_battlefield_entry = Some(Box::new(PendingTokenBattlefieldEntry {
+            block_attacker: None,
             object_id: ObjectId(7),
             name: "Record Probe".to_string(),
             source_id: ObjectId(1),
-        });
+        }));
         let encoded = serde_json::to_string(&state).expect("GameState serializes");
         let decoded: GameState = serde_json::from_str(&encoded).expect("GameState deserializes");
         assert_eq!(
@@ -7027,6 +7086,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Soldier".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -7117,6 +7177,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "w_1_1_soldier".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -7164,6 +7225,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Treasure".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -7201,6 +7263,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Powerstone".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -7236,6 +7299,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "r_1_1_warrior".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -7297,6 +7361,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Map".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -8455,6 +8520,7 @@ mod tests {
             "the Gingerbrute preset must carry its {{1}} cost reminder"
         );
         let spec = TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Gingerbrute".to_string(),
                 power: Some(1),
@@ -8863,6 +8929,7 @@ mod tests {
         );
 
         let spec = TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Pest".to_string(),
                 power: Some(1),
@@ -8967,6 +9034,7 @@ mod tests {
                 offered_batch: OfferedBatchCustody::Settled,
             });
             let copy = CopyTokenSpec {
+                block_attacker: None,
                 values: Box::new(intrinsic_copiable_values(&state.objects[&voice])),
                 display: DisplayIdentity {
                     display_source: DisplaySource::Token,
@@ -9068,6 +9136,7 @@ mod tests {
             Zone::Battlefield,
         );
         let creature_spec = |name: &str| TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: name.to_string(),
                 power: Some(1),
@@ -9151,6 +9220,7 @@ mod tests {
             .source_related_token_ids
             .push("0060ce13-67e2-5607-a29b-721c743e6770".to_string());
         let spec = TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Treasure".to_string(),
                 power: None,
@@ -9224,6 +9294,7 @@ mod tests {
             .source_related_token_ids
             .push("48b5010a-9c00-5cc1-b5e1-f407670846ba".to_string());
         let spec = TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Royal".to_string(),
                 power: None,
@@ -9305,6 +9376,7 @@ mod tests {
             Zone::Battlefield,
         );
         let spec = TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 // The name the parser actually produces for "a Monster Role token".
                 display_name: "Monster Role".to_string(),
@@ -9396,6 +9468,7 @@ mod tests {
 
         let create_role = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Monster Role".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -9502,6 +9575,7 @@ mod tests {
                 vec![MONSTER_PRESET.to_string(), SORCERER_PRESET.to_string()];
         }
         let spec = TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Monster Role".to_string(),
                 power: None,
@@ -10067,6 +10141,7 @@ mod tests {
         use crate::types::proposed_event::TokenCharacteristics;
         let mut state = GameState::new_two_player(42);
         let spec = TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Construct".to_string(),
                 power: Some(0),
@@ -10136,6 +10211,7 @@ mod tests {
         use crate::types::proposed_event::TokenCharacteristics;
         let mut state = GameState::new_two_player(42);
         let spec = TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Stoneforged Blade".to_string(),
                 power: Some(0),
@@ -10196,6 +10272,7 @@ mod tests {
         host: TokenHostRequest,
     ) -> ProposedEvent {
         let spec = TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Probe Curse".to_string(),
                 power: Some(0),
@@ -10350,6 +10427,7 @@ mod tests {
         use crate::types::proposed_event::TokenCharacteristics;
         let mut state = GameState::new_two_player(42);
         let spec = TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Conditional Blade".to_string(),
                 power: Some(0),
@@ -10429,6 +10507,7 @@ mod tests {
         use crate::types::proposed_event::TokenCharacteristics;
         let mut state = GameState::new_two_player(42);
         let spec = TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Meteorite".to_string(),
                 power: Some(0),
@@ -10487,6 +10566,7 @@ mod tests {
 
         use crate::types::proposed_event::TokenCharacteristics;
         let spec = TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Hero".to_string(),
                 power: Some(1),
@@ -10560,6 +10640,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "soldier".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -10694,6 +10775,7 @@ mod tests {
         source_id: ObjectId,
     ) -> crate::types::game_state::LiminalEntry {
         crate::types::game_state::LiminalEntry {
+            block_attacker: None,
             copy_settlement: None,
             object,
             name: "Unhosted Aura".to_string(),
@@ -10963,6 +11045,7 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
+                block_attacker: None,
                 copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(token),
@@ -10977,6 +11060,7 @@ mod tests {
                 remaining_count: 0,
                 created_ids: Vec::new(),
                 copy_resume: Some(Box::new(CopyTokenSpec {
+                    block_attacker: None,
                     values: Box::new(values.clone()),
                     display: DisplayIdentity {
                         display_source: DisplaySource::Token,
@@ -11102,6 +11186,7 @@ mod tests {
         // per-land quantity (3), with no `repeat_for` loop.
         let ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "treasure".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -11141,6 +11226,7 @@ mod tests {
     /// caller. The Role enters as Enchantment Aura Role per CR 303.7.
     fn role_token_effect(attach_to: Option<TargetFilter>) -> Effect {
         Effect::Token {
+            block_attacker: None,
             name: "Cursed Role".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -12637,6 +12723,7 @@ mod tests {
         entry_counter_creature(&mut state, PlayerId(1), "Opponent Creature", 2);
         let ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Ooze".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),

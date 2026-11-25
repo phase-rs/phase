@@ -1406,6 +1406,7 @@ fn dragonstorm_globe_counters_created_dragon_token() {
         Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                block_attacker: None,
                 name: "Dragon".to_string(),
                 power: crate::types::ability::PtValue::Fixed(4),
                 toughness: crate::types::ability::PtValue::Fixed(4),

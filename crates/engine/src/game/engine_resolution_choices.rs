@@ -4331,6 +4331,7 @@ pub(super) fn handle_resolution_choice(
                                     owner: player,
                                     count: growth.per_cycle_delta.saturating_mul(amount),
                                     copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
+                                        block_attacker: None,
                                         values: growth.profile.clone(),
                                         display: crate::game::game_object::DisplayIdentity {
                                             display_source:

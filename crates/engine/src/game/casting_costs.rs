@@ -28298,6 +28298,7 @@ mod tests {
         }
 
         let token_effect = Effect::Token {
+            block_attacker: None,
             name: "Insect".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

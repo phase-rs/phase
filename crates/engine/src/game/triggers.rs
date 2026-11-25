@@ -19738,7 +19738,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp, reader: BindingReader) -> boo
         FilterProp::MostPrevalentCreatureTypeIn { scope, .. } => {
             controller_ref_binding_diverges(scope, reader)
         }
-        FilterProp::Attacking { defender } | FilterProp::AttackedThisTurn { defender } => {
+        FilterProp::Attacking { defender , .. } | FilterProp::AttackedThisTurn { defender } => {
             defender.as_ref().is_some_and(|controller| controller_ref_binding_diverges(controller, reader))
         }
         FilterProp::HasAttachment { controller, .. }
@@ -41054,6 +41054,7 @@ pub mod tests {
                         AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::Token {
+                                block_attacker: None,
                                 name: "Illusion".to_string(),
                                 power: crate::types::ability::PtValue::Quantity(
                                     QuantityExpr::Ref {
@@ -52154,7 +52155,10 @@ pub mod tests {
                     target: TargetFilter::Typed(
                         TypedFilter::new(TypeFilter::Subtype("Goblin".to_string()))
                             .controller(ControllerRef::You)
-                            .properties(vec![FilterProp::Attacking { defender: None }]),
+                            .properties(vec![FilterProp::Attacking {
+                                scope: Default::default(),
+                                defender: None,
+                            }]),
                     ),
                 },
             ))

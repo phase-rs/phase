@@ -7549,7 +7549,13 @@ fn parse_for_each_combat_creature_controlled<'a>(
     )))
     .parse(input)?;
     let (rest, combat_property) = alt((
-        value(FilterProp::Attacking { defender: None }, tag("attacking ")),
+        value(
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+            tag("attacking "),
+        ),
         value(FilterProp::Blocking, tag("blocking ")),
     ))
     .parse(rest)?;
@@ -7578,7 +7584,13 @@ fn parse_for_each_combat_creature_controlled<'a>(
 /// "for each attacking/blocking creature other than ~".
 fn parse_for_each_combat_creature_other_than_source(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, combat_property) = alt((
-        value(FilterProp::Attacking { defender: None }, tag("attacking ")),
+        value(
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+            tag("attacking "),
+        ),
         value(FilterProp::Blocking, tag("blocking ")),
     ))
     .parse(input)?;
@@ -8507,6 +8519,7 @@ fn parse_for_each_attacking_controller_type(input: &str) -> OracleResult<'_, Qua
                 type_filters: vec![tf],
                 controller: None,
                 properties: vec![FilterProp::Attacking {
+                    scope: Default::default(),
                     defender: Some(ControllerRef::You),
                 }],
             }),
@@ -11540,7 +11553,10 @@ mod tests {
         };
         assert_eq!(type_filters, vec![TypeFilter::Creature]);
         assert!(properties.contains(&FilterProp::Another));
-        assert!(properties.contains(&FilterProp::Attacking { defender: None }));
+        assert!(properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(properties.iter().any(|p| matches!(
             p,
             FilterProp::SharesQuality {
@@ -14948,7 +14964,7 @@ mod tests {
                     ..
                 })
             } if type_filters == vec![TypeFilter::Creature]
-                && properties == vec![FilterProp::Attacking { defender: None }, FilterProp::Another]
+                && properties == vec![FilterProp::Attacking { scope: Default::default(), defender: None }, FilterProp::Another]
         ));
     }
 
@@ -14965,7 +14981,7 @@ mod tests {
                     ..
                 })
             } if type_filters == vec![TypeFilter::Creature]
-                && properties == vec![FilterProp::Attacking { defender: None }]
+                && properties == vec![FilterProp::Attacking { scope: Default::default(), defender: None }]
         ));
     }
 
@@ -15098,7 +15114,7 @@ mod tests {
             } if type_filters == vec![TypeFilter::Creature]
                 && properties == vec![
                     FilterProp::EquippedBy,
-                    FilterProp::Attacking { defender: None },
+                    FilterProp::Attacking { scope: Default::default(), defender: None },
                 ]
         ));
     }

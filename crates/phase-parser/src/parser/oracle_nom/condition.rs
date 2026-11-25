@@ -2165,7 +2165,13 @@ pub(crate) fn parse_attached_subject_combat_state(
     let (rest, _) = tag("is ").parse(rest)?;
     let (rest, prop) = alt((
         value(FilterProp::AttackingAlone, tag("attacking alone")),
-        value(FilterProp::Attacking { defender: None }, tag("attacking")),
+        value(
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+            tag("attacking"),
+        ),
         value(FilterProp::Blocking, tag("blocking")),
     ))
     .parse(rest)?;
@@ -6093,7 +6099,13 @@ fn parse_filtered_creature_is_attacking(input: &str) -> OracleResult<'_, StaticC
         )),
     )
     .parse(remainder)?;
-    let filter = add_filter_property(filter, FilterProp::Attacking { defender });
+    let filter = add_filter_property(
+        filter,
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender,
+        },
+    );
     Ok((
         after,
         StaticCondition::IsPresent {
@@ -6123,7 +6135,10 @@ fn parse_a_type_is_in_combat(input: &str) -> OracleResult<'_, StaticCondition> {
     };
     let (rest, prop) = alt((
         value(
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
             tag("is attacking"),
         ),
         value(FilterProp::Blocking, tag("is blocking")),
@@ -6168,7 +6183,13 @@ fn parse_creatures_in_combat_count_threshold(input: &str) -> OracleResult<'_, St
     let (rest, (_, combat_prop)) = (
         alt((tag("creatures are"), tag("creature is"))),
         alt((
-            value(FilterProp::Attacking { defender: None }, tag(" attacking")),
+            value(
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None,
+                },
+                tag(" attacking"),
+            ),
             nom_quantity::parse_blocking_source_referent,
         )),
     )
@@ -15575,7 +15596,8 @@ mod tests {
                 tf.properties.iter().any(|p| matches!(
                     p,
                     FilterProp::Attacking {
-                        defender: Some(ControllerRef::You)
+                        defender: Some(ControllerRef::You),
+                        ..
                     }
                 )),
                 "filter should carry Attacking {{ defender: You }}, got {tf:?}"
@@ -15607,7 +15629,7 @@ mod tests {
                 assert!(
                     tf.properties
                         .iter()
-                        .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                     "filter should carry Attacking {{ defender: None }}, got {tf:?}"
                 );
             }
@@ -15647,7 +15669,7 @@ mod tests {
                 assert!(
                     tf.properties
                         .iter()
-                        .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                     "filter should carry Attacking {{ defender: None }}, got {tf:?}"
                 );
             }
@@ -16774,7 +16796,7 @@ mod tests {
                     assert!(
                         tf.properties
                             .iter()
-                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                         "expected Attacking filter, got {tf:?}"
                     );
                 } else {
@@ -16789,7 +16811,10 @@ mod tests {
     /// any controller, no defender restriction.
     fn attacking_creature_count_filter() -> TargetFilter {
         TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
+            TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            }]),
         )
     }
 
@@ -17195,7 +17220,7 @@ mod tests {
             } => assert!(
                 tf.properties
                     .iter()
-                    .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                    .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                 "the attacking sibling must still win its own input, got {tf:?}"
             ),
             other => panic!("attacking sibling was shadowed, got {other:?}"),
@@ -18363,7 +18388,13 @@ mod tests {
                 TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::EquippedBy])
             )
         );
-        assert_eq!(prop, FilterProp::Attacking { defender: None });
+        assert_eq!(
+            prop,
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }
+        );
     }
 
     #[test]
@@ -18378,7 +18409,13 @@ mod tests {
                 TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::EnchantedBy])
             )
         );
-        assert_eq!(prop, FilterProp::Attacking { defender: None });
+        assert_eq!(
+            prop,
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }
+        );
     }
 
     /// CR 611.3a: the non-creature `parse_attached_condition_subject_core`
@@ -18418,7 +18455,13 @@ mod tests {
                     TypedFilter::new(type_filter).properties(vec![attachment_prop])
                 )
             );
-            assert_eq!(prop, FilterProp::Attacking { defender: None });
+            assert_eq!(
+                prop,
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }
+            );
         }
     }
 
@@ -20227,7 +20270,13 @@ mod tests {
             parse_attached_subject_combat_state("enchanted creature is attacking")
                 .expect("existing broad attacking condition must still parse");
         assert_eq!(rest, "");
-        assert_eq!(prop, FilterProp::Attacking { defender: None });
+        assert_eq!(
+            prop,
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }
+        );
     }
 
     #[test]

@@ -9063,6 +9063,7 @@ fn effect_pump_creatures_attacking_opponents_and_planeswalkers() {
         panic!("expected typed target, got {target:?}");
     };
     assert!(typed.properties.contains(&FilterProp::Attacking {
+        scope: Default::default(),
         defender: Some(ControllerRef::Opponent),
     }));
     assert_eq!(power, PtValue::Fixed(2));
@@ -15661,7 +15662,8 @@ fn effect_mirror_match_copy_blockers_and_delayed_exile() {
             assert!(tf.properties.iter().any(|p| matches!(
                 p,
                 FilterProp::Attacking {
-                    defender: Some(ControllerRef::You)
+                    defender: Some(ControllerRef::You),
+                    ..
                 }
             )));
         }
@@ -42715,7 +42717,10 @@ fn strip_suffix_conditional_parses_lki_combat_status() {
     for (input, expected_prop, expected_negated) in [
         (
             "draw a card if it was attacking",
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
             false,
         ),
         (
@@ -42725,7 +42730,10 @@ fn strip_suffix_conditional_parses_lki_combat_status() {
         ),
         (
             "draw a card if it wasn't attacking",
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
             true,
         ),
         (
@@ -46952,6 +46960,7 @@ fn effect_gain_life_for_each_creature_attacking_you() {
                     qty: QuantityRef::ObjectCount {
                         filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
                             FilterProp::Attacking {
+                                scope: Default::default(),
                                 defender: Some(ControllerRef::You)
                             }
                         ]),),
@@ -47504,7 +47513,10 @@ fn effect_target_player_draws_for_each_attacking_creature_they_control() {
                     filter: TargetFilter::Typed(TypedFilter {
                         type_filters: vec![TypeFilter::Creature],
                         controller: Some(ControllerRef::TargetPlayer),
-                        properties: vec![FilterProp::Attacking { defender: None }],
+                        properties: vec![FilterProp::Attacking {
+                            scope: Default::default(),
+                            defender: None
+                        }],
                     }),
                 },
             },
@@ -51613,7 +51625,7 @@ fn combat_class_pump_all_for_each_other_than_source_is_dynamic() {
                     properties,
                     ..
                 }) if type_filters.contains(&TypeFilter::Creature)
-                    && properties.contains(&FilterProp::Attacking { defender: None })
+                    && properties.contains(&FilterProp::Attacking { scope: Default::default(), defender: None })
                     && properties.contains(&FilterProp::Another)
             ));
             assert!(matches!(
@@ -51627,7 +51639,7 @@ fn combat_class_pump_all_for_each_other_than_source_is_dynamic() {
                         })
                     }
                 }) if type_filters == &vec![TypeFilter::Creature]
-                    && properties == &vec![FilterProp::Attacking { defender: None }, FilterProp::Another]
+                    && properties == &vec![FilterProp::Attacking { scope: Default::default(), defender: None }, FilterProp::Another]
             ));
             assert_eq!(power, toughness);
         }
@@ -61504,7 +61516,7 @@ fn each_player_for_each_attacking_creature_they_control_binds_scoped_player() {
                     ..
                 })
             }
-        } if properties.as_slice() == [FilterProp::Attacking { defender: None }]
+        } if properties.as_slice() == [FilterProp::Attacking { scope: Default::default(), defender: None }]
     ));
 }
 

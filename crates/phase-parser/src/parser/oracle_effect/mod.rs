@@ -22110,6 +22110,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 static_abilities,
                 enter_with_counters,
                 count: base_count,
+                block_attacker,
             } => {
                 // CR 109.4: a "their <zone>" possessive in the for-each clause
                 // binds to the player creating the token. Stamp ScopedPlayer
@@ -22147,6 +22148,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                     scoped_count
                 };
                 Effect::Token {
+                    block_attacker,
                     name,
                     power,
                     toughness,
@@ -49449,6 +49451,7 @@ fn parse_for_each_attacker_copy_blocker_ir(
     let source_filter =
         TargetFilter::Typed(
             TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You),
             }]),
         );
@@ -64245,6 +64248,7 @@ mod iteration_destination_rebinding_tests {
 
     fn token_naming(attack_destination: TokenAttackDestination) -> Effect {
         Effect::Token {
+            block_attacker: None,
             name: "Goblin".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

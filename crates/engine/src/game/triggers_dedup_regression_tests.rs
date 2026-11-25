@@ -3074,6 +3074,7 @@ fn optional_draw_effect() -> Effect {
 /// than `Effect::Draw`, so it independently exercises the context-ref guard.
 fn optional_create_token_effect() -> Effect {
     Effect::Token {
+        block_attacker: None,
         name: "Sliver".into(),
         power: crate::types::ability::PtValue::Fixed(1),
         toughness: crate::types::ability::PtValue::Fixed(1),

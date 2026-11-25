@@ -601,6 +601,7 @@ mod tests {
         token_gen.abilities.push(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Token {
+                block_attacker: None,
                 name: "Goblin".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),

@@ -36,6 +36,8 @@ The owner/phasing repairs in PR #10635 retain distinct binding authorities:
 - Entering-blocker effects publish attacker-side combat events without pretending the new creature declared a block. Mirror Match triggers the original attacking Dream Fighter once per entering copy, never the copy's own blocks ability; a bare becomes-blocked trigger such as Drelnoch fires only on the first blocked transition.
 - The shared attacker-blocked family and Ring emblem consume those same occurrences. Afflict loses life only on the first blocked transition; Ring level three schedules the entering creature's sacrifice at end of combat. The public Ring control counters Mirror Match's separate expiry with Stifle, distinguishing the exact sacrifice from the spell's ordinary exile.
 - Entering-blocker admission reads the entrant's effective type after layers settle. A Mirror Match copy of a crewed Smuggler's Copter is an uncrewed noncreature Vehicle: it establishes no block or Cunning Evasion trigger, the original deals its combat damage, and the token still expires at end of combat.
+- Brimaz, King of Oreskos creates one vigilant Cat Soldier for each pair in its own block declaration. If the paired attacker leaves before resolution, that Cat still enters without a block assignment.
+- Flash Foliage targets a creature attacking its caster directly. Each resulting battlefield entrant blocks the target, and an illegal sole target prevents both creation and the draw.
 - Supported compound phasing references use their own binding authority. An indexed parent slot is selected before incarnation checks, so a stale earlier slot cannot renumber a later one; a missing or stale selected slot cannot revive another inherited object. Unsupported context unions retain ordinary announced-target behavior.
 - Authoritative raw and trusted restores reject a constructed combat-phase instruction whose live battlefield partner lacks a captured incarnation. Exact stale pins and already-departed partners remain admissible; unplaced trigger blueprints are not mistaken for constructed stack abilities.
 - A target filter containing only properties is still constrained. Forge of Heroes retains both commander designation and entry-this-turn restrictions.
@@ -90,7 +92,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 ## Full card lists per root cause
 
-### 1. Relative-clause / filter restriction on target dropped  (710 cards)
+### 1. Relative-clause / filter restriction on target dropped  (709 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -314,7 +316,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Flame Channeler
 - Flamerush Rider
 - Flamewar, Brash Veteran
-- Flash Foliage
 - Flensing Raptor
 - Flower
 - Flowstone Flood
@@ -4618,7 +4619,7 @@ are outside the detector's class.
 
 </details>
 
-### 21. Token entry flags / keyword / attachment clause dropped  (51 cards)
+### 21. Token entry flags / keyword / attachment clause dropped  (50 cards)
 
 **Signature.** Token creation drops tapped/enters_attacking flags, a 'with <keyword>' grant, color/name, or an attach-to-target clause (terminator misses a trailing relative phrase).
 
@@ -4631,7 +4632,6 @@ are outside the detector's class.
 - A-Winota, Joiner of Forces
 - Aang, Master of Elements
 - Adeline, Resplendent Cathar
-- Brimaz, King of Oreskos
 - Cabaretti Courtyard
 - Cloudform
 - Crow Storm

@@ -596,7 +596,13 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
         value(FilterProp::Untapped, tag("untapped")),
         // CR 702.171b: "saddled Mount/creature" selector.
         value(FilterProp::IsSaddled, tag("saddled")),
-        value(FilterProp::Attacking { defender: None }, tag("attacking")),
+        value(
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+            tag("attacking"),
+        ),
         value(FilterProp::Blocking, tag("blocking")),
         value(FilterProp::Token, tag("token")),
         value(FilterProp::NonToken, tag("nontoken")),
@@ -934,7 +940,7 @@ pub fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usize)> {
         if matches!(
             prop,
             FilterProp::BlockStatus { .. }
-                | FilterProp::Attacking { defender: None }
+                | FilterProp::Attacking { defender: None , .. }
                 | FilterProp::Blocking
                 | FilterProp::Tapped
                 | FilterProp::Untapped

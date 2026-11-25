@@ -3,6 +3,7 @@
 //! Replaces the Forge-style string filter parsing with typed enum matching.
 //! All filter logic works against the TargetFilter enum hierarchy from types/ability.rs.
 
+use crate::types::attack_target::AttackTarget;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
@@ -3883,7 +3884,7 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         | FilterProp::NameMatchesAnyPermanent { controller }
         | FilterProp::Attacking {
             defender: controller,
-        }
+         .. }
         | FilterProp::AttackedThisTurn {
             defender: controller,
         } => controller.as_mut(),
@@ -11529,9 +11530,14 @@ fn matches_filter_prop(
         }),
         // CR 508.1b: Attacking creatures may be scoped by defending player
         // relation ("attacking", "attacking you", "attacking your opponents").
-        FilterProp::Attacking { defender } => state.combat.as_ref().is_some_and(|combat| {
+        FilterProp::Attacking { defender, scope } => state.combat.as_ref().is_some_and(|combat| {
             combat.attackers.iter().any(|a| {
                 a.object_id == object_id
+                    && (scope.is_defending_side()
+                        || matches!(
+                            crate::game::combat::active_attack_target(state, a),
+                            Some((AttackTarget::Player(_), _))
+                        ))
                     && attacking_defender_matches(
                         state,
                         source,
@@ -12906,8 +12912,10 @@ fn zone_change_record_matches_property(
         // CR 508.1k / CR 509.1g / CR 509.1h: Combat state as of the zone change.
         // Live combat maps are cleared when an object leaves combat (CR 506.4),
         // so look-back filters must read the zone-change snapshot.
-        FilterProp::Attacking { defender } => {
+        FilterProp::Attacking { defender, scope } => {
             record.combat_status.attacking
+                && (scope.is_defending_side()
+                    || matches!(record.combat_status.attack_target, Some(AttackTarget::Player(_))))
                 && match defender {
                     None => true,
                     Some(defender) => record.combat_status.defending_player.is_some_and(
@@ -15927,6 +15935,7 @@ mod tests {
         );
         if let ProposedEvent::ZoneChange { enter_as_copy, .. } = &mut event {
             *enter_as_copy = Some(Box::new(crate::types::proposed_event::CopyTokenSpec {
+                block_attacker: None,
                 values: Box::new(values),
                 display: Default::default(),
                 extra_keywords: vec![],
@@ -19960,9 +19969,13 @@ mod tests {
             ..CombatState::default()
         });
 
-        let filter = TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
-        );
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None,
+                }]),
+            );
 
         assert!(matches_target_filter(&state, attacker, &filter, attacker));
         assert!(!matches_target_filter(&state, bystander, &filter, attacker));
@@ -27226,7 +27239,10 @@ mod tests {
         };
 
         assert!(zone_change_record_matches_property(
-            &FilterProp::Attacking { defender: None },
+            &FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            },
             &state,
             &attacking_record,
             &source_ctx,
@@ -27241,6 +27257,7 @@ mod tests {
         ));
         assert!(zone_change_record_matches_property(
             &FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You)
             },
             &state,
@@ -28712,6 +28729,7 @@ mod tests {
         } = &mut event
         {
             *enter_as_copy = Some(Box::new(CopyTokenSpec {
+                block_attacker: None,
                 values: Box::new(values),
                 display: crate::game::game_object::DisplayIdentity {
                     display_source: crate::game::game_object::DisplaySource::Token,
@@ -29297,6 +29315,7 @@ mod characteristic_read_classification_tests {
                 caster: ControllerRef::You,
             },
             FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You),
             },
             FilterProp::ProtectorMatches {
@@ -29464,6 +29483,7 @@ mod declared_group_binder_tests {
     fn carriers(with: ControllerRef) -> Vec<FilterProp> {
         vec![
             FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(with.clone()),
             },
             FilterProp::ProtectorMatches {

@@ -189,6 +189,7 @@ fn aura_token_effect(attach_to: Option<TargetFilter>) -> Effect {
 
 fn token_effect(name: &str, types: Vec<String>, attach_to: Option<TargetFilter>) -> Effect {
     Effect::Token {
+        block_attacker: None,
         name: name.to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),
@@ -371,6 +372,7 @@ fn an_ordinary_token_without_a_host_is_still_created() {
 fn a_replacement_that_leaves_a_non_aura_entrant_still_creates_the_token() {
     let mut board = board();
     let spec = TokenSpec {
+        block_attacker: None,
         characteristics: TokenCharacteristics {
             display_name: "Spirit".to_string(),
             power: Some(1),

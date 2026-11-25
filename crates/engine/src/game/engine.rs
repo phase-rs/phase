@@ -7801,6 +7801,7 @@ fn seed_representative_fodder(
         owner,
         count: 1,
         copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
+            block_attacker: None,
             values: Box::new(profile.clone()),
             display: crate::game::game_object::DisplayIdentity {
                 display_source: crate::game::game_object::DisplaySource::Token,
@@ -24868,6 +24869,7 @@ mod stage2_injector_tests {
             let mut a = shape_b(
                 src,
                 Effect::Token {
+                    block_attacker: None,
                     name: "Cursed Role".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),

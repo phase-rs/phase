@@ -4432,6 +4432,7 @@ pub(super) fn parse_search_and_creation_ast(
                 static_abilities,
                 enters_attacking,
                 attack_destination,
+                block_attacker,
                 ..
             }) => Some(SearchCreationImperativeAst::Token {
                 token: Box::new(TokenDescription {
@@ -4448,6 +4449,7 @@ pub(super) fn parse_search_and_creation_ast(
                     static_abilities,
                     enters_attacking,
                     attack_destination,
+                    block_attacker,
                 }),
             }),
             _ => None,
@@ -4705,6 +4707,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             attach_to: token.attach_to,
             enters_attacking: token.enters_attacking,
             attack_destination: token.attack_destination,
+            block_attacker: token.block_attacker,
             // CR 205.4a: Preserve parsed token supertypes (legendary/snow).
             supertypes: token.supertypes,
             static_abilities: token.static_abilities,
@@ -17993,6 +17996,7 @@ fn lower_imperative_family_clause(ast: ImperativeFamilyAst) -> ParsedEffectClaus
             let token = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    block_attacker: None,
                     name: "Human Soldier".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),

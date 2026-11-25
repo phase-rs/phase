@@ -8442,6 +8442,7 @@ mod tests {
             (
                 "Token granted ability",
                 Effect::Token {
+                    block_attacker: None,
                     name: "Test".to_string(),
                     power: crate::types::ability::PtValue::Fixed(1),
                     toughness: crate::types::ability::PtValue::Fixed(1),

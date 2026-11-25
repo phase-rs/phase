@@ -6612,7 +6612,7 @@ fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
         match prop {
             FilterProp::Attacking {
                 defender: Some(ControllerRef::DefendingPlayer),
-            }
+             .. }
             | FilterProp::AttackedThisTurn {
                 defender: Some(ControllerRef::DefendingPlayer),
             }
@@ -12525,7 +12525,8 @@ fn filter_needs_trigger_source_for_retarget(filter: &TargetFilter) -> bool {
         matches!(
             prop,
             FilterProp::Attacking {
-                defender: Some(ControllerRef::DefendingPlayer)
+                defender: Some(ControllerRef::DefendingPlayer),
+                ..
             } | FilterProp::AttackedThisTurn {
                 defender: Some(ControllerRef::DefendingPlayer)
             }
@@ -15114,6 +15115,7 @@ mod tests {
 
     fn attacking(defender: ControllerRef) -> FilterProp {
         FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(defender),
         }
     }
@@ -15169,7 +15171,10 @@ mod tests {
         // Negative: every `Attacking`/`AttackedThisTurn` value that exists in the
         // corpus today must stay on the bare door, unchanged.
         for prop in [
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
             attacking(ControllerRef::You),
             attacking(ControllerRef::Opponent),
             attacking(ControllerRef::SourceChosenPlayer),
@@ -19338,6 +19343,7 @@ mod tests {
         let mode_token = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                block_attacker: None,
                 name: "Treasure".to_string(),
                 power: crate::types::ability::PtValue::Fixed(0),
                 toughness: crate::types::ability::PtValue::Fixed(0),
@@ -20111,6 +20117,7 @@ mod tests {
         // target-slot construction must offer only legal opponent players.
         let ability = ResolvedAbility::new(
             Effect::Token {
+                block_attacker: None,
                 name: "Spirit".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -25793,6 +25800,7 @@ mod tests {
         // controller (no player slot from `owner`), while the count reads a
         // "target player controls" population — the count's slot must fire.
         let token_with_count = |count: QuantityExpr| Effect::Token {
+            block_attacker: None,
             name: "Warrior".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

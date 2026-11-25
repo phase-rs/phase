@@ -149,6 +149,7 @@ pub(crate) struct TokenDescription {
     /// CR 508.4: the defender named by an inline "attacking that player".
     #[serde(skip_serializing_if = "TokenAttackDestination::is_controller_chooses")]
     pub(crate) attack_destination: TokenAttackDestination,
+    pub(crate) block_attacker: Option<Box<TargetFilter>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]

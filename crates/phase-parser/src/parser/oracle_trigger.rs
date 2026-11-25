@@ -15820,6 +15820,7 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         if let Ok((after_suffix, defender)) = parse_attacking_player_postnominal(rest.trim_start())
         {
             let attacking = FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(defender),
             };
             return (conjoin_filter_property(filter, attacking), after_suffix);
@@ -20467,7 +20468,13 @@ fn parse_count_qualified_block_filter(input: &str) -> OracleResult<'_, (i32, Tar
 /// CR 603.4: this event qualifier is not an intervening-if and must not be
 /// rechecked when the ability resolves; EventTime is stripped when stacking.
 fn source_block_count_condition(filter: TargetFilter, minimum: i32) -> TriggerCondition {
-    let filter = add_property(filter, FilterProp::Attacking { defender: None });
+    let filter = add_property(
+        filter,
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        },
+    );
     let filter = add_property(
         filter,
         FilterProp::CombatRelation {
@@ -20512,7 +20519,10 @@ fn subject_attack_count_condition(
                     qty: QuantityRef::ObjectCount {
                         filter: add_property(
                             filter.clone(),
-                            FilterProp::Attacking { defender: None },
+                            FilterProp::Attacking {
+                                scope: Default::default(),
+                                defender: None,
+                            },
                         ),
                     },
                 },

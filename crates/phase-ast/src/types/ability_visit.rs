@@ -1433,9 +1433,12 @@ fn effect(e: &$($mut_)? Effect, v: &mut impl FnMut(Symbol<'_>)) {
             pt(toughness, v);
             filter(target, v);
         }
-        Effect::Token { power, toughness, .. } => {
+        Effect::Token { power, toughness, block_attacker, .. } => {
             pt(power, v);
             pt(toughness, v);
+            if let Some(attacker) = block_attacker {
+                filter(attacker, v);
+            }
         }
         Effect::Animate { power, toughness, .. } => {
             for p in [power, toughness].into_iter().flatten() {

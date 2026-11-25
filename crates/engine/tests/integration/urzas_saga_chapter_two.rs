@@ -66,6 +66,7 @@ fn chapter_two_granted_ability() -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::Token {
+            block_attacker: None,
             name: "Construct".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),

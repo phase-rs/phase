@@ -271,6 +271,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                block_attacker: None,
                 name: "Giant".into(),
                 power: PtValue::Fixed(4),
                 toughness: PtValue::Fixed(4),

@@ -946,7 +946,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::CastThisTurn { caster } => {
                 parts.push(format!("cast this turn ({})", fmt_controller(caster)))
             }
-            FilterProp::Attacking { defender } => match defender {
+            FilterProp::Attacking { defender, .. } => match defender {
                 None => parts.push("attacking".into()),
                 Some(ControllerRef::You) => parts.push("attacking you".into()),
                 Some(ControllerRef::Opponent) => parts.push("attacking your opponents".into()),
@@ -18684,6 +18684,7 @@ mod tests {
         };
 
         let spec = |attack_request: TokenAttackRequest| TokenSpec {
+            block_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Goblin".to_string(),
                 power: Some(1),
@@ -18745,6 +18746,7 @@ mod tests {
         use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
 
         let token = |attack_destination| Effect::Token {
+            block_attacker: None,
             name: "Glimmer".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -20941,6 +20943,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                block_attacker: None,
                 name: "Coverage Token".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -26257,6 +26260,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    block_attacker: None,
                     name: "Rat".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),
@@ -26300,6 +26304,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    block_attacker: None,
                     name: "Fractal".to_string(),
                     power: PtValue::Fixed(0),
                     toughness: PtValue::Fixed(0),

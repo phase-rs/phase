@@ -3230,6 +3230,7 @@ mod tests {
     }
     fn token(count: QuantityExpr) -> Effect {
         Effect::Token {
+            block_attacker: None,
             name: "Servo".into(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

@@ -854,6 +854,7 @@ pub fn room_effects(
         (DungeonId::TombOfAnnihilation, 4) => (
             simple(
                 Effect::Token {
+                    block_attacker: None,
                     name: "The Atropal".to_string(),
                     power: PtValue::Fixed(4),
                     toughness: PtValue::Fixed(4),
@@ -1275,6 +1276,7 @@ fn creature_token(
         types.push((*sub).to_string());
     }
     Effect::Token {
+        block_attacker: None,
         name: name.to_string(),
         power: PtValue::Fixed(power),
         toughness: PtValue::Fixed(toughness),
@@ -1598,6 +1600,7 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
 /// Build a Treasure artifact token Effect.
 fn treasure_token() -> Effect {
     Effect::Token {
+        block_attacker: None,
         name: "Treasure".to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),

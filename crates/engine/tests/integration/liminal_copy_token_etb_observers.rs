@@ -215,6 +215,7 @@ fn enter_plain_creature(runner: &mut GameRunner) {
         .expect("the premise board is non-empty");
     let ability = ResolvedAbility::new(
         Effect::Token {
+            block_attacker: None,
             name: "Saproling".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

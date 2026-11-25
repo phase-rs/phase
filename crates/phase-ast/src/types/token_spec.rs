@@ -71,6 +71,9 @@ pub struct TokenSpec {
     /// CR 508.4: the batch's resolved destination.
     #[serde(default, skip_serializing_if = "TokenAttackRequest::is_unspecified")]
     pub attack_request: TokenAttackRequest,
+    /// CR 509.4: the bound attacker shared by all entrants of this instruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_attacker: Option<super::ObjectIncarnationRef>,
     /// CR 603.7: When set, the token is sacrificed at the end of the given
     /// duration (e.g., Mobilize tokens sacrificed at end of combat).
     pub sacrifice_at: Option<Duration>,
