@@ -2221,3 +2221,163 @@ fn mindslaver_controlled_team_pairs_each_owner_with_controller() {
         "control is released for the opposing window"
     );
 }
+
+/// CR 805.5b: P1's direct UntilStackEmpty install on the Bolt window records
+/// P1 alone and preserves P0's Counterspell decision — and the runner keeps
+/// honoring P1's preference afterwards without repeatedly passing the
+/// holder. Regression (maintainer Review-2 F3): P1's install was proven to
+/// record P1 alone, but nothing proved P0's Counterspell decision survived
+/// on the Bolt window with P0 holding Counterspell + {U}{U}.
+#[test]
+fn teammate_until_stack_empty_preserves_representative_counterspell_on_bolt_window() {
+    // The bolt_setup window, plus P0 holding Counterspell + {U}{U}.
+    // bolt_setup builds internally, so stage pre-build through the same
+    // public builders it uses (staged_bolt_scenario + :625's Counterspell
+    // staging on P0), then drive identically.
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let (mut sc, ids) = staged_bolt_scenario();
+    let p0_counterspell = sc.add_real_card(P0, "Counterspell", Zone::Hand, db);
+    sc.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = sc.build();
+    park_p0(&mut runner);
+    runner
+        .pass_holding_team()
+        .expect("active team passes to P2");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P2
+        ),
+        "P2 must hold priority to cast, got {:?}",
+        runner.state().waiting_for
+    );
+    let _committed = runner.cast(ids.bolt).target_player(P0).commit();
+    assert_eq!(runner.stack_names(), ["Lightning Bolt"]);
+    runner
+        .pass_holding_team()
+        .expect("opposing team passes back");
+    // Reach-guard: Priority{P0}, stack [Bolt], passes {P2,P3}, and P0 holds
+    // Counterspell + UU.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "reach: window P0, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.stack_names(), ["Lightning Bolt"]);
+    assert_eq!(passes_set(&runner), BTreeSet::from([P2, P3]));
+    assert_eq!(
+        runner.state().objects[&p0_counterspell].zone,
+        Zone::Hand,
+        "reach: P0 holds Counterspell"
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool.count_color(ManaType::Blue),
+        2,
+        "reach: P0 holds {{U}}{{U}}"
+    );
+
+    // P1 installs its own UntilStackEmpty through the authenticated boundary
+    // (mirror VM-S1's apply).
+    game_engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect("P1 install must be accepted");
+
+    // The install records P1 alone: passes gain exactly P1, the preference
+    // stores under P1's own key, and P0 stays unpassed on the parked window.
+    assert_eq!(
+        passes_set(&runner),
+        BTreeSet::from([P2, P3, P1]),
+        "P1's install must add exactly P1's pass"
+    );
+    assert!(
+        matches!(
+            runner.state().auto_pass.get(&P1),
+            Some(AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 1,
+                ..
+            })
+        ),
+        "P1's install must store under P1, got {:?}",
+        runner.state().auto_pass.get(&P1)
+    );
+    assert!(
+        !runner.state().auto_pass.contains_key(&P0),
+        "P1's install must not store under P0"
+    );
+    assert!(
+        !runner.state().priority_passes.contains(&P0),
+        "P1's install must not pass for P0"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "the window must stay parked on P0, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // P0's Counterspell decision survives: Counterspell over the Bolt is
+    // still offered to P0 (mirror :625's offer assertion).
+    let (actions, _, _) = ai_support::legal_actions_for_viewer(runner.state(), P0);
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            GameAction::CastSpell { object_id, .. } if *object_id == p0_counterspell
+        )),
+        "P0 must still be offered Counterspell in response, got {actions:?}"
+    );
+
+    // Honor P1's preference: P1 re-submits its pass through the authenticated
+    // boundary. The re-pass is idempotent (P1 already passed) but re-runs the
+    // boundary runner — the second scan must again decline to pass P0 from
+    // P1's preference. (Not pass_holding_team: the helper always submits the
+    // holder's own pass, which would complete the round and resolve the Bolt,
+    // making Counterspell legally unofferable on the empty stack.)
+    game_engine::apply(runner.state_mut(), P1, GameAction::PassPriority)
+        .expect("P1's re-pass must be accepted on the shared window");
+    assert!(
+        !runner.state().priority_passes.contains(&P0),
+        "P0 must stay unpassed"
+    );
+    let (actions, _, _) = ai_support::legal_actions_for_viewer(runner.state(), P0);
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            GameAction::CastSpell { object_id, .. } if *object_id == p0_counterspell
+        )),
+        "P0 must still be offered Counterspell after the drive, got {actions:?}"
+    );
+    assert_eq!(
+        passes_set(&runner),
+        BTreeSet::from([P2, P3, P1]),
+        "P0's pass must never be recorded"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "the window must stay parked on P0, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.stack_names(), ["Lightning Bolt"]);
+    assert!(
+        runner.state().priority_passes.contains(&P1),
+        "P1's preference must stay honored"
+    );
+}
