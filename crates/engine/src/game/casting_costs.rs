@@ -646,6 +646,7 @@ fn declaration_offerable_reserving(
         &|id| !fodder.contains(&id),
         &mut held,
         &mut explored,
+        CARD_HOLD_PROBE_BUDGET,
         &|objects| scratch.borrow_mut().probe_holding(objects, payable),
     ) != Some(false))
 }
@@ -2083,6 +2084,13 @@ pub enum ReservationVerdict {
 /// [`ReservationVerdict::Exhausted`].
 pub const RESERVATION_PROBE_BUDGET: usize = 4_096;
 
+/// The most assignments a search over an additional cost's hand and graveyard
+/// cards explores. Each one runs the mana feasibility authority, which copies
+/// the state, and the search runs for every contended spell whenever the legal
+/// actions are generated, so it is kept small. Past it the cast stays offered,
+/// as it was before the cards were held; the real payment decides.
+const CARD_HOLD_PROBE_BUDGET: usize = 64;
+
 /// CR 118.3 + CR 601.2g-h: search the assignments of `legs`' objects for one
 /// that leaves `base`'s priced total payable by the castability authority with
 /// those objects and `pricing.reserved`'s life held.
@@ -2146,6 +2154,7 @@ fn reserved_alternative_verdict(
         &|id| !mana_sources.contains(&id),
         &mut held,
         &mut explored,
+        RESERVATION_PROBE_BUDGET,
         &payable,
     ) {
         Some(true) => ReservationVerdict::Witness,
@@ -2161,6 +2170,7 @@ fn assign_reserved_legs(
     inert: &impl Fn(ObjectId) -> bool,
     held: &mut Vec<(ObjectId, super::casting::ReservedUse)>,
     explored: &mut usize,
+    budget: usize,
     payable: &impl Fn(&[(ObjectId, super::casting::ReservedUse)]) -> bool,
 ) -> Option<bool> {
     let Some((leg, rest)) = legs.split_first() else {
@@ -2186,12 +2196,12 @@ fn assign_reserved_legs(
     let mut cursor: Vec<usize> = (0..remainder).collect();
     let verdict = loop {
         *explored += 1;
-        if *explored > RESERVATION_PROBE_BUDGET {
+        if *explored > budget {
             break None;
         }
         held.truncate(start + from_inert);
         held.extend(cursor.iter().map(|&i| (active[i], leg.reserved_use)));
-        match assign_reserved_legs(rest, inert, held, explored, payable) {
+        match assign_reserved_legs(rest, inert, held, explored, budget, payable) {
             Some(false) => {}
             settled => break settled,
         }
@@ -12026,6 +12036,7 @@ pub(super) fn required_declaration_offerable_under_alternative(
         &|id| !contended.contains(&id),
         &mut held,
         &mut explored,
+        CARD_HOLD_PROBE_BUDGET,
         &|objects| {
             scratch
                 .borrow_mut()
@@ -38292,5 +38303,40 @@ its replicate cost was paid.)\nDraw a card.";
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod card_hold_probe_budget_tests {
+    use super::{assign_reserved_legs, CARD_HOLD_PROBE_BUDGET};
+    use crate::game::casting::ReservedUse;
+    use crate::game::cost_payability::ReservableLeg;
+    use crate::types::identifiers::ObjectId;
+    use std::cell::Cell;
+
+    /// A leg with C(20, 6) assignments, none of them payable: the search stops
+    /// at the budget without a verdict, so the caller keeps the offer, and the
+    /// payment probe runs no more often than the budget.
+    #[test]
+    fn a_card_hold_search_stops_at_its_budget() {
+        let leg = ReservableLeg {
+            reserved_use: ReservedUse::Present,
+            count: 6,
+            candidates: (0..20).map(ObjectId).collect(),
+        };
+        let probes = Cell::new(0usize);
+        let verdict = assign_reserved_legs(
+            &[leg],
+            &|_| false,
+            &mut Vec::new(),
+            &mut 0,
+            CARD_HOLD_PROBE_BUDGET,
+            &|_| {
+                probes.set(probes.get() + 1);
+                false
+            },
+        );
+        assert_eq!(verdict, None);
+        assert_eq!(probes.get(), CARD_HOLD_PROBE_BUDGET);
     }
 }
