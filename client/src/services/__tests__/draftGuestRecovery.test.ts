@@ -2,21 +2,33 @@ import "fake-indexeddb/auto";
 import { clear, get, set } from "idb-keyval";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { parseWebSocketUrl } from "../../config/multiplayerServer";
 import {
+  canonicalNativeDraftEndpoint,
   clearActiveDraftGuestIfCurrent,
   clearDraftDeckSubmission,
   clearDraftGuestRecovery,
+  clearNativeDraftCapability,
   getDraftStore,
   inspectActiveDraftGuest,
+  inspectActiveNativeDraft,
   loadActiveDraftGuest,
   loadDraftDeckSubmission,
   loadDraftGuestCapability,
   loadDraftGuestSession,
+  loadNativeDraftCapability,
+  publishActiveNativeDraft,
   saveActiveDraftGuest,
   saveDraftDeckSubmission,
   saveDraftGuestSession,
+  saveNativeDraftCapability,
 } from "../draftPersistence";
-import type { DraftGuestCapability, DraftGuestCapabilityOwner } from "../draftPersistence";
+import type {
+  ActiveNativeDraftPointer,
+  DraftGuestCapability,
+  DraftGuestCapabilityOwner,
+  NativeDraftCapabilityRecord,
+} from "../draftPersistence";
 
 /**
  * A guest's durable recovery records on real idb-keyval over fake-indexeddb:
@@ -609,6 +621,143 @@ describe("guest recovery records", () => {
         type: "present",
         meta: { roomCode: "FGHJK", hostPeerId: HOST2 },
       });
+    });
+  });
+
+  describe("native draft capabilities", () => {
+    const ENDPOINT = "wss://h.example/ws";
+    const capC: Omit<NativeDraftCapabilityRecord, "timestamp"> = {
+      capabilityId: "cap-C",
+      endpoint: ENDPOINT,
+      draftCode: "NAT001",
+      playerToken: "tok-C",
+      seatIndex: 2,
+      participant: "guest",
+    };
+
+    function nativeKey(capabilityId: string): string {
+      return `phase-native-draft-capability:${capabilityId}`;
+    }
+
+    function storedNative(capabilityId: string): Promise<unknown> {
+      return get(nativeKey(capabilityId), getDraftStore());
+    }
+
+    /** A native pointer naming `capabilityId`, as the installed owner publishes it. */
+    function nativePointer(fields: Partial<ActiveNativeDraftPointer> = {}): ActiveNativeDraftPointer {
+      return {
+        transport: "native",
+        capabilityId: "cap-C",
+        endpoint: ENDPOINT,
+        draftCode: "NAT001",
+        seatIndex: 2,
+        participant: "guest",
+        timestamp: Date.now(),
+        ...fields,
+      };
+    }
+
+    it("canonicalizes a native endpoint once", () => {
+      const accepted: [string, string][] = [
+        ["wss://h.example/ws", "wss://h.example/ws"],
+        ["ws://h:9374", "ws://h:9374/"],
+        [" wss://h.example/ws ", "wss://h.example/ws"],
+        ["wss://H.EXAMPLE:443/ws", "wss://h.example/ws"],
+      ];
+      for (const [input, canonical] of accepted) {
+        const output = canonicalNativeDraftEndpoint(input);
+        // Reach: the output is the socket authority's own serialization.
+        expect(output).toBe(parseWebSocketUrl(input.trim())!.href);
+        expect(output).toBe(canonical);
+        expect(canonicalNativeDraftEndpoint(output!)).toBe(output);
+      }
+      for (const refused of ["wss://u:p@h/", "wss://h/?t=1", "wss://h/#", "https://h/", " "]) {
+        expect(canonicalNativeDraftEndpoint(refused)).toBeNull();
+      }
+    });
+
+    it("commits the native secret half and returns a pointer without it", async () => {
+      const pointer = await saveNativeDraftCapability(capC);
+
+      // Reach: the record read back is the input, stamped.
+      await expect(storedNative("cap-C")).resolves.toEqual({ ...capC, timestamp: pointer.timestamp });
+      expect(Object.keys(pointer).sort()).toEqual([
+        "capabilityId", "draftCode", "endpoint", "participant", "seatIndex", "timestamp", "transport",
+      ]);
+      expect(pointer).toMatchObject({ transport: "native", capabilityId: "cap-C", endpoint: ENDPOINT });
+      expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+
+      publishActiveNativeDraft(pointer);
+      const published = localStorage.getItem(POINTER_KEY);
+      expect(published).not.toBeNull();
+      expect(published).not.toContain("tok-C");
+      expect(JSON.parse(published!)).toEqual(pointer);
+
+      // Hostile: refused input throws before anything is written.
+      await expect(saveNativeDraftCapability({ ...capC, capabilityId: "cap-D", endpoint: "ws://h:9374" }))
+        .rejects.toThrow();
+      await expect(saveNativeDraftCapability({ ...capC, capabilityId: "" })).rejects.toThrow();
+      await expect(storedNative("cap-D")).resolves.toBeUndefined();
+      await expect(storedNative("")).resolves.toBeUndefined();
+    });
+
+    it("reads untagged pointers as P2P and leaves a tagged one to its own reader", () => {
+      setRawPointer({ capabilityId: "cap-A" });
+      expect(inspectActiveDraftGuest().type).toBe("present");
+      expect(inspectActiveNativeDraft()).toEqual({ type: "absent" });
+
+      publishActiveNativeDraft(nativePointer());
+      expect(inspectActiveDraftGuest()).toEqual({ type: "absent" });
+      expect(inspectActiveNativeDraft()).toMatchObject({ type: "present", pointer: { capabilityId: "cap-C" } });
+
+      setRawPointer({ transport: "other" });
+      expect(inspectActiveDraftGuest()).toEqual({ type: "absent" });
+      expect(inspectActiveNativeDraft()).toEqual({ type: "absent" });
+
+      localStorage.setItem(POINTER_KEY, JSON.stringify({ transport: "native", capabilityId: "cap-C" }));
+      expect(inspectActiveDraftGuest()).toEqual({ type: "absent" });
+      expect(inspectActiveNativeDraft()).toMatchObject({ type: "invalid" });
+    });
+
+    it("native loads never mutate storage", async () => {
+      const legs: [Record<string, unknown>, string][] = [
+        [{ ...capC, timestamp: Date.now() - FIVE_HOURS_MS }, "invalid"],
+        [{ ...capC, playerToken: "", timestamp: Date.now() }, "invalid"],
+        [{ ...capC, draftCode: "NAT999", timestamp: Date.now() }, "mismatch"],
+      ];
+      for (const [record, outcome] of legs) {
+        await set(nativeKey("cap-C"), record, getDraftStore());
+        const before = await storedNative("cap-C");
+
+        await expect(loadNativeDraftCapability(nativePointer())).resolves.toEqual({ type: outcome });
+
+        await expect(storedNative("cap-C")).resolves.toEqual(before);
+      }
+    });
+
+    it("clears only this native capability", async () => {
+      const hold = { capabilityId: "cap-C", endpoint: ENDPOINT, draftCode: "NAT001", playerToken: "tok-C" };
+
+      // Its own pair.
+      publishActiveNativeDraft(await saveNativeDraftCapability(capC));
+      await expect(storedNative("cap-C")).resolves.toMatchObject({ playerToken: "tok-C" });
+      await clearNativeDraftCapability(hold);
+      await expect(storedNative("cap-C")).resolves.toBeUndefined();
+      expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+
+      // Its record, with a pointer naming another capability.
+      await saveNativeDraftCapability(capC);
+      publishActiveNativeDraft(nativePointer({ capabilityId: "cap-D" }));
+      const pointerD = localStorage.getItem(POINTER_KEY);
+      await clearNativeDraftCapability(hold);
+      await expect(storedNative("cap-C")).resolves.toBeUndefined();
+      expect(localStorage.getItem(POINTER_KEY)).toBe(pointerD);
+
+      // Its name under another token, with its pointer.
+      publishActiveNativeDraft(await saveNativeDraftCapability({ ...capC, playerToken: "tok-X" }));
+      await clearNativeDraftCapability(hold);
+      await expect(storedNative("cap-C")).resolves.toMatchObject({ playerToken: "tok-X" });
+      expect(localStorage.getItem(POINTER_KEY)).toBeNull();
     });
   });
 });

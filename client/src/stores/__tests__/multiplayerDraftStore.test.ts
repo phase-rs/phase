@@ -1290,7 +1290,7 @@ describe("multiplayerDraftStore", () => {
       expect(installDeclared).toBe(true);
       expect(assignments.length).toBeGreaterThan(0);
       expect(moduleBindings.filter(({ kind, typeText }) => kind === "const" && ownerTypeNames.test(typeText))
-        .map(({ name }) => name).sort()).toEqual(["disposedGuestAdapters", "hostAdapterTeardowns", "leftHostAdapters"]);
+        .map(({ name }) => name).sort()).toEqual(["disposedGuestAdapters", "disposedNativeAdapters", "hostAdapterTeardowns", "leftHostAdapters"]);
       const commanderLaunch = moduleBindings.find(({ name }) => name === "commanderLaunchInFlight");
       expect(commanderLaunch).toMatchObject({ kind: "let" });
       expect(commanderLaunch?.typeText).toContain("P2PHostAdapter");
@@ -1298,14 +1298,14 @@ describe("multiplayerDraftStore", () => {
       // One union-typed slot names the installed owner.
       expect(moduleBindings.filter(({ kind, typeText }) => kind === "let" && ownerTypeNames.test(typeText))
         .map(({ name }) => name)).toEqual(["installedDraftOwner"]);
-      expect([...new Set(roles)].sort()).toEqual(["guest", "host"]);
+      expect([...new Set(roles)].sort()).toEqual(["guest", "host", "native"]);
       // Only the install step makes it non-null; only the detach step nulls it.
       expect(assignments.filter(({ value }) => value === "owner").map(({ owner }) => owner))
         .toEqual(expect.arrayContaining(["installDraftOwner"]));
       expect(assignments.filter(({ value, owner }) => value === "owner" && owner !== "installDraftOwner")).toEqual([]);
       expect(assignments.filter(({ value, owner }) => value === "null" && owner !== "detachInstalledDraftOwner")).toEqual([]);
       expect(assignments.some(({ value }) => value === "null")).toBe(true);
-      expect([...installCalls].sort()).toEqual(["hostDraft", "joinDraft", "resumeHostedDraft"]);
+      expect([...installCalls].sort()).toEqual(["hostDraft", "joinDraft", "openNativeOwner", "resumeHostedDraft", "resumeNativeDraft"]);
       // Hostile: none of the retired slots survives under its old name.
       for (const slot of retiredOwnerSlots) expect(text).not.toMatch(new RegExp(`\\b${slot}\\b`));
     });

@@ -49,6 +49,11 @@ import type {
   SharedStackPileDecision,
 } from "./draft-adapter";
 import { draftViewPresentation } from "./draft-adapter";
+import {
+  classifyDraft27Compatibility,
+  Draft27IncompatibilityError,
+  type Draft27CompatibilityError,
+} from "./draft-compatibility";
 import { SubmissionSlot } from "./submissionSlot";
 import type { FullSessionKey, ServerInfo } from "./ws-adapter";
 import { getSharedAdapter } from "./wasm-adapter";
@@ -117,6 +122,8 @@ export type ServerDraftAdapterEvent =
   | { type: "serverHello"; info: ServerInfo; compatible: boolean }
   | { type: "waitingForPlayers" }
   | { type: "draftViewUpdated"; view: DraftPlayerView }
+  /** A view the shared classifier refused; emitted before the operation it answered rejects. */
+  | { type: "incompatible"; failure: Draft27CompatibilityError }
   | { type: "matchStarting"; matchId: string; round: number; opponentName: string; gameCode: string }
   | { type: "timerSync"; remainingMs: number }
   | { type: "draftOver"; standings: StandingEntry[] }
@@ -131,6 +138,13 @@ export type ServerDraftAdapterEvent =
   | { type: "error"; message: string };
 
 type ServerDraftAdapterEventListener = (event: ServerDraftAdapterEvent) => void;
+
+/** The seat a server-hosted draft issued: what a reconnect presents to reclaim it. */
+export interface NativeDraftCredential {
+  draftCode: string;
+  playerToken: string;
+  seatIndex: number;
+}
 
 /** The state-bearing fields shared by the `GameStarted` and `StateUpdate` payloads. */
 interface StateBearingPayload {
@@ -347,6 +361,12 @@ export class ServerDraftAdapter implements EngineAdapter {
 
   get currentMatchId(): string | null {
     return this.activeMatchId;
+  }
+
+  /** The seat this adapter holds, or null until it holds all of it. */
+  get credential(): NativeDraftCredential | null {
+    if (this.draftCode === null || this.draftToken === null || this.seatIndex === null) return null;
+    return { draftCode: this.draftCode, playerToken: this.draftToken, seatIndex: this.seatIndex };
   }
 
   getServerInfo(): ServerInfo | null {
@@ -950,6 +970,22 @@ export class ServerDraftAdapter implements EngineAdapter {
     // Non-pick actions retain the legacy current-stream completion semantics;
     // retired frames have already been restricted to their own pending reply.
     this.settleDraftAction(view);
+  }
+
+  /**
+   * A view the shared classifier refused touches no seat, view or phase state.
+   * The typed event comes first, as on the P2P guest, then the reconnect or
+   * join it answered rejects with the same refusal.
+   */
+  private refuseView(
+    failure: Draft27CompatibilityError,
+    sourceSocket: PhaseSocketTransport,
+    initOwner: DraftInit | null,
+  ): void {
+    const error = new Draft27IncompatibilityError(failure);
+    if (this.ws === sourceSocket) this.emit({ type: "incompatible", failure });
+    if (this.ws === sourceSocket) this.settleInit(initOwner, error);
+    this.settleDraftAction(error, sourceSocket);
   }
 
   private takeInteractionPreview(socket: PhaseSocketTransport, requestId: string) {
@@ -1657,6 +1693,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           seat_index: number;
           view: DraftPlayerView;
         };
+        const admission = classifyDraft27Compatibility(data.view);
+        if (!admission.ok) {
+          this.refuseView(admission.error, sourceSocket, initOwner);
+          break;
+        }
         if (this.ws === sourceSocket) {
           this.draftCode = data.draft_code;
           this.draftToken = data.player_token;
@@ -1670,6 +1711,11 @@ export class ServerDraftAdapter implements EngineAdapter {
 
       case "DraftStateUpdate": {
         const data = msg.data as { view: DraftPlayerView };
+        const admission = classifyDraft27Compatibility(data.view);
+        if (!admission.ok) {
+          this.refuseView(admission.error, sourceSocket, initOwner);
+          break;
+        }
         const current = this.ws === sourceSocket;
         if (current) {
           this.draftView = data.view;
@@ -2185,7 +2231,21 @@ export class ServerDraftAdapter implements EngineAdapter {
 
   // ── Reconnect ──────────────────────────────────────────────────────
 
-  async reconnectDraft(): Promise<void> {
+  /**
+   * Reattaches this adapter's seat. A fresh adapter takes the seat from a
+   * stored `credential`; one already holding a different seat refuses it
+   * before opening anything.
+   */
+  async reconnectDraft(credential?: NativeDraftCredential): Promise<void> {
+    if (credential) {
+      if (this.draftCode === null && this.draftToken === null) {
+        this.draftCode = credential.draftCode;
+        this.draftToken = credential.playerToken;
+        this.seatIndex = credential.seatIndex;
+      } else if (this.draftCode !== credential.draftCode || this.draftToken !== credential.playerToken) {
+        throw new AdapterError("PHASE_ERROR", "This adapter holds a different draft seat", false);
+      }
+    }
     const draftCode = this.draftCode;
     const playerToken = this.draftToken;
     if (!draftCode || !playerToken) {

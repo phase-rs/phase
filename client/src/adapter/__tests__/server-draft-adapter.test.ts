@@ -3,6 +3,7 @@ import { SETUP_CONFIRMATION_TIMEOUT_MS } from "../../services/setupConfirmation"
 
 import { EMPTY_DRAFT_POOL_GROUPS } from "../draft-adapter";
 import { ServerDraftAdapter, type ServerDraftAdapterEvent } from "../server-draft-adapter";
+import { Draft27IncompatibilityError } from "../draft-compatibility";
 import { PROTOCOL_VERSION } from "../ws-adapter";
 import { AdapterError, AdapterErrorCode } from "../types";
 import type { DraftPlayerView, DraftPlayerViewFields } from "../draft-adapter";
@@ -8234,5 +8235,183 @@ describe("ServerDraftAdapter — production codec provider default", () => {
     } finally {
       adapter.dispose();
     }
+  });
+});
+
+describe("ServerDraftAdapter — native view admission and seat credential", () => {
+  const settings = {
+    displayName: "Alice",
+    setCodes: ["MKM"],
+    kind: "Premier" as const,
+    public: true,
+    tournamentFormat: "Swiss" as const,
+    podPolicy: "Competitive" as const,
+    podSize: 8,
+  };
+  const credentials = { draft_code: "NEXT12", player_token: "next-token", seat_index: 1 };
+  const adapters: ServerDraftAdapter[] = [];
+
+  function fresh(): ServerDraftAdapter {
+    const adapter = new ServerDraftAdapter("ws://localhost:9374/ws", { stateCodecSessionProvider: null });
+    adapters.push(adapter);
+    return adapter;
+  }
+
+  function frames(ws: MockWebSocket): { type: string; data?: Record<string, unknown> }[] {
+    // Outbound frames are authored by the adapter, not external input.
+    return ws.send.mock.calls.map(([raw]) => JSON.parse(raw as string) as { type: string; data?: Record<string, unknown> });
+  }
+
+  /** Opens the attachment's socket and waits until its setup frame is written; no answer yet. */
+  async function openUntilSetup(setupType: string): Promise<MockWebSocket> {
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+    const ws = MockWebSocket.last!;
+    ws.dispatchSynthetic("message", SERVER_HELLO);
+    await vi.waitFor(() => expect(frames(ws).map(({ type }) => type)).toContain(setupType));
+    return ws;
+  }
+
+  /** A created adapter holding seat 0 of ABCD12. */
+  async function created(): Promise<{ adapter: ServerDraftAdapter; ws: MockWebSocket }> {
+    MockWebSocket.last = null;
+    const adapter = fresh();
+    const creating = adapter.createDraft(settings);
+    const ws = await openUntilSetup("CreateDraftWithSettings");
+    receive(ws, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+    await creating;
+    return { adapter, ws };
+  }
+
+  /** A view the shared classifier refuses, built on the legacy shape. */
+  function refusedView(marker: Record<string, unknown>): DraftPlayerView {
+    return { ...createMockDraftView({ status: "Lobby" }), ...marker } as unknown as DraftPlayerView;
+  }
+
+  beforeEach(() => {
+    MockWebSocket.last = null;
+  });
+
+  afterEach(() => {
+    for (const adapter of adapters.splice(0)) adapter.dispose();
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ["flow", { flow: "FifoAsync" }, "fifo_flow"],
+    ["status", { status: "Review" }, "review_status"],
+    ["fifo", { fifo: {} }, "residual_fifo"],
+  ] as const)("refuses a FIFO or Review join before any effect (%s)", async (_label, marker, code) => {
+    const adapter = fresh();
+    const log: string[] = [];
+    adapter.onEvent((event) => log.push(event.type));
+
+    // Reach: a legacy view in the same harness resolves the join.
+    const legacy = createMockDraftView({ status: "Lobby" });
+    const admitted = adapter.joinDraft("NEXT12", "Alice");
+    const first = await openUntilSetup("JoinDraftWithPassword");
+    receive(first, "DraftJoined", { ...credentials, view: legacy });
+    await expect(admitted).resolves.toEqual(legacy);
+    expect(adapter.currentDraftView).toEqual(legacy);
+
+    MockWebSocket.last = null;
+    log.length = 0;
+    const joining = adapter.joinDraft("NEXT12", "Alice");
+    const settled = joining.then(
+      () => log.push("caller:resolved"),
+      () => log.push("caller:rejected"),
+    );
+    const ws = await openUntilSetup("JoinDraftWithPassword");
+    receive(ws, "DraftJoined", { ...credentials, view: refusedView(marker) });
+    await settled;
+
+    const error = await joining.catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(Draft27IncompatibilityError);
+    expect(error).toMatchObject({ code });
+    expect(log).toEqual(["serverHello", "incompatible", "caller:rejected"]);
+    expect(adapter.currentDraftView).toBeNull();
+    expect(adapter.credential).toBeNull();
+  });
+
+  it("refuses a Review reconnect bootstrap and keeps the held view", async () => {
+    const { adapter, ws: established } = await created();
+    await receiveDraftView(adapter, established, createMockDraftView({ pick_number: 3 }));
+    const log: string[] = [];
+    adapter.onEvent((event) => log.push(event.type));
+
+    MockWebSocket.last = null;
+    const reconnecting = adapter.reconnectDraft();
+    void reconnecting.catch(() => undefined);
+    const ws = await openUntilSetup("ReconnectDraft");
+    // Reach: the reattach was sent on the new socket.
+    expect(ws).not.toBe(established);
+    expect(frames(ws).filter(({ type }) => type === "ReconnectDraft")).toHaveLength(1);
+    receive(ws, "DraftStateUpdate", { view: refusedView({ status: "Review" }) });
+
+    await expect(reconnecting).rejects.toMatchObject({ code: "review_status" });
+    await expect(reconnecting).rejects.toBeInstanceOf(Draft27IncompatibilityError);
+    expect(log).toEqual(["serverHello", "incompatible"]);
+    expect(adapter.currentDraftView?.pick_number).toBe(3);
+    expect(adapter.currentDraftView?.status).toBe("Drafting");
+  });
+
+  it("refuses a Review reconnect bootstrap and keeps the held view: a retired socket's pending action", async () => {
+    const { adapter, ws: a } = await created();
+    await receiveDraftView(adapter, a, createMockDraftView({ pick_number: 3 }));
+    const held = adapter.currentDraftView;
+
+    /** Sends a decision on the current socket, then replaces that socket by a reattach. */
+    async function decisionOnRetired(current: MockWebSocket) {
+      const decision = trackRejection(adapter.submitSharedStackDecision(0, "Take"));
+      expect(frames(current).map(({ type }) => type)).toContain("DraftAction");
+      MockWebSocket.last = null;
+      void adapter.reconnectDraft().catch(() => undefined);
+      const candidate = await openUntilSetup("ReconnectDraft");
+      // A neutral bootstrap frame adopts the candidate without settling the decision.
+      receive(candidate, "DraftMatchStart", {
+        match_id: "stand-in", round: 1, game_code: "G", player_token: "t", your_player: 0, opponent_name: "x",
+      });
+      await drainArt();
+      expect(await decision()).toBe("never settled");
+      return { decision, candidate };
+    }
+
+    // Reach: the same frame carrying a legacy view resolves the retired socket's action.
+    const legacyLeg = await decisionOnRetired(a);
+    const legacy = createMockDraftView({ pick_number: 4 });
+    receive(a, "DraftStateUpdate", { view: legacy });
+    expect(await legacyLeg.decision()).toEqual({ resolvedWith: legacy });
+
+    const refusedLeg = await decisionOnRetired(legacyLeg.candidate);
+    const viewBefore = adapter.currentDraftView;
+    receive(legacyLeg.candidate, "DraftStateUpdate", { view: refusedView({ status: "Review" }) });
+    const refusal = await refusedLeg.decision();
+    expect(refusal).toBeInstanceOf(Draft27IncompatibilityError);
+    expect(refusal).toMatchObject({ code: "review_status" });
+    expect(adapter.currentDraftView).toBe(viewBefore);
+    expect(adapter.currentDraftView?.status).not.toBe("Review");
+    expect(held?.pick_number).toBe(3);
+  });
+
+  it("reconnects a fresh adapter from a stored credential", async () => {
+    const adapter = fresh();
+    const reconnecting = adapter.reconnectDraft({ draftCode: "NAT001", playerToken: "tok-guest", seatIndex: 3 });
+    const ws = await openUntilSetup("ReconnectDraft");
+    const reattach = frames(ws).filter(({ type }) => type === "ReconnectDraft");
+    // Reach: one reattach frame was sent.
+    expect(reattach).toHaveLength(1);
+    expect(reattach[0]!.data).toEqual({ draft_code: "NAT001", player_token: "tok-guest" });
+    receive(ws, "DraftStateUpdate", { view: createMockDraftView() });
+    await expect(reconnecting).resolves.toBeUndefined();
+    expect(adapter.credential).toEqual({ draftCode: "NAT001", playerToken: "tok-guest", seatIndex: 3 });
+
+    // Hostile: an adapter holding another seat refuses the credential and opens nothing.
+    const { adapter: holding } = await created();
+    MockWebSocket.last = null;
+    const opened = openedUrls.length;
+    await expect(holding.reconnectDraft({ draftCode: "NAT001", playerToken: "tok-guest", seatIndex: 3 }))
+      .rejects.toMatchObject({ code: "PHASE_ERROR" });
+    expect(MockWebSocket.last).toBeNull();
+    expect(openedUrls.length).toBe(opened);
+    expect(holding.credential).toEqual({ draftCode: "ABCD12", playerToken: "tok123", seatIndex: 0 });
   });
 });

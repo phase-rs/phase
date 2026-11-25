@@ -21,6 +21,7 @@ import {
 } from "../components/draft/workspace/types";
 import type { DraftMatchBinding, DraftMatchLaunch, DraftMatchSettlement } from "../network/draftProtocol";
 import { parseRoomCode } from "../network/connection";
+import { parseWebSocketUrl } from "../config/multiplayerServer";
 import { ACTIVE_DRAFT_GUEST_KEY, ACTIVE_DRAFT_POD_KEY } from "../constants/storage";
 import type { DraftIntergameCommand } from "./intergameCommandLedger";
 
@@ -194,6 +195,66 @@ export type ActiveDraftGuestLoadResult =
   | { type: "invalid"; capture: ActiveDraftGuestMetaCapture | null }
   | { type: "present"; meta: ActiveDraftGuestMeta; capture: ActiveDraftGuestMetaCapture };
 
+/** Which side of a server-hosted draft a native seat took when it was opened. */
+export type NativeDraftParticipant = "host" | "guest";
+
+/**
+ * The secret half of a native draft seat's recovery capability, kept in
+ * IndexedDB under its own name so no other seat's write can replace it.
+ */
+export interface NativeDraftCapabilityRecord {
+  capabilityId: string;
+  /** Canonical, as `canonicalNativeDraftEndpoint` returns it. */
+  endpoint: string;
+  draftCode: string;
+  playerToken: string;
+  seatIndex: number;
+  participant: NativeDraftParticipant;
+  timestamp: number;
+}
+
+/**
+ * The non-secret route back to a native seat's private record. It shares the
+ * guest pointer's key, told apart by its `transport` tag, and never carries
+ * the seat token.
+ */
+export interface ActiveNativeDraftPointer {
+  transport: "native";
+  capabilityId: string;
+  endpoint: string;
+  draftCode: string;
+  seatIndex: number;
+  participant: NativeDraftParticipant;
+  timestamp: number;
+}
+
+/** The exact stored text of a native pointer, as a reader saw it. */
+export interface NativeDraftPointerCapture {
+  raw: string;
+}
+
+/** Non-mutating classification of the native pointer. */
+export type ActiveNativeDraftLoadResult =
+  | { type: "absent" }
+  | { type: "invalid"; capture: NativeDraftPointerCapture }
+  | { type: "present"; pointer: ActiveNativeDraftPointer; capture: NativeDraftPointerCapture };
+
+/** Non-mutating classification of the private record a native pointer names. */
+export type NativeDraftCapabilityLoadResult =
+  | { type: "absent" }
+  | { type: "invalid" }
+  | { type: "mismatch" }
+  | { type: "present"; record: NativeDraftCapabilityRecord }
+  | { type: "readFailure"; error: unknown };
+
+/** What an exact clear of one native capability matches on. */
+export interface NativeDraftCapabilityHold {
+  readonly capabilityId: string;
+  readonly endpoint: string;
+  readonly draftCode: string;
+  readonly playerToken: string;
+}
+
 export type ActiveDraftPodPhase =
   | "lobby"
   | "drafting"
@@ -265,6 +326,7 @@ const DRAFT_GUEST_PREFIX = "phase-draft-guest:";
 const DRAFT_SETTLEMENT_PREFIX = "phase-draft-settlement:";
 const DRAFT_INTERGAME_PREFIX = "phase-draft-intergame:";
 const DRAFT_DECK_SUBMISSION_PREFIX = "phase-draft-deck-submission:";
+const NATIVE_DRAFT_CAPABILITY_PREFIX = "phase-native-draft-capability:";
 const HOST_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 /** Guest token TTL — 4 hours matches the game session TTL. */
 const GUEST_SESSION_TTL_MS = 4 * 60 * 60 * 1000;
@@ -416,6 +478,8 @@ export function inspectActiveDraftGuest(): ActiveDraftGuestLoadResult {
     const raw = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
     if (!raw) return { type: "absent" };
     const value: unknown = JSON.parse(raw);
+    // A tagged record belongs to its transport's reader, never to this one.
+    if (isRecord(value) && hasTransportTag(value)) return { type: "absent" };
     if (!isActiveDraftGuestMeta(value)) return { type: "invalid", capture: null };
     const capture = activeDraftGuestCapture(value);
     if (!capture || Date.now() - capture.timestamp > GUEST_SESSION_TTL_MS) {
@@ -524,7 +588,7 @@ function isActiveDraftPodMeta(value: unknown): value is ActiveDraftPodMeta {
 }
 
 function isActiveDraftGuestMeta(value: unknown): value is ActiveDraftGuestMeta {
-  if (!isRecord(value)) return false;
+  if (!isRecord(value) || hasTransportTag(value)) return false;
   return isCanonicalRoomCode(value.roomCode)
     && isNonEmptyString(value.displayName)
     && isNonEmptyString(value.hostPeerId)
@@ -717,6 +781,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+/** An untagged pointer is a P2P guest's; any own `transport` key names another reader. */
+function hasTransportTag(value: Record<string, unknown>): boolean {
+  return Object.prototype.hasOwnProperty.call(value, "transport");
+}
+
 // ── Guest Persistence ──────────────────────────────────────────────────
 
 export async function saveDraftGuestSession(
@@ -870,6 +939,197 @@ export async function clearDraftGuestRecovery(capability: DraftGuestCapability):
     // this capability's only when this clear has just removed its unnamed record.
     : capability.capabilityId === null && removal === "removed";
   if (namesThisCapability) clearActiveDraftGuestIfCurrent(capture);
+}
+
+// ── Native Draft Capability ───────────────────────────────────────────
+
+/**
+ * The one form a native draft endpoint is stored and compared in: a ws/wss
+ * address `parseWebSocketUrl` accepts, with no userinfo and no query, as its
+ * serialized `href`. Null for anything else. Each output maps to itself.
+ */
+export function canonicalNativeDraftEndpoint(value: string): string | null {
+  const url = parseWebSocketUrl(value.trim());
+  if (!url || url.username !== "" || url.password !== "" || url.search !== "") return null;
+  return url.href;
+}
+
+function isCanonicalNativeEndpoint(value: unknown): value is string {
+  return typeof value === "string" && canonicalNativeDraftEndpoint(value) === value;
+}
+
+function isNativeDraftParticipant(value: unknown): value is NativeDraftParticipant {
+  return value === "host" || value === "guest";
+}
+
+function isNativeDraftCapabilityRecord(value: unknown): value is NativeDraftCapabilityRecord {
+  return isRecord(value)
+    && isNonEmptyString(value.capabilityId)
+    && isCanonicalNativeEndpoint(value.endpoint)
+    && isNonEmptyString(value.draftCode)
+    && isNonEmptyString(value.playerToken)
+    && isNonnegativeInteger(value.seatIndex)
+    && isNativeDraftParticipant(value.participant)
+    && isPositiveFiniteNumber(value.timestamp);
+}
+
+function isActiveNativeDraftPointer(value: unknown): value is ActiveNativeDraftPointer {
+  return isRecord(value)
+    && value.transport === "native"
+    && isNonEmptyString(value.capabilityId)
+    && isCanonicalNativeEndpoint(value.endpoint)
+    && isNonEmptyString(value.draftCode)
+    && isNonnegativeInteger(value.seatIndex)
+    && isNativeDraftParticipant(value.participant)
+    && isPositiveFiniteNumber(value.timestamp);
+}
+
+/**
+ * Commits a native seat's secret half and returns the pointer that leads to
+ * it, without writing that pointer: only the installed owner publishes it.
+ * Throws on invalid input or a failed write.
+ */
+export async function saveNativeDraftCapability(
+  input: Omit<NativeDraftCapabilityRecord, "timestamp">,
+): Promise<ActiveNativeDraftPointer> {
+  const record: NativeDraftCapabilityRecord = {
+    capabilityId: input.capabilityId,
+    endpoint: input.endpoint,
+    draftCode: input.draftCode,
+    playerToken: input.playerToken,
+    seatIndex: input.seatIndex,
+    participant: input.participant,
+    timestamp: Date.now(),
+  };
+  if (!isNativeDraftCapabilityRecord(record)) throw new Error("Invalid native draft recovery capability");
+  await set(NATIVE_DRAFT_CAPABILITY_PREFIX + record.capabilityId, record, getDraftStore());
+  return {
+    transport: "native",
+    capabilityId: record.capabilityId,
+    endpoint: record.endpoint,
+    draftCode: record.draftCode,
+    seatIndex: record.seatIndex,
+    participant: record.participant,
+    timestamp: record.timestamp,
+  };
+}
+
+/** Writes a native pointer; one that does not validate is not written. */
+export function publishActiveNativeDraft(pointer: ActiveNativeDraftPointer): void {
+  if (!isActiveNativeDraftPointer(pointer)) return;
+  localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, JSON.stringify({
+    transport: "native",
+    capabilityId: pointer.capabilityId,
+    endpoint: pointer.endpoint,
+    draftCode: pointer.draftCode,
+    seatIndex: pointer.seatIndex,
+    participant: pointer.participant,
+    timestamp: pointer.timestamp,
+  }));
+}
+
+/**
+ * Inspects the native pointer without mutating it. Anything not tagged
+ * `native` is absent to this reader; a tagged record that is malformed or
+ * expired is invalid.
+ */
+export function inspectActiveNativeDraft(): ActiveNativeDraftLoadResult {
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
+  } catch {
+    return { type: "absent" };
+  }
+  if (raw === null) return { type: "absent" };
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { type: "absent" };
+  }
+  if (!isRecord(value) || !hasTransportTag(value) || value.transport !== "native") return { type: "absent" };
+  const capture: NativeDraftPointerCapture = { raw };
+  if (!isActiveNativeDraftPointer(value) || Date.now() - value.timestamp > GUEST_SESSION_TTL_MS) {
+    return { type: "invalid", capture };
+  }
+  return {
+    type: "present",
+    pointer: {
+      transport: "native",
+      capabilityId: value.capabilityId,
+      endpoint: value.endpoint,
+      draftCode: value.draftCode,
+      seatIndex: value.seatIndex,
+      participant: value.participant,
+      timestamp: value.timestamp,
+    },
+    capture,
+  };
+}
+
+/** Reads the private record a native pointer names. Never mutates. */
+export async function loadNativeDraftCapability(
+  pointer: ActiveNativeDraftPointer,
+): Promise<NativeDraftCapabilityLoadResult> {
+  let value: unknown;
+  try {
+    value = await get<unknown>(NATIVE_DRAFT_CAPABILITY_PREFIX + pointer.capabilityId, getDraftStore());
+  } catch (error) {
+    return { type: "readFailure", error };
+  }
+  if (value === undefined) return { type: "absent" };
+  if (!isNativeDraftCapabilityRecord(value) || Date.now() - value.timestamp > GUEST_SESSION_TTL_MS) {
+    return { type: "invalid" };
+  }
+  if (
+    value.capabilityId !== pointer.capabilityId
+    || value.endpoint !== pointer.endpoint
+    || value.draftCode !== pointer.draftCode
+    || value.seatIndex !== pointer.seatIndex
+    || value.participant !== pointer.participant
+  ) {
+    return { type: "mismatch" };
+  }
+  return { type: "present", record: value };
+}
+
+/** Removes the native pointer only when its stored text is still the captured text. */
+export function clearActiveNativeDraftIfCurrent(capture: NativeDraftPointerCapture): void {
+  try {
+    if (localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY) === capture.raw) {
+      localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
+    }
+  } catch {
+    // Unavailable storage is not evidence that this caller owns the pointer.
+  }
+}
+
+/**
+ * The guest's exact-clear rule for a native capability: its private record
+ * goes only when it is a live record of this token and name, and a pointer
+ * naming this capability goes whatever record sits behind it. Malformed,
+ * expired and another token's records stay.
+ */
+export async function clearNativeDraftCapability(hold: NativeDraftCapabilityHold): Promise<void> {
+  await removeDraftRecordIf(
+    NATIVE_DRAFT_CAPABILITY_PREFIX + hold.capabilityId,
+    (value) => isNativeDraftCapabilityRecord(value)
+      && Date.now() - value.timestamp <= GUEST_SESSION_TTL_MS
+      && value.capabilityId === hold.capabilityId
+      && value.playerToken === hold.playerToken
+      && value.endpoint === hold.endpoint
+      && value.draftCode === hold.draftCode,
+  );
+  const active = inspectActiveNativeDraft();
+  if (active.type !== "present") return;
+  const { pointer, capture } = active;
+  if (
+    pointer.capabilityId === hold.capabilityId
+    && pointer.endpoint === hold.endpoint
+    && pointer.draftCode === hold.draftCode
+  ) {
+    clearActiveNativeDraftIfCurrent(capture);
+  }
 }
 
 /**
