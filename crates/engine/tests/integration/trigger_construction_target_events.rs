@@ -12,7 +12,8 @@
 //! - a dispatch window collects its own range (the window collector);
 //! - an action-seam construction finisher (`SelectTargets`, `ChooseTarget`,
 //!   `SelectModes`) matches its own span at emission, claims it, and queues the
-//!   matched abilities after its own drain (`ConstructionSpanOwner::Finisher`);
+//!   matched abilities before its own drain, outside the process under way
+//!   (`ConstructionSpanOwner::Finisher`);
 //! - a finisher that runs inside a dispatch window (the random-mode re-entry)
 //!   leaves the span to the window and does not drain
 //!   (`ConstructionSpanOwner::EnclosingWindow`);
@@ -22,8 +23,8 @@
 //! - a windowless synthetic dispatch (a dungeon room, CR 309.4c) is collected by
 //!   the `ChooseDungeonRoom` arm's range collection.
 //!
-//! In-class observers whose own trigger has a target slot (why a released or
-//! nested context can emit again). Comma-form predicate
+//! In-class observers whose own trigger has a target slot (why a finisher-queued
+//! or nested context can emit again). Comma-form predicate
 //! `(commits? a crime|becomes? the targets? of [^.]*abilit[^.]*), [^.]*\btarget\b`:
 //! Mouse Trapper, Black Bolt, Inhuman King, Scalelord Reckoner, Pawpatch
 //! Recruit, Beta Ray Bill, Rattleback Apothecary, Kaervek, the Punisher.
@@ -1139,9 +1140,10 @@ fn skaro_board(with_ascension: bool) -> (GameRunner, Option<ObjectId>, [ObjectId
     (runner, ascension, [iroh, trapper, skaro, tar_pit])
 }
 
-/// N-1: the nested finalize with the typed observer beside the target-lock observer. The
-/// batch's end-of-batch drain prompts valiant and both Ascension firings
-/// together (CR 603.3b).
+/// N-1: the nested finalize with the typed observer beside the target-lock observer.
+/// CR 603.3b: the second part of the attack's placement is the two Ascension
+/// firings, one prompt; valiant and the Tar Pit trigger triggered while that
+/// placement was under way and go in later repetitions.
 #[test]
 fn n1_in_window_random_mode_does_not_drain_mid_batch() {
     let (mut runner, ascension, [iroh, trapper, skaro, tar_pit]) = skaro_board(true);
@@ -1161,12 +1163,12 @@ fn n1_in_window_random_mode_does_not_drain_mid_batch() {
     let sources: Vec<ObjectId> = triggers.iter().map(|t| t.source_id).collect();
     assert_eq!(
         sources.len(),
-        3,
-        "the second order prompt lists valiant and both Ascension firings: {sources:?}"
+        2,
+        "the second order prompt lists the two Ascension firings: {sources:?}"
     );
-    assert_eq!(sources.iter().filter(|s| **s == trapper).count(), 1);
     assert_eq!(sources.iter().filter(|s| **s == ascension).count(), 2);
-    order_sources_first(&mut runner, &[trapper, ascension, ascension]);
+    assert!(!sources.contains(&trapper));
+    order_sources_first(&mut runner, &[ascension, ascension]);
     order_identity_until_priority(&mut runner);
 
     let state = runner.state();
@@ -1178,6 +1180,15 @@ fn n1_in_window_random_mode_does_not_drain_mid_batch() {
     let positions = trigger_positions(state, tar_pit);
     assert_eq!(positions.len(), 1, "Count(Tar Pit) = {}", positions.len());
     assert!(positions[0] > valiant_index);
+    let ascension_positions = trigger_positions(state, ascension);
+    assert_eq!(
+        ascension_positions.len(),
+        2,
+        "both Ascension firings must reach the stack: {ascension_positions:?}"
+    );
+    assert!(ascension_positions
+        .iter()
+        .all(|position| *position < valiant_index));
 }
 
 /// N-1b: the nested finalize's count discriminator (no Ascension).
@@ -1251,8 +1262,8 @@ fn w1_drain_window_on_the_action_buffer_is_collected_once() {
     );
 }
 
-/// W-2: a held context with its own target slot (Mouse Trapper's valiant) is
-/// released and dispatched in a window on the next action's buffer.
+/// W-2: a finisher-queued context with its own target slot (Mouse Trapper's
+/// valiant) is dispatched in a window on the next action's buffer.
 #[test]
 fn w2_released_context_window_is_collected_once() {
     let mut scenario = GameScenario::new();

@@ -24445,6 +24445,13 @@ mod stage2_injector_tests {
     /// no producer moved; the assertion that the phase_out file contributes exactly one
     /// in-test site is what makes that delta an explicit adjudication instead of a number
     /// bump.
+    ///
+    /// The next in-test site takes the same route: `game/triggers.rs`'s
+    /// `accepted_triggered_mana_pauses` fixture constructs each of the five pauses
+    /// `is_accepted_triggered_mana_pause` admits, for the legacy-save placement predicate's
+    /// carrier row (`placement_may_be_under_way_is_each_carrier`). It is `#[cfg(test)]`-only
+    /// and mints no production producer; the producer and reader multisets are unchanged,
+    /// so the partition moves from `4 / 9 / 42` to `4 / 9 / 43`.
     #[test]
     fn the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event() {
         /// Every `.rs` under the crate's `src`.
@@ -24487,7 +24494,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test.len(),
-            55,
+            56,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -24495,12 +24502,13 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test.len()),
-            (4, 9, 42),
+            (4, 9, 43),
             "the partition, not just the total: four PRODUCTION producers, nine PRODUCTION \
-             readers (including the two optional-subject projection reads), and 42 \
+             readers (including the two optional-subject projection reads), and 43 \
              `#[cfg(test)]` sites, including the ChooseOneOf, retained optional/outer, \
              retained repeat/choice restore fixtures, and the `phase_out` suspension fixture \
-             that parks a typed prompt on a clone (test-only: it mints no producer).\n\
+             that parks a typed prompt on a clone, and the legacy-placement predicate fixture that \
+             constructs each accepted triggered-mana pause (both test-only: neither mints a producer).\n\
              producers={producers:#?}\nreaders={readers:#?}"
         );
         // The one delta against the first pin, named rather than counted away: the `phase_out`
