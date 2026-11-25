@@ -48071,3 +48071,93 @@ fn trigger_verrak_pay_that_much_life_again_stays_unimplemented() {
                 && description.as_deref() == Some("pay that much life again")
     ));
 }
+
+/// Raggadragga, Goreguts Boss (issue #1184) — "Whenever a creature you
+/// control with a mana ability attacks, untap it." The "with a mana ability"
+/// subject qualifier (CR 605.1) is a declaration-time property of the
+/// attacker (CR 508.1), so it folds into the attack trigger's `valid_card`
+/// as `FilterProp::HasManaAbility` — the trigger must NOT strand as
+/// `Unknown` (the pre-fix fixture shape in `r.jsonl`).
+#[test]
+fn raggadragga_attack_trigger_subject_keeps_mana_ability() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control with a mana ability attacks, untap it.",
+        "Raggadragga, Goreguts Boss",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    let typed = match def.valid_card.as_ref() {
+        Some(TargetFilter::Typed(tf)) => tf,
+        other => panic!("attack subject must be a typed filter, got {other:?}"),
+    };
+    assert!(
+        typed.type_filters.contains(&TypeFilter::Creature),
+        "subject must stay a creature filter, got {:?}",
+        typed.type_filters
+    );
+    assert_eq!(typed.controller, Some(ControllerRef::You));
+    assert!(
+        typed.properties.contains(&FilterProp::HasManaAbility),
+        "subject must carry HasManaAbility, got {:?}",
+        typed.properties
+    );
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::SetTapState {
+                target: TargetFilter::TriggeringSource,
+                state: TapStateChange::Untap,
+                ..
+            }
+        ),
+        "expected untap-the-attacker, got {:?}",
+        execute.effect
+    );
+    assert_no_unimplemented(execute);
+}
+
+/// SHAPE pin for Raggadragga's third clause — "Whenever you cast a spell, if
+/// at least seven mana was spent to cast it, ...". The intervening-if
+/// (CR 603.4) reads the triggering spell's payment record (CR 601.2h).
+/// Reach-guard for the runtime tests: if this shape regresses, the runtime
+/// silence/pump tests would fail for a parse reason, not a rules reason.
+#[test]
+fn raggadragga_seven_mana_spell_trigger_shape() {
+    let def = parse_trigger_line(
+        "Whenever you cast a spell, if at least seven mana was spent to cast it, untap target creature. It gets +7/+7 and gains trample until end of turn.",
+        "Raggadragga, Goreguts Boss",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    match def.condition.as_ref() {
+        Some(TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        }) => {
+            assert!(
+                matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ManaSpentToCast {
+                            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                            metric: crate::types::ability::CastManaSpentMetric::Total,
+                        },
+                    }
+                ),
+                "lhs must read total mana spent on the triggering spell, got {lhs:?}"
+            );
+            assert_eq!(*comparator, Comparator::GE);
+            assert!(
+                matches!(rhs, QuantityExpr::Fixed { value: 7 }),
+                "threshold must be seven, got {rhs:?}"
+            );
+        }
+        other => panic!("expected the seven-mana intervening-if, got {other:?}"),
+    }
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert_no_unimplemented(execute);
+    assert!(
+        execute.sub_ability.is_some(),
+        "the +7/+7 trample continuation must be attached past the untap"
+    );
+}
