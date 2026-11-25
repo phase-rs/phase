@@ -1862,23 +1862,29 @@ fn counter_removal_threshold_fires_once_per_recipient(trig_def: &TriggerDefiniti
             .is_some_and(|filter| filter.threshold == Some(0))
 }
 
-/// CR 603.2c: a "one or more … deal damage to a player" trigger fires once for
-/// each player recipient in a simultaneous damage event. Both trigger modes that
-/// carry this wording qualify: the printed "Whenever one or more creatures you
-/// control deal combat damage to a player" lowers to
-/// `DamageDoneOnceByController`, and the same words in a delayed body ("…
-/// to a player this turn" — Jace, Cunning Castaway's +1) lower to `DamageDone`.
-/// Per the 2017-09-29 Jace ruling, damage to two players fires twice. Other
-/// recipient scopes keep their aggregate batching. The normalizer
-/// (`matching_damage_done_once_by_controller_event`) reads only the trigger's
-/// recipient, source, kind and amount fields, so it serves both modes.
+/// CR 603.2c: simultaneous damage can contain one occurrence for each player
+/// recipient. The active form covers "one or more creatures … deal damage to a
+/// player", including delayed triggers such as Jace, Cunning Castaway's +1.
+/// The passive form batches the sources in "an opponent is dealt damage by
+/// one or more creatures …". A batched passive definition without a source
+/// filter instead batches the recipients, as on Master of Barbs and Fblthp,
+/// Impossibly Lost ("one or more opponents are dealt damage").
 fn damage_fires_per_player_recipient(trig_def: &TriggerDefinition) -> bool {
-    trig_def.batched
-        && matches!(
-            trig_def.mode,
-            TriggerMode::DamageDoneOnceByController | TriggerMode::DamageDone
-        )
-        && trig_def.valid_target == Some(TargetFilter::Player)
+    if !trig_def.batched {
+        return false;
+    }
+    if trig_def.mode == TriggerMode::DamageReceived {
+        return trig_def.valid_card.is_none()
+            && trig_def.valid_source.is_some()
+            && trig_def
+                .valid_target
+                .as_ref()
+                .is_some_and(super::trigger_matchers::is_player_scope_damage_filter);
+    }
+    matches!(
+        trig_def.mode,
+        TriggerMode::DamageDoneOnceByController | TriggerMode::DamageDone
+    ) && trig_def.valid_target == Some(TargetFilter::Player)
 }
 
 /// CR 510.2 + CR 120.4b + CR 603.2c: combat damage is dealt simultaneously,
@@ -1886,7 +1892,7 @@ fn damage_fires_per_player_recipient(trig_def: &TriggerDefinition) -> bool {
 /// first-seen recipient order and normalize each candidate before retaining it,
 /// so resolution sees only the source amounts that satisfied the trigger.
 #[allow(clippy::too_many_arguments)] // The shared per-candidate filter chain needs each input.
-fn matching_damage_done_once_by_controller_events_by_player_recipient(
+fn matching_damage_events_by_player_recipient(
     state: &GameState,
     event_batch: &[GameEvent],
     trig_def: &TriggerDefinition,
@@ -1918,14 +1924,19 @@ fn matching_damage_done_once_by_controller_events_by_player_recipient(
         ) {
             continue;
         }
-        let Some(normalized) =
+        let normalized = if trig_def.mode == TriggerMode::DamageReceived {
+            // The passive matcher admitted this original per-source DamageDealt event.
+            candidate.clone()
+        } else if let Some(event) =
             super::trigger_matchers::matching_damage_done_once_by_controller_event(
                 candidate,
                 trig_def,
                 source_context,
                 state,
             )
-        else {
+        {
+            event
+        } else {
             continue;
         };
         match groups
@@ -2526,18 +2537,16 @@ fn trigger_firing_groups(
             conditions,
         ))
     } else if damage_fires_per_player_recipient(trig_def) {
-        indexed_groups(
-            matching_damage_done_once_by_controller_events_by_player_recipient(
-                state,
-                event_batch,
-                trig_def,
-                source_context,
-                controller,
-                matcher,
-                active_suppress_triggers,
-                conditions,
-            ),
-        )
+        indexed_groups(matching_damage_events_by_player_recipient(
+            state,
+            event_batch,
+            trig_def,
+            source_context,
+            controller,
+            matcher,
+            active_suppress_triggers,
+            conditions,
+        ))
     } else if attack_fires_per_defending_player(trig_def) {
         // CR 508.3d + CR 508.5a: the "one or more creatures attack <player>"
         // class fires once per attacked player, with that player's own
@@ -26861,7 +26870,7 @@ pub mod tests {
             },
         ];
 
-        let batches = matching_damage_done_once_by_controller_events_by_player_recipient(
+        let batches = matching_damage_events_by_player_recipient(
             &state,
             &event_batch,
             &trigger,
@@ -26995,7 +27004,7 @@ pub mod tests {
             },
         ];
 
-        let batches = matching_damage_done_once_by_controller_events_by_player_recipient(
+        let batches = matching_damage_events_by_player_recipient(
             &state,
             &event_batch,
             &trigger,

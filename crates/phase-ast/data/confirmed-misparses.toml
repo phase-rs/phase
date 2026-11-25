@@ -1361,7 +1361,6 @@ face = [
   { key = "lobelia, defender of bag end", class = "missing_effect", clauses = ["When Lobelia enters, look at the top card of each opponent's library and exile those cards face down."] },
   { key = "locket of yesterdays", class = "dropped_qualifier", clauses = ["Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard."] },
   { key = "loki, god of lies", class = "wrong_object", clauses = ["If it's your turn, untap that creature and it gains haste until end of turn."] },
-  { key = "lolth, spider queen", class = "dropped_qualifier", clauses = ["[−8]: You get an emblem with \"Whenever an opponent is dealt combat damage by one or more creatures you control, if that player lost less than 8 life this turn, they lose life equal to the difference.\""] },
   { key = "longtusk stalker", class = "wrong_object", clauses = ["Pay {E}{E}: this creature perpetually gets +1/+0."] },
   { key = "lonis, cryptozoologist", class = "wrong_count", clauses = ["{T}, Sacrifice X Clues: Target opponent reveals the top X cards of their library.", "You may put a nonland permanent card with mana value X or less from among them onto the battlefield under your control.", "That player puts the rest on the bottom of their library in a random order."] },
   { key = "loot dispute", class = "dropped_qualifier", clauses = ["Whenever you attack the player who has the initiative, create a Treasure token."] },
