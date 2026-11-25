@@ -1472,7 +1472,6 @@ fn foreign_library_top_visible_during_action(
         || state
             .foreign_library_look_snapshot
             .as_deref()
-            .filter(|snapshot| snapshot.player == grantee)
             .is_none_or(|snapshot| snapshot.tops.contains(&(owner, live)))
 }
 
@@ -1651,15 +1650,15 @@ pub(super) fn snapshot_foreign_library_tops(
     if state.foreign_library_look_snapshot.is_some() {
         return;
     }
-    if !super::static_abilities::top_of_library_look_owners(state, player)
-        .any(|owner| owner != player)
-    {
+    if !state.players.iter().any(|viewer| {
+        super::static_abilities::top_of_library_look_owners(state, viewer.id)
+            .any(|owner| owner != viewer.id)
+    }) {
         return;
     }
     let tops = state
         .players
         .iter()
-        .filter(|seat| seat.id != player)
         .filter_map(|seat| Some((seat.id, *state.library_of(seat.id).front()?)))
         .collect();
     state.foreign_library_look_snapshot = Some(Box::new(ForeignLibraryLookSnapshot {

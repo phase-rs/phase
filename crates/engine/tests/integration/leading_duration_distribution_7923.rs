@@ -1635,6 +1635,16 @@ fn activate_grove(
 
 #[test]
 fn xanathar_defers_a_new_foreign_top_during_manual_cast_payment() {
+    assert_xanathar_defers_a_new_foreign_top_during_manual_cast_payment(P0);
+}
+
+#[test]
+fn xanathar_defers_a_new_foreign_top_during_another_players_cast() {
+    assert_xanathar_defers_a_new_foreign_top_during_manual_cast_payment(PlayerId(2));
+}
+
+// CR 401.5: The foreign top stays hidden even when the viewer is not the caster.
+fn assert_xanathar_defers_a_new_foreign_top_during_manual_cast_payment(caster: PlayerId) {
     let third = PlayerId(2);
     let (mut scenario, _) = xanathar_scenario(3);
     // CR 605.1a + CR 614.6: Grove qualifies as a mana ability. The external
@@ -1642,7 +1652,7 @@ fn xanathar_defers_a_new_foreign_top_during_manual_cast_payment() {
     let mut add_grove = || {
         scenario
             .add_land_from_oracle(
-                P0,
+                caster,
                 "Grove of the Burnwillows",
                 "{T}: Add {C}.\n{T}: Add {R} or {G}. Each opponent gains 1 life.",
             )
@@ -1655,7 +1665,7 @@ fn xanathar_defers_a_new_foreign_top_during_manual_cast_payment() {
     );
     let hand = scenario
         .add_spell_to_hand_from_oracle(
-            P0,
+            caster,
             "Fog",
             true,
             "Prevent all combat damage that would be dealt this turn.",
@@ -1682,6 +1692,11 @@ fn xanathar_defers_a_new_foreign_top_during_manual_cast_payment() {
     assert!(!seen(runner.state(), P1, before));
     assert!(!seen(runner.state(), third, before));
 
+    while runner.state().priority_player != caster {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass to the caster");
+    }
     let card_id = runner.state().objects[&hand].card_id;
     let casting = runner
         .act(GameAction::CastSpell {
@@ -1701,12 +1716,6 @@ fn xanathar_defers_a_new_foreign_top_during_manual_cast_payment() {
             .clone()
     };
     let announced_snapshot = snapshot(runner.state());
-    assert!(
-        announced_snapshot["tops"]
-            .as_array()
-            .is_some_and(|tops| tops.contains(&serde_json::json!([P1, before]))),
-        "the cast must capture Xanathar's chosen opponent's top: {announced_snapshot}"
-    );
     let activation = activate_grove(&mut runner, grove);
     assert!(activation
         .events
@@ -1718,7 +1727,16 @@ fn xanathar_defers_a_new_foreign_top_during_manual_cast_payment() {
     ));
     assert_eq!(runner.state().library_of(P1).front(), Some(&next));
     assert_eq!(snapshot(runner.state()), announced_snapshot);
-    assert!(!seen(runner.state(), P0, next));
+    assert!(
+        !seen(runner.state(), P0, next),
+        "the newly drawn top stays hidden during payment"
+    );
+    assert!(
+        announced_snapshot["tops"]
+            .as_array()
+            .is_some_and(|tops| tops.contains(&serde_json::json!([P1, before]))),
+        "the cast must capture Xanathar's chosen opponent's top: {announced_snapshot}"
+    );
 
     let viewer = serde_json::to_value(filter_state_for_viewer(runner.state(), P0))
         .expect("serialize the grantee's projection");
@@ -1746,7 +1764,7 @@ fn xanathar_defers_a_new_foreign_top_during_manual_cast_payment() {
         .expect("cancel the cast");
     assert!(matches!(
         cancel.waiting_for,
-        WaitingFor::Priority { player: P0 }
+        WaitingFor::Priority { player } if player == caster
     ));
     assert_eq!(canceled.state().library_of(P1).front(), Some(&next));
     assert!(seen(canceled.state(), P0, next));
@@ -1762,10 +1780,9 @@ fn xanathar_defers_a_new_foreign_top_during_manual_cast_payment() {
     let committed = runner
         .act(GameAction::PassPriority)
         .expect("commit the payment");
-    assert!(committed
-        .events
-        .iter()
-        .any(|event| matches!(event, GameEvent::SpellCast { controller: P0, .. })));
+    assert!(committed.events.iter().any(
+        |event| matches!(event, GameEvent::SpellCast { controller, .. } if *controller == caster)
+    ));
     assert!(seen(runner.state(), P0, next));
     assert!(!seen(runner.state(), P1, next));
     assert!(!seen(runner.state(), third, next));
@@ -1924,6 +1941,10 @@ fn xanathar_repeatedly_casts_from_the_live_top_with_its_payment_concession() {
         }
     )));
     assert_eq!(runner.state().library_of(P1).front(), Some(&colorless));
+    // CR 107.4c: The available mana covers the total, but neither unit can pay {C}.
+    let pool = &runner.state().players[0].mana_pool;
+    assert_eq!(pool.total(), 2);
+    assert_eq!(pool.count_color(ManaType::Red), 2);
     assert!(
         runner
             .cast(colorless)
@@ -1945,6 +1966,159 @@ fn xanathar_repeatedly_casts_from_the_live_top_with_its_payment_concession() {
     assert!(runner.state().stack.is_empty());
     assert!(runner.state().library_of(P1).is_empty());
     assert!(runner.state().exile.is_empty());
+}
+
+#[test]
+fn xanathar_casts_tibalt_from_the_opponents_library() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let (mut scenario, _) = xanathar_scenario(2);
+    let valki = scenario.add_real_card(P1, "Valki, God of Lies", Zone::Library, db);
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+    resolve_xanathar_trigger(&mut runner);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    add_test_mana(&mut runner, P0, ManaType::Red, 7);
+    assert!(legal_actions(runner.state()).iter().any(|action| {
+        matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == valki)
+    }));
+
+    // CR 712.11b: The public cast pipeline must prompt for Tibalt's face.
+    let cast = runner.cast(valki).modal_back_face(true).commit();
+    let spell = cast.state().stack.back().expect("Tibalt on the stack");
+    assert_eq!(
+        cast.state().objects[&spell.source_id].name,
+        "Tibalt, Cosmic Impostor"
+    );
+    assert_eq!(cast.state().players[0].mana_pool.total(), 0);
+    assert!(matches!(
+        cast.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn xanathar_casts_the_adventure_from_the_opponents_library_during_upkeep() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let (mut scenario, _) = xanathar_scenario(2);
+    let giant = scenario.add_real_card(P1, "Bonecrusher Giant", Zone::Library, db);
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+    resolve_xanathar_trigger(&mut runner);
+    add_test_mana(&mut runner, P0, ManaType::Blue, 2);
+    assert!(legal_actions(runner.state()).iter().any(|action| {
+        matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == giant)
+    }));
+
+    // CR 715.3a: The instant is castable here even though its normal face isn't.
+    let cast = runner
+        .cast(giant)
+        .adventure_face(false)
+        .target_player(P1)
+        .commit();
+    let spell = cast.state().stack.back().expect("Stomp on the stack");
+    assert_eq!(cast.state().objects[&spell.source_id].name, "Stomp");
+    assert_eq!(cast.state().players[0].mana_pool.total(), 0);
+    let outcome = cast.resolve();
+    outcome.assert_life_delta(P1, -2);
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn xanathar_casts_fireblast_by_sacrificing_two_mountains() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let (mut scenario, _) = xanathar_scenario(2);
+    let fireblast = scenario.add_real_card(P1, "Fireblast", Zone::Library, db);
+    let first = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    let second = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+    resolve_xanathar_trigger(&mut runner);
+    assert!(legal_actions(runner.state()).iter().any(|action| {
+        matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == fireblast)
+    }));
+
+    // CR 118.9: The sacrifice replaces Fireblast's printed mana cost.
+    let outcome = runner
+        .cast(fireblast)
+        .accept_optional()
+        .sacrifice_with(&[first, second])
+        .target_player(P1)
+        .resolve();
+    outcome.assert_life_delta(P1, -4);
+    assert_eq!(outcome.state().graveyard_of(P0).len(), 2);
+    assert!(!outcome.state().battlefield.contains(&first));
+    assert!(!outcome.state().battlefield.contains(&second));
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn citadel_library_cast_cannot_take_fireblasts_printed_alternative_cost() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Bolas's Citadel", Zone::Battlefield, db);
+    let fireblast = scenario.add_real_card(P0, "Fireblast", Zone::Library, db);
+    let first = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    let second = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+
+    // CR 118.9a: Citadel's life payment precludes the printed sacrifice alternative.
+    let outcome = runner
+        .cast(fireblast)
+        .accept_optional()
+        .sacrifice_with(&[first, second])
+        .target_player(P1)
+        .resolve();
+    outcome.assert_life_delta(P0, -6);
+    outcome.assert_life_delta(P1, -4);
+    outcome.assert_zone(&[first, second], Zone::Battlefield);
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn xanathar_casts_opt_with_red_mana_when_future_sight_also_grants_the_cast() {
+    use engine::types::format::FormatConfig;
+
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 42);
+    scenario.at_phase(Phase::Untap);
+    scenario.add_creature_from_oracle(P0, "Xanathar, Guild Kingpin", 5, 6, XANATHAR);
+    scenario.add_real_card(P0, "Future Sight", Zone::Battlefield, db);
+    let opt = scenario.add_real_card(P0, "Opt", Zone::Library, db);
+    scenario.add_real_card(P0, "Island", Zone::Library, db);
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().library_of(P1).front(), Some(&opt));
+    announce_xanathar_trigger(&mut runner);
+    add_test_mana(&mut runner, P0, ManaType::Red, 1);
+    let opt_offered = |state: &GameState| {
+        legal_actions(state).iter().any(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == opt),
+        )
+    };
+    // CR 609.4b: Future Sight alone supplies no permission to spend red as blue.
+    assert!(!opt_offered(runner.state()));
+    resolve_xanathar_trigger(&mut runner);
+    assert!(opt_offered(runner.state()));
+    let outcome = runner.cast(opt).resolve();
+    outcome.assert_hand_drawn(P0, 1);
+    assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
 }
 
 #[test]

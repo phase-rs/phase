@@ -1677,10 +1677,11 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
             .filter(|id| seen_library_cards.insert(*id))
             .filter(|id| {
                 state.objects.get(id).is_some_and(|obj| {
-                    object_may_enter_cast_path(obj)
-                        && (top_of_library_grant_for_object(state, player, *id, CardPlayMode::Cast)
-                            .is_some()
-                            || cast_spell_face_choice_offered_from_zone(state, player, obj))
+                    (object_may_enter_cast_path(obj)
+                        && top_of_library_grant_for_object(state, player, *id, CardPlayMode::Cast)
+                            .is_some())
+                        || cast_spell_face_choice_offered_from_zone(state, player, obj)
+                        || adventure_face_choice_offered_from_zone(state, player, obj)
                 })
             }),
     );
@@ -5518,13 +5519,7 @@ pub(super) fn player_mana_spend_permission_for_optional_spell(
         .as_deref()
         .filter(|pending| pending.object_id == spell_id);
     // CR 609.4b: Apply only the concession of the permission that admitted this spell.
-    if let Some(latch) = pending
-        .and_then(|pending| pending.ability.context.top_of_library_cast_latch.as_deref())
-        .or(state
-            .active_top_of_library_cast_latch
-            .as_deref()
-            .filter(|latch| latch.spell_id == spell_id))
-    {
+    if let Some(latch) = in_flight_top_of_library_cast_latch(state, spell_id) {
         return with_static(latch.mana_spend_permission);
     }
     let casting_variant = pending.map(|pending| pending.casting_variant).or_else(|| {
@@ -7681,24 +7676,44 @@ fn top_of_library_grant_for_face<'a>(
     action: CardPlayMode,
     projected_face: Option<&GameObject>,
 ) -> Option<TopOfLibraryGrant<'a>> {
-    if obj.zone != Zone::Library
-        || !state.players.iter().any(|seat| seat.id == obj.owner)
-        || state.library_of(obj.owner).front() != Some(&obj.id)
-    {
-        return None;
-    }
+    let latch = (action == CardPlayMode::Cast)
+        .then(|| in_flight_top_of_library_cast_latch(state, obj.id))
+        .flatten();
     let mut selected = None;
-    for grant in top_of_library_grants(state, player, action).filter(|grant| {
-        grant.object_id == obj.id
-            && state.object_in_players_zone(obj, Zone::Library, grant.library_owner)
-            && grant.matches_face(state, player, projected_face)
-    }) {
+    for grant in matching_top_of_library_grants(state, player, obj, action, projected_face) {
+        if let Some(latch) = latch {
+            if grant.latch() == *latch {
+                return Some(grant);
+            }
+            continue;
+        }
         if grant.frequency.is_unlimited() {
             return Some(grant);
         }
         selected = Some(grant);
     }
     selected
+}
+
+fn matching_top_of_library_grants<'a, 'face>(
+    state: &'a GameState,
+    player: PlayerId,
+    obj: &'face GameObject,
+    action: CardPlayMode,
+    projected_face: Option<&'face GameObject>,
+) -> impl Iterator<Item = TopOfLibraryGrant<'a>> + use<'a, 'face> {
+    let is_top = obj.zone == Zone::Library
+        && state.players.iter().any(|seat| seat.id == obj.owner)
+        && state.library_of(obj.owner).front() == Some(&obj.id);
+    is_top
+        .then(|| top_of_library_grants(state, player, action))
+        .into_iter()
+        .flatten()
+        .filter(move |grant| {
+            grant.object_id == obj.id
+                && state.object_in_players_zone(obj, Zone::Library, grant.library_owner)
+                && grant.matches_face(state, player, projected_face)
+        })
 }
 
 /// CR 702.170a + CR 702.170f: Return the `(top_library_card, grant_source)` pair
@@ -7816,9 +7831,46 @@ pub(crate) fn top_of_library_alt_ability_cost_for_object(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Option<crate::types::ability::AbilityCost> {
+    if let Some(latch) = in_flight_top_of_library_cast_latch(state, object_id) {
+        return latch.alt_cost.clone();
+    }
     top_of_library_grant_for_object(state, player, object_id, CardPlayMode::Cast)?
         .alt_cost
         .cloned()
+}
+
+fn in_flight_top_of_library_cast_latch(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<&crate::types::game_state::TopOfLibraryCastLatch> {
+    let for_spell =
+        |latch: &&crate::types::game_state::TopOfLibraryCastLatch| latch.spell_id == object_id;
+    state
+        .active_top_of_library_cast_latch
+        .as_deref()
+        .filter(for_spell)
+        .or_else(|| {
+            state
+                .pending_cast
+                .as_deref()
+                .into_iter()
+                .chain(state.waiting_for.pending_cast_ref())
+                .filter_map(|pending| pending.ability.context.top_of_library_cast_latch.as_deref())
+                .find(for_spell)
+        })
+}
+
+/// CR 118.9a: A grant that replaces the mana cost precludes another alternative.
+pub(super) fn library_cast_pays_printed_mana_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    if let Some(latch) = in_flight_top_of_library_cast_latch(state, object_id) {
+        return latch.alt_cost.is_none();
+    }
+    top_of_library_grant_for_object(state, player, object_id, CardPlayMode::Cast)
+        .is_some_and(|grant| grant.alt_cost.is_none())
 }
 
 /// CR 604.2 + CR 305.1 + CR 701.17d: Find lands in the player's graveyard that
@@ -10195,6 +10247,66 @@ fn prepare_spell_cast_announced(
     object_id: ObjectId,
     variant_override: Option<CastingVariant>,
     latched_alt_cost: Option<crate::types::mana::ManaCost>,
+    casting_permission_index_override: Option<CastingPermissionIndex>,
+    mode: CastingMode,
+    announcement: Option<&crate::types::game_state::AnnouncedGraveyardPermission>,
+    election: InstanceElection<'_>,
+) -> Result<PreparedSpellCast, EngineError> {
+    let prepare = |state: &GameState| {
+        prepare_spell_cast_announced_inner(
+            state,
+            player,
+            object_id,
+            variant_override,
+            latched_alt_cost.clone(),
+            casting_permission_index_override,
+            mode,
+            announcement,
+            election,
+        )
+    };
+    if casting_permission_index_override.is_none()
+        && in_flight_top_of_library_cast_latch(state, object_id).is_none()
+    {
+        if let Some(obj) = state
+            .objects
+            .get(&object_id)
+            .filter(|obj| obj.zone == Zone::Library)
+        {
+            let mut eligible =
+                matching_top_of_library_grants(state, player, obj, CardPlayMode::Cast, None);
+            if let (Some(first), Some(second)) = (eligible.next(), eligible.next()) {
+                // CR 601.2a + CR 609.4b: Price each cast with the terms of its
+                // own grant. Prefer unlimited grants among payable routes.
+                let candidates: Vec<_> = [first, second].into_iter().chain(eligible).collect();
+                let (unlimited, bounded): (Vec<_>, Vec<_>) = candidates
+                    .into_iter()
+                    .partition(|grant| grant.frequency.is_unlimited());
+                for grant in unlimited.into_iter().chain(bounded.into_iter().rev()) {
+                    let mut priced = state.clone();
+                    priced.active_top_of_library_cast_latch = Some(Box::new(grant.latch()));
+                    if let Ok(prepared) = prepare(&priced) {
+                        if prepared.top_of_library_cast_latch
+                            == priced.active_top_of_library_cast_latch
+                            && can_cast_prepared_now_with_probe(&priced, player, &prepared, None)
+                        {
+                            return Ok(prepared);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    prepare(state)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_spell_cast_announced_inner(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    variant_override: Option<CastingVariant>,
+    latched_alt_cost: Option<ManaCost>,
     casting_permission_index_override: Option<CastingPermissionIndex>,
     mode: CastingMode,
     announcement: Option<&crate::types::game_state::AnnouncedGraveyardPermission>,
@@ -16999,6 +17111,34 @@ fn cast_face_choice_offered_from_zone(
         || (state.format_config.command_zone && obj.zone == Zone::Command && obj.is_commander)
 }
 
+/// CR 715.3a / CR 720.3a: A library permission can admit either face
+/// using that face's own characteristics.
+fn adventure_face_choice_offered_from_zone(
+    state: &GameState,
+    player: PlayerId,
+    obj: &GameObject,
+) -> bool {
+    if alternative_spell_layout(obj).is_none() {
+        return false;
+    }
+    cast_face_choice_offered_from_zone(state, obj)
+        || (obj.zone == Zone::Library
+            && (top_of_library_grant_for_object(state, player, obj.id, CardPlayMode::Cast)
+                .is_some()
+                || {
+                    let mut face = obj.clone();
+                    swap_to_alternative_spell_face(&mut face);
+                    top_of_library_grant_for_face(
+                        state,
+                        player,
+                        obj,
+                        CardPlayMode::Cast,
+                        Some(&face),
+                    )
+                    .is_some()
+                }))
+}
+
 /// CR 709.3 + CR 712.11b: Spell//spell split cards and spell//spell MDFCs need a
 /// cast-time face choice from any zone that permits casting the card, not only
 /// hand or command (#3987 — Life // Death from graveyard via Jace, Telepath
@@ -20029,12 +20169,10 @@ pub fn handle_cast_spell_with_payment_mode(
     // The parent, not casting, owns that carrier and settles it only after the
     // instructed cast window and every continuation have completed.
 
-    // CR 715.3 / CR 720.3: Adventure-family cards from hand (or a commander cast
-    // from the command zone) require choosing the normal creature face or
-    // alternative spell face.
+    // CR 715.3 / CR 720.3: Choose the normal or alternative spell face before
+    // announcing an Adventure-family card from a permitted zone.
     if let Some(obj) = state.objects.get(&object_id) {
-        if cast_face_choice_offered_from_zone(state, obj) && alternative_spell_layout(obj).is_some()
-        {
+        if adventure_face_choice_offered_from_zone(state, player, obj) {
             // CR 715.3a + CR 601.2: the prompt offers only faces castable now
             // (the same authority as its candidate list); with none it would
             // be a choice with no legal answer, so the cast is refused.
@@ -22463,8 +22601,7 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
         // CR 715.3 / CR 720.3 / CR 712.11b: Adventure, Omen, and modal DFC
         // face choices happen before target selection, so no single target-slot
         // preview exists until the face is chosen.
-        if (cast_face_choice_offered_from_zone(state, obj)
-            && alternative_spell_layout(obj).is_some())
+        if adventure_face_choice_offered_from_zone(state, player, obj)
             || cast_spell_face_choice_offered_from_zone(state, player, obj)
         {
             return Ok(Vec::new());
@@ -23010,13 +23147,14 @@ fn castable_alternative_spell_face_verdict(
     // CR 715.3a / CR 720.3a: An Adventure instant/sorcery face may be
     // castable even when `prepare_spell_cast` fails on the creature face —
     // most commonly the sorcery-speed timing gate outside main phases.
-    if alternative_spell_layout(obj).is_some() && cast_face_choice_offered_from_zone(state, obj) {
+    if adventure_face_choice_offered_from_zone(state, player, obj) {
         let mut transformed_state = state.clone();
         swap_to_alternative_spell_face(transformed_state.objects.get_mut(&object_id)?);
         if let Ok(prepared) = prepare_spell_cast(&transformed_state, player, object_id) {
             if can_cast_prepared_now_with_probe(&transformed_state, player, &prepared, None) {
                 return Some(CastableSpellVerdict {
-                    payment_state: Some(transformed_state),
+                    payment_state: prepared_payment_terms_state(&transformed_state, &prepared)
+                        .or(Some(transformed_state)),
                     prepared_cost: Some(prepared.mana_cost),
                 });
             }
@@ -23272,17 +23410,35 @@ pub(super) fn latch_payment_terms_state(
     })
 }
 
-/// CR 601.2a + CR 609.4b + CR 611.2f: `state` priced under the payment terms
-/// of the graveyard grant `prepared` is announced under, or `None` when it has
-/// none (see `GraveyardCastAuthority::payment_terms_state`).
+/// CR 601.2a + CR 609.4b + CR 611.2f: `state` priced under the terms of the
+/// library or graveyard grant elected by `prepared`, when projection is needed.
 fn prepared_payment_terms_state(
     state: &GameState,
     prepared: &PreparedSpellCast,
 ) -> Option<GameState> {
+    if let Some(priced) =
+        library_cast_payment_terms_state(state, prepared.top_of_library_cast_latch.as_deref())
+    {
+        return Some(priced);
+    }
     prepared
         .graveyard_authority
         .as_ref()
         .and_then(|resolution| resolution.authority().payment_terms_state(state))
+}
+
+/// CR 609.4b: Price an announced spell with the terms carried in its latch,
+/// including during transitions that have taken the pending cast out of state.
+pub(super) fn library_cast_payment_terms_state(
+    state: &GameState,
+    latch: Option<&crate::types::game_state::TopOfLibraryCastLatch>,
+) -> Option<GameState> {
+    let latch = latch?;
+    (in_flight_top_of_library_cast_latch(state, latch.spell_id) != Some(latch)).then(|| {
+        let mut priced = state.clone();
+        priced.active_top_of_library_cast_latch = Some(Box::new(latch.clone()));
+        priced
+    })
 }
 
 fn can_cast_prepared_now_with_probe(
@@ -23739,11 +23895,15 @@ fn can_cast_prepared_now_with_probe(
         return true;
     }
 
+    if obj.zone == Zone::Library {
+        return false;
+    }
+
     // CR 715.3a / CR 720.3a: For Adventure-family cards, also evaluate the
     // alternative spell face. The creature face may be unaffordable while the
     // spell face is castable; in that case the card is still legally castable
     // and will prompt AdventureCastChoice.
-    if alternative_spell_layout(obj).is_some() && cast_face_choice_offered_from_zone(state, obj) {
+    if adventure_face_choice_offered_from_zone(state, player, obj) {
         let mut sim = state.clone();
         if let Some(sim_obj) = sim.objects.get_mut(&prepared.object_id) {
             swap_to_alternative_spell_face(sim_obj);

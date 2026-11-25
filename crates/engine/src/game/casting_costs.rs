@@ -780,6 +780,11 @@ fn next_offered_alternative_cost(
     pending: &PendingCast,
     declined: Option<(&AbilityCost, Option<ObjectId>)>,
 ) -> Option<PayableSpellAlternativeCost> {
+    let terms_state = super::casting::library_cast_payment_terms_state(
+        state,
+        pending.ability.context.top_of_library_cast_latch.as_deref(),
+    );
+    let state = terms_state.as_ref().unwrap_or(state);
     let mut offered = offered_alternative_costs(
         state,
         player,
@@ -1746,7 +1751,11 @@ fn payable_spell_alternative_costs_at_index_with(
     // in this order (`next_offered_alternative_cost`): declining one offers the
     // next. Within a tier only the first payable option is listed, so a choice
     // among several grants of one tier is a known limitation.
-    let self_option_reaches_cast = (own_card && origin_zone == Zone::Hand) || impulse_exile_cast;
+    let printed_library_cast = origin_zone == Zone::Library
+        && casting_permission_index.is_none()
+        && super::casting::library_cast_pays_printed_mana_cost(state, player, object_id);
+    let self_option_reaches_cast =
+        (own_card && origin_zone == Zone::Hand) || impulse_exile_cast || printed_library_cast;
     let self_option = self_option_reaches_cast
         .then(|| obj.casting_options.iter())
         .into_iter()
@@ -10903,10 +10912,15 @@ fn check_additional_cost_or_pay_with_kept_cost(
     // pays the alternative cost, declining pays the printed mana cost as the
     // fallback branch.
     // CR 118.9a: never over a cast whose method or permission already elected one.
+    let library_terms = super::casting::library_cast_payment_terms_state(
+        state,
+        ability.context.top_of_library_cast_latch.as_deref(),
+    );
+    let terms_state = library_terms.as_ref().unwrap_or(state);
     if lock.alternative_cost_election
         == crate::types::game_state::SpellAlternativeCostElection::Undecided
         && !super::casting::cast_has_elected_alternative_cost(
-            state,
+            terms_state,
             player,
             object_id,
             casting_permission_index,
@@ -10917,7 +10931,7 @@ fn check_additional_cost_or_pay_with_kept_cost(
         // reaches `continue_cost_declarations`), so a matching Defiler that
         // can still be announced counts toward the alternative's payability.
         let alt_cost = select_offered_alternative_cost(
-            state,
+            terms_state,
             player,
             object_id,
             casting_variant,
