@@ -206,6 +206,16 @@ fn resolution_window_linked_batch_candidates(
         .chain_tracked_set_id
         .and_then(|id| state.tracked_object_sets.get(&id))?;
     let linked = crate::game::players::linked_exile_cards_for_source(state, source_id);
+    let linked_ids: HashSet<ObjectId> = linked.iter().map(|link| link.exiled_id).collect();
+    // CR 608.2c: the active set is authoritative only when the whole
+    // published batch is linked to this source. A stale chain set can contain
+    // one of the source's cards alongside an unrelated producer's cards; using
+    // its filtered intersection would silently narrow a source-anchored pool.
+    // In that case, return `None` so the caller can use the durable linked
+    // ledger instead.
+    if members.iter().any(|id| !linked_ids.contains(id)) {
+        return None;
+    }
     let mut seen = HashSet::new();
     Some(
         members
@@ -910,8 +920,21 @@ pub fn resolve(
         if !exact_bound_batch {
             if let Some(active_batch) =
                 resolution_window_linked_batch_candidates(state, ability.source_id)
+                    .filter(|ids| !ids.is_empty())
             {
                 target_ids = active_batch;
+            } else if target_ids.is_empty() && target_filter.references_exiled_by_source() {
+                // CR 607.2a + CR 608.2g: a source-anchored plural anaphor can
+                // open a one-card resolution window over the source's durable
+                // linked-exile ledger (Evercoat Ursine). The active batch is
+                // authoritative when this ability follows an exile in the
+                // same resolution; when it is absent, use the same fallback
+                // authority as the singular linked-exile cast path.
+                if let ExiledBySourceBinding::LinkedExile(ids) =
+                    exiled_by_source_fallback_binding(state, ability, target_filter)
+                {
+                    target_ids = ids;
+                }
             }
         }
     }

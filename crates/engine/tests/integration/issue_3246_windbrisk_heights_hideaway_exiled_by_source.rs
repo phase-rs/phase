@@ -27,9 +27,9 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastOfferKind, WaitingFor};
 use engine::types::identifiers::{ObjectId, TrackedSetId};
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -267,4 +267,189 @@ fn windbrisk_heights_plays_correct_hidden_card_across_unrelated_tracked_set_acti
         Some(Zone::Exile),
         "the unrelated decoy must be untouched by Windbrisk's activation"
     );
+}
+
+/// CR 603.4 + CR 607.2a + CR 608.2g + CR 702.75a: Evercoat Ursine's
+/// combat-damage trigger must offer exactly one card from its own Hideaway
+/// exile links. The exact printed Oracle text is parsed through the production
+/// scenario pipeline; no ability AST is constructed by this test.
+#[test]
+fn evercoat_ursine_plays_one_linked_hideaway_card_after_combat_damage() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    const EVERCOAT_URSINE: &str = "Trample
+Hideaway 3, hideaway 3 (When this creature enters, look at the top three cards of your library, exile one face down, then put the rest on the bottom in a random order. Then do it again.)
+Whenever this creature deals combat damage to a player, if there are cards exiled with it, you may play one of them without paying its mana cost.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ursine = scenario
+        .add_creature_to_hand(P0, "Evercoat Ursine", 4, 4)
+        .from_oracle_text(EVERCOAT_URSINE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let _hidden_a = scenario.add_real_card(P0, "Shock", Zone::Library, db);
+    let _hidden_b = scenario.add_real_card(P0, "Lightning Bolt", Zone::Library, db);
+    for _ in 0..4 {
+        scenario.add_real_card(P0, "Forest", Zone::Library, db);
+        scenario.add_real_card(P1, "Forest", Zone::Library, db);
+    }
+    let decoy = scenario.add_real_card(P0, "Shock", Zone::Exile, db);
+
+    let mut runner = scenario.build();
+    runner.cast(ursine).commit();
+
+    // Drive both real Hideaway ETB triggers. The selected cards are recorded
+    // from the production DigChoice prompts, so the test remains independent
+    // of the library ordering chosen by the scenario builder.
+    let mut hidden = Vec::new();
+    let mut hideaway_setup_complete = false;
+    for _ in 0..128 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order the Hideaway triggers");
+            }
+            WaitingFor::DigChoice { cards, .. } => {
+                let selected = cards[0];
+                hidden.push(selected);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![selected],
+                    })
+                    .expect("Hideaway selection accepted");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() && hidden.len() == 2 => {
+                hideaway_setup_complete = true;
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass while resolving Hideaway");
+            }
+            other => panic!("unexpected Hideaway state: {other:?}"),
+        }
+    }
+    assert_eq!(
+        hidden.len(),
+        2,
+        "both Hideaway instances must exile one card each"
+    );
+    assert!(
+        hideaway_setup_complete,
+        "both Hideaway instances must finish before combat setup"
+    );
+    let linked_ids: Vec<_> = runner
+        .state()
+        .exile_links
+        .iter()
+        .filter(|link| link.source_id == ursine)
+        .map(|link| link.exiled_id)
+        .collect();
+    assert_eq!(
+        linked_ids.len(),
+        hidden.len(),
+        "both Hideaway selections must be source-linked"
+    );
+    assert!(
+        hidden.iter().all(|id| linked_ids.contains(id))
+            && linked_ids.iter().all(|id| hidden.contains(id)),
+        "the source-linked exile ledger must contain exactly both Hideaway selections"
+    );
+
+    let life_before = runner.state().players[P1.0 as usize].life;
+    runner.advance_to_end_step();
+    runner.advance_to_combat();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareAttackers { .. }
+    ));
+    runner
+        .declare_attackers(&[(ursine, AttackTarget::Player(P1))])
+        .expect("Evercoat Ursine attacks P1");
+
+    let mut offered = false;
+    let mut selected = None;
+    for _ in 0..128 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .declare_blockers(&[])
+                    .expect("P1 declares no blockers");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept Evercoat Ursine's optional cast");
+            }
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { candidates, .. },
+                ..
+            } => {
+                offered = true;
+                assert!(
+                    candidates
+                        .iter()
+                        .all(|candidate| hidden.contains(candidate)),
+                    "the linked-exile window must not offer unrelated cards: {candidates:?}"
+                );
+                assert!(!candidates.contains(&decoy));
+                let choice = hidden
+                    .iter()
+                    .copied()
+                    .find(|candidate| candidates.contains(candidate))
+                    .expect("a linked Hideaway card must be offered");
+                selected = Some(choice);
+                runner
+                    .act(GameAction::FreeCastWindowChoice {
+                        selection: Some(choice),
+                    })
+                    .expect("choose one linked Hideaway card");
+            }
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(P1)),
+                    })
+                    .expect("choose Shock or Lightning Bolt's target");
+            }
+            WaitingFor::Priority { .. }
+                if runner.state().stack.is_empty()
+                    && matches!(
+                        runner.state().phase,
+                        Phase::EndCombat | Phase::PostCombatMain
+                    ) =>
+            {
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass after combat damage");
+            }
+            other => panic!("unexpected Evercoat Ursine state: {other:?}"),
+        }
+    }
+
+    let selected = selected.expect("the cast window must select a linked card");
+    assert!(
+        offered,
+        "reach-guard: combat damage must reach the linked cast window"
+    );
+    assert!(
+        runner.state().players[P1.0 as usize].life < life_before,
+        "Evercoat Ursine must deal combat damage before its trigger resolves"
+    );
+    assert_eq!(runner.state().objects[&selected].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&decoy].zone, Zone::Exile);
+    for hidden_id in hidden {
+        if hidden_id != selected {
+            assert_eq!(runner.state().objects[&hidden_id].zone, Zone::Exile);
+        }
+    }
 }
