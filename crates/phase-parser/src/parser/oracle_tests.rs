@@ -10471,21 +10471,56 @@ fn elspeth_tirel_minus_five_excludes_lands_and_tokens() {
     );
 }
 
-// GitHub #4710 CI hostile fixture (Flame Sweep, caught by CI's parse-diff
-// coverage report on the PR fixing this class): "Flame Sweep deals 2 damage
-// to each creature except for creatures you control with flying." The
-// exception here is a FILTERED SUBSET ("creatures you control with flying"),
-// not a bare type list — the naive suffix parser accepted "creatures" as a
-// recognized type word and stopped at "you" (not a valid list separator),
-// silently emitting `Non(Creature)` alongside the base `Creature` filter: a
-// self-contradictory filter matching zero creatures, breaking the card's
-// damage effect entirely. `parse_except_for_type_list_suffix` must decline
-// the whole clause when trailing text remains after the parsed list items
-// (this card's flying-exception itself stays an out-of-scope, pre-existing
-// gap — the base filter must simply be left as `Creature`, matching
-// pre-fix/baseline behavior, not made worse).
+fn assert_controlled_subset_damage(ability: &AbilityDefinition, damage: i32, subset: TypedFilter) {
+    assert_eq!(
+        ability.effect.as_ref(),
+        &Effect::DamageAll {
+            amount: QuantityExpr::Fixed { value: damage },
+            target: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::Not {
+                        filter: Box::new(TargetFilter::Typed(
+                            subset.controller(ControllerRef::You)
+                        )),
+                    },
+                ],
+            },
+            player_filter: None,
+            damage_source: None,
+        }
+    );
+    assert!(ability.sub_ability.is_none());
+}
+
+// SHAPE: CR 608.2c + CR 109.5. The −3 excludes the tokens its activating
+// player controls from the positive creature population.
 #[test]
-fn flame_sweep_filtered_subset_exception_does_not_corrupt_base_filter() {
+fn ajani_unrelenting_minus_three_parses_controlled_token_exception() {
+    let r = parse(
+        "Whenever you activate a loyalty ability, create a 2/2 colorless Wizard Soldier creature token named Cadet.\n[+1]: Creatures you control get +1/+0 and gain haste until end of turn.\n[−2]: Discard your hand, then draw a card for each creature you control.\n[−3]: Ajani deals 4 damage to each creature except for tokens you control.",
+        "Ajani Unrelenting",
+        &[],
+        &["Planeswalker"],
+        &["Ajani"],
+    );
+    let minus_three = r
+        .abilities
+        .iter()
+        .find(|ability| matches!(ability.cost, Some(AbilityCost::Loyalty { amount: -3 })))
+        .expect("Ajani's parsed −3 loyalty ability");
+    assert_controlled_subset_damage(
+        minus_three,
+        4,
+        TypedFilter::default().properties(vec![FilterProp::Token]),
+    );
+    assert!(r.parse_warnings.is_empty(), "{:?}", r.parse_warnings);
+}
+
+// SHAPE: CR 608.2c + CR 109.5. All three exception criteria belong inside
+// one negated filter. The base remains the positive creature type (issue #4710).
+#[test]
+fn flame_sweep_parses_controlled_flying_exception() {
     let r = parse(
         "Flame Sweep deals 2 damage to each creature except for creatures you control with flying.",
         "Flame Sweep",
@@ -10494,18 +10529,14 @@ fn flame_sweep_filtered_subset_exception_does_not_corrupt_base_filter() {
         &[],
     );
     assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
-    let Effect::DamageAll { target, .. } = &*r.abilities[0].effect else {
-        panic!("expected DamageAll effect, got {:?}", r.abilities[0].effect);
-    };
-    let TargetFilter::Typed(typed) = target else {
-        panic!("expected Typed filter, got {target:?}");
-    };
-    assert_eq!(
-        typed.type_filters,
-        vec![TypeFilter::Creature],
-        "the type-list suffix must decline this filtered-subset exception, \
-         not emit a self-contradictory Non(Creature) alongside Creature"
+    assert_controlled_subset_damage(
+        &r.abilities[0],
+        2,
+        TypedFilter::creature().properties(vec![FilterProp::WithKeyword {
+            value: Keyword::Flying,
+        }]),
     );
+    assert!(r.parse_warnings.is_empty(), "{:?}", r.parse_warnings);
 }
 
 #[test]
