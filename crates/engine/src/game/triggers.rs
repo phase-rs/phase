@@ -7174,7 +7174,7 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority_for(
         .filter(|event| owner_collects_occurrence(collector, event))
         .cloned()
         .collect();
-    let occurrences = events
+    let occurrences: Vec<_> = events
         .iter()
         .enumerate()
         .filter_map(|(index, event)| {
@@ -7187,27 +7187,6 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority_for(
                 .flatten()
                 .map(|owned_index| {
                     unclaimed_owned_zone_events.remove(owned_index);
-                    // CR 603.2c + CR 603.7b: this owner collected the ordinary
-                    // triggers. Its claim must leave a watched death available
-                    // to the delayed collector, including a merged departure
-                    // delivered by an owner-controlled component batch.
-                    let scope = if matches!(scope, ConsumedTriggerEventScope::AllCollectors)
-                        && matches!(
-                            event,
-                            GameEvent::ZoneChanged {
-                                to: Zone::Graveyard,
-                                ..
-                            }
-                        )
-                        && recorded_battlefield_departure_pin(event).is_some_and(|pin| {
-                            state.delayed_triggers.iter().any(|delayed| {
-                                delayed.ability.context.delayed_watch_incarnation == Some(pin)
-                            })
-                        }) {
-                        ConsumedTriggerEventScope::OrdinaryCollectorsOnly
-                    } else {
-                        scope
-                    };
                     ConsumedTriggerEventOccurrence {
                         event: event.clone(),
                         occurrence: trigger_event_occurrence(events, index),
@@ -7216,6 +7195,49 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority_for(
                 })
         })
         .collect();
+    // CR 603.2c + CR 603.7b: an owner that closes the occurrence for both
+    // collectors delivers its recorded deaths directly to incarnation-pinned
+    // watchers. Keep the complete claim for all other watchers.
+    if scope == ConsumedTriggerEventScope::AllCollectors {
+        let mut deaths = Vec::new();
+        let mut pins = HashSet::new();
+        for claim in &occurrences {
+            if matches!(
+                claim.event,
+                GameEvent::ZoneChanged {
+                    to: Zone::Graveyard,
+                    ..
+                }
+            ) {
+                if let Some(pin) = recorded_battlefield_departure_pin(&claim.event) {
+                    pins.insert(pin);
+                    deaths.push(claim.event.clone());
+                }
+            }
+        }
+        if !deaths.is_empty() {
+            let matched = collect_matching_delayed_triggers_with(
+                state,
+                &deaths,
+                DelayedTriggerEventScope::Any,
+                AsEntersRollScan::Held,
+                Some(&|delayed| {
+                    delayed
+                        .ability
+                        .context
+                        .delayed_watch_incarnation
+                        .is_some_and(|pin| pins.contains(&pin))
+                }),
+            );
+            resolve_and_apply_trigger_collection(
+                state,
+                ResolvedTriggerCollection::DeferPending {
+                    contexts: matched.contexts,
+                },
+            )
+            .expect("logical departure trigger collection must have a live cause");
+        }
+    }
     resolve_and_apply_trigger_collection(
         state,
         ResolvedTriggerCollection::ConsumeBeforePriority { occurrences },
@@ -12009,6 +12031,7 @@ pub(crate) fn collect_as_enters_roll_observers(
         rolls,
         DelayedTriggerEventScope::Any,
         AsEntersRollScan::AtEmission,
+        None,
     )
     .contexts;
     // CR 603.2 + CR 603.10 + CR 603.6d + CR 611.3b: the roll triggers what is on
@@ -15875,6 +15898,7 @@ pub(crate) fn collect_activation_event_at_boundary(
             seed,
             raw_batch,
             DelayedTriggerEventScope::Any,
+            None,
         );
     // Anything irreversible the observation did binds it: an admitted trigger
     // (even one later pruned), a collected context, or a one-shot delayed
@@ -20723,7 +20747,7 @@ fn collect_matching_delayed_triggers(
     events: &[GameEvent],
     scope: DelayedTriggerEventScope,
 ) -> DelayedTriggerMatch {
-    collect_matching_delayed_triggers_with(state, events, scope, AsEntersRollScan::Held)
+    collect_matching_delayed_triggers_with(state, events, scope, AsEntersRollScan::Held, None)
 }
 
 /// [`collect_matching_delayed_triggers`], naming which scan an as-enters roll
@@ -20734,6 +20758,7 @@ fn collect_matching_delayed_triggers_with(
     events: &[GameEvent],
     scope: DelayedTriggerEventScope,
     scan: AsEntersRollScan,
+    admits_watcher: Option<&dyn Fn(&DelayedTrigger) -> bool>,
 ) -> DelayedTriggerMatch {
     if state.delayed_triggers.is_empty() && state.epic_effects.is_empty() {
         return DelayedTriggerMatch::default();
@@ -20771,6 +20796,9 @@ fn collect_matching_delayed_triggers_with(
     };
 
     for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
+        if admits_watcher.is_some_and(|admits| !admits(delayed)) {
+            continue;
+        }
         if let Some(firings) = delayed_whenever_event_firings(
             state,
             delayed,
@@ -20925,6 +20953,9 @@ fn collect_matching_delayed_triggers_with(
             state.canonical_epic_effect_id(index),
             effect,
         );
+        if admits_watcher.is_some_and(|admits| !admits(&synth)) {
+            continue;
+        }
         if let Some((event_index, trigger_event)) = delayed_trigger_event_with_index(
             &synth.condition,
             events,
@@ -21209,6 +21240,7 @@ fn collect_pending_and_delayed_triggers_for_batch(
         normal_pending,
         delayed_events,
         delayed_scope,
+        None,
     )
     .0
 }
@@ -21221,13 +21253,20 @@ fn collect_pending_and_delayed_triggers_reporting_terminalized(
     normal_pending: Vec<PendingTriggerContext>,
     delayed_events: &[GameEvent],
     delayed_scope: DelayedTriggerEventScope,
+    admits_watcher: Option<&dyn Fn(&DelayedTrigger) -> bool>,
 ) -> (CollectedTriggerContextBatch, usize) {
     let normal_was_non_empty = !normal_pending.is_empty();
     let DelayedTriggerMatch {
         contexts: delayed_pending,
         consumed: delayed_consumed,
         terminalized_unfired,
-    } = collect_matching_delayed_triggers(state, delayed_events, delayed_scope);
+    } = collect_matching_delayed_triggers_with(
+        state,
+        delayed_events,
+        delayed_scope,
+        AsEntersRollScan::Held,
+        admits_watcher,
+    );
     let mut contexts = normal_pending;
     contexts.extend(delayed_pending);
     // CR 603.3b + CR 101.4: placement part, then APNAP order.
@@ -21290,6 +21329,7 @@ pub(crate) fn process_collected_triggers_with_delayed_phase_events(
         normal_pending,
         delayed_events,
         DelayedTriggerEventScope::PhaseChangedOnly,
+        None,
         events_out,
     )
 }
@@ -21307,6 +21347,26 @@ pub(crate) fn process_collected_triggers_with_delayed_events(
         normal_pending,
         delayed_events,
         DelayedTriggerEventScope::Any,
+        None,
+        events_out,
+    )
+}
+
+/// CR 603.2c + CR 603.7b: incarnation-pinned watchers already observed the
+/// answer through the logical owner or the action's occurrence journal. The
+/// raw SBA answer scan still delivers its events to legacy watchers.
+pub(super) fn process_sba_answer_trigger_batch(
+    state: &mut GameState,
+    pending: Vec<PendingTriggerContext>,
+    answer: &[GameEvent],
+    events_out: &mut Vec<GameEvent>,
+) -> TriggerBatchOutcome {
+    process_collected_triggers_with_delayed_events_scoped(
+        state,
+        pending,
+        answer,
+        DelayedTriggerEventScope::Any,
+        Some(&|delayed| delayed.ability.context.delayed_watch_incarnation.is_none()),
         events_out,
     )
 }
@@ -21316,6 +21376,7 @@ fn process_collected_triggers_with_delayed_events_scoped(
     normal_pending: Vec<PendingTriggerContext>,
     delayed_events: &[GameEvent],
     delayed_scope: DelayedTriggerEventScope,
+    admits_watcher: Option<&dyn Fn(&DelayedTrigger) -> bool>,
     events_out: &mut Vec<GameEvent>,
 ) -> TriggerBatchOutcome {
     let stack_before = state.stack.len();
@@ -21328,12 +21389,14 @@ fn process_collected_triggers_with_delayed_events_scoped(
         delayed_events: _,
         delayed_consumed: consumed_events,
         normal_was_non_empty,
-    } = collect_pending_and_delayed_triggers_for_batch(
+    } = collect_pending_and_delayed_triggers_reporting_terminalized(
         state,
         normal_pending,
         delayed_events,
         delayed_scope,
-    );
+        admits_watcher,
+    )
+    .0;
     terminalize_unmatched_reflexives_for_closed_batch(state, delayed_events, delayed_scope);
 
     // CR 603.3b (issue #770 cluster): a truly-empty batch for *this* event
@@ -21408,6 +21471,7 @@ pub(crate) fn process_triggers_with_delayed_declaration_events(
         normal_pending,
         events,
         DelayedTriggerEventScope::DeclarationSettlement,
+        None,
         events_out,
     )
 }

@@ -968,6 +968,7 @@ fn fatal_fissure_targets_a_land_on_the_watched_death_and_preserves_its_return() 
     let victim = scenario.add_creature(P1, "Announced creature", 2, 2).id();
     let land = scenario.add_basic_land(P0, ManaColor::Black);
     let bystander = scenario.add_basic_land(P0, ManaColor::Black);
+    let opposing_land = scenario.add_basic_land(P1, ManaColor::Black);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Earthbend watcher", true, FATAL_FISSURE)
         .from_oracle_text_with_keywords(&["Earthbend"], FATAL_FISSURE)
@@ -1004,17 +1005,38 @@ fn fatal_fissure_targets_a_land_on_the_watched_death_and_preserves_its_return() 
         .act(GameAction::PassPriority)
         .expect("resolve removal");
     assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::TriggerTargetSelection { player: P0, .. }
-    ));
+    // CR 701.66a: Earthbend targets a land controlled by its controller.
+    let WaitingFor::TriggerTargetSelection {
+        player: P0,
+        target_slots,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("P0 must choose the Earthbend target");
+    };
+    let [slot] = target_slots.as_slice() else {
+        panic!("Earthbend has one target slot");
+    };
+    assert_eq!(slot.legal_targets.len(), 2);
+    assert!(slot.legal_targets.contains(&TargetRef::Object(land)));
+    assert!(slot.legal_targets.contains(&TargetRef::Object(bystander)));
+    assert!(!slot
+        .legal_targets
+        .contains(&TargetRef::Object(opposing_land)));
     runner
         .act(GameAction::ChooseTarget {
             target: Some(TargetRef::Object(land)),
         })
         .expect("choose the Earthbend land");
     runner.advance_until_stack_empty();
-    assert_eq!(runner.state().objects[&land].power, Some(4));
+    // CR 701.66a: the creature keeps its land type and gains haste and counters.
+    let animated_land = &runner.state().objects[&land];
+    assert!(animated_land
+        .card_types
+        .core_types
+        .contains(&engine::types::card_type::CoreType::Land));
+    assert!(animated_land.has_keyword(&engine::types::Keyword::Haste));
+    assert_eq!(animated_land.power, Some(4));
     assert_eq!(
         runner.state().objects[&land]
             .counters
@@ -1191,10 +1213,12 @@ fn searing_blood_reads_the_selected_creatures_controller_at_death() {
 
 #[test]
 fn printed_pump_watchers_fire_only_for_the_selected_creature_this_turn() {
+    use engine::types::mana::ManaColor;
+
     for (oracle, bonus, token) in [
         ("Target creature gets +2/+0 until end of turn. When that creature dies this turn, you draw a card.", 2, None),
-        ("Target creature gets +1/+0 until end of turn. When that creature dies this turn, create a 3/2 red and white Spirit creature token.", 1, Some("Spirit")),
-        ("Target creature gets +1/+0 until end of turn. When that creature dies this turn, create a 3/2 colorless Eldrazi Horror creature token.", 1, Some("Eldrazi")),
+        ("Target creature gets +1/+0 until end of turn. When that creature dies this turn, create a 3/2 red and white Spirit creature token.", 1, Some((&["Spirit"][..], &[ManaColor::Red, ManaColor::White][..]))),
+        ("Target creature gets +1/+0 until end of turn. When that creature dies this turn, create a 3/2 colorless Eldrazi Horror creature token.", 1, Some((&["Eldrazi", "Horror"][..], &[][..]))),
     ] {
         for late in [false, true] {
             let mut scenario = GameScenario::new();
@@ -1234,12 +1258,18 @@ fn printed_pump_watchers_fire_only_for_the_selected_creature_this_turn() {
             let death = runner.cast(destroy_selected).target_object(selected).resolve();
             assert_eq!(death.zone_of(selected), Zone::Graveyard);
             let created: Vec<_> = death.state().objects.values().filter(|object| object.is_token).collect();
-            if let (false, Some(subtype)) = (late, token) {
+            if let (false, Some((subtypes, colors))) = (late, token) {
                 let [created] = created.as_slice() else {
                     panic!("the selected death must create exactly one token");
                 };
+                // CR 111.3: the effect defines the token's characteristics.
                 assert_eq!((created.power, created.toughness), (Some(3), Some(2)));
-                assert!(created.card_types.subtypes.iter().any(|actual| actual == subtype));
+                assert_eq!(created.zone, Zone::Battlefield);
+                assert_eq!(created.card_types.core_types, [engine::types::card_type::CoreType::Creature]);
+                assert_eq!(created.card_types.subtypes.len(), subtypes.len());
+                assert!(subtypes.iter().all(|expected| created.card_types.subtypes.iter().any(|actual| actual == expected)));
+                assert_eq!(created.color.len(), colors.len());
+                assert!(colors.iter().all(|color| created.color.contains(color)));
             } else {
                 assert!(created.is_empty());
             }

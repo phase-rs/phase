@@ -981,9 +981,7 @@ fn place_priority_batch(
         return None;
     }
     let outcome = match answer_delayed_events {
-        Some(delayed) => {
-            triggers::process_collected_triggers_with_delayed_events(state, batch, delayed, events)
-        }
+        Some(delayed) => triggers::process_sba_answer_trigger_batch(state, batch, delayed, events),
         None => triggers::process_collected_triggers_with_delayed_phase_events(
             state,
             batch,

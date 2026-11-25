@@ -888,6 +888,15 @@ fn merged_phytotitan_survivor_put_back_before_its_trigger_still_returns_its_comp
 
 #[test]
 fn together_forever_returns_a_merged_component_after_cremate_exiles_the_survivor() {
+    together_forever_merged_death(false);
+}
+
+#[test]
+fn together_forever_does_not_open_a_merged_death_to_scarblades_malice() {
+    together_forever_merged_death(true);
+}
+
+fn together_forever_merged_death(with_scarblades_malice: bool) {
     let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
         .expect("integration card fixture must load");
     let mut scenario = GameScenario::new();
@@ -908,6 +917,14 @@ fn together_forever_returns_a_merged_component_after_cremate_exiles_the_survivor
     scenario.with_counter(host, engine::types::counter::CounterType::Plus1Plus1, 1);
     let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
     let murder = add_free_spell(&mut scenario, P0, "Murder", "Destroy target creature.");
+    let scarblades_malice = with_scarblades_malice.then(|| {
+        add_free_spell(
+            &mut scenario,
+            P0,
+            "Scarblade's Malice",
+            "Target creature you control gains deathtouch and lifelink until end of turn. When that creature dies this turn, create a 2/2 black and green Elf creature token.",
+        )
+    });
     let cremate = add_free_spell(&mut scenario, P0, "Cremate", CREMATE);
     scenario.add_card_to_library_top(P0, "Cremate draw");
     let mut runner = scenario.build();
@@ -921,6 +938,14 @@ fn together_forever_returns_a_merged_component_after_cremate_exiles_the_survivor
         .delayed_watch_incarnation
         .expect("installed incarnation pin");
     assert_eq!(watched, incarnation(&runner, host));
+    if let Some(spell) = scarblades_malice {
+        runner.cast(spell).target_object(host).resolve();
+        assert!(runner.state().delayed_triggers.iter().any(|delayed| {
+            delayed.source_id == spell
+                && delayed.ability.context.delayed_watch_incarnation.is_none()
+                && matches!(delayed.condition, DelayedTriggerCondition::WhenDies { .. })
+        }));
+    }
     runner.cast(murder).target_object(host).commit();
     runner
         .act(GameAction::PassPriority)
@@ -944,6 +969,16 @@ fn together_forever_returns_a_merged_component_after_cremate_exiles_the_survivor
         Some(watched),
         "the firing must see the watched departure"
     );
+    if let Some(spell) = scarblades_malice {
+        assert!(
+            runner
+                .state()
+                .delayed_triggers
+                .iter()
+                .any(|delayed| delayed.source_id == spell),
+            "the legacy watcher must remain installed, as it did before the merged-death handoff"
+        );
+    }
     assert_eq!(
         runner.state().stack.len(),
         1,
@@ -960,6 +995,15 @@ fn together_forever_returns_a_merged_component_after_cremate_exiles_the_survivor
     // CR 400.7e + CR 730.3c + CR 609.3: each still-findable arrival returns.
     assert_eq!(zone(&runner, host), Zone::Exile);
     assert!(runner.state().players[0].hand.contains(&gemrazer));
+    assert!(!runner.state().battlefield.iter().any(|id| {
+        let object = &runner.state().objects[id];
+        object.is_token
+            && object
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Elf")
+    }));
     assert!(runner.state().stack.is_empty());
     assert!(matches!(
         runner.state().waiting_for,

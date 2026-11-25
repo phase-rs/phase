@@ -2218,6 +2218,8 @@ fn cleanup_loss_board(commander: bool, seed_older: bool) -> CleanupLossBoard {
             CounterType::Minus1Minus1,
             if commander { 2 } else { 1 },
         );
+    // Structural control derived from Together Forever, the nearest printed precedent.
+    // Removing "this turn" keeps the legacy watcher installed across cleanup.
     let delayed_source = sc.add_enchantment_from_oracle(
         P0,
         "Unwindowed cleanup watcher",
