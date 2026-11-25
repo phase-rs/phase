@@ -347,6 +347,7 @@ mod mana_target_recipient_and_count_source;
 mod mana_values_among_graveyard_condition;
 mod mandatory_reflexive_modal_parent;
 mod manifest_dread_that_creature_anaphor;
+mod marauding_raptor_dinosaur_pump;
 mod maraxus_team_pump_anthem;
 mod martial_impetus_other_attacker_exclusion_6017;
 mod martyr_reveal_x_cost;
