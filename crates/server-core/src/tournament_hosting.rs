@@ -33,7 +33,7 @@ use seat_reducer::types::DeckChoice;
 use tracing::warn;
 
 use crate::deck_resolve::{self, deck_data_from_payload};
-use crate::session::SessionManager;
+use crate::session::{FullSessionKey, SessionManager};
 
 /// Binds hosted tournament pairings to the game sessions serving them. The
 /// tournament core is deliberately `game_code`-free (see `tournament.rs`
@@ -42,8 +42,8 @@ use crate::session::SessionManager;
 /// the native server may recover after a result-less retirement.
 #[derive(Debug, Default)]
 pub struct TournamentHostingManager {
-    /// `(tournament_code, pairing_id) -> spawned game_code`.
-    active_matches: HashMap<(String, PairingId), String>,
+    /// `(tournament_code, pairing_id) -> spawned Full lifetime`.
+    active_matches: HashMap<(String, PairingId), FullSessionKey>,
     /// Pairings for which the server removed a live binding without a result.
     pending_rehosts: HashMap<String, HashSet<PairingId>>,
 }
@@ -75,15 +75,23 @@ impl TournamentHostingManager {
     pub fn game_code_for(&self, code: &str, pairing_id: PairingId) -> Option<&str> {
         self.active_matches
             .get(&(code.to_string(), pairing_id))
-            .map(String::as_str)
+            .map(|key| key.game_code.as_str())
     }
 
-    /// Reverse lookup: the `(tournament, pairing)` a spawned game serves — the
-    /// game-over handoff's entry point (mirrors `draft_for_game_code`).
+    /// Read-only code projection. Work belonging to a particular game
+    /// lifetime uses [`Self::tournament_for_session`].
     pub fn tournament_for_game_code(&self, game_code: &str) -> Option<(String, PairingId)> {
         self.active_matches
             .iter()
-            .find(|(_, gc)| gc.as_str() == game_code)
+            .find(|(_, key)| key.game_code == game_code)
+            .map(|((code, pairing_id), _)| (code.clone(), *pairing_id))
+    }
+
+    /// The pairing bound to the exact Full game lifetime.
+    pub fn tournament_for_session(&self, key: &FullSessionKey) -> Option<(String, PairingId)> {
+        self.active_matches
+            .iter()
+            .find(|(_, active)| *active == key)
             .map(|((code, pairing_id), _)| (code.clone(), *pairing_id))
     }
 
@@ -91,17 +99,17 @@ impl TournamentHostingManager {
     /// handed back to the core, so the freed pairing can never re-resolve to a
     /// torn-down game. The core's `hosted` provenance is durable and untouched;
     /// only this server-layer binding is dropped.
-    ///
-    pub fn forget(&mut self, code: &str, pairing_id: PairingId) -> Option<String> {
-        self.active_matches.remove(&(code.to_string(), pairing_id))
+    pub fn forget(&mut self, key: &FullSessionKey) -> Option<FullSessionKey> {
+        let pairing = self.tournament_for_session(key)?;
+        self.active_matches.remove(&pairing)
     }
 
     /// Record the `(tournament, pairing) -> game_code` binding for a spawned
     /// match. Called by the caller only AFTER the game's Full runtime is bound
     /// and the pairing is marked hosted, so a binding never outruns a live game.
-    pub fn bind(&mut self, code: &str, pairing_id: PairingId, game_code: String) {
+    pub fn bind(&mut self, code: &str, pairing_id: PairingId, key: FullSessionKey) {
         self.active_matches
-            .insert((code.to_string(), pairing_id), game_code);
+            .insert((code.to_string(), pairing_id), key);
         if let Some(pending) = self.pending_rehosts.get_mut(code) {
             pending.remove(&pairing_id);
             if pending.is_empty() {
@@ -112,8 +120,8 @@ impl TournamentHostingManager {
 
     /// Release the exact binding of a game retired without a reported result.
     /// The trusted reaper may serve the freed pairing if it is still ready.
-    pub fn queue_rehost(&mut self, game_code: &str) -> Option<(String, PairingId)> {
-        let key = self.tournament_for_game_code(game_code)?;
+    pub fn queue_rehost(&mut self, retired: &FullSessionKey) -> Option<(String, PairingId)> {
+        let key = self.tournament_for_session(retired)?;
         self.active_matches.remove(&key);
         self.pending_rehosts
             .entry(key.0.clone())
@@ -161,11 +169,11 @@ impl TournamentHostingManager {
     }
 
     /// Drop every binding for a whole tournament and return the freed game
-    /// codes, so a lifecycle teardown (tournament expiry/deletion) can remove
+    /// runtime keys, so a lifecycle teardown (tournament expiry/deletion) can remove
     /// their sessions. The core's durable `hosted` provenance is untouched —
     /// this only releases the server-layer bindings and hands back the games to
     /// reap.
-    pub fn forget_tournament(&mut self, code: &str) -> Vec<String> {
+    pub fn forget_tournament(&mut self, code: &str) -> Vec<FullSessionKey> {
         self.pending_rehosts.remove(code);
         let keys: Vec<(String, PairingId)> = self
             .active_matches
@@ -514,14 +522,12 @@ mod tests {
         assert_eq!(ready.len(), 2);
         let pairing = ready[0].pairing_id;
         tournaments.begin_hosting("T", pairing, &env).unwrap();
-        hosting.bind("T", pairing, "OLD".to_string());
+        let old = game_key("OLD", 1);
+        hosting.bind("T", pairing, old.clone());
 
-        assert_eq!(hosting.queue_rehost("unrelated"), None);
+        assert_eq!(hosting.queue_rehost(&game_key("unrelated", 1)), None);
         assert!(hosting.pending_rehost_tournaments().is_empty());
-        assert_eq!(
-            hosting.queue_rehost("OLD"),
-            Some(("T".to_string(), pairing))
-        );
+        assert_eq!(hosting.queue_rehost(&old), Some(("T".to_string(), pairing)));
         assert_eq!(hosting.game_code_for("T", pairing), None);
         let retry = hosting.pending_rehost_matches("T", &tournaments);
         assert_eq!(retry.len(), 1);
@@ -542,11 +548,11 @@ mod tests {
         assert_eq!(replacements[0].pairing_id, pairing);
         assert_eq!(games.game_count(), 1);
 
-        let new_code = &replacements[0].game_code;
-        hosting.bind("T", pairing, new_code.clone());
+        let replacement = game_key(&replacements[0].game_code, 2);
+        hosting.bind("T", pairing, replacement.clone());
         assert!(hosting.pending_rehost_tournaments().is_empty());
         assert_eq!(
-            hosting.queue_rehost(new_code),
+            hosting.queue_rehost(&replacement),
             Some(("T".to_string(), pairing))
         );
         tournaments
@@ -561,14 +567,21 @@ mod tests {
         assert!(hosting.pending_rehost_tournaments().is_empty());
     }
 
+    fn game_key(code: &str, generation: u64) -> FullSessionKey {
+        FullSessionKey {
+            game_code: code.to_string(),
+            generation,
+        }
+    }
+
     /// The `(tournament, pairing) <-> game_code` binding supports both lookups
     /// and is dropped by `forget`.
     #[test]
     fn map_reverse_lookup_and_forget() {
         let mut hosting = TournamentHostingManager::new();
-        hosting
-            .active_matches
-            .insert(("T".to_string(), 7), "GAME1".to_string());
+        let previous = game_key("GAME1", 1);
+        let current = game_key("GAME1", 2);
+        hosting.bind("T", 7, current.clone());
 
         assert_eq!(hosting.game_code_for("T", 7), Some("GAME1"));
         assert_eq!(
@@ -577,7 +590,15 @@ mod tests {
         );
         assert_eq!(hosting.tournament_for_game_code("absent"), None);
 
-        assert_eq!(hosting.forget("T", 7), Some("GAME1".to_string()));
+        assert_eq!(hosting.tournament_for_session(&previous), None);
+        assert_eq!(hosting.queue_rehost(&previous), None);
+        assert_eq!(hosting.forget(&previous), None);
+        assert!(hosting.pending_rehost_tournaments().is_empty());
+        assert_eq!(
+            hosting.tournament_for_session(&current),
+            Some(("T".to_string(), 7))
+        );
+        assert_eq!(hosting.forget(&current), Some(current));
         assert_eq!(hosting.game_code_for("T", 7), None);
         assert_eq!(hosting.tournament_for_game_code("GAME1"), None);
     }
