@@ -11060,10 +11060,13 @@ fn paid_unless_reflexive_continuation_keeps_its_condition() {
     }
 }
 
-/// CR 605.1: Power Sink's plural qualifier — "tap all lands with mana abilities
-/// they control" — reaches the shared type-phrase with-arm via TapAll and must
-/// keep HasManaAbility on the tap target instead of silently dropping it
-/// (fixture `power sink` carries `confirmed_misparse: dropped_qualifier`).
+/// CR 605.1 + CR 608.2c + CR 118.12a: Power Sink's plural qualifier — "tap all
+/// lands with mana abilities they control" — reaches the shared type-phrase
+/// with-arm via TapAll and must keep HasManaAbility on the tap target instead
+/// of silently dropping it; "they control" resolves to the declining
+/// unless-payer (the counter target's controller), not the caster. The "lose
+/// all unspent mana" tail stays an explicit Unimplemented node (honest gap, not
+/// a silent drop).
 #[test]
 fn power_sink_plural_mana_abilities_keeps_qualifier() {
     let parsed = parse_card(
@@ -11103,6 +11106,70 @@ fn power_sink_plural_mana_abilities_keeps_qualifier() {
         tf.properties.contains(&FilterProp::HasManaAbility),
         "Power Sink: tap target must keep HasManaAbility, got {:?}",
         tf.properties
+    );
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::ParentTargetController),
+        "Power Sink: CR 608.2c resolves \"they control\" to the declining \
+         unless-payer (the counter target's controller, CR 109.4), not the caster"
+    );
+    // Honesty reach-guard (deliberate non-fix): "and lose all unspent mana" has
+    // no mana-drain effect, so it must stay an explicit Unimplemented node —
+    // the suite would catch a re-silencing, and coverage stays red through the
+    // gap channel rather than confirmed_misparse.
+    assert!(
+        parsed.abilities.iter().flat_map(chain_defs).any(
+            |def| matches!(def.effect.as_ref(), Effect::Unimplemented { description, .. }
+                if description
+                    .as_deref()
+                    .is_some_and(|d| d.contains("lose all unspent mana")))
+        ),
+        "Power Sink: the mana-drain tail must stay an explicit gap: {:#?}",
+        parsed.abilities
+    );
+}
+
+/// CR 608.2c + CR 118.12a: Frightful Delusion's connector-less consequence
+/// ("That player discards a card.") already binds through the subject route to
+/// the counter target's controller — the F1 seed never fires for it (no bare
+/// reflexive connector) and must not move it. R-FD1: the discard is
+/// unconditional (it happens even when they pay).
+#[test]
+fn frightful_delusion_that_player_discard_stays_bound_and_unconditional() {
+    let parsed = parse_card(
+        "Counter target spell unless its controller pays {1}. That player discards a card.",
+        "Frightful Delusion",
+        &[],
+        &["Instant"],
+    );
+    let discard = parsed
+        .abilities
+        .iter()
+        .flat_map(chain_defs)
+        .find(|def| matches!(def.effect.as_ref(), Effect::Discard { .. }))
+        .unwrap_or_else(|| {
+            panic!(
+                "Frightful Delusion: discard clause: {:#?}",
+                parsed.abilities
+            )
+        });
+    let Effect::Discard { target, .. } = discard.effect.as_ref() else {
+        unreachable!("matcher above guarantees Discard");
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTargetController,
+        "Frightful Delusion: \"that player\" names the counter target's controller"
+    );
+    assert!(
+        discard.condition.is_none(),
+        "Frightful Delusion: R-FD1, the discard is unconditional: {:?}",
+        discard.condition
+    );
+    assert!(
+        !parsed.abilities.iter().any(ability_chain_has_unimplemented),
+        "reach-guard: Frightful Delusion lowers with no gaps: {:#?}",
+        parsed.abilities
     );
 }
 

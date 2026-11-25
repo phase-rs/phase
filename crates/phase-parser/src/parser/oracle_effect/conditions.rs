@@ -1413,6 +1413,20 @@ pub(super) fn strip_if_you_do_conditional_with_context(
     }
 }
 
+/// CR 608.2c + CR 118.12a: whether a reflexive-strip condition is a BARE
+/// outcome gate — exactly the affirmative `effect_performed` ("If they do",
+/// "If that player does") or its negation ("If they don't", "If that player
+/// doesn't"). Composed from the two existing `AbilityCondition` predicates;
+/// nothing is re-matched.
+///
+/// The unless-payer seeding rung admits only this pair: a `WhenYouDo` marker,
+/// a deferred guard, a zone-change head, a reveal gate, or an `And`-wrapped
+/// composition is a different conditional family whose body anaphor (if any)
+/// resolves through its own scope.
+pub(super) fn is_bare_reflexive_outcome_gate(condition: &AbilityCondition) -> bool {
+    condition.is_optional_effect_performed() || condition.is_not_optional_effect_performed()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum UnlessSuffixStrip {
     Absent,
@@ -10952,6 +10966,51 @@ mod tests {
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::player::PlayerCounterKind;
+
+    /// CR 608.2c + CR 118.12a: the unless-payer seeding gate admits exactly the
+    /// bare affirmative/negated outcome pair — every other reflexive-strip
+    /// output (markers, guards, heads, compositions) is excluded.
+    #[test]
+    fn bare_reflexive_outcome_gate_admits_only_the_affirmative_negated_pair() {
+        // Admitted: the bare pair.
+        assert!(is_bare_reflexive_outcome_gate(
+            &AbilityCondition::effect_performed()
+        ));
+        assert!(is_bare_reflexive_outcome_gate(&AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        }));
+        // Excluded: every other reflexive-strip family.
+        let excluded = [
+            // "When you do" creation marker, bare and guard-composed (the
+            // deferred-marker shape).
+            AbilityCondition::WhenYouDo,
+            AbilityCondition::when_you_do_with_guard(AbilityCondition::IsYourTurn),
+            // The reveal-until creation gate (its own guard family).
+            super::super::reveal_this_way_gate_condition(),
+            // A negated DIFFERENT signal is not the negated outcome.
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::current_scope_succeeded()),
+            },
+            // Zone-change "this way" heads.
+            AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::ParentTarget,
+                destination: None,
+            },
+            // `And` compositions, even ones CONTAINING the outcome signal.
+            AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::effect_performed(),
+                    AbilityCondition::IsYourTurn,
+                ],
+            },
+        ];
+        for condition in &excluded {
+            assert!(
+                !is_bare_reflexive_outcome_gate(condition),
+                "excluded: {condition:?}"
+            );
+        }
+    }
 
     #[test]
     fn player_counter_absence_requires_a_proven_event_antecedent() {
