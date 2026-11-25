@@ -1,5 +1,7 @@
 //! Namor, Atlantean King — the attacked-player predicate and the
-//! "attacking that player" defending-player anaphor.
+//! "attacking that player" attacked-player anaphor (CR 508.7a: the player the
+//! attack was declared against, `FilterProp::Attacking { defender:
+//! AttackedPlayer }`).
 //!
 //! Verbatim Oracle text (Scryfall oracle id
 //! `171a0a09-4aee-466c-aebd-3b0d4c1f51b4`):
@@ -136,7 +138,7 @@ fn power_toughness(runner: &GameRunner, id: ObjectId) -> (Option<i32>, Option<i3
 ///      `Pump { target: TargetFilter::Any }` sentinel — `other_lane` (and
 ///      Namor, and every other permanent) gets +2/+0.
 ///   2. Emit `Attacking { defender: None }` instead of
-///      `Some(DefendingPlayer)` and `other_lane` — attacking the OTHER
+///      `Some(AttackedPlayer)` and `other_lane` — attacking the OTHER
 ///      defender in the same declaration — is pumped.
 ///   3. Drop `FilterProp::Another` and Namor pumps itself.
 ///
@@ -189,7 +191,7 @@ fn namor_pumps_only_co_attackers_of_the_same_defender_cr_508_5a() {
 ///
 /// The latecomer is built to MATCH the pump filter in full — `CoreType::Creature`
 /// for the `type_filters`, controlled by P0, registered as an attacker against
-/// the SAME defending player for `Attacking { defender: DefendingPlayer }`, and
+/// the SAME defending player for `Attacking { defender: AttackedPlayer }`, and
 /// distinct from Namor for `FilterProp::Another`. That is what makes the row
 /// discriminating: a latecomer that failed the filter anyway (no card types, not
 /// in `combat.attackers`) would assert the same `(2, 2)` under LIVE
@@ -250,7 +252,7 @@ fn namor_pump_is_a_resolution_snapshot_cr_611_2c() {
         object.base_toughness = Some(2);
     }
     // CR 508.1a: register it as an attacker against the SAME defender Namor is
-    // attacking, so `FilterProp::Attacking { defender: DefendingPlayer }` is
+    // attacking, so `FilterProp::Attacking { defender: AttackedPlayer }` is
     // satisfied for it too.
     runner
         .state_mut()
@@ -263,13 +265,23 @@ fn namor_pump_is_a_resolution_snapshot_cr_611_2c() {
 
     // Reach-guard the negative: the latecomer really does satisfy the pump's
     // filter as of NOW. If it did not, the assertion below would hold under live
-    // re-evaluation too and would not discriminate CR 611.2c at all.
+    // re-evaluation too and would not discriminate CR 611.2c at all. The filter's
+    // "that player" is the player Namor's attack declared (CR 508.7a), which is
+    // read only with a trigger context, so the guard evaluates it with Namor's
+    // own trigger-source latch (Namor was declared attacking P1).
+    let namor_context = engine::game::triggers::trigger_source_context_for_latch(
+        runner.state(),
+        &runner.state().objects[&namor],
+    );
     assert!(
         engine::game::filter::matches_target_filter(
             runner.state(),
             latecomer,
             &namor_pump_filter(&runner, namor),
-            &engine::game::filter::FilterContext::from_source(runner.state(), namor),
+            &engine::game::filter::FilterContext {
+                trigger_source: Some(&namor_context),
+                ..engine::game::filter::FilterContext::from_source(runner.state(), namor)
+            },
         ),
         "reach guard: the latecomer must MATCH the pump filter live — otherwise \
          this row cannot discriminate a snapshot from a live rescan"

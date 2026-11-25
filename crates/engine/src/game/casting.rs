@@ -3513,6 +3513,7 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -14048,6 +14049,7 @@ fn cost_filter_reads_targets(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -35287,6 +35289,7 @@ fn controller_ref_reads_chosen_target(controller: &ControllerRef, read: TargetRe
         | ControllerRef::ScopedPlayer
         | ControllerRef::EventTargetController
         | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::TriggeringPlayer
@@ -35452,6 +35455,7 @@ fn target_filter_reads_chosen_target(filter: &TargetFilter, read: TargetRead) ->
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }

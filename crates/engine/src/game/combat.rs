@@ -2794,6 +2794,7 @@ fn matches_relative_blocker(
                     | ControllerRef::EventTargetController
                     | ControllerRef::ParentTargetOwner
                     | ControllerRef::DefendingPlayer
+                    | ControllerRef::AttackedPlayer
                     | ControllerRef::ChosenPlayer { .. }
                     | ControllerRef::DeclaredPlayer { .. }
                     | ControllerRef::SourceChosenPlayer

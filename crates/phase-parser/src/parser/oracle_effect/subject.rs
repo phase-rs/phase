@@ -3012,7 +3012,8 @@ fn parse_block_grant_duration(input: &str) -> OracleResult<'_, Option<Duration>>
 /// by an "attack[s] enchanted player" trigger condition
 /// (`relative_player_scope_for_condition`, oracle_trigger.rs) — resolves a bare
 /// player anaphor ("that player" / "them" / "they") in the effect body to the
-/// defender captured by that attack event via `TargetFilter::DefendingPlayer`.
+/// enchanted player the attack was declared against, via
+/// `TargetFilter::AttackedPlayer` (CR 508.7a: a reselection does not change it).
 ///
 /// Single authority for the scope→filter binding, consulted by all three parallel
 /// "that player"/"them" anaphor resolvers — `parse_subject_application` (this
@@ -3025,7 +3026,9 @@ fn parse_block_grant_duration(input: &str) -> OracleResult<'_, Option<Duration>>
 pub(super) fn enchanted_player_anaphor_filter(
     scope: Option<&ControllerRef>,
 ) -> Option<TargetFilter> {
-    matches!(scope, Some(ControllerRef::EnchantedPlayer)).then_some(TargetFilter::DefendingPlayer)
+    // CR 303.4b + CR 508.7a: "that player" is the enchanted player the attack
+    // named as declared.
+    matches!(scope, Some(ControllerRef::EnchantedPlayer)).then_some(TargetFilter::AttackedPlayer)
 }
 
 /// CR 608.2c + CR 109.4: single authority for "the player a `Choose(Player)`
@@ -3084,6 +3087,7 @@ pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<Co
             | ControllerRef::EventTargetController
             | ControllerRef::ParentTargetOwner
             | ControllerRef::DefendingPlayer
+            | ControllerRef::AttackedPlayer
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::DeclaredPlayer { .. }
             | ControllerRef::SourceChosenPlayer
@@ -4117,6 +4121,7 @@ fn parse_subject_application_for(
             ctx_filter,
             TargetFilter::TriggeringPlayer
                 | TargetFilter::DefendingPlayer
+                | TargetFilter::AttackedPlayer
                 | TargetFilter::TriggeringSourceController
                 | TargetFilter::EventTargetController
         ) {
@@ -4158,7 +4163,11 @@ fn parse_subject_application_for(
                 TargetFilter::ParentTargetOwner
             } else if matches!(
                 ctx.relative_player_scope,
-                Some(ControllerRef::TriggeringPlayer | ControllerRef::DefendingPlayer)
+                Some(
+                    ControllerRef::TriggeringPlayer
+                        | ControllerRef::DefendingPlayer
+                        | ControllerRef::AttackedPlayer
+                )
             ) {
                 // CR 608.2c + CR 106.12a: An explicit triggering/defending player
                 // scope established by `relative_player_scope_for_condition`
@@ -4176,8 +4185,8 @@ fn parse_subject_application_for(
             {
                 // A bare "that player"/"the player" anaphor in an effect body whose
                 // trigger condition names "attack enchanted player" refers to the
-                // defender captured at attack declaration, resolved via
-                // `DefendingPlayer` (the shared
+                // player the attack was declared against (CR 508.7a), resolved via
+                // `AttackedPlayer` (the shared
                 // `enchanted_player_anaphor_filter` binding). The explicit "that/the
                 // attacking player" phrases name the attacker instead, so the
                 // `PlayerSubjectAnaphor::AttackingPlayer` discriminant excludes them
@@ -5262,6 +5271,10 @@ fn relative_player_scope_anaphor_filter(ctx: &ParseContext) -> Option<TargetFilt
         // — the player (or the attacked planeswalker's controller) the source is
         // attacking — not the attacking player carried by the attack event.
         ControllerRef::DefendingPlayer => Some(TargetFilter::DefendingPlayer),
+        // CR 508.7a: after an attack-declaration head ("Whenever you attack a
+        // player, ... that player ..."), the player the attack was declared
+        // against; a reselection does not change it.
+        ControllerRef::AttackedPlayer => Some(TargetFilter::AttackedPlayer),
         // CR 120.3: the damaged / acting player the trigger event
         // carries ("deals [combat] damage to a player", Unstoppable Slasher).
         ControllerRef::TargetPlayer | ControllerRef::TriggeringPlayer => {
@@ -8084,6 +8097,7 @@ fn build_restriction_clause(
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
@@ -10424,6 +10438,7 @@ mod tests {
                 ControllerRef::DefendingPlayer,
                 TargetFilter::DefendingPlayer,
             ),
+            (ControllerRef::AttackedPlayer, TargetFilter::AttackedPlayer),
             (
                 ControllerRef::TriggeringPlayer,
                 TargetFilter::TriggeringPlayer,

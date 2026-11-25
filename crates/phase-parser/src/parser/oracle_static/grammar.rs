@@ -172,6 +172,7 @@ pub(crate) fn rule_static_affected_is_player_scope(affected: &TargetFilter) -> b
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
     ) || matches!(
         affected,
         TargetFilter::Typed(TypedFilter {

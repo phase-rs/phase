@@ -5746,6 +5746,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }

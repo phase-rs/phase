@@ -3047,6 +3047,7 @@ pub(crate) fn return_all_to_zone_effect(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -15141,6 +15142,7 @@ fn is_player_axis_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         // CR 508.1b + CR 601.2c: "the attacked player or planeswalker" can name
         // a player, so it is not a plain object host filter — fail closed here
         // rather than admitting it through the object default.
@@ -34461,6 +34463,7 @@ mod loyalty_symbol_effect_tests {
             TargetFilter::ParentTargetController,
             TargetFilter::ParentTargetOwner,
             TargetFilter::DefendingPlayer,
+            TargetFilter::AttackedPlayer,
             TargetFilter::Owner,
             TargetFilter::AllPlayers,
             TargetFilter::Not {

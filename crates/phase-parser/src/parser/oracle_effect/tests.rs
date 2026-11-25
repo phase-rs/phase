@@ -70726,10 +70726,10 @@ fn glen_elendras_answer_counter_all_conjunction_parses_single_or() {
 }
 
 /// The `EnchantedPlayer` relative-player scope produced by an "attack enchanted
-/// player" trigger must bind a bare player anaphor to the defender captured at
-/// attack declaration uniformly across every "that player"/"them"
+/// player" trigger must bind a bare player anaphor to the player the attack was
+/// declared against (CR 508.7a) uniformly across every "that player"/"them"
 /// resolver. `enchanted_player_anaphor_filter` is the single authority; this
-/// pins that it maps `EnchantedPlayer → DefendingPlayer` and nothing else, and that
+/// pins that it maps `EnchantedPlayer → AttackedPlayer` and nothing else, and that
 /// the library-owner sibling resolver (`that_player_library_filter`, the sibling
 /// of the subject.rs and damage-recipient resolvers) consults it — so "that
 /// player's library" in this trigger class belongs to that attacked player, not
@@ -70740,10 +70740,10 @@ fn enchanted_player_anaphor_binding_is_shared_across_resolvers() {
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::types::ability::{ControllerRef, TargetFilter};
 
-    // Shared authority: EnchantedPlayer → DefendingPlayer; every other scope → None.
+    // Shared authority: EnchantedPlayer → AttackedPlayer; every other scope → None.
     assert_eq!(
         super::subject::enchanted_player_anaphor_filter(Some(&ControllerRef::EnchantedPlayer)),
-        Some(TargetFilter::DefendingPlayer)
+        Some(TargetFilter::AttackedPlayer)
     );
     assert_eq!(
         super::subject::enchanted_player_anaphor_filter(Some(&ControllerRef::TriggeringPlayer)),
@@ -70758,8 +70758,8 @@ fn enchanted_player_anaphor_binding_is_shared_across_resolvers() {
     };
     assert_eq!(
         super::imperative::that_player_library_filter(&ctx),
-        TargetFilter::DefendingPlayer,
-        "'that player's library' under an attack-enchanted-player scope must use the captured defender"
+        TargetFilter::AttackedPlayer,
+        "'that player's library' under an attack-enchanted-player scope must use the declared attacked player"
     );
 }
 
@@ -74169,6 +74169,7 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -95992,14 +95993,14 @@ fn plural_damage_heads_keep_their_parse() {
 }
 
 /// P-5. CR 508.6: the "one or more players" antecedent is confined to attack
-/// heads. Zurzoth's head introduces the attacked (defending) players; the plural
+/// heads. Zurzoth's head introduces the attacked players (CR 508.7a); the plural
 /// damage head, whose players are damaged rather than attacked, introduces none.
 #[test]
 fn one_or_more_players_antecedent_is_confined_to_attack_heads() {
     let scope = crate::parser::oracle_trigger::relative_player_scope_for_condition;
     assert_eq!(
         scope("whenever one or more devils you control attack one or more players"),
-        Some(ControllerRef::DefendingPlayer)
+        Some(ControllerRef::AttackedPlayer)
     );
     assert_eq!(
         scope(

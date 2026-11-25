@@ -721,6 +721,7 @@ impl EventObjectSnapshot {
             | TargetFilter::PlayerMatching { .. }
             | TargetFilter::Neighbor { .. }
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::SourceChosenPlayer
             | TargetFilter::OriginalController
             | TargetFilter::TriggeringPlayer

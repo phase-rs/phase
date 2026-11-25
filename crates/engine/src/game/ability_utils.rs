@@ -6611,10 +6611,10 @@ fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
     fn prop_needs(prop: &FilterProp) -> bool {
         match prop {
             FilterProp::Attacking {
-                defender: Some(ControllerRef::DefendingPlayer),
+                defender: Some(ControllerRef::DefendingPlayer | ControllerRef::AttackedPlayer),
             }
             | FilterProp::AttackedThisTurn {
-                defender: Some(ControllerRef::DefendingPlayer),
+                defender: Some(ControllerRef::DefendingPlayer | ControllerRef::AttackedPlayer),
             }
             // CR 115.1d + CR 400.7: "other" in a triggered target clause is
             // relative to the event object, so enumeration must carry the
@@ -6626,10 +6626,19 @@ fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
         }
     }
 
-    crate::types::ability::filter_contains(
-        filter,
-        &|inner| matches!(inner, TargetFilter::Typed(typed) if typed.properties.iter().any(prop_needs)),
-    )
+    // CR 508.7a: unlike `DefendingPlayer` (deliberately excluded above), an
+    // `AttackedPlayer` controller has no live-combat fallback — with no trigger
+    // source `combat::attacked_player_cr508_7a` names no one — so it always
+    // needs the trigger context ("target creature that player controls",
+    // Gornog, the Red Reaper).
+    crate::types::ability::filter_contains(filter, &|inner| {
+        matches!(
+            inner,
+            TargetFilter::Typed(typed)
+                if typed.properties.iter().any(prop_needs)
+                    || typed.controller == Some(ControllerRef::AttackedPlayer)
+        )
+    })
 }
 
 // CR 102.1 + CR 608.2c: "that player controls" filters lowered to
@@ -7264,6 +7273,7 @@ pub(crate) fn filter_selects_players(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -7441,7 +7451,7 @@ pub(crate) fn collect_player_targets(
                     ) == Some(p.id)
                 }
                 Some(ControllerRef::ParentTargetOwner) => false,
-                Some(ControllerRef::DefendingPlayer) => false,
+                Some(ControllerRef::DefendingPlayer | ControllerRef::AttackedPlayer) => false,
                 // CR 613.1: no card scopes this shape to a persisted chosen
                 // player; fail closed (mirrors DefendingPlayer).
                 Some(ControllerRef::SourceChosenPlayer) => false,
@@ -12525,9 +12535,9 @@ fn filter_needs_trigger_source_for_retarget(filter: &TargetFilter) -> bool {
         matches!(
             prop,
             FilterProp::Attacking {
-                defender: Some(ControllerRef::DefendingPlayer)
+                defender: Some(ControllerRef::DefendingPlayer | ControllerRef::AttackedPlayer)
             } | FilterProp::AttackedThisTurn {
-                defender: Some(ControllerRef::DefendingPlayer)
+                defender: Some(ControllerRef::DefendingPlayer | ControllerRef::AttackedPlayer)
             }
         )
     }

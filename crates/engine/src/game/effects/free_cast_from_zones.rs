@@ -472,6 +472,7 @@ fn member_pool_filter(filter: &TargetFilter) -> TargetFilter {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }

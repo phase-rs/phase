@@ -1005,6 +1005,17 @@ fn source_defending_player_for_context(
     crate::game::combat::defending_player_cr508_5(state, ctx.source, ctx.trigger_source.as_ref())
 }
 
+/// CR 508.7a: `ControllerRef::AttackedPlayer` door, quantity-context flavour —
+/// the player the triggering attack declared, read through the single
+/// as-declared authority `combat::attacked_player_cr508_7a` with the same
+/// arguments as [`source_defending_player_for_context`].
+fn source_attacked_player_for_context(
+    state: &GameState,
+    ctx: &QuantityContext,
+) -> Option<PlayerId> {
+    crate::game::combat::attacked_player_cr508_7a(state, ctx.source, ctx.trigger_source.as_ref())
+}
+
 /// Drive the production `ControllerRef::DefendingPlayer` quantity-context door
 /// (the `attachment-controller` and `damage-source-controller` comparisons) from
 /// the cross-door fixtures in `combat.rs`. This door had the largest behaviour
@@ -7510,6 +7521,11 @@ fn resolve_ref(
                             source_defending_player_for_context(state, &ctx)
                                 .is_some_and(|pid| pid == snap.controller)
                         }
+                        // CR 508.7a: the player the triggering attack declared.
+                        Some(ControllerRef::AttackedPlayer) => {
+                            source_attacked_player_for_context(state, &ctx)
+                                .is_some_and(|pid| pid == snap.controller)
+                        }
                         // CR 613.1: Attachment controlled by the source's chosen player.
                         Some(ControllerRef::SourceChosenPlayer) => {
                             source_chosen_player_for_context(state, &ctx)
@@ -7601,6 +7617,10 @@ fn damage_source_controller_matches(
             .is_some_and(|player| actual == player),
         ControllerRef::DefendingPlayer => {
             source_defending_player_for_context(state, &ctx).is_some_and(|player| actual == player)
+        }
+        // CR 508.7a: the player the triggering attack declared.
+        ControllerRef::AttackedPlayer => {
+            source_attacked_player_for_context(state, &ctx).is_some_and(|player| actual == player)
         }
         // CR 613.1: Damage source controlled by the source's chosen player.
         ControllerRef::SourceChosenPlayer => {

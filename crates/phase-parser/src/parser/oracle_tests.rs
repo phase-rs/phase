@@ -32587,17 +32587,42 @@ fn namor_attack_trigger(parsed: &ParsedAbilities) -> &TriggerDefinition {
         .expect("Namor must have an Attacks trigger")
 }
 
-fn target_filter_has_defending_player_anaphor(filter: &TargetFilter) -> bool {
+/// Whether `filter` carries an `Attacking { defender }` property whose defender
+/// satisfies `accept`.
+fn target_filter_has_attacking_defender(
+    filter: &TargetFilter,
+    accept: &dyn Fn(&ControllerRef) -> bool,
+) -> bool {
     match filter {
-        TargetFilter::Typed(typed) => typed.properties.contains(&FilterProp::Attacking {
-            defender: Some(ControllerRef::DefendingPlayer),
+        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| {
+            matches!(prop, FilterProp::Attacking { defender: Some(defender) } if accept(defender))
         }),
-        TargetFilter::Not { filter } => target_filter_has_defending_player_anaphor(filter),
+        TargetFilter::Not { filter } => target_filter_has_attacking_defender(filter, accept),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter()
-            .any(target_filter_has_defending_player_anaphor),
+            .any(|filter| target_filter_has_attacking_defender(filter, accept)),
         _ => false,
     }
+}
+
+/// The "attacking that player" anaphor in either form: the context-free
+/// `DefendingPlayer` placeholder, or the `AttackedPlayer` an attack-declaration
+/// head rebinds it to (CR 508.7a). Matching both keeps the exclusion negatives
+/// discriminating for rebound and non-rebound heads alike.
+fn target_filter_has_defending_player_anaphor(filter: &TargetFilter) -> bool {
+    target_filter_has_attacking_defender(filter, &|defender| {
+        matches!(
+            defender,
+            ControllerRef::DefendingPlayer | ControllerRef::AttackedPlayer
+        )
+    })
+}
+
+/// The anaphor as rebound by an attack-declaration head (CR 508.7a), exactly.
+fn target_filter_has_attacked_player_anaphor(filter: &TargetFilter) -> bool {
+    target_filter_has_attacking_defender(filter, &|defender| {
+        *defender == ControllerRef::AttackedPlayer
+    })
 }
 
 /// V2 — Namor's effect body must scope the pump to the co-attackers on the
@@ -32610,7 +32635,7 @@ fn target_filter_has_defending_player_anaphor(filter: &TargetFilter) -> bool {
 /// `Effect::Pump { target: TargetFilter::Any }` sentinel — a board-wide pump
 /// that hits both players' permanents, lands included.
 #[test]
-fn namor_pump_scopes_to_other_attackers_of_the_defending_player() {
+fn namor_pump_scopes_to_other_attackers_of_the_attacked_player() {
     let result = parse_namor();
 
     // Positive reach-guard: the card parses with zero Unimplemented, so the
@@ -32653,9 +32678,9 @@ fn namor_pump_scopes_to_other_attackers_of_the_defending_player() {
     );
     assert!(
         typed.properties.contains(&FilterProp::Attacking {
-            defender: Some(ControllerRef::DefendingPlayer),
+            defender: Some(ControllerRef::AttackedPlayer),
         }),
-        "pump filter must carry the CR 508.5 defending-player anaphor, got {:?}",
+        "pump filter must carry the CR 508.7a attacked-player anaphor, got {:?}",
         typed.properties
     );
     assert!(
@@ -32667,10 +32692,10 @@ fn namor_pump_scopes_to_other_attackers_of_the_defending_player() {
 
 /// V10 — the anaphor covers the CLASS, not just Namor: both printed cards that
 /// place "attacking that player" in a genuine TARGET filter must now carry the
-/// CR 508.5 property. Echoing Assault additionally exercises an EXCLUDED
-/// position in its second sentence, so one card proves both halves.
+/// CR 508.7a attacked-player property. Echoing Assault additionally exercises
+/// an EXCLUDED position in its second sentence, so one card proves both halves.
 #[test]
-fn attacking_that_player_target_filters_carry_the_defending_player_anaphor() {
+fn attacking_that_player_target_filters_carry_the_attacked_player_anaphor() {
     // Verbatim Oracle text (MTGJSON); a paraphrase can take a different parser
     // branch and go green while the real card stays broken.
     let ordruun = parse(
@@ -32685,7 +32710,7 @@ fn attacking_that_player_target_filters_carry_the_defending_player_anaphor() {
             .triggers
             .iter()
             .filter_map(|t| t.execute.as_deref())
-            .any(definition_chain_has_defending_player_anaphor),
+            .any(definition_chain_has_attacked_player_anaphor),
         "Ordruun Mentor's target filter must scope to the attacked player: {ordruun:#?}"
     );
 
@@ -32701,23 +32726,32 @@ fn attacking_that_player_target_filters_carry_the_defending_player_anaphor() {
             .triggers
             .iter()
             .filter_map(|t| t.execute.as_deref())
-            .any(definition_chain_has_defending_player_anaphor),
+            .any(definition_chain_has_attacked_player_anaphor),
         "Echoing Assault's target filter must scope to the attacked player: {echoing:#?}"
     );
 }
 
-fn definition_chain_has_defending_player_anaphor(def: &AbilityDefinition) -> bool {
-    def.effect
-        .target_filter()
-        .is_some_and(target_filter_has_defending_player_anaphor)
+fn definition_chain_has_filter(
+    def: &AbilityDefinition,
+    has: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    def.effect.target_filter().is_some_and(has)
         || def
             .sub_ability
             .as_deref()
-            .is_some_and(definition_chain_has_defending_player_anaphor)
+            .is_some_and(|sub| definition_chain_has_filter(sub, has))
         || def
             .else_ability
             .as_deref()
-            .is_some_and(definition_chain_has_defending_player_anaphor)
+            .is_some_and(|branch| definition_chain_has_filter(branch, has))
+}
+
+fn definition_chain_has_defending_player_anaphor(def: &AbilityDefinition) -> bool {
+    definition_chain_has_filter(def, &target_filter_has_defending_player_anaphor)
+}
+
+fn definition_chain_has_attacked_player_anaphor(def: &AbilityDefinition) -> bool {
+    definition_chain_has_filter(def, &target_filter_has_attacked_player_anaphor)
 }
 
 /// V9 — the anaphor must not steal the token-spec / battlefield-entry /

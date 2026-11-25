@@ -392,6 +392,7 @@ pub fn apnap_order_from(
             | ControllerRef::EventTargetController
             | ControllerRef::ParentTargetOwner
             | ControllerRef::DefendingPlayer
+            | ControllerRef::AttackedPlayer
             | ControllerRef::SourceChosenPlayer
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::TriggeringPlayer

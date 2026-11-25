@@ -125,9 +125,18 @@ impl Driver {
         target: AttackTarget,
         trigger_target: Option<ObjectId>,
     ) {
+        self.declare_all(&[(attacker, target)], trigger_target);
+    }
+
+    /// [`Driver::declare`] for several attackers in one declaration.
+    fn declare_all(
+        &mut self,
+        attacks: &[(ObjectId, AttackTarget)],
+        trigger_target: Option<ObjectId>,
+    ) {
         let result = self
             .r
-            .declare_attackers(&[(attacker, target)])
+            .declare_attackers(attacks)
             .expect("the attack is legal");
         self.events.extend(result.events);
         self.trace.push(self.r.state().waiting_for.variant_name());
@@ -1515,4 +1524,364 @@ fn a_conceded_destination_with_several_remaining_reprompts() {
     d.choose(AttackTarget::Player(p3));
     d.assert_boundary();
     assert_eq!(d.attacker(cleric), (AttackTarget::Player(p3), p3));
+}
+
+// ---------------------------------------------------------------------------
+// The body of an attack-declaration trigger: "that player" is the player the attack was
+// declared against (CR 508.7a), while a literal "defending player" stays live (CR 508.5).
+// ---------------------------------------------------------------------------
+
+const GORNOG: &str = "Haste\nCowards can't block Warriors.\nWhenever one or more Warriors you control attack a player, target creature that player controls becomes a Coward.\nAttacking Warriors you control get +X/+0, where X is the number of Cowards your opponents control.";
+const SOARING_LIGHTBRINGER: &str = "Flying\nOther enchantment creatures you control have flying.\nWhenever you attack a player, create a 1/1 white Glimmer enchantment creature token that's tapped and attacking that player.";
+const SIEGE_DRAGON: &str = "Flying\nWhen this creature enters, destroy all Walls your opponents control.\nWhenever this creature attacks, if defending player controls no Walls, it deals 2 damage to each creature without flying that player controls.";
+const ARCHNEMESIS: &str = "Enchant opponent\nWhenever you attack enchanted player, that player loses 2 life. You draw a card and gain 2 life.\nWhenever a player attacks you, you may attach this Aura to that player.";
+const SERAPHIC_GREATSWORD: &str = "Equipped creature gets +2/+2.\nWhenever equipped creature attacks the player with the most life or tied for most life, create a 4/4 white Angel creature token with flying that's tapped and attacking that player.\nEquip {4}";
+const NAMOR: &str = "Flying\nWhenever you cast a noncreature spell, create a 1/1 blue Merfolk creature token.\nWhenever Namor attacks a player who has more life than you, other creatures you control attacking that player get +2/+0 until end of turn.";
+
+/// After the attack trigger is on the stack, P0 casts Misleading Signpost on `attacker` and
+/// answers with `reselect`; then the stack resolves to the active player's priority.
+fn reselect_under_trigger_and_resolve(
+    d: &mut Driver,
+    signpost: ObjectId,
+    attacker: ObjectId,
+    trigger_source: ObjectId,
+    reselect: Option<PlayerId>,
+) {
+    assert!(
+        stack_has_trigger_from(d.state(), trigger_source),
+        "reach guard: the attack trigger is on the stack"
+    );
+    d.cast_to_optional_choice(signpost, attacker);
+    assert!(
+        stack_has_trigger_from(d.state(), trigger_source),
+        "the attack trigger is still on the stack under the reselection"
+    );
+    match reselect {
+        Some(player) => {
+            d.decide(true);
+            d.choose(AttackTarget::Player(player));
+        }
+        None => d.decide(false),
+    }
+    d.resolve_stack();
+    d.assert_boundary();
+}
+
+fn subtypes(state: &GameState, id: ObjectId) -> Vec<String> {
+    state.objects[&id].card_types.subtypes.clone()
+}
+
+fn tokens_named(state: &GameState, name: &str) -> Vec<ObjectId> {
+    let mut ids: Vec<ObjectId> = state
+        .objects
+        .values()
+        .filter(|o| o.zone == Zone::Battlefield && o.is_token && o.name == name)
+        .map(|o| o.id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn on_battlefield(state: &GameState, id: ObjectId) -> bool {
+    state.objects[&id].zone == Zone::Battlefield
+}
+
+/// The three-player Gornog board: P0 controls Gornog and holds Signpost; P1 and P2 each control
+/// Grizzly Bears. Gornog attacks P1 and its trigger targets P1's Bears.
+struct GornogBoard {
+    d: Driver,
+    gornog: ObjectId,
+    p1_bears: ObjectId,
+    p2_bears: ObjectId,
+}
+
+fn gornog_attack_and_resolve(reselect: Option<PlayerId>) -> GornogBoard {
+    let mut sc = GameScenario::new_n_player(3, 29);
+    sc.at_phase(Phase::PreCombatMain);
+    let gornog = sc
+        .add_creature_from_oracle(P0, "Gornog, the Red Reaper", 2, 3, GORNOG)
+        .with_subtypes(vec!["Minotaur", "Warrior"])
+        .from_oracle_text_with_keywords(&["Haste"], GORNOG)
+        .id();
+    let signpost = add_card(&mut sc, P0, Card::Signpost);
+    let p1_bears = sc.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let p2_bears = sc.add_creature(P2, "Grizzly Bears", 2, 2).id();
+    let mut d = Driver::new(sc.build());
+    d.advance_to_combat();
+    d.declare(gornog, AttackTarget::Player(P1), Some(p1_bears));
+    reselect_under_trigger_and_resolve(&mut d, signpost, gornog, gornog, reselect);
+    GornogBoard {
+        d,
+        gornog,
+        p1_bears,
+        p2_bears,
+    }
+}
+
+/// V10: CR 508.7a + CR 608.2b — Gornog's "target creature that player controls" names the
+/// player Gornog was declared attacking (P1). Reselecting Gornog to P2 leaves P1's Bears a legal
+/// target, so they become a Coward; reading the live defender (P2) would make the target illegal
+/// and the trigger would do nothing.
+#[test]
+fn gornog_target_stays_legal_after_a_reselection() {
+    let b = gornog_attack_and_resolve(Some(P2));
+    assert_eq!(b.d.attacker(b.gornog), (AttackTarget::Player(P2), P2));
+    assert_eq!(
+        subtypes(b.d.state(), b.p1_bears),
+        vec!["Coward".to_string()],
+        "the declared player's creature becomes a Coward"
+    );
+    assert_eq!(
+        subtypes(b.d.state(), b.p2_bears),
+        Vec::<String>::new(),
+        "the reselected player's creature is untouched"
+    );
+}
+
+/// V10 paired positive: declining keeps the Coward.
+#[test]
+fn gornog_target_becomes_a_coward_when_the_reselection_is_declined() {
+    let b = gornog_attack_and_resolve(None);
+    assert_eq!(b.d.attacker(b.gornog), (AttackTarget::Player(P1), P1));
+    assert_eq!(
+        subtypes(b.d.state(), b.p1_bears),
+        vec!["Coward".to_string()]
+    );
+}
+
+/// V11: CR 508.7a + CR 508.4 — Soaring Lightbringer's Glimmer enters attacking "that player",
+/// the player the Bears were declared attacking (P1), even after the Bears are reselected to P2.
+fn lightbringer_attack_and_resolve(reselect: Option<PlayerId>) -> (Driver, ObjectId) {
+    let mut sc = GameScenario::new_n_player(3, 31);
+    sc.at_phase(Phase::PreCombatMain);
+    let lightbringer = sc
+        .add_creature_from_oracle(P0, "Soaring Lightbringer", 4, 5, SOARING_LIGHTBRINGER)
+        .from_oracle_text_with_keywords(&["Flying"], SOARING_LIGHTBRINGER)
+        .id();
+    let bears = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let signpost = add_card(&mut sc, P0, Card::Signpost);
+    let mut d = Driver::new(sc.build());
+    d.advance_to_combat();
+    d.declare(bears, AttackTarget::Player(P1), None);
+    reselect_under_trigger_and_resolve(&mut d, signpost, bears, lightbringer, reselect);
+    (d, bears)
+}
+
+#[test]
+fn lightbringer_glimmer_attacks_the_declared_player_after_a_reselection() {
+    let (d, bears) = lightbringer_attack_and_resolve(Some(P2));
+    assert_eq!(d.attacker(bears), (AttackTarget::Player(P2), P2));
+    let glimmers = tokens_named(d.state(), "Glimmer");
+    assert_eq!(glimmers.len(), 1, "reach guard: one Glimmer");
+    assert_eq!(d.attacker(glimmers[0]), (AttackTarget::Player(P1), P1));
+}
+
+/// V11 paired positive: declining, the Glimmer attacks P1.
+#[test]
+fn lightbringer_glimmer_attacks_the_declared_player_when_the_reselection_is_declined() {
+    let (d, bears) = lightbringer_attack_and_resolve(None);
+    assert_eq!(d.attacker(bears), (AttackTarget::Player(P1), P1));
+    let glimmers = tokens_named(d.state(), "Glimmer");
+    assert_eq!(glimmers.len(), 1, "reach guard: one Glimmer");
+    assert_eq!(d.attacker(glimmers[0]), (AttackTarget::Player(P1), P1));
+}
+
+/// V12: CR 508.5 — Siege Dragon's "that player" anaphors the literal "defending player", which
+/// follows the reselection (Signpost ruling), so the damage hits the reselected player's (P2)
+/// creatures. An over-broad as-declared fix would damage P1's instead.
+fn siege_dragon_attack_and_resolve(reselect: Option<PlayerId>) -> (Driver, ObjectId, ObjectId) {
+    let mut sc = GameScenario::new_n_player(3, 37);
+    sc.at_phase(Phase::PreCombatMain);
+    let dragon = sc
+        .add_creature_from_oracle(P0, "Siege Dragon", 5, 5, SIEGE_DRAGON)
+        .from_oracle_text_with_keywords(&["Flying"], SIEGE_DRAGON)
+        .id();
+    let signpost = add_card(&mut sc, P0, Card::Signpost);
+    let p1_bears = sc.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let p2_bears = sc.add_creature(P2, "Grizzly Bears", 2, 2).id();
+    let mut d = Driver::new(sc.build());
+    d.advance_to_combat();
+    d.declare(dragon, AttackTarget::Player(P1), None);
+    reselect_under_trigger_and_resolve(&mut d, signpost, dragon, dragon, reselect);
+    (d, p1_bears, p2_bears)
+}
+
+#[test]
+fn siege_dragon_damages_the_reselected_defending_players_creatures() {
+    let (d, p1_bears, p2_bears) = siege_dragon_attack_and_resolve(Some(P2));
+    assert!(!on_battlefield(d.state(), p2_bears), "P2's Bears die");
+    assert!(on_battlefield(d.state(), p1_bears), "P1's Bears live");
+}
+
+/// V12 paired positive: declining, P1's Bears die.
+#[test]
+fn siege_dragon_damages_the_declared_defenders_creatures_when_the_reselection_is_declined() {
+    let (d, p1_bears, p2_bears) = siege_dragon_attack_and_resolve(None);
+    assert!(!on_battlefield(d.state(), p1_bears), "P1's Bears die");
+    assert!(on_battlefield(d.state(), p2_bears), "P2's Bears live");
+}
+
+/// The life totals of P0, P1 and P2.
+fn lives(d: &Driver) -> [i32; 3] {
+    [d.life(P0), d.life(P1), d.life(P2)]
+}
+
+/// V13: CR 303.4b + CR 508.7a — Archnemesis's "that player" is the enchanted player the attack
+/// was declared against (P1). Returns the driver, the life totals before combat, and P0's hand
+/// size just before the attack trigger resolved (after Signpost left it).
+fn archnemesis_attack_and_resolve(reselect: Option<PlayerId>) -> (Driver, [i32; 3], usize) {
+    use engine::game::effects::attach::attach_to_player;
+    use engine::game::layers::evaluate_layers;
+    use engine::game::trigger_index::reindex_object_triggers;
+
+    let mut sc = GameScenario::new_n_player(3, 41);
+    sc.at_phase(Phase::PreCombatMain);
+    let archnemesis = {
+        let mut builder = sc.add_creature(P0, "Archnemesis", 0, 0);
+        builder.as_enchantment();
+        builder.with_subtypes(vec!["Aura"]);
+        builder.from_oracle_text(ARCHNEMESIS);
+        builder.id()
+    };
+    let bears = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let signpost = add_card(&mut sc, P0, Card::Signpost);
+    for _ in 0..4 {
+        sc.add_card_to_library_top(P0, "Plains");
+    }
+    let mut r = sc.build();
+    attach_to_player(r.state_mut(), archnemesis, P1);
+    evaluate_layers(r.state_mut());
+    reindex_object_triggers(r.state_mut(), archnemesis);
+    let mut d = Driver::new(r);
+    let before = lives(&d);
+    let hand_after_cast = d.state().players[0].hand.len() - 1;
+    d.advance_to_combat();
+    d.declare(bears, AttackTarget::Player(P1), None);
+    reselect_under_trigger_and_resolve(&mut d, signpost, bears, archnemesis, reselect);
+    assert_eq!(d.state().phase, Phase::DeclareAttackers, "before blockers");
+    (d, before, hand_after_cast)
+}
+
+#[test]
+fn archnemesis_drains_the_declared_enchanted_player_after_a_reselection() {
+    let (d, [p0, p1, p2], hand_after_cast) = archnemesis_attack_and_resolve(Some(P2));
+    assert_eq!(lives(&d), [p0 + 2, p1 - 2, p2]);
+    assert_eq!(
+        d.state().players[0].hand.len(),
+        hand_after_cast + 1,
+        "the controller draws a card"
+    );
+}
+
+/// V13 paired positive: declining, P1 loses 2.
+#[test]
+fn archnemesis_drains_the_enchanted_player_when_the_reselection_is_declined() {
+    let (d, [p0, p1, p2], hand_after_cast) = archnemesis_attack_and_resolve(None);
+    assert_eq!(lives(&d), [p0 + 2, p1 - 2, p2]);
+    assert_eq!(d.state().players[0].hand.len(), hand_after_cast + 1);
+}
+
+/// V14: CR 508.7a + CR 508.4 — Seraphic Greatsword's Angel enters attacking "that player", the
+/// player with the most life the equipped creature was declared attacking (P1, 25 life), even
+/// after the equipped creature is reselected to P2.
+fn greatsword_attack_and_resolve(reselect: Option<PlayerId>) -> (Driver, ObjectId) {
+    use engine::game::game_object::AttachTarget;
+
+    let mut sc = GameScenario::new_n_player(3, 43);
+    sc.at_phase(Phase::PreCombatMain);
+    sc.with_life(P1, 25);
+    let bears = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let greatsword = sc
+        .add_artifact_from_oracle(P0, "Seraphic Greatsword", SERAPHIC_GREATSWORD)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let signpost = add_card(&mut sc, P0, Card::Signpost);
+    let mut r = sc.build();
+    {
+        let state = r.state_mut();
+        state.objects.get_mut(&greatsword).unwrap().attached_to = Some(AttachTarget::Object(bears));
+        state
+            .objects
+            .get_mut(&bears)
+            .unwrap()
+            .attachments
+            .push(greatsword);
+    }
+    let mut d = Driver::new(r);
+    d.advance_to_combat();
+    d.declare(bears, AttackTarget::Player(P1), None);
+    reselect_under_trigger_and_resolve(&mut d, signpost, bears, greatsword, reselect);
+    (d, bears)
+}
+
+#[test]
+fn greatsword_angel_attacks_the_declared_player_after_a_reselection() {
+    let (d, bears) = greatsword_attack_and_resolve(Some(P2));
+    assert_eq!(d.attacker(bears), (AttackTarget::Player(P2), P2));
+    let angels = tokens_named(d.state(), "Angel");
+    assert_eq!(angels.len(), 1, "reach guard: one Angel");
+    assert_eq!(d.attacker(angels[0]), (AttackTarget::Player(P1), P1));
+}
+
+/// V14 paired positive: declining, the Angel attacks P1.
+#[test]
+fn greatsword_angel_attacks_the_declared_player_when_the_reselection_is_declined() {
+    let (d, bears) = greatsword_attack_and_resolve(None);
+    assert_eq!(d.attacker(bears), (AttackTarget::Player(P1), P1));
+    let angels = tokens_named(d.state(), "Angel");
+    assert_eq!(angels.len(), 1, "reach guard: one Angel");
+    assert_eq!(d.attacker(angels[0]), (AttackTarget::Player(P1), P1));
+}
+
+/// V15: CR 508.7a + CR 611.2c — Namor's "other creatures you control attacking that player" is
+/// scoped to the player Namor was declared attacking (P1, 25 life). Namor is reselected to P2;
+/// the Bears still attack P1, so they get +2/+0. Reading Namor's live defender (P2) would skip
+/// them. Casting Signpost also triggers Namor's noncreature-spell ability (a Merfolk token),
+/// which resolves before the attack trigger.
+fn namor_attack_and_resolve(reselect: Option<PlayerId>) -> (Driver, ObjectId, ObjectId) {
+    let mut sc = GameScenario::new_n_player(3, 47);
+    sc.at_phase(Phase::PreCombatMain);
+    sc.with_life(P1, 25);
+    let namor = sc
+        .add_creature_from_oracle(P0, "Namor, Atlantean King", 2, 2, NAMOR)
+        .from_oracle_text_with_keywords(&["Flying"], NAMOR)
+        .id();
+    let bears = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let signpost = add_card(&mut sc, P0, Card::Signpost);
+    let mut d = Driver::new(sc.build());
+    d.advance_to_combat();
+    d.declare_all(
+        &[
+            (namor, AttackTarget::Player(P1)),
+            (bears, AttackTarget::Player(P1)),
+        ],
+        None,
+    );
+    reselect_under_trigger_and_resolve(&mut d, signpost, namor, namor, reselect);
+    assert_eq!(
+        tokens_named(d.state(), "Merfolk").len(),
+        1,
+        "reach guard: the noncreature-spell trigger resolved"
+    );
+    (d, namor, bears)
+}
+
+#[test]
+fn namor_pumps_attackers_of_the_declared_player_after_a_reselection() {
+    let (d, namor, bears) = namor_attack_and_resolve(Some(P2));
+    assert_eq!(d.attacker(namor), (AttackTarget::Player(P2), P2));
+    assert_eq!(d.attacker(bears), (AttackTarget::Player(P1), P1));
+    assert_eq!(
+        power_toughness(d.state(), bears),
+        (Some(4), Some(2)),
+        "the Bears attack the declared player (P1), so they get +2/+0"
+    );
+}
+
+/// V15 paired positive: declining, the Bears get +2/+0.
+#[test]
+fn namor_pumps_attackers_of_the_declared_player_when_the_reselection_is_declined() {
+    let (d, namor, bears) = namor_attack_and_resolve(None);
+    assert_eq!(d.attacker(namor), (AttackTarget::Player(P1), P1));
+    assert_eq!(power_toughness(d.state(), bears), (Some(4), Some(2)));
 }

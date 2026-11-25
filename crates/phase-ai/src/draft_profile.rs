@@ -1261,6 +1261,7 @@ fn filter_may_name_another_creature(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -1605,6 +1606,7 @@ fn may_be_opposing_creature(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::Owner
         | TargetFilter::AllPlayers => false,
     }
@@ -1679,6 +1681,7 @@ fn sacrifice_scope_can_be_opposing(scope: &ControllerRef) -> bool {
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::DeclaredPlayer { .. }
         | ControllerRef::SourceChosenPlayer

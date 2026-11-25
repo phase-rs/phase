@@ -1273,25 +1273,41 @@ fn parse_referenced_player_phrase(input: &str) -> OracleResult<'_, ()> {
         value((), tag("an opponent")),
         value((), tag("a player")),
         // CR 508.1a + CR 725.1: "attacks the monarch ... that player controls" —
-        // the monarch is the attacked (defending) player chosen at attack
-        // declaration, so the trailing "that player" anaphor binds to
-        // `ControllerRef::DefendingPlayer` (The Spear of Bashenga: "destroy
-        // target tapped nonland permanent that player controls").
+        // the monarch is the attacked player chosen at attack declaration, so
+        // the trailing "that player" anaphor binds to
+        // `ControllerRef::AttackedPlayer` (CR 508.7a; The Spear of Bashenga:
+        // "destroy target tapped nonland permanent that player controls").
         value((), tag("the monarch")),
     ))
     .parse(input)
 }
 
 /// CR 508.6: the players an attack head names. Adds the plural set
-/// ("one or more players", Zurzoth, Chaos Rider) to the single referents
-/// of `parse_referenced_player_phrase`. Attack heads only: a damage head's
-/// damaged players are not a `DefendingPlayer` antecedent.
+/// ("one or more players", Zurzoth, Chaos Rider) and the superlative player
+/// (Seraphic Greatsword) to the single referents of
+/// `parse_referenced_player_phrase`. Attack heads only: a damage head's
+/// damaged players are not an `AttackedPlayer` antecedent.
 fn parse_attacked_player_phrase(input: &str) -> OracleResult<'_, ()> {
     alt((
         parse_referenced_player_phrase,
         // CR 508.6: "one or more players" — the attacked players a plural attack
         // head introduces (Zurzoth, Chaos Rider).
         value((), tag::<_, _, OracleError<'_>>("one or more players")),
+        // CR 102.1 + CR 508.1b: Seraphic Greatsword — "attacks the player with
+        // the most life or tied for most life". Matched only when the whole
+        // superlative-or-tie qualifier follows (the trigger-mode head's own
+        // qualifier combinator), so a bare "the player" never introduces the
+        // antecedent.
+        value(
+            (),
+            terminated(
+                tag("the player"),
+                peek(preceded(
+                    tag(" with the "),
+                    crate::parser::oracle_nom::quantity::parse_most_or_tied_for_most,
+                )),
+            ),
+        ),
     ))
     .parse(input)
 }
@@ -1506,9 +1522,10 @@ fn parse_batch_creature_attack_subject(input: &str) -> OracleResult<'_, ()> {
 /// CR 303.4b + CR 508.1a: "[actor] attack[s] enchanted player" names
 /// the Aura's attached player as the trigger's referenced defender, so a later
 /// bare "that player"/"the player" anaphor in the effect body binds to the
-/// defender captured at attack declaration. Sibling of
-/// `condition_introduces_defending_player`; `AttachedTo` remains the trigger-time
-/// match constraint while the body uses the generic combat defender. The actor
+/// player the attack was declared against (`TargetFilter::AttackedPlayer`,
+/// CR 508.7a). Sibling of `condition_introduces_defending_player`;
+/// `AttachedTo` remains the trigger-time match constraint while the body uses
+/// the as-declared attacked player. The actor
 /// prefix is optional (matched via
 /// `parse_trigger_actor` with an `unwrap_or` fallback) so "a creature attacks
 /// enchanted player" is covered by the bare-verb form, exactly as the second
@@ -1806,16 +1823,25 @@ pub(crate) fn relative_player_scope_for_condition(cond_lower: &str) -> Option<Co
     } else if condition_introduces_damage_source_controller_player(cond_lower) {
         Some(ControllerRef::ParentTargetController)
     } else if condition_introduces_enchanted_player(cond_lower) {
-        // "That player" after "attack enchanted player" is the defender captured
-        // by the attack event, resolved via `TargetFilter::DefendingPlayer`
-        // (subject.rs). This remains distinct from `AttachedTo`, which is used
-        // only to decide whether the Aura's trigger fires.
+        // CR 508.7a: "That player" after "attack enchanted player" is the
+        // enchanted player the attack was declared against, resolved via
+        // `TargetFilter::AttackedPlayer` (subject.rs). This remains distinct from
+        // `AttachedTo`, which is used only to decide whether the Aura's trigger
+        // fires.
         Some(ControllerRef::EnchantedPlayer)
     } else if condition_introduces_defending_player(cond_lower) {
-        // CR 608.2c: Attack triggers use DefendingPlayer (the attacked player
-        // in combat), not TargetPlayer (which requires a player target to be
-        // bound at runtime).
-        Some(ControllerRef::DefendingPlayer)
+        if strip_attack_unblocked_qualifier(cond_lower).0 {
+            // CR 509.3g: an "attacks … and isn't blocked" event is the unblocked
+            // status, not the declaration (Master of Cruelties ruling), so its
+            // "that player" is the live defending player.
+            Some(ControllerRef::DefendingPlayer)
+        } else {
+            // CR 508.7a + CR 608.2c: after an attack-declaration head, "that
+            // player"/"that opponent" is the player the attack was declared
+            // against; a reselection does not change it. Not TargetPlayer
+            // (which requires a player target to be bound at runtime).
+            Some(ControllerRef::AttackedPlayer)
+        }
     } else if condition_introduces_attacking_player(cond_lower) {
         // CR 508.1 + CR 603.2c: the attacking player is the triggering-event
         // player for "that player" anaphors in the effect body (Total War:
@@ -3084,6 +3110,19 @@ pub(crate) fn lower_trigger_ir_with_provenance(
     if modifiers.relative_player_scope == Some(ControllerRef::SourceChosenPlayer) {
         if let Some(ability) = execute.as_deref_mut() {
             crate::parser::oracle_effect::rewrite_player_quantity_refs_to_source_chosen(ability);
+        }
+    }
+    // CR 508.7a + CR 603.2: an attack-declaration head makes the body's
+    // context-free "that player" placeholders the player the attack was declared
+    // against (token destinations, "attacking that player" filters).
+    if matches!(
+        modifiers.relative_player_scope,
+        Some(ControllerRef::AttackedPlayer | ControllerRef::EnchantedPlayer)
+    ) {
+        if let Some(ability) = execute.as_deref_mut() {
+            crate::parser::oracle_effect::rebind_attack_anaphor_placeholders_to_attacked_player(
+                ability,
+            );
         }
     }
     // Sword of War and Peace class (issue #9280 follow-up): damage-done
@@ -20438,6 +20477,7 @@ fn subject_attack_scope(subject_scope: Option<&ControllerRef>) -> Option<Subject
             | ControllerRef::EventTargetController
             | ControllerRef::ParentTargetOwner
             | ControllerRef::DefendingPlayer
+            | ControllerRef::AttackedPlayer
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::SourceChosenPlayer
             | ControllerRef::TriggeringPlayer

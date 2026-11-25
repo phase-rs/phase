@@ -249,6 +249,7 @@ fn map_relative_player_scope(scope: &ControllerRef) -> Option<ControllerRef> {
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::EnchantedPlayer
         | ControllerRef::ActivePlayer
@@ -608,6 +609,7 @@ mod tests {
             ControllerRef::ParentTargetController,
             ControllerRef::ParentTargetOwner,
             ControllerRef::DefendingPlayer,
+            ControllerRef::AttackedPlayer,
             ControllerRef::SourceChosenPlayer,
             ControllerRef::EnchantedPlayer,
             ControllerRef::ActivePlayer,

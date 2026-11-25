@@ -851,6 +851,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
             "controller of the object targeted by the triggering event".into()
         }
         TargetFilter::DefendingPlayer => "defending player".into(),
+        TargetFilter::AttackedPlayer => "the attacked player".into(),
         TargetFilter::AttackedPlayerOrPlaneswalker => {
             "the player or planeswalker it's attacking".into()
         }
@@ -957,6 +958,10 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 // player this creature is attacking.
                 Some(ControllerRef::DefendingPlayer) => {
                     parts.push("attacking defending player".into())
+                }
+                // CR 508.7a: the player the triggering attack declared.
+                Some(ControllerRef::AttackedPlayer) => {
+                    parts.push("attacking the attacked player".into())
                 }
                 Some(_) => parts.push("attacking scoped player".into()),
             },
@@ -1199,6 +1204,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::EventTargetController => "the damaged object's controller's",
                     ControllerRef::ParentTargetOwner => "parent target owner's",
                     ControllerRef::DefendingPlayer => "defending player's",
+                    ControllerRef::AttackedPlayer => "the attacked player's",
                     ControllerRef::SourceChosenPlayer => "the chosen player's",
                     ControllerRef::ChosenPlayer { .. } => "chosen player's",
                     ControllerRef::TriggeringPlayer => "triggering player's",
@@ -1397,6 +1403,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 }
                 ControllerRef::ParentTargetOwner => "parent target's owner",
                 ControllerRef::DefendingPlayer => "defending player",
+                ControllerRef::AttackedPlayer => "the attacked player",
                 ControllerRef::SourceChosenPlayer => "the chosen player",
                 ControllerRef::ChosenPlayer { .. } => "chosen player",
                 ControllerRef::TriggeringPlayer => "triggering player",
@@ -1478,6 +1485,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         }
         ControllerRef::ParentTargetOwner => "parent target's owner controls",
         ControllerRef::DefendingPlayer => "defending player controls",
+        ControllerRef::AttackedPlayer => "the attacked player controls",
         ControllerRef::SourceChosenPlayer => "the chosen player controls",
         ControllerRef::ChosenPlayer { .. } => "chosen player controls",
         ControllerRef::TriggeringPlayer => "triggering player controls",
@@ -5654,6 +5662,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
                 ControllerRef::EventTargetController => "the event target's controller",
                 ControllerRef::ParentTargetOwner => "the parent target's owner",
                 ControllerRef::DefendingPlayer => "the defending player",
+                ControllerRef::AttackedPlayer => "the attacked player",
                 ControllerRef::ChosenPlayer { .. } => "the chosen player",
                 ControllerRef::DeclaredPlayer { .. } => "the declared player",
                 ControllerRef::SourceChosenPlayer => "the source-chosen player",
@@ -13434,6 +13443,7 @@ fn pt_cost_qualifier_covered(
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }

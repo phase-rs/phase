@@ -5097,6 +5097,7 @@ fn typed_slot_type_axis_matches(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::Owner
         | TargetFilter::AllPlayers => false,
@@ -28026,6 +28027,7 @@ mod tests {
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }

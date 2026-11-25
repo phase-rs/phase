@@ -953,6 +953,10 @@ fn parse_token_description_with_context(
 /// "that player", "that opponent", optionally "or a planeswalker they
 /// control". Input starts at the space after "attacking"; the phrase must end
 /// the clause.
+///
+/// The `DefendingPlayer` is the context-free "that player" placeholder; an
+/// attack-declaration head rebinds it to `AttackedPlayer`
+/// (`oracle_effect::rebind_attack_anaphor_placeholders_to_attacked_player`).
 pub(super) fn parse_token_attack_destination(
     input: &str,
 ) -> OracleResult<'_, TokenAttackDestination> {

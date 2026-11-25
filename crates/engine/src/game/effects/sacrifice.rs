@@ -95,6 +95,15 @@ fn resolve_sacrifice_scope(
                 .map(|pid| vec![pid])
                 .unwrap_or_default()
         }
+        // CR 508.7a: the player the triggering attack declared; no referent
+        // means no sacrificing player.
+        Some(ControllerRef::AttackedPlayer) => crate::game::combat::attacked_player_cr508_7a(
+            state,
+            ability.source_id,
+            ability.trigger_source.as_ref(),
+        )
+        .map(|pid| vec![pid])
+        .unwrap_or_default(),
         // CR 613.1: Player persisted on the source via an "as ~ enters, choose
         // a player" replacement.
         Some(ControllerRef::SourceChosenPlayer) => {

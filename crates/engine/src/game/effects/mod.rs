@@ -7835,6 +7835,7 @@ fn moved_objects_referent(
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::Owner
         | TargetFilter::AllPlayers
         | TargetFilter::StackAbility { .. }
@@ -8271,6 +8272,7 @@ fn animate_names_moved_objects(target: &TargetFilter, source: MovedObjectsSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -11213,6 +11215,7 @@ fn referent_exists_without_gated_action(
                         | ControllerRef::EventTargetController
                         | ControllerRef::ParentTargetOwner
                         | ControllerRef::DefendingPlayer
+                        | ControllerRef::AttackedPlayer
                         | ControllerRef::ChosenPlayer { index: _ }
                         | ControllerRef::SourceChosenPlayer
                         | ControllerRef::TriggeringPlayer
@@ -11280,6 +11283,7 @@ fn referent_exists_without_gated_action(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -22688,6 +22692,17 @@ pub(crate) fn resolve_player_for_context_ref(
         TargetFilter::Owner | TargetFilter::SpecificPlayer { .. } => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
         }
+        // CR 508.7a: the player the triggering attack declared the referent
+        // creature as attacking, through the single as-declared authority with
+        // the ability's captured trigger context. A reselection does not change
+        // it. A missing referent, or one who has left the game (CR 800.4a),
+        // names no player — never the controller fallback below.
+        TargetFilter::AttackedPlayer => crate::game::combat::attacked_player_cr508_7a(
+            state,
+            ability.source_id,
+            ability.trigger_source.as_ref(),
+        )
+        .filter(|player| crate::game::players::is_alive(state, *player)),
         _ if declared_player_slot_is_empty(state, ability, target_filter) => None,
         _ => Some(resolve_context_player(state, ability, target_filter)),
     }
@@ -23234,6 +23249,7 @@ fn hydratable_event_context_filter(filter: &TargetFilter) -> bool {
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTarget
             | TargetFilter::StackSpell
@@ -36059,6 +36075,9 @@ fn resolve_unless_payer(
                     _ => None,
                 })
         }
+        // CR 508.7a + CR 118.12a: "that player" after an attack-declaration head
+        // pays as the player the attack was declared against.
+        TargetFilter::AttackedPlayer => resolve_player_for_context_ref(state, ability, payer),
         // CR 118.12a + CR 608.2f: "Each player/each opponent ... unless they pay" —
         // the payer is the player_scope iteration's scoped player, not a chosen
         // target. resolve_effect_player_ref maps ScopedPlayer -> ability.scoped_player,

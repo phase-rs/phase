@@ -742,6 +742,7 @@ fn admits_quantity_controller(controller: &ControllerRef, form: ControllerForm) 
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::TriggeringPlayer
         | ControllerRef::EnchantedPlayer
@@ -3347,6 +3348,7 @@ pub(crate) fn is_admissible_zone_card_count_filter(filter: &TargetFilter) -> boo
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -3621,6 +3623,7 @@ fn add_zone_card_count_property(
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }
@@ -3864,6 +3867,7 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -4007,6 +4011,7 @@ pub fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -8175,6 +8180,7 @@ fn parse_put_into_graveyard_origin_zones_for_owner(
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::TriggeringPlayer

@@ -165,6 +165,7 @@ pub(crate) fn retarget_dependencies(filter: &TargetFilter) -> RetargetDeps {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -222,6 +223,7 @@ fn controller_deps(controller: &ControllerRef) -> RetargetDeps {
         | ControllerRef::ScopedPlayer
         | ControllerRef::EventTargetController
         | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::TriggeringPlayer

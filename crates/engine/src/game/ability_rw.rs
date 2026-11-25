@@ -1561,6 +1561,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         // CR 506.3: a damage/effect recipient the combat authority names at
         // resolution (a player or a planeswalker): external to the source, with
         // no chain root to inherit.
@@ -2515,6 +2516,7 @@ fn legacy_controller_ref(x: &ControllerRef) -> bool {
         | ControllerRef::TargetOpponent
         | ControllerRef::DeclaredPlayer { .. }
         | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
         // CR 102.1: the active player is a game-defined role read live, not a
@@ -2610,6 +2612,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         // `SpecificObject`, its concretized form).
         | TargetFilter::OriginalSource
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         // Not one of the 12 frozen event-context tags: a combat-state referent
         // read from the member's own source and bound event.
         | TargetFilter::AttackedPlayerOrPlaneswalker
@@ -2895,6 +2898,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::PlayerMatching { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         // CR 108.3: owner-partition-commutative among identical members — same
@@ -2938,7 +2942,8 @@ fn member_bound_controller_ref(x: &ControllerRef) -> bool {
         // CR 109.4 + CR 611.2: a frozen player id is a plain literal read, not
         // an event-context tag.
         | ControllerRef::SpecificPlayer { .. }
-        | ControllerRef::DefendingPlayer => false,
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer => false,
     }
 }
 
@@ -4672,6 +4677,7 @@ fn target_recipient(f: &TargetFilter) -> (bool, bool) {
         | TargetFilter::Owner
         | TargetFilter::AllPlayers
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::SourceChosenPlayer
@@ -8093,6 +8099,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         // to `SpecificObject` at resolution).
         | TargetFilter::OriginalSource
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -8300,6 +8307,7 @@ fn rw_controller_ref(x: &ControllerRef) -> RwProfile {
         | ControllerRef::TargetOpponent
         | ControllerRef::DeclaredPlayer { .. }
         | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer
         // CR 102.1: a live read of `state.active_player` — no sibling-mutable
         // state, empty RW profile (mirrors `DefendingPlayer`).
         | ControllerRef::ActivePlayer

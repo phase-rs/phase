@@ -3438,6 +3438,7 @@ fn bind_possessive_it(ctx: &ParseContext, gated_instruction: &str) -> ItsReferen
                 | TargetFilter::PostReplacementDamageTarget
                 | TargetFilter::PostReplacementDamageTargetOwner
                 | TargetFilter::DefendingPlayer
+                | TargetFilter::AttackedPlayer
                 | TargetFilter::HasChosenName
                 | TargetFilter::ChosenDamageSource { .. }
                 | TargetFilter::Named { .. }
@@ -7416,6 +7417,8 @@ fn player_attack_endpoint_to_scope(scope: &ControllerRef) -> Option<PlayerScope>
         | ControllerRef::ChosenPlayer { .. } => Some(PlayerScope::Target),
         ControllerRef::SourceChosenPlayer => Some(PlayerScope::SourceChosenPlayer),
         ControllerRef::DefendingPlayer => Some(PlayerScope::DefendingPlayer),
+        // CR 508.7a: the player the triggering attack declared.
+        ControllerRef::AttackedPlayer => Some(PlayerScope::AttackedPlayer),
         ControllerRef::ScopedPlayer => Some(PlayerScope::ScopedPlayer),
         // No exact mapping: `Opponent` needs an aggregate the source lacks,
         // the target/event-relative refs name no single endpoint, and

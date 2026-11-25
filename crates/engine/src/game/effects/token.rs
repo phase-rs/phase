@@ -4954,6 +4954,7 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::Owner
         | TargetFilter::SpecificPlayer { .. }

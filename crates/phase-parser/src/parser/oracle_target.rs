@@ -7255,6 +7255,7 @@ fn admits_past_direct_controller(controller: &ControllerRef) -> bool {
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::TriggeringPlayer
@@ -8100,6 +8101,10 @@ fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterPr
 /// occurs only in the positions enumerated above (Kaalia of the Vast,
 /// Mardu Siegebreaker, ...), never as an object-filter suffix, so accepting it
 /// here would add zero coverage.
+///
+/// The `DefendingPlayer` is the context-free "that player" placeholder; an
+/// attack-declaration head rebinds it to `AttackedPlayer`
+/// (`oracle_effect::rebind_attack_anaphor_placeholders_to_attacked_player`).
 fn parse_attacking_defender_anaphor(input: &str) -> OracleResult<'_, FilterProp> {
     let (rest, _) = (tag("attacking"), space1, tag("that player")).parse(input)?;
     let (_, _) = parse_attacking_status_clause_boundary(rest)?;
@@ -11475,6 +11480,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }

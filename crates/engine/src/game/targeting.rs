@@ -647,7 +647,7 @@ fn find_legal_targets_with_context(
                     // Fail closed, mirroring the parent-target refs above.
                     Some(ControllerRef::EventTargetController) => false,
                     Some(ControllerRef::ParentTargetOwner) => false,
-                    Some(ControllerRef::DefendingPlayer) => false,
+                    Some(ControllerRef::DefendingPlayer | ControllerRef::AttackedPlayer) => false,
                     // CR 613.1: a persisted chosen player isn't a target
                     // candidate here. Fail closed.
                     Some(ControllerRef::SourceChosenPlayer) => false,
@@ -1554,6 +1554,13 @@ pub(crate) fn affected_event_context_target(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Option<TargetRef> {
+    // CR 508.7a: the as-declared attacked player needs the ability's trigger
+    // source, so it is read here (where the ability is in hand) through the
+    // single context-ref player door.
+    if matches!(filter, TargetFilter::AttackedPlayer) {
+        return crate::game::effects::resolve_player_for_context_ref(state, ability, filter)
+            .map(TargetRef::Player);
+    }
     match resolve_event_referent(state, ability, filter) {
         EventReferentBinding::Found(id) => Some(TargetRef::Object(id)),
         EventReferentBinding::Unfindable => None,
@@ -1831,6 +1838,15 @@ pub(crate) fn resolved_targets_with(
         )
         .into_iter()
         .collect();
+    }
+    // CR 508.7a: the player the triggering attack declared, read by the single
+    // context-ref player door. An absent referent is the empty set; it must not
+    // fall through to `ability.targets`, the source, or a controller.
+    if matches!(target_filter, TargetFilter::AttackedPlayer) {
+        return crate::game::effects::resolve_player_for_context_ref(state, ability, target_filter)
+            .map(TargetRef::Player)
+            .into_iter()
+            .collect();
     }
     if matches!(target_filter, TargetFilter::SourceOrPaired) {
         return state
@@ -2489,6 +2505,7 @@ pub(crate) fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool
             | TargetFilter::TriggeringSource
             | TargetFilter::EventTarget
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::AttachedTo
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
@@ -3353,6 +3370,12 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         // door carries neither the ability nor the latch, so it names no referent;
         // `resolved_targets` and the DealDamage recipient binding call the authority.
         TargetFilter::AttackedPlayerOrPlaneswalker => None,
+        // CR 508.7a: the as-declared attacked player is read by
+        // `combat::attacked_player_cr508_7a`, which needs the ability's trigger
+        // source; this door carries none, so it names no referent.
+        // `affected_event_context_target`, `resolved_targets` and the DealDamage
+        // recipient binding read it through `resolve_player_for_context_ref`.
+        TargetFilter::AttackedPlayer => None,
         TargetFilter::AttachedTo => {
             let host = resolve_source_attached_to(state, source_id)?;
             match host {
@@ -4537,6 +4560,7 @@ fn stack_entry_controller_matches(
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::TriggeringPlayer

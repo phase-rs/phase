@@ -1835,6 +1835,7 @@ fn subject_anchored_optional_actor(
             // ability's own firing event.
             TargetFilter::TriggeringPlayer
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
@@ -1909,6 +1910,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::ParentTargetOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
             | TargetFilter::ScopedPlayer

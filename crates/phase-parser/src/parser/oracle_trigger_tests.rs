@@ -7561,7 +7561,8 @@ fn trigger_attacks_the_monarch_scopes_to_monarch_filter() {
         "monarch identity is checked by the Monarch filter, not via valid_target"
     );
     // The destroy target is a tapped nonland permanent controlled by the
-    // defending (monarch) player — resolved via `ControllerRef::DefendingPlayer`.
+    // attacked (monarch) player as declared — resolved via
+    // `ControllerRef::AttackedPlayer` (CR 508.7a).
     let effect = def
         .execute
         .as_ref()
@@ -7575,8 +7576,8 @@ fn trigger_attacks_the_monarch_scopes_to_monarch_filter() {
         Effect::Destroy { target, .. } => {
             let json = format!("{target:?}");
             assert!(
-                json.contains("DefendingPlayer"),
-                "destroy target must be controlled by DefendingPlayer, got {target:?}"
+                json.contains("controller: Some(AttackedPlayer)"),
+                "destroy target must be controlled by AttackedPlayer, got {target:?}"
             );
         }
         other => panic!("expected Effect::Destroy, got {other:?}"),
@@ -35885,13 +35886,13 @@ fn mangara_attack_batch_intervening_if_counts_attacking_you_or_planeswalkers() {
     );
 }
 
-/// CR 109.4 + CR 115.1 + CR 506.2: Karazikar's first trigger introduces
+/// CR 109.4 + CR 115.1 + CR 508.7a: Karazikar's first trigger introduces
 /// the attacked player in the condition; "that player controls" inside the
-/// effect must resolve to `ControllerRef::DefendingPlayer` so the runtime
-/// reads the defending player from the combat state, not from a TargetPlayer
+/// effect must resolve to `ControllerRef::AttackedPlayer` so the runtime
+/// reads the player the attack was declared against, not a TargetPlayer
 /// target slot. Regression test for #1667.
 #[test]
-fn karazikar_attack_a_player_uses_defending_player_controller() {
+fn karazikar_attack_a_player_uses_attacked_player_controller() {
     use crate::types::ability::Effect;
 
     let def = parse_trigger_line(
@@ -35908,8 +35909,8 @@ fn karazikar_attack_a_player_uses_defending_player_controller() {
         } => match target {
             TargetFilter::Typed(t) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::DefendingPlayer),
-                "tap target should reference the defending player via DefendingPlayer",
+                Some(ControllerRef::AttackedPlayer),
+                "tap target should reference the attacked player via AttackedPlayer",
             ),
             other => panic!("expected Typed filter, got {other:?}"),
         },
@@ -35917,17 +35918,16 @@ fn karazikar_attack_a_player_uses_defending_player_controller() {
     }
 }
 
-/// CR 109.4 + CR 115.1 + CR 506.2: Gornog's "Whenever one or more Warriors
+/// CR 109.4 + CR 115.1 + CR 508.7a: Gornog's "Whenever one or more Warriors
 /// you control attack a player, target creature that player controls
 /// becomes a Coward" introduces the attacked player through a relative-
 /// clause subject ("Warriors you control") rather than a bare actor. The
 /// effect's "that player controls" must resolve to
-/// `ControllerRef::DefendingPlayer` so the runtime reads the defending
-/// player from the combat state, not from a TargetPlayer target slot.
-/// Regression test for #1667 — the parser now emits DefendingPlayer for
-/// attack triggers instead of TargetPlayer.
+/// `ControllerRef::AttackedPlayer` so the runtime reads the player the attack
+/// was declared against, not a TargetPlayer target slot. Regression test for
+/// #1667.
 #[test]
-fn gornog_one_or_more_warriors_attack_uses_defending_player_controller() {
+fn gornog_one_or_more_warriors_attack_uses_attacked_player_controller() {
     use crate::types::ability::Effect;
 
     let def = parse_trigger_line(
@@ -35940,8 +35940,8 @@ fn gornog_one_or_more_warriors_attack_uses_defending_player_controller() {
         Effect::GenericEffect { target, .. } => match target {
             Some(TargetFilter::Typed(t)) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::DefendingPlayer),
-                "GenericEffect target should reference the defending player via DefendingPlayer",
+                Some(ControllerRef::AttackedPlayer),
+                "GenericEffect target should reference the attacked player via AttackedPlayer",
             ),
             other => panic!("expected Some(Typed) target filter, got {other:?}"),
         },
@@ -36009,11 +36009,11 @@ fn fangorn_tree_shepherd_attack_trigger_adds_multiplied_event_context_green() {
     }
 }
 
-/// CR 506.2 + CR 508.1a + CR 608.2c: "attack an opponent" introduces the
+/// CR 508.1a + CR 508.7a + CR 608.2c: "attack an opponent" introduces the
 /// attacked player just like "attack a player"; the effect's "that player"
-/// anaphor must still bind to `DefendingPlayer`.
+/// anaphor must still bind to `AttackedPlayer`.
 #[test]
-fn attack_an_opponent_uses_defending_player_controller() {
+fn attack_an_opponent_uses_attacked_player_controller() {
     let def = parse_trigger_line(
             "Whenever a creature you control attacks an opponent, tap target creature that player controls.",
             "Test Card",
@@ -36027,8 +36027,8 @@ fn attack_an_opponent_uses_defending_player_controller() {
         } => match target {
             TargetFilter::Typed(t) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::DefendingPlayer),
-                "tap target should reference the defending player via DefendingPlayer",
+                Some(ControllerRef::AttackedPlayer),
+                "tap target should reference the attacked player via AttackedPlayer",
             ),
             other => panic!("expected Typed filter, got {other:?}"),
         },
@@ -36036,10 +36036,10 @@ fn attack_an_opponent_uses_defending_player_controller() {
     }
 }
 
-/// CR 506.2 + CR 508.1a + CR 608.2c: plural opponent phrases are the same
+/// CR 508.1a + CR 508.7a + CR 608.2c: plural opponent phrases are the same
 /// attacked-player anaphor class and must not fall back to TargetPlayer.
 #[test]
-fn attack_one_or_more_opponents_uses_defending_player_controller() {
+fn attack_one_or_more_opponents_uses_attacked_player_controller() {
     let def = parse_trigger_line(
             "Whenever one or more creatures you control attack one or more of your opponents, tap target creature that player controls.",
             "Test Card",
@@ -36053,8 +36053,8 @@ fn attack_one_or_more_opponents_uses_defending_player_controller() {
         } => match target {
             TargetFilter::Typed(t) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::DefendingPlayer),
-                "tap target should reference the defending player via DefendingPlayer",
+                Some(ControllerRef::AttackedPlayer),
+                "tap target should reference the attacked player via AttackedPlayer",
             ),
             other => panic!("expected Typed filter, got {other:?}"),
         },
@@ -39366,6 +39366,76 @@ fn siege_dragon_that_player_controls_binds_to_defending_player() {
     }
 }
 
+/// P6 — CR 509.3g: an "attacks a player and isn't blocked" head is the unblocked
+/// status, not the declaration (Master of Cruelties ruling: it triggers in the
+/// declare blockers step after blockers are declared), so its "that player"
+/// stays the live defending player (CR 508.5) rather than the as-declared
+/// `AttackedPlayer` (CR 508.7a) an attack-declaration head introduces. Paired
+/// positive: the same head without "and isn't blocked" introduces
+/// `AttackedPlayer`.
+#[test]
+fn unblocked_attack_head_keeps_that_player_as_the_live_defending_player() {
+    let scope = crate::parser::oracle_trigger::relative_player_scope_for_condition;
+    assert_eq!(
+        scope("whenever this creature attacks a player and isn't blocked"),
+        Some(ControllerRef::DefendingPlayer)
+    );
+    assert_eq!(
+        scope("whenever this creature attacks a player"),
+        Some(ControllerRef::AttackedPlayer),
+        "reach guard: the declaration head introduces the as-declared player"
+    );
+
+    // Verbatim Oracle text (MTGJSON).
+    let parsed = parse_oracle_text(
+        "First strike, deathtouch\nThis creature can only attack alone.\nWhenever this creature attacks a player and isn't blocked, that player's life total becomes 1. This creature assigns no combat damage this combat.",
+        "Master of Cruelties",
+        &[],
+        &["Creature".to_string()],
+        &["Demon".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::AttackerUnblocked)
+        .unwrap_or_else(|| panic!("Master of Cruelties has an unblocked trigger: {parsed:#?}"));
+    let rendered = format!("{:?}", trigger.execute);
+    assert!(
+        rendered.contains("DefendingPlayer") && !rendered.contains("AttackedPlayer"),
+        "that player's life total reads the live defending player: {trigger:#?}"
+    );
+}
+
+/// P6 — a literal "defending player" antecedent stays the live CR 508.5 read
+/// (Signpost ruling: "defending player" changes with a reselection), so
+/// Midnight Crusader Shuttle's "defending player faces a villainous choice —
+/// That player ..." never becomes the as-declared `AttackedPlayer`.
+#[test]
+fn literal_defending_player_antecedent_never_becomes_attacked_player() {
+    // Verbatim Oracle text (MTGJSON).
+    let parsed = parse_oracle_text(
+        "Midnight Entity — Whenever this Vehicle attacks, defending player faces a villainous choice — That player sacrifices a creature of their choice, or you gain control of a creature of your choice that player controls until end of turn. If you gain control of a creature this way, tap it, and it's attacking that player.\nCrew 2",
+        "Midnight Crusader Shuttle",
+        &[],
+        &["Artifact".to_string()],
+        &["Vehicle".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Attacks)
+        .unwrap_or_else(|| panic!("the Shuttle has an attack trigger: {parsed:#?}"));
+    let rendered = format!("{:?}", trigger.execute);
+    assert!(
+        rendered.contains("DefendingPlayer"),
+        "reach guard: the body names the defending player: {trigger:#?}"
+    );
+    assert!(
+        !rendered.contains("AttackedPlayer"),
+        "a literal defending-player antecedent stays live: {trigger:#?}"
+    );
+}
+
 /// CR 508.5: For an ability of an attacking creature that refers to a defending
 /// player, that player is the player the creature attacks.
 /// Elder Brain: "Whenever this creature attacks a player, exile all cards
@@ -39376,7 +39446,8 @@ fn siege_dragon_that_player_controls_binds_to_defending_player() {
 /// condition is "whenever ~ attacks a player", which the PRE-EXISTING
 /// `condition_introduces_defending_player` check
 /// (`relative_player_scope_for_condition`) already recognized and stamped as
-/// `ControllerRef::DefendingPlayer` before this fix. What was still broken:
+/// `ControllerRef::DefendingPlayer` before this fix (now
+/// `ControllerRef::AttackedPlayer`, CR 508.7a). What was still broken:
 /// `resolve_they_pronoun` had no arm reading that scope at all, so "they" in
 /// "they draw that many cards" fell through to the generic `ParentTarget`
 /// default regardless of which mechanism set the scope. This test locks in
@@ -39384,7 +39455,7 @@ fn siege_dragon_that_player_controls_binds_to_defending_player() {
 /// detector and the new `resolve_they_pronoun` arm together, distinct from
 /// the body-conditional route the other two tests cover.
 #[test]
-fn elder_brain_they_draw_binds_to_defending_player() {
+fn elder_brain_they_draw_binds_to_attacked_player() {
     let def = parse_trigger_line(
         "Whenever this creature attacks a player, exile all cards from that player's hand, then they draw that many cards. You may play lands and cast spells from among the exiled cards for as long as they remain exiled. If you cast a spell this way, you may spend mana as though it were mana of any color to cast it.",
         "Elder Brain",
@@ -39406,8 +39477,8 @@ fn elder_brain_they_draw_binds_to_defending_player() {
         Effect::Draw { target, count } => {
             assert_eq!(
                 target,
-                &TargetFilter::DefendingPlayer,
-                "\"they draw\" must bind to the attacked defending player, not ParentTarget"
+                &TargetFilter::AttackedPlayer,
+                "\"they draw\" must bind to the player the attack was declared against,                  not ParentTarget"
             );
             assert_eq!(
                 count,
@@ -39479,10 +39550,11 @@ fn archnemesis_you_attack_enchanted_player_drains_enchanted_player() {
         matches!(amount, QuantityExpr::Fixed { value: 2 }),
         "expected 2 life, got {amount:?}"
     );
+    // CR 508.7a: the enchanted player the attack was declared against.
     assert_eq!(
         target.as_ref(),
-        Some(&TargetFilter::DefendingPlayer),
-        "'that player' must drain the captured defender, not the attacker"
+        Some(&TargetFilter::AttackedPlayer),
+        "'that player' must drain the player the attack was declared against, not the attacker"
     );
 
     // The "You draw a card and gain 2 life" tail stays on the controller.
@@ -39536,10 +39608,11 @@ fn attack_enchanted_player_binds_damage_to_them_to_declared_defender() {
     let Effect::DealDamage { target, .. } = execute.effect.as_ref() else {
         panic!("expected DealDamage head, got {:?}", execute.effect);
     };
+    // CR 508.7a: the enchanted player the attack was declared against.
     assert_eq!(
         *target,
-        TargetFilter::DefendingPlayer,
-        "'them' must bind to the captured defender, not the attacker"
+        TargetFilter::AttackedPlayer,
+        "'them' must bind to the player the attack was declared against, not the attacker"
     );
 }
 
@@ -44458,9 +44531,12 @@ fn token_attack_fields(
     }
 }
 
+/// CR 508.7a: after an attack-declaration head the token's "that player" is
+/// rebound from the context-free `DefendingPlayer` placeholder to the player
+/// the attack was declared against.
 fn names_that_player() -> crate::types::ability::TokenAttackDestination {
     crate::types::ability::TokenAttackDestination::Player {
-        player: ControllerRef::DefendingPlayer,
+        player: ControllerRef::AttackedPlayer,
         scope: crate::types::ability::NamedDefenderScope::Player,
     }
 }
@@ -44529,10 +44605,10 @@ fn copy_token_continuation_sentence_names_that_player_as_its_attack_destination(
             target,
             TargetFilter::Typed(typed) if typed.properties.iter().any(|prop| matches!(
                 prop,
-                FilterProp::Attacking { defender: Some(ControllerRef::DefendingPlayer) }
+                FilterProp::Attacking { defender: Some(ControllerRef::AttackedPlayer) }
             ))
         ),
-        "the choose clause still reads the defending player: {target:?}"
+        "the choose clause reads the player the attack was declared against: {target:?}"
     );
 
     let tokens = token_definitions_in_chain(execute);

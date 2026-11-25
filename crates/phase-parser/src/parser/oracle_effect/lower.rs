@@ -469,6 +469,7 @@ fn target_filter_is_player_scoped(filter: &TargetFilter) -> bool {
             | TargetFilter::Controller
             | TargetFilter::AllPlayers
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::ScopedPlayer
             | TargetFilter::TriggeringPlayer
             | TargetFilter::OriginalController
@@ -4687,6 +4688,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
@@ -4790,6 +4792,7 @@ pub(super) fn filter_tree_has_chosen_card(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -11954,6 +11957,8 @@ fn resolve_player_anaphor_damage_recipient(
             Some(TargetFilter::TriggeringPlayer)
         }
         Some(ControllerRef::DefendingPlayer) => Some(TargetFilter::DefendingPlayer),
+        // CR 508.7a: the player the triggering attack declared.
+        Some(ControllerRef::AttackedPlayer) => Some(TargetFilter::AttackedPlayer),
         // CR 608.2k: No explicit player scope — fall back to the trigger
         // subject. A player-actor subject (a bare player filter: empty type
         // filters with a controller ref, e.g. "an opponent draws a card", or

@@ -5148,7 +5148,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             history: HistoryReads::NONE,
             that_player: false,
         },
-        TargetFilter::DefendingPlayer => Axes::NONE,
+        TargetFilter::DefendingPlayer | TargetFilter::AttackedPlayer => Axes::NONE,
         // CR 506.3: reads the bound attack event (event) and live combat and
         // battlefield state (a planeswalker's loyalty is changed by the damage it
         // receives, so a sibling trigger can interact: sibling). Not DefendingPlayer's NONE.
@@ -7160,7 +7160,7 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes<'_> {
             history: HistoryReads::NONE,
             that_player: false,
         },
-        ControllerRef::DefendingPlayer => Axes::NONE,
+        ControllerRef::DefendingPlayer | ControllerRef::AttackedPlayer => Axes::NONE,
         ControllerRef::ChosenPlayer { index: _ } => Axes::NONE,
         ControllerRef::SourceChosenPlayer => Axes::NONE,
         ControllerRef::TriggeringPlayer => Axes {

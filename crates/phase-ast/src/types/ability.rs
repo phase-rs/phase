@@ -6983,6 +6983,15 @@ pub enum ControllerRef {
     /// `combat::defending_player_for_attacker`. Used by intervening-if
     /// quantity checks such as "defending player controls more lands than you."
     DefendingPlayer,
+    /// CR 508.7a + CR 603.2: the player the triggering attack declared the
+    /// referred-to creature as attacking ("that player"/"that opponent" after an
+    /// attack-declaration head: Gornog, the Red Reaper's "target creature that
+    /// player controls"; Soaring Lightbringer's token "attacking that player").
+    /// Unlike [`DefendingPlayer`](Self::DefendingPlayer) (CR 508.5, live), a
+    /// reselection does not change it. Resolved only through
+    /// `combat::attacked_player_cr508_7a`. Not `AttackedYouScope::AttackedPlayer`,
+    /// a different enum (turn-history scope).
+    AttackedPlayer,
     /// CR 608.2c + CR 109.4: Filter controller is the player chosen by the
     /// Nth `Effect::Choose { choice_type: ChoiceType::Player }` in this
     /// resolving ability chain (`index` is 0-based: 0 = the first choose).
@@ -9227,6 +9236,15 @@ pub enum TargetFilter {
     /// attacking creature, looked up per attacker through
     /// `combat::defending_player_for_attacker`.
     DefendingPlayer,
+    /// CR 508.7a + CR 603.2: the player the triggering attack declared the
+    /// referred-to creature as attacking ("that player" after an
+    /// attack-declaration head: Archnemesis's "Whenever you attack enchanted
+    /// player, that player loses 2 life"). Unlike
+    /// [`DefendingPlayer`](Self::DefendingPlayer) (CR 508.5, live), a reselection
+    /// does not change it. Resolved only through `combat::attacked_player_cr508_7a`;
+    /// a context reference, never a declared target. Not
+    /// `AttackedYouScope::AttackedPlayer`, a different enum (turn-history scope).
+    AttackedPlayer,
     /// Matches objects whose name equals the source's ChosenAttribute::CardName.
     /// Used for "card with the chosen name" patterns.
     HasChosenName,
@@ -9538,6 +9556,7 @@ pub fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter) -> bo
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -9846,6 +9865,7 @@ pub fn filter_grammar_any(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -10414,6 +10434,7 @@ pub fn rewrite_filter_props<C>(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -11312,6 +11333,7 @@ pub(crate) fn filter_binds_player(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -12992,6 +13014,7 @@ fn target_filter_has_unsupported_selected_ref(filter: &TargetFilter, nested: boo
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -13243,6 +13266,7 @@ fn controller_ref_is_selected_dependent(reference: &ControllerRef, direct_member
         | ControllerRef::Opponent
         | ControllerRef::ScopedPlayer
         | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::TriggeringPlayer
         | ControllerRef::EnchantedPlayer
@@ -27966,6 +27990,7 @@ pub fn phase_out_filter_is_context_union(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -29736,6 +29761,7 @@ pub fn filter_recipient_read(filter: &TargetFilter) -> RecipientRead {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -30760,6 +30786,7 @@ impl TargetFilter {
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
@@ -30842,6 +30869,7 @@ impl TargetFilter {
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
@@ -31259,6 +31287,7 @@ impl TargetFilter {
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
@@ -31427,6 +31456,7 @@ impl TargetFilter {
                 | TargetFilter::TriggeringSource
                 | TargetFilter::EventTarget
                 | TargetFilter::DefendingPlayer
+                | TargetFilter::AttackedPlayer
                 // CR 506.3 + CR 115.10a: read from combat at resolution, never declared.
                 | TargetFilter::AttackedPlayerOrPlaneswalker
                 // CR 608.2c + CR 115.1: "that token" / "those tokens"

@@ -16844,6 +16844,7 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -16873,6 +16874,7 @@ fn latched_controller_clause_is_judged(
             | ControllerRef::EventTargetController
             | ControllerRef::ParentTargetOwner
             | ControllerRef::DefendingPlayer
+            | ControllerRef::AttackedPlayer
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::DeclaredPlayer { .. }
             | ControllerRef::SourceChosenPlayer
@@ -16905,6 +16907,7 @@ fn latched_controller_clause_matches(
             | ControllerRef::EventTargetController
             | ControllerRef::ParentTargetOwner
             | ControllerRef::DefendingPlayer
+            | ControllerRef::AttackedPlayer
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::DeclaredPlayer { .. }
             | ControllerRef::SourceChosenPlayer
@@ -19252,7 +19255,9 @@ pub(crate) fn filter_binding_diverges(filter: &TargetFilter, reader: BindingRead
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::EventTarget
-        | TargetFilter::DefendingPlayer => match reader {
+        | TargetFilter::DefendingPlayer
+        // CR 508.7a: the same event-bound authority, as-declared reading.
+        | TargetFilter::AttackedPlayer => match reader {
             // The fire-time leg publishes that event through
             // `DETECTION_TRIGGER_EVENT`, and every reader here
             // (`triggering_event_player` / `_target_object` / `_source_object`,
@@ -19396,7 +19401,9 @@ fn controller_ref_binding_diverges(controller: &ControllerRef, reader: BindingRe
             }
         },
         // CR 603.2 + CR 508.5: event-derived players.
-        ControllerRef::TriggeringPlayer | ControllerRef::DefendingPlayer => match reader {
+        ControllerRef::TriggeringPlayer
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer => match reader {
             // Resolved through the same resolution-or-detection dual path as the
             // event-scoped filters.
             BindingReader::DelayedTriggerFireTime => false,

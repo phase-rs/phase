@@ -87,9 +87,13 @@ fn player_context_target(
 ) -> Option<PlayerRecipient> {
     if matches!(
         target_filter,
-        TargetFilter::DeclaredPlayer { .. } | TargetFilter::SpecificPlayer { .. }
+        TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::AttackedPlayer
     ) {
         // CR 608.2b: a declared player with no legal referent is dealt nothing.
+        // CR 508.7a: likewise the player an attack was declared against, once
+        // absent.
         return Some(
             match super::resolve_player_for_context_ref(state, ability, target_filter) {
                 Some(player) => PlayerRecipient::Bound(TargetRef::Player(player)),
@@ -170,6 +174,7 @@ fn bound_player_context_target(
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayer
             | TargetFilter::ParentTargetOwner
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::PostReplacementDamageTargetOwner

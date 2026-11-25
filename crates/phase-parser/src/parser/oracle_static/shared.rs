@@ -1562,6 +1562,7 @@ fn filter_zone_truth(filter: &TargetFilter, zone: Zone) -> SourceZoneTruth {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -6338,10 +6339,13 @@ fn admits_static_subject_controller(
             nom_target::ControllerForm::Plural | nom_target::ControllerForm::Negated => true,
             nom_target::ControllerForm::Singular | nom_target::ControllerForm::Passive => false,
         },
-        // `TargetPlayer` and `DefendingPlayer` are deliberately excluded because
-        // this call site builds a continuous static `TargetFilter` with no
-        // companion target-player authority or combat context.
-        ControllerRef::TargetPlayer | ControllerRef::DefendingPlayer => false,
+        // `TargetPlayer`, `DefendingPlayer` and `AttackedPlayer` are deliberately
+        // excluded because this call site builds a continuous static
+        // `TargetFilter` with no companion target-player authority or combat
+        // context.
+        ControllerRef::TargetPlayer
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer => false,
         ControllerRef::ScopedPlayer
         | ControllerRef::TargetOpponent
         | ControllerRef::ParentTargetController

@@ -517,6 +517,7 @@ pub(crate) fn admits_type_phrase_controller(controller: &ControllerRef) -> bool 
         | ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
         | ControllerRef::DefendingPlayer
+        | ControllerRef::AttackedPlayer
         | ControllerRef::EnchantedPlayer
         | ControllerRef::ActivePlayer => true,
         // The chosen player is excluded from the SHARED set: the folding
