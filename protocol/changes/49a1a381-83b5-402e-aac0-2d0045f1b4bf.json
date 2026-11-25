@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Blocking token entry carries a bound attacker in card effects and pending entry state. Older peers can drop the rider and miss combat edges and events, so full-game and peer-to-peer execution require coordinated versions."
+}
