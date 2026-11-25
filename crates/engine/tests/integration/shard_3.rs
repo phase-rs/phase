@@ -234,6 +234,7 @@ mod flashback_nonmana_payability;
 mod flavor_word_additional_cost;
 mod fleeting_effigy_end_step_return;
 mod flickerwisp_delayed_return;
+mod fling;
 mod floodpits_drowner;
 mod flowstone_surge_mixed_anthem;
 mod foil_alternative_cost;

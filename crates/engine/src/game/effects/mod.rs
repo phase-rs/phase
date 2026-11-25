@@ -29134,7 +29134,116 @@ fn resolve_chain_body(
                     if escape == FalseGateEscape::OrdinalSibling {
                         apply_parent_chain_context(&mut sub_resolved, ability, None, state);
                     }
+                    // CR 608.2c + CR 608.2d: this node's own gate was false, so
+                    // an OPTIONAL node was never offered and never performed —
+                    // latch that decision for outcome continuations, exactly as
+                    // the decline path does (`resolve_optional_effect_decision`:
+                    // the branch must read THIS decision, not a stale `true`
+                    // inherited from an enclosing accepted optional such as a
+                    // kept up-to dig selection). Without the latch a paired
+                    // `Not(OptionalEffectPerformed)` continuation misreads the
+                    // skip as performed (Break Out's hand fallback), and a
+                    // positive `IfYouDo` continuation can misfire. A mandatory
+                    // node carries no performed-record, so only optionals latch
+                    // (a later mandatory resolver re-seeds `true` for its own
+                    // performed riders via `mandatory_rider_owned`).
+                    if ability.optional {
+                        sub_resolved.context.optional_effect_performed = false;
+                    }
                     progress = resolve_ability_chain_step(state, &sub_resolved, events, depth + 1)?;
+                } else {
+                    // CR 608.2c: no escape — the direct sub is a resolution step
+                    // of this skipped instruction (or a dependent gate), so it
+                    // dies with it. Later INDEPENDENT instructions still resolve
+                    // in written order: walk past the steps to the next
+                    // `SequentialSibling`, mirroring the gated-sub sibling walk
+                    // above (same skip rules: `WhenYouDo` reflexives of the
+                    // failed instruction never trigger; each sibling evaluates
+                    // its own condition; the first live sibling's own chain
+                    // continues recursively, so the walk stops there).
+                    // Break Out is the witness: a false "that card has mana
+                    // value 2 or less" gate skips the may-put and its haste
+                    // step, and the walk resumes at the "If you didn't put ..."
+                    // hand fallback (whose `Not` gate reads the latched `false`
+                    // above) instead of stranding the card in the library.
+                    // Ordinal exclusivity for the walk below: below a false
+                    // `Resolved`-tally ordinal gate, a DEPENDENT sibling whose
+                    // own gate is not ordinal stays suppressed with the
+                    // unmatched ordinal (it is part of that ordinal's branch),
+                    // while unconditioned siblings and ordinal siblings keep
+                    // their direct-sub escape equivalents. Mirrors the
+                    // `OrdinalSibling` escape's scope (which is also
+                    // `Resolved`-only).
+                    let parent_gate_is_ordinal = matches!(
+                        condition,
+                        AbilityCondition::AbilityUseCountThisTurn {
+                            tally: AbilityUseTally::Resolved,
+                            ..
+                        }
+                    );
+                    let mut current = Some(sub.as_ref());
+                    while let Some(sibling) = current {
+                        // CR 603.12: "When you do, ..." is the reflexive trigger
+                        // of the instruction just before it. The gated node did
+                        // not happen, so its reflexive rider never triggers even
+                        // when the parser links it as a separate-sentence
+                        // sibling.
+                        if sibling
+                            .condition
+                            .as_ref()
+                            .is_some_and(AbilityCondition::has_when_you_do_marker)
+                        {
+                            current = sibling.sub_ability.as_deref();
+                            continue;
+                        }
+                        if parent_gate_is_ordinal
+                            && sibling.sibling_condition == SiblingCondition::Dependent
+                            && sibling.condition.as_ref().is_some_and(|gate| {
+                                !matches!(
+                                    gate,
+                                    AbilityCondition::AbilityUseCountThisTurn {
+                                        tally: AbilityUseTally::Resolved,
+                                        ..
+                                    }
+                                )
+                            })
+                        {
+                            current = sibling.sub_ability.as_deref();
+                            continue;
+                        }
+                        if starts_independent_instruction(sibling) {
+                            let mut sibling_resolved = sibling.clone();
+                            if should_propagate_parent_targets(ability, &sibling_resolved) {
+                                sibling_resolved.mirror_targets_from(ability);
+                            }
+                            sibling_resolved.context = ability.context.clone();
+                            if ability.optional {
+                                sibling_resolved.context.optional_effect_performed = false;
+                            }
+                            if sibling_resolved
+                                .condition
+                                .as_ref()
+                                .is_some_and(|condition| {
+                                    !evaluate_condition(condition, state, &sibling_resolved)
+                                        && sibling_resolved.else_ability.is_none()
+                                })
+                            {
+                                if let Some(result_id) = sibling_resolved.declares_return_result {
+                                    publish_empty_return_result_for_active(state, result_id)?;
+                                }
+                                current = sibling.sub_ability.as_deref();
+                                continue;
+                            }
+                            progress = resolve_ability_chain_step(
+                                state,
+                                &sibling_resolved,
+                                events,
+                                depth + 1,
+                            )?;
+                            break;
+                        }
+                        current = sibling.sub_ability.as_deref();
+                    }
                 }
             }
             return Ok(progress);
