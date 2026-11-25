@@ -20057,7 +20057,7 @@ fn build_aura_attach_clause(
         kind,
         Effect::Sacrifice {
             target: TargetFilter::ParentTarget,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -20209,7 +20209,8 @@ fn balance_clause_effect(verb: EqualizeVerb, filter: TargetFilter) -> Effect {
                 count: QuantityExpr::Difference {
                     left: Box::new(left),
                     right: Box::new(right),
-                },
+                }
+                .into(),
                 min_count: 0,
             }
         }
@@ -22744,7 +22745,7 @@ fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContex
         // any "they control" refs inside the count to the same player.
         Effect::Sacrifice {
             target: mut sac_target,
-            count: mut sac_count,
+            count: crate::types::ability::SacrificeSelection::Count(mut sac_count),
             min_count,
         } if player_filter_as_controller_ref(&target).is_some() => {
             let ctrl = player_filter_as_controller_ref(&target).expect("guarded is_some");
@@ -22757,7 +22758,7 @@ fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContex
             );
             Effect::Sacrifice {
                 target: sac_target,
-                count: sac_count,
+                count: sac_count.into(),
                 min_count,
             }
         }
@@ -37352,7 +37353,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
                 let effective_ctrl =
                     sacrifice_subject_controller(ctrl, subject.target.is_some());
                 force_controller(target, effective_ctrl.clone());
-                if subject.target.is_some() {
+                if let Some(count) = count.count_expr_mut().filter(|_| subject.target.is_some()) {
                     rewrite_quantity_controller(count, ControllerRef::ScopedPlayer, effective_ctrl);
                 }
             }
@@ -45068,7 +45069,11 @@ pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Scry { count, .. }
         | Effect::Surveil { count, .. }
         | Effect::PutCounter { count, .. } => f(count),
-        Effect::Sacrifice { count, .. } => f(count),
+        Effect::Sacrifice { count, .. } => {
+            if let Some(count) = count.count_expr_mut() {
+                f(count);
+            }
+        }
         // CR 608.2c: the two remaining `where X is …` quantity carriers reached
         // by the set-anaphor grammar — `ExileTop` (Kylox, Visionary Inventor /
         // Witch-king, Sky Scourge: "exile the top X cards … where X is their

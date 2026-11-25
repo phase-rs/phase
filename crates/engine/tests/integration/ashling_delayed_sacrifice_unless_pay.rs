@@ -76,7 +76,7 @@ fn run_to_end_step_unless_prompt() -> (GameRunner, ObjectId) {
     let sac = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::SpecificObject { id: elemental },
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
         vec![TargetRef::Object(elemental)],

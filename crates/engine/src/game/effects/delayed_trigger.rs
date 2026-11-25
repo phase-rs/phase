@@ -164,6 +164,23 @@ pub fn resolve(
     let tracked_set_id = if uses_tracked_set {
         if matches!(
             &*effect_def.effect,
+            Effect::Sacrifice {
+                count: crate::types::ability::SacrificeSelection::EntireReferent,
+                ..
+            }
+        ) {
+            // CR 603.7c: freeze membership separately from the writable
+            // chain publication, even when the producer created no tokens.
+            let chain_id = state.chain_tracked_set_id;
+            let members = chain_id
+                .and_then(|id| state.tracked_object_sets.get(&id))
+                .cloned()
+                .unwrap_or_default();
+            let bound = super::publish_fresh_tracked_set(state, members);
+            state.chain_tracked_set_id = chain_id;
+            Some(bound)
+        } else if matches!(
+            &*effect_def.effect,
             Effect::ChangeZone {
                 target: TargetFilter::SelfRef,
                 ..
@@ -842,14 +859,12 @@ pub fn resolve(
     delayed_ability.context.outer_declared_players =
         crate::game::targeting::live_declared_players(state, ability);
     delayed_ability.context.creation_illegal_referents = illegal;
-    // CR 400.7 + CR 603.7c: a delayed move of a tracked set's exiled members
-    // ("When that token leaves the battlefield, put the exiled card into your
-    // hand") affects only the objects exiled by the creating effect. A member
-    // that left exile and came back is a new object and is not affected, so pin
-    // each member to the incarnation it has now.
+    // CR 400.7 + CR 603.7c: pin tracked exile returns and sacrifices in
+    // their expected zones. If a member leaves that zone and returns, it is
+    // a new object outside the delayed ability's referent.
     let target_pins = if target_pins.is_empty() {
         tracked_set_id
-            .map(|real_id| tracked_exile_member_pins(state, &delayed_ability, real_id))
+            .map(|real_id| tracked_member_pins(state, &delayed_ability, real_id))
             .unwrap_or_default()
     } else {
         target_pins
@@ -988,10 +1003,9 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 400.7 + CR 603.7c: Incarnation pins for the members of the bound tracked
-/// set that currently sit in exile, when the delayed payload moves exactly that
-/// set out of exile. Empty for every other payload shape.
-fn tracked_exile_member_pins(
+/// CR 400.7 + CR 603.7c: Pin a bound tracked set's members for a delayed
+/// return from exile or for a delayed sacrifice of the entire named set.
+fn tracked_member_pins(
     state: &GameState,
     delayed_ability: &ResolvedAbility,
     real_id: TrackedSetId,
@@ -1004,16 +1018,27 @@ fn tracked_exile_member_pins(
             ..
         } if *id == real_id
     );
-    if !moves_bound_set_from_exile {
+    let zone = if moves_bound_set_from_exile {
+        Zone::Exile
+    } else if matches!(
+        &delayed_ability.effect,
+        Effect::Sacrifice {
+            target: TargetFilter::TrackedSet { id },
+            count: crate::types::ability::SacrificeSelection::EntireReferent,
+            ..
+        } if *id == real_id
+    ) {
+        Zone::Battlefield
+    } else {
         return Vec::new();
-    }
+    };
     state
         .tracked_object_sets
         .get(&real_id)
         .into_iter()
         .flatten()
         .filter_map(|id| state.objects.get(id))
-        .filter(|object| object.zone == Zone::Exile)
+        .filter(|object| object.zone == zone)
         .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
         .collect()
 }
@@ -2185,7 +2210,14 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
         // `TargetFilter::rebind_tracked_set_sentinel` (types/ability.rs) — the
         // single authority for rewriting `TrackedSet{0}`/`TrackedSetFiltered{0}` →
         // concrete inside a filter (recursing And/Or/Not).
-        Effect::DestroyAll { target, .. } => target.rebind_tracked_set_sentinel(real_id),
+        Effect::DestroyAll { target, .. }
+        | Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::EntireReferent,
+            ..
+        } => {
+            target.rebind_tracked_set_sentinel(real_id);
+        }
         // Upgrade ChangeZone → ChangeZoneAll: ChangeZone uses ability.targets (empty for
         // delayed triggers), so it would move nothing. ChangeZoneAll scans by filter.
         Effect::ChangeZone {
@@ -6869,7 +6901,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Sacrifice {
                 target: crate::types::ability::TargetFilter::LastCreated,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         );
@@ -6953,7 +6985,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Sacrifice {
                 target: crate::types::ability::TargetFilter::LastCreated,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         );

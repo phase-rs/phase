@@ -12364,7 +12364,11 @@ fn for_each_sacrifice_target_opponent_dynamic_count_binds_target_opponent() {
              into your graveyard from the battlefield this turn.",
     );
     match e {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert_eq!(
                 target_filter_controller_ref(&target),
                 Some(ControllerRef::TargetOpponent),
@@ -12396,7 +12400,11 @@ fn for_each_sacrifice_target_player_counters_on_source_binds_target_player() {
              on this Equipment.",
     );
     match e {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert_eq!(
                 target_filter_controller_ref(&target),
                 Some(ControllerRef::TargetPlayer),
@@ -12439,7 +12447,11 @@ fn for_each_sacrifice_din_first_leg_binds_target_opponent() {
         .first()
         .expect("Din should produce a spell ability");
     match &*def.effect {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert_eq!(
                 target_filter_controller_ref(target),
                 Some(ControllerRef::TargetOpponent),
@@ -40657,7 +40669,12 @@ fn crackling_doom_sacrifice_preserves_greatest_power_filter() {
         .as_ref()
         .expect("damage clause should chain to opponent sacrifice");
     assert_eq!(sacrifice.player_scope, Some(PlayerFilter::Opponent));
-    let Effect::Sacrifice { target, count, .. } = &*sacrifice.effect else {
+    let Effect::Sacrifice {
+        target,
+        count: crate::types::ability::SacrificeSelection::Count(count),
+        ..
+    } = &*sacrifice.effect
+    else {
         panic!("expected sacrifice clause, got {:?}", sacrifice.effect);
     };
     assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
@@ -64940,7 +64957,7 @@ fn replace_target_with_parent_recurses_delayed_trigger_sub_ability() {
                 AbilityKind::Spell,
                 Effect::Sacrifice {
                     target: TargetFilter::SelfRef,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
             )),
@@ -103187,7 +103204,7 @@ fn def_chain_is_zone_ledger_invisible_walks_the_nested_compound_chain() {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );

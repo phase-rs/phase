@@ -23484,6 +23484,45 @@ where
     })
 }
 
+/// CR 701.21a + CR 608.2c: How a sacrifice instruction selects permanents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SacrificeSelection {
+    /// Every eligible member of the named set.
+    EntireReferent,
+    /// A quantity to choose, including ranged quantities. Keep the existing
+    /// QuantityExpr wire format for counted instructions.
+    #[serde(untagged)]
+    Count(QuantityExpr),
+}
+
+impl SacrificeSelection {
+    pub fn count_expr(&self) -> Option<&QuantityExpr> {
+        match self {
+            Self::EntireReferent => None,
+            Self::Count(count) => Some(count),
+        }
+    }
+
+    pub fn count_expr_mut(&mut self) -> Option<&mut QuantityExpr> {
+        match self {
+            Self::EntireReferent => None,
+            Self::Count(count) => Some(count),
+        }
+    }
+}
+
+impl Default for SacrificeSelection {
+    fn default() -> Self {
+        Self::Count(default_quantity_one())
+    }
+}
+
+impl From<QuantityExpr> for SacrificeSelection {
+    fn from(count: QuantityExpr) -> Self {
+        Self::Count(count)
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
@@ -23830,18 +23869,19 @@ pub enum Effect {
     Sacrifice {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        /// CR 701.21a: Number of permanents to sacrifice. Defaults to 1 so every
-        /// existing emission site — AST lowering, dungeon rooms, token graveyard
-        /// upkeep, emblem cost handlers, Forge importer — keeps its original
-        /// "sacrifice one" semantics without code changes. Dynamic quantities
-        /// ("sacrifice half the permanents they control") resolve per-iteration
-        /// via `resolve_quantity_with_targets`, which honors `player_scope`
-        /// controller rebinding.
-        /// CR 701.21a + CR 608.2d: "Sacrifice up to N permanents" is encoded
-        /// as `count: QuantityExpr::UpTo { max: <former count> }`. Distinct
-        /// from `optional: true` on the ability ("you may sacrifice").
-        #[serde(default = "default_quantity_one")]
-        count: QuantityExpr,
+        /// CR 701.21a: How many permanents to sacrifice. `Count` defaults to 1
+        /// so every emission site (AST lowering, dungeon rooms, token graveyard
+        /// upkeep, emblem cost handlers, Forge importer) keeps its "sacrifice
+        /// one" semantics. Dynamic quantities ("sacrifice half the permanents
+        /// they control") resolve per-iteration via
+        /// `resolve_quantity_with_targets`, which honors `player_scope`
+        /// controller rebinding. CR 701.21a + CR 608.2d: "Sacrifice up to N
+        /// permanents" is `Count(QuantityExpr::UpTo { max: N })`, distinct from
+        /// `optional: true` on the ability ("you may sacrifice").
+        /// CR 608.2c: `EntireReferent` is a count-less "sacrifice them" /
+        /// "sacrifice those tokens": every member of the set the target names.
+        #[serde(default)]
+        count: SacrificeSelection,
         /// CR 107.1c: Minimum number of permanents to choose for ranged
         /// sacrifice effects. Defaults to 0 for ordinary "up to" choices; set
         /// to 1 for "one or more" choices.
@@ -28883,7 +28923,8 @@ pub fn effect_target_slot_filter(effect: &Effect) -> Option<QuantitySlotDerivati
         // its own slot. The tokens' owner stays the controller (CR 111.2), so
         // `target_filter()` surfaces no slot for it.
         | Effect::Token { count: amount, .. }
-        | Effect::Sacrifice { count: amount, .. } => quantity_expr_target_slot_filter(amount),
+            => quantity_expr_target_slot_filter(amount),
+        Effect::Sacrifice { count, .. } => count.count_expr().and_then(quantity_expr_target_slot_filter),
         Effect::DestroyAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::SetTapState {
@@ -34767,9 +34808,10 @@ macro_rules! define_effect_quantity_walk {
             Effect::RemoveCounter { count, .. } => {
                 f(count);
             }
-            Effect::Sacrifice { count, .. } => {
-                f(count);
-            }
+            Effect::Sacrifice { count, .. } => match count {
+                SacrificeSelection::Count(count) => f(count),
+                SacrificeSelection::EntireReferent => {}
+            },
             Effect::Mill { count, .. } => {
                 f(count);
             }
@@ -35718,11 +35760,11 @@ impl Effect {
         match self {
             // Only an `Exactly` run carries a flip count; `UntilLoss` has none.
             Effect::FlipCoins { flips, .. } => flips.count_expr(),
+            Effect::Sacrifice { count, .. } => count.count_expr(),
 
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
             Effect::Draw { count, .. }
             | Effect::Token { count, .. }
-            | Effect::Sacrifice { count, .. }
             | Effect::Mill { count, .. }
             | Effect::Scry { count, .. }
             | Effect::Dig { count, .. }
@@ -35993,11 +36035,11 @@ impl Effect {
         match self {
             // Only an `Exactly` run carries a flip count; `UntilLoss` has none.
             Effect::FlipCoins { flips, .. } => flips.count_expr_mut(),
+            Effect::Sacrifice { count, .. } => count.count_expr_mut(),
 
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
             Effect::Draw { count, .. }
             | Effect::Token { count, .. }
-            | Effect::Sacrifice { count, .. }
             | Effect::Mill { count, .. }
             | Effect::Scry { count, .. }
             | Effect::Dig { count, .. }

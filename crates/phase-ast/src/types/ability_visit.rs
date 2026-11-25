@@ -1404,8 +1404,13 @@ pub fn node_fields(node: $Node<'_>, v: &mut impl FnMut(Symbol<'_>)) {
 
 fn effect(e: &$($mut_)? Effect, v: &mut impl FnMut(Symbol<'_>)) {
     match e {
-        Effect::Sacrifice { target, count, .. }
-        | Effect::PutCounter { target, count, .. }
+        Effect::Sacrifice { target, count, .. } => {
+            filter(target, v);
+            if let crate::types::ability::SacrificeSelection::Count(count) = count {
+                quantity(count, v);
+            }
+        }
+        Effect::PutCounter { target, count, .. }
         | Effect::RemoveCounter { target, count, .. } => {
             filter(target, v);
             quantity(count, v);

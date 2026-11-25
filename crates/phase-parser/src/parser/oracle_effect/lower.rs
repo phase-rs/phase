@@ -4301,6 +4301,84 @@ pub(super) fn resolve_populated_token_anaphors(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// CR 603.7c + CR 608.2c: Resolve the count-less plural sacrifice only
+/// after assembly has enough context to identify its token-producing clause.
+pub(super) fn bind_plural_token_sacrifice(
+    def: &mut AbilityDefinition,
+    prior_defs: &[AbilityDefinition],
+) {
+    let Effect::CreateDelayedTrigger {
+        effect,
+        uses_tracked_set,
+        ..
+    } = def.effect.as_mut()
+    else {
+        return;
+    };
+    let Effect::Sacrifice { target, count, .. } = effect.effect.as_mut() else {
+        return;
+    };
+    if !matches!(
+        count,
+        crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 })
+    ) {
+        return;
+    }
+    let nearest_creator = prior_defs
+        .iter()
+        .rev()
+        .find(|previous| is_token_creating_effect(&previous.effect));
+    if matches!(target, TargetFilter::TrackedSet { .. }) {
+        let mut publishers = prior_defs
+            .iter()
+            .filter(|previous| super::publishes_aggregate_set_from_resolution(&previous.effect));
+        if *uses_tracked_set
+            && publishers
+                .next()
+                .is_some_and(|def| matches!(*def.effect, Effect::Token { .. }))
+            && publishers.next().is_none()
+        {
+            *count = crate::types::ability::SacrificeSelection::EntireReferent;
+        }
+        return;
+    }
+    if !matches!(
+        target,
+        TargetFilter::LastCreated
+            | TargetFilter::ParentTarget
+            | TargetFilter::TriggeringSource
+            | TargetFilter::SelfRef
+    ) {
+        return;
+    }
+    let nested_token_creator = prior_defs.last().is_some_and(|previous| {
+        matches!(
+            &*previous.effect,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent { .. },
+                effect: producer,
+                ..
+            } if is_token_creating_effect(&producer.effect)
+        )
+    });
+    if nearest_creator.is_some() || nested_token_creator {
+        // Use the same operand rewrite as the ordinary post-token pass and
+        // the nested per-attack cleanup fold.
+        rewrite_parent_target_to_last_created(&mut effect.effect, false);
+        if !nested_token_creator {
+            rewrite_delayed_cleanup_self_ref_to_last_created(&mut effect.effect);
+        }
+        if let Effect::Sacrifice {
+            target: TargetFilter::LastCreated,
+            count,
+            ..
+        } = effect.effect.as_mut()
+        {
+            *count = crate::types::ability::SacrificeSelection::EntireReferent;
+        }
+    }
+}
+
 /// CR 111.1: is this a token-creation effect? The authority is
 /// [`Effect::is_token_creator`]; this name is kept for the parser's callers.
 pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
@@ -13486,7 +13564,7 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
         | Effect::Renown { count: amount, .. }
         | Effect::RevealUntil { count: amount, .. }
         | Effect::RollDie { count: amount, .. }
-        | Effect::Sacrifice { count: amount, .. }
+        | Effect::Sacrifice { count: crate::types::ability::SacrificeSelection::Count(amount), .. }
         | Effect::SearchOutsideGame { count: amount, .. }
         | Effect::OpenBoosterPack { count: amount, .. }
         | Effect::SetLifeTotal { amount, .. }
@@ -17048,7 +17126,7 @@ mod tests {
                     AbilityKind::Spell,
                     Effect::Sacrifice {
                         target: TargetFilter::ParentTarget,
-                        count: QuantityExpr::Fixed { value: 2 },
+                        count: QuantityExpr::Fixed { value: 2 }.into(),
                         min_count: 0,
                     },
                 )),

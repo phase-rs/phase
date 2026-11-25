@@ -10897,7 +10897,7 @@ mod tests {
             },
             PinCarrier::RegisteredSacrifice | PinCarrier::FiredSacrifice => Effect::Sacrifice {
                 target: TargetFilter::EventTarget,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             PinCarrier::AnnouncedSpellTarget => Effect::Destroy {
@@ -17232,7 +17232,7 @@ mod tests {
             let runtime_body = ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
                 vec![],
@@ -19142,7 +19142,7 @@ mod tests {
                 Box::new(ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::ParentTarget,
-                        count: QuantityExpr::Fixed { value: 1 },
+                        count: QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![TargetRef::Object(ObjectId(705))],

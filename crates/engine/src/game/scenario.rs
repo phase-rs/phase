@@ -5337,7 +5337,8 @@ mod tests {
                     target: filter.clone(),
                     count: QuantityExpr::up_to(QuantityExpr::Ref {
                         qty: crate::types::ability::QuantityRef::ObjectCount { filter },
-                    }),
+                    })
+                    .into(),
                     min_count: 0,
                 },
             ))),

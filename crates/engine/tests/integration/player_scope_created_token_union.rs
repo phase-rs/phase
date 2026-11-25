@@ -676,7 +676,7 @@ fn paused_fan_out_delayed_trigger_snapshots_every_seats_tokens() {
             AbilityKind::Spell,
             Effect::Sacrifice {
                 target: TargetFilter::LastCreated,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         )),

@@ -467,7 +467,8 @@ fn devour_post_replacement_continuation_still_resolves() {
                             TypedFilter::creature().controller(ControllerRef::You),
                         ),
                     },
-                }),
+                })
+                .into(),
                 min_count: 0,
             },
         )

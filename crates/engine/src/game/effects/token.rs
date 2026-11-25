@@ -2145,7 +2145,7 @@ fn apply_create_token_batch(
                 ability: Box::new(ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::Any,
-                        count: QuantityExpr::Fixed { value: 1 },
+                        count: QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![TargetRef::Object(obj_id)],
@@ -3562,7 +3562,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
             ability: Box::new(ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
                 vec![TargetRef::Object(object_id)],

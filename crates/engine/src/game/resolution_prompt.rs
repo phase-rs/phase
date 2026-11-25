@@ -1899,7 +1899,7 @@ mod tests {
             },
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: fixed(1),
+                count: fixed(1).into(),
                 min_count: 0,
             },
             Effect::DiscardCard {
