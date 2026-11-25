@@ -10538,7 +10538,7 @@ pub(super) fn elected_cast_alternative_ability_cost(
                     .map(|extra| extra.cost)
                 })
             })
-    } else if state.object_in_players_zone(obj, Zone::Library, player) {
+    } else if obj.zone == Zone::Library && casting_permission_index.is_none() {
         super::casting::top_of_library_alt_ability_cost_for_object(state, player, object_id)
     } else {
         None
@@ -11013,13 +11013,17 @@ fn check_additional_cost_or_pay_with_kept_cost(
     // (Bolas's Citadel). Paid before additional costs; queued keyword costs and
     // required additional costs (e.g. Entwine) are attached to `pending` so they
     // are collected and paid on the alternative cost per CR 118.9d.
-    let alt_ability_cost = elected_cast_alternative_ability_cost(
-        state,
-        player,
-        object_id,
-        casting_variant,
-        casting_permission_index,
-    );
+    let alt_ability_cost = if let Some(latch) = &ability.context.top_of_library_cast_latch {
+        latch.alt_cost.clone()
+    } else {
+        elected_cast_alternative_ability_cost(
+            state,
+            player,
+            object_id,
+            casting_variant,
+            casting_permission_index,
+        )
+    };
     if let Some(alt_cost) = alt_ability_cost {
         let mut pending = pending_cast_keeping(
             object_id,
@@ -15204,7 +15208,11 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    finalize_cast_with_phyrexian_choices_inner(
+    let prior_latch = std::mem::replace(
+        &mut state.active_top_of_library_cast_latch,
+        ability.context.top_of_library_cast_latch.clone(),
+    );
+    let result = finalize_cast_with_phyrexian_choices_inner(
         state,
         player,
         object_id,
@@ -15223,7 +15231,9 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         None,
         events,
     )
-    .map_err(|err| terminal_cast_cancellation_error(&err).unwrap_or(err))
+    .map_err(|err| terminal_cast_cancellation_error(&err).unwrap_or(err));
+    state.active_top_of_library_cast_latch = prior_latch;
+    result
 }
 
 /// CR 601.2h-i: resume the already-paid cast without repeating cost election,
@@ -15666,6 +15676,25 @@ fn finalize_cast_with_phyrexian_choices_inner(
         obj.cast_from_zone = Some(source_zone);
         obj.cast_controller = Some(player);
     }
+    // CR 601.2a: Consume the permission that admitted the spell at announcement.
+    let elected_library_grant = ability
+        .context
+        .top_of_library_cast_latch
+        .take()
+        .map(|latch| (latch.source, latch.frequency))
+        .or_else(|| {
+            // Older saved announcements predate the latch.
+            if origin_zone != Zone::Library || casting_permission_index.is_some() {
+                return None;
+            }
+            super::casting::top_of_library_grant_for_object(
+                state,
+                player,
+                object_id,
+                crate::types::ability::CardPlayMode::Cast,
+            )
+            .map(|grant| (grant.source, grant.frequency))
+        });
     let stack_ability = (!is_placeholder).then_some(ability);
 
     // CR 107.3m: Apply the paid-X snapshot to the object (after the placeholder
@@ -15735,19 +15764,6 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 casting_permission_index,
             )
         })
-    } else {
-        None
-    };
-    // CR 601.2a + CR 401.5: Capture the *selected* authorizing
-    // `StaticMode::TopOfLibraryCastPermission` source — and its frequency —
-    // BEFORE the card leaves the library for the stack (Assemble the Players,
-    // Johann). The selection prefers an `Unlimited` authorizer when one exists,
-    // so a `OncePerTurn` slot is only spent when the bounded permission is what
-    // actually authorized this cast. The slot is consumed below ONLY when the
-    // captured frequency is `OncePerTurn`; an `Unlimited` selection (Realmwalker,
-    // Future Sight, Bolas's Citadel) never consumes a slot.
-    let top_of_library_permission_source = if source_zone == Zone::Library {
-        super::casting::top_of_library_selected_permission(state, player, object_id)
     } else {
         None
     };
@@ -15841,7 +15857,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // Reading the rider after the move would return `None` and the redirect would
     // never install, wrongly sending the spell to the graveyard instead of the
     // library bottom. Mirrors the sibling exile-scoped captures above
-    // (`exile_play_permission_source`, `top_of_library_permission_source`,
+    // (`exile_play_permission_source`, `elected_library_grant`,
     // `single_use_play_group`), all read pre-move for the same reason. The
     // destination is read from the selected-permission authority (the permission
     // that actually supports THIS cast) so a non-consumed sibling `ExileWithAltCost`
@@ -16287,8 +16303,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // Sight, Bolas's Citadel) authorized the cast — even if a OncePerTurn
     // permission also matched the top card — no bounded slot is spent, so a
     // second matching top spell remains castable this turn.
-    if let Some((source, crate::types::statics::CastFrequency::OncePerTurn)) =
-        top_of_library_permission_source
+    if let Some((source, crate::types::statics::CastFrequency::OncePerTurn)) = elected_library_grant
     {
         crate::game::ledger::consume_once_per_turn_permission(
             state,
@@ -20593,6 +20608,8 @@ fn finalize_mana_payment_with_resume(
     // a later spend.)
     state.active_payment_pins = pending.pinned_pool_units.clone();
     state.active_casting_permission_index = pending.casting_permission_index;
+    state.active_top_of_library_cast_latch =
+        pending.ability.context.top_of_library_cast_latch.clone();
     state.active_graveyard_permission_latch = pending
         .ability
         .context
@@ -20935,6 +20952,7 @@ fn finalize_mana_payment_with_resume(
     state.active_payment_pins.clear();
     state.active_casting_permission_index = None;
     state.active_graveyard_permission_latch = None;
+    state.active_top_of_library_cast_latch = None;
     state.active_spend_only_on_x_count = None;
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),
@@ -21037,6 +21055,8 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     // empty outside an in-progress finalize spend".
     state.active_payment_pins = pending.pinned_pool_units.clone();
     state.active_casting_permission_index = pending.casting_permission_index;
+    state.active_top_of_library_cast_latch =
+        pending.ability.context.top_of_library_cast_latch.clone();
     state.active_graveyard_permission_latch = pending
         .ability
         .context
@@ -21390,6 +21410,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     state.active_payment_pins.clear();
     state.active_casting_permission_index = None;
     state.active_graveyard_permission_latch = None;
+    state.active_top_of_library_cast_latch = None;
     state.active_spend_only_on_x_count = None;
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),

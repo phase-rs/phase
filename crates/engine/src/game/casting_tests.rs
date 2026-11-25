@@ -43238,6 +43238,8 @@ mod top_of_library_cast_permission_runtime {
             Zone::Battlefield,
         );
         let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode: CardPlayMode::Cast,
             frequency: CastFrequency::Unlimited,
             alt_cost: None,
@@ -43344,9 +43346,14 @@ mod top_of_library_cast_permission_runtime {
         let land =
             put_card_on_top_of_library(state, P0, CardId(907), "Top Land", vec![CoreType::Land]);
         assert_eq!(
-            top_of_library_land_playable_by_permission(state, P0),
-            Some((land, source_id)),
+            top_of_library_lands_playable_by_permission(state, P0).next(),
+            Some(land),
             "the land branch must authorize the top land on the play-land path"
+        );
+        assert_eq!(
+            top_of_library_grant_for_object(state, P0, land, CardPlayMode::Play)
+                .map(|grant| grant.source),
+            Some(source_id),
         );
         assert!(
             !spell_objects_available_to_cast(state, P0).contains(&land),
@@ -43404,6 +43411,8 @@ mod top_of_library_cast_permission_runtime {
             Zone::Battlefield,
         );
         let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode: CardPlayMode::Cast,
             frequency: CastFrequency::OncePerTurn,
             alt_cost: None,
@@ -43427,7 +43436,7 @@ mod top_of_library_cast_permission_runtime {
     /// `spell_objects_available_to_cast` once its per-turn slot is consumed,
     /// and comes back at turn cleanup. This is the discriminating test for
     /// the new `frequency` axis: reverting the frequency gate in
-    /// `top_of_library_permission_source` makes the `after_consumed`
+    /// `top_of_library_grant_for_object` makes the `after_consumed`
     /// assertion fail (the slot would never be honored, so the card stays
     /// castable). Mirrors the Maralen exile-permission frequency test.
     #[test]
@@ -43482,7 +43491,7 @@ mod top_of_library_cast_permission_runtime {
     }
 
     /// CR 601.2a + CR 401.5: The cast-time selection helper
-    /// `top_of_library_selected_permission` returns the granting source AND
+    /// `top_of_library_grant_for_object` returns the granting source AND
     /// its frequency for a `OncePerTurn` permission (so `finalize_cast`
     /// stamps the slot) and an `Unlimited` frequency for the Realmwalker
     /// shape (which never consumes a slot). This is the discriminating test
@@ -43497,7 +43506,8 @@ mod top_of_library_cast_permission_runtime {
         let src = install_once_per_turn_creature_static(&mut state, player);
         let top = put_creature_on_top_of_library(&mut state, player, CardId(906));
         assert_eq!(
-            top_of_library_selected_permission(&state, player, top),
+            top_of_library_grant_for_object(&state, player, top, CardPlayMode::Cast)
+                .map(|grant| (grant.source, grant.frequency)),
             Some((src, CastFrequency::OncePerTurn)),
             "OncePerTurn permission must be selected with its OncePerTurn frequency"
         );
@@ -43507,7 +43517,7 @@ mod top_of_library_cast_permission_runtime {
         let unlimited_src = install_realmwalker_static(&mut state2, player, "Elf");
         let top2 = put_creature_on_top_of_library(&mut state2, player, CardId(907));
         assert_eq!(
-            top_of_library_selected_permission(&state2, player, top2),
+            top_of_library_grant_for_object(&state2, player, top2, CardPlayMode::Cast).map(|grant| (grant.source, grant.frequency)),
             Some((unlimited_src, CastFrequency::Unlimited)),
             "Unlimited permission must be selected with Unlimited frequency — never consumes a slot"
         );
@@ -43529,7 +43539,8 @@ mod top_of_library_cast_permission_runtime {
         pd.library.retain(|id| *id != below);
         pd.library.push_back(below);
         assert_eq!(
-            top_of_library_selected_permission(&state, player, below),
+            top_of_library_grant_for_object(&state, player, below, CardPlayMode::Cast)
+                .map(|grant| (grant.source, grant.frequency)),
             None,
             "only the current top card is authorized by the top-of-library permission"
         );
@@ -43540,7 +43551,7 @@ mod top_of_library_cast_permission_runtime {
     /// helper PREFERS the `Unlimited` authorizer so the bounded slot is
     /// preserved. This is the discriminating test for the
     /// preserve-bounded-slot fix: reverting the Unlimited-preference in
-    /// `top_of_library_permission_source` (back to "first match wins") lets
+    /// `top_of_library_grant_for_object` (back to "first match wins") lets
     /// a battlefield-ordering that puts the OncePerTurn source first report
     /// `OncePerTurn`, flipping this assertion. The cast-path consumption is
     /// driven by the reported frequency, so reporting `Unlimited` here is
@@ -43566,7 +43577,8 @@ mod top_of_library_cast_permission_runtime {
             "test sanity: the two permission sources must be distinct"
         );
         assert_eq!(
-            top_of_library_selected_permission(&state, player, top),
+            top_of_library_grant_for_object(&state, player, top, CardPlayMode::Cast)
+                .map(|grant| (grant.source, grant.frequency)),
             Some((unlimited_src, CastFrequency::Unlimited)),
             "Unlimited authorizer must be preferred so the OncePerTurn slot is preserved"
         );
@@ -54918,8 +54930,7 @@ mod plot_from_library {
 
         // The cast family still authorizes a Library→Stack cast.
         assert!(
-            top_of_library_permission_source(runner.state(), P0, Some(CardPlayMode::Cast))
-                .is_some(),
+            top_of_library_grant_for_object(runner.state(), P0, top, CardPlayMode::Cast).is_some(),
             "Future Sight class must still authorize casting the top card"
         );
         // But it is NOT a plot authorizer — the dedicated path is disjoint.

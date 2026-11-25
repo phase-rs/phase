@@ -30421,7 +30421,7 @@ fn normalized_filter_prop(prop: FilterProp) -> FilterProp {
 /// CR 701.38a + CR 101.4: Default starting voter for `Effect::Vote` is the
 /// ability controller ("starting with you"). Defining this as a free function
 /// (not an enum default) keeps the serde shape stable across schema upgrades.
-fn default_controller_ref_you() -> ControllerRef {
+pub(super) fn default_controller_ref_you() -> ControllerRef {
     ControllerRef::You
 }
 

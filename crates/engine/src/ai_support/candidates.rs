@@ -4724,9 +4724,7 @@ pub(crate) fn priority_actions_with_probe(
         // CR 401.5 + CR 305.1: Land on top of library playable via
         // `TopOfLibraryCastPermission { play_mode: Play }` (Future Sight,
         // Bolas's Citadel, Magus of the Future).
-        if let Some((top_id, _source)) =
-            casting::top_of_library_land_playable_by_permission(state, player)
-        {
+        for top_id in casting::top_of_library_lands_playable_by_permission(state, player) {
             if let Some(obj) = state.objects.get(&top_id) {
                 if !casting::is_blocked_by_cant_play_lands(state, player, obj) {
                     actions.push(candidate(

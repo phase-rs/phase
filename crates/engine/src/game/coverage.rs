@@ -118,6 +118,9 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
+            // CR 701.20e + CR 401.5: Owner-parameterized look in the shared
+            // identity projection (visibility.rs).
+            | StaticMode::MayLookAtTopOfLibrary { .. }
             // CR 702.170a grant + CR 702.170f permission: the two nullary
             // plot-from-library markers (Fblthp's L3 "has plot" grant and L4
             // "you may plot nonland cards" permission). The nonland scope is the
@@ -246,10 +249,8 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // and the registry uses exact-key lookup.
             | StaticMode::SkipStep { .. }
             // CR 400.2: RevealTopOfLibrary carries `all_players`; libraries
-            // are hidden zones unless revealed by an effect. Runtime permission
-            // is in casting.rs::top_of_library_permission_source(). Coverage
-            // support via is_data_carrying_static() because the variant is
-            // parameterized.
+            // are hidden zones unless revealed by an effect. Runtime
+            // visibility is derived from the active reveal statics.
             | StaticMode::RevealTopOfLibrary { .. }
             // CR 400.2 + CR 701.20a: RevealHand carries the affected player
             // scope (`opponents`, `all_players`, or `controller`). Runtime

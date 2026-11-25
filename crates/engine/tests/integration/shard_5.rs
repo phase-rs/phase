@@ -339,6 +339,7 @@ mod tomb_tyrant_graveyard_count_activation;
 mod tomb_veils_of_fear_life_loss_runtime;
 mod tombstone_stairwell_per_player_tokens;
 mod top_manifold_key_incarnation;
+mod top_of_library_foreign_permission;
 mod top_of_library_mixed_permission;
 mod top_of_library_object_form_permission;
 mod torch_the_tower_die_exile;

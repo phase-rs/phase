@@ -2715,7 +2715,7 @@ fn quoted_static_rides_a_trick(definition: &StaticDefinition) -> bool {
         | StaticMode::CantCrew
         | StaticMode::CantPhaseIn
         | StaticMode::CrewContribution { .. }
-        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtTopOfLibrary { .. }
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
         | StaticMode::MayChooseNotToUntap

@@ -13576,7 +13576,12 @@ fn static_max_untap_static_orb_conditional() {
 #[test]
 fn static_you_may_look_at_top_card_of_library() {
     let def = parse_static_line("You may look at the top card of your library any time.").unwrap();
-    assert_eq!(def.mode, StaticMode::MayLookAtTopOfLibrary);
+    assert_eq!(
+        def.mode,
+        StaticMode::MayLookAtTopOfLibrary {
+            library: crate::types::ability::ControllerRef::You
+        }
+    );
     assert_eq!(
         def.affected,
         Some(TargetFilter::Typed(
@@ -32987,6 +32992,7 @@ fn top_of_library_cast_permission_realmwalker() {
             play_mode,
             frequency,
             ref alt_cost,
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Cast);
             assert_eq!(frequency, CastFrequency::Unlimited);
@@ -33025,6 +33031,7 @@ fn top_of_library_cast_permission_future_sight_compound() {
             play_mode,
             frequency,
             ref alt_cost,
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
             assert_eq!(frequency, CastFrequency::Unlimited);
@@ -33052,6 +33059,7 @@ fn top_of_library_object_form_unconditional() {
             play_mode,
             frequency,
             ref alt_cost,
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
             assert_eq!(frequency, CastFrequency::Unlimited);
@@ -33188,7 +33196,12 @@ fn top_of_library_object_form_does_not_shadow_neighbours() {
     let look = parse_static_line("You may look at the top card of your library any time.")
         .expect("look-at line must still parse");
     assert!(
-        matches!(look.mode, StaticMode::MayLookAtTopOfLibrary),
+        matches!(
+            look.mode,
+            StaticMode::MayLookAtTopOfLibrary {
+                library: crate::types::ability::ControllerRef::You
+            }
+        ),
         "expected MayLookAtTopOfLibrary, got {look:?}"
     );
 
@@ -33315,6 +33328,7 @@ fn top_of_library_cast_permission_crystal_skull_historic_disjunctive() {
             play_mode,
             frequency,
             ref alt_cost,
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
             assert_eq!(frequency, CastFrequency::Unlimited);
@@ -33364,6 +33378,7 @@ fn top_of_library_cast_permission_locked_hothouse_mixed_disjunctive() {
             play_mode,
             frequency,
             ref alt_cost,
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
             assert_eq!(frequency, CastFrequency::Unlimited);
@@ -33455,6 +33470,7 @@ fn top_of_library_cast_permission_bolas_alt_cost() {
             play_mode,
             frequency: CastFrequency::Unlimited,
             alt_cost: Some(crate::types::ability::AbilityCost::PayLife { amount }),
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
             assert_eq!(
@@ -33536,6 +33552,7 @@ fn top_of_library_cast_permission_once_per_turn_disjunctive() {
             play_mode,
             frequency,
             ref alt_cost,
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
             assert_eq!(frequency, CastFrequency::OncePerTurn);
@@ -33590,7 +33607,7 @@ fn the_fourth_doctor_full_card_parse() {
         parsed
             .statics
             .iter()
-            .any(|s| matches!(s.mode, StaticMode::MayLookAtTopOfLibrary)),
+            .any(|s| matches!(s.mode, StaticMode::MayLookAtTopOfLibrary { .. })),
         "expected MayLookAtTopOfLibrary static, got {:?}",
         parsed.statics
     );
@@ -33606,6 +33623,7 @@ fn the_fourth_doctor_full_card_parse() {
             play_mode,
             frequency,
             alt_cost,
+            ..
         } => {
             assert_eq!(*play_mode, CardPlayMode::Play);
             assert_eq!(*frequency, CastFrequency::OncePerTurn);
@@ -36805,6 +36823,7 @@ fn assemble_the_players_once_per_turn_top_of_library() {
             play_mode,
             frequency,
             alt_cost,
+            ..
         } => {
             assert_eq!(*play_mode, CardPlayMode::Cast);
             assert_eq!(*frequency, CastFrequency::OncePerTurn);
@@ -36894,11 +36913,15 @@ fn johann_apprentice_sorcerer_once_per_turn_top_of_library() {
 fn top_of_library_frequency_display_roundtrip() {
     use std::str::FromStr;
     let unlimited = StaticMode::TopOfLibraryCastPermission {
+        library: crate::types::ability::ControllerRef::You,
+        mana_spend_permission: None,
         play_mode: CardPlayMode::Cast,
         frequency: CastFrequency::Unlimited,
         alt_cost: None,
     };
     let once = StaticMode::TopOfLibraryCastPermission {
+        library: crate::types::ability::ControllerRef::You,
+        mana_spend_permission: None,
         play_mode: CardPlayMode::Cast,
         frequency: CastFrequency::OncePerTurn,
         alt_cost: None,

@@ -967,6 +967,7 @@ struct PreparedSpellCast {
     /// (`stamp_prepared_cast_context`); `AwaitingSlot` must first get its
     /// per-type slot from `ChoosePermanentTypeSlot`.
     graveyard_authority: Option<GraveyardAuthorityResolution>,
+    top_of_library_cast_latch: Option<Box<crate::types::game_state::TopOfLibraryCastLatch>>,
     /// CR 113.2c + CR 601.2b: the keyword instance this cast announced for an
     /// instance-elected method (`keywords::instance_elected_kind`); `None`
     /// otherwise. Copied onto every pending cast built from this preparation.
@@ -1669,19 +1670,18 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
     // in `Zone::Library` until `finalize_cast` performs the standard zone-
     // change to `Zone::Stack` — there is NO exile step (CR 601.2a:
     // "moves that card from where it is to the stack").
-    if let Some((top_id, _src, _freq, _alt)) =
-        top_of_library_permission_source(state, player, Some(CardPlayMode::Cast))
-    {
-        // CR 305.9: only non-land cards reach the cast path; lands flow through the
-        // play-land action (`top_of_library_land_playable_by_permission`).
-        if state
-            .objects
-            .get(&top_id)
-            .is_some_and(object_may_enter_cast_path)
-        {
-            objects.push(top_id);
-        }
-    }
+    let mut seen_library_cards = BTreeSet::new();
+    objects.extend(
+        top_of_library_grants(state, player, CardPlayMode::Cast)
+            .map(|grant| grant.object_id)
+            .filter(|id| seen_library_cards.insert(*id))
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(object_may_enter_cast_path)
+            }),
+    );
 
     objects
         .into_iter()
@@ -2242,9 +2242,7 @@ pub(in crate::game) fn priority_play_land_announcements(
             }
         }
     }
-    if let Some((object_id, _)) =
-        top_of_library_land_playable_by_permission(state, land_resource_owner)
-    {
+    for object_id in top_of_library_lands_playable_by_permission(state, land_resource_owner) {
         if let Some(object) = state.objects.get(&object_id) {
             if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
                 announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
@@ -4288,7 +4286,7 @@ fn exile_alt_cost_permission_grants_to_player(
 ///   the inference would then name every seat as entitled to see the card. Such a
 ///   permission answers `false` here and a disclosure caller refuses.
 /// * The admission rests on a `player`-parameterised static
-///   ([`top_of_library_permission_source`], [`exile_cast_permission_source`]). The
+///   ([`top_of_library_grant_for_object`], [`exile_cast_permission_source`]). The
 ///   object carries no `CastingPermission` at all, this predicate is vacuously `true`,
 ///   and the subject is the `player` the gate was asked about.
 ///
@@ -4421,26 +4419,9 @@ pub(crate) fn castable_from_current_zone(
             && normal_cost_route())
         // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast via static
         // permission (Realmwalker, Future Sight, Bolas's Citadel, etc.). The card
-        // must be the current top of the library `player` reads — whoever owns
-        // it — AND match the static's `affected` filter, so it sits outside the
-        // owner block above.
-        //
-        // The `library.front()` test reproduces
-        // `top_of_library_permission_source`'s own first two steps. It is
-        // verdict-identical: that callee binds its returned `top_id` from this same
-        // `front()`, so a non-top object could never satisfy the `top_id == obj.id`
-        // comparison below, and an absent player or an empty library makes callee
-        // and test answer no alike. It skips only a call whose answer that
-        // comparison discards.
-        || (obj.zone == Zone::Library
-            && state
-                .players
-                .iter()
-                .find(|p| p.id == player)
-                .and_then(|p| state.library_of(p.id).front())
-                == Some(&obj.id)
-            && top_of_library_permission_source(state, player, Some(CardPlayMode::Cast))
-                .is_some_and(|(top_id, _, _, _)| top_id == obj.id))
+        // must be the current top of the library the permission names
+        // and match the permission's eligibility filter.
+        || top_of_library_grant_for_object(state, player, obj.id, CardPlayMode::Cast).is_some()
         )
 }
 
@@ -5529,6 +5510,16 @@ pub(super) fn player_mana_spend_permission_for_optional_spell(
         .pending_cast
         .as_deref()
         .filter(|pending| pending.object_id == spell_id);
+    // CR 609.4b: Apply only the concession of the permission that admitted this spell.
+    if let Some(latch) = pending
+        .and_then(|pending| pending.ability.context.top_of_library_cast_latch.as_deref())
+        .or(state
+            .active_top_of_library_cast_latch
+            .as_deref()
+            .filter(|latch| latch.spell_id == spell_id))
+    {
+        return with_static(latch.mana_spend_permission);
+    }
     let casting_variant = pending.map(|pending| pending.casting_variant).or_else(|| {
         state.stack.iter().rev().find_map(|entry| {
             (entry.source_id == spell_id)
@@ -5576,6 +5567,14 @@ pub(super) fn player_mana_spend_permission_for_optional_spell(
         return with_static(object_cast_mana_spend_permission(
             state, player, spell_id, index,
         ));
+    }
+
+    if pending.is_none() {
+        if let Some(grant) =
+            top_of_library_grant_for_object(state, player, spell_id, CardPlayMode::Cast)
+        {
+            return with_static(grant.mana_spend_permission);
+        }
     }
 
     // Static-only pre-announcement affordability: bind to the same source the
@@ -7402,117 +7401,127 @@ fn graveyard_printed_cast_terms_state(
         .payment_terms_state(state)
 }
 
-/// CR 401.5 + CR 118.9 + CR 601.2a: Find the (single) top card of `player`'s
-/// library if a battlefield static grants `TopOfLibraryCastPermission` whose
-/// `affected` filter matches it. Returns
-/// `(top_card_id, source_id, frequency, alt_cost)` for the *selected*
-/// authorizing permission.
-///
-/// CR 601.2a: When more than one permission can authorize the same top-of-
-/// library cast, an `Unlimited` authorizer (Realmwalker, Future Sight, Bolas's
-/// Citadel) is preferred over a bounded `OncePerTurn` one (Assemble the
-/// Players, Johann). The unlimited permission alone suffices, so the player is
-/// not forced to spend a once-per-turn slot — selecting it preserves the
-/// bounded slot for a later cast this turn. The `frequency` of the selected
-/// source is what drives per-turn-slot consumption at `finalize_cast`; the
-/// selected source/frequency is threaded through the casting context rather
-/// than independently rescanned, so availability and consumption agree on the
-/// single authorizing permission.
-///
-/// Filter eligibility is re-evaluated each call because the top of library
-/// changes between priority windows; callers (`spell_objects_available_to_cast`,
-/// `prepare_spell_cast`) invoke this fresh each lookup. `play_mode_filter`
-/// gates which permissions count: `Some(CardPlayMode::Cast)` for the spell-
-/// availability path, `Some(CardPlayMode::Play)` for land plays. `None` lets
-/// any mode through.
-pub(crate) fn top_of_library_permission_source(
-    state: &GameState,
-    player: PlayerId,
-    play_mode_filter: Option<CardPlayMode>,
-) -> Option<(
-    ObjectId,
-    ObjectId,
-    CastFrequency,
-    Option<crate::types::ability::AbilityCost>,
-)> {
-    let player_data = state.players.iter().find(|p| p.id == player)?;
-    let &top_id = state.library_of(player_data.id).front()?;
-    // CR 601.2a: Collect every permission that can authorize this cast, then
-    // prefer an `Unlimited` authorizer so a bounded `OncePerTurn` slot is only
-    // spent when nothing else authorizes the cast.
-    let mut selected: Option<(
-        ObjectId,
-        CastFrequency,
-        Option<crate::types::ability::AbilityCost>,
-    )> = None;
-    for &src_id in &state.battlefield {
-        let Some(obj) = state.objects.get(&src_id) else {
-            continue;
-        };
-        if obj.controller != player {
-            continue;
-        }
-        let Some((frequency, alt_cost)) = active_static_definitions(state, obj)
-            .find_map(|s| match &s.mode {
-                StaticMode::TopOfLibraryCastPermission {
-                    play_mode,
-                    frequency,
-                    alt_cost,
-                } => {
-                    // Gate by play_mode: Cast permissions cover only spells;
-                    // Play permissions cover both lands and non-land spells
-                    // (CR 305.1). When the caller specifies a mode, only
-                    // permissions matching that mode (or wider) qualify.
-                    let mode_matches = match play_mode_filter {
-                        None => true,
-                        Some(CardPlayMode::Play) => *play_mode == CardPlayMode::Play,
-                        Some(CardPlayMode::Cast) => true,
-                    };
-                    if !mode_matches {
-                        return None;
-                    }
-                    // CR 601.2a: A `OncePerTurn` permission winks out for the rest
-                    // of the turn once a spell has been cast through this source
-                    // (Assemble the Players, Johann). `Unlimited` permissions
-                    // (Realmwalker, Future Sight, Bolas's Citadel) never consult
-                    // the used-set.
-                    if matches!(frequency, CastFrequency::OncePerTurn)
-                        && state.top_of_library_cast_permissions_used.contains(&src_id)
-                    {
-                        return None;
-                    }
-                    s.affected
-                        .as_ref()
-                        .map(|f| (f, *frequency, alt_cost.clone()))
-                }
-                _ => None,
-            })
-            .and_then(|(filter, frequency, alt_cost)| {
-                super::filter::matches_target_filter(
-                    state,
-                    top_id,
-                    filter,
-                    &super::filter::FilterContext::from_source_with_controller(src_id, player),
-                )
-                .then_some((frequency, alt_cost))
-            })
-        else {
-            continue;
-        };
-        // CR 601.2a: An `Unlimited` authorizer always wins — it preserves any
-        // bounded slot. Otherwise keep the first match found.
-        let prefer = frequency.is_unlimited()
-            || selected
-                .as_ref()
-                .is_none_or(|(_, sel_freq, _)| !sel_freq.is_unlimited());
-        if prefer {
-            selected = Some((src_id, frequency, alt_cost));
-        }
-        if frequency.is_unlimited() {
-            break;
+/// An eligible CR 601.2a cast or CR 305.1 land play from a library.
+pub(crate) struct TopOfLibraryGrant<'a> {
+    library_owner: PlayerId,
+    object_id: ObjectId,
+    pub(crate) source: ObjectId,
+    pub(crate) frequency: CastFrequency,
+    pub(crate) alt_cost: Option<&'a crate::types::ability::AbilityCost>,
+    pub(crate) mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+}
+
+impl TopOfLibraryGrant<'_> {
+    fn latch(&self) -> crate::types::game_state::TopOfLibraryCastLatch {
+        crate::types::game_state::TopOfLibraryCastLatch {
+            spell_id: self.object_id,
+            source: self.source,
+            frequency: self.frequency,
+            alt_cost: self.alt_cost.cloned(),
+            mana_spend_permission: self.mana_spend_permission,
         }
     }
-    selected.map(|(src_id, frequency, alt_cost)| (top_id, src_id, frequency, alt_cost))
+}
+
+fn top_of_library_grants(
+    state: &GameState,
+    player: PlayerId,
+    action: CardPlayMode,
+) -> impl Iterator<Item = TopOfLibraryGrant<'_>> {
+    let printed = state
+        .battlefield
+        .iter()
+        .filter_map(move |source| {
+            state
+                .objects
+                .get(source)
+                .filter(|obj| obj.controller == player)
+        })
+        .flat_map(move |obj| {
+            active_static_definitions(state, obj)
+                .filter_map(move |def| Some((obj.id, &def.mode, def.affected.as_ref()?)))
+        });
+
+    let transient = super::static_abilities::player_transient_static_modes(state, player)
+        .filter(|(_, mode)| {
+            matches!(
+                mode,
+                StaticMode::TopOfLibraryCastPermission {
+                    library: ControllerRef::SpecificPlayer { .. },
+                    ..
+                }
+            )
+        })
+        .map(|(source, mode)| (source, mode, &TargetFilter::Any));
+
+    // CR 401.5: Read the current top of each library the grant names.
+    printed
+        .chain(transient)
+        .filter_map(move |(source, mode, affected)| {
+            let StaticMode::TopOfLibraryCastPermission {
+                library,
+                play_mode,
+                frequency,
+                alt_cost,
+                mana_spend_permission,
+            } = mode
+            else {
+                return None;
+            };
+            if action == CardPlayMode::Play && *play_mode != CardPlayMode::Play {
+                return None;
+            }
+            if *frequency == CastFrequency::OncePerTurn
+                && state.top_of_library_cast_permissions_used.contains(&source)
+            {
+                return None;
+            }
+            let library_owner = super::static_abilities::concrete_library_owner(library, player)?;
+            if !state.players.iter().any(|seat| seat.id == library_owner) {
+                return None;
+            }
+            let object_id = *state.library_of(library_owner).front()?;
+            let ctx = super::filter::FilterContext::from_source_with_controller(source, player);
+            super::filter::matches_target_filter(state, object_id, affected, &ctx).then_some(
+                TopOfLibraryGrant {
+                    library_owner,
+                    object_id,
+                    source,
+                    frequency: *frequency,
+                    alt_cost: alt_cost.as_ref(),
+                    mana_spend_permission: *mana_spend_permission,
+                },
+            )
+        })
+}
+
+/// CR 601.2a + CR 305.1: Elect the authorizer for the requested object.
+/// The first unlimited grant preserves any once-per-turn slot. If none
+/// qualifies, keep the previous election order for bounded grants.
+pub(crate) fn top_of_library_grant_for_object(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    action: CardPlayMode,
+) -> Option<TopOfLibraryGrant<'_>> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone != Zone::Library
+        || !state.players.iter().any(|seat| seat.id == obj.owner)
+        || state.library_of(obj.owner).front() != Some(&object_id)
+    {
+        return None;
+    }
+    let mut selected = None;
+    for grant in top_of_library_grants(state, player, action).filter(|grant| {
+        grant.object_id == object_id
+            && state.object_in_players_zone(obj, Zone::Library, grant.library_owner)
+    }) {
+        if grant.frequency.is_unlimited() {
+            return Some(grant);
+        }
+        selected = Some(grant);
+    }
+    selected
 }
 
 /// CR 702.170a + CR 702.170f: Return the `(top_library_card, grant_source)` pair
@@ -7542,7 +7551,7 @@ pub(crate) fn top_of_library_permission_source(
 /// land/nonland clause, so there is NO separate hard-gate (a future land-
 /// permitting plot-from-top card would correctly allow lands).
 ///
-/// Categorically distinct from [`top_of_library_permission_source`] (CR 601.2a —
+/// Categorically distinct from [`top_of_library_grant_for_object`] (CR 601.2a —
 /// a `Library → Stack` cast with no exile). This authorizes the CR 702.170 plot
 /// special action: `Library → Exile` face up now, then a free `Exile → Stack`
 /// cast on a later turn. The positional top-only restriction (CR 702.170f — "the
@@ -7611,74 +7620,32 @@ pub(crate) fn top_of_library_plot_source(
 /// Realmwalker (cast-only) do not. CR 305.1 — lands are "played," not "cast,"
 /// so the engine emits `GameAction::PlayLand` for the library top via this
 /// helper rather than routing through the cast pipeline.
-pub fn top_of_library_land_playable_by_permission(
+pub(crate) fn top_of_library_lands_playable_by_permission(
     state: &GameState,
     player: PlayerId,
-) -> Option<(ObjectId, ObjectId)> {
-    let (top_id, src_id, _freq, _alt) =
-        top_of_library_permission_source(state, player, Some(CardPlayMode::Play))?;
-    let obj = state.objects.get(&top_id)?;
-    // CR 305.1: Only lands reach this path; non-land cards under the same
-    // permission flow through `spell_objects_available_to_cast`.
-    if !obj
-        .card_types
-        .core_types
-        .contains(&crate::types::card_type::CoreType::Land)
-    {
-        return None;
-    }
-    Some((top_id, src_id))
+) -> impl Iterator<Item = ObjectId> + '_ {
+    let mut seen = BTreeSet::new();
+    top_of_library_grants(state, player, CardPlayMode::Play)
+        .map(|grant| grant.object_id)
+        .filter(move |id| seen.insert(*id))
+        .filter(move |id| {
+            state.objects.get(id).is_some_and(|obj| {
+                obj.card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Land)
+            })
+        })
 }
 
-/// CR 118.9 + CR 401.5: When `object_id` is the current top of `player`'s library
-/// and a `TopOfLibraryCastPermission` static grants an alt-cost rider (Bolas's
-/// Citadel: pay life equal to mana value), return that cost for castability
-/// pre-checks and the `check_additional_cost_or_pay` payment path.
+/// CR 118.9: Return the elected grant's alternative cost for this spell.
 pub(crate) fn top_of_library_alt_ability_cost_for_object(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
 ) -> Option<crate::types::ability::AbilityCost> {
-    let obj = state.objects.get(&object_id)?;
-    if !state.object_in_players_zone(obj, Zone::Library, player) {
-        return None;
-    }
-    top_of_library_permission_source(state, player, Some(CardPlayMode::Cast)).and_then(
-        |(top_id, _src, _freq, alt)| {
-            if top_id == object_id {
-                alt
-            } else {
-                None
-            }
-        },
-    )
-}
-
-/// CR 601.2a + CR 401.5: When `object_id` is the current top of `player`'s
-/// library, return the `(source, frequency)` of the `TopOfLibraryCastPermission`
-/// static that the cast pipeline *selects* to authorize the cast. This is the
-/// single authority threaded through the casting context to drive per-turn-slot
-/// consumption — it mirrors how `CastingVariant::ExilePermission` /
-/// `GraveyardPermission` carry their authorizing source through `finalize_cast`.
-///
-/// Delegates to [`top_of_library_permission_source`], which prefers an
-/// `Unlimited` authorizer when one exists (CR 601.2a: an unlimited permission
-/// alone suffices, so a bounded `OncePerTurn` slot must not be spent when an
-/// unlimited one also matches). `finalize_cast` stamps
-/// `top_of_library_cast_permissions_used` ONLY when the returned `frequency` is
-/// `OncePerTurn` — an `Unlimited` selection never consumes a slot. Returns
-/// `None` when no top-of-library permission authorizes casting `object_id`.
-pub(crate) fn top_of_library_selected_permission(
-    state: &GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-) -> Option<(ObjectId, CastFrequency)> {
-    top_of_library_permission_source(state, player, Some(CardPlayMode::Cast)).and_then(
-        |(top_id, src_id, frequency, _alt)| {
-            // CR 401.5: only the actual top card is authorized by the permission.
-            (top_id == object_id).then_some((src_id, frequency))
-        },
-    )
+    top_of_library_grant_for_object(state, player, object_id, CardPlayMode::Cast)?
+        .alt_cost
+        .cloned()
 }
 
 /// CR 604.2 + CR 305.1 + CR 701.17d: Find lands in the player's graveyard that
@@ -10168,13 +10135,11 @@ fn prepare_spell_cast_announced(
 
     // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast via static permission
     // (Realmwalker, Future Sight, Bolas's Citadel, etc.). The card must be the
-    // current top of `player`'s library AND match the static's `affected`
+    // current top of the library named by the grant and match its eligibility
     // filter. The optional `alt_cost` flows through to `prepare_spell_cast`'s
     // alt-cost branch below, mirroring `ExileWithAltAbilityCost` semantics.
-    let top_of_library_permission_src = if state.object_in_players_zone(obj, Zone::Library, player)
-    {
-        top_of_library_permission_source(state, player, Some(CardPlayMode::Cast))
-            .filter(|(top_id, _, _, _)| *top_id == object_id)
+    let top_of_library_permission_src = if casting_permission_index.is_none() {
+        top_of_library_grant_for_object(state, player, object_id, CardPlayMode::Cast)
     } else {
         None
     };
@@ -10390,7 +10355,7 @@ fn prepare_spell_cast_announced(
     } else if obj.zone == Zone::Library
         && top_of_library_permission_src
             .as_ref()
-            .is_some_and(|(_, _, _, alt)| alt.is_some())
+            .is_some_and(|grant| grant.alt_cost.is_some())
     {
         // CR 401.5 + CR 118.9: Bolas's Citadel — alt-cost rider on the static
         // grant zeros the spell's mana cost; the `AbilityCost` body is paid
@@ -11441,6 +11406,8 @@ fn prepare_spell_cast_announced(
         origin_zone,
         payment_mode: CastPaymentMode::Auto,
         graveyard_authority,
+        top_of_library_cast_latch: top_of_library_permission_src
+            .map(|grant| Box::new(grant.latch())),
         alternative_cost_keyword,
     })
 }
@@ -21128,6 +21095,7 @@ fn stamp_prepared_cast_context(prepared: &PreparedSpellCast, ability: &mut Resol
     // CR 601.2a + CR 601.2c: from its announcement, a spell declares only the
     // targets chosen for it.
     ability.start_target_record_recursive();
+    ability.context.top_of_library_cast_latch = prepared.top_of_library_cast_latch.clone();
     if let Some(GraveyardAuthorityResolution::Complete(authority)) = &prepared.graveyard_authority {
         stamp_graveyard_authority(ability, authority);
     }
@@ -21169,6 +21137,11 @@ fn announce_spell_on_stack(
     prepared: &PreparedSpellCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    super::visibility::snapshot_foreign_library_tops(
+        state,
+        player,
+        crate::types::game_state::ForeignLibraryLookAction::Cast,
+    );
     // CR 601.2 + CR 733.1: the action boundary records sparse inverse edits
     // for this cast; the declaration retains only its identity and journal mark.
     if state.spell_cast_reversal.is_none() && !super::engine_casting::in_confirmed_take() {
@@ -23267,10 +23240,12 @@ fn can_cast_prepared_now_with_probe(
     // Citadel) replace the mana cost with a PayLife cost equal to the spell's
     // mana value. Gate legal actions on life affordability so the UI never offers
     // a cast the payment pipeline would reject after the player taps mana.
-    if let Some(alt_cost) =
-        top_of_library_alt_ability_cost_for_object(state, player, prepared.object_id)
+    if let Some(alt_cost) = prepared
+        .top_of_library_cast_latch
+        .as_deref()
+        .and_then(|latch| latch.alt_cost.as_ref())
     {
-        if let Some(amount) = find_pay_life_cost(&alt_cost, state, player, prepared.object_id) {
+        if let Some(amount) = find_pay_life_cost(alt_cost, state, player, prepared.object_id) {
             if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, amount) {
                 return false;
             }
@@ -38611,6 +38586,8 @@ mod castable_zone_authority_tests {
 
     fn top_of_library_static() -> StaticDefinition {
         let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode: CardPlayMode::Cast,
             frequency: CastFrequency::Unlimited,
             alt_cost: None,

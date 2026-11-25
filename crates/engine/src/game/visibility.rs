@@ -911,22 +911,22 @@ pub(crate) fn identity_projection_for_viewer(
             HashSet::new()
         };
 
-    // CR 701.20e + CR 400.2: "looking at a card ... is shown only to the
-    // specified player." A player with a continuous "you may look at the top
-    // card of your library" permission (MayLookAtTopOfLibrary — Vizier of the
-    // Menagerie, Fblthp, Lost on the Range, etc.) privately sees their OWN
-    // library top. Engine-authoritative exposure (never client-side): the
-    // top-of-library object is the source/render target of cast-from-top
-    // (CR 601.2a) and plot-from-top (CR 702.170f) actions, so without this it
-    // would be redacted for the very player allowed to act on it. The derived
-    // `can_look_at_top_of_library` flag already encodes the static check;
-    // `can_view_private_for_player` extends the look to a player controlling
-    // this player's turn, mirroring the private-look / face-down look paths.
+    // CR 701.20e: A private look belongs to the grantee or the player
+    // controlling their turn. Public reveals follow their separate audience.
     let look_top_visible: HashSet<ObjectId> = state
         .players
         .iter()
-        .filter(|p| p.can_look_at_top_of_library && can_view_private_for_player(p.id))
-        .filter_map(|p| state.library_of(p.id).front().copied())
+        .filter(|p| can_view_private_for_player(p.id))
+        .flat_map(|p| {
+            p.can_look_at_top_of_library
+                .then_some(p.id)
+                .into_iter()
+                .chain(
+                    super::static_abilities::top_of_library_look_owners(state, p.id)
+                        .filter(move |&owner| owner != p.id),
+                )
+                .filter_map(move |owner| visible_library_top_for_look(state, p.id, owner))
+        })
         .collect();
     let all_library_ids: Vec<ObjectId> = state
         .players
@@ -954,8 +954,7 @@ pub(crate) fn identity_projection_for_viewer(
             // does NOT unhide a library object. Its identity is public, but its
             // library position is not, so the identity is published only through
             // the unindexed `DerivedViews::stack_revealed_cards`.
-            // CR 701.20e: own (or controlled-turn) library top under a
-            // MayLookAtTopOfLibrary permission — see `look_top_visible` above.
+            // CR 701.20e: Privately visible top under a look grant.
             || look_top_visible.contains(&obj_id);
         if !visible
             && !effect_zone_hand_cards.contains(&obj_id)
@@ -1442,6 +1441,133 @@ pub fn filter_state_for_unseated_viewer(state: &GameState) -> GameState {
     filter_state_for_scope(state, None)
 }
 
+/// CR 401.5: For a foreign-library look, only the top at the start of a
+/// pending play may be seen, and only while that object is still on top.
+fn visible_library_top_for_look(
+    state: &GameState,
+    grantee: PlayerId,
+    owner: PlayerId,
+) -> Option<ObjectId> {
+    if !state.players.iter().any(|seat| seat.id == owner) {
+        return None;
+    }
+    let live = *state.library_of(owner).front()?;
+    if owner == grantee {
+        return Some(live);
+    }
+    state
+        .foreign_library_look_snapshot
+        .as_deref()
+        .filter(|snapshot| snapshot.player == grantee)
+        .is_none_or(|snapshot| snapshot.tops.contains(&(owner, live)))
+        .then_some(live)
+}
+
+pub(super) fn begin_foreign_library_look_boundary(
+    state: &mut GameState,
+    player: PlayerId,
+    action: &crate::types::actions::GameAction,
+) {
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::ForeignLibraryLookAction;
+
+    let kind = match action {
+        GameAction::CastSpell { .. }
+        | GameAction::CastSpellForFree { .. }
+        | GameAction::CastSpellAsMiracle { .. }
+        | GameAction::CastSpellAsMadness { .. }
+        | GameAction::CastSpellAsSneak { .. }
+        | GameAction::CastSpellAsWebSlinging { .. }
+        | GameAction::PlayFaceDown { .. }
+        | GameAction::CastPreparedCopy { .. }
+        | GameAction::CastParadigmCopy { .. } => ForeignLibraryLookAction::Cast,
+        GameAction::PlayLand { .. } => ForeignLibraryLookAction::PlayLand,
+        GameAction::ActivateAbility { .. }
+        | GameAction::ActivateManaSource { .. }
+        | GameAction::TapLandForMana { .. }
+        | GameAction::ActivateNinjutsu { .. }
+        | GameAction::Equip { .. }
+        | GameAction::CrewVehicle { .. }
+        | GameAction::ActivateStation { .. }
+        | GameAction::SaddleMount { .. } => {
+            let Some(source) = action.source_object() else {
+                return;
+            };
+            ForeignLibraryLookAction::Activate(source)
+        }
+        _ => return,
+    };
+    snapshot_foreign_library_tops(state, player, kind);
+}
+
+/// CR 401.5: Capture the foreign tops before the action can change them.
+/// Resolution can start a cast from an answer to a parent choice, so the
+/// spell announcement can also open the snapshot.
+pub(super) fn snapshot_foreign_library_tops(
+    state: &mut GameState,
+    player: PlayerId,
+    action: crate::types::game_state::ForeignLibraryLookAction,
+) {
+    use crate::types::game_state::ForeignLibraryLookSnapshot;
+
+    if state.foreign_library_look_snapshot.is_some() {
+        return;
+    }
+    if !super::static_abilities::top_of_library_look_owners(state, player)
+        .any(|owner| owner != player)
+    {
+        return;
+    }
+    let tops = state
+        .players
+        .iter()
+        .filter(|seat| seat.id != player)
+        .filter_map(|seat| Some((seat.id, *state.library_of(seat.id).front()?)))
+        .collect();
+    state.foreign_library_look_snapshot = Some(Box::new(ForeignLibraryLookSnapshot {
+        player,
+        action,
+        tops,
+    }));
+}
+
+pub(super) fn finish_foreign_library_look_boundary(
+    state: &mut GameState,
+    result: &crate::types::game_state::ActionResult,
+) {
+    use crate::types::game_state::ForeignLibraryLookAction;
+
+    let Some(snapshot) = state.foreign_library_look_snapshot.as_deref() else {
+        return;
+    };
+    let completed = matches!(
+        result.waiting_for,
+        WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
+    ) || result
+        .events
+        .iter()
+        .any(|event| match (&snapshot.action, event) {
+            (ForeignLibraryLookAction::Cast, GameEvent::SpellCast { controller, .. }) => {
+                *controller == snapshot.player
+            }
+            (ForeignLibraryLookAction::PlayLand, GameEvent::LandPlayed { player_id, .. }) => {
+                *player_id == snapshot.player
+            }
+            (
+                ForeignLibraryLookAction::Activate(source),
+                GameEvent::AbilityActivated {
+                    player_id,
+                    source_id,
+                    ..
+                },
+            ) => *player_id == snapshot.player && source == source_id,
+            _ => false,
+        });
+    if completed {
+        state.foreign_library_look_snapshot = None;
+    }
+}
+
 fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameState {
     // CR 601.2h + CR 608.2c: only the actor entitled to answer the staged
     // prompt receives its materialized shadow. Other viewers retain the
@@ -1892,6 +2018,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             }
         }
     }
+    filtered.foreign_library_look_snapshot = None;
 
     // CR 702.106c + CR 702.106f: an agenda's secretly chosen names — and how
     // many names it takes — belong to its controller until the turn-face-up
@@ -15650,13 +15777,15 @@ mod tests {
 
     use crate::game::game_object::GameObject;
 
-    /// CR 601.2a: `top_of_library_permission_source` requires a non-`None` `affected`
+    /// CR 601.2a: `top_of_library_grant_for_object` requires a non-`None` `affected`
     /// filter — the permission scopes WHICH top cards it names — so a bare
     /// `StaticDefinition::new` would make every row below vacuously refuse.
     fn top_of_library_static() -> crate::types::ability::StaticDefinition {
         use crate::types::ability::{CardPlayMode, StaticDefinition};
         use crate::types::statics::{CastFrequency, StaticMode};
         let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode: CardPlayMode::Cast,
             frequency: CastFrequency::Unlimited,
             alt_cost: None,

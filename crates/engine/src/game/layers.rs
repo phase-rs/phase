@@ -11837,7 +11837,7 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
         | StaticMode::CantCrew
         | StaticMode::CantPhaseIn
         | StaticMode::CrewContribution { .. }
-        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtTopOfLibrary { .. }
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
         | StaticMode::MayChooseNotToUntap
