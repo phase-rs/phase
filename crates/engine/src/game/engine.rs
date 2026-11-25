@@ -25833,10 +25833,15 @@ mod resolving_carrier_settle_tests {
                         state.waiting_for
                     );
                 };
+                // CR 805.5b (F8-class driver): one seat's pass never passes for the
+                // team, so each beat passes the next unpassed member of the
+                // holding team — re-passing the parked holder would stall the
+                // window and Vision Skeins would never resolve.
+                let seat = crate::game::topology::next_team_passer(state, player);
                 let raw = super::apply_action_boundary_core(
                     state,
-                    player,
-                    player,
+                    seat,
+                    seat,
                     GameAction::PassPriority,
                     None,
                     true,
