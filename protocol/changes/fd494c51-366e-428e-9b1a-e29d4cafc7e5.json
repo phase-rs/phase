@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Persist the per-player reveal ledger required to resume Kamahl's Summons resolution correctly"
+}

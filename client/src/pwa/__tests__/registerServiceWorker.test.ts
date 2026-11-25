@@ -997,4 +997,60 @@ describe("registerServiceWorker connectivity lifecycle", () => {
       });
     });
   });
+
+  // On the visit that installs the worker, the page's own /config.js load ran
+  // before any worker controlled it, so the worker's NetworkFirst rule has
+  // nothing to serve on an offline start until /config.js goes through it.
+  describe("deployment config caching on first install", () => {
+    function uncontrolledContainer() {
+      const listeners: Array<() => void> = [];
+      const container = {
+        controller: null as { scriptURL: string } | null,
+        addEventListener: vi.fn((type: string, listener: () => void) => {
+          if (type === "controllerchange") listeners.push(listener);
+        }),
+      };
+      Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: container });
+      return {
+        container,
+        takeControl() {
+          container.controller = { scriptURL: "/sw.js" };
+          listeners.splice(0).forEach((listener) => listener());
+        },
+      };
+    }
+
+    function configFetches(): unknown[][] {
+      return vi.mocked(fetch).mock.calls.filter(([url]) => url === "/config.js");
+    }
+
+    it("fetches /config.js through the worker once it takes control", async () => {
+      const page = uncontrolledContainer();
+      const options = await register();
+      options.onRegisteredSW("/sw.js", registration());
+      expect(configFetches()).toHaveLength(0);
+
+      page.takeControl();
+
+      expect(configFetches()).toHaveLength(1);
+    });
+
+    it("does not refetch on a page the worker already controls", async () => {
+      const options = await register();
+      options.onRegisteredSW("/sw.js", registration());
+
+      expect(configFetches()).toHaveLength(0);
+    });
+
+    it("leaves the network alone when the worker takes control while offline", async () => {
+      const page = uncontrolledContainer();
+      const options = await register();
+      options.onRegisteredSW("/sw.js", registration());
+      transitionOffline(true);
+
+      page.takeControl();
+
+      expect(configFetches()).toHaveLength(0);
+    });
+  });
 });

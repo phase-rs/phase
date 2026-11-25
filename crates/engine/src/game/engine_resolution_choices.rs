@@ -5933,8 +5933,14 @@ pub(super) fn handle_resolution_choice(
             // continuation counts ("for each card revealed this way").
             if cardinality == crate::types::ability::ObjectSelectionCardinality::AnyNumber {
                 effects::reveal_hand::validate_reveal_selection(&cards, cardinality, &chosen)?;
-                effects::reveal_hand::reveal_selected_hand_cards(state, player, &chosen, events);
-                effects::publish_tracked_set(state, chosen);
+                if effects::record_player_scope_reveal(state, player, chosen.clone(), events)
+                    .is_none()
+                {
+                    effects::reveal_hand::reveal_selected_hand_cards(
+                        state, player, &chosen, events,
+                    );
+                    effects::publish_scoped_reveal(state, player, chosen);
+                }
                 set_priority(state, player);
                 super::engine::resume_pending_continuation_if_priority(state, events)
                     .expect("a settled reveal choice must resume its continuation");
@@ -9094,9 +9100,11 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
-            if let Some(snapshot) =
-                effects::parent_referent_context_from_events(state, &events[events_before_effect..])
-            {
+            if let Some(snapshot) = effects::parent_referent_context_from_events(
+                state,
+                &events[events_before_effect..],
+                true,
+            ) {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     frame
                         .pending
@@ -9630,7 +9638,13 @@ pub(super) fn handle_resolution_choice(
                 events,
             )
             .map_err(|e| EngineError::InvalidAction(format!("spellbook draft: {e:?}")))?;
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    finish_with_continuation(state, player, events)
+                } else {
+                    state.waiting_for.clone()
+                },
+            )
         }
         (
             WaitingFor::DamageSourceChoice {
@@ -12183,7 +12197,7 @@ pub(crate) fn run_batch_completion(
                 });
             }
             if let Some(snapshot) = settled_kept_snapshot
-                .or_else(|| effects::parent_referent_context_from_events(state, events))
+                .or_else(|| effects::parent_referent_context_from_events(state, events, true))
             {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     frame
@@ -12439,6 +12453,7 @@ pub(crate) fn run_batch_completion(
         BatchCompletion::DestroyPopulationSettled {
             ability,
             settled_destroyed,
+            ..
         } => {
             let destroyed =
                 settled_destroyed.expect("destroy population completion must be settled");

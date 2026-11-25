@@ -837,6 +837,7 @@ impl EventObjectSnapshot {
             | FilterProp::HasColor { .. }
             | FilterProp::NotColor { .. }
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::NotSupertype { .. }
             | FilterProp::Historic
@@ -1114,6 +1115,12 @@ pub enum GameEvent {
         /// synthetic events that do not carry cast-time characteristics.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_mana_value: Option<u32>,
+        /// CR 601.2h: Total mana actually paid for this cast. Zero is a known payment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_mana_spent: Option<u32>,
+        /// CR 400.7: The incarnation that became cast.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_incarnation: Option<u64>,
     },
     /// CR 702.140c + CR 730.2: A mutating creature spell merged with a target
     /// creature, forming a mutated permanent. Emitted by
@@ -2380,6 +2387,21 @@ pub enum GameEvent {
 }
 
 impl GameEvent {
+    /// CR 601.2h + CR 601.2i: Capture the completed cast from its stack object.
+    pub(crate) fn spell_cast(
+        spell: &crate::game::game_object::GameObject,
+        controller: PlayerId,
+    ) -> Self {
+        Self::SpellCast {
+            card_id: spell.card_id,
+            controller,
+            object_id: spell.id,
+            cast_mana_value: Some(spell.spell_mana_value()),
+            cast_mana_spent: Some(spell.mana_spent_to_cast_amount),
+            cast_incarnation: Some(spell.incarnation),
+        }
+    }
+
     /// CR 400.7 + CR 608.2h: a `PermanentTapped` event for `object_id`, stamped
     /// with the incarnation of the permanent that is tapped now, so a later
     /// "that permanent's controller" names this object even if it has left and
@@ -2499,6 +2521,37 @@ mod tests {
             }
             other => panic!("expected AbilityActivated, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn spell_cast_facts_preserve_zero_and_accept_legacy_events() {
+        let event = GameEvent::SpellCast {
+            card_id: CardId(1),
+            controller: PlayerId(0),
+            object_id: ObjectId(2),
+            cast_mana_value: Some(4),
+            cast_mana_spent: Some(0),
+            cast_incarnation: Some(7),
+        };
+        let mut json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["data"]["cast_mana_spent"], 0);
+        assert_eq!(
+            serde_json::from_value::<GameEvent>(json.clone()).unwrap(),
+            event
+        );
+        let data = json["data"].as_object_mut().unwrap();
+        data.remove("cast_mana_spent");
+        data.remove("cast_incarnation");
+        let legacy: GameEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            legacy,
+            GameEvent::SpellCast {
+                cast_mana_spent: None,
+                cast_incarnation: None,
+                cast_mana_value: Some(4),
+                ..
+            }
+        ));
     }
 
     #[test]

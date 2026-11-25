@@ -7604,6 +7604,19 @@ pub enum FilterProp {
         comparator: Comparator,
         count: u8,
     },
+    /// CR 205.2a: Matches objects by distinct card-type count ("a card with two
+    /// or more card types" — Rendmaw, Creaking Nest; Visitor from Planet Q).
+    /// Counts distinct [`CoreType`] values of the object's `core_types`, the same
+    /// source type matching reads: supertypes (CR 205.4a) and subtypes (CR 205.3)
+    /// never count, and a Tribal single counts 1 under any wording. The
+    /// Tribal+Kindred pair vector is empty and Boss/Event never appear on a
+    /// playable card, so the stored-value count equals the CR 205.2a count on
+    /// every reachable object. Parameterized over [`Comparator`] like
+    /// `ColorCount`, so other thresholds need no new variant.
+    CardTypeCount {
+        comparator: Comparator,
+        count: u8,
+    },
     /// CR 107.4 + CR 202.1: Matches objects whose count of colored mana symbols
     /// in the printed mana cost satisfies `comparator` against `value`.
     /// `color: Some(c)` counts symbols contributing to color `c` (hybrid /
@@ -8116,6 +8129,7 @@ impl FilterProp {
             | FilterProp::HasColor { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -9363,6 +9377,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -9626,6 +9641,7 @@ pub fn filter_prop_contains(prop: &FilterProp, leaf: &dyn Fn(&TargetFilter) -> b
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -9925,6 +9941,7 @@ pub fn filter_prop_grammar_any(
             | FilterProp::HasColor { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -10590,6 +10607,7 @@ pub fn rewrite_filter_prop<C>(
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -13086,6 +13104,7 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -19353,6 +19372,19 @@ pub enum ParsedCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         specific: Option<crate::types::dungeon::DungeonId>,
     },
+    /// CR 725.1 + CR 109.5: True when the activating player holds the monarch
+    /// designation. Crown of Gondor's equip discount uses this condition in an
+    /// activation instruction (CR 602.1b) applied during total cost determination
+    /// (CR 602.2b + CR 601.2f). Like the city's blessing, the enduring story and
+    /// dungeon completion, it reads a status off the scoped player, so
+    /// `static_condition_to_restriction_condition` converts it exactly.
+    ///
+    /// Activator-relative like `HasCityBlessing`, because the printed clause is
+    /// addressed to whoever is activating ("if you're"). CR 602.2 lets an
+    /// `activator_filter` of `PlayerFilter::All` make the activator someone
+    /// other than the source's controller, and the designation read must follow
+    /// that player. The leaf is false when no player is the monarch.
+    IsMonarch,
     /// CR 702.178a: True when the SOURCE's player has max speed — its
     /// controller on the battlefield, its owner anywhere else, per the "Max
     /// Speed" glossary entry (sense 2). Unlike its designation siblings above,
@@ -29788,6 +29820,7 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -39635,19 +39668,11 @@ pub enum AbilityCondition {
         )]
         subject: ObjectScope,
     },
-    /// CR 601.2c + CR 608.2c + CR 115.1: True iff the parent ability actually has
-    /// at least one *object* target. Guards reflexive-target riders ("If that
-    /// creature …, …") against the optional-declined-target case: when a
-    /// variable-number-of-targets antecedent ("destroy up to one target
-    /// creature") is announced with zero targets (CR 601.2c), the anaphor "that
-    /// creature" has no antecedent (CR 608.2c — read the whole text), so the
-    /// rider must not fire. `evaluate_condition` checks the resolved ability's
-    /// declared targets (CR 115.1) for a `TargetRef::Object`, with NO
-    /// `TriggeringSource` fallback (unlike `TargetMatchesFilter`), so a declined
-    /// optional target reads false. The lowering pass conjoins this with the
-    /// reflexive sub-condition (`And{[HasObjectTarget, …]}`) only when the
-    /// antecedent's `multi_target.min_is_fixed_zero()` — a no-op for
-    /// mandatory-single-target cards (`multi_target == None`).
+    /// CR 608.2c + CR 601.2c + CR 115.6: Guard reflexive object riders
+    /// against an absent antecedent, including a declined optional target.
+    /// Referent selection follows the resolver's chain and event-context rules.
+    /// This guard alone does not establish that an object received damage;
+    /// damage riders must also check the preceding instruction's actual result.
     HasObjectTarget,
     /// CR 608.2c + CR 603.2: "if it targets a [filter]" on a triggered ability —
     /// gates the sub_ability on whether the triggering spell's chosen targets

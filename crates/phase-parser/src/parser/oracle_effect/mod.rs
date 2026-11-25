@@ -140,18 +140,19 @@ use crate::types::ability::{
     GuardReading, GuessSubject, InstructionJoin, IntensityScope, IterationKindBinding,
     KeeperConstraint, KeeperCounterMark, LibraryPosition, LibraryShuffleMode, ManaProduction,
     ManaSpendPermission, ManaTargetRole, MultiTargetSpec, NameStickerSet, NumberDistinctness,
-    ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
-    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
-    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
-    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatForTiming, ReplacementCondition,
-    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
-    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
-    SkipScope, SpellStackToGraveyardReplacement, SpellbookSelection, StaticCondition,
-    StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
-    TargetReadOrigin, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
-    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
-    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole, ZoneOwner,
+    ObjectProperty, ObjectScope, ObjectSelectionCardinality, OriginConstraint, PerPlayerScope,
+    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
+    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    RepeatForTiming, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
+    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
+    SpellbookSelection, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
+    TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause,
+    TokenAttackDestination, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate,
+    TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject,
+    WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole,
+    ZoneOwner,
 };
 // Imported on its own line rather than folded into the block above: that block
 // is the busiest merge point in this file, and a one-name addition inside it
@@ -2795,6 +2796,46 @@ fn target_span_dropped_this_way_anaphor(span: &str, target: &TargetFilter) -> bo
     }
     let unbound = strip_bound_quantity_anaphors(&span_lower);
     scan_contains_phrase(&unbound, "this way")
+}
+
+/// CR 400.3 + CR 400.7j + CR 608.2d: A mandatory singular return from a
+/// preceding instruction's arrivals in the spell controller's graveyard.
+/// Clause IR assigns the preceding instruction; the return routes only
+/// recognize the complete descriptor and its ordinary battlefield delivery.
+pub(crate) fn graveyard_arrival_return_spec(
+    input: &str,
+) -> OracleResult<'_, crate::types::ability::ReturnResultReadSpec> {
+    let (rest, _) = all_consuming((
+        tag("return "),
+        verify(nom_primitives::parse_number, |count| *count == 1),
+        tag(" creature card "),
+        tag("put into "),
+        tag("your graveyard "),
+        tag("this way "),
+        tag("to the battlefield "),
+        verify(parse_control_clause, |possessor| {
+            *possessor == ControlClausePossessor::You
+        }),
+        opt(tag(".")),
+    ))
+    .parse(input.trim())?;
+    Ok((
+        rest,
+        crate::types::ability::ReturnResultReadSpec {
+            noun: TypedFilter::creature()
+                .properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                ])
+                .into(),
+            destination: Zone::Graveyard,
+            recipient: ControllerRef::You,
+        },
+    ))
 }
 
 /// CR 608.2d (override) + CR 701.9b (analogous): locate the "at random"
@@ -24830,9 +24871,15 @@ fn try_parse_verb_and_target<'a>(
         // the bound-quantity-anaphor excision and the reveal-choice
         // exemption — so this arm routes through it rather than duplicating
         // the raw predicate.
-        if target_span_dropped_this_way_anaphor(target_text, &target) {
-            return None;
-        }
+        let (target, origin) = if let Ok((_, reader)) = graveyard_arrival_return_spec(lower) {
+            rem = dest_remainder;
+            (reader.noun, Some(reader.destination))
+        } else {
+            if target_span_dropped_this_way_anaphor(target_text, &target) {
+                return None;
+            }
+            (target, origin)
+        };
         // CR 115.1: A bounce resolves at-resolution iff the Oracle text omitted
         // the word "target" AND the filter has a controller scope to enumerate
         // against. Computed here so both Hand-destined and default-None
@@ -27376,7 +27423,7 @@ fn parse_bare_damage_continuation<'a>(
 /// Composed one `alt` per axis: the copy-object exiled-card anaphor, then the
 /// comma/bare `and` conjunction (CR 608.2c) that coordinates the cast tail. The
 /// returned remainder is the lowercase cast half.
-fn parse_copy_cast_head_connector(input: &str) -> OracleResult<'_, ()> {
+pub(super) fn parse_copy_cast_head_connector(input: &str) -> OracleResult<'_, ()> {
     let (input, _) = tag("copy ").parse(input)?;
     let (input, _) = alt((
         tag("those exiled cards"),
@@ -46020,9 +46067,8 @@ pub(crate) fn rewrite_event_anchored_zone_counts_to_scoped(def: &mut AbilityDefi
 /// parser cannot see the comparison operands, so it emits this placeholder and
 /// the trigger-level difference binding in `lower_trigger_ir` (oracle_trigger.rs)
 /// replaces it with the `QuantityExpr::Difference` of the condition's two
-/// operands (alongside the sibling draw/lose bindings). Left unbound
-/// (a card with the anaphor but no comparison), a `Variable` ref resolves to 0
-/// in `quantity::resolve_ref`, so the effect is inert rather than wrong.
+/// operands. The binding and final coverage guards turn unbound placeholders
+/// into explicit gaps.
 pub(crate) const DIFFERENCE_ANAPHOR_VARIABLE: &str = "difference";
 
 /// Construct the deferred "the difference" count placeholder (see
@@ -46047,8 +46093,8 @@ pub(crate) fn is_difference_anaphor_placeholder(expr: &QuantityExpr) -> bool {
 }
 
 /// The count position of a verb that is not a "the difference" carrier (draw,
-/// mill, scry, surveil, discard, gain/lose life, reveal from hand). Only a
-/// carrier [`resolve_difference_anaphor_in_effect`] rebinds (token creation) may
+/// mill, scry, surveil, discard, gain life, reveal from hand). Only a
+/// carrier [`resolve_difference_anaphor_in_effect`] rebinds may
 /// take the deferred placeholder; every other verb rejects it, so "draw cards
 /// equal to the difference" keeps the `Unimplemented` → trigger-rewrite contract
 /// in `lower_trigger_ir`.
@@ -46074,7 +46120,9 @@ pub(super) fn parse_verb_count_slot<'a>(
 ///   * with a bound `Difference` (`bound = Some`), each placeholder binds to it, and
 ///   * with none to bind (`bound = None`), the carrying effect is downgraded to
 ///     an explicit `Effect::Unimplemented` — an honest coverage gap rather than a
-///     silently-zero effect that reads as supported.
+///     silently-zero effect that reads as supported. Life loss defers that
+///     rejection to the final ability boundary so a nested continuation gets
+///     every chance to inherit its comparison.
 pub(crate) fn resolve_difference_anaphor_in_ability(
     def: &mut AbilityDefinition,
     bound: Option<&QuantityExpr>,
@@ -46114,6 +46162,7 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
             ("put", "counters equal to the difference")
         }
         Effect::Token { .. } => ("create", "tokens equal to the difference"),
+        Effect::LoseLife { .. } if bound.is_some() => ("lose", "life equal to the difference"),
         _ => return,
     };
     let is_placeholder = effect
@@ -46131,6 +46180,36 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
         None => {
             *effect = Effect::unimplemented(downgrade.0, downgrade.1);
         }
+    }
+}
+
+/// CR 608.2c: An independent ability's governing comparison must supply the
+/// two operands before an anaphoric life-loss amount can be interpreted.
+pub(super) fn reject_unbound_life_loss_in_effect(effect: &mut Effect) -> std::ops::ControlFlow<()> {
+    if matches!(
+        effect,
+        Effect::LoseLife { amount, .. } if is_difference_anaphor_placeholder(amount)
+    ) {
+        *effect = Effect::unimplemented("lose", "life equal to the difference");
+    }
+    std::ops::ControlFlow::Continue(())
+}
+
+pub(crate) fn reject_unbound_life_loss_difference(parsed: &mut super::oracle::ParsedAbilities) {
+    use crate::types::ability_visit::effects_mut;
+
+    let mut reject = reject_unbound_life_loss_in_effect;
+    for ability in &mut parsed.abilities {
+        let _ = effects_mut::visit_ability_def(ability, &mut reject);
+    }
+    for trigger in &mut parsed.triggers {
+        let _ = effects_mut::visit_trigger(trigger, &mut reject);
+    }
+    for definition in &mut parsed.statics {
+        let _ = effects_mut::visit_static(definition, &mut reject);
+    }
+    for replacement in &mut parsed.replacements {
+        let _ = effects_mut::visit_replacement(replacement, &mut reject);
     }
 }
 
@@ -54518,30 +54597,6 @@ fn parse_effect_chain_ir_body(
                 None
             }
         });
-        // CR 119.3 + CR 608.2c: "they lose life equal to the difference" — when a
-        // leading QuantityCheck condition bounds life lost (Lolth emblem: "if that
-        // player lost less than 8 life this turn"), the loss amount is the unsigned
-        // gap between the threshold and life lost this turn.
-        let difference_lose = condition.as_ref().and_then(|cond| {
-            let lower = text_no_qty.to_lowercase();
-            let clean = lower.trim().trim_end_matches('.');
-            if all_consuming(alt((
-                tag::<_, _, OracleError<'_>>("lose life equal to the difference"),
-                tag("they lose life equal to the difference"),
-            )))
-            .parse(clean)
-            .is_ok()
-            {
-                conditions::difference_expr(cond).map(|diff| {
-                    parsed_clause(Effect::LoseLife {
-                        amount: diff,
-                        target: Some(TargetFilter::ParentTarget),
-                    })
-                })
-            } else {
-                None
-            }
-        });
         // CR 608.2c + CR 608.2d + CR 118.12: an "any opponent / any player / any other
         // player may" action is performed by the player who accepts. Its immediate
         // "if a player does" consequence names that same player, even when an enclosing
@@ -54593,8 +54648,6 @@ fn parse_effect_chain_ir_body(
             (retained_type_clause.lower(duration_binding), repeat_for)
         } else if let Some(draw) = difference_draw {
             (draw, repeat_for)
-        } else if let Some(lose) = difference_lose {
-            (lose, repeat_for)
         } else if let Some(rider) = entry_rider {
             (rider, repeat_for)
         } else {
@@ -54685,30 +54738,6 @@ fn parse_effect_chain_ir_body(
         );
         let (clause, repeat_for) = lower_copy_each_tracked_spell(&text_no_qty, clause, repeat_for);
         let head_window = ctx.head_window.take_window();
-
-        // CR 608.2c: a clause that STATED its subject ("target opponent loses
-        // life equal to the difference" — Ancient Cellarspawn) has it peeled
-        // into `leading_subject_application`, and its quantity gap records only
-        // the bare predicate. The trigger-side "difference" rewrite binds that
-        // bare predicate to `ParentTarget`, which is right only for the
-        // anaphoric "they" (Lolth's emblem, whose peeled subject IS
-        // `ParentTarget`); for a stated subject it made the controller lose the
-        // life. Record the whole clause instead, so the rewrite can't claim it
-        // and the gap stays honest until the stated subject is threaded through.
-        let clause = match leading_subject_application.as_ref() {
-            Some(application)
-                if application.affected != TargetFilter::ParentTarget
-                    && clause.effect.unimplemented_description().is_some_and(
-                        crate::parser::oracle_trigger::is_difference_lose_life_gap,
-                    ) =>
-            {
-                parsed_clause(Effect::unimplemented(
-                    "difference_drops_stated_subject",
-                    text.trim(),
-                ))
-            }
-            _ => clause,
-        };
 
         // CR 608.2c: advance once per finalized chunk, including player choices
         // nested in its own sub-ability chain. Speculative parses only read it.
@@ -56298,11 +56327,22 @@ fn parse_effect_chain_ir_body(
                     Effect::unimplemented("choice_assignment_antecedent", normalized_text);
             }
             // CR 608.2c + CR 109.5: a clause that itself runs per player makes its own
-            // reveal choice as that player; the resolver's reveal chooser inside a
-            // player-scope iteration is the printed controller, so such a choice
-            // cannot be represented — honest gap.
+            // reveal choice as that player. `AnyNumber` is representable only when the
+            // hand owner is established by the player scope; an `any player may` offer
+            // binds `scoped_player` only at acceptance and leaves `Controller` as the
+            // ability controller, so its `their hand` target cannot safely use this
+            // exemption.
+            let scoped_any_number_reveal = player_scope.is_some()
+                && matches!(
+                    &clause.effect,
+                    Effect::RevealHand {
+                        cardinality: ObjectSelectionCardinality::AnyNumber,
+                        ..
+                    }
+                );
             if (player_scope.is_some() || opponent_may_scope.is_some() || is_distributed_chunk)
                 && crate::types::ability::effect_parks_reveal_card_choice(&clause.effect)
+                && !scoped_any_number_reveal
             {
                 clause.effect =
                     Effect::unimplemented("non_controller_reveal_choice", normalized_text);

@@ -236,6 +236,8 @@ fn event_source_reads_the_event_object_not_the_declared_target() {
             controller: P0,
             object_id: spell,
             cast_mana_value: Some(6),
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         assert_eq!(
             gated_life_gain(&mut state, source, target, condition(3, false, scope)),
@@ -259,6 +261,8 @@ fn departed_event_spell_reads_its_stack_exit_snapshot() {
         controller: P0,
         object_id: spell,
         cast_mana_value: Some(6),
+        cast_mana_spent: None,
+        cast_incarnation: None,
     });
     let mut events = Vec::new();
     move_to_zone(&mut state, spell, Zone::Graveyard, &mut events);

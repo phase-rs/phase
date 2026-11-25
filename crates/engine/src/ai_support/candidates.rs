@@ -3723,6 +3723,7 @@ pub fn candidate_actions_broad_with_probe(
         WaitingFor::RetargetChoice {
             player,
             stack_entry_index,
+            stack_entry_id: _,
             scope,
             current_targets,
             slots,
@@ -4373,6 +4374,9 @@ fn retarget_proposals(
             entry,
             stack_ability,
             &bindings,
+            Some(crate::game::targeting::StackTriggerContext::for_entry(
+                state, entry,
+            )),
         );
         // CR 115.7a + INVARIANT SC (phase-rs/phase#8355 round-8 review finding
         // H1, second pass): mirrors `engine::apply_retarget`'s same guard — a
@@ -4561,6 +4565,7 @@ pub fn retarget_actions(
             state,
             &crate::game::engine::RetargetProposal {
                 stack_entry_index,
+                stack_entry_id: state.stack.get(stack_entry_index).map(|entry| entry.id),
                 scope,
                 current_targets,
                 slots,
@@ -4603,6 +4608,7 @@ pub(crate) fn retarget_response_exists(
             state,
             &crate::game::engine::RetargetProposal {
                 stack_entry_index,
+                stack_entry_id: state.stack.get(stack_entry_index).map(|entry| entry.id),
                 scope,
                 current_targets,
                 slots,

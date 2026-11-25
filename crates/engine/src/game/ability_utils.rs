@@ -6262,6 +6262,7 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -6529,8 +6530,10 @@ fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
 }
 
 /// CR 508.5 + CR 508.5a + CR 603.3d: a filter whose evaluation asks
-/// `combat::defending_player_cr508_5` for the attacked-player anaphor needs the
-/// resolving ability's `trigger_source`, because that authority's binding rule is
+/// `combat::defending_player_cr508_5` for the attacked-player anaphor, or whose
+/// `FilterProp::OtherThanTriggerObject` compares against the event subject,
+/// needs the resolving trigger context. The former needs the ability's
+/// `trigger_source`, because that authority's binding rule is
 /// `trigger_source.and_then(|_| detection.or(state.current_trigger_event))` — with
 /// no `trigger_source` no attack event is bound (`with_bound_attack_event` passes
 /// `None`), which skips the attack-entry tiers entirely and leaves only `resolve_defending_player`. That
@@ -6546,17 +6549,20 @@ fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
 /// Routing these filters to `find_legal_targets_for_ability`
 /// (`FilterContext::from_ability`) supplies the `trigger_source` that
 /// `set_trigger_source_recursive` already put on every instantiated triggered
-/// ability, making SLOT-BUILD agree with the CR 608.2b re-validation door
+/// ability; its state-aware context bridge also binds the current event object
+/// for `OtherThanTriggerObject`. This makes SLOT-BUILD agree with the CR 608.2b
+/// re-validation door
 /// (`targeting::validate_targets_for_ability`), which has always used
 /// `from_ability`. The disagreement between those two doors is what made this
 /// failure silent.
 ///
-/// SCOPE — exactly the refs that consume `trigger_source`, and no others.
+/// SCOPE — exactly the refs that consume trigger context, and no others.
 /// `filter::source_controller_ref_player` special-cases three refs:
 /// `DefendingPlayer` (reads `trigger_source`), `SourceChosenPlayer` (reads the
 /// source), and `EnchantedPlayer` (reads `source.attached_to`); everything else
-/// routes to `controller_ref_player`. Only `DefendingPlayer` needs the ability
-/// context, so only `DefendingPlayer` is matched here — leaving the existing
+/// routes to `controller_ref_player`. Only `DefendingPlayer` and
+/// `OtherThanTriggerObject` need the ability context, so only those values are
+/// matched here — leaving the existing
 /// corpus producers of `Attacking { defender: Some(You | Opponent |
 /// SourceChosenPlayer | EnchantedPlayer) }` on their existing door, unchanged.
 ///
@@ -6597,10 +6603,10 @@ fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
 /// `DifferentNameFrom`, `CanEnchant`) — each of which would keep the bare
 /// `find_legal_targets` door and reproduce the CR 603.3d removal above.
 ///
-/// What remains local is a pure LEAF-VALUE test ("is this prop the
-/// defending-player anaphor?"), including the two prop-level combinators
-/// (`AnyOf` / `Not`) that can wrap it. Its `_ => false` is a value verdict on a
-/// prop that carries no `defender` axis, not a containment claim about nesting.
+/// What remains local is a pure LEAF-VALUE test ("does this prop consume trigger
+/// context?"), including the two prop-level combinators (`AnyOf` / `Not`) that
+/// can wrap it. Its `_ => false` is a value verdict on a prop that carries no
+/// trigger-context axis, not a containment claim about nesting.
 fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
     fn prop_needs(prop: &FilterProp) -> bool {
         match prop {
@@ -6609,7 +6615,11 @@ fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
             }
             | FilterProp::AttackedThisTurn {
                 defender: Some(ControllerRef::DefendingPlayer),
-            } => true,
+            }
+            // CR 115.1d + CR 400.7: "other" in a triggered target clause is
+            // relative to the event object, so enumeration must carry the
+            // current trigger event into the filter context.
+            | FilterProp::OtherThanTriggerObject => true,
             FilterProp::AnyOf { props } => props.iter().any(prop_needs),
             FilterProp::Not { prop } => prop_needs(prop),
             _ => false,
@@ -12466,6 +12476,65 @@ pub fn chain_retarget_slots(ability: &ResolvedAbility) -> Vec<RetargetSlotBindin
     bindings
 }
 
+/// CR 115.7e + CR 400.7 + CR 608.2h: whether a retargeted slot's legality
+/// needs the triggered entry's own event rather than only the saved candidate
+/// pool and the live board. A missing event must not reject ordinary filters
+/// such as Bolt Bend's "any other target"; it must fail closed only for a
+/// filter whose referent or comparison is supplied by that event.
+pub(crate) fn retarget_requires_trigger_event_provenance(ability: &ResolvedAbility) -> bool {
+    let cost_or_effect_snapshot_present =
+        ability.cost_paid_object.is_some() || ability.effect_context_object.is_some();
+    chain_retarget_slots(ability).into_iter().any(|binding| {
+        let SlotEnforcement::Filtered(filter) = binding.enforcement else {
+            return false;
+        };
+        let event_subject = crate::types::ability::filter_contains(&filter, &|node| {
+            matches!(
+                node,
+                TargetFilter::TriggeringSource | TargetFilter::EventTarget
+            )
+        });
+        let event_controller = filter_needs_trigger_source_for_retarget(&filter);
+        let event_quantity =
+            crate::types::ability::filter_contains_filter_prop(&filter, &|prop| match prop {
+                FilterProp::Counters { count, .. }
+                | FilterProp::Cmc { value: count, .. }
+                | FilterProp::PtComparison { value: count, .. } => {
+                    [
+                        ObjectScope::Source,
+                        ObjectScope::EventSource,
+                        ObjectScope::EventTarget,
+                        ObjectScope::BatchSource,
+                    ]
+                    .into_iter()
+                    .any(|scope| crate::types::ability::quantity_expr_contains_scope(count, scope))
+                        || (!cost_or_effect_snapshot_present && count.references_cost_paid_object())
+                }
+                _ => false,
+            }) || (!cost_or_effect_snapshot_present && filter.references_cost_paid_object());
+        event_subject || event_controller || event_quantity
+    })
+}
+
+/// The target-enumeration helper also treats `OtherThanTriggerObject` as a
+/// context-routing signal. Retarget validation is narrower: that marker can
+/// still be checked against the prompt's saved alternatives when the event is
+/// absent, while controller and event-subject references cannot.
+fn filter_needs_trigger_source_for_retarget(filter: &TargetFilter) -> bool {
+    fn prop_needs(prop: &FilterProp) -> bool {
+        matches!(
+            prop,
+            FilterProp::Attacking {
+                defender: Some(ControllerRef::DefendingPlayer)
+            } | FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::DefendingPlayer)
+            }
+        )
+    }
+
+    crate::types::ability::filter_contains_filter_prop(filter, &|prop| prop_needs(prop))
+}
+
 /// Exhaustive over `ChainStep`; `None` when the path does not resolve, which
 /// `apply_retarget` turns into `InvalidAction` rather than writing elsewhere.
 pub(crate) fn node_at<'a>(
@@ -12712,6 +12781,7 @@ pub(crate) fn unchanged_targets_stay_legal(
     bindings: &[RetargetSlotBinding],
     changed: &dyn Fn(usize) -> bool,
     pool_controller: PlayerId,
+    trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
 ) -> Result<(), EngineError> {
     let slot_is_legal = |chain: &ResolvedAbility,
                          path: &[ChainStep],
@@ -12734,20 +12804,22 @@ pub(crate) fn unchanged_targets_stay_legal(
         let judged = bound.as_ref().unwrap_or(node);
         if crate::types::ability::filter_reads_declared_slot(filter) {
             let view = retarget_declared_view(pre, chain);
-            targeting::find_legal_targets_for_ability_with_view(
+            targeting::find_legal_targets_for_ability_with_view_and_trigger_context(
                 state,
                 filter,
                 judged,
                 pool_controller,
                 &view,
+                trigger_context,
             )
             .contains(current)
         } else {
-            targeting::find_legal_targets_for_ability_with_controller(
+            targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
                 state,
                 filter,
                 judged,
                 pool_controller,
+                trigger_context,
             )
             .contains(current)
         }
@@ -12818,6 +12890,7 @@ pub(crate) fn changed_dependent_targets_are_legal(
     bindings: &[RetargetSlotBinding],
     changed: &dyn Fn(usize) -> bool,
     pool_controller: PlayerId,
+    trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
 ) -> Result<(), EngineError> {
     let view = retarget_declared_view(pre, post);
     for (i, binding) in bindings.iter().enumerate() {
@@ -12841,19 +12914,21 @@ pub(crate) fn changed_dependent_targets_are_legal(
         };
         let judged = bound.as_ref().unwrap_or(post_node);
         let legal = if reads_declared_slot {
-            targeting::find_legal_targets_for_ability_with_view(
+            targeting::find_legal_targets_for_ability_with_view_and_trigger_context(
                 state,
                 filter,
                 judged,
                 pool_controller,
                 &view,
+                trigger_context,
             )
         } else {
-            targeting::find_legal_targets_for_ability_with_controller(
+            targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
                 state,
                 filter,
                 judged,
                 pool_controller,
+                trigger_context,
             )
         };
         if !legal.contains(post_current) {
@@ -12910,6 +12985,7 @@ pub(crate) fn widen_dependent_retarget_pools(
     bindings: &[RetargetSlotBinding],
     pools: &mut [Vec<TargetRef>],
     pool_controller: PlayerId,
+    trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
 ) {
     let addresses = declared_position_addresses(stack_ability);
     let announced = retarget_declared_view(stack_ability, stack_ability);
@@ -12944,11 +13020,12 @@ pub(crate) fn widen_dependent_retarget_pools(
                 let mut widened = Vec::new();
                 for referent in referents {
                     let bound = resolved_ability_with_bound_object_target(node, referent);
-                    for target in targeting::find_legal_targets_for_ability_with_controller(
+                    for target in targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
                         state,
                         filter,
                         &bound,
                         pool_controller,
+                        trigger_context,
                     ) {
                         if !widened.contains(&target) {
                             widened.push(target);
@@ -13001,12 +13078,13 @@ pub(crate) fn widen_dependent_retarget_pools(
         }
         let mut widened = Vec::new();
         for view in &views {
-            for target in targeting::find_legal_targets_for_ability_with_view(
+            for target in targeting::find_legal_targets_for_ability_with_view_and_trigger_context(
                 state,
                 filter,
                 node,
                 pool_controller,
                 view,
+                trigger_context,
             ) {
                 if !widened.contains(&target) {
                     widened.push(target);
@@ -15053,10 +15131,12 @@ mod tests {
     /// `combat::defending_player_cr508_5`, whose binding rule requires a
     /// `trigger_source` to consult the attack entries at all.
     #[test]
-    fn filter_needs_trigger_source_routes_only_the_defending_player_anaphor() {
-        // Positive: the new value, bare and under every recursive shape.
+    fn filter_needs_trigger_source_routes_only_trigger_context_values() {
+        // Positive: both trigger-context values, bare and under every recursive shape.
         let bare = typed_with(vec![attacking(ControllerRef::DefendingPlayer)]);
+        let other_than_trigger_object = typed_with(vec![FilterProp::OtherThanTriggerObject]);
         assert!(filter_needs_trigger_source(&bare));
+        assert!(filter_needs_trigger_source(&other_than_trigger_object));
         assert!(filter_needs_trigger_source(&TargetFilter::Or {
             filters: vec![typed_with(vec![]), bare.clone()],
         }));
@@ -15065,6 +15145,9 @@ mod tests {
         }));
         assert!(filter_needs_trigger_source(&TargetFilter::Not {
             filter: Box::new(bare.clone()),
+        }));
+        assert!(filter_needs_trigger_source(&TargetFilter::Not {
+            filter: Box::new(other_than_trigger_object.clone()),
         }));
         assert!(filter_needs_trigger_source(&typed_with(vec![
             FilterProp::AnyOf {
@@ -28744,6 +28827,8 @@ mod tests {
             controller: PlayerId(1),
             object_id: triggering_spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         let mut events = Vec::new();
         crate::game::effects::exchange_control::resolve(&mut state, &mixed, &mut events).unwrap();

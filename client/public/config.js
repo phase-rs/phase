@@ -3,12 +3,18 @@
 // compiled into the bundle.
 //
 // Self-hosting? Replace this file (the phase-server helm chart renders it from
-// `web.defaultMultiplayerServerUrl` and `web.previewSiteUrl`) — the bundle needs
-// no rebuild. Every key is optional, and the app ignores a malformed value:
+// `web.defaultMultiplayerServerUrl` and `web.previewSiteUrl`; the phase-web image
+// renders it from PHASE_MULTIPLAYER_SERVER_URL and PHASE_PREVIEW_SITE_URL) — the
+// bundle needs no rebuild. Every key is optional, and the app ignores a
+// malformed value:
 //
 //   window.__PHASE_CONFIG__ = {
 //     multiplayerServerUrl: "wss://your-host/ws",
 //     // Where a release build's "Try Preview" badge points (http or https).
 //     previewSiteUrl: "https://preview.your-host/",
+//     // Cloud sync against your own Supabase project (both or neither). Its
+//     // auth redirect allow-list must include this site's origin.
+//     supabaseUrl: "https://your-project.supabase.co",
+//     supabaseAnonKey: "sb_publishable_…",
 //   };
 window.__PHASE_CONFIG__ = {};

@@ -1190,7 +1190,7 @@ fn apply_rounding_postmodifier(count: QuantityExpr, noun: &str) -> (QuantityExpr
 /// context ("that much", "the damage prevented this way"), the cda grammar, the
 /// chunk's bare-card aggregate ("those cards"), the where-X core (without the
 /// printed-name possessive arm), then the "the difference" placeholder that
-/// only the token carrier rebinds. A `Sum` whose operands read different object
+/// the enclosing comparison rebinds. A `Sum` whose operands read different object
 /// pronouns is a miss (the operand-anaphor guard).
 pub(crate) fn parse_equal_to_count(quantity: &str, ctx: &mut ParseContext) -> Option<QuantityExpr> {
     let lower = quantity

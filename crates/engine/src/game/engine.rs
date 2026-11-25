@@ -1442,6 +1442,7 @@ fn apply_action_boundary_core(
     stack_resolution_limit: Option<u32>,
     authorize_actor: bool,
 ) -> Result<RawActionApplication, EngineError> {
+    let _damage_scope = effects::DamageDeliveryScope::enter(None);
     let lifecycle = super::lifecycle::enter_action_frame();
     if let Err(error) = mana_sources::preflight_tap_land_action(state, authenticated_actor, &action)
     {
@@ -2700,10 +2701,21 @@ fn restore_engine_derived_retarget_prompts(
     if let WaitingFor::RetargetChoice {
         player,
         stack_entry_index,
+        stack_entry_id,
         scope,
         ..
     } = state.waiting_for.clone()
     {
+        if stack_entry_id.is_some_and(|expected| {
+            state
+                .stack
+                .get(stack_entry_index)
+                .is_none_or(|entry| entry.id != expected)
+        }) {
+            return Err(PersistedRestoreError::PrioritySettlementFailed(
+                "retarget prompt stack entry identity no longer matches".into(),
+            ));
+        }
         if let Some(prompt) =
             effects::change_targets::retarget_prompt(state, stack_entry_index, &scope, player)
         {
@@ -3339,14 +3351,21 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     // mana ability (CR 605.4a). Paying life down to 0 is a legal payment
     // (CR 119.4), so the 0-life check waits until that process ends and a
     // player would next receive priority. Until then that player is still in
-    // the game, so waiting on their choices is not the #962 softlock; prompts
-    // owned by a resolution keep the net. CR 117.2e + CR 121.4: one exception is
+    // the game, so waiting on their choices is not the #962 softlock.
+    // CR 117.2e + CR 121.4: one further exclusion is
     // a parked unless payment of draws: a draw from an empty library loses at the
     // next priority, after the payment's later replacement prompts.
     // CR 510.2 + CR 704.3: a parked combat damage batch is not a point where a
     // player would receive priority; its state-based actions are checked once it
     // completes.
-    if sba::has_pending_player_loss_sba(state)
+    // CR 117.2e + CR 704.4: during a live spell or ability's choice, preserve
+    // the #962 emergency only if a chooser will depart. The loss of another
+    // player must wait until the resolution finishes and priority can return.
+    // Sandbox and priority waits do not have this restriction.
+    let choosing_players = (state.resolving_stack_entry.is_some()
+        && !matches!(state.waiting_for, WaitingFor::Priority { .. }))
+    .then(|| state.waiting_for.acting_players());
+    if sba::has_pending_player_loss_sba(state, choosing_players.as_deref())
         && !state.withholds_priority()
         && !engine_payment_choices::draw_payment_is_parked(state)
         && !state.combat_damage_batch_parked()
@@ -3359,7 +3378,9 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
         // its events (CR 603.10a, CR 603.2c), so the settlement's scan from
         // `departure_start` takes only what happened after it.
         let departure_start = result.events.len();
-        match sba::check_state_based_actions_reporting_departure(state, &mut result.events) {
+        let (resume, departure_queued) =
+            sba::check_state_based_actions_reporting_departure(state, &mut result.events);
+        match resume {
             super::elimination::DepartureResume::ResolutionTail => {
                 settle_resolution_resumed_after_departure(
                     state,
@@ -3372,6 +3393,26 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
             // go on the stack before the next player has priority, as after a
             // concession.
             super::elimination::DepartureResume::Settled => {
+                if state.game_end.is_none() && departure_start < result.events.len() {
+                    // CR 603.2c + CR 117.5: the departure's snapshot already
+                    // claimed its occurrences. Add the unclaimed suffix, including
+                    // later SBA checks, before the one legal trigger placement.
+                    let first_owned = state
+                        .deferred_triggers
+                        .len()
+                        .saturating_sub(departure_queued);
+                    super::triggers::collect_departure_triggers_into_deferred(
+                        state,
+                        &result.events,
+                        departure_start,
+                        None,
+                    );
+                    let origin = engine_priority::parked_batch_origin(&state.waiting_for);
+                    if origin == super::triggers::DeferredTriggerBatchOrigin::StateBasedActionChoice
+                    {
+                        super::triggers::stamp_deferred_triggers_from(state, first_owned, origin);
+                    }
+                }
                 super::elimination::drain_or_clear_deferred_triggers_after_elimination(
                     state,
                     super::elimination::DepartureTriggers::ScannedByCaller,
@@ -9377,6 +9418,12 @@ fn resume_pending_continuation_pass(
         // Inert unless a `Token` resume with a live liminal entry is parked.
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             super::life_safety::observe_boundary_carrier(state);
+            if state.outside_game_entry_resume_is_due() {
+                super::engine_replacement::resume_pending_outside_game_card_entry(state, events);
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    effects::drain_pending_continuation(state, events);
+                }
+            }
             if let Some(waiting_for) =
                 super::engine_replacement::resume_pending_liminal_token_entry(state, events)
             {
@@ -15888,6 +15935,40 @@ fn apply_non_priority_pass_action(
             let returned = *returned_id;
             let active_player = *player;
             let action_event_start = events.len();
+            if let Some(crate::types::game_state::PendingLiminalEntryResume::OutsideGameCard {
+                source_id,
+                player,
+                ..
+            }) = state.pending_liminal_entry_resume.as_ref()
+            {
+                if *source_id == returned && *player == active_player {
+                    let Some(
+                        crate::types::game_state::PendingLiminalEntryResume::OutsideGameCard {
+                            event,
+                            ..
+                        },
+                    ) = state.pending_liminal_entry_resume.take()
+                    else {
+                        unreachable!()
+                    };
+                    state.waiting_for = WaitingFor::Priority {
+                        player: active_player,
+                    };
+                    super::zone_pipeline::deliver_outside_game_card_entry(
+                        state,
+                        event,
+                        Some(chosen),
+                        &mut events,
+                    );
+                    resume_pending_continuation_if_priority(state, &mut events)?;
+                    triggers::collect_and_drain_entry_observer_triggers_if_settled(
+                        state,
+                        &mut events,
+                        action_event_start,
+                    );
+                    return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+                }
+            }
             let (filter, grants) = match &pending.effect {
                 crate::types::ability::Effect::ReturnAsAura {
                     enchant_filter,
@@ -17197,13 +17278,19 @@ fn apply_non_priority_pass_action(
                     state.priority_player = active;
                     match unit {
                         DistributionUnit::Damage => {
-                            effects::deal_damage::resume_resolution_division(
+                            effects::resume_damage_delivery(
                                 state,
-                                &pending_effect,
-                                &distribution,
-                                &mut events,
+                                pending_effect.context.damage_delivery_owner,
+                                |state| {
+                                    effects::deal_damage::resume_resolution_division(
+                                        state,
+                                        &pending_effect,
+                                        &distribution,
+                                        &mut events,
+                                    )
+                                },
                             )
-                            .map_err(|err| EngineError::InvalidAction(err.to_string()))?
+                            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
                         }
                         DistributionUnit::EvenSplitDamage
                         | DistributionUnit::Counters(_)
@@ -17429,6 +17516,7 @@ fn apply_non_priority_pass_action(
             WaitingFor::RetargetChoice {
                 player,
                 stack_entry_index,
+                stack_entry_id,
                 scope,
                 current_targets,
                 slots,
@@ -17443,6 +17531,7 @@ fn apply_non_priority_pass_action(
             RetargetSubmission {
                 player: *player,
                 stack_entry_index: *stack_entry_index,
+                stack_entry_id: *stack_entry_id,
                 scope,
                 current_targets,
                 slots,
@@ -17460,6 +17549,7 @@ fn apply_non_priority_pass_action(
             WaitingFor::RetargetChoice {
                 player,
                 stack_entry_index,
+                stack_entry_id,
                 scope: RetargetScope::Single,
                 current_targets,
                 slots,
@@ -17474,6 +17564,7 @@ fn apply_non_priority_pass_action(
             RetargetSubmission {
                 player: *player,
                 stack_entry_index: *stack_entry_index,
+                stack_entry_id: *stack_entry_id,
                 scope: &RetargetScope::Single,
                 current_targets,
                 slots,
@@ -17767,6 +17858,7 @@ fn check_debug_action_access(state: &GameState, actor: PlayerId) -> Result<(), E
 #[derive(Clone, Copy)]
 pub(crate) struct RetargetProposal<'a> {
     pub(crate) stack_entry_index: usize,
+    pub(crate) stack_entry_id: Option<ObjectId>,
     pub(crate) scope: &'a RetargetScope,
     pub(crate) current_targets: &'a [TargetRef],
     pub(crate) slots: &'a [RetargetSlotAddress],
@@ -17779,6 +17871,7 @@ pub(crate) struct RetargetProposal<'a> {
 struct RetargetSubmission<'a> {
     player: PlayerId,
     stack_entry_index: usize,
+    stack_entry_id: Option<ObjectId>,
     scope: &'a RetargetScope,
     current_targets: &'a [TargetRef],
     slots: &'a [RetargetSlotAddress],
@@ -17798,10 +17891,21 @@ fn apply_retarget(
 ) -> Result<WaitingFor, EngineError> {
     let player = submission.player;
     let stack_entry_index = submission.stack_entry_index;
+    if submission.stack_entry_id.is_some_and(|expected| {
+        state
+            .stack
+            .get(stack_entry_index)
+            .is_none_or(|entry| entry.id != expected)
+    }) {
+        return Err(EngineError::InvalidAction(
+            "Retarget prompt no longer refers to the selected stack entry".into(),
+        ));
+    }
     let mutated = validate_retarget_submission(
         state,
         &RetargetProposal {
             stack_entry_index,
+            stack_entry_id: submission.stack_entry_id,
             scope: submission.scope,
             current_targets: submission.current_targets,
             slots: submission.slots,
@@ -17977,6 +18081,7 @@ pub(crate) fn validate_retarget_submission(
 ) -> Result<crate::types::ability::ResolvedAbility, EngineError> {
     let RetargetProposal {
         stack_entry_index,
+        stack_entry_id,
         scope,
         current_targets,
         slots,
@@ -17985,15 +18090,38 @@ pub(crate) fn validate_retarget_submission(
         new_targets,
     } = *proposal;
 
+    let Some(entry) = state.stack.get(stack_entry_index) else {
+        return Err(EngineError::InvalidAction(
+            "Invalid stack entry index for retargeting".to_string(),
+        ));
+    };
+    if stack_entry_id.is_some_and(|expected| entry.id != expected) {
+        return Err(EngineError::InvalidAction(
+            "Retarget prompt no longer refers to the selected stack entry".to_string(),
+        ));
+    }
+    let trigger_context = Some(crate::game::targeting::StackTriggerContext::for_entry(
+        state, entry,
+    ));
+    // CR 603.2 + CR 115.7e + CR 400.7: a restored triggered entry whose own event
+    // provenance is absent cannot safely accept a changed target. The prompt's
+    // saved pool may still contain the pre-save alternatives, but re-evaluating
+    // a trigger-relative filter without its event would otherwise let that
+    // stale pool bypass the live provenance check. Keeping every target is
+    // still the CR 115.7d no-change path; any election fails closed.
+    let missing_trigger_event = matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })
+        && trigger_context.is_some_and(|context| context.event.is_none())
+        && entry
+            .ability()
+            .is_some_and(crate::game::ability_utils::retarget_requires_trigger_event_provenance);
+
     // CR 115.7d + CR 601.2c: derived here (rather than only after the match
     // below) because H3's outer-empty re-derivation needs it before
     // `pool_for` is built. The address space the player was OFFERED must be
     // the one their submission is validated, admitted and written against;
     // the payload snapshots it, `chain_retarget_slots` re-derives it.
-    let derived = state
-        .stack
-        .get(stack_entry_index)
-        .and_then(|entry| entry.ability())
+    let derived = entry
+        .ability()
         .map(crate::game::ability_utils::chain_retarget_slots)
         .unwrap_or_default();
 
@@ -18027,6 +18155,7 @@ pub(crate) fn validate_retarget_submission(
                     entry,
                     stack_ability,
                     &derived,
+                    trigger_context,
                 )
             }
             None => Vec::new(),
@@ -18118,12 +18247,7 @@ pub(crate) fn validate_retarget_submission(
         slot_pools.is_empty() || slot_pools.len() == slots.len(),
         "slot_pools must be aligned 1:1 with slots or absent",
     );
-    if stack_entry_index >= state.stack.len() {
-        return Err(EngineError::InvalidAction(
-            "Invalid stack entry index for retargeting".to_string(),
-        ));
-    }
-    let Some(pre) = state.stack[stack_entry_index].ability() else {
+    let Some(pre) = entry.ability() else {
         return Err(EngineError::InvalidAction(
             "Retarget: stack entry has no ability to retarget".to_string(),
         ));
@@ -18147,6 +18271,11 @@ pub(crate) fn validate_retarget_submission(
     // announced incarnation is gone (an election of the returned object).
     let positions_changed =
         crate::game::ability_utils::retarget_positions_changed(state, pre, &written, new_targets);
+    if missing_trigger_event && positions_changed.iter().any(|changed| *changed) {
+        return Err(EngineError::InvalidAction(
+            "Retarget: triggered entry is missing its event provenance".into(),
+        ));
+    }
     // CR 115.7a + CR 115.7b: Single changes one target; keeping the same
     // occurrence is not a response, including through the legacy pool fallback.
     if matches!(scope, RetargetScope::Single) && positions_changed.first() != Some(&true) {
@@ -18282,6 +18411,7 @@ pub(crate) fn validate_retarget_submission(
         &derived,
         &changed,
         pool_controller,
+        trigger_context,
     )?;
     crate::game::ability_utils::changed_dependent_targets_are_legal(
         state,
@@ -18290,6 +18420,7 @@ pub(crate) fn validate_retarget_submission(
         &derived,
         &changed,
         pool_controller,
+        trigger_context,
     )?;
     Ok(mutated)
 }
@@ -25187,6 +25318,122 @@ mod resolving_carrier_settle_tests {
     use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    // CR 810.8a: the P1 chooser departs when P0 cannot draw, but an
+    // opposing P2 chooser can still complete their printed replacement.
+    #[test]
+    fn team_chooser_departure_follows_effective_loss_membership() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::format::FormatConfig;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+
+        let p2 = PlayerId(2);
+        let p3 = PlayerId(3);
+        let db = crate::test_support::load_fixture();
+        for chooser in [P1, p2] {
+            let mut sc = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+            sc.at_phase(Phase::PreCombatMain);
+            let skeins = sc.add_real_card(P0, "Vision Skeins", Zone::Hand, &db);
+            let imp = sc.add_real_card(chooser, "Stinkweed Imp", Zone::Graveyard, &db);
+            for seat in [P1, p2, p3] {
+                for _ in 0..7 {
+                    sc.add_real_card(seat, "Island", Zone::Library, &db);
+                }
+            }
+            sc.with_mana_pool(
+                P0,
+                vec![
+                    ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+                    ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ],
+            );
+            let mut runner = sc.build();
+            assert_eq!(crate::game::players::teammates(runner.state(), P0), [P1]);
+            assert_eq!(crate::game::players::teammates(runner.state(), p2), [p3]);
+            assert!(runner.state().players[0].library.is_empty());
+            assert!(runner
+                .state()
+                .players
+                .iter()
+                .all(|seat| !seat.drew_from_empty_library));
+            drop(runner.cast(skeins).commit());
+
+            let state = runner.state_mut();
+            let mut losses = Vec::new();
+            for _ in 0..8 {
+                let WaitingFor::Priority { player } = state.waiting_for else {
+                    panic!(
+                        "unexpected wait before Vision Skeins resolves: {:?}",
+                        state.waiting_for
+                    );
+                };
+                let raw = super::apply_action_boundary_core(
+                    state,
+                    player,
+                    player,
+                    GameAction::PassPriority,
+                    None,
+                    true,
+                )
+                .expect("normal priority pass reaches the production action boundary");
+                let parked = match &raw.result.waiting_for {
+                    WaitingFor::Priority { .. } => false,
+                    WaitingFor::ReplacementChoice {
+                        player, candidates, ..
+                    } => {
+                        assert_eq!(*player, chooser);
+                        assert_eq!(candidates.len(), 2);
+                        assert!(candidates
+                            .iter()
+                            .all(|candidate| candidate.source_id == imp));
+                        assert!(state.players[0].drew_from_empty_library);
+                        assert!(state
+                            .players
+                            .iter()
+                            .skip(1)
+                            .all(|seat| !seat.drew_from_empty_library));
+                        assert!(state.players.iter().all(|seat| !seat.is_eliminated));
+                        assert!(state.resolving_stack_entry.is_some());
+                        true
+                    }
+                    other => panic!("expected the printed Dredge replacement, got {other:?}"),
+                };
+                let final_result =
+                    super::finish_action_boundary(state, raw, super::PublicFinalizeMode::Immediate)
+                        .expect("finish the production priority boundary");
+                losses.extend(final_result.events.iter().filter_map(|event| match event {
+                    GameEvent::PlayerLost { player_id, .. } => Some(*player_id),
+                    _ => None,
+                }));
+                if parked {
+                    break;
+                }
+            }
+            if chooser == p2 {
+                assert!(losses.is_empty(), "loss waits on the opposing chooser");
+                assert!(state.players.iter().all(|seat| !seat.is_eliminated));
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == p2)
+                );
+                let answer = super::apply(state, p2, GameAction::ChooseReplacement { index: 0 })
+                    .expect("answer the opposing player's printed Dredge");
+                assert!(state.players[2].hand.contains(&imp));
+                losses.extend(answer.events.iter().filter_map(|event| match event {
+                    GameEvent::PlayerLost { player_id, .. } => Some(*player_id),
+                    _ => None,
+                }));
+            }
+            assert_eq!(losses, [P0, P1]);
+            assert!(state.players[0].is_eliminated && state.players[1].is_eliminated);
+            assert!(!state.players[2].is_eliminated && !state.players[3].is_eliminated);
+            assert!(
+                matches!(state.waiting_for, WaitingFor::GameOver { winner: Some(winner) } if [p2, p3].contains(&winner))
+            );
+        }
+    }
 
     const SOURCE: ObjectId = ObjectId(60);
 

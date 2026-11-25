@@ -336,7 +336,7 @@ export function removeOneCopy(entries: DeckEntry[], card: string | DeckEntry): D
   const key = typeof card === "string" ? undefined : deckEntryKey(card);
   const name = typeof card === "string" ? card.toLowerCase() : undefined;
   const index = entries.findIndex((entry) =>
-    key === undefined ? entry.name.toLowerCase() === name : deckEntryKey(entry) === key,
+    entry.count > 0 && (key === undefined ? entry.name.toLowerCase() === name : deckEntryKey(entry) === key),
   );
   if (index === -1) return entries;
   return entries.flatMap((entry, i) =>

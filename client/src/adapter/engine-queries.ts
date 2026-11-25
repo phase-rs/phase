@@ -13,7 +13,35 @@
  */
 import type * as EngineWasm from "@wasm/engine";
 
-import type { FormatConfig, GameFormat } from "./types";
+import type { DeckEntry, ExpandedDeck } from "../services/deckParser";
+import type { ChallengeDeck, FormatConfig, GameFormat } from "./types";
+
+/**
+ * CR 903.5a: does a request's main deck already CONTAIN the designated
+ * commander cards, or are they held beside it?
+ *
+ * The two editors genuinely differ and neither is wrong. Constructed Commander
+ * is commanders-OUTSIDE — `useDeckBuilder.handleSetCommander` moves the chosen
+ * card out of `main`, so the 99 plus the commander make 100. A drafted
+ * Commander pool is commanders-INSIDE — `validate_limited_deck` requires a copy
+ * of every designated name IN `main_deck`, so the designation is a LABEL on a
+ * deck card, never an extra card beside the deck.
+ *
+ * Declared by the caller rather than inferred, because both editors can run
+ * under the same `CommanderDraft` format tag.
+ */
+export type CommanderDeckComposition = "commanders-inside" | "commanders-outside";
+
+export type CommanderCandidatesRequest =
+  Pick<ExpandedDeck, "main_deck" | "commander">
+  & Partial<Omit<ExpandedDeck, "main_deck" | "commander">>
+  & {
+    selected_format?: GameFormat | null;
+    selected_challenge_deck?: ChallengeDeck | null;
+    draft_set_codes?: readonly string[];
+  };
+
+export type CommanderInferenceRow = Pick<DeckEntry, "name" | "count">;
 
 export type EngineModule = typeof EngineWasm;
 
@@ -32,10 +60,6 @@ export const ENGINE_QUERIES = {
     needsCardDb: true,
     run: (engine: EngineModule, cardNames: string[]) => engine.classify_deck_js(cardNames),
   },
-  isCardCommanderEligible: {
-    needsCardDb: true,
-    run: (engine: EngineModule, name: string) => engine.is_card_commander_eligible(name),
-  },
   isCardCommanderEligibleForFormat: {
     needsCardDb: true,
     run: (engine: EngineModule, name: string, format: GameFormat) =>
@@ -49,6 +73,19 @@ export const ENGINE_QUERIES = {
   signatureSpellSelectionPolicy: {
     needsCardDb: true,
     run: (engine: EngineModule, request: unknown) => engine.signatureSpellSelectionPolicy(request),
+  },
+  commanderCandidates: {
+    needsCardDb: true,
+    run: (engine: EngineModule, request: CommanderCandidatesRequest, composition: CommanderDeckComposition) =>
+      engine.commanderCandidates(request, composition),
+  },
+  inferCommander: {
+    needsCardDb: true,
+    run: (
+      engine: EngineModule,
+      main: readonly CommanderInferenceRow[],
+      ...format: [selectedFormat?: GameFormat]
+    ): string | null => engine.inferCommander(main, ...format),
   },
   companionCandidates: {
     needsCardDb: true,

@@ -3,9 +3,9 @@ import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-import { STORAGE_KEY_PREFIX, listSavedDeckNames, writeSavedDeckData } from "../../../constants/storage";
+import { STORAGE_KEY_PREFIX, listSavedDeckNames, loadSavedDeck, writeSavedDeckData } from "../../../constants/storage";
 import {
-  isCardCommanderEligible,
+  inferCommander,
   isCardCommanderEligibleForFormat,
   signatureSpellSelectionPolicy,
 } from "../../../services/engineRuntime";
@@ -28,7 +28,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../services/engineRuntime", () => ({
-  isCardCommanderEligible: vi.fn(),
+  inferCommander: vi.fn(),
   isCardCommanderEligibleForFormat: vi.fn(),
   signatureSpellSelectionPolicy: vi.fn(),
 }));
@@ -47,7 +47,7 @@ describe("ImportDeckModal", () => {
   beforeEach(() => {
     localStorage.clear();
     useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
-    vi.mocked(isCardCommanderEligible).mockResolvedValue(false);
+    vi.mocked(inferCommander).mockReset().mockResolvedValue(null);
     vi.mocked(isCardCommanderEligibleForFormat).mockReset();
     vi.mocked(signatureSpellSelectionPolicy).mockReset();
     mocks.fetchDeckFromUrl.mockReset();
@@ -96,6 +96,87 @@ describe("ImportDeckModal", () => {
     await waitFor(() => expect(onImported).toHaveBeenCalledWith("URL Deck", ["URL Deck"], "open"));
     expect(mocks.fetchDeckFromUrl).toHaveBeenCalledWith("https://moxfield.com/decks/abc");
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "URL Deck")).not.toBeNull();
+  });
+
+  it("saves an unmarked 60-card URL import when commander inference rejects", async () => {
+    const user = userEvent.setup();
+    const onImported = vi.fn();
+    const name = "URL Plains";
+    const rows = [{ name: "Plains", count: 60 }];
+    mocks.fetchDeckFromUrl.mockResolvedValue(`Name: ${name}\n[Main]\n60 Plains`);
+    vi.mocked(inferCommander).mockRejectedValueOnce(new Error("engine initialization failed"));
+    render(<ImportDeckModal open onClose={vi.fn()} onImported={onImported} />);
+
+    await user.click(screen.getByRole("button", { name: "From URL" }));
+    await user.type(screen.getByPlaceholderText(/moxfield\.com\/decks/i), "https://moxfield.com/decks/abc");
+    await user.click(screen.getByRole("button", { name: "Import" }));
+
+    await waitFor(() => expect(onImported).toHaveBeenCalledWith(name, [name], "open"));
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[rows]]);
+    const saved = loadSavedDeck(name);
+    expect(saved?.main).toEqual(rows);
+    expect(saved?.commander).toBeUndefined();
+  });
+
+  const isamaru = { name: "Isamaru, Hound of Konda", count: 1 };
+
+  it.each([
+    ["60 Plains", "engine initialization failed", [{ name: "Plains", count: 60 }]],
+    ["4294967296 Plains", "card database unavailable", [{ name: "Plains", count: 4294967296 }]],
+    [
+      `1 ${isamaru.name}\n2 The One Ring\n97 Plains`,
+      "card database unavailable",
+      [isamaru, { name: "The One Ring", count: 2 }, { name: "Plains", count: 97 }],
+    ],
+    [
+      `1 ${isamaru.name}\n99 Plains`,
+      "card database unavailable",
+      [isamaru, { name: "Plains", count: 99 }],
+    ],
+  ] as const)("saves the exact pasted counts after inference rejects for %s", async (text, message, rows) => {
+    const user = userEvent.setup();
+    const onImported = vi.fn();
+    const name = "Pasted Plains";
+    mocks.canonicalCardNames.mockRejectedValue(new Error(message));
+    vi.mocked(inferCommander).mockRejectedValueOnce(new Error(message));
+    render(<ImportDeckModal open onClose={vi.fn()} onImported={onImported} />);
+
+    fireEvent.change(screen.getByPlaceholderText(/Paste deck list here/i), { target: { value: `Name: ${name}\n[Main]\n${text}` } });
+    await user.click(screen.getByRole("button", { name: "Import" }));
+
+    await waitFor(() => expect(onImported).toHaveBeenCalledWith(name, [name], "open"));
+    expect(mocks.canonicalCardNames).toHaveBeenCalledWith(rows.map(({ name }) => name));
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[rows]]);
+    const saved = loadSavedDeck(name);
+    expect(saved?.main).toEqual(rows);
+    expect(saved?.commander).toBeUndefined();
+  });
+
+  it.each([true, false])("persists the Commander designation with explicit markup = %s", async (marked) => {
+    const user = userEvent.setup();
+    const onImported = vi.fn();
+    const name = "Commander Paste";
+    const plains = { name: "Plains", count: 99 };
+    if (marked) {
+      const failure = new Error("card database unavailable");
+      mocks.canonicalCardNames.mockRejectedValue(failure);
+      vi.mocked(inferCommander).mockRejectedValue(failure);
+    } else {
+      vi.mocked(inferCommander).mockResolvedValue(isamaru.name);
+    }
+    const text = marked
+      ? `[Commander]\n1 ${isamaru.name}\n[Main]\n99 Plains`
+      : `[Main]\n1 ${isamaru.name}\n99 Plains`;
+    render(<ImportDeckModal open onClose={vi.fn()} onImported={onImported} />);
+
+    fireEvent.change(screen.getByPlaceholderText(/Paste deck list here/i), { target: { value: `Name: ${name}\n${text}` } });
+    await user.click(screen.getByRole("button", { name: "Import" }));
+
+    await waitFor(() => expect(onImported).toHaveBeenCalledWith(name, [name], "open"));
+    expect(mocks.canonicalCardNames).toHaveBeenCalled();
+    expect(vi.mocked(inferCommander).mock.calls).toEqual(marked ? [] : [[[isamaru, plains]]]);
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + name) ?? "{}");
+    expect(stored).toMatchObject({ main: [plains], commander: [isamaru.name] });
   });
 
   it.each([
