@@ -3762,6 +3762,7 @@ pub(crate) fn try_parse_counter_linked_exile_play_permission(
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
