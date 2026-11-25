@@ -4666,10 +4666,31 @@ export interface UnlessDrawCostView {
   stage: UnlessDrawPaymentStage;
 }
 
+/**
+ * CR 723.5 + CR 805.8: one pending decision's semantic owner paired with the
+ * seat authorized to submit it. Mirrors
+ * `engine::game::turn_control::DecisionBinding` (serde snake_case keys).
+ */
+export interface DecisionBinding {
+  semantic_owner: PlayerId;
+  authorized_actor: PlayerId;
+}
+
 export interface DerivedViews {
   /** Chooser-private printed creature types, ranked by deck frequency. */
   named_choice_suggestions?: string[];
   unique_authorized_submitter?: PlayerId;
+  /**
+   * CR 805.5a + CR 723.5: each living seat entitled to answer the live
+   * priority window that has not passed it yet — the parked representative
+   * plus unpassed teammates on a shared-team window — paired with its
+   * authorized actor. Absent on non-priority windows, when the owners would
+   * name only the holder (always so for individual seats), and on wire
+   * paths without derived views; consumers then fall back to
+   * `priority_player`. Mirrors
+   * `engine::game::derived_views::DerivedViews::priority_decision_bindings`.
+   */
+  priority_decision_bindings?: DecisionBinding[];
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
   scry_prompt_id?: InteractionId;
   /** Opaque engine-issued identity of this viewer's prompt, excluding display-only data. */

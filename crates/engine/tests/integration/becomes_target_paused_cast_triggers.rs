@@ -271,6 +271,14 @@ fn resolve_all(runner: &mut GameRunner, pay_ward: bool) {
         {
             return;
         }
+        // CR 805.5b: the holding team passes together; the Priority arm
+        // below only runs on an empty stack, where the window is done.
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && !runner.state().stack.is_empty()
+        {
+            let _ = runner.pass_holding_team();
+            continue;
+        }
         let action = match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } => GameAction::PassPriority,
             WaitingFor::UnlessPayment { .. } => GameAction::PayUnlessCost { pay: pay_ward },

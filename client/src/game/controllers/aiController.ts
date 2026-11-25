@@ -454,6 +454,22 @@ export function createAIController(config: AIControllerConfig): AIController {
       const { representative } = waitingFor.data;
       return aiPlayerIds.has(representative) ? representative : null;
     }
+    // CR 805.5a + CR 723.5: on a shared-team priority window the parked
+    // representative is not the only seat that may act. Drive the first
+    // non-local AUTHORIZED ACTOR among the engine-authored pending decision
+    // bindings so an AI teammate stays eligible while the window sits on
+    // its representative, an AI controller of humans is scheduled, and a
+    // human controller of AI stays manual. Falls back to the holder when
+    // the list is absent: it names only the holder, or derived views are
+    // missing (legacy wire paths).
+    if (waitingFor.type === "Priority") {
+      const bindings = state.derived?.priority_decision_bindings;
+      if (bindings?.length) {
+        return (
+          bindings.find((b) => b.authorized_actor !== PLAYER_ID)?.authorized_actor ?? null
+        );
+      }
+    }
     if (
       !("data" in waitingFor) ||
       !waitingFor.data ||
@@ -739,9 +755,19 @@ export function createAIController(config: AIControllerConfig): AIController {
           failed = true;
           return;
         }
+        // CR 805.5a + CR 723.5: on a shared-team window a proposal owned by
+        // an unpassed teammate is live — not a sign the engine advanced — so
+        // the holder-mismatch reconcile admits the parked holder OR an exact
+        // engine-authored (owner, actor) pair, never a stale pairing.
+        const scheduledBindings = currentGameState?.derived?.priority_decision_bindings;
         if (
           scheduledWaitingFor.type === "Priority"
           && proposal.semanticOwner !== scheduledWaitingFor.data.player
+          && !scheduledBindings?.some(
+            (b) =>
+              b.semantic_owner === proposal.semanticOwner &&
+              b.authorized_actor === proposal.actor,
+          )
         ) {
           // The live engine may have advanced beyond the displayed prompt.
           // Reconcile its atomic snapshot before scheduling another decision.

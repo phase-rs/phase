@@ -4,6 +4,7 @@ import type {
   AiProposalSubmission,
   ContestClickInput,
   ContestDriveResult,
+  DecisionBinding,
   EngineAdapter,
   EngineSnapshot,
   FormatConfig,
@@ -1385,6 +1386,7 @@ export function aiActorFromWaitingFor(
   waitingFor: WaitingFor,
   seats: SeatState["seats"],
   authorizedSubmitter: PlayerId,
+  decisionBindings?: DecisionBinding[],
 ): PlayerId | null {
   if (
     waitingFor.type === "MulliganDecision" ||
@@ -1407,6 +1409,19 @@ export function aiActorFromWaitingFor(
   // multiplayer. This mirrors the `aiController.ts` fix for #2012. With no
   // turn-control effect, `priority_player === data.player` for every
   // single-acting state, so this is a no-op.
+  // CR 805.5a + CR 723.5: on a shared-team priority window the parked
+  // representative is not the only seat that may act. Drive the first AI
+  // AUTHORIZED ACTOR among the engine-authored pending decision bindings so
+  // an AI teammate stays eligible while the window sits on its
+  // representative, an AI controller of humans is scheduled, and a human
+  // controller of AI stays manual. Falls back to the authorized submitter
+  // when derived views are absent.
+  if (waitingFor.type === "Priority" && decisionBindings?.length) {
+    return (
+      decisionBindings.find((b) => seats[b.authorized_actor]?.type === "Ai")
+        ?.authorized_actor ?? null
+    );
+  }
   // CR 732.2a: LoopShortcut's data field is `proposer`, not `player`; route to
   // the engine-derived authorized submitter (priority_player) exactly like the
   // `player in` states so an AI-owned controller seat drives the declare.
@@ -2467,6 +2482,7 @@ export class P2PHostAdapter implements EngineAdapter {
         waitingFor as WaitingFor,
         this.pregameSeatState.seats,
         state.priority_player,
+        state.derived?.priority_decision_bindings,
       );
       if (actor == null) {
         return;

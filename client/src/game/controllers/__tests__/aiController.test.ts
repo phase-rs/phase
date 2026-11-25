@@ -38,6 +38,7 @@ let storeState: {
   adapter: {
     getAiActionProposal?: (difficulty: string, playerId: number) => Promise<AiActionProposal | null>;
     getAiTacticalActionProposal?: (difficulty: string, playerId: number) => Promise<AiActionProposal | null>;
+    getSnapshot?: () => Promise<{ state: GameState }>;
   } | null;
   gameSessionGeneration: number;
   pendingUndoId: number | null;
@@ -128,6 +129,196 @@ describe("AI proposal controller", () => {
 
     expect(getAiActionProposal).toHaveBeenCalledWith("Medium", 1);
     expect(dispatchAiActionProposal).toHaveBeenCalledTimes(1);
+    expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
+    controller.dispose();
+  });
+
+  it("drives an AI teammate while priority is parked on the local representative (CR 805.5a)", async () => {
+    const issued = proposal(PASS);
+    const getAiActionProposal = vi.fn(async () => issued);
+    dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
+    const parked = { type: "Priority", data: { player: 0 } } as WaitingFor;
+    const state = buildGameState({
+      waiting_for: parked,
+      priority_player: 0,
+      stack: [],
+      derived: {
+        priority_decision_bindings: [
+          { semantic_owner: 0, authorized_actor: 0 },
+          { semantic_owner: 1, authorized_actor: 1 },
+        ],
+      },
+    });
+    storeState.gameState = state;
+    storeState.waitingFor = parked;
+    storeState.adapter = { getAiActionProposal };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    // Revert-probe target: without the derived-bindings branch the parked
+    // local holder idles the controller and no proposal is requested.
+    expect(getAiActionProposal).toHaveBeenCalledWith("Medium", 1);
+    expect(dispatchAiActionProposal).toHaveBeenCalledTimes(1);
+    controller.dispose();
+  });
+
+  it("leaves a parked window alone when no decision actor is a remote seat (control)", async () => {
+    const getAiActionProposal = vi.fn(async () => proposal(PASS));
+    const parked = { type: "Priority", data: { player: 0 } } as WaitingFor;
+    const state = buildGameState({
+      waiting_for: parked,
+      priority_player: 0,
+      stack: [],
+      derived: {
+        priority_decision_bindings: [{ semantic_owner: 0, authorized_actor: 0 }],
+      },
+    });
+    storeState.gameState = state;
+    storeState.waitingFor = parked;
+    storeState.adapter = { getAiActionProposal };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    expect(getAiActionProposal).not.toHaveBeenCalled();
+    expect(dispatchAiActionProposal).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("schedules an AI controller of human teammates on a controlled park (CR 723.5)", async () => {
+    const issued: AiActionProposal = {
+      token: "engine-bound",
+      semanticOwner: 0,
+      actor: 2,
+      action: PASS,
+    };
+    const getAiActionProposal = vi.fn(async () => issued);
+    dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
+    const parked = { type: "Priority", data: { player: 0 } } as WaitingFor;
+    const state = buildGameState({
+      waiting_for: parked,
+      priority_player: 2,
+      stack: [],
+      derived: {
+        priority_decision_bindings: [
+          { semantic_owner: 0, authorized_actor: 2 },
+          { semantic_owner: 1, authorized_actor: 2 },
+        ],
+      },
+    });
+    storeState.gameState = state;
+    storeState.waitingFor = parked;
+    storeState.adapter = { getAiActionProposal };
+
+    const controller = createAIController({ seats: [{ playerId: 2, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    // On the base owner shape this state owner-selects seat 1, a human
+    // subject — the wrong seat. Actor-select schedules the AI controller.
+    expect(getAiActionProposal).toHaveBeenCalledWith("Medium", 2);
+    expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
+    controller.dispose();
+  });
+
+  it("idles when the local human controls the parked team (CR 723.5)", async () => {
+    const getAiActionProposal = vi.fn(async () => proposal(PASS));
+    const parked = { type: "Priority", data: { player: 0 } } as WaitingFor;
+    const state = buildGameState({
+      waiting_for: parked,
+      priority_player: 0,
+      stack: [],
+      derived: {
+        priority_decision_bindings: [
+          { semantic_owner: 0, authorized_actor: 0 },
+          { semantic_owner: 1, authorized_actor: 0 },
+        ],
+      },
+    });
+    storeState.gameState = state;
+    storeState.waitingFor = parked;
+    storeState.adapter = { getAiActionProposal };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    expect(getAiActionProposal).not.toHaveBeenCalled();
+    expect(dispatchAiActionProposal).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("refuses a proposal whose (owner, actor) pair matches no binding (CR 723.5)", async () => {
+    const stale: AiActionProposal = {
+      token: "engine-bound",
+      semanticOwner: 1,
+      actor: 9,
+      action: PASS,
+    };
+    const getAiActionProposal = vi.fn(async () => stale);
+    const getSnapshot = vi.fn(async () => ({ state: storeState.gameState as GameState }));
+    dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
+    const parked = { type: "Priority", data: { player: 0 } } as WaitingFor;
+    const state = buildGameState({
+      waiting_for: parked,
+      priority_player: 2,
+      stack: [],
+      derived: {
+        priority_decision_bindings: [
+          { semantic_owner: 0, authorized_actor: 2 },
+          { semantic_owner: 1, authorized_actor: 2 },
+        ],
+      },
+    });
+    storeState.gameState = state;
+    storeState.waitingFor = parked;
+    storeState.adapter = { getAiActionProposal, getSnapshot };
+
+    const controller = createAIController({ seats: [{ playerId: 2, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    // The pair (1, 9) matches neither binding: no dispatch, and the snapshot
+    // path runs instead of applying a stale pairing.
+    expect(getAiActionProposal).toHaveBeenCalledWith("Medium", 2);
+    expect(getSnapshot).toHaveBeenCalledTimes(1);
+    expect(dispatchAiActionProposal).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("dispatches a proposal whose (owner, actor) pair matches a binding (CR 723.5)", async () => {
+    const issued: AiActionProposal = {
+      token: "engine-bound",
+      semanticOwner: 1,
+      actor: 2,
+      action: PASS,
+    };
+    const getAiActionProposal = vi.fn(async () => issued);
+    dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
+    const parked = { type: "Priority", data: { player: 0 } } as WaitingFor;
+    const state = buildGameState({
+      waiting_for: parked,
+      priority_player: 2,
+      stack: [],
+      derived: {
+        priority_decision_bindings: [
+          { semantic_owner: 0, authorized_actor: 2 },
+          { semantic_owner: 1, authorized_actor: 2 },
+        ],
+      },
+    });
+    storeState.gameState = state;
+    storeState.waitingFor = parked;
+    storeState.adapter = { getAiActionProposal };
+
+    const controller = createAIController({ seats: [{ playerId: 2, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    expect(getAiActionProposal).toHaveBeenCalledWith("Medium", 2);
     expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
     controller.dispose();
   });

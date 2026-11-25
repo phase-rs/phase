@@ -739,11 +739,9 @@ fn validate_companion_to_hand_action(
         ));
     }
 
-    let is_sorcery_speed = matches!(
-        state.phase,
-        crate::types::phase::Phase::PreCombatMain | crate::types::phase::Phase::PostCombatMain
-    ) && state.stack.is_empty()
-        && state.active_player == player;
+    // CR 805.5a: a teammate acts on the shared team turn, so the sorcery-speed
+    // window admits any player on the active team, not just the active player.
+    let is_sorcery_speed = super::restrictions::is_sorcery_speed_window(state, player);
     if !is_sorcery_speed {
         return Err(EngineError::InvalidAction(
             "Companion can only be put into hand at sorcery speed".to_string(),

@@ -100,7 +100,13 @@ fn pass_stack(r: &mut GameRunner) -> Vec<GameEvent> {
         {
             return events;
         }
-        events.extend(act(r, GameAction::PassPriority));
+        // F8-class driver: pass the whole holding team — passing only the
+        // parked holder stalls a shared-team window. Identical to a holder
+        // pass in individual-turn formats.
+        events.extend(
+            r.pass_holding_team()
+                .expect("team pass advances the window"),
+        );
     }
     panic!("stack did not settle");
 }
@@ -503,7 +509,10 @@ fn priority(r: &mut GameRunner, player: PlayerId) {
         if matches!(r.state().waiting_for, WaitingFor::Priority { player: p } if p == player) {
             return;
         }
-        act(r, GameAction::PassPriority);
+        // F8-class driver: pass the whole holding team — passing only the
+        // parked holder stalls a shared-team window. Identical to a holder
+        // pass in individual-turn formats.
+        r.pass_holding_team().expect("team pass rotates priority");
     }
     panic!(
         "expected priority for {player:?}, got {:?}",
@@ -627,8 +636,9 @@ fn aura_targeting(name: &str, team: bool, host_controller: PlayerId) {
         let spell = card(&mut s, player, "Giant Growth", Zone::Hand);
         let source = card(&mut s, player, "Prodigal Pyromancer", Zone::Battlefield);
         stock(&mut s, player, &["Swamp", "Plains", "Mountain"]);
-        // CR 805.5a + CR 805.5b: Players act and pass through shared team priority. The engine's
-        // public priority prompt currently authorizes only the team representative.
+        // CR 805.5a + CR 805.5b: Players act and pass through shared team priority,
+        // with every living teammate authorized on a team window. Inspection
+        // stays representative-scoped; only the pass driver below changed.
         if !team || index % 2 == 0 {
             seats.push((player, spell, source));
         }
