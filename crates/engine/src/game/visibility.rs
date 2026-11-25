@@ -705,6 +705,12 @@ fn exempt_from_hiding(
     crate::game::casting::cast_permissions_name_their_grantee(obj)
         && state.players.iter().any(|pl| {
             can_view_private_for_player(pl.id)
+                // CR 401.5: The cast-grant inference must respect the same
+                // stopped look window as the explicit top-of-library grant.
+                && !(obj.zone == Zone::Library
+                    && !foreign_library_top_visible_during_action(state, pl.id, obj.owner, obj.id)
+                    && state.players.iter().any(|seat| seat.id == obj.owner)
+                    && state.library_of(obj.owner).front() == Some(&obj.id))
                 && crate::game::casting::castable_from_current_zone(state, obj, pl.id, None)
         })
 }
@@ -1452,15 +1458,21 @@ fn visible_library_top_for_look(
         return None;
     }
     let live = *state.library_of(owner).front()?;
-    if owner == grantee {
-        return Some(live);
-    }
-    state
-        .foreign_library_look_snapshot
-        .as_deref()
-        .filter(|snapshot| snapshot.player == grantee)
-        .is_none_or(|snapshot| snapshot.tops.contains(&(owner, live)))
-        .then_some(live)
+    foreign_library_top_visible_during_action(state, grantee, owner, live).then_some(live)
+}
+
+fn foreign_library_top_visible_during_action(
+    state: &GameState,
+    grantee: PlayerId,
+    owner: PlayerId,
+    live: ObjectId,
+) -> bool {
+    owner == grantee
+        || state
+            .foreign_library_look_snapshot
+            .as_deref()
+            .filter(|snapshot| snapshot.player == grantee)
+            .is_none_or(|snapshot| snapshot.tops.contains(&(owner, live)))
 }
 
 pub(super) fn begin_foreign_library_look_boundary(
@@ -1495,7 +1507,132 @@ pub(super) fn begin_foreign_library_look_boundary(
             };
             ForeignLibraryLookAction::Activate(source)
         }
-        _ => return,
+        // CR 116.2: paid special actions open the boundary in their cost
+        // procedures. Plot and suspend enter through ActivateAbility.
+        GameAction::PassPriority
+        | GameAction::ChooseMeldPair { .. }
+        | GameAction::ChooseEntryAttackTarget { .. }
+        | GameAction::Foretell { .. }
+        | GameAction::DeclareAttackers { .. }
+        | GameAction::DeclareBlockers { .. }
+        | GameAction::ChooseUntap { .. }
+        | GameAction::ChooseExert { .. }
+        | GameAction::ChooseEnlist { .. }
+        | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseZoneOpponentChooser { .. }
+        | GameAction::ChoosePileOpponent { .. }
+        | GameAction::ChooseAnnouncingOpponent { .. }
+        | GameAction::ChooseGiftRecipient { .. }
+        | GameAction::ChooseAssistPlayer { .. }
+        | GameAction::CommitAssistPayment { .. }
+        | GameAction::MulliganDecision { .. }
+        | GameAction::ReorderHand { .. }
+        | GameAction::BackToManaPayment
+        | GameAction::UntapLandForMana { .. }
+        | GameAction::SpendPoolMana { .. }
+        | GameAction::UnspendPoolMana { .. }
+        | GameAction::SelectCards { .. }
+        | GameAction::ChooseRemoveCounterCostDistribution { .. }
+        | GameAction::SelectCoinFlips { .. }
+        | GameAction::SelectDieRolls { .. }
+        | GameAction::ChooseOutsideGameCards { .. }
+        | GameAction::SelectTargets { .. }
+        | GameAction::ChooseTarget { .. }
+        | GameAction::ChooseReplacement { .. }
+        | GameAction::ChooseReplacementAndRemember { .. }
+        | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::ChooseEntryController { .. }
+        | GameAction::OrderTriggers { .. }
+        | GameAction::OrderCostReductions { .. }
+        | GameAction::CancelCast
+        | GameAction::Transform { .. }
+        | GameAction::TurnFaceUp { .. }
+        | GameAction::SubmitSideboard { .. }
+        | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseStartingPlayer { .. }
+        | GameAction::ChooseOption { .. }
+        | GameAction::SubmitVoteCandidate { .. }
+        | GameAction::SubmitSpellbookDraft { .. }
+        | GameAction::SubmitPilePartition { .. }
+        | GameAction::ChoosePile { .. }
+        | GameAction::ChooseBranch { .. }
+        | GameAction::SubmitLifeRedistribution { .. }
+        | GameAction::ChooseDamageSource { .. }
+        | GameAction::SelectModes { .. }
+        | GameAction::DecideOptionalCost { .. }
+        | GameAction::ChooseAdventureFace { .. }
+        | GameAction::ChooseModalFace { .. }
+        | GameAction::ChooseAlternativeCast { .. }
+        | GameAction::ChooseCastingVariant { .. }
+        | GameAction::KeepAllCopyTargets
+        | GameAction::ChoosePermanentTypeSlot { .. }
+        | GameAction::DecideOptionalEffect { .. }
+        | GameAction::ChooseResolutionOptionalPaymentBranch { .. }
+        | GameAction::RespondToSpliceOffer { .. }
+        | GameAction::DecideOptionalEffectAndRemember { .. }
+        | GameAction::PayUnlessCost { .. }
+        | GameAction::ChooseUnlessCostBranch { .. }
+        | GameAction::ChooseActivationCostBranch { .. }
+        | GameAction::PayCombatTax { .. }
+        | GameAction::ChooseRingBearer { .. }
+        | GameAction::ChoosePair { .. }
+        | GameAction::ChooseDungeon { .. }
+        | GameAction::ChooseDungeonRoom { .. }
+        | GameAction::UnlockRoomDoor { .. }
+        | GameAction::RollPlanarDie
+        | GameAction::ChooseRoomDoor { .. }
+        | GameAction::TapForConvoke { .. }
+        | GameAction::HarmonizeTap { .. }
+        | GameAction::ChooseSecretAgendaNames { .. }
+        | GameAction::DeclareCompanion { .. }
+        | GameAction::CompanionToHand
+        | GameAction::DiscoverChoice { .. }
+        | GameAction::GraveyardPaidCastChoice { .. }
+        | GameAction::CascadeChoice { .. }
+        | GameAction::RippleChoice { .. }
+        | GameAction::FreeCastWindowChoice { .. }
+        | GameAction::ChooseTopOrBottom { .. }
+        | GameAction::ChooseMutateMergeSide { .. }
+        | GameAction::CipherEncode { .. }
+        | GameAction::ChooseLegend { .. }
+        | GameAction::ChooseBattleProtector { .. }
+        | GameAction::SetAutoPass { .. }
+        | GameAction::CancelAutoPass
+        | GameAction::SetPhaseStops { .. }
+        | GameAction::SetPriorityPassingMode { .. }
+        | GameAction::SetPriorityYield { .. }
+        | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::UnAction { .. }
+        | GameAction::SetTriggerOrderTemplate { .. }
+        | GameAction::AssignCombatDamage { .. }
+        | GameAction::AssignBlockerDamage { .. }
+        | GameAction::DistributeAmong { .. }
+        | GameAction::ChooseCounterMoveDistribution { .. }
+        | GameAction::ChooseCountersToRemove { .. }
+        | GameAction::SubmitPayAmount { .. }
+        | GameAction::RetargetSpell { .. }
+        | GameAction::LearnDecision { .. }
+        | GameAction::SelectCategoryPermanents { .. }
+        | GameAction::ChooseKeptCreatures { .. }
+        | GameAction::ChooseKeptPermanents { .. }
+        | GameAction::ChooseX { .. }
+        | GameAction::SubmitPhyrexianChoices { .. }
+        | GameAction::ChooseManaColor { .. }
+        | GameAction::PayManaAbilityMana { .. }
+        | GameAction::ChooseSpecializeColor { .. }
+        | GameAction::PassParadigmOffer
+        | GameAction::Debug(..)
+        | GameAction::GrantDebugPermission { .. }
+        | GameAction::RevokeDebugPermission { .. }
+        | GameAction::Concede { .. }
+        | GameAction::DeclareShortcut { .. }
+        | GameAction::RespondToShortcut { .. }
+        | GameAction::DeclineShortcut
+        | GameAction::PrecastCopyShortcut { .. }
+        | GameAction::EndContinuousEffect { .. }
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. } => return,
     };
     snapshot_foreign_library_tops(state, player, kind);
 }
@@ -1536,6 +1673,7 @@ pub(super) fn finish_foreign_library_look_boundary(
     result: &crate::types::game_state::ActionResult,
 ) {
     use crate::types::game_state::ForeignLibraryLookAction;
+    use crate::types::mana::SpecialAction;
 
     let Some(snapshot) = state.foreign_library_look_snapshot.as_deref() else {
         return;
@@ -1561,6 +1699,43 @@ pub(super) fn finish_foreign_library_look_boundary(
                     ..
                 },
             ) => *player_id == snapshot.player && source == source_id,
+            (
+                ForeignLibraryLookAction::Special(SpecialAction::TurnFaceUp),
+                GameEvent::TurnedFaceUp { .. },
+            ) => true,
+            (
+                ForeignLibraryLookAction::Special(SpecialAction::CompanionToHand),
+                GameEvent::CompanionMovedToHand { player, .. },
+            )
+            | (
+                ForeignLibraryLookAction::Special(SpecialAction::EndContinuousEffect),
+                GameEvent::ContinuousEffectEnded { player, .. },
+            )
+            | (
+                ForeignLibraryLookAction::Special(SpecialAction::Foretell),
+                GameEvent::Foretold {
+                    player_id: player, ..
+                },
+            )
+            | (
+                ForeignLibraryLookAction::Special(SpecialAction::UnlockDoor),
+                GameEvent::RoomDoorUnlocked {
+                    player_id: player, ..
+                },
+            )
+            | (
+                ForeignLibraryLookAction::Special(SpecialAction::RollPlanarDie),
+                GameEvent::PlanarDieRolled {
+                    player_id: player, ..
+                },
+            ) => *player == snapshot.player,
+            (
+                ForeignLibraryLookAction::Activate(source),
+                GameEvent::BecomesPlotted {
+                    player_id,
+                    object_id,
+                },
+            ) => *player_id == snapshot.player && source == object_id,
             _ => false,
         });
     if completed {

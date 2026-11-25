@@ -2,15 +2,14 @@
 
 use engine::ai_support::legal_actions;
 use engine::game::casting::spell_objects_available_to_cast;
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::visibility::{filter_state_for_viewer, HIDDEN_CARD_NAME};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
     CardPlayMode, ContinuousModification, ControllerRef, Duration, ManaSpendPermission,
     TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, GameState, ManaChoice, WaitingFor};
+use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -168,107 +167,4 @@ fn foreign_top_plays_land_and_repeatedly_casts_only_with_its_own_spend_rider() {
         .cast(own)
         .try_resolve()
         .expect("Future Sight remains usable");
-}
-
-#[test]
-fn casting_from_hand_defers_a_new_foreign_top_until_commit() {
-    let third = PlayerId(2);
-    let mut scenario = GameScenario::new_n_player(3, 41);
-    scenario.at_phase(Phase::PreCombatMain);
-    // CR 605.1a + CR 614.6: Grove qualifies as a mana ability. The external
-    // replacement makes its opponent life gain draw a card during payment.
-    let grove = scenario
-        .add_land_from_oracle(
-            P0,
-            "Grove of the Burnwillows",
-            "{T}: Add {C}.\n{T}: Add {R} or {G}. Each opponent gains 1 life.",
-        )
-        .id();
-    scenario.add_enchantment_from_oracle(P1, "Nefarious Lich",
-        "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game."
-    );
-    let hand = scenario
-        .add_spell_to_hand(P0, "Hand spell", true)
-        .with_mana_cost(mono_cost(ManaCostShard::Green))
-        .id();
-    let next = scenario.add_spell_to_library_top(P1, "New top", true).id();
-    let before = scenario
-        .add_spell_to_library_top(P1, "Original top", true)
-        .id();
-    let mut runner = scenario.build();
-    install_foreign_library_grant(
-        runner.state_mut(),
-        grove,
-        P1,
-        StaticMode::MayLookAtTopOfLibrary {
-            library: ControllerRef::SpecificPlayer { id: P1 },
-        },
-    );
-
-    let seen = |state: &GameState, viewer, object| {
-        filter_state_for_viewer(state, viewer).objects[&object].name != HIDDEN_CARD_NAME
-    };
-    assert!(seen(runner.state(), P0, before));
-    assert!(!seen(runner.state(), P0, next));
-    assert!(!seen(runner.state(), P1, before));
-    assert!(!seen(runner.state(), third, before));
-
-    let card_id = runner.state().objects[&hand].card_id;
-    let casting = runner
-        .act(GameAction::CastSpell {
-            object_id: hand,
-            card_id,
-            targets: vec![],
-            payment_mode: CastPaymentMode::Manual,
-        })
-        .expect("start the cast");
-    assert!(matches!(
-        casting.waiting_for,
-        WaitingFor::ManaPayment { .. }
-    ));
-    let choose_color = runner
-        .act(GameAction::ActivateAbility {
-            source_id: grove,
-            ability_index: 1,
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .expect("activate Grove during payment");
-    assert!(matches!(
-        choose_color.waiting_for,
-        WaitingFor::ChooseManaColor { .. }
-    ));
-    let activation = runner
-        .act(GameAction::ChooseManaColor {
-            choice: ManaChoice::SingleColor(ManaType::Green),
-            count: 1,
-        })
-        .expect("add green mana with Grove");
-    assert!(activation
-        .events
-        .iter()
-        .any(|event| matches!(event, GameEvent::CardDrawn { player_id: P1, .. })));
-    assert!(matches!(
-        activation.waiting_for,
-        WaitingFor::ManaPayment { .. }
-    ));
-    assert_eq!(runner.state().library_of(P1).front(), Some(&next));
-    assert!(!seen(runner.state(), P0, next));
-
-    let mut canceled = GameRunner::from_state(runner.state().clone());
-    canceled
-        .act(GameAction::CancelCast)
-        .expect("cancel the cast");
-    let canceled_top = *canceled.state().library_of(P1).front().unwrap();
-    assert!(seen(canceled.state(), P0, canceled_top));
-
-    let committed = runner
-        .act(GameAction::PassPriority)
-        .expect("commit the payment");
-    assert!(committed
-        .events
-        .iter()
-        .any(|event| matches!(event, GameEvent::SpellCast { controller: P0, .. })));
-    assert!(seen(runner.state(), P0, next));
-    assert!(!seen(runner.state(), P1, next));
-    assert!(!seen(runner.state(), third, next));
 }

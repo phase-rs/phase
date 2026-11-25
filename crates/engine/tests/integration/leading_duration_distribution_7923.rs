@@ -62,7 +62,11 @@ use engine::types::ability::{
     StaticCondition, SubAbilityLink, TargetFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, TransientContinuousEffect, WaitingFor};
+use engine::types::events::GameEvent;
+use engine::types::game_state::{
+    CastPaymentMode, GameState, ManaChoice, TransientContinuousEffect, TrustedGameStateEnvelope,
+    WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::ManaCostShard;
@@ -1605,6 +1609,167 @@ fn can_play_land(state: &GameState, id: ObjectId) -> bool {
     legal_actions(state)
         .iter()
         .any(|action| matches!(action, GameAction::PlayLand { object_id, .. } if *object_id == id))
+}
+
+fn activate_grove(
+    runner: &mut GameRunner,
+    grove: ObjectId,
+) -> engine::types::game_state::ActionResult {
+    let choose_color = runner
+        .act(GameAction::ActivateAbility {
+            source_id: grove,
+            ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Grove");
+    assert!(matches!(
+        choose_color.waiting_for,
+        WaitingFor::ChooseManaColor { .. }
+    ));
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Green),
+            count: 1,
+        })
+        .expect("add green mana with Grove")
+}
+
+#[test]
+fn xanathar_defers_a_new_foreign_top_during_manual_cast_payment() {
+    let third = PlayerId(2);
+    let (mut scenario, _) = xanathar_scenario(3);
+    // CR 605.1a + CR 614.6: Grove qualifies as a mana ability. The external
+    // replacement makes its opponent life gain draw a card during payment.
+    let mut add_grove = || {
+        scenario
+            .add_land_from_oracle(
+                P0,
+                "Grove of the Burnwillows",
+                "{T}: Add {C}.\n{T}: Add {R} or {G}. Each opponent gains 1 life.",
+            )
+            .id()
+    };
+    let grove = add_grove();
+    let second_grove = add_grove();
+    scenario.add_enchantment_from_oracle(P1, "Nefarious Lich",
+        "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game."
+    );
+    let hand = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Fog",
+            true,
+            "Prevent all combat damage that would be dealt this turn.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        })
+        .id();
+    let later = scenario.add_land_to_library_top(P1, "Plains").id();
+    let next = scenario.add_spell_to_library_top(P1, "New top", true).id();
+    let before = scenario
+        .add_spell_to_library_top(P1, "Original top", true)
+        .id();
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+    resolve_xanathar_trigger(&mut runner);
+
+    let seen = |state: &GameState, viewer, object| {
+        filter_state_for_viewer(state, viewer).objects[&object].name != HIDDEN_CARD_NAME
+    };
+    assert!(seen(runner.state(), P0, before));
+    assert!(!seen(runner.state(), P0, next));
+    assert!(!seen(runner.state(), P1, before));
+    assert!(!seen(runner.state(), third, before));
+
+    let card_id = runner.state().objects[&hand].card_id;
+    let casting = runner
+        .act(GameAction::CastSpell {
+            object_id: hand,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("start the cast");
+    assert!(matches!(
+        casting.waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    let snapshot = |state: &GameState| {
+        serde_json::to_value(state).expect("serialize authoritative state")
+            ["foreign_library_look_snapshot"]
+            .clone()
+    };
+    let announced_snapshot = snapshot(runner.state());
+    assert!(
+        announced_snapshot["tops"]
+            .as_array()
+            .is_some_and(|tops| tops.contains(&serde_json::json!([P1, before]))),
+        "the cast must capture Xanathar's chosen opponent's top: {announced_snapshot}"
+    );
+    let activation = activate_grove(&mut runner, grove);
+    assert!(activation
+        .events
+        .iter()
+        .any(|event| matches!(event, GameEvent::CardDrawn { player_id: P1, .. })));
+    assert!(matches!(
+        activation.waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    assert_eq!(runner.state().library_of(P1).front(), Some(&next));
+    assert_eq!(snapshot(runner.state()), announced_snapshot);
+    assert!(!seen(runner.state(), P0, next));
+
+    let viewer = serde_json::to_value(filter_state_for_viewer(runner.state(), P0))
+        .expect("serialize the grantee's projection");
+    assert!(viewer.get("foreign_library_look_snapshot").is_none());
+    assert!(!viewer
+        .to_string()
+        .contains(&runner.state().objects[&next].name));
+
+    let saved = serde_json::to_string(&TrustedGameStateEnvelope::capture(runner.state().clone()))
+        .expect("save the authoritative state during payment");
+    let restored: TrustedGameStateEnvelope =
+        serde_json::from_str(&saved).expect("restore the authoritative state during payment");
+    let mut runner = GameRunner::from_state(restored.into_game_state());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    assert_eq!(runner.state().library_of(P1).front(), Some(&next));
+    assert_eq!(snapshot(runner.state()), announced_snapshot);
+    assert!(!seen(runner.state(), P0, next));
+
+    let mut canceled = GameRunner::from_state(runner.state().clone());
+    let cancel = canceled
+        .act(GameAction::CancelCast)
+        .expect("cancel the cast");
+    assert!(matches!(
+        cancel.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(canceled.state().library_of(P1).front(), Some(&next));
+    assert!(seen(canceled.state(), P0, next));
+
+    let later_activation = activate_grove(&mut canceled, second_grove);
+    assert!(later_activation
+        .events
+        .iter()
+        .any(|event| matches!(event, GameEvent::CardDrawn { player_id: P1, .. })));
+    assert_eq!(canceled.state().library_of(P1).front(), Some(&later));
+    assert!(seen(canceled.state(), P0, later));
+
+    let committed = runner
+        .act(GameAction::PassPriority)
+        .expect("commit the payment");
+    assert!(committed
+        .events
+        .iter()
+        .any(|event| matches!(event, GameEvent::SpellCast { controller: P0, .. })));
+    assert!(seen(runner.state(), P0, next));
+    assert!(!seen(runner.state(), P1, next));
+    assert!(!seen(runner.state(), third, next));
 }
 
 #[test]

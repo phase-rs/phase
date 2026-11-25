@@ -16680,6 +16680,8 @@ pub(crate) enum ForeignLibraryLookAction {
     Cast,
     Activate(ObjectId),
     PlayLand,
+    /// CR 401.5 + CR 116.2: A special action with a resumable cost.
+    Special(crate::types::mana::SpecialAction),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

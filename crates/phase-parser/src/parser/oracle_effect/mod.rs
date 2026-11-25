@@ -6871,10 +6871,6 @@ fn strip_temporary_restriction_duration_prefix(
     }
 }
 
-/// CR 101.2: "Your opponents can't cast spells this turn" / "Players can't cast spells this turn."
-/// Handles blanket "can't cast spells" prohibitions from instant/sorcery effects (e.g., Silence).
-/// Must be called AFTER try_parse_cast_only_from_zones_restriction (which handles the more
-/// specific "can't cast spells from anywhere other than" variant).
 /// CR 401.5 + CR 608.2b: an anaphoric library reuses the announced player;
 /// an explicit target phrase declares a player target of its own.
 fn parse_top_library_player_possessive(
@@ -6966,6 +6962,10 @@ fn try_parse_standing_top_library_permission(
     ))
 }
 
+/// CR 101.2: "Your opponents can't cast spells this turn" / "Players can't cast spells this turn."
+/// Handles blanket "can't cast spells" prohibitions from instant/sorcery effects (e.g., Silence).
+/// Must be called AFTER try_parse_cast_only_from_zones_restriction (which handles the more
+/// specific "can't cast spells from anywhere other than" variant).
 fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let (scope_tp, expiry, duration) = strip_temporary_restriction_duration_prefix(tp);
 

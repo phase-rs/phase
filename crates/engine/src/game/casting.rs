@@ -26979,6 +26979,11 @@ pub(crate) fn pay_special_action_mana_cost_with_resume(
     resume: Option<&ManaAbilityResume>,
     events: &mut Vec<GameEvent>,
 ) -> Result<SpecialActionManaPayment, EngineError> {
+    super::visibility::snapshot_foreign_library_tops(
+        state,
+        player,
+        crate::types::game_state::ForeignLibraryLookAction::Special(action),
+    );
     let resume_at_resolution_depth = state.resolution_stack.len();
     match pay_non_cast_mana_cost(
         state,
