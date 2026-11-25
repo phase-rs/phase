@@ -2351,7 +2351,7 @@ fn pay_ability_cost_inner(
         } if !matches!(filter, Some(TargetFilter::SelfRef))
             && matches!(scope, PaymentScope::Resolution { .. }) =>
         {
-            // CR 601.2b + CR 602.2b: the any-number sentinel chooses its
+            // CR 107.1c + CR 118.12: the any-number sentinel chooses its
             // count here — every eligible card is a candidate and zero is
             // legal, so the forced-choice fast path below must not fire for
             // it (eligible.len() always "fills" a whole-set maximum).
@@ -4386,7 +4386,7 @@ fn can_pay_resolution(
             filter,
             ..
         } if !matches!(filter, Some(TargetFilter::SelfRef)) => {
-            // CR 601.2b + CR 602.2b: "any number" always admits zero, so it
+            // CR 107.1c: "any number" always admits zero, so it
             // is payable with any eligible set (including an empty one).
             if *count == EXILE_COST_ANY_NUMBER {
                 return true;

@@ -149,7 +149,7 @@ fn painbringer_exile_two_shrinks_target_by_two() {
     assert!(state.objects[&painbringer].tapped);
 }
 
-/// Exiling zero is legal (CR 601.2b: "any number" admits zero): the ability
+/// Exiling zero is legal (CR 107.1c: "any number" admits zero): the ability
 /// resolves as -0/-0 and the graveyard is untouched.
 #[test]
 fn painbringer_exile_zero_resolves_without_shrinking() {
