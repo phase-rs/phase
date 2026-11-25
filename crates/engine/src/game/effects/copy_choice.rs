@@ -324,15 +324,6 @@ pub(crate) fn elect_announcing_opponent(
     Ok(())
 }
 
-/// The `depth`-th link of `ability`'s sub-ability chain.
-fn chain_link_mut(ability: &mut ResolvedAbility, depth: usize) -> Option<&mut ResolvedAbility> {
-    let mut node = Some(ability);
-    for _ in 0..depth {
-        node = node?.sub_ability.as_deref_mut();
-    }
-    node
-}
-
 /// CR 707.10c / CR 601.2c: the longest prefix of `picks` the walk still
 /// accepts on the current board. Each pick is replayed through the walk's own
 /// gate and advance in published form (the casting walk's auto-advances
@@ -393,31 +384,31 @@ pub(crate) fn reconcile_copy_announcement_after_departure(
     let baseline = build_target_slots(state, ability)?;
     // A group's slots are the ones whose announcer changes when only that
     // group's announcer is set to the controller (the CR 601.2c default).
-    let mut unanswered = Vec::new();
-    let mut node = Some(ability);
-    let mut depth = 0;
-    while let Some(link) = node {
+    let mut candidates = Vec::new();
+    super::super::ability_utils::walk_announced_nodes(ability, &mut |link, path| {
         let needs_announcer = matches!(link.target_chooser, Some(TargetFilter::Opponent))
             && link
                 .context
                 .announcing_opponent
                 .is_none_or(|announcer| !is_alive(state, announcer));
         if needs_announcer {
-            let mut probe = ability.clone();
-            let controller = probe.controller;
-            if let Some(probe_link) = chain_link_mut(&mut probe, depth) {
-                probe_link.context.announcing_opponent = Some(controller);
-            }
-            let probed = build_target_slots(state, &probe)?;
-            let owns_undecided = probed.len() != baseline.len()
-                || (picks.len()..baseline.len())
-                    .any(|slot| probed[slot].chooser != baseline[slot].chooser);
-            if owns_undecided {
-                unanswered.push(depth);
-            }
+            candidates.push(path.to_vec());
         }
-        node = link.sub_ability.as_deref();
-        depth += 1;
+    });
+    let mut unanswered = Vec::new();
+    for path in candidates {
+        let mut probe = ability.clone();
+        let controller = probe.controller;
+        if let Some(probe_link) = super::super::ability_utils::node_at_mut(&mut probe, &path) {
+            probe_link.context.announcing_opponent = Some(controller);
+        }
+        let probed = build_target_slots(state, &probe)?;
+        let owns_undecided = probed.len() != baseline.len()
+            || (picks.len()..baseline.len())
+                .any(|slot| probed[slot].chooser != baseline[slot].chooser);
+        if owns_undecided {
+            unanswered.push(path);
+        }
     }
     let replacement = match choosable_opponents(state, walk.player).as_slice() {
         [only] => Some(*only),
@@ -429,8 +420,8 @@ pub(crate) fn reconcile_copy_announcement_after_departure(
         .find(|entry| entry.id == walk.copy_id)
         .and_then(|entry| entry.ability_mut())
         .ok_or_else(|| EngineError::InvalidAction("Copy is no longer on the stack".to_string()))?;
-    for depth in unanswered {
-        if let Some(link) = chain_link_mut(ability, depth) {
+    for path in unanswered {
+        if let Some(link) = super::super::ability_utils::node_at_mut(ability, &path) {
             link.context.announcing_opponent = replacement;
         }
     }

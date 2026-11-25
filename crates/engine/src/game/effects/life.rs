@@ -7,7 +7,8 @@ use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, Ta
 use crate::types::events::{GameEvent, LifeTotalReading};
 use crate::types::game_state::{
     GameState, IngressLifeWindow, PendingEffectResolutionEvent, PendingEffectResolved,
-    PendingLifeTotalAssignment, UnrepresentablePolicy, WaitingFor,
+    PendingLifeTotalAssignment, ResidentDrainPolicy, StagedLifeGainSubstitute, StagedLifeGains,
+    UnrepresentablePolicy, WaitingFor,
 };
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -86,13 +87,17 @@ enum SubstitutionDrainOutcome {
 }
 
 /// Final settle step of a life event: applies the (possibly replaced) event and
-/// reports the amount actually changed.
+/// reports the amount actually changed. The error widens to [`LifeChangeError`]
+/// (not just [`LifeChangeUnrepresentable`]) because the Horde no-life-total
+/// redirect substitutes a full mill resolution for the bare life mutation, and
+/// that mill can pause on its own replacement choice (CR 616.1) — which the
+/// settle must surface as [`LifeChangeError::Deferred`], never swallow.
 type LifeSettleFn = fn(
     &mut GameState,
     ProposedEvent,
     UnrepresentablePolicy,
     &mut Vec<GameEvent>,
-) -> Result<u32, LifeChangeUnrepresentable>;
+) -> Result<u32, LifeChangeError>;
 
 /// Runs `body` with a fresh action-ingress window open and returns its result
 /// together with the window as it stood at close. Any player-resource
@@ -223,7 +228,7 @@ pub fn resolve_gain(
 
 /// The proposed `LifeGain` event for an entry, or `None` when the change is
 /// vacuous or suppressed before the replacement pipeline.
-fn proposed_life_gain(
+pub(crate) fn proposed_life_gain(
     state: &GameState,
     player_id: PlayerId,
     amount: u32,
@@ -244,9 +249,38 @@ fn proposed_life_gain(
     })
 }
 
+/// CR 616.1: can this gain's replacement pipeline open a choice? CR 614.6 +
+/// CR 616.2: also check whether a substitute's action opens a choice on this
+/// board using the read-only replacement candidate scan.
+/// A zero or prohibited gain (CR 119.7) never reaches the pipeline.
+pub(crate) fn life_gain_may_prompt(state: &GameState, player_id: PlayerId, amount: u32) -> bool {
+    let Some(event) = proposed_life_gain(state, player_id, amount) else {
+        return false;
+    };
+    let causes = replacement::proposed_event_prompt_cause(
+        state,
+        &event,
+        replacement::replacement_registry(),
+    );
+    causes.may_open_player_choice()
+        || causes.contains(replacement::ReplacementPromptCause::LifeGainSubstituteMayPrompt)
+}
+
+/// CR 616.1: can the life-loss event itself open a replacement choice?
+/// CR 119.8: a player who can't lose life never reaches the pipeline.
+pub(crate) fn life_loss_may_prompt(state: &GameState, player_id: PlayerId, amount: u32) -> bool {
+    proposed_life_loss(state, player_id, amount)
+        .is_some_and(|event| proposed_event_may_prompt(state, &event))
+}
+
+fn proposed_event_may_prompt(state: &GameState, event: &ProposedEvent) -> bool {
+    replacement::proposed_event_prompt_cause(state, event, replacement::replacement_registry())
+        .may_open_player_choice()
+}
+
 /// The proposed `LifeLoss` event for an entry, or `None` when the change is
 /// vacuous or suppressed before the replacement pipeline.
-fn proposed_life_loss(
+pub(crate) fn proposed_life_loss(
     state: &GameState,
     player_id: PlayerId,
     amount: u32,
@@ -334,8 +368,7 @@ fn apply_life_change_core(
 ) -> Result<u32, LifeChangeError> {
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            let applied =
-                settle(state, event, policy, events).map_err(LifeChangeError::Unrepresentable)?;
+            let applied = settle(state, event, policy, events)?;
             // CR 614.6 + CR 704.3: Drain any mandatory-post-effect continuation
             // (cross-event substitutes such as Lich; same-event work beyond the
             // applier's amount substitution) inside this resolution step so
@@ -412,6 +445,78 @@ pub fn apply_life_gain(
     ))
 }
 
+/// What staging one life gain produced (see [`stage_life_gain`]).
+///
+/// `Final` carries the event inline: every caller matches the result
+/// immediately, so boxing it would add an allocation per staged gain without
+/// saving retained state.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum StagedLifeGain {
+    /// The final post-replacement `ProposedEvent::LifeGain`, NOT yet applied:
+    /// the caller settles it later through [`apply_life_gain_after_replacement`].
+    Final(ProposedEvent),
+    /// Nothing is left to settle: the gain never reached the pipeline (amount
+    /// 0, or CR 119.7 "can't gain life"), was fully replaced, or settled inline
+    /// for this amount because a substitute continuation had to run with it.
+    Settled(u32),
+}
+
+/// CR 101.4 + CR 616.1: run one life gain's replacement pipeline WITHOUT
+/// writing the board, for a caller that settles several simultaneous gains
+/// together once every choice of the batch has been made. Every gain staged
+/// before the first settle reads the same board, so each one's replacement
+/// applicability (a "while you have N or less life" condition) is the
+/// pre-batch state, as CR 101.4 requires ("the actions happen
+/// simultaneously" once all choices are made).
+///
+/// The sibling of [`apply_life_gain`] (whose body is unchanged): the arms are
+/// the same except that a plain `Execute` returns the final event instead of
+/// settling it. Two arms cannot be deferred and finish inline exactly as
+/// [`apply_life_gain`] does: a fully replaced gain (`Prevented`) and an
+/// `Execute` with a resident post-replacement continuation.
+/// CR 614.6 + CR 704.3: the substitute must run in the same step as the root change, and its
+/// continuation stash holds one drain at a time. A CR 616.1 choice parks
+/// exactly as in [`apply_life_gain`]: nothing applied, `state.pending_replacement`
+/// owns the event and `Err(ReplacementChoice)` is returned.
+pub(crate) fn stage_life_gain(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<StagedLifeGain, ReplacementDeferred> {
+    let Some(proposed) = proposed_life_gain(state, player_id, amount) else {
+        return Ok(StagedLifeGain::Settled(0));
+    };
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) if !state.has_post_replacement_drain() => {
+            Ok(StagedLifeGain::Final(event))
+        }
+        ReplacementResult::Execute(event) => {
+            let applied = apply_life_gain_after_replacement(state, event, events);
+            match drain_substitution_continuation(state, events) {
+                SubstitutionDrainOutcome::Completed => Ok(StagedLifeGain::Settled(applied)),
+                SubstitutionDrainOutcome::Deferred => {
+                    Err(ReplacementDeferred::SubstitutionContinuation { applied })
+                }
+            }
+        }
+        // CR 614.1a + CR 614.6: a cross-event substitute (Lich class).
+        ReplacementResult::Prevented => match drain_substitution_continuation(state, events) {
+            SubstitutionDrainOutcome::Completed => Ok(StagedLifeGain::Settled(0)),
+            SubstitutionDrainOutcome::Deferred => {
+                Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
+            }
+        },
+        // CR 616.1: competing replacements, the affected player chooses.
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            Err(ReplacementDeferred::ReplacementChoice)
+        }
+    }
+}
+
 /// Action-ingress life gain: like [`apply_life_gain`], except that a final
 /// result the engine cannot represent is reported as
 /// [`LifeChangeError::Unrepresentable`] so the caller rejects the action and
@@ -429,6 +534,145 @@ pub fn try_apply_life_gain(
         return Ok(0);
     };
     run_ingress_life_change(state, proposed, settle_life_gain, events)
+}
+
+/// Where staging a batch of simultaneous life gains stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedLifeGainOutcome {
+    /// Every recipient's gain has been through the replacement pipeline and is
+    /// staged, ready for [`settle_staged_life_gains`].
+    Staged,
+    /// A recipient's gain paused (a CR 616.1 replacement choice, or a
+    /// substitute's continuation). `state.waiting_for` owns the prompt and
+    /// `paused_on` names the recipient whose choice is pending, if any.
+    Deferred,
+}
+
+/// CR 101.4 + CR 119.3: the recipients of one simultaneous life gain in APNAP
+/// order. Players outside `recipients` are dropped; players the active player's
+/// turn order does not reach (eliminated seats) are kept last in their given order.
+pub fn order_life_gain_recipients(state: &GameState, recipients: &[PlayerId]) -> Vec<PlayerId> {
+    let mut ordered: Vec<PlayerId> = crate::game::players::apnap_order(state)
+        .into_iter()
+        .filter(|player| recipients.contains(player))
+        .collect();
+    let unreached: Vec<PlayerId> = recipients
+        .iter()
+        .copied()
+        .filter(|player| !ordered.contains(player))
+        .collect();
+    ordered.extend(unreached);
+    ordered
+}
+
+/// CR 101.4 + CR 119.3 + CR 616.1: stage a simultaneous life gain of `amount` for
+/// every player in `recipients` (already in APNAP order) by running each gain
+/// through the replacement pipeline WITHOUT applying it. A replacement condition
+/// (Phial of Galadriel: "while you have 5 or less life") therefore reads the life
+/// totals as they stood before any of the gains happened, and competing
+/// replacements surface their CR 616.1 choices in APNAP order. The staged gains
+/// are applied together by [`settle_staged_life_gains`]. A gain a cross-event
+/// substitute replaces outright (CR 614.6, Tainted Remedy) is staged the same way:
+/// its continuation is taken off the replacement slot and held in `staged`, so it
+/// cannot change a life total a later recipient's replacement still has to read,
+/// and two substitutes in one batch cannot overwrite each other.
+///
+/// On a pause the recipients not yet reached stay in `recipients`; the caller
+/// parks them and resumes this function after the prompt is answered, staging the
+/// answered recipient's surviving event itself (it is recorded in `paused_on`).
+pub fn stage_life_gains(
+    state: &mut GameState,
+    recipients: &mut Vec<PlayerId>,
+    amount: u32,
+    staged: &mut StagedLifeGains,
+    paused_on: &mut Option<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) -> StagedLifeGainOutcome {
+    while !recipients.is_empty() {
+        let recipient = recipients.remove(0);
+        let Some(proposed) = proposed_life_gain(state, recipient, amount) else {
+            continue;
+        };
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(ProposedEvent::LifeGain {
+                player_id, amount, ..
+            }) => staged.gains.push((player_id, amount)),
+            ReplacementResult::Execute(other) => {
+                debug_assert!(false, "a life-gain proposal replaced into {other:?}");
+            }
+            // CR 614.6: a cross-event substitute (Lich, Tainted Remedy) replaces
+            // the gain outright. CR 101.4: it happens with the rest of the
+            // simultaneous batch, so hold it instead of running it now.
+            ReplacementResult::Prevented => {
+                staged.substitutes.extend(take_life_gain_substitute(state));
+            }
+            ReplacementResult::NeedsChoice(player) => {
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+                *paused_on = Some(recipient);
+                return StagedLifeGainOutcome::Deferred;
+            }
+        }
+    }
+    StagedLifeGainOutcome::Staged
+}
+
+/// CR 101.4 + CR 614.6: take the continuation a cross-event substitute (Lich,
+/// Tainted Remedy) just left in place of a staged life gain, with the replaced
+/// gain's amount, so it runs with the rest of the simultaneous batch instead of
+/// now. `None` when the replacement left no continuation to run.
+pub(crate) fn take_life_gain_substitute(state: &mut GameState) -> Option<StagedLifeGainSubstitute> {
+    let drain = state.take_ready_post_replacement_drain()?;
+    Some(StagedLifeGainSubstitute {
+        drain,
+        amount: state.last_effect_count,
+    })
+}
+
+/// CR 101.4 + CR 119.3: settle one simultaneous life gain once every recipient is
+/// staged. The surviving gains are applied together in the order staged, then any
+/// same-event continuation the replacements left drains (CR 614.6), then each
+/// substituted outcome runs its own continuation (CR 614.6: the replaced gain
+/// never happens and the modified event occurs instead, reading the amount of the
+/// gain it replaced). Returns the total life actually gained, or the deferral
+/// when a continuation paused for player input; the outcomes not yet run stay in
+/// `staged` for the caller to park.
+pub fn settle_staged_life_gains(
+    state: &mut GameState,
+    staged: &mut StagedLifeGains,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, ReplacementDeferred> {
+    let mut total = 0;
+    for (player_id, amount) in std::mem::take(&mut staged.gains) {
+        total += apply_life_gain_after_replacement(
+            state,
+            ProposedEvent::LifeGain {
+                player_id,
+                amount,
+                applied: HashSet::new(),
+            },
+            events,
+        );
+    }
+    let deferred = || ReplacementDeferred::SubstitutionContinuation { applied: total };
+    if matches!(
+        drain_substitution_continuation(state, events),
+        SubstitutionDrainOutcome::Deferred
+    ) {
+        return Err(deferred());
+    }
+    while !staged.substitutes.is_empty() {
+        let StagedLifeGainSubstitute { drain, amount } = staged.substitutes.remove(0);
+        state.last_effect_count = amount;
+        state.install_post_replacement_drain(drain, ResidentDrainPolicy::Replace);
+        if matches!(
+            drain_substitution_continuation(state, events),
+            SubstitutionDrainOutcome::Deferred
+        ) {
+            return Err(deferred());
+        }
+    }
+    Ok(total)
 }
 
 /// CR 614.1a + CR 614.6 — Issue #317: Drain a `post_replacement_continuation`
@@ -489,7 +733,7 @@ fn settle_life_gain(
     event: ProposedEvent,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<u32, LifeChangeUnrepresentable> {
+) -> Result<u32, LifeChangeError> {
     let ProposedEvent::LifeGain {
         player_id: pid,
         amount: gain_amount,
@@ -503,11 +747,20 @@ fn settle_life_gain(
         return Ok(0);
     };
     if let Some(settled) = settle_quantity_overflow(state, pid, policy, "life gain") {
-        return settled;
+        return settled.map_err(LifeChangeError::Unrepresentable);
     }
     if ingress_window_has_failed(state) {
         return Ok(0);
     }
+
+    // Horde Magic (casual variant): the Horde seat has no life total, so life
+    // gain does nothing to it (mirrors the CR 119.7 "can't gain life" no-op
+    // shape, though here the cause is the absence of a life total, not a
+    // static ability). No mutation, no LifeChanged event.
+    if crate::game::horde::player_has_no_life_total(state, pid) {
+        return Ok(0);
+    }
+
     // CR 119.8: gaining 0 life doesn't count as gaining life — no state
     // mutation and no journal command; the event below still fires as before.
     if gain_amount != 0 {
@@ -515,11 +768,15 @@ fn settle_life_gain(
             .map_err(|_| LifeChangeUnrepresentable { player: pid })
             .and_then(|delta| apply_final_life_edit(state, pid, delta));
         if let Err(unrepresentable) = edit {
-            return settle_unrepresentable(state, unrepresentable, policy, "life gain");
+            return settle_unrepresentable(state, unrepresentable, policy, "life gain")
+                .map_err(LifeChangeError::Unrepresentable);
         }
     }
     // CR 611.3a + CR 119: gate escalation on a live life-reading static.
-    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::LifeTotal,
+    );
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: gain_amount as i32,
@@ -669,15 +926,30 @@ pub(crate) fn settle_life_gain_after_choice(
     event: ProposedEvent,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<u32, LifeChangeUnrepresentable> {
+) -> Result<u32, LifeChangeError> {
     settle_life_gain(state, event, policy, events)
 }
 
 /// Compatibility-policy settle result as a plain amount. `IgnoreImpossible`
 /// records ingress failure for the public owner to reject and restore, or uses
-/// the logged skip outside a boundary; the `Err` arm is defensive.
-fn ordinary_settled_amount(result: Result<u32, LifeChangeUnrepresentable>) -> u32 {
-    ordinary_settlement(result, 0, "ordinary life settle")
+/// the logged skip outside a boundary; the `Err` arms are defensive. Only for
+/// settles that can never pause (life gain has no redirect): a settle that CAN
+/// pause must propagate [`LifeChangeError::Deferred`] to its caller instead of
+/// collapsing it here.
+fn ordinary_settled_amount(result: Result<u32, LifeChangeError>) -> u32 {
+    match result {
+        Ok(applied) => applied,
+        Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
+            ordinary_settlement(Err(unrepresentable), 0, "ordinary life settle")
+        }
+        Err(LifeChangeError::Deferred(_)) => {
+            debug_assert!(
+                false,
+                "ordinary_settled_amount called on a settle that parked a prompt"
+            );
+            0
+        }
+    }
 }
 
 /// Compatibility-policy settle result for any player-resource settle step.
@@ -736,7 +1008,21 @@ pub fn try_apply_life_loss(
     amount: u32,
     events: &mut Vec<GameEvent>,
 ) -> Result<u32, LifeChangeError> {
-    let Some(proposed) = proposed_life_loss(state, player_id, amount) else {
+    try_apply_life_loss_with_prohibition_board(state, player_id, amount, None, events)
+}
+
+/// CR 614.12a + CR 119.4: entry payments judge life-loss prohibitions before
+/// entry, while replacements and settlement still operate on the live state.
+/// `None` uses the live board, as ordinary life loss does.
+pub(crate) fn try_apply_life_loss_with_prohibition_board(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    prohibition_board: Option<&GameState>,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, LifeChangeError> {
+    let Some(proposed) = proposed_life_loss(prohibition_board.unwrap_or(state), player_id, amount)
+    else {
         return Ok(0);
     };
     run_ingress_life_change(state, proposed, settle_life_loss, events)
@@ -761,7 +1047,7 @@ fn settle_life_loss(
     event: ProposedEvent,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<u32, LifeChangeUnrepresentable> {
+) -> Result<u32, LifeChangeError> {
     let ProposedEvent::LifeLoss {
         player_id: pid,
         amount: loss_amount,
@@ -775,11 +1061,39 @@ fn settle_life_loss(
         return Ok(0);
     };
     if let Some(settled) = settle_quantity_overflow(state, pid, policy, "life loss") {
-        return settled;
+        return settled.map_err(LifeChangeError::Unrepresentable);
     }
     if ingress_window_has_failed(state) {
         return Ok(0);
     }
+
+    // Horde Magic (casual variant): the Horde seat has no life total. Damage it
+    // suffers (CR 120.3a: damage to a player causes that much life loss) and any
+    // direct life loss (CR 119.3) is redirected to milling that many cards from
+    // the top of its own library — the milled count stands in for the "loss".
+    // The Horde's `life` is NOT decremented and `life_lost_this_turn` is NOT
+    // incremented, so it can never lose to the CR 704.5a life state-based
+    // action. Lifelink is unaffected: the dealer's life GAIN is a separate
+    // upstream `LifeGain` event, not routed through this loss-mutation point.
+    if crate::game::horde::player_has_no_life_total(state, pid) {
+        // Single authority for the Horde damage→mill redirect. It proposes a
+        // real Mill event through the replacement pipeline (so the Bruvac
+        // doubling class folds its count) and applies the community advanced
+        // legendary rule when the ruleset opts in (a milled legendary
+        // permanent enters + phases out instead of being buried). A mill
+        // replacement choice that parks mid-redirect surfaces here as a
+        // `Deferred` pause — the prompt is already in `waiting_for` — so the
+        // caller stops exactly as it would for a life-loss ordering choice.
+        match crate::game::horde::mill_from_loss(state, pid, loss_amount, events) {
+            crate::game::horde::MillFromLossOutcome::Settled => return Ok(loss_amount),
+            crate::game::horde::MillFromLossOutcome::Paused => {
+                return Err(LifeChangeError::Deferred(
+                    ReplacementDeferred::ReplacementChoice,
+                ));
+            }
+        }
+    }
+
     // CR 119.8: losing 0 life doesn't count as losing life — no state
     // mutation and no journal command; the event below still fires as before.
     if loss_amount != 0 {
@@ -790,7 +1104,8 @@ fn settle_life_loss(
             .map_err(|_| LifeChangeUnrepresentable { player: pid })
             .and_then(|magnitude| apply_final_life_edit(state, pid, -magnitude));
         if let Err(unrepresentable) = edit {
-            return settle_unrepresentable(state, unrepresentable, policy, "life loss");
+            return settle_unrepresentable(state, unrepresentable, policy, "life loss")
+                .map_err(LifeChangeError::Unrepresentable);
         }
         let after = crate::game::players::team_life_total(state, pid);
         // The clone-local preview observes the real edit before events or a
@@ -805,7 +1120,10 @@ fn settle_life_loss(
     }
     // CR 611.3a + CR 119 + CR 120.3a: gate escalation on a live life-reading
     // static. Also the sink for non-infect player damage (deal_damage.rs).
-    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::LifeTotal,
+    );
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: -(loss_amount as i32),
@@ -827,19 +1145,32 @@ fn settle_life_loss(
 /// result for the public boundary to reject and restore; without one, ordinary
 /// resolution and legacy parked records log and skip it for compatibility.
 ///
+/// Returns `Err` when the Horde no-life-total redirect parked a mill
+/// replacement choice mid-settle — the prompt is already in `waiting_for`.
+/// Callers must stop (or mirror their own `NeedsChoice` handling), never
+/// proceed as if the loss settled.
+///
 /// Extracted from `apply_life_loss`'s Execute arm. Caller is responsible for
 /// emitting `EffectResolved`.
 pub fn apply_life_loss_after_replacement(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
-) -> u32 {
-    ordinary_settled_amount(settle_life_loss(
+) -> Result<u32, ReplacementDeferred> {
+    match settle_life_loss(
         state,
         event,
         UnrepresentablePolicy::IgnoreImpossible,
         events,
-    ))
+    ) {
+        Ok(applied) => Ok(applied),
+        Err(LifeChangeError::Deferred(deferred)) => Err(deferred),
+        Err(LifeChangeError::Unrepresentable(unrepresentable)) => Ok(ordinary_settlement(
+            Err(unrepresentable),
+            0,
+            "ordinary life settle",
+        )),
+    }
 }
 
 /// Resume-path settle for a parked life loss: the loss twin of
@@ -849,7 +1180,7 @@ pub(crate) fn settle_life_loss_after_choice(
     event: ProposedEvent,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<u32, LifeChangeUnrepresentable> {
+) -> Result<u32, LifeChangeError> {
     settle_life_loss(state, event, policy, events)
 }
 
@@ -1074,7 +1405,7 @@ pub fn resolve_lose(
     Ok(())
 }
 
-pub(super) fn resolve_life_loss_target(
+pub(crate) fn resolve_life_loss_target(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: Option<&TargetFilter>,
@@ -1213,6 +1544,7 @@ mod tests {
     use super::*;
     use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
+    use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         AggregateFunction, ChooseOneOfKind, ControllerRef, QuantityExpr, QuantityRef,
         SharedQuality, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
@@ -1245,6 +1577,126 @@ mod tests {
             )),
         );
         id
+    }
+
+    /// CR 616.1: `life_gain_may_prompt` / `life_loss_may_prompt` answer "can
+    /// this event's own replacement pipeline open a player choice". No
+    /// replacement: false. A lone mandatory "+1" modifier: false (it only
+    /// carries `MandatoryBodyContinuation`, which never prompts; this row is
+    /// what proves the gate is not that cause). "+1" with "twice": true
+    /// (ordering material). An optional replacement: true. The loss twin uses
+    /// Bloodletter of Aclazotz (a lone mandatory doubler on P1's loss during
+    /// P0's turn: false) and a typed optional loss replacement (true).
+    /// "Can't gain/lose life" (CR 119.7 / CR 119.8) and amount 0 never reach
+    /// the pipeline: false, each paired with the same board's positive row as
+    /// its reach-guard.
+    #[test]
+    fn life_change_may_prompt_reads_the_replacement_candidates() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+        use crate::types::replacements::ReplacementEvent;
+
+        const PLUS_ONE: &str = "If you would gain life, you gain that much life plus 1 instead.";
+        const TWICE: &str = "If you would gain life, you gain twice that much life instead.";
+        const BLOODLETTER: &str = "Flying\nIf an opponent would lose life during your turn, they lose twice that much life instead.";
+
+        fn add_optional(state: &mut GameState, event: ReplacementEvent) {
+            let id = create_object(
+                state,
+                CardId(951),
+                P0,
+                "Optional Replacement".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(event)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Optional Replacement".to_string()),
+                );
+        }
+
+        let board = |gain_texts: &[&str], bloodletter: bool, optional: &[ReplacementEvent]| {
+            let mut scenario = GameScenario::new();
+            for text in gain_texts {
+                scenario.add_enchantment_from_oracle(P0, "Modifier", text);
+            }
+            if bloodletter {
+                scenario
+                    .add_creature(P0, "Bloodletter of Aclazotz", 2, 4)
+                    .from_oracle_text_with_keywords(&["Flying"], BLOODLETTER);
+            }
+            for event in optional {
+                add_optional(&mut scenario.state, event.clone());
+            }
+            let mut runner = scenario.build();
+            runner.state_mut().active_player = P0;
+            runner
+        };
+
+        let none = board(&[], false, &[]);
+        assert!(!life_gain_may_prompt(none.state(), P0, 2));
+        assert!(!life_loss_may_prompt(none.state(), P1, 2));
+
+        let lone = board(&[PLUS_ONE], true, &[]);
+        assert_eq!(
+            lone.state()
+                .objects
+                .values()
+                .filter(|obj| !obj.replacement_definitions.is_empty())
+                .count(),
+            2,
+            "reach-guard: both lone modifiers parsed into replacements"
+        );
+        assert!(!life_gain_may_prompt(lone.state(), P0, 2), "lone +1 gain");
+        assert!(!life_loss_may_prompt(lone.state(), P1, 2), "lone x2 loss");
+
+        let competing = board(&[PLUS_ONE, TWICE], true, &[ReplacementEvent::LoseLife]);
+        assert!(
+            life_gain_may_prompt(competing.state(), P0, 2),
+            "+1 and x2 gain"
+        );
+        assert!(
+            !life_gain_may_prompt(competing.state(), P0, 0),
+            "amount 0 gain"
+        );
+        assert!(
+            life_loss_may_prompt(competing.state(), P0, 2),
+            "optional loss (its controller's)"
+        );
+        assert!(
+            !life_loss_may_prompt(competing.state(), P0, 0),
+            "amount 0 loss"
+        );
+
+        // CR 119.7 / CR 119.8: "can't gain/lose life" short-circuits before
+        // the pipeline even with the choice-capable replacements present.
+        let mut locked = competing.state().clone();
+        add_life_lock_permanent(
+            &mut locked,
+            P0,
+            StaticMode::CantGainLife,
+            ControllerRef::You,
+        );
+        add_life_lock_permanent(
+            &mut locked,
+            P0,
+            StaticMode::CantLoseLife,
+            ControllerRef::You,
+        );
+        assert!(!life_gain_may_prompt(&locked, P0, 2), "can't gain life");
+        assert!(!life_loss_may_prompt(&locked, P0, 2), "can't lose life");
+
+        // A typed optional life-gain replacement opens a choice on its own.
+        let optional = board(&[], false, &[ReplacementEvent::GainLife]);
+        assert!(
+            life_gain_may_prompt(optional.state(), P0, 2),
+            "optional gain"
+        );
     }
 
     #[test]
@@ -1402,8 +1854,9 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::LoseLife {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::Target,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 target: None,
@@ -2069,7 +2522,7 @@ mod tests {
 
     /// CR 115.10a + CR 119.3 + CR 608.2c (Wound Reflection / Archfiend of Despair /
     /// Warlock Class L3): "each opponent loses life equal to the life they lost
-    /// this turn" resolves with a `LifeLostThisTurn { ScopedPlayer }` amount under
+    /// this turn" resolves with a `LifeLost { ScopedPlayer }` amount under
     /// `player_scope: Opponent`. Each iterated opponent must lose its OWN life lost
     /// this turn — NOT the source controller's. The controller's count is seeded
     /// high (99) as a trap: the prior `Controller`-scoped encoding drained every
@@ -2092,8 +2545,9 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::LoseLife {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::ScopedPlayer,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 target: None,
@@ -2123,6 +2577,153 @@ mod tests {
             p2_life_before - 5,
             "opponent B must lose its own life lost (5), not the controller's 99"
         );
+    }
+
+    /// CR 101.4 + CR 616.1: `stage_life_gain` arms. (a) amount 0 and CR 119.7
+    /// "can't gain life" never reach the pipeline: `Settled(0)`, no change.
+    /// (b) a cross-event substitute (Lich: "draw that many cards instead")
+    /// cannot be deferred: it finishes inline (`Settled(0)`, cards drawn), and
+    /// an interactive substitute reports `SubstitutionContinuation`. (c) a
+    /// plain gain under a lone doubler stages its FINAL event and writes
+    /// nothing: no life change and no `LifeChanged` until the caller settles
+    /// it, then the settle applies exactly that event.
+    #[test]
+    fn stage_life_gain_arms() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, PlayerFilter, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        // (a)
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        assert_eq!(
+            stage_life_gain(&mut state, PlayerId(0), 0, &mut events),
+            Ok(StagedLifeGain::Settled(0))
+        );
+        add_life_lock_permanent(
+            &mut state,
+            PlayerId(0),
+            StaticMode::CantGainLife,
+            ControllerRef::You,
+        );
+        assert_eq!(
+            stage_life_gain(&mut state, PlayerId(0), 3, &mut events),
+            Ok(StagedLifeGain::Settled(0))
+        );
+        assert_eq!(state.players[0].life, 20);
+        assert!(events.is_empty());
+
+        // (b) Lich: drawn inline, nothing left to settle.
+        let mut state = GameState::new_two_player(42);
+        let lich = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Lich".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&lich)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::GainLife)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ))]
+        .into();
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(600 + i),
+                PlayerId(0),
+                format!("Library {i}"),
+                Zone::Library,
+            );
+        }
+        let hand_before = state.players[0].hand.len();
+        assert_eq!(
+            stage_life_gain(&mut state, PlayerId(0), 3, &mut Vec::new()),
+            Ok(StagedLifeGain::Settled(0))
+        );
+        assert_eq!(state.players[0].hand.len(), hand_before + 3, "(b) drew 3");
+        assert_eq!(state.players[0].life, 20);
+        assert!(!state.has_post_replacement_drain());
+
+        // (b) interactive substitute: the deferral is reported, not staged.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(702),
+            PlayerId(0),
+            "Interactive Lich".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::GainLife)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    )],
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+            ))]
+        .into();
+        assert_eq!(
+            stage_life_gain(&mut state, PlayerId(0), 4, &mut Vec::new()),
+            Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
+        );
+
+        // (c) a lone doubler: the final event is 6, nothing written yet.
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        scenario.add_enchantment_from_oracle(
+            PlayerId(0),
+            "Twice",
+            "If you would gain life, you gain twice that much life instead.",
+        );
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let mut events = Vec::new();
+        let staged = stage_life_gain(state, PlayerId(0), 3, &mut events);
+        let Ok(StagedLifeGain::Final(event)) = staged else {
+            panic!("(c) expected a staged final event, got {staged:?}");
+        };
+        assert!(
+            matches!(
+                event,
+                ProposedEvent::LifeGain {
+                    player_id: PlayerId(0),
+                    amount: 6,
+                    ..
+                }
+            ),
+            "(c) the doubled final event, got {event:?}"
+        );
+        assert_eq!(state.players[0].life, 20, "(c) staging writes nothing");
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::LifeChanged { .. })));
+        assert_eq!(
+            apply_life_gain_after_replacement(state, event, &mut events),
+            6
+        );
+        assert_eq!(state.players[0].life, 26);
     }
 
     /// Issue #317 (Lich): "If you would gain life, draw that many cards
@@ -2957,7 +3558,9 @@ mod tests {
                     UnrepresentablePolicy::Reject,
                     &mut events
                 ),
-                Err(LifeChangeUnrepresentable { player })
+                Err(LifeChangeError::Unrepresentable(
+                    LifeChangeUnrepresentable { player }
+                ))
             );
             assert_eq!(state.replacement_quantity_overflow, None);
             state.record_replacement_quantity_overflow(source);
@@ -2968,7 +3571,9 @@ mod tests {
                     UnrepresentablePolicy::Reject,
                     &mut events
                 ),
-                Err(LifeChangeUnrepresentable { player })
+                Err(LifeChangeError::Unrepresentable(
+                    LifeChangeUnrepresentable { player }
+                ))
             );
             assert_eq!(state.replacement_quantity_overflow, None);
 

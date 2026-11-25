@@ -115,7 +115,6 @@ vi.mock("../useDeckBuilder", async () => {
         handleSearchResults: vi.fn(),
         handleSearchTrigger: vi.fn(),
         handleAddCard: vi.fn(),
-        handleAddCardByName: vi.fn(),
         handleRemoveCard: vi.fn(),
         handleIncrementCard: vi.fn(),
         canIncrement: () => true,

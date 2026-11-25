@@ -13,7 +13,7 @@ import { useCardHover } from "../../hooks/useCardHover.ts";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import type { GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
+import type { CardPrinting, GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
 import {
   collectObjectActions,
   resolveSingleActionDispatch,
@@ -218,6 +218,7 @@ export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDraw
                     cardName={obj.name}
                     oracleId={obj.printed_ref?.oracle_id}
                     faceName={obj.printed_ref?.face_name}
+                    ownerPrinting={obj.printing}
                     isToken={obj.display_source === "Token"}
                     tokenImageRef={obj.token_image_ref}
                     manaCost={obj.mana_cost}
@@ -243,6 +244,7 @@ interface DrawerCardProps {
   cardName: string;
   oracleId?: string;
   faceName?: string;
+  ownerPrinting?: CardPrinting | null;
   isToken: boolean;
   tokenImageRef?: GameObject["token_image_ref"];
   manaCost: ManaCost;
@@ -259,6 +261,7 @@ const DrawerCard = memo(function DrawerCard({
   cardName,
   oracleId,
   faceName,
+  ownerPrinting,
   isToken,
   tokenImageRef,
   manaCost,
@@ -276,6 +279,7 @@ const DrawerCard = memo(function DrawerCard({
     size: "normal",
     oracleId,
     faceName,
+    ownerPrinting,
     isToken,
     tokenImageRef,
   });

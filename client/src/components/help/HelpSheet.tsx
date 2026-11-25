@@ -41,6 +41,7 @@ const HELP_ENTRIES = [
   { section: "Shortcuts", id: "undo", shortcut: "Z" },
   { section: "Shortcuts", id: "cancel", shortcut: "Esc" },
   { section: "Shortcuts", id: "advancedDebugPanel", shortcut: "`" },
+  { section: "Shortcuts", id: "toggleClickMode", shortcut: "K" },
   { section: "Recovery", id: "reportOrExportState" },
   { section: "Recovery", id: "boardRightClickMenu" },
 ] as const satisfies readonly HelpEntry[];

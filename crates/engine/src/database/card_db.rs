@@ -1,16 +1,17 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
 use super::bracket_lists::{BracketLists, BracketSignals};
 use super::legality::{normalize_legalities, CardLegalities, LegalityFormat, LegalityStatus};
 use super::mtgjson::Ruling;
+use crate::game::bracket_estimate::BracketAxis;
 use crate::types::card::{CardFace, CardRules, LayoutKind, PrintedCardRef};
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CardType, CoreType};
 
 use std::io::{BufReader, Read};
 
@@ -58,10 +59,161 @@ impl From<Arc<CardDatabase>> for CardDbHandle {
     }
 }
 
+/// A `face_index` entry: typed at load, or a test loader's raw record typed on first read.
+// Typed stays inline so production faces keep CardFace's size; only the test-only Raw is boxed.
+#[cfg_attr(feature = "test-support", allow(clippy::large_enum_variant))]
+pub(crate) enum FaceSlot {
+    Typed(CardFace),
+    #[cfg(feature = "test-support")]
+    Raw(Box<RawFace>),
+}
+
+const _: () = assert!(std::mem::size_of::<FaceSlot>() == std::mem::size_of::<CardFace>());
+
+/// An export record kept as a range of the text it was read from, typed on its first read.
+#[cfg(feature = "test-support")]
+pub(crate) struct RawFace {
+    text: Arc<String>,
+    record: std::ops::Range<usize>,
+    name: String,
+    card_type: CardType,
+    scryfall_oracle_id: Option<String>,
+    face: OnceLock<CardFace>,
+}
+
+impl FaceSlot {
+    fn face(&self) -> &CardFace {
+        match self {
+            FaceSlot::Typed(face) => face,
+            #[cfg(feature = "test-support")]
+            FaceSlot::Raw(raw) => raw.face.get_or_init(|| {
+                serde_json::from_str::<CardExportEntry>(&raw.text[raw.record.clone()])
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "card-data record for `{}` does not deserialize: {error}",
+                            raw.name
+                        )
+                    })
+                    .face
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            FaceSlot::Typed(face) => &face.name,
+            #[cfg(feature = "test-support")]
+            FaceSlot::Raw(raw) => &raw.name,
+        }
+    }
+
+    fn card_type(&self) -> &CardType {
+        match self {
+            FaceSlot::Typed(face) => &face.card_type,
+            #[cfg(feature = "test-support")]
+            FaceSlot::Raw(raw) => &raw.card_type,
+        }
+    }
+
+    fn oracle_id(&self) -> Option<&str> {
+        match self {
+            FaceSlot::Typed(face) => face.scryfall_oracle_id.as_deref(),
+            #[cfg(feature = "test-support")]
+            FaceSlot::Raw(raw) => raw.scryfall_oracle_id.as_deref(),
+        }
+    }
+}
+
+/// The face store, keyed by lowercased face name.
+/// Test loaders may leave a face untyped until its first read.
+#[derive(Default)]
+pub(crate) struct FaceIndex(HashMap<String, FaceSlot>);
+
+impl FaceIndex {
+    pub(crate) fn get(&self, key: &str) -> Option<&CardFace> {
+        self.0.get(key).map(FaceSlot::face)
+    }
+
+    pub(crate) fn contains_key(&self, key: &str) -> bool {
+        self.0.contains_key(key)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &String> {
+        self.0.keys()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&String, &CardFace)> {
+        self.0.iter().map(|(key, slot)| (key, slot.face()))
+    }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = &CardFace> {
+        self.0.values().map(FaceSlot::face)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert(&mut self, key: String, face: CardFace) {
+        self.0.insert(key, FaceSlot::Typed(face));
+    }
+
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.values().map(FaceSlot::name)
+    }
+
+    pub(crate) fn oracle_ids(&self) -> impl Iterator<Item = (&String, Option<&str>)> {
+        self.0.iter().map(|(key, slot)| (key, slot.oracle_id()))
+    }
+
+    pub(crate) fn card_types(&self) -> impl Iterator<Item = &CardType> {
+        self.0.values().map(FaceSlot::card_type)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn typed_face_count(&self) -> usize {
+        self.0
+            .values()
+            .filter(|slot| match slot {
+                FaceSlot::Typed(_) => true,
+                #[cfg(feature = "test-support")]
+                FaceSlot::Raw(raw) => raw.face.get().is_some(),
+            })
+            .count()
+    }
+}
+
+impl From<HashMap<String, CardFace>> for FaceIndex {
+    fn from(faces: HashMap<String, CardFace>) -> Self {
+        Self(
+            faces
+                .into_iter()
+                .map(|(key, face)| (key, FaceSlot::Typed(face)))
+                .collect(),
+        )
+    }
+}
+
+#[cfg(test)]
+impl PartialEq for FaceIndex {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().all(|(key, face)| other.get(key) == Some(face))
+    }
+}
+
+#[cfg(feature = "test-support")]
+mod fixture_cache;
+
 #[derive(Default)]
 pub struct CardDatabase {
     pub(crate) cards: HashMap<String, CardRules>,
-    pub(crate) face_index: HashMap<String, CardFace>,
+    pub(crate) face_index: FaceIndex,
     pub(crate) name_alias_index: HashMap<String, String>,
     pub(crate) oracle_id_index: HashMap<String, Vec<String>>,
     /// Maps face key (lowercased card name) to its original zero-based position
@@ -73,7 +225,6 @@ pub struct CardDatabase {
     /// every query.
     pub(crate) search_face_keys: Vec<String>,
     /// Maps oracle_id → runtime LayoutKind for multi-face cards.
-    /// Populated only from the export path (the MTGJSON path uses `cards` directly).
     /// Enables `rehydrate_game_from_card_db` to determine the correct layout kind
     /// when `get_by_name` returns None (export path doesn't build `CardRules`).
     pub(crate) layout_index: HashMap<String, LayoutKind>,
@@ -87,9 +238,10 @@ pub struct CardDatabase {
     /// cards carry rulings; back-face lookups return the empty slice.
     pub(crate) rulings_index: HashMap<String, Vec<Ruling>>,
     pub(crate) errors: Vec<(PathBuf, String)>,
-    /// Non-MTGJSON bracket-axis name lists. Populated by `with_bracket_lists`
-    /// at export time for policy axes MTGJSON does not expose. WASM/server
-    /// consumers receive those signals in the already-built database.
+    /// Non-MTGJSON bracket-axis name lists, attached by `with_bracket_lists`.
+    /// A database loaded from an export holds only the engine's compiled-in
+    /// list revision (`BracketLists::bundled_revision`) and reads its signals
+    /// from each entry's stamps; that function says when the two can differ.
     pub(crate) bracket_lists: BracketLists,
     /// Stamped during `from_export_entries` from each `CardExportEntry`'s
     /// `bracket_signals` field. Keyed by lowercased card name. Read by
@@ -104,6 +256,10 @@ pub struct CardDatabase {
     /// (Coat of Arms, Changeling expansion) see every printed creature type,
     /// not just the subset present in the loaded decks.
     pub(crate) creature_type_vocabulary: Vec<String>,
+    /// Lazily-built coverage subtype lexicon (see `valid_subtypes`). Built on
+    /// first use so repeated deck-compatibility requests do not rescan every
+    /// face; the database is immutable once loaded.
+    pub(crate) valid_subtypes: OnceLock<HashSet<String>>,
 }
 
 impl CardDatabase {
@@ -121,12 +277,12 @@ impl CardDatabase {
     }
 
     /// Load a pre-processed card-data export from an already-open reader.
-    /// Keeps compressed test fixtures on the same deserialization path as the
-    /// production file loader without changing production's buffered-file flow.
-    pub fn from_export_reader<R: Read>(reader: R) -> Result<Self, Box<dyn std::error::Error>> {
-        let entries: HashMap<String, CardExportEntry> =
-            serde_json::from_reader(BufReader::new(reader))?;
-        Ok(Self::from_export_entries(entries))
+    /// The stream is read into memory and parsed by [`Self::from_json_str`], because
+    /// serde_json parses a `str` much faster than an `io::Read`.
+    pub fn from_export_reader<R: Read>(mut reader: R) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut json = String::new();
+        reader.read_to_string(&mut json)?;
+        Ok(Self::from_json_str(&json)?)
     }
 
     /// Load from a card-data export JSON string.
@@ -136,8 +292,72 @@ impl CardDatabase {
         Ok(Self::from_export_entries(entries))
     }
 
+    /// Test loader: like [`Self::from_export_reader`], but each face is typed on its first read,
+    /// which panics naming the card if its record does not deserialize.
+    #[cfg(feature = "test-support")]
+    pub fn from_export_reader_typing_faces_on_read<R: Read>(
+        mut reader: R,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut json = String::new();
+        reader.read_to_string(&mut json)?;
+        Self::from_export_text_typing_faces_on_read(json)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn from_export_text_typing_faces_on_read(
+        json: String,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let text = Arc::new(json);
+        // Borrowed raw values are slices of `text`, so each record's range is its address offset.
+        let records: HashMap<String, &serde_json::value::RawValue> = serde_json::from_str(&text)?;
+        let mut parsed = Vec::with_capacity(records.len());
+        for (key, record) in records {
+            let record = record.get();
+            let start = record.as_ptr() as usize - text.as_ptr() as usize;
+            let skeleton: ExportRecordSkeleton = serde_json::from_str(record)?;
+            parsed.push((
+                key,
+                ExportRecord {
+                    face: FaceSlot::Raw(Box::new(RawFace {
+                        text: Arc::clone(&text),
+                        record: start..start + record.len(),
+                        name: skeleton.name,
+                        card_type: skeleton.card_type,
+                        scryfall_oracle_id: skeleton.scryfall_oracle_id,
+                        face: OnceLock::new(),
+                    })),
+                    legalities: skeleton.legalities,
+                    layout: skeleton.layout,
+                    face_order: skeleton.face_index,
+                    printings: skeleton.printings,
+                    rulings: skeleton.rulings,
+                    bracket_signals: skeleton.bracket_signals,
+                },
+            ));
+        }
+        Ok(Self::from_export_records(parsed))
+    }
+
     fn from_export_entries(entries: HashMap<String, CardExportEntry>) -> Self {
-        let mut face_index = HashMap::with_capacity(entries.len());
+        Self::from_export_records(entries.into_iter().map(|(key, entry)| {
+            (
+                key,
+                ExportRecord {
+                    face: FaceSlot::Typed(entry.face),
+                    legalities: entry.legalities,
+                    layout: entry.layout,
+                    face_order: entry.face_index,
+                    printings: entry.printings,
+                    rulings: entry.rulings,
+                    bracket_signals: entry.bracket_signals,
+                },
+            )
+        }))
+    }
+
+    fn from_export_records(entries: impl IntoIterator<Item = (String, ExportRecord)>) -> Self {
+        let entries = entries.into_iter();
+        let mut face_index = HashMap::with_capacity(entries.size_hint().0);
         let mut oracle_id_index: HashMap<String, Vec<String>> = HashMap::new();
         let mut face_order_index: HashMap<String, usize> = HashMap::new();
         let mut layout_index: HashMap<String, LayoutKind> = HashMap::new();
@@ -145,14 +365,14 @@ impl CardDatabase {
         let mut printings_index: HashMap<String, Vec<String>> = HashMap::new();
         let mut rulings_index: HashMap<String, Vec<Ruling>> = HashMap::new();
         let mut bracket_signals_by_name: HashMap<String, BracketSignals> =
-            HashMap::with_capacity(entries.len());
+            HashMap::with_capacity(entries.size_hint().0);
 
         for (export_key, entry) in entries {
             let storage_key = export_key.to_lowercase();
-            if let Some(face_order) = entry.face_index {
+            if let Some(face_order) = entry.face_order {
                 face_order_index.insert(storage_key.clone(), face_order);
             }
-            if let Some(oracle_id) = entry.face.scryfall_oracle_id.clone() {
+            if let Some(oracle_id) = entry.face.oracle_id().map(str::to_string) {
                 oracle_id_index
                     .entry(oracle_id.clone())
                     .or_default()
@@ -180,9 +400,10 @@ impl CardDatabase {
         for keys in oracle_id_index.values_mut() {
             keys.sort_by_key(|key| face_order_index.get(key).copied().unwrap_or(usize::MAX));
         }
+        let face_index = FaceIndex(face_index);
         let search_face_keys = build_search_face_keys(&face_index, &face_order_index);
         let name_alias_index = build_name_alias_index(face_index.keys());
-        let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.values());
+        let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.card_types());
 
         Self {
             cards: HashMap::new(),
@@ -196,9 +417,10 @@ impl CardDatabase {
             printings_index,
             rulings_index,
             errors: Vec::new(),
-            bracket_lists: BracketLists::default(),
+            bracket_lists: BracketLists::bundled_revision(),
             bracket_signals_by_name,
             creature_type_vocabulary,
+            valid_subtypes: OnceLock::new(),
         }
     }
 
@@ -354,6 +576,16 @@ impl CardDatabase {
         self.layout_index.get(oracle_id).copied()
     }
 
+    /// Faces of every card whose layout is `kind`.
+    pub(crate) fn faces_with_layout(&self, kind: LayoutKind) -> impl Iterator<Item = &CardFace> {
+        self.layout_index
+            .iter()
+            .filter(move |(_, layout)| **layout == kind)
+            .filter_map(|(oracle_id, _)| self.oracle_id_index.get(oracle_id))
+            .flatten()
+            .filter_map(|key| self.face_index.get(key))
+    }
+
     pub fn export_integrity_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
         for (oracle_id, layout_kind) in &self.layout_index {
@@ -459,9 +691,21 @@ impl CardDatabase {
     /// the ORDER is load-bearing, such as an RNG draw whose result has to
     /// match across peers and replays.
     pub fn faces_in_scan_order(&self) -> impl Iterator<Item = &CardFace> {
+        self.face_iter_in_scan_order().map(|(_, face)| face)
+    }
+
+    /// `face_iter` in the deterministic order `faces_in_scan_order` documents.
+    pub fn face_iter_in_scan_order(&self) -> impl Iterator<Item = (&str, &CardFace)> {
         self.search_face_keys
             .iter()
-            .filter_map(|key| self.face_index.get(key))
+            .filter_map(|key| self.face_index.get(key).map(|face| (key.as_str(), face)))
+    }
+
+    /// Coverage subtype lexicon: every subtype printed on a loaded face, the same
+    /// set `analyze_coverage` uses. Computed once per database and cached.
+    pub fn valid_subtypes(&self) -> &HashSet<String> {
+        self.valid_subtypes
+            .get_or_init(|| crate::game::coverage::collect_valid_subtypes(self))
     }
 
     /// CR 205.3m: Returns the full creature subtype vocabulary derived from
@@ -476,11 +720,7 @@ impl CardDatabase {
 
     /// Returns all card names (title-cased as stored in face data), sorted.
     pub fn card_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .face_index
-            .values()
-            .map(|face| face.name.clone())
-            .collect();
+        let mut names: Vec<String> = self.face_index.names().map(str::to_string).collect();
         names.sort();
         names.dedup();
         names
@@ -493,10 +733,12 @@ impl CardDatabase {
         self
     }
 
-    /// Case-insensitive bracket-signal lookup. Game Changers are card-level
-    /// MTGJSON facts stamped into `bracket_signals_by_name`; other axes may
-    /// come from either the export or `bracket_lists`. Returns all-false
-    /// `BracketSignals` when the name is unknown to both.
+    /// Case-insensitive bracket-signal lookup. Exported and curated-list axes
+    /// are unioned, so when lists are attached with `with_bracket_lists`, a
+    /// stale export cannot suppress a newly curated Game Changer. Other axes
+    /// likewise retain signals from either source. An export-loaded database
+    /// attaches no lists and reads the export's stamps alone.
+    /// Returns all-false `BracketSignals` when the name is unknown to both.
     ///
     /// Multi-face combined names (`"A // B"` — partner pairs, MDFCs, split,
     /// etc.) are aggregated face-by-face with logical-OR *before* the
@@ -546,30 +788,25 @@ impl CardDatabase {
                 .name_alias_index
                 .contains_key(&fold_card_name_key(name));
         if let Some((a, b)) = split_composite_name(name).filter(|_| !is_indexed_whole_name) {
-            let sa = self.signals_for_single_face(a.trim());
-            let sb = self.signals_for_single_face(b.trim());
-            return BracketSignals {
-                game_changer: sa.game_changer || sb.game_changer,
-                mass_land_denial: sa.mass_land_denial || sb.mass_land_denial,
-                extra_turn: sa.extra_turn || sb.extra_turn,
-                efficient_tutor: sa.efficient_tutor || sb.efficient_tutor,
-            };
+            let mut axes: BTreeSet<BracketAxis> = self.signals_for_single_face(a.trim()).axes();
+            axes.extend(self.signals_for_single_face(b.trim()).axes());
+            return BracketSignals::from_axes(&axes);
         }
         self.signals_for_single_face(name)
     }
 
+    /// The data version `estimate_bracket` stamps onto `BracketEstimate::data_version`, which `pod_selection` compares declared labels against.
+    pub fn bracket_lists_version(&self) -> &str {
+        &self.bracket_lists.version
+    }
+
     fn signals_for_single_face(&self, name: &str) -> BracketSignals {
         let key = self.lookup_key(name);
-        let list_signals = self.bracket_lists.signals_for(name);
-        let Some(card_signals) = self.bracket_signals_by_name.get(&key) else {
-            return list_signals;
-        };
-        BracketSignals {
-            game_changer: card_signals.game_changer,
-            mass_land_denial: card_signals.mass_land_denial || list_signals.mass_land_denial,
-            extra_turn: card_signals.extra_turn || list_signals.extra_turn,
-            efficient_tutor: card_signals.efficient_tutor || list_signals.efficient_tutor,
+        let mut axes: BTreeSet<BracketAxis> = self.bracket_lists.signals_for(name).axes();
+        if let Some(card_signals) = self.bracket_signals_by_name.get(&key) {
+            axes.extend(card_signals.axes());
         }
+        BracketSignals::from_axes(&axes)
     }
 
     /// Single authority for resolving any caller-supplied card name — including
@@ -713,36 +950,22 @@ impl CardDatabase {
 }
 
 pub(crate) fn build_search_face_keys(
-    face_index: &HashMap<String, CardFace>,
+    face_index: &FaceIndex,
     face_order_index: &HashMap<String, usize>,
 ) -> Vec<String> {
-    let mut keys: Vec<String> = face_index.keys().cloned().collect();
-    keys.sort_by(|left_key, right_key| {
-        let left_oracle = face_index
-            .get(left_key)
-            .and_then(|face| face.scryfall_oracle_id.as_deref())
-            .unwrap_or("");
-        let right_oracle = face_index
-            .get(right_key)
-            .and_then(|face| face.scryfall_oracle_id.as_deref())
-            .unwrap_or("");
-        left_oracle
-            .cmp(right_oracle)
-            .then_with(|| {
-                face_order_index
-                    .get(left_key)
-                    .copied()
-                    .unwrap_or(usize::MAX)
-                    .cmp(
-                        &face_order_index
-                            .get(right_key)
-                            .copied()
-                            .unwrap_or(usize::MAX),
-                    )
-            })
-            .then_with(|| left_key.cmp(right_key))
-    });
-    keys
+    // Each face's sort key is read once, not once per comparison.
+    let mut keyed: Vec<(&str, usize, &String)> = face_index
+        .oracle_ids()
+        .map(|(key, oracle_id)| {
+            (
+                oracle_id.unwrap_or(""),
+                face_order_index.get(key).copied().unwrap_or(usize::MAX),
+                key,
+            )
+        })
+        .collect();
+    keyed.sort_unstable();
+    keyed.into_iter().map(|(_, _, key)| key.clone()).collect()
 }
 
 /// CR 205.2b + CR 205.3m + CR 308.1: subtype categories are disjoint — a
@@ -758,12 +981,12 @@ pub(crate) fn build_search_face_keys(
 /// land/artifact/enchantment/spell types, never creature types. Returns the
 /// sorted, deduped creature-type vocabulary.
 pub(crate) fn collect_creature_type_vocabulary<'a>(
-    faces: impl Iterator<Item = &'a CardFace>,
+    card_types: impl Iterator<Item = &'a CardType>,
 ) -> Vec<String> {
     let mut creature_candidates: HashSet<&str> = HashSet::new();
     let mut non_creature_subtypes: HashSet<&str> = HashSet::new();
-    for face in faces {
-        let core_types = &face.card_type.core_types;
+    for card_type in card_types {
+        let core_types = &card_type.core_types;
         let is_creature_face = core_types.contains(&CoreType::Creature)
             || core_types.contains(&CoreType::Kindred)
             || core_types.contains(&CoreType::Tribal);
@@ -772,7 +995,7 @@ pub(crate) fn collect_creature_type_vocabulary<'a>(
         } else {
             &mut non_creature_subtypes
         };
-        bucket.extend(face.card_type.subtypes.iter().map(String::as_str));
+        bucket.extend(card_type.subtypes.iter().map(String::as_str));
     }
     let mut sorted: Vec<String> = creature_candidates
         .difference(&non_creature_subtypes)
@@ -930,6 +1153,39 @@ struct CardExportEntry {
     bracket_signals: BracketSignals,
 }
 
+/// An export record as the index builder consumes it.
+struct ExportRecord {
+    face: FaceSlot,
+    legalities: HashMap<String, String>,
+    layout: Option<String>,
+    face_order: Option<usize>,
+    printings: Vec<String>,
+    rulings: Vec<Ruling>,
+    bracket_signals: BracketSignals,
+}
+
+/// The fields of a card-data record the derived indices read; the rest of the record is skipped.
+#[cfg(feature = "test-support")]
+#[derive(Deserialize)]
+struct ExportRecordSkeleton {
+    name: String,
+    card_type: CardType,
+    #[serde(default)]
+    scryfall_oracle_id: Option<String>,
+    #[serde(default)]
+    legalities: HashMap<String, String>,
+    #[serde(default)]
+    layout: Option<String>,
+    #[serde(default)]
+    face_index: Option<usize>,
+    #[serde(default)]
+    printings: Vec<String>,
+    #[serde(default)]
+    rulings: Vec<Ruling>,
+    #[serde(default)]
+    bracket_signals: BracketSignals,
+}
+
 fn layout_kind_requires_multiple_faces(layout_kind: LayoutKind) -> bool {
     matches!(
         layout_kind,
@@ -984,13 +1240,15 @@ fn map_layout_str(s: &str) -> Option<LayoutKind> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, Effect, ModalChoice,
+        PlayerFilter, QuantityExpr, ReplacementDefinition, StaticDefinition, TargetChoiceTiming,
+        TargetFilter, TriggerDefinition,
     };
     use crate::types::card_type::CardType;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
 
-    fn test_face(name: &str) -> CardFace {
+    pub(super) fn test_face(name: &str) -> CardFace {
         CardFace {
             name: name.to_string(),
             mana_cost: ManaCost::NoCost,
@@ -1022,10 +1280,162 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    #[test]
+    fn export_reader_matches_the_streaming_parse_on_the_committed_fixture() {
+        use crate::database::integration_fixture;
+        use crate::test_support::assert_same_database;
+
+        let streamed = CardDatabase::from_export_entries(
+            serde_json::from_reader(integration_fixture::reader().unwrap())
+                .expect("streaming parse"),
+        );
+        let buffered = CardDatabase::from_export_reader(integration_fixture::reader().unwrap())
+            .expect("buffered parse");
+        assert_same_database(&streamed, &buffered);
+    }
+
+    #[test]
+    fn lazy_and_cached_fixture_loads_are_observably_identical_to_the_eager_load() {
+        use super::fixture_cache::{self, Key};
+        use crate::database::search::CardSearchQuery;
+        use crate::test_support::{assert_same_database, load_fixture};
+
+        let eager = CardDatabase::from_integration_fixture().unwrap();
+        let lazy = load_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture-cache");
+        let key = Key {
+            fixture_hash: 1,
+            binary_len: 2,
+            binary_mtime_ns: 3,
+        };
+        fixture_cache::write(&path, key, &lazy).expect("the lazy load is cacheable");
+        let cached = fixture_cache::read(&path, key).expect("the written cache is served");
+
+        for db in [&lazy, &cached] {
+            for (key, slot) in &db.face_index.0 {
+                let FaceSlot::Raw(raw) = slot else {
+                    panic!("{key} was typed at load");
+                };
+                let face = eager.face_index.get(key).unwrap();
+                assert_eq!(raw.name, face.name, "{key}");
+                assert_eq!(raw.card_type, face.card_type, "{key}");
+                assert_eq!(raw.scryfall_oracle_id, face.scryfall_oracle_id, "{key}");
+            }
+            assert_eq!(db.card_names(), eager.card_names());
+        }
+        assert_eq!(cached.face_index.typed_face_count(), 0);
+        assert_same_database(&eager, &lazy);
+        assert_same_database(&eager, &cached);
+
+        let walk = |db: &CardDatabase| {
+            let faces: std::collections::BTreeMap<String, serde_json::Value> = db
+                .face_iter()
+                .map(|(key, face)| (key.to_string(), serde_json::to_value(face).unwrap()))
+                .collect();
+            let scan: Vec<String> = db
+                .face_iter_in_scan_order()
+                .map(|(key, _)| key.to_string())
+                .collect();
+            let search = serde_json::to_value(db.search(&CardSearchQuery {
+                limit: Some(usize::MAX),
+                ..Default::default()
+            }))
+            .unwrap();
+            let all: BTreeSet<String> = db.face_index.keys().cloned().collect();
+            let subset: serde_json::Value =
+                serde_json::from_str(&db.export_subset_json(&all)).unwrap();
+            (
+                faces,
+                scan,
+                db.valid_subtypes().clone(),
+                {
+                    let mut errors = db.export_integrity_errors();
+                    errors.sort();
+                    errors
+                },
+                search,
+                subset,
+            )
+        };
+        assert!(walk(&eager) == walk(&lazy), "whole walks differ");
+    }
+
+    #[test]
+    fn lazy_fixture_types_every_face() {
+        use crate::test_support::load_fixture;
+
+        let db = load_fixture();
+        assert_eq!(db.face_index.typed_face_count(), 0);
+        assert_eq!(db.face_iter().count(), db.face_index.len());
+        assert_eq!(db.face_index.typed_face_count(), db.face_index.len());
+    }
+
+    #[test]
+    #[should_panic(expected = "card-data record for `Words of Worship` does not deserialize")]
+    fn lazy_load_defers_a_malformed_record_until_read_and_names_it() {
+        let mut malformed = serde_json::to_value(test_face("Words of Worship")).unwrap();
+        malformed["abilities"] =
+            serde_json::json!([{"kind": "Spell", "effect": {"type": "Unknown"}}]);
+        let export = serde_json::json!({
+            "Lightning Bolt": serde_json::to_value(test_face("Lightning Bolt")).unwrap(),
+            "Words of Worship": malformed,
+        });
+        let db =
+            CardDatabase::from_export_reader_typing_faces_on_read(export.to_string().as_bytes())
+                .expect("the skeleton loads");
+        assert!(db.get_face_by_name("Lightning Bolt").is_some());
+        db.get_face_by_name("Words of Worship");
+    }
+
+    #[test]
+    fn card_names_equal_the_typed_face_walk_on_the_committed_fixture() {
+        let db = crate::test_support::shared_card_db();
+        let mut expected: Vec<String> = db.face_iter().map(|(_, face)| face.name.clone()).collect();
+        expected.sort();
+        expected.dedup();
+        assert!(expected.len() < db.face_index.len());
+        assert_eq!(db.card_names(), expected);
+    }
+
+    #[test]
+    fn search_face_keys_order_by_oracle_id_then_face_order_then_key() {
+        let rows: [(&str, Option<&str>, Option<usize>); 6] = [
+            ("ancestral recall", None, None),
+            ("black lotus", None, None),
+            ("delver of secrets", Some("o-dv"), None),
+            ("insectile aberration", Some("o-dv"), Some(1)),
+            ("revival", Some("o-rr"), Some(0)),
+            ("revenge", Some("o-rr"), Some(1)),
+        ];
+        let mut face_index = HashMap::new();
+        let mut face_order_index = HashMap::new();
+        for (key, oracle, order) in rows {
+            let mut face = test_face(key);
+            face.scryfall_oracle_id = oracle.map(str::to_string);
+            face_index.insert(key.to_string(), face);
+            if let Some(order) = order {
+                face_order_index.insert(key.to_string(), order);
+            }
+        }
+        assert_eq!(
+            build_search_face_keys(&FaceIndex::from(face_index), &face_order_index),
+            [
+                "ancestral recall",
+                "black lotus",
+                "insectile aberration",
+                "delver of secrets",
+                "revival",
+                "revenge",
+            ]
+        );
     }
 
     /// CR 118.12a: the corpus-wide half of the unenforceable-gate authority.
@@ -1168,6 +1578,196 @@ mod tests {
             "a nested payment gate on a combat-taxed mode is enforceable and must pass: {:?}",
             ok_db.export_integrity_errors()
         );
+    }
+
+    /// CR 109.4 (Matt R2-F4): the corpus-wide export gate refuses a typed
+    /// Continuous static gated on a `PlayerAttackedPlayer` with a
+    /// resolution-scoped `ChosenPlayer` endpoint — bare or nested under
+    /// `Not` — because the layer pipeline has no resolving ability to
+    /// answer it. CR 109.4 + CR 115.1 (Matt R7-F2): the same refusal
+    /// covers the target-relative endpoints (`TargetPlayer`/`TargetOpponent`).
+    /// The same gate with bindable endpoints ships clean.
+    /// Pre-fix the target-relative shapes pass the export.
+    #[test]
+    fn export_integrity_refuses_unanswerable_attack_gate() {
+        use crate::types::ability::{ControllerRef, StaticCondition, StaticDefinition};
+
+        let gate = |attacker: ControllerRef| StaticCondition::Not {
+            condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                attacker,
+                defender: ControllerRef::You,
+            }),
+        };
+        let face_with = |name: &str, condition: StaticCondition| {
+            let mut face = test_face(name);
+            let mut def = StaticDefinition::continuous();
+            def.condition = Some(condition);
+            face.static_abilities = vec![def];
+            face
+        };
+
+        // REJECT: bare and nested-Not unanswerable gates fail the export no
+        // matter which parser route built them.
+        for (key, name, condition) in [
+            (
+                "chosen probe",
+                "Chosen Probe",
+                StaticCondition::PlayerAttackedPlayer {
+                    attacker: ControllerRef::ChosenPlayer { index: 0 },
+                    defender: ControllerRef::You,
+                },
+            ),
+            (
+                "nested chosen probe",
+                "Nested Chosen Probe",
+                gate(ControllerRef::ChosenPlayer { index: 0 }),
+            ),
+            (
+                "target probe",
+                "Target Probe",
+                gate(ControllerRef::TargetPlayer),
+            ),
+            (
+                "target opponent probe",
+                "Target Opponent Probe",
+                gate(ControllerRef::TargetOpponent),
+            ),
+        ] {
+            let mut faces = HashMap::new();
+            faces.insert(key.to_string(), face_with(name, condition));
+            let db = CardDatabase::from_json_str(&serde_json::to_string(&faces).unwrap())
+                .expect("parses");
+            let errors = db.export_integrity_errors();
+            assert!(
+                errors.iter().any(|e| e.contains(name)),
+                "an unanswerable attack gate must fail the export, got {errors:?}"
+            );
+        }
+
+        // ACCEPT: the same gate with bindable endpoints ships clean.
+        // `ActivePlayer` reads live game state with no ability context.
+        let mut ok_faces = HashMap::new();
+        ok_faces.insert(
+            "bound probe".to_string(),
+            face_with("Bound Probe", gate(ControllerRef::ActivePlayer)),
+        );
+        let ok_db = CardDatabase::from_json_str(&serde_json::to_string(&ok_faces).unwrap())
+            .expect("parses");
+        assert!(
+            ok_db.export_integrity_errors().is_empty(),
+            "a bindable attack gate must pass the export: {:?}",
+            ok_db.export_integrity_errors()
+        );
+    }
+
+    #[test]
+    fn export_loaders_read_legacy_draw_replacements_and_preserve_current_metadata() {
+        let gain_life = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        let current = gain_life()
+            .player_scope(PlayerFilter::All)
+            .condition(AbilityCondition::IsYourTurn)
+            .target_choice_timing(TargetChoiceTiming::Resolution)
+            .sub_ability(gain_life())
+            .with_else_ability(gain_life())
+            .with_modal(
+                ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count: 1,
+                    ..Default::default()
+                },
+                vec![gain_life()],
+            );
+        let mut face = test_face("Words of Worship");
+        face.oracle_text = Some(
+            "{1}: The next time you would draw a card this turn, you gain 5 life instead."
+                .to_string(),
+        );
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::CreateDrawReplacement {
+                    replacement_effect: Box::new(current.clone()),
+                },
+            )
+            .cost(AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            })
+            .description(
+                "{1}: The next time you would draw a card this turn, you gain 5 life instead."
+                    .to_string(),
+            ),
+        );
+        let mut export = serde_json::json!({ "words of worship": face });
+        // Exact bare replacement payload witnessed in the original-base export.
+        let legacy =
+            serde_json::json!({"type": "GainLife", "amount": {"type": "Fixed", "value": 5}});
+        for (payload, expected) in [
+            (legacy, gain_life()),
+            (serde_json::to_value(&current).unwrap(), current),
+        ] {
+            export["words of worship"]["abilities"][0]["effect"]["replacement_effect"] =
+                payload.clone();
+            let bytes = serde_json::to_vec(&export).unwrap();
+            let json = std::str::from_utf8(&bytes).unwrap();
+            for db in [
+                CardDatabase::from_export_reader(bytes.as_slice())
+                    .expect("reader reaches the replacement decoder"),
+                CardDatabase::from_json_str(json)
+                    .expect("string loader reaches the replacement decoder"),
+            ] {
+                let loaded = db
+                    .get_face_by_name("Words of Worship")
+                    .expect("populated face survives loading");
+                assert_eq!(loaded.abilities.len(), 1);
+                assert_eq!(loaded.abilities[0].kind, AbilityKind::Activated);
+                let Effect::CreateDrawReplacement { replacement_effect } =
+                    &*loaded.abilities[0].effect
+                else {
+                    panic!("expected replacement on loaded face")
+                };
+                assert_eq!(**replacement_effect, expected);
+                assert!(matches!(
+                    *replacement_effect.effect,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 5 },
+                        ..
+                    }
+                ));
+                assert_eq!(replacement_effect.player_scope, expected.player_scope);
+                assert_eq!(
+                    replacement_effect.mode_abilities.len(),
+                    expected.mode_abilities.len()
+                );
+                let names = ["Words of Worship".to_string()].into_iter().collect();
+                let emitted: serde_json::Value =
+                    serde_json::from_str(&db.export_subset_json(&names)).unwrap();
+                let replacement =
+                    &emitted["words of worship"]["abilities"][0]["effect"]["replacement_effect"];
+                assert_eq!(replacement["kind"], "Spell");
+                assert_eq!(replacement["effect"]["amount"]["value"], 5);
+                assert!(replacement.get("type").is_none());
+                assert_eq!(*replacement, serde_json::to_value(&expected).unwrap());
+            }
+            let mut malformed = export.clone();
+            malformed["words of worship"]["abilities"][0]["effect"]["replacement_effect"] =
+                if payload.get("type").is_some() {
+                    serde_json::json!({"type": "GainLife", "amount": {"type": "Fixed"}})
+                } else {
+                    serde_json::json!({"kind": "Spell", "effect": {"type": "Unknown"}})
+                };
+            let bad_bytes = serde_json::to_vec(&malformed).unwrap();
+            assert!(CardDatabase::from_export_reader(bad_bytes.as_slice()).is_err());
+            assert!(CardDatabase::from_json_str(std::str::from_utf8(&bad_bytes).unwrap()).is_err());
+        }
     }
 
     #[test]
@@ -1467,14 +2067,46 @@ mod tests {
 
     #[test]
     fn bracket_signals_lookup_uses_loaded_lists() {
-        use crate::database::bracket_lists::BracketLists;
-        let lists = BracketLists::from_json_str(
-            r#"{ "version":"t", "efficient_tutors":["Demonic Tutor"] }"#,
-        )
-        .unwrap();
+        use crate::database::bracket_lists::{BracketCardClass, BracketLists};
+        let lists = BracketLists::from_pairs(
+            "t",
+            &[(BracketCardClass::EfficientTutors, &["Demonic Tutor"])],
+        );
         let db = CardDatabase::default().with_bracket_lists(lists);
         let sig = db.bracket_signals_for("Demonic Tutor");
-        assert!(sig.efficient_tutor);
+        assert!(sig.axes().contains(&BracketAxis::EfficientTutors));
+    }
+
+    #[test]
+    fn curated_game_changer_is_unioned_with_a_false_export_signal() {
+        use crate::database::bracket_lists::{BracketCardClass, BracketLists};
+
+        let json = r#"{
+            "newly curated card": {
+                "name": "Newly Curated Card",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Artifact"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": false, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            }
+        }"#;
+        let lists = BracketLists::from_pairs(
+            "t",
+            &[(BracketCardClass::GameChangers, &["Newly Curated Card"])],
+        );
+        let db = CardDatabase::from_json_str(json)
+            .unwrap()
+            .with_bracket_lists(lists);
+
+        assert!(db
+            .bracket_signals_for("Newly Curated Card")
+            .axes()
+            .contains(&BracketAxis::GameChangers));
     }
 
     #[test]
@@ -1513,14 +2145,52 @@ mod tests {
             .with_bracket_lists(BracketLists::default());
 
         // Single-face lookup still works.
-        assert!(db.bracket_signals_for("Halana, Kessig Ranger").game_changer);
+        assert!(db
+            .bracket_signals_for("Halana, Kessig Ranger")
+            .axes()
+            .contains(&BracketAxis::GameChangers));
 
         // Partner-pair combined name must aggregate across both faces.
         let sig = db.bracket_signals_for("Halana, Kessig Ranger // Alena, Trapper Founder");
         assert!(
-            sig.game_changer,
+            sig.axes().contains(&BracketAxis::GameChangers),
             "partner-pair name must resolve to either face's signals"
         );
+    }
+
+    #[test]
+    fn export_database_names_the_bundled_list_revision_but_reads_only_stamped_signals() {
+        use crate::database::bracket_lists::BracketLists;
+        // Rhystic Study is on the tracked Game Changers list, but this export
+        // stamped it clean: the export, not the bundled lists, is the authority.
+        let json = r#"{
+            "rhystic study": {
+                "name": "Rhystic Study",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Enchantment"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": false, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            }
+        }"#;
+        let db = CardDatabase::from_json_str(json).unwrap();
+
+        let tracked = BracketLists::from_json_path(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/bracket_lists.json"),
+        )
+        .expect("tracked bracket list data must parse");
+        assert!(
+            tracked.signals_for("Rhystic Study").game_changer,
+            "the clean stamp below proves nothing unless the tracked list curates this card"
+        );
+        let bundled = BracketLists::bundled_revision();
+        assert!(!bundled.version.is_empty());
+        assert_eq!(db.bracket_lists_version(), bundled.version);
+        assert!(db.bracket_signals_for("Rhystic Study").is_clean());
     }
 
     #[test]
@@ -1557,7 +2227,7 @@ mod tests {
         let db = CardDatabase::from_json_str(json).unwrap();
         let sig = db.bracket_signals_for("Halana, Kessig Ranger // Alena, Trapper Founder");
         assert!(
-            sig.game_changer,
+            sig.axes().contains(&BracketAxis::GameChangers),
             "back-face partner signal must survive lookup_key's front-face collapse"
         );
     }
@@ -1599,7 +2269,8 @@ mod tests {
         let db = CardDatabase::from_json_str(json).unwrap();
         assert!(
             db.bracket_signals_for("Halana, Kessig Ranger//Alena, Trapper Founder")
-                .game_changer,
+                .axes()
+                .contains(&BracketAxis::GameChangers),
             "glued composite name must aggregate both faces, like the spaced form"
         );
     }
@@ -1627,7 +2298,8 @@ mod tests {
         let db = CardDatabase::from_json_str(json).unwrap();
         assert!(
             db.bracket_signals_for("SP//dr, Piloted by Peni")
-                .game_changer,
+                .axes()
+                .contains(&BracketAxis::GameChangers),
             "an indexed whole name containing // must not be split into faces"
         );
     }
@@ -1642,13 +2314,26 @@ mod tests {
         // `bracket_lists` too, or the name is split into two nonexistent faces
         // and its real mass-land-denial signal is lost.
         let lists = BracketLists::from_json_str(
-            r#"{"version":"t","mass_land_denial":["SP//dr, Piloted by Peni"]}"#,
+            r#"{
+                "version":"t",
+                "lists": {
+                    "mass_land_sweepers": {
+                        "source": {
+                            "url":"test",
+                            "published":"2026-09-12",
+                            "retrieved":"2026-09-12"
+                        },
+                        "names":["SP//dr, Piloted by Peni"]
+                    }
+                }
+            }"#,
         )
         .unwrap();
         let db = CardDatabase::default().with_bracket_lists(lists);
         assert!(
             db.bracket_signals_for("SP//dr, Piloted by Peni")
-                .mass_land_denial,
+                .axes()
+                .contains(&BracketAxis::MassLandDenial),
             "a lists-only whole name containing // must not be split into faces"
         );
     }
@@ -1658,13 +2343,25 @@ mod tests {
         use crate::database::bracket_lists::BracketLists;
         // No export entries — bracket_lists is the source of truth.
         let lists = BracketLists::from_json_str(
-            r#"{"version":"t","efficient_tutors":["Halana, Kessig Ranger"]}"#,
+            r#"{
+                "version":"t",
+                "lists": {
+                    "efficient_tutors": {
+                        "source": {
+                            "url":"test",
+                            "published":"2026-09-12",
+                            "retrieved":"2026-09-12"
+                        },
+                        "names":["Halana, Kessig Ranger"]
+                    }
+                }
+            }"#,
         )
         .unwrap();
         let db = CardDatabase::default().with_bracket_lists(lists);
         let sig = db.bracket_signals_for("Halana, Kessig Ranger // Alena, Trapper Founder");
         assert!(
-            sig.efficient_tutor,
+            sig.axes().contains(&BracketAxis::EfficientTutors),
             "falls back to bracket_lists for partner pair when export map is empty"
         );
     }
@@ -1730,14 +2427,14 @@ mod tests {
         let vocab = db.creature_type_vocabulary();
 
         assert!(
-            vocab.contains(&"Saproling".to_string()),
+            vocab.iter().any(|i| i == "Saproling"),
             "Saproling must appear (token-only creature type)"
         );
         assert!(
-            vocab.contains(&"Golem".to_string()),
+            vocab.iter().any(|i| i == "Golem"),
             "Golem must appear (multi-core-type creature)"
         );
-        assert!(vocab.contains(&"Bear".to_string()));
+        assert!(vocab.iter().any(|i| i == "Bear"));
         // Sorted.
         let mut sorted = vocab.to_vec();
         sorted.sort();
@@ -1791,11 +2488,11 @@ mod tests {
         let db = CardDatabase::from_json_str(&json).unwrap();
         let vocab = db.creature_type_vocabulary();
         assert!(
-            vocab.contains(&"Faerie".to_string()),
+            vocab.iter().any(|i| i == "Faerie"),
             "Faerie must appear from a Tribal-only face (no Creature core type)"
         );
         assert!(
-            vocab.contains(&"Elf".to_string()),
+            vocab.iter().any(|i| i == "Elf"),
             "Elf must appear from a Kindred-only face (no Creature core type)"
         );
     }
@@ -1854,19 +2551,19 @@ mod tests {
         let db = CardDatabase::from_json_str(&json).unwrap();
         let vocab = db.creature_type_vocabulary();
         assert!(
-            vocab.contains(&"Dryad".to_string()),
+            vocab.iter().any(|i| i == "Dryad"),
             "Dryad is a creature type and must survive, got {vocab:?}"
         );
         assert!(
-            vocab.contains(&"Construct".to_string()),
+            vocab.iter().any(|i| i == "Construct"),
             "Construct is a creature type and must survive, got {vocab:?}"
         );
         assert!(
-            !vocab.contains(&"Forest".to_string()),
+            !vocab.iter().any(|i| i == "Forest"),
             "Forest is a land type (appears on a pure Land face) — must not leak, got {vocab:?}"
         );
         assert!(
-            !vocab.contains(&"Equipment".to_string()),
+            !vocab.iter().any(|i| i == "Equipment"),
             "Equipment is an artifact type (appears on a pure Artifact face) — must not leak, got {vocab:?}"
         );
     }
@@ -2310,7 +3007,7 @@ mod tests {
 
     #[test]
     fn from_json_merges_card_signals_with_list_signals() {
-        use crate::database::bracket_lists::BracketLists;
+        use crate::database::bracket_lists::{BracketCardClass, BracketLists};
 
         let json = r#"{
             "demonic tutor": {
@@ -2327,14 +3024,16 @@ mod tests {
                 }
             }
         }"#;
-        let lists =
-            BracketLists::from_json_str(r#"{"version":"t","efficient_tutors":["Demonic Tutor"]}"#)
-                .unwrap();
+        let lists = BracketLists::from_pairs(
+            "t",
+            &[(BracketCardClass::EfficientTutors, &["Demonic Tutor"])],
+        );
         let db = CardDatabase::from_json_str(json)
             .unwrap()
             .with_bracket_lists(lists);
         let sig = db.bracket_signals_for("demonic tutor");
-        assert!(sig.efficient_tutor);
-        assert!(sig.game_changer);
+        let axes = sig.axes();
+        assert!(axes.contains(&BracketAxis::EfficientTutors));
+        assert!(axes.contains(&BracketAxis::GameChangers));
     }
 }

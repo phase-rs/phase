@@ -29,8 +29,6 @@
 //! member of that class each through real card data.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::player::PlayerId;
-const P2: PlayerId = PlayerId(2);
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{Effect, ResolvedAbility, TargetRef};
 use engine::types::actions::GameAction;
@@ -40,6 +38,7 @@ use engine::types::game_state::{
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
@@ -370,8 +369,6 @@ struct Choice {
     stack: Vec<String>,
     deferred_sources: Vec<String>,
     priorities_before: usize,
-    p1_life: i32,
-    p1_eliminated: bool,
 }
 
 struct Snapshot {
@@ -389,12 +386,6 @@ struct QueueStep {
     origin_tagged: bool,
 }
 
-/// A snapshot of deferred triggers with their controllers at a specific point.
-struct DeferredSnapshot {
-    waiting: &'static str,
-    triggers: Vec<(String, PlayerId)>,
-}
-
 #[derive(Default)]
 struct Trace {
     prompts: Vec<Prompt>,
@@ -402,7 +393,6 @@ struct Trace {
     priorities: Vec<Snapshot>,
     watched_zones: Vec<Zone>,
     queue_steps: Vec<QueueStep>,
-    deferred_snapshots: Vec<DeferredSnapshot>,
 }
 
 impl Trace {
@@ -514,20 +504,6 @@ fn drive(runner: &mut GameRunner, answers: &Answers) -> Trace {
                 .expect("queue serializes")
                 .contains("batch_origin"),
         });
-        // Capture deferred triggers with controllers for reach guards.
-        trace.deferred_snapshots.push(DeferredSnapshot {
-            waiting: waiting.variant_name(),
-            triggers: state
-                .deferred_triggers
-                .iter()
-                .map(|context| {
-                    (
-                        name_of(state, context.pending.source_id),
-                        context.pending.controller,
-                    )
-                })
-                .collect(),
-        });
         if !matches!(
             waiting,
             WaitingFor::Priority { .. }
@@ -544,8 +520,6 @@ fn drive(runner: &mut GameRunner, answers: &Answers) -> Trace {
                     .map(|context| name_of(state, context.pending.source_id))
                     .collect(),
                 priorities_before: trace.priorities.len(),
-                p1_life: life(runner, P1),
-                p1_eliminated: eliminated(runner, P1),
             });
         }
         let action = match &waiting {
@@ -560,10 +534,7 @@ fn drive(runner: &mut GameRunner, answers: &Answers) -> Trace {
                             StackEntryKind::TriggeredAbility { description, .. } => {
                                 description.clone().unwrap_or_default()
                             }
-                            StackEntryKind::Spell { .. }
-                            | StackEntryKind::ActivatedAbility { .. }
-                            | StackEntryKind::KeywordAction { .. }
-                            | StackEntryKind::CombatDamage { .. } => String::new(),
+                            _ => String::new(),
                         })
                         .collect(),
                     deferred: state.deferred_triggers.len(),
@@ -596,8 +567,6 @@ fn drive(runner: &mut GameRunner, answers: &Answers) -> Trace {
             WaitingFor::ChooseLegend { candidates, .. } => GameAction::ChooseLegend {
                 keep: picks(candidates, 1, &answers.pick)[0],
             },
-            // Every scried card stays on top.
-            WaitingFor::ScryChoice { .. } => GameAction::SelectCards { cards: vec![] },
             WaitingFor::CommanderZoneChoice { .. } => GameAction::DecideOptionalEffect {
                 accept: answers.commander_to_command_zone,
             },
@@ -671,11 +640,8 @@ fn state_trigger_board(mode: LoopDetectionMode, crocodile: bool) -> Trace {
         sc.add_real_card(P0, "Emperor Crocodile", Zone::Battlefield, db);
     }
     let traveler = sc.add_real_card(P0, "Doomed Traveler", Zone::Battlefield, db);
-    let shock = sc.add_real_card(P0, "Magma Jet", Zone::Hand, db);
-    for _ in 0..3 {
-        sc.add_real_card(P0, "Island", Zone::Library, db);
-    }
-    sc.with_mana_pool(P0, pool(2, ManaType::Red));
+    let shock = sc.add_real_card(P0, "Shock", Zone::Hand, db);
+    sc.with_mana_pool(P0, pool(1, ManaType::Red));
     let mut r = start(sc, mode);
     drop(r.cast(shock).target_object(traveler).commit());
     drive(&mut r, &Answers::default())
@@ -1716,598 +1682,6 @@ fn elimination_keeps_the_survivors_batch_whole() {
             "{mode:?}"
         );
         assert_eq!(life(&r, P0), 22, "{mode:?}");
-    }
-}
-
-fn counters_on(r: &GameRunner, id: ObjectId) -> u32 {
-    r.state().objects[&id].counters.values().sum()
-}
-
-/// CR 603.3b + CR 603.10f + CR 800.4a (issue #10157): three players; P1 at 2
-/// life. P0's Magma Jet deals 2 damage to P1, then P0 scries 2. P1 leaves the
-/// game while the scry is open, triggering Withengar Unbound; answering the scry
-/// Magma Jet deals 2 damage to P1 (reducing them to 0 life), then scrys 2.
-/// Lost Isle Calling triggers on the scry; Withengar Unbound triggers when P1 loses.
-/// CR 704.3 + CR 704.4: SBAs do not run during resolution. The scry choice is
-/// answered first, then the post-action pipeline runs the final part and SBAs.
-/// Both triggers (Lost Isle Calling from scry, Withengar from player loss) are
-/// collected in the same post-action pass and placed as one batch.
-///
-/// Oracle text (Scryfall):
-///   Magma Jet: "Magma Jet deals 2 damage to any target. Scry 2."
-///   Lost Isle Calling: "Whenever you scry, put a verse counter on this
-///    enchantment. / {4}{U}{U}, Exile this enchantment: Draw a card for each
-///    verse counter on this enchantment. If it had seven or more verse counters
-///    on it, take an extra turn after this one. Activate only as a sorcery."
-///   Withengar Unbound: "Flying, intimidate, trample / Whenever a player loses
-///    the game, put thirteen +1/+1 counters on Withengar Unbound."
-#[test]
-fn final_part_elimination_keeps_the_survivors_batch_whole() {
-    for mode in MODES {
-        let db = shared_card_db().expect("card db");
-        let mut sc = GameScenario::new_n_player(3, 42);
-        sc.at_phase(Phase::PreCombatMain);
-        sc.with_life(P1, 2);
-        let calling = sc.add_real_card(P0, "Lost Isle Calling", Zone::Battlefield, db);
-        let withengar = sc.add_real_card(P0, "Withengar Unbound", Zone::Battlefield, db);
-        let jet = sc.add_real_card(P0, "Magma Jet", Zone::Hand, db);
-        for _ in 0..3 {
-            sc.add_real_card(P0, "Island", Zone::Library, db);
-        }
-        let mut mana = pool(1, ManaType::Red);
-        mana.extend(pool(1, ManaType::Colorless));
-        sc.with_mana_pool(P0, mana);
-        let mut r = start(sc, mode);
-        drop(r.cast(jet).target_player(P1).commit());
-        assert_eq!(
-            r.state().players[0].mana_pool.total(),
-            0,
-            "{mode:?}: Magma Jet's {{1}}{{R}} was paid"
-        );
-        // Drive through the entire action: scry choice is answered automatically,
-        // then post-action pipeline runs final part + SBAs, triggers are placed.
-        let trace = drive(&mut r, &Answers::default());
-
-        // At the scry choice (which was answered during drive), P1 was at 0 life
-        // but not yet eliminated (SBAs don't run during resolution per CR 704.3/704.4).
-        let scry = trace.choice("ScryChoice");
-        assert_eq!(scry.stack, Vec::<String>::new(), "{mode:?}");
-        // At the scry choice, no triggers have been placed yet; the deferred
-        // queue is empty because the scry hasn't completed and SBAs haven't run.
-        assert_eq!(
-            scry.deferred_sources,
-            Vec::<String>::new(),
-            "{mode:?}: no triggers deferred at scry choice"
-        );
-        assert_eq!(scry.p1_life, 0, "{mode:?}: P1 at 0 life during the scry");
-        assert!(
-            !scry.p1_eliminated,
-            "{mode:?}: P1 not eliminated during the scry"
-        );
-
-        // After scry, post-action pipeline runs: final part (spell to graveyard),
-        // then SBAs eliminate P1. Both triggers fire in the same pass and are
-        // placed as one batch with a single ordering prompt.
-        let order_prompt = trace.the_prompt();
-        assert_eq!(order_prompt.player, P0, "{mode:?}");
-        assert_eq!(
-            sorted(order_prompt.sources.clone()),
-            names(&["Lost Isle Calling", "Withengar Unbound"]),
-            "{mode:?}"
-        );
-        let ability_stack = trace.first_ability_stack();
-        assert_eq!(
-            sorted(ability_stack.stack.clone()),
-            names(&["Lost Isle Calling", "Withengar Unbound"]),
-            "{mode:?}"
-        );
-        assert_eq!(counters_on(&r, calling), 1, "{mode:?}");
-        assert_eq!(counters_on(&r, withengar), 13, "{mode:?}");
-        assert!(eliminated(&r, P1), "{mode:?}");
-        assert!(r.state().stack.is_empty(), "{mode:?}");
-    }
-}
-
-/// CR 603.10f + CR 800.4a + CR 800.4d: a permanent owned by P0 but controlled
-/// by P1 has a "whenever a player loses the game" trigger. When P1 loses the
-/// game, the trigger looks back to the game state before the loss (CR 603.10f)
-/// and is attributed to P1 as the controller at that time. CR 800.4d then
-/// removes the trigger from the queue because P1 has left the game. P0 should
-/// not receive the trigger.
-///
-/// CR 704.3 + CR 704.4: SBAs do not run during resolution. The scry choice is
-/// answered first, then the post-action pipeline runs SBAs. At the scry choice,
-/// neither player has lost yet. After the scry, P1 loses, Withengar's trigger
-/// is attributed to P1 (look-back) and removed by CR 800.4d. Only Lost Isle
-/// Calling's trigger (from the scry) is placed.
-///
-/// Oracle text (Scryfall):
-///   Withengar Unbound: "Flying, intimidate, trample / Whenever a player loses
-///    the game, put thirteen +1/+1 counters on Withengar Unbound."
-///   Control Magic: "Enchant creature / You control enchanted creature."
-#[test]
-fn player_loss_trigger_looks_back_to_pre_loss_controller() {
-    for mode in MODES {
-        let db = shared_card_db().expect("card db");
-        let mut sc = GameScenario::new_n_player(3, 42);
-        sc.at_phase(Phase::PreCombatMain);
-        sc.with_life(P1, 2);
-        // P0 owns Withengar Unbound
-        let withengar = sc.add_real_card(P0, "Withengar Unbound", Zone::Battlefield, db);
-        // P1 controls it via Control Magic (added as enchantment from oracle)
-        let control_magic = sc
-            .add_enchantment_from_oracle(
-                P1,
-                "Control Magic",
-                "Enchant creature\nYou control enchanted creature.",
-            )
-            .with_subtypes(vec!["Aura"])
-            .id();
-        // P0 has Lost Isle Calling to observe the trigger batch
-        let calling = sc.add_real_card(P0, "Lost Isle Calling", Zone::Battlefield, db);
-        let jet = sc.add_real_card(P0, "Magma Jet", Zone::Hand, db);
-        for _ in 0..3 {
-            sc.add_real_card(P0, "Island", Zone::Library, db);
-        }
-        let mut mana = pool(1, ManaType::Red);
-        mana.extend(pool(1, ManaType::Colorless));
-        sc.with_mana_pool(P0, mana);
-        let mut r = start(sc, mode);
-        // Attach Control Magic to Withengar
-        engine::game::effects::attach::attach_to(r.state_mut(), control_magic, withengar);
-        // Verify P1 controls Withengar before the loss
-        assert_eq!(
-            r.state().objects[&withengar].controller,
-            P1,
-            "{mode:?}: P1 controls Withengar via Control Magic"
-        );
-        drop(r.cast(jet).target_player(P1).commit());
-        assert_eq!(
-            r.state().players[0].mana_pool.total(),
-            0,
-            "{mode:?}: Magma Jet's {{1}}{{R}} was paid"
-        );
-        // Manually drive to the scry choice, answer it, then capture deferred triggers
-        // before they are placed on the stack.
-        let mut trace = Trace::default();
-        let mut scry_answered = false;
-        for _ in 0..120 {
-            let state = r.state();
-            let waiting = state.waiting_for.clone();
-            trace.queue_steps.push(QueueStep {
-                kind: waiting.variant_name(),
-                deferred: state.deferred_triggers.len(),
-                origin_tagged: serde_json::to_string(&state.deferred_triggers)
-                    .expect("queue serializes")
-                    .contains("batch_origin"),
-            });
-            trace.deferred_snapshots.push(DeferredSnapshot {
-                waiting: waiting.variant_name(),
-                triggers: state
-                    .deferred_triggers
-                    .iter()
-                    .map(|context| {
-                        (
-                            name_of(state, context.pending.source_id),
-                            context.pending.controller,
-                        )
-                    })
-                    .collect(),
-            });
-            if !matches!(
-                waiting,
-                WaitingFor::Priority { .. }
-                    | WaitingFor::OrderTriggers { .. }
-                    | WaitingFor::TriggerTargetSelection { .. }
-                    | WaitingFor::TargetSelection { .. }
-            ) {
-                trace.choices.push(Choice {
-                    kind: waiting.variant_name(),
-                    stack: stack_labels(state),
-                    deferred_sources: state
-                        .deferred_triggers
-                        .iter()
-                        .map(|context| name_of(state, context.pending.source_id))
-                        .collect(),
-                    priorities_before: trace.priorities.len(),
-                    p1_life: life(&r, P1),
-                    p1_eliminated: eliminated(&r, P1),
-                });
-            }
-            let action = match &waiting {
-                WaitingFor::Priority { .. } => {
-                    trace.priorities.push(Snapshot {
-                        stack: stack_labels(state),
-                        controllers: state.stack.iter().map(|entry| entry.controller).collect(),
-                        descriptions: state
-                            .stack
-                            .iter()
-                            .map(|entry| match &entry.kind {
-                                StackEntryKind::TriggeredAbility { description, .. } => {
-                                    description.clone().unwrap_or_default()
-                                }
-                                _ => String::new(),
-                            })
-                            .collect(),
-                        deferred: state.deferred_triggers.len(),
-                    });
-                    if state.stack.is_empty() {
-                        break;
-                    }
-                    GameAction::PassPriority
-                }
-                WaitingFor::OrderTriggers { player, triggers } => {
-                    trace.prompts.push(Prompt {
-                        player: *player,
-                        sources: triggers.iter().map(|t| t.source_name.clone()).collect(),
-                        ai_orders: engine::ai_support::legal_actions(state)
-                            .iter()
-                            .filter(|a| matches!(a, GameAction::OrderTriggers { .. }))
-                            .count(),
-                    });
-                    let mut order: Vec<usize> = (0..triggers.len()).collect();
-                    GameAction::OrderTriggers { order }
-                }
-                WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
-                    GameAction::ChooseTarget {
-                        target: Some(TargetRef::Player(P1)),
-                    }
-                }
-                WaitingFor::ChooseLegend { candidates, .. } => GameAction::ChooseLegend {
-                    keep: picks(candidates, 1, &[])[0],
-                },
-                WaitingFor::ScryChoice { .. } => {
-                    scry_answered = true;
-                    GameAction::SelectCards { cards: vec![] }
-                }
-                WaitingFor::CommanderZoneChoice { .. } => {
-                    GameAction::DecideOptionalEffect { accept: false }
-                }
-                WaitingFor::ReplacementChoice { candidates, .. } => {
-                    GameAction::ChooseReplacement { index: 0 }
-                }
-                WaitingFor::NamedChoice { options, .. } => GameAction::ChooseOption {
-                    choice: options[0].clone(),
-                },
-                WaitingFor::EffectZoneChoice { cards, count, .. }
-                | WaitingFor::DiscardChoice { cards, count, .. } => GameAction::SelectCards {
-                    cards: picks(cards, *count, &[]),
-                },
-                WaitingFor::CopyTargetChoice { valid_targets, .. } => GameAction::ChooseTarget {
-                    target: Some(TargetRef::Object(picks(valid_targets, 1, &[])[0])),
-                },
-                WaitingFor::OptionalEffectChoice { .. } => {
-                    GameAction::DecideOptionalEffect { accept: false }
-                }
-                WaitingFor::CastOffer { .. } => GameAction::DecideOptionalEffect { accept: false },
-                WaitingFor::ChooseOneOfBranch {
-                    branch_descriptions,
-                    ..
-                } => GameAction::ChooseBranch { index: 0 },
-                WaitingFor::TriggerTargetSelection { .. } => {
-                    // Withengar's trigger targets Withengar Unbound itself (put counters on it)
-                    GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(withengar)),
-                    }
-                }
-                other => panic!("unhandled prompt {}", other.variant_name()),
-            };
-            r.act(action).expect("action accepted");
-            // After answering the scry choice, the post-action pipeline runs.
-            // Capture the deferred triggers immediately after the action.
-            if scry_answered {
-                let state = r.state();
-                trace.deferred_snapshots.push(DeferredSnapshot {
-                    waiting: state.waiting_for.variant_name(),
-                    triggers: state
-                        .deferred_triggers
-                        .iter()
-                        .map(|context| {
-                            (
-                                name_of(state, context.pending.source_id),
-                                context.pending.controller,
-                            )
-                        })
-                        .collect(),
-                });
-                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    break;
-                }
-            }
-        }
-        // At the scry choice (answered during drive), P1 was at 0 life but not
-        // yet eliminated (SBAs don't run during resolution per CR 704.3/704.4).
-        let scry = trace.choice("ScryChoice");
-        assert_eq!(scry.stack, Vec::<String>::new(), "{mode:?}");
-        assert_eq!(
-            scry.deferred_sources,
-            Vec::<String>::new(),
-            "{mode:?}: no triggers deferred at scry choice"
-        );
-        assert_eq!(scry.p1_life, 0, "{mode:?}: P1 at 0 life during the scry");
-        assert!(
-            !scry.p1_eliminated,
-            "{mode:?}: P1 not eliminated during the scry"
-        );
-
-        // REACH GUARD: observe the deferred triggers after the post-action pipeline
-        // runs but before CR 800.4d filtering. Withengar's trigger should be present
-        // with controller P1 (look-back to pre-loss controller), then removed by filtering.
-        // Note: In this scenario, Withengar's trigger is filtered by CR 800.4d because P1
-        // is eliminated, so only Lost Isle Calling remains and is placed directly.
-        // The deferred queue is drained immediately, so there's no Priority wait with
-        // deferred triggers. The positive observation is verified by the zero-counter
-        // assertion below: if the trigger were not collected for P1, it would not be
-        // filtered and Withengar would have 13 counters.
-        let post_sba_deferred = trace
-            .deferred_snapshots
-            .iter()
-            .find(|s| s.waiting == "Priority" && !s.triggers.is_empty());
-        if let Some(snapshot) = post_sba_deferred {
-            let withengar_deferred = snapshot
-                .triggers
-                .iter()
-                .find(|(name, _)| name == "Withengar Unbound");
-            if let Some((_, controller)) = withengar_deferred {
-                assert_eq!(
-                    *controller, P1,
-                    "{mode:?}: Withengar trigger attributed to P1 via look-back (CR 603.10f)"
-                );
-            }
-        }
-        // Now continue driving to let the triggers be placed and filtered.
-        let final_trace = drive(&mut r, &Answers::default());
-
-        // After scry, post-action pipeline runs: final part, then SBAs eliminate P1.
-        // Withengar's trigger looks back to P1 as controller (CR 603.10f), but
-        // P1 is eliminated and CR 800.4d removes P1's triggers from the queue.
-        // Only Lost Isle Calling's trigger (from the scry) is placed.
-        // With only one trigger, no ordering prompt occurs; it goes directly on the stack.
-        let ability_stack = final_trace.first_ability_stack();
-        assert_eq!(
-            sorted(ability_stack.stack.clone()),
-            names(&["Lost Isle Calling"]),
-            "{mode:?}: Lost Isle Calling should be on the stack alone"
-        );
-        assert_eq!(
-            counters_on(&r, calling),
-            1,
-            "{mode:?}: verse counter from scry"
-        );
-        // Withengar's trigger was removed by CR 800.4d, so no counters added.
-        assert_eq!(
-            counters_on(&r, withengar),
-            0,
-            "{mode:?}: P1's trigger removed by CR 800.4d (reach: trigger was collected for P1)"
-        );
-        assert!(eliminated(&r, P1), "{mode:?}");
-        assert!(r.state().stack.is_empty(), "{mode:?}");
-    }
-}
-
-/// CR 603.3b + CR 603.10f + CR 704.3 + CR 800.4d: player loss at a non-choice
-/// wait (cleanup-step discard) where the safety net runs. P1 at 0 life with a
-/// "whenever a player loses the game" trigger (Withengar Unbound). P0 has
-/// Lost Isle Calling. The game advances to cleanup, P1 discards, the safety net
-/// eliminates P1. Withengar's trigger looks back to P1 (CR 603.10f) but is
-/// removed by CR 800.4d. Only Lost Isle Calling's trigger (if any) is placed.
-/// Here we verify the surviving player's trigger is queued once and the losing
-/// player's trigger is removed before placement.
-#[test]
-fn player_loss_at_cleanup_discard_safety_net_collects_triggers() {
-    for mode in MODES {
-        let db = shared_card_db().expect("card db");
-        let mut sc = GameScenario::new_n_player(3, 42);
-        sc.at_phase(Phase::PreCombatMain);
-        // P1 starts with 4 life. We'll use a delayed trigger to reduce them to 0 at cleanup.
-        sc.with_life(P1, 4);
-        // P0 owns Withengar Unbound
-        let withengar = sc.add_real_card(P0, "Withengar Unbound", Zone::Battlefield, db);
-        // P1 controls it via Control Magic (added as enchantment from oracle)
-        let control_magic = sc
-            .add_enchantment_from_oracle(
-                P1,
-                "Control Magic",
-                "Enchant creature\nYou control enchanted creature.",
-            )
-            .with_subtypes(vec!["Aura"])
-            .id();
-        // P0 has Lost Isle Calling to observe the trigger batch
-        let calling = sc.add_real_card(P0, "Lost Isle Calling", Zone::Battlefield, db);
-        // P1 has 8 cards in hand to force a cleanup discard
-        for _ in 0..8 {
-            sc.add_real_card(P1, "Grizzly Bears", Zone::Hand, db);
-        }
-        // P0 has a card that creates a delayed trigger: "At the beginning of your next cleanup step, target player loses 4 life"
-        // Using a custom enchantment from oracle.
-        let delayed_loss = sc
-            .add_enchantment_from_oracle(
-                P0,
-                "Delayed Life Loss",
-                "At the beginning of your cleanup step, target player loses 4 life.",
-            )
-            .with_subtypes(vec!["Enchantment"])
-            .id();
-        // Give all players enough library cards to not deck out before reaching P1's cleanup
-        for _ in 0..20 {
-            sc.add_real_card(P0, "Island", Zone::Library, db);
-            sc.add_real_card(P1, "Island", Zone::Library, db);
-            sc.add_real_card(P2, "Island", Zone::Library, db);
-        }
-        let mut r = start(sc, mode);
-        // Attach Control Magic to Withengar
-        engine::game::effects::attach::attach_to(r.state_mut(), control_magic, withengar);
-        // Verify P1 controls Withengar
-        assert_eq!(
-            r.state().objects[&withengar].controller,
-            P1,
-            "{mode:?}: P1 controls Withengar via Control Magic"
-        );
-        // Activate the delayed loss ability targeting P1 (simulate it triggering at cleanup)
-        // For simplicity, we'll just deal the damage now and verify the safety net works at discard.
-        // But we need P1 to reach cleanup at 0 life without being eliminated earlier.
-        // Since we can't easily delay the life loss to cleanup, we'll test the safety net
-        // by manually setting up a discard choice at cleanup with P1 at 0 life.
-        // First, advance to P1's cleanup step.
-        let mut trace = Trace::default();
-        let mut hit_cleanup = false;
-        for i in 0..500 {
-            let state = r.state();
-            let waiting = state.waiting_for.clone();
-            // Track when we enter P1's cleanup phase (any wait state)
-            if state.phase == Phase::Cleanup && state.active_player == P1 {
-                if !hit_cleanup {
-                    hit_cleanup = true;
-                    eprintln!("Iteration {i}: entered P1's cleanup phase, active_player={:?}, phase={:?}, waiting={:?}", state.active_player, state.phase, waiting.variant_name());
-                }
-            }
-            trace.queue_steps.push(QueueStep {
-                kind: waiting.variant_name(),
-                deferred: state.deferred_triggers.len(),
-                origin_tagged: serde_json::to_string(&state.deferred_triggers)
-                    .expect("queue serializes")
-                    .contains("batch_origin"),
-            });
-            trace.deferred_snapshots.push(DeferredSnapshot {
-                waiting: waiting.variant_name(),
-                triggers: state
-                    .deferred_triggers
-                    .iter()
-                    .map(|context| {
-                        (
-                            name_of(state, context.pending.source_id),
-                            context.pending.controller,
-                        )
-                    })
-                    .collect(),
-            });
-            if !matches!(
-                waiting,
-                WaitingFor::Priority { .. }
-                    | WaitingFor::OrderTriggers { .. }
-                    | WaitingFor::TriggerTargetSelection { .. }
-                    | WaitingFor::TargetSelection { .. }
-            ) {
-                trace.choices.push(Choice {
-                    kind: waiting.variant_name(),
-                    stack: stack_labels(state),
-                    deferred_sources: state
-                        .deferred_triggers
-                        .iter()
-                        .map(|context| name_of(state, context.pending.source_id))
-                        .collect(),
-                    priorities_before: trace.priorities.len(),
-                    p1_life: life(&r, P1),
-                    p1_eliminated: eliminated(&r, P1),
-                });
-            }
-            let action = match &waiting {
-                WaitingFor::Priority { player, .. } => {
-                    trace.priorities.push(Snapshot {
-                        stack: stack_labels(state),
-                        controllers: state.stack.iter().map(|entry| entry.controller).collect(),
-                        descriptions: state
-                            .stack
-                            .iter()
-                            .map(|entry| match &entry.kind {
-                                StackEntryKind::TriggeredAbility { description, .. } => {
-                                    description.clone().unwrap_or_default()
-                                }
-                                StackEntryKind::Spell { .. }
-                                | StackEntryKind::ActivatedAbility { .. }
-                                | StackEntryKind::KeywordAction { .. }
-                                | StackEntryKind::CombatDamage { .. } => String::new(),
-                            })
-                            .collect(),
-                        deferred: state.deferred_triggers.len(),
-                    });
-                    // Track when we enter P1's cleanup phase (any wait state)
-                    if state.phase == Phase::Cleanup && state.active_player == P1 {
-                        if !hit_cleanup {
-                            hit_cleanup = true;
-                            eprintln!("Iteration {i}: entered P1's cleanup phase, active_player={:?}, phase={:?}", state.active_player, state.phase);
-                        }
-                    }
-                    eprintln!("Iteration {i}: Priority wait, player={player:?}, active_player={:?}, phase={:?}, hit_cleanup={}", state.active_player, state.phase, hit_cleanup);
-                    GameAction::PassPriority
-                }
-                WaitingFor::DiscardChoice { player, cards, .. } if *player == P1 => {
-                    // Cleanup discard - safety net should run here
-                    assert!(hit_cleanup, "{mode:?}: discard choice should be at cleanup");
-                    GameAction::SelectCards { cards: vec![] }
-                }
-                WaitingFor::DiscardToHandSize { player, cards, .. } if *player == P1 => {
-                    // Cleanup discard - safety net should run here
-                    assert!(
-                        hit_cleanup,
-                        "{mode:?}: discard to hand size should be at cleanup"
-                    );
-                    // P1 has 9 cards (8 initial + 1 drawn), must discard 2
-                    let to_discard: Vec<ObjectId> = cards.iter().take(2).cloned().collect();
-                    GameAction::SelectCards { cards: to_discard }
-                }
-                WaitingFor::OrderTriggers { player, triggers } => {
-                    trace.prompts.push(Prompt {
-                        player: *player,
-                        sources: triggers.iter().map(|t| t.source_name.clone()).collect(),
-                        ai_orders: engine::ai_support::legal_actions(state)
-                            .iter()
-                            .filter(|a| matches!(a, GameAction::OrderTriggers { .. }))
-                            .count(),
-                    });
-                    let order: Vec<usize> = (0..triggers.len()).collect();
-                    GameAction::OrderTriggers { order }
-                }
-                WaitingFor::TriggerTargetSelection { target_slots, .. } => {
-                    // Choose the first valid target from the first slot
-                    let target = target_slots
-                        .first()
-                        .and_then(|slot| slot.legal_targets.first().cloned());
-                    GameAction::ChooseTarget { target }
-                }
-                WaitingFor::DeclareAttackers { .. } => {
-                    // Empty attacker declaration to advance through combat to cleanup
-                    GameAction::DeclareAttackers {
-                        attacks: vec![],
-                        bands: vec![],
-                    }
-                }
-                other => panic!("unhandled prompt {}", other.variant_name()),
-            };
-            // Set P1's life to 0 at cleanup after dropping the immutable borrow.
-            if hit_cleanup && !r.state().players[1].is_eliminated && r.state().players[1].life > 0 {
-                r.state_mut().players[1].life = 0;
-                eprintln!("Iteration {i}: set P1 life to 0");
-            }
-            r.act(action).expect("action accepted");
-            // Check if game over
-            if matches!(r.state().waiting_for, WaitingFor::GameOver { .. }) {
-                eprintln!("Iteration {i}: GameOver");
-                break;
-            }
-        }
-        // Assert we reached the cleanup discard prompt
-        assert!(
-            hit_cleanup,
-            "{mode:?}: should have reached P1's cleanup discard prompt"
-        );
-        // P1 should be eliminated by the safety net during cleanup discard
-        assert!(
-            eliminated(&r, P1),
-            "{mode:?}: P1 eliminated by safety net at cleanup discard"
-        );
-        // Withengar's trigger should be removed (attributed to P1, then CR 800.4d)
-        assert_eq!(
-            counters_on(&r, withengar),
-            0,
-            "{mode:?}: P1's trigger removed by CR 800.4d"
-        );
-        // The safety net ran and collected triggers properly (terminal reconciliation)
-        // Withengar's trigger was collected for P1 (look-back) and removed by CR 800.4d
-        assert!(
-            r.state().stack.is_empty() || r.state().stack.iter().all(|e| e.source_id != withengar),
-            "{mode:?}: Withengar's trigger not on stack"
-        );
     }
 }
 

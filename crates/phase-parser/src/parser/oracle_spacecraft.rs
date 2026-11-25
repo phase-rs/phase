@@ -1,8 +1,7 @@
-//! CR 721 — Spacecraft pipe-delimited threshold lines ("N+ | body").
+//! CR 702.184b / CR 721 — Station card pipe-delimited threshold lines ("N+ | body").
 //!
-//! Each line of the form `N+ | <body>` attaches a
-//! `StaticCondition::HasCounters { counter_type: "charge", minimum: N, ... }`
-//! gate to whatever ability the body describes:
+//! Each line of the form `N+ | <body>` attaches a charge-counter gate to
+//! whatever ability the body describes:
 //!
 //! - Keyword-only body (e.g. `Flying`, `Flying, trample`) → `AddKeyword`
 //!   continuous modifications on `SelfRef`.
@@ -27,9 +26,10 @@ use nom::Parser;
 
 use super::oracle::{find_activated_colon, has_unimplemented, strip_activated_constraints};
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::parse_effect_chain_with_provenance;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
+use super::oracle_ir::history_provenance::Lowered;
 use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_keyword::parse_granted_keyword_fragment;
 use super::oracle_nom::primitives as nom_primitives;
@@ -44,11 +44,11 @@ use crate::types::ability::{
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 
-/// Counter type gating Spacecraft threshold lines (CR 702.184a / CR 721).
+/// Counter type gating station card threshold lines (CR 702.184b / CR 721).
 pub(crate) const STATION_COUNTER: &str = "charge";
 
 /// CR 721.2a / CR 721.2b: Return the highest `N+` station-symbol threshold
-/// printed on this Spacecraft, reading body lines that `parse_spacecraft_threshold_lines`
+/// printed on this station card, reading body lines that `parse_spacecraft_threshold_lines`
 /// would also recognize. Used by the synthesis layer to derive the
 /// creature-shift threshold from the striation with the printed P/T box,
 /// rather than from reminder text (CR 721.3).
@@ -69,11 +69,11 @@ pub fn max_spacecraft_threshold(lines: &[&str]) -> Option<u32> {
 type SpacecraftThresholdParse = (
     Vec<(usize, StaticIr)>,
     Vec<(usize, TriggerDefinition)>,
-    Vec<(usize, AbilityDefinition)>,
+    Vec<(usize, Lowered<AbilityDefinition>)>,
     Vec<usize>,
 );
 
-/// Parse all `N+ | body` threshold lines in `lines`.
+/// Parse all `N+ | body` threshold lines on a station card (CR 702.184b).
 ///
 /// Returns parsed statics / triggers / activated abilities, plus the set of
 /// consumed line indices (so the main oracle dispatcher can skip them).
@@ -82,7 +82,7 @@ type SpacecraftThresholdParse = (
 /// parser will occupy in the card's full printed-trigger list (i.e. the
 /// caller's `result.triggers.len()` at invocation time). It is forwarded to
 /// `parse_trigger_lines_at_index` so any "and it has this ability" except
-/// clause inside a Spacecraft threshold trigger body resolves to the correct
+/// clause inside a station threshold trigger body resolves to the correct
 /// printed-trigger slot (CR 707.9a).
 pub(crate) fn parse_spacecraft_threshold_lines(
     lines: &[&str],
@@ -112,10 +112,14 @@ pub(crate) fn parse_spacecraft_threshold_lines(
             minimum: threshold,
             maximum: None,
         };
-        let trigger_cond = TriggerCondition::HasCounters {
-            counters: CounterMatch::OfType(CounterType::Generic(STATION_COUNTER.to_string())),
-            minimum: threshold,
-            maximum: None,
+        // CR 721.2a + CR 113.7a: The source must have the ability when
+        // it triggers. The ability then exists independently on the stack.
+        let trigger_cond = TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic(STATION_COUNTER.to_string())),
+                minimum: threshold,
+                maximum: None,
+            }),
         };
         let parser = ThresholdParser {
             card_name,
@@ -166,7 +170,7 @@ struct ThresholdParser<'a> {
 struct ThresholdOutput<'a> {
     statics: &'a mut Vec<(usize, StaticIr)>,
     triggers: &'a mut Vec<(usize, TriggerDefinition)>,
-    abilities: &'a mut Vec<(usize, AbilityDefinition)>,
+    abilities: &'a mut Vec<(usize, Lowered<AbilityDefinition>)>,
 }
 
 impl ThresholdParser<'_> {
@@ -198,7 +202,7 @@ impl ThresholdParser<'_> {
             // CR 707.9a: Index for this trigger in the card's full printed
             // trigger list = caller-provided base + triggers already emitted
             // by this parser. Threading the index makes "has this ability"
-            // retain the correct printed trigger slot for Spacecraft-gated
+            // retain the correct printed trigger slot for station-gated
             // triggers.
             let mut parsed = parse_trigger_lines_at_index(
                 body,
@@ -209,7 +213,12 @@ impl ThresholdParser<'_> {
                 &mut ParseContext::default(),
             );
             for trig in &mut parsed {
-                trig.condition = Some(self.trigger_cond.clone());
+                trig.condition = Some(match trig.condition.take() {
+                    Some(existing) => TriggerCondition::And {
+                        conditions: vec![self.trigger_cond.clone(), existing],
+                    },
+                    None => self.trigger_cond.clone(),
+                });
             }
             for trig in parsed {
                 output.triggers.push((line_idx, trig));
@@ -225,31 +234,38 @@ impl ThresholdParser<'_> {
             let normalized_cost_text = normalize_self_refs_for_static(cost_text, self.card_name);
             let cost = parse_oracle_cost(&normalized_cost_text);
 
-            let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
-            if has_unimplemented(&def) {
+            let mut lowered =
+                parse_effect_chain_with_provenance(&effect_text, AbilityKind::Activated);
+            if has_unimplemented(&lowered.value) {
                 let normalized_effect =
                     normalize_self_refs_for_static(&effect_text, self.card_name);
                 if normalized_effect != effect_text {
-                    let alt = parse_effect_chain(&normalized_effect, AbilityKind::Activated);
-                    if !has_unimplemented(&alt) {
-                        def = alt;
+                    let alt = parse_effect_chain_with_provenance(
+                        &normalized_effect,
+                        AbilityKind::Activated,
+                    );
+                    if !has_unimplemented(&alt.value) {
+                        drop(lowered); // The rejected trial definition and its records are replaced together.
+                        lowered = alt;
+                    } else {
+                        drop(alt); // The rejected alternative and its records are never emitted.
                     }
                 }
             }
-            def.cost = Some(cost);
-            def.description = Some(description.to_string());
+            lowered.value.cost = Some(cost);
+            lowered.value.description = Some(description.to_string());
             let mut restrictions = constraints.restrictions;
             restrictions.push(ActivationRestriction::CounterThreshold {
                 counters: CounterMatch::OfType(CounterType::Generic(STATION_COUNTER.to_string())),
                 minimum: self.threshold,
                 maximum: None,
             });
-            def.activation_restrictions = restrictions;
+            lowered.value.activation_restrictions = restrictions;
             crate::parser::oracle_effect::refuse_linked_paid_cast_in_activated_mana_ability(
-                &mut def,
+                &mut lowered.value,
                 description,
             );
-            output.abilities.push((line_idx, def));
+            output.abilities.push((line_idx, lowered));
             return true;
         }
 
@@ -375,7 +391,7 @@ mod tests {
         (
             statics.into_iter().map(|(_, s)| s.definition).collect(),
             triggers.into_iter().map(|(_, t)| t).collect(),
-            abilities.into_iter().map(|(_, a)| a).collect(),
+            abilities.into_iter().map(|(_, a)| a.value).collect(),
             consumed,
         )
     }
@@ -467,7 +483,8 @@ mod tests {
         assert_eq!(triggers.len(), 1);
         assert!(matches!(
             triggers[0].condition,
-            Some(TriggerCondition::HasCounters { minimum: 1, .. })
+            Some(TriggerCondition::EventTime { ref condition })
+                if matches!(condition.as_ref(), TriggerCondition::HasCounters { minimum: 1, .. })
         ));
         assert!(statics.iter().all(|static_def| matches!(
             static_def.condition,
@@ -487,7 +504,8 @@ mod tests {
         assert_eq!(triggers.len(), 1);
         assert!(matches!(
             triggers[0].condition,
-            Some(TriggerCondition::HasCounters { minimum: 3, .. })
+            Some(TriggerCondition::EventTime { ref condition })
+                if matches!(condition.as_ref(), TriggerCondition::HasCounters { minimum: 3, .. })
         ));
     }
 
@@ -536,6 +554,103 @@ mod tests {
                 maximum: None,
             } if name == "charge"
         )));
+    }
+
+    #[test]
+    fn planet_thresholds_route_by_station_keyword_from_either_source() {
+        use super::super::oracle::parse_oracle_text;
+
+        let station = "Station (Tap another creature you control: Put charge counters equal to its power on this Planet. Station only as a sorcery.)";
+        let planets = [
+            ("Adagia, Windswept Bastion", "12+ | {3}{W}, {T}: Create a token that's a copy of target artifact or enchantment you control, except it's legendary. Activate only as a sorcery."),
+            ("Kavaron, Memorial World", "12+ | {1}{R}, {T}, Sacrifice a land: Create a 2/2 colorless Robot artifact creature token, then creatures you control get +1/+0 and gain haste until end of turn."),
+            ("Uthros, Titanic Godcore", "12+ | {U}, {T}: Add {U} for each artifact you control."),
+            ("Evendo, Waking Haven", "12+ | {G}, {T}: Add {G} for each creature you control."),
+            ("Susur Secundi, Void Altar", "12+ | {1}{B}, {T}, Pay 2 life, Sacrifice a creature: Draw cards equal to the sacrificed creature's power. Activate only as a sorcery."),
+        ];
+        let keywords = ["sTaTiOn".to_string()];
+        for (name, threshold) in planets {
+            let printed = format!("{station}\n{threshold}");
+            for (text, keywords) in [(printed.as_str(), &[][..]), (threshold, &keywords[..])] {
+                let parsed = parse_oracle_text(
+                    text,
+                    name,
+                    keywords,
+                    &["Land".to_string()],
+                    &["Planet".to_string()],
+                );
+                // CR 721.2a: every activated ability in this striation needs 12 charge counters.
+                assert!(
+                    parsed.abilities.iter().any(|ability| {
+                        ability.activation_restrictions.iter().any(|restriction| {
+                            matches!(restriction, ActivationRestriction::CounterThreshold {
+                            counters: CounterMatch::OfType(CounterType::Generic(name)),
+                            minimum: 12,
+                            maximum: None,
+                        } if name == STATION_COUNTER)
+                        })
+                    }),
+                    "{name}: {:?}",
+                    parsed.abilities
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_station_d20_keeps_its_open_ended_result_row() {
+        use super::super::oracle::parse_oracle_text;
+        use crate::types::ability::Effect;
+
+        let parsed = parse_oracle_text(
+            "Each player sacrifices a nontoken creature of their choice. Roll a d20 and add the toughness of the creature you sacrificed this way.\n1—14 | Return a creature card put into a graveyard this way to the battlefield under your control.\n15+ | Return up to two creature cards put into graveyards this way to the battlefield under your control.",
+            "Danse Macabre",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        assert!(parsed
+            .abilities
+            .iter()
+            .flat_map(|ability| {
+                std::iter::successors(Some(ability), |node| node.sub_ability.as_deref())
+            })
+            .any(|ability| matches!(
+                ability.effect.as_ref(),
+                Effect::RollDie { results, .. } if results.iter().any(|row| row.min == 15)
+            )));
+    }
+
+    #[test]
+    fn station_trigger_gate_preserves_printed_intervening_if() {
+        // Romulan Bird-of-Prey's printed intervening-if sits outside its striation.
+        // No printed station card puts that shape inside a threshold.
+        let body = "Whenever another creature dies, if you control an artifact, draw a card.";
+        let (_, plain, _, _) = spacecraft_test_lines(
+            &[&format!("1+ | {body}")],
+            "Test",
+            PrintedTriggerIndex::from_slot_for_test(0),
+        );
+        let original = parse_trigger_lines_at_index(
+            body,
+            "Test",
+            Some(PrintedTriggerIndex::from_slot_for_test(0)),
+            &mut ParseContext::default(),
+        );
+        let printed = original[0]
+            .condition
+            .clone()
+            .expect("printed intervening-if");
+        let Some(TriggerCondition::And { conditions }) = &plain[0].condition else {
+            panic!("expected station gate and printed condition");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert!(matches!(
+            &conditions[0],
+            TriggerCondition::EventTime { condition }
+                if matches!(condition.as_ref(), TriggerCondition::HasCounters { minimum: 1, .. })
+        ));
+        assert_eq!(conditions[1], printed);
     }
 
     #[test]

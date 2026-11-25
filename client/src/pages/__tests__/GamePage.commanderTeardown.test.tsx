@@ -142,6 +142,9 @@ vi.mock("../../stores/gameStore", async () => ({
   canExportAuthoritativeState: (
     await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
   ).canExportAuthoritativeState,
+  seatSource: (
+    await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
+  ).seatSource,
   loadActiveGame: vi.fn(() => null),
   saveActiveGame: vi.fn(),
   clearActiveGame: vi.fn(),

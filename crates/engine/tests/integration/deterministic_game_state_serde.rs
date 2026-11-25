@@ -6,7 +6,9 @@ use engine::game::combat::{
 };
 use engine::game::dungeon::DungeonProgress;
 use engine::game::game_object::ObjectIncarnationRefExt;
-use engine::game::game_object::{BackFaceData, GameObject, ProtectionStartSnapshot};
+use engine::game::game_object::{
+    BackFaceData, GameObject, ProtectionStartKey, ProtectionStartSnapshot,
+};
 use engine::game::printed_cards::intrinsic_copiable_values;
 use engine::types::ability::{
     AbilityCost, ControllerRef, CopyTargetPurpose, Effect, KeywordAction, ReplacementCondition,
@@ -18,7 +20,7 @@ use engine::types::counter::CounterType;
 use engine::types::definitions::Definitions;
 use engine::types::events::{BoundActivationCost, GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    AbilityActivationRecord, ActivationTargetFact, AutoPassMode, DepartedStackSpell,
+    AbilityActivationRecord, ActivationTargetFact, AutoPassMode, CyclingRecord, DepartedStackSpell,
     LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileLki, LinkedExileSnapshot,
     PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry,
     StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
@@ -117,11 +119,13 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::cards_drawn_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::spells_cast_this_game", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::spells_cast_this_game_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::cycles_completed_this_game_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::spells_cast_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::abilities_activated_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lands_played_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::attacking_creatures_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::attacked_defenders_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::attacked_players_directly_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::attacked_defenders_last_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::creature_attacked_defenders_this_turn", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::cards_discarded_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -206,6 +210,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "crew_activated_this_turn",
         "crew_resolved_this_turn",
         "crew_history_this_turn",
+        "creatures_fought_this_turn",
         "exerted_this_turn",
         "graveyard_cast_permissions_used",
         "graveyard_cast_permissions_used_per_type",
@@ -274,15 +279,6 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         game_state,
         "GameState",
         None,
-        "post_replacement_token_choice_applied",
-        "Option<HashSet>",
-        Classification::Canonical(OPTION_HASH_SET),
-    );
-    add_spec(
-        &mut specs,
-        game_state,
-        "GameState",
-        None,
         "creature_types_dealt_combat_damage_this_turn",
         "im::HashSet",
         Classification::Canonical(IM_HASH_SET),
@@ -317,6 +313,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "cards_drawn_this_turn",
         "spells_cast_this_game",
         "spells_cast_this_game_by_player",
+        "cycles_completed_this_game_by_player",
         "spells_cast_this_turn_by_player",
         "lands_played_this_turn_by_player",
         "attacking_creatures_this_turn",
@@ -379,6 +376,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
     );
     for field in [
         "attacked_defenders_this_turn",
+        "attacked_players_directly_this_turn",
         "creature_attacked_defenders_this_turn",
     ] {
         add_spec(
@@ -462,16 +460,31 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "HashMap",
         Classification::Canonical(HASH_MAP_ENTRIES),
     );
+    // CR 602.5c: the activation counters are keyed by the per-acquisition
+    // `AbilityUsageKey`, so they name the dedicated adapter (`tuple_key_map`
+    // stays with the index-keyed resolution tally). The departed-incarnation
+    // twins name their own adapter, which reuses the usage-key encoding under
+    // a leading incarnation segment.
     for (field, shape, adapter) in [
         (
             "activated_abilities_this_turn",
             "im::HashMap",
-            "with=\"tuple_key_map\"",
+            "with=\"ability_usage_key_map\"",
         ),
         (
             "activated_abilities_this_game",
             "im::HashMap",
-            "with=\"tuple_key_map\"",
+            "with=\"ability_usage_key_map\"",
+        ),
+        (
+            "departed_activated_abilities_this_turn",
+            "im::HashMap",
+            "with=\"departed_activation_tally_map\"",
+        ),
+        (
+            "departed_activated_abilities_this_game",
+            "im::HashMap",
+            "with=\"departed_activation_tally_map\"",
         ),
         (
             "ability_resolutions_this_turn",
@@ -616,6 +629,13 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             HASH_SET,
         ),
         (
+            "PendingBatchDeliveries",
+            None,
+            "pre_entry_battlefield",
+            "Option<HashSet>",
+            OPTION_HASH_SET,
+        ),
+        (
             "PendingBatchZoneChangeCause",
             Some("Draw"),
             "seed_applied",
@@ -647,6 +667,13 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         ("PendingDrawDelivery", None, "applied", "HashSet", HASH_SET),
         ("DrawSequenceFrame", None, "applied", "HashSet", HASH_SET),
         ("DrawDealerSeat", None, "applied", "HashSet", HASH_SET),
+        (
+            "PendingHordeReveal",
+            Some("TokenCreation"),
+            "before",
+            "HashSet",
+            HASH_SET,
+        ),
     ] {
         add_spec(
             &mut specs,
@@ -720,9 +747,17 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             "src/game/game_object.rs",
             "GameObject",
             None,
-            "protection_start_exempt_attachments",
+            "protection_start_snapshots",
             "HashMap",
             Classification::Canonical(HASH_MAP_ENTRIES),
+        ),
+        (
+            "src/game/game_object.rs",
+            "GameObject",
+            None,
+            "legacy_protection_start_exempt_attachments",
+            "HashMap",
+            Classification::DeserializeOnlyOrRuntime,
         ),
         (
             "src/game/game_object.rs",
@@ -885,6 +920,22 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::DeserializeOnlyOrRuntime,
         ),
         (
+            "src/game/zone_pipeline.rs",
+            "MemberDeliveryOwner",
+            None,
+            "population_devour_snapshot",
+            "Option<HashSet>",
+            Classification::DeserializeOnlyOrRuntime,
+        ),
+        (
+            "src/types/game_state.rs",
+            "StagedBatchDelivery",
+            None,
+            "population_devour_snapshot",
+            "Option<HashSet>",
+            Classification::Canonical(OPTION_HASH_SET),
+        ),
+        (
             "src/game/effects/choose_one_of.rs",
             "PromptRequest",
             None,
@@ -954,6 +1005,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::Canonical(HASH_SET),
         );
     }
+    add_spec(
+        &mut specs,
+        "src/types/proposed_event.rs",
+        "TokenBatch",
+        None,
+        "applied",
+        "HashSet",
+        Classification::Canonical(HASH_SET),
+    );
 
     for owner in NUMERIC_MAP_ROUND_TRIP_OWNERS {
         let spec = specs.get_mut(owner.id).unwrap_or_else(|| {
@@ -1338,7 +1398,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        61,
+        63,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -1427,6 +1487,10 @@ fn build_populated_state(reverse: bool) -> GameState {
         [PlayerId(0), PlayerId(1)]
     };
     state.attacked_defenders_this_turn = outer_order
+        .into_iter()
+        .map(|player| (player, inner_order.into_iter().collect()))
+        .collect();
+    state.attacked_players_directly_this_turn = outer_order
         .into_iter()
         .map(|player| (player, inner_order.into_iter().collect()))
         .collect();
@@ -1628,6 +1692,7 @@ fn assert_representative_membership(state: &GameState) {
     assert_eq!(state.ring_level.len(), 2);
     assert_eq!(state.enduring_story.len(), 2);
     assert_eq!(state.attacked_defenders_this_turn.len(), 2);
+    assert_eq!(state.attacked_players_directly_this_turn.len(), 2);
     assert_eq!(state.steps_to_skip.len(), 2);
     assert_eq!(state.objects.len(), 6);
     assert_eq!(
@@ -1765,6 +1830,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(1),
             LiminalEntry {
+                copy_settlement: None,
                 object: LiminalEntrant::Token(TokenProjection::materialize(first.clone())),
                 name: "First liminal".to_string(),
                 source_id: ObjectId(11),
@@ -1786,6 +1852,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(2),
             LiminalEntry {
+                copy_settlement: None,
                 object: LiminalEntrant::Token(TokenProjection::materialize(second.clone())),
                 name: "Second liminal".to_string(),
                 source_id: ObjectId(22),
@@ -1964,6 +2031,21 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (PlayerId(0), im::Vector::from(vec![first_spell])),
         (PlayerId(1), im::Vector::from(vec![second_spell])),
     ]);
+    let first_cycle = CyclingRecord {
+        name: "First cycled card".to_owned(),
+        turn: 1,
+    };
+    let second_cycle = CyclingRecord {
+        name: "Second cycled card".to_owned(),
+        turn: 2,
+    };
+    state.cycles_completed_this_game_by_player = HashMap::from([
+        (PlayerId(0), im::Vector::unit(first_cycle.clone())),
+        (
+            PlayerId(1),
+            im::Vector::from(vec![first_cycle, second_cycle]),
+        ),
+    ]);
     state.lands_played_this_turn_by_player = HashMap::from([
         (
             PlayerId(0),
@@ -1980,6 +2062,16 @@ fn build_all_direct_numeric_maps_state() -> GameState {
     ]);
     state.attacking_creatures_this_turn = HashMap::from([(PlayerId(0), 1), (PlayerId(1), 2)]);
     state.attacked_defenders_this_turn = HashMap::from([
+        (
+            PlayerId(0),
+            [PlayerId(1), PlayerId(0)].into_iter().collect(),
+        ),
+        (
+            PlayerId(1),
+            [PlayerId(0), PlayerId(1)].into_iter().collect(),
+        ),
+    ]);
+    state.attacked_players_directly_this_turn = HashMap::from([
         (
             PlayerId(0),
             [PlayerId(1), PlayerId(0)].into_iter().collect(),
@@ -2255,11 +2347,13 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "cards_drawn_this_turn",
         "spells_cast_this_game",
         "spells_cast_this_game_by_player",
+        "cycles_completed_this_game_by_player",
         "spells_cast_this_turn_by_player",
         "abilities_activated_this_turn_by_player",
         "lands_played_this_turn_by_player",
         "attacking_creatures_this_turn",
         "attacked_defenders_this_turn",
+        "attacked_players_directly_this_turn",
         "attacked_defenders_last_turn",
         "creature_attacked_defenders_this_turn",
         "cards_discarded_this_turn_by_player",
@@ -2280,7 +2374,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        46,
+        48,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {
@@ -2797,6 +2891,9 @@ fn real_game_state_hash_owners_are_canonical_and_round_trip_across_all_persisten
     );
     assert!(forward_json.contains("\"ring_level\":{\"0\":1,\"1\":2}"));
     assert!(forward_json.contains("\"attacked_defenders_this_turn\":{\"0\":[0,1],\"1\":[0,1]}"));
+    assert!(
+        forward_json.contains("\"attacked_players_directly_this_turn\":{\"0\":[0,1],\"1\":[0,1]}")
+    );
     assert!(forward_json.contains("\"attacked_defenders_last_turn\":{\"0\":[0,1],\"1\":[0,1]}"));
     assert!(forward_json
         .contains("\"steps_to_skip\":[{\"PreCombatMain\":1,\"PostCombatMain\":2},{\"End\":3}]"));
@@ -2986,7 +3083,7 @@ fn populated_stack_resolution_session_round_trips_deterministically_through_raw_
 }
 
 #[test]
-fn protection_tuple_map_round_trips_deterministically_through_all_persistence_forms() {
+fn protection_start_snapshot_map_round_trips_deterministically_through_all_persistence_forms() {
     let mut state = GameState::new(FormatConfig::standard(), 2, 42);
     let mut object = GameObject::new(
         ObjectId(1),
@@ -2998,28 +3095,44 @@ fn protection_tuple_map_round_trips_deterministically_through_all_persistence_fo
     assert!(
         serde_json::to_value(&object)
             .expect("empty protection fixture serializes")
-            .get("protection_start_exempt_attachments")
+            .get("protection_start_snapshots")
             .is_none(),
         "the empty transient map remains omitted"
     );
 
-    let lower_key = (0, 2, ObjectId(1));
+    let host = engine::types::identifiers::ObjectIncarnationRef::of(ObjectId(1), 0);
+    let lower_key = ProtectionStartKey {
+        occurrence: engine::types::layers::ProtectionGrantOccurrence::Static {
+            definition_index: 0,
+        },
+        mod_index: 2,
+        host,
+    };
     let lower_snapshot = ProtectionStartSnapshot {
         resolved_quality: ProtectionTarget::Color(ManaColor::White),
         attachment_ids: vec![ObjectId(3), ObjectId(4)],
     };
-    let upper_key = (1, 0, ObjectId(1));
+    let upper_key = ProtectionStartKey {
+        occurrence: engine::types::layers::ProtectionGrantOccurrence::Granted {
+            origin: engine::types::ability::TriggerProducerOrigin::Transient {
+                continuous_effect_id: 7,
+                modification_index: 0,
+            },
+        },
+        mod_index: 0,
+        host,
+    };
     let upper_snapshot = ProtectionStartSnapshot {
         resolved_quality: ProtectionTarget::CardType("Artifact".to_string()),
         attachment_ids: vec![ObjectId(5)],
     };
     object
-        .protection_start_exempt_attachments
-        .insert(upper_key, upper_snapshot.clone());
+        .protection_start_snapshots
+        .insert(upper_key.clone(), upper_snapshot.clone());
     object
-        .protection_start_exempt_attachments
-        .insert(lower_key, lower_snapshot.clone());
-    assert_eq!(object.protection_start_exempt_attachments.len(), 2);
+        .protection_start_snapshots
+        .insert(lower_key.clone(), lower_snapshot.clone());
+    assert_eq!(object.protection_start_snapshots.len(), 2);
     state.objects.insert(ObjectId(1), object);
 
     let mut opposite_insertion = state.clone();
@@ -3027,7 +3140,7 @@ fn protection_tuple_map_round_trips_deterministically_through_all_persistence_fo
         .objects
         .get_mut(&ObjectId(1))
         .expect("fixture object exists")
-        .protection_start_exempt_attachments;
+        .protection_start_snapshots;
     opposite_map.clear();
     opposite_map.insert(lower_key, lower_snapshot);
     opposite_map.insert(upper_key, upper_snapshot);
@@ -3042,17 +3155,33 @@ fn protection_tuple_map_round_trips_deterministically_through_all_persistence_fo
     let bare_value: serde_json::Value =
         serde_json::from_str(&bare_bytes).expect("bare state bytes are JSON");
     assert_eq!(
-        bare_value["objects"]["1"]["protection_start_exempt_attachments"],
+        bare_value["objects"]["1"]["protection_start_snapshots"],
         serde_json::json!([
             [
-                [0, 2, 1],
+                {
+                    "occurrence": {"type": "Static", "data": {"definition_index": 0}},
+                    "mod_index": 2,
+                    "host": {"object_id": 1, "incarnation": 0}
+                },
                 {
                     "resolved_quality": {"Color": "White"},
                     "attachment_ids": [3, 4]
                 }
             ],
             [
-                [1, 0, 1],
+                {
+                    "occurrence": {
+                        "type": "Granted",
+                        "data": {
+                            "origin": {
+                                "type": "Transient",
+                                "data": {"continuous_effect_id": 7, "modification_index": 0}
+                            }
+                        }
+                    },
+                    "mod_index": 0,
+                    "host": {"object_id": 1, "incarnation": 0}
+                },
                 {
                     "resolved_quality": {"CardType": "Artifact"},
                     "attachment_ids": [5]
@@ -3069,12 +3198,12 @@ fn protection_tuple_map_round_trips_deterministically_through_all_persistence_fo
             .objects
             .get(&ObjectId(1))
             .expect("restored bare object exists")
-            .protection_start_exempt_attachments,
+            .protection_start_snapshots,
         state
             .objects
             .get(&ObjectId(1))
             .expect("source fixture object exists")
-            .protection_start_exempt_attachments
+            .protection_start_snapshots
     );
     assert_eq!(
         serde_json::to_string(&bare_restored).expect("restored bare state reserializes"),
@@ -3104,21 +3233,56 @@ fn protection_tuple_map_round_trips_deterministically_through_all_persistence_fo
                 .objects
                 .get(&ObjectId(1))
                 .expect("restored persisted object exists")
-                .protection_start_exempt_attachments,
+                .protection_start_snapshots,
             state
                 .objects
                 .get(&ObjectId(1))
                 .expect("source fixture object exists")
-                .protection_start_exempt_attachments,
+                .protection_start_snapshots,
             "{persistence_name} persistence restores every protection snapshot"
         );
     }
 }
 
+/// CR 702.16p: an older save stores start snapshots under the slot key
+/// `(definition index, modification index, host id)` in
+/// `protection_start_exempt_attachments`. It still decodes, into the
+/// migration-only map, and is never written back.
+#[test]
+fn legacy_protection_start_snapshots_decode_into_the_migration_map() {
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    let object = GameObject::new(
+        ObjectId(1),
+        CardId(1),
+        PlayerId(0),
+        "Protection Fixture".to_string(),
+        Zone::Battlefield,
+    );
+    state.objects.insert(ObjectId(1), object);
+    let mut value = serde_json::to_value(&state).expect("state serializes");
+    value["objects"]["1"]["protection_start_exempt_attachments"] = serde_json::json!([[
+        [0, 2, 1],
+        {"resolved_quality": {"Color": "White"}, "attachment_ids": [3, 4]}
+    ]]);
+    let decoded: GameState = serde_json::from_value(value).expect("legacy key decodes");
+    let object = &decoded.objects[&ObjectId(1)];
+    assert!(object.protection_start_snapshots.is_empty());
+    assert_eq!(
+        object.legacy_protection_start_exempt_attachments[&(0, 2, ObjectId(1))].attachment_ids,
+        vec![ObjectId(3), ObjectId(4)]
+    );
+    assert!(
+        serde_json::to_value(&decoded).expect("decoded state serializes")["objects"]["1"]
+            .get("protection_start_exempt_attachments")
+            .is_none(),
+        "the legacy field is read, never written"
+    );
+}
+
 /// S1: the block-history pair sets (`CombatState::creature_blocked_attackers_this_combat`,
 /// `GameState::creature_blocked_attackers_this_turn`) round-trip through every
 /// persistence form with insertion-order-independent, `Ord`-sorted bytes —
-/// the model is `protection_tuple_map_round_trips_deterministically_through_all_persistence_forms`.
+/// the model is `protection_start_snapshot_map_round_trips_deterministically_through_all_persistence_forms`.
 #[test]
 fn block_history_pair_sets_round_trip_through_all_persistence_forms() {
     let low = BlockHistoryPair {

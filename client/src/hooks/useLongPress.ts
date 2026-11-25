@@ -2,6 +2,16 @@ import { useCallback, useEffect, useRef } from "react";
 
 const MOVE_THRESHOLD = 10;
 
+/** The default hold, in milliseconds, after which a press is a long press rather than a tap. */
+export const LONG_PRESS_DELAY_MS = 500;
+
+/**
+ * Marks an element that handles its own taps, such as a tooltip trigger that
+ * opens on a tap (`GameplayTooltip`'s `touch="toggle"`). A long press that
+ * starts inside one leaves the pointer uncaptured (see `onPointerDown`).
+ */
+export const OWNS_TAP_ATTRIBUTE = "data-owns-tap";
+
 interface UseLongPressOptions {
   delay?: number;
 }
@@ -18,7 +28,7 @@ export function useLongPress(
   callback: () => void,
   options?: UseLongPressOptions,
 ) {
-  const { delay = 500 } = options ?? {};
+  const { delay = LONG_PRESS_DELAY_MS } = options ?? {};
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const firedRef = useRef(false);
   const startPos = useRef<{ x: number; y: number } | null>(null);
@@ -40,10 +50,22 @@ export function useLongPress(
       firedRef.current = false;
       pointerIdRef.current = e.pointerId;
       startPos.current = { x: e.clientX, y: e.clientY };
-      try {
-        e.currentTarget.setPointerCapture?.(e.pointerId);
-      } catch {
-        // Pointer capture is best-effort; long-press still works without it.
+      // Capture keeps the rest of the press on this element, but it also sends
+      // the press's `pointerup` and `click` here rather than to the element
+      // under the finger. When the press starts inside a descendant that
+      // handles its own taps, leave the pointer where it is so the tap reaches
+      // it. A touch pointer is captured to the element under the finger
+      // anyway, and its move, up and cancel events bubble here, so the long
+      // press and its cancellation work the same.
+      const tapOwner = e.target instanceof Element ? e.target.closest(`[${OWNS_TAP_ATTRIBUTE}]`) : null;
+      const descendantOwnsTap =
+        tapOwner !== null && tapOwner !== e.currentTarget && e.currentTarget.contains(tapOwner);
+      if (!descendantOwnsTap) {
+        try {
+          e.currentTarget.setPointerCapture?.(e.pointerId);
+        } catch {
+          // Pointer capture is best-effort; long-press still works without it.
+        }
       }
       timerRef.current = setTimeout(() => {
         firedRef.current = true;

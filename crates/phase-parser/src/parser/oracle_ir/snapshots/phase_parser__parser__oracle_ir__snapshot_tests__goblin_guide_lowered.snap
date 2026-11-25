@@ -39,6 +39,13 @@ expression: "&lowered"
           "kind": "Spell",
           "effect": {
             "type": "ChangeZone",
+            "actor": {
+              "Player": {
+                "player": {
+                  "type": "DefendingPlayer"
+                }
+              }
+            },
             "origin": null,
             "destination": "Hand",
             "target": {

@@ -10,6 +10,7 @@ import { useUiStore } from "../../stores/uiStore";
 import type { DiceRollPayload } from "../../stores/uiStore";
 import type { Coin3D as Coin3DImpl } from "./dice3d/Coin3D.tsx";
 import type { Dice3D as Dice3DImpl } from "./dice3d/Dice3D.tsx";
+import { BANNER_TITLE_GUTTERS, useBannerTitleFit } from "./bannerTitle";
 import { loadCoin3DModule, loadDice3DModule } from "./dice3d/loaders";
 import { safeLazy, warnOnce } from "./dice3d/safeLazy";
 
@@ -48,6 +49,11 @@ const IGNORED = "100,116,139"; // slate-500 — a dropped/ignored die, still sho
 const COIN_WON = "52,211,153"; // emerald-400 — the flipper won
 const COIN_LOST = "251,113,133"; // rose-400 — the flipper lost
 
+/** The smallest the 36px (`text-4xl`) roll-winner caption shrinks to before it wraps instead. */
+const WINNER_CAPTION_MINIMUM_REM = 1.5;
+/** The smallest the 24px (`text-2xl`) coin-flip outcome shrinks to before it wraps instead. */
+const COIN_OUTCOME_MINIMUM_REM = 1.125;
+
 let nextRollKey = 1;
 const rollKeys = new WeakMap<DiceRollPayload, string>();
 
@@ -69,20 +75,29 @@ function hasWebGL(): boolean {
  * Full-screen dice-roll / coin-flip moment. Gated on `uiStore.diceRoll` (set by
  * `flashDiceRoll`), it animates the engine's already-known result in real 3D.
  * Mirrors the TurnBanner pattern: `fixed inset-0`, AnimatePresence,
- * pointer-events-none. Falls back to a static result under reduced-motion or
- * when WebGL is unavailable — the roll is cosmetic, so degrading is safe.
+ * pointer-events-none. Falls back to a static result under reduced-motion, when
+ * WebGL is unavailable, or when an ability roll never reports its landing
+ * (`uiStore.diceRollStalled`). The roll is cosmetic, so degrading is safe.
  *
  * Sits at `z-[55]` — above the `z-50` board overlays (turn banner, mulligan) so
  * the roll is never occluded mid-animation. The starting-player contest is also
  * sequenced ahead of the mulligan UI in `GamePage` (CR 103.1 before CR 103.5),
  * so the two never compete; the raised z-index is defense-in-depth for in-game
  * rolls that can fire while other overlays are up.
+ *
+ * Its side gutters bound the captions that name a player (the roll winner, a
+ * coin flip's outcome): each sits in a row as wide as the overlay inside them,
+ * and fits itself to that row (`bannerTitle`).
  */
 export function DiceRollOverlay() {
   const diceRoll = useUiStore((s) => s.diceRoll);
+  const diceRollStalled = useUiStore((s) => s.diceRollStalled);
   const skipDiceRoll = useUiStore((s) => s.skipDiceRoll);
   const shouldReduceMotion = useReducedMotion();
   const { t } = useTranslation();
+  // A roll whose landing never arrived shows its static result, as one whose
+  // renderer threw does (the boundary's fallback).
+  const animate = !shouldReduceMotion && hasWebGL() && !diceRollStalled;
 
   // Tap-to-skip via keyboard: Escape dismisses the current roll (advancing to
   // the next queued one, or clearing the overlay). Bound only while a roll is
@@ -123,7 +138,7 @@ export function DiceRollOverlay() {
     <AnimatePresence>
       {diceRoll && (
         <motion.div
-          className="fixed inset-0 z-[55] flex items-center justify-center pointer-events-none"
+          className={`fixed inset-0 z-[55] flex items-center justify-center pointer-events-none ${BANNER_TITLE_GUTTERS}`}
           role="status"
           aria-live="polite"
           initial={{ opacity: 0 }}
@@ -141,15 +156,14 @@ export function DiceRollOverlay() {
             className="absolute inset-0 cursor-pointer bg-[radial-gradient(circle_at_center,rgba(2,6,23,0.55),rgba(2,6,23,0.86)_70%)] backdrop-blur-[2px] pointer-events-auto"
           />
           {/* Keyed by payload identity so each roll the FIFO advances to gets a
-              fresh component instance (resets settle state, re-runs the 3D mount). */}
+              fresh component instance (resets settle state, re-runs the 3D mount),
+              and by `animate` so a roll that falls back to its static face
+              remounts already landed. */}
           <DiceRollBoundary
-            key={diceRollKey(diceRoll)}
+            key={`${diceRollKey(diceRoll)}:${animate ? "animated" : "static"}`}
             fallback={<DiceRollContent payload={diceRoll} animate={false} />}
           >
-            <DiceRollContent
-              payload={diceRoll}
-              animate={!shouldReduceMotion && hasWebGL()}
-            />
+            <DiceRollContent payload={diceRoll} animate={animate} />
           </DiceRollBoundary>
           <motion.span
             className="pointer-events-none absolute bottom-8 text-xs font-medium uppercase tracking-[0.2em] text-slate-400/70"
@@ -169,9 +183,9 @@ export function DiceRollOverlay() {
  * Keeps a failure inside the cosmetic dice/coin render local rather than letting
  * it reach the app-level ErrorBoundary, which would unmount the whole game
  * route. The animation is dropped but the engine's result is not: `fallback`
- * re-renders the same payload statically (first-player caption, turn order,
- * coin outcome). The error is still reported to telemetry like any other
- * caught render error, so a real WebGL crash does not go unseen.
+ * re-renders the same payload statically (roll-winner caption, coin outcome).
+ * The error is still reported to telemetry like any other caught render error,
+ * so a real WebGL crash does not go unseen.
  */
 class DiceRollBoundary extends Component<
   { children: ReactNode; fallback: ReactNode },
@@ -206,60 +220,26 @@ function diceRollKey(payload: DiceRollPayload): string {
 function DiceRollContent({ payload, animate }: { payload: DiceRollPayload; animate: boolean }) {
   const { t } = useTranslation();
   const speedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
+  const settleDiceRoll = useUiStore((s) => s.settleDiceRoll);
+  // An ability roll's close countdown starts when its dice or coin land, not
+  // at mount: the 3D renderer only starts once its lazy chunk and WebGL are
+  // ready, so a countdown from mount could close the overlay before the result
+  // shows. The starting-player contest holds until the player dismisses it, so
+  // it has no countdown to start.
+  const onLanded = useCallback(() => settleDiceRoll(payload), [settleDiceRoll, payload]);
 
   const playerLabel = (playerId: number): string =>
     playerId === getPlayerId() ? t("diceRoll.you") : getOpponentDisplayName(playerId);
 
   if (payload.kind === "coin") {
-    // No engine-named face: `won` (relative to the flipping player) maps to a
-    // heads/tails depiction. We show "heads" on a win — a pure display choice.
-    const face = payload.won ? "heads" : "tails";
-    const accent = payload.won ? COIN_WON : COIN_LOST;
-    const outcome = payload.won
-      ? t("diceRoll.wonCoinFlip", { name: playerLabel(payload.playerId) })
-      : t("diceRoll.lostCoinFlip", { name: playerLabel(payload.playerId) });
     return (
-      <div className="relative flex flex-col items-center gap-4 select-none">
-        <span className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-400">
-          {t("diceRoll.coinFlip")}
-        </span>
-        <DieFace animate={animate} accent={accent} emphasize>
-          {(handleSettle) =>
-            animate ? (
-              <Suspense fallback={<DiePlaceholder label="" />}>
-                <Coin3D
-                  face={face}
-                  speedMultiplier={speedMultiplier}
-                  onSettle={handleSettle}
-                  size={DIE_SIZE}
-                  labels={{ heads: t("diceRoll.heads"), tails: t("diceRoll.tails") }}
-                />
-              </Suspense>
-            ) : (
-              <DiePlaceholder label={t(`diceRoll.${face}`)} />
-            )
-          }
-        </DieFace>
-        <motion.span
-          className="rounded-full border px-5 py-2 text-2xl font-extrabold uppercase tracking-wide"
-          initial={{ opacity: 0, scale: 0.82, y: 8 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          transition={{
-            delay: animate ? 1.35 / Math.max(speedMultiplier, 0.01) : 0,
-            type: "spring",
-            stiffness: 260,
-            damping: 20,
-          }}
-          style={{
-            color: `rgb(${accent})`,
-            borderColor: `rgba(${accent},0.7)`,
-            backgroundColor: `rgba(${accent},0.14)`,
-            boxShadow: `0 0 28px rgba(${accent},0.32)`,
-          }}
-        >
-          {outcome}
-        </motion.span>
-      </div>
+      <CoinFlip
+        payload={payload}
+        animate={animate}
+        speedMultiplier={speedMultiplier}
+        playerLabel={playerLabel}
+        onLanded={onLanded}
+      />
     );
   }
 
@@ -271,19 +251,116 @@ function DiceRollContent({ payload, animate }: { payload: DiceRollPayload; anima
       playerLabel={playerLabel}
     />
   ) : (
-    <InGameDice payload={payload} animate={animate} speedMultiplier={speedMultiplier} />
+    <InGameDice
+      payload={payload}
+      animate={animate}
+      speedMultiplier={speedMultiplier}
+      onLanded={onLanded}
+    />
   );
 }
 
 /**
- * Starting-player contest (CR 103.1): the d20 roll-off, rendered one round at a
- * time. Round 0 rolls every seat; on a tie the tied-max group rerolls in the
- * next round (the others drop out), until one seat is the unique high roller —
- * the engine's authoritative `winner`. Rendering round-by-round (rather than
+ * A coin flip, landing on the engine's already-known result. Nothing gives the
+ * result away before the coin lands: the frame stays neutral, and the won/lost
+ * colour, glow and banner all arrive with the landing, the way ContestDice
+ * holds its caption until `revealed`.
+ */
+function CoinFlip({
+  payload,
+  animate,
+  speedMultiplier,
+  playerLabel,
+  onLanded,
+}: {
+  payload: Extract<DiceRollPayload, { kind: "coin" }>;
+  animate: boolean;
+  speedMultiplier: number;
+  playerLabel: (playerId: number) => string;
+  onLanded: () => void;
+}) {
+  const { t } = useTranslation();
+  // The static face has no flip to wait for, so it starts landed.
+  const [settled, setSettled] = useState(!animate);
+  const onSettle = useCallback(() => setSettled(true), []);
+
+  useEffect(() => {
+    if (settled) onLanded();
+  }, [settled, onLanded]);
+
+  // No engine-named face: `won` (relative to the flipping player) maps to a
+  // heads/tails depiction. We show "heads" on a win, a pure display choice.
+  const face = payload.won ? "heads" : "tails";
+  const resultAccent = payload.won ? COIN_WON : COIN_LOST;
+  const outcome = payload.won
+    ? t("diceRoll.wonCoinFlip", { name: playerLabel(payload.playerId) })
+    : t("diceRoll.lostCoinFlip", { name: playerLabel(payload.playerId) });
+  const outcomeRef = useBannerTitleFit(outcome, COIN_OUTCOME_MINIMUM_REM);
+
+  return (
+    <div className="relative flex w-full flex-col items-center gap-4 select-none">
+      <span className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-400">
+        {t("diceRoll.coinFlip")}
+      </span>
+      <DieFace
+        animate={animate}
+        accent={settled ? resultAccent : NEUTRAL}
+        emphasize={settled}
+        onSettle={onSettle}
+      >
+        {(handleSettle) =>
+          animate ? (
+            <Suspense fallback={<DiePlaceholder label="" />}>
+              <Coin3D
+                face={face}
+                speedMultiplier={speedMultiplier}
+                onSettle={handleSettle}
+                size={DIE_SIZE}
+                labels={{ heads: t("diceRoll.heads"), tails: t("diceRoll.tails") }}
+              />
+            </Suspense>
+          ) : (
+            <DiePlaceholder label={t(`diceRoll.${face}`)} />
+          )
+        }
+      </DieFace>
+      {/* Holds a one-line banner's height so the coin doesn't shift when it
+          lands. A long name that wraps grows the row instead of spilling out.
+          As wide as the overlay inside its gutters: the banner's line. */}
+      <div className="flex min-h-14 w-full items-center justify-center">
+        {settled && (
+          <motion.span
+            ref={outcomeRef}
+            className="rounded-full border px-5 py-2 text-center text-balance text-2xl font-extrabold uppercase tracking-wide"
+            initial={{ opacity: 0, scale: 0.82, y: 8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            transition={{ type: "spring", stiffness: 260, damping: 20 }}
+            style={{
+              color: `rgb(${resultAccent})`,
+              borderColor: `rgba(${resultAccent},0.7)`,
+              backgroundColor: `rgba(${resultAccent},0.14)`,
+              boxShadow: `0 0 28px rgba(${resultAccent},0.32)`,
+            }}
+          >
+            {outcome}
+          </motion.span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Starting-player contest (CR 103.1): the d20 roll-off that decides who chooses
+ * the starting player, rendered one round at a time. Round 0 rolls every seat;
+ * on a tie the tied-max group rerolls in the next round (the others drop out),
+ * until one seat is the unique high roller — the engine's authoritative
+ * `winner`. Rendering round-by-round (rather than
  * collapsing to last-roll-per-player) keeps the winner the visible high roller
  * of the round shown; the prior collapse could surface an eliminated seat's
  * higher earlier die as if it beat the winner's lower reroll. `rounds` and
- * `winner` come straight from the engine event — never recomputed here.
+ * `winner` come straight from the engine event — never recomputed here; the
+ * caption names the roll winner, not the starting player.
  */
 function ContestDice({
   payload,
@@ -313,12 +390,13 @@ function ContestDice({
 
   // Walk the reroll rounds: once a non-final round's dice settle, hold a beat so
   // the tie reads, then advance — the tied group rerolls (remounted by key).
+  // The multiplier scales durations (2 is slowest), so the beat multiplies by it.
   useEffect(() => {
     if (!animate || isFinalRound || !roundSettled) return;
     const id = setTimeout(() => {
       setRoundIndex((r) => r + 1);
       setSettledCount(0);
-    }, 1100 / speedMultiplier);
+    }, 1100 * speedMultiplier);
     return () => clearTimeout(id);
   }, [animate, isFinalRound, roundSettled, speedMultiplier]);
 
@@ -328,16 +406,13 @@ function ContestDice({
   const caption =
     winner != null
       ? winnerIsYou
-        ? t("diceRoll.youPlayFirst")
-        : t("diceRoll.playerPlaysFirst", { name: getOpponentDisplayName(winner) })
+        ? t("diceRoll.youWonRoll")
+        : t("diceRoll.playerWonRoll", { name: getOpponentDisplayName(winner) })
       : null;
-  const yourTurnCaption =
-    payload.viewerTurnNumber && payload.viewerTurnNumber > 1
-      ? t("diceRoll.youTakeTurn", { turn: payload.viewerTurnNumber })
-      : null;
+  const captionRef = useBannerTitleFit(caption ?? "", WINNER_CAPTION_MINIMUM_REM);
 
   return (
-    <div className="relative flex flex-col items-center gap-8 select-none">
+    <div className="relative flex w-full flex-col items-center gap-8 select-none">
       <motion.span
         key={roundIndex}
         className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-400"
@@ -366,7 +441,7 @@ function ContestDice({
               transition={{ type: "spring", stiffness: 260, damping: 22 }}
             >
               <span
-                className="text-base font-bold uppercase tracking-wide transition-colors"
+                className="text-center text-balance text-base font-bold uppercase tracking-wide transition-colors"
                 style={{ color: revealed && isWinner ? `rgb(${GOLD})` : "#cbd5e1" }}
               >
                 {playerLabel(roll.playerId)}
@@ -399,11 +474,16 @@ function ContestDice({
         })}
       </div>
 
-      <div className="flex h-10 items-center">
+      {/* Holds a one-line caption's height so the dice don't shift when it
+          appears. A long name that wraps grows the row instead of spilling out.
+          As wide as the overlay inside its gutters, the caption's line, even
+          when three or four seats' dice run wider than a phone. */}
+      <div className="flex min-h-10 w-full items-center justify-center">
         <AnimatePresence>
           {revealed && caption && (
             <motion.span
-              className="text-4xl font-extrabold uppercase tracking-wider"
+              ref={captionRef}
+              className="text-center text-balance text-4xl font-extrabold uppercase tracking-wider"
               style={{
                 color: `rgb(${GOLD})`,
                 textShadow: `0 0 22px rgba(${GOLD},0.6), 0 2px 4px rgba(0,0,0,0.5)`,
@@ -417,47 +497,6 @@ function ContestDice({
           )}
         </AnimatePresence>
       </div>
-      {revealed && payload.turnOrder && payload.turnOrder.length > 0 && (
-        <motion.div
-          className="flex flex-col items-center gap-2"
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.25, duration: 0.35 }}
-        >
-          <span className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
-            {t("diceRoll.turnOrder")}
-          </span>
-          <div className="flex flex-wrap justify-center gap-2">
-            {payload.turnOrder.map((slot) => {
-              return (
-                <span
-                  key={slot.slot_index}
-                  className="rounded-full border px-3 py-1 text-sm font-bold"
-                  style={{
-                    color: slot.is_viewer ? `rgb(${GOLD})` : "#cbd5e1",
-                    borderColor:
-                      slot.is_viewer || slot.is_starting_player
-                        ? `rgba(${GOLD},0.62)`
-                        : "rgba(148,163,184,0.32)",
-                    backgroundColor:
-                      slot.is_viewer || slot.is_starting_player
-                        ? `rgba(${GOLD},0.12)`
-                        : "rgba(15,23,42,0.7)",
-                  }}
-                >
-                  {t("diceRoll.turnOrderItem", {
-                    turn: slot.turn_number,
-                    name: playerLabel(slot.player),
-                  })}
-                </span>
-              );
-            })}
-          </div>
-          {yourTurnCaption && (
-            <span className="text-lg font-extrabold text-amber-300">{yourTurnCaption}</span>
-          )}
-        </motion.div>
-      )}
     </div>
   );
 }
@@ -470,11 +509,23 @@ function InGameDice({
   payload,
   animate,
   speedMultiplier,
+  onLanded,
 }: {
   payload: Extract<DiceRollPayload, { kind: "die" }>;
   animate: boolean;
   speedMultiplier: number;
+  onLanded: () => void;
 }) {
+  // Each die reports its own landing (a static face on mount), and the roll has
+  // landed once the last one does, so no die is still tumbling at the close.
+  const [settledCount, setSettledCount] = useState(0);
+  const onDieSettle = useCallback(() => setSettledCount((count) => count + 1), []);
+  const landed = settledCount >= payload.rolls.length;
+
+  useEffect(() => {
+    if (landed) onLanded();
+  }, [landed, onLanded]);
+
   return (
     <div className="relative flex items-end justify-center gap-10 select-none">
       {payload.rolls.map((roll, i) => (
@@ -484,6 +535,7 @@ function InGameDice({
           accent={roll.ignored ? IGNORED : NEUTRAL}
           ignored={roll.ignored}
           value={roll.value}
+          onSettle={onDieSettle}
         >
           {(handleSettle) =>
             animate ? (
@@ -509,8 +561,9 @@ function InGameDice({
 /**
  * Wraps a single die/coin and plays a landing flourish the moment it settles: a
  * scale "pop", an expanding accent ring, and a soft radial flash. `emphasize`
- * adds a lingering glow for the contest winner. `ignored` dims a dropped die
- * (roll-2-drop-lowest) and strikes its badge while still showing its value.
+ * adds a lingering glow, for the contest winner or a landed coin's result.
+ * `ignored` dims a dropped die (roll-2-drop-lowest) and strikes its badge while
+ * still showing its value.
  * The die is supplied as a render prop so the wrapper can hand its settle
  * callback to whichever 3D child (Dice3D / Coin3D) it renders; the static
  * fallback settles on mount instead.
@@ -558,9 +611,10 @@ function DieFace({
         className={`relative rounded-2xl${ignored ? " opacity-60 saturate-50" : ""}`}
         style={{ width: DIE_SIZE, height: DIE_SIZE }}
       >
-        {/* Lingering glow for the emphasized (winner) die. */}
+        {/* Lingering glow for the emphasized die (the contest winner, a landed coin). */}
         {emphasize && (
           <motion.div
+            data-testid="die-emphasis"
             className="absolute -inset-1 rounded-2xl pointer-events-none"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}

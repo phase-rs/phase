@@ -7,15 +7,96 @@ use super::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::target::{ControllerPhrase, ControllerSubject, PlayerAnaphor};
 use crate::types::ability::{
     ChosenGroupId, ControllerRef, CostCategory, Duration, MultiTargetSpec, ObjectScope,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetChoiceTiming, TargetFilter,
-    TargetSelectionMode, ZoneChoiceCandidateSource,
+    OpponentMayScope, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetChoiceTiming,
+    TargetFilter, TargetSelectionMode, ZoneChoiceCandidateSource,
 };
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
 
-/// The players an anaphoric controller phrase can bind to, read from the parse
-/// context (`ParseContext::player_antecedents`) or supplied by a named seed.
-/// `None` means no antecedent is in scope.
+/// CR 608.2d + CR 115.10a: who makes the bare choices of the clause being
+/// lowered, when that is not proven to be the ability's controller. `TargetOnly`'s
+/// resolution-time chooser prompts only the controller, so a bare choice owned by
+/// any of these keeps the timing it had before the bare-choice producer existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClauseChooser {
+    /// A subject other than the controller or the source: printed on the
+    /// predicate ("an opponent chooses ..."), carried by a conjugated
+    /// continuation, or named by an earlier chunk of the same sentence (CR 608.2c).
+    Subject,
+    /// A player scope peeled from an earlier chunk of the same sentence that this
+    /// subjectless chunk continues ("each opponent may draw a card, then choose
+    /// ...").
+    Scope,
+    /// An accepting-player scope peeled from an earlier chunk of the same sentence
+    /// ("any opponent may ..., then choose ...").
+    AcceptingPlayers,
+    /// An earlier chunk of the same sentence names a subject the parser does not
+    /// recognize ("your opponents each draw a card, then choose ..."; "an opponent
+    /// does the same, then chooses ..."). It is not proven to be the controller, so
+    /// the choice fails closed.
+    UnrecognizedSubject,
+    /// A chunk that opens with a conjugated verb and no subject of its own, whose
+    /// subject neither the chain nor the earlier chunks of its sentence name ("each
+    /// opponent who does chooses ...", "an opponent who controls an artifact
+    /// chooses ...", whose relative-clause subject is lifted into a condition
+    /// before the clause is parsed). "You"
+    /// refers to the controller (CR 109.5) and never takes the conjugated verb, so
+    /// the chooser is some other player.
+    ElidedThirdPerson,
+}
+
+/// CR 611.2a + CR 608.2c: the window a chunk's clause printed at its head, read by
+/// the clause parser itself rather than re-derived from the chunk's source text.
+///
+/// A duration that heads a sentence scopes every coordinated predicate of it
+/// ("Until your next turn, X and Y"), so assembly distributes it to the
+/// sentence's later clauses. Whether the clause heads with one is only knowable
+/// AFTER the chunk loop has lifted the clause's leading guards (a general
+/// conditional, a reflexive "If you do,", …) and the clause shell has peeled its
+/// slots; re-peeling the printed fragment downstream would have to re-implement
+/// that whole guard stack. So the chunk loop arms this probe immediately before
+/// the clause's main parse, the clause parser settles it on the text it actually
+/// lowers, and the chunk loop lifts the result onto `ClauseIr::head_window`.
+///
+/// `Unarmed` (the default, and every standalone parse) records nothing. An
+/// `Armed` probe the parse never settled — a recognizer that returned before
+/// reading its head — means "no head window": it states nothing to distribute.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum HeadWindowProbe {
+    #[default]
+    Unarmed,
+    Armed,
+    Read(Option<Duration>),
+}
+
+impl HeadWindowProbe {
+    pub(crate) fn is_armed(&self) -> bool {
+        matches!(self, Self::Armed)
+    }
+
+    /// Settle an armed probe with the window read at the clause head; a probe
+    /// that is unarmed or already settled is left untouched, so a nested clause
+    /// parse cannot overwrite the head reading.
+    pub(crate) fn settle(&mut self, window: Option<Duration>) {
+        if self.is_armed() {
+            *self = Self::Read(window);
+        }
+    }
+
+    /// Disarm the probe, yielding the head window it recorded (if any).
+    pub(crate) fn take_window(&mut self) -> Option<Duration> {
+        match std::mem::take(self) {
+            Self::Read(window) => window,
+            Self::Unarmed | Self::Armed => None,
+        }
+    }
+}
+
+/// The referents an anaphor in a captured clause may bind to — the players an
+/// anaphoric controller phrase names and the object a possessive-pronoun
+/// characteristic names — read from the parse context
+/// (`ParseContext::player_antecedents`) or supplied by a named seed. `None`
+/// means no antecedent is in scope.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PlayerAntecedents {
     /// CR 608.2c + CR 115.1a: the player the effect chain itself declared, the
@@ -29,6 +110,10 @@ pub(crate) struct PlayerAntecedents {
     pub third_person: Option<ControllerRef>,
     /// The referent of "its controller" / "their controller".
     pub object_controller: Option<ControllerRef>,
+    /// CR 608.2k + CR 608.2c: the object a possessive-pronoun characteristic
+    /// ("its power") in a where-X definition names — the characteristic twin of
+    /// `object_controller`; `None` keeps the `Source` default.
+    pub characteristic_pronoun_owner: Option<ObjectScope>,
 }
 
 impl PlayerAntecedents {
@@ -63,6 +148,18 @@ impl PlayerAntecedents {
     pub(crate) fn basic_land_type_count() -> Self {
         PlayerAntecedents {
             third_person: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        }
+    }
+
+    /// CR 608.2k: only the characteristic rung of `ctx`'s antecedents. The
+    /// count slot's where-X binder (`oracle_util::parse_count_slot`) reads
+    /// "its power" against the trigger's "it" antecedent, but it has never
+    /// threaded the player rungs, and threading them would rebind relative
+    /// controller phrases outside this class.
+    pub(crate) fn characteristic_owner_only(ctx: &ParseContext) -> Self {
+        PlayerAntecedents {
+            characteristic_pronoun_owner: ctx.player_antecedents().characteristic_pronoun_owner,
             ..Default::default()
         }
     }
@@ -246,6 +343,44 @@ impl TriggerZoneChangeProvenance {
     }
 }
 
+/// Parser-only provenance: which objects the enclosing trigger's CONDITION
+/// names, as classified from that condition's parsed `TriggerDefinition` and
+/// its text (`oracle_trigger::trigger_condition_objects`).
+///
+// CR 603.1 + CR 608.2k: a triggered ability is "[When/Whenever/At] [trigger
+// condition], [effect]", and an effect's untargeted reference to an object the
+// trigger condition referred to keeps naming that object. When the condition
+// names the ability's own object and NO other object, a bare "it" in the
+// effect can only be that object; when the condition names a second object
+// ("blocks a creature", "becomes attached to a creature", "becomes the target
+// of a spell"), "it" is ambiguous between the two and the parser must not pick
+// one. A player the condition names ("deals combat damage to a player") is
+// not an object, so it leaves the reading unambiguous.
+///
+/// A typed provenance rather than a bool: "no enclosing trigger condition was
+/// classified" (a non-trigger parse, an independent body with its own event)
+/// and "a trigger condition that is not source-only" are different facts, and
+/// consumers must match `SourceOnly` EXPLICITLY — every other value fails
+/// closed. Ordinary `Clone` preserves it (the same body continues);
+/// [`ParseContext::clone_for_independent_body`] resets it, because a reflexive
+/// or nested body has its own trigger event that this value does not describe,
+/// and [`ParseContext::enter_delayed_trigger_body`] resets it for the same
+/// reason in the body of a delayed triggered ability the chain creates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TriggerConditionObjects {
+    /// No enclosing trigger condition was classified for this parse.
+    #[default]
+    Unestablished,
+    /// The condition names the ability's own object and no other object; any
+    /// second participant it names is a player.
+    SourceOnly,
+    /// The condition names an object other than the ability's own object, or
+    /// carries a shape (an unrecognized event, a condition qualifier, a
+    /// disjunctive zone-change clause) the classifier does not prove free of
+    /// one.
+    NotSourceOnly,
+}
+
 /// CR 608.2c + CR 115.1: what a bare card-set aggregate surface (the
 /// demonstrative "those cards" shape) binds to in this chunk — either a
 /// chain-set cause or the ability's own chosen targets. A typed two-leaf
@@ -257,6 +392,56 @@ pub enum BareCardAggregateBinding {
     ChainSet(crate::types::ability::TrackedAnaphorSource),
     /// The ability's own chosen targets (`TargetedObjects { slot: None }`).
     AbilityTargets,
+}
+
+/// CR 608.2c + CR 608.2k: what a bare "that spell" anaphor names in the body
+/// being parsed, for a body NOT itself flagged `in_trigger`. Read only through
+/// [`ParseContext::effective_spell_anaphor_binding`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SpellAnaphorBinding {
+    /// CR 608.2c: a resolving spell/ability instruction — the spell its earlier
+    /// text announced (lowers to `TargetFilter::ParentTarget`).
+    #[default]
+    ParentTarget,
+    /// CR 608.2k: the spell the enclosing trigger condition referred to (lowers
+    /// to `TargetFilter::TriggeringSource`). Handed down to bodies parsed with a
+    /// fresh context that still belong to a triggered ability: delayed /
+    /// reflexive bodies (CR 603.7 / CR 603.12), a trigger-owned results table
+    /// (CR 706.3b), an "instead" sub-body of a triggered ability.
+    EventSource,
+}
+
+/// CR 608.2c + CR 607.2a: the prior clauses of the current clause's OWN resolution chain (and, for a nested delayed / reflexive / continuation body, its enclosing chain), each treated as a potential tracked-set publisher because runtime publication is generic (`publish_tracked_set_for_resolution`). Distinguishes "no prior publisher"
+/// (the linked-ability LTB return `detect_etb_exile_ltb_return` pairs) from
+/// "only non-exile publishers" (the linked-exile return, `linked_exile_return_binding`: the source's linked exile when the return is printed on the source, the `Exiled`-caused chain members when an effect creates it) and "an exile producer" (same-chain binding).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ChainPriorPublishers {
+    /// No earlier clause in the chain (or its enclosing chain).
+    #[default]
+    Absent,
+    /// Earlier clauses exist, and none of them is an exile producer.
+    NonExileOnly,
+    /// At least one earlier clause is an exile producer
+    /// (`clause_ir_is_exile_producer`).
+    IncludesExile,
+}
+
+impl ChainPriorPublishers {
+    /// Lattice join: `Absent < NonExileOnly < IncludesExile`.
+    pub fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::IncludesExile, Self::IncludesExile | Self::NonExileOnly | Self::Absent)
+            | (Self::NonExileOnly | Self::Absent, Self::IncludesExile) => Self::IncludesExile,
+            (Self::NonExileOnly, Self::NonExileOnly | Self::Absent)
+            | (Self::Absent, Self::NonExileOnly) => Self::NonExileOnly,
+            (Self::Absent, Self::Absent) => Self::Absent,
+        }
+    }
+
+    /// Whether an earlier clause of the chain is an exile producer.
+    pub fn includes_exile(self) -> bool {
+        matches!(self, Self::IncludesExile)
+    }
 }
 
 /// CR 601.2c + CR 608.2c: the target slots announced by the earlier clauses of
@@ -291,6 +476,40 @@ pub struct DeclaredSlotEntry {
     pub filter: TargetFilter,
 }
 
+/// CR 608.2c: how the immediately preceding instruction produced the chain's
+/// pending tracked set, and the zone it left those cards in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingTrackedSet {
+    pub zone: Zone,
+    pub producer: TrackedSetProducer,
+}
+
+/// CR 608.2c: the instruction kind that published a pending tracked set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackedSetProducer {
+    /// "Choose card(s) in <zone>": the chosen cards are a referent that a later
+    /// bare "it" / "they" can name.
+    Chosen,
+    /// A bare reveal (CR 701.20b) chooses nothing, so its cards are named only
+    /// by "those cards" / "the cards revealed this way", never by a bare
+    /// pronoun.
+    Revealed,
+}
+
+impl ParseContext {
+    /// CR 608.2c: whether the preceding instruction chose cards that a bare
+    /// "it" / "they" can refer back to.
+    pub fn chosen_tracked_set_pending(&self) -> bool {
+        matches!(
+            self.pending_tracked_set,
+            Some(PendingTrackedSet {
+                producer: TrackedSetProducer::Chosen,
+                ..
+            })
+        )
+    }
+}
+
 /// CR 700.2: the body a [`ParseContext`] parses — a whole ability, or one mode
 /// of a modal spell or ability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -298,6 +517,32 @@ pub enum BodyScope {
     #[default]
     WholeAbility,
     ModalMode,
+}
+
+/// CR 608.2c: whether the effect chain about to be parsed is proven to resolve
+/// as its ability's root node. The engine evaluates a root's gate on the root
+/// itself; a sub-ability's gate is evaluated first in its parent's hand-off,
+/// against the PARENT, and again on the sub itself, and both must hold. So a
+/// gate that reads the gated instruction's own target is only representable on
+/// a proven root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResolvedChainRoot {
+    /// Not proven: the chain may be attached under another node, or have
+    /// another instruction appended below it, at parse or cast time (a nested
+    /// remainder parse, a mode, a spell with a second paragraph, a fused half, a
+    /// spliced card or a splice host, a gift spell, an awaken spell), or lose
+    /// its targets at cast time (an overloaded spell).
+    #[default]
+    Unproven,
+    /// Set by a top-level entry point whose chain is its ability's resolved
+    /// root with its printed targets (a triggered ability's body, an activated
+    /// ability's effect on a card without a gift keyword, the spell line of a
+    /// card whose only non-keyword line it is and whose spell is not rewritten
+    /// at cast). A gift card is excluded for activated abilities too: the
+    /// engine wraps its first spell or activated ability under a `GiftDelivery`
+    /// root (`synthesize_gift`; Starforged Sword's synthesized Equip sits under
+    /// it).
+    Proven,
 }
 
 /// CR 608.2k: the object a trigger condition introduces for its body's bare
@@ -340,6 +585,20 @@ pub struct ParseContext {
     /// A declared "target creature" subject inside a trigger body fails closed
     /// to `Unimplemented` (Ria Ivor's shield is not yet supported).
     pub in_trigger: bool,
+    /// What a bare "that spell" anaphor in this effect body names when the body
+    /// is not itself an `in_trigger` body (CR 608.2c + CR 608.2k).
+    ///
+    /// Set to [`SpellAnaphorBinding::EventSource`] for a delayed triggered
+    /// ability's body (CR 603.7), a reflexive body (CR 603.12), a trigger-owned
+    /// results table (CR 706.3b) and an "instead" sub-body parsed out of a
+    /// triggered ability: those bodies parse with a fresh context but have no
+    /// announced parent target, so their anaphor names the object the trigger
+    /// condition referred to. Distinct from `in_trigger`, which gates many other
+    /// parser branches. Consumers read this through
+    /// [`Self::effective_spell_anaphor_binding`], which lets `in_trigger`
+    /// dominate; only a context hand-off that also carries `in_trigger` (the
+    /// effect-chain chunk context) copies the raw field.
+    pub spell_anaphor_binding: SpellAnaphorBinding,
     /// Contextual source for the exact bare aggregate surface "those cards".
     /// Set per effect-chain chunk from the nearest typed producer, or from a
     /// proven trigger subject batch when no compatible chain producer wins.
@@ -383,6 +642,9 @@ pub struct ParseContext {
     /// paid, duration-scoped, capped-at-one `from among` batch grant to the
     /// `GrantCastingPermission { PlayFromExile { single_use: true } }` shape.
     pub stated_clause_duration: Option<Duration>,
+    /// CR 611.2a + CR 608.2c: whether the clause the chain chunk loop is about
+    /// to parse printed a window at its HEAD. See [`HeadWindowProbe`].
+    pub head_window: HeadWindowProbe,
     /// CR 608.2c + CR 400.7: the REST-partition destination zone of the
     /// nearest preceding `Effect::Dig` in this chain whose kept and rest
     /// destinations differ (a genuine reveal/split, e.g. Dihada, Binder of
@@ -393,14 +655,32 @@ pub struct ParseContext {
     /// disambiguate from (Pinnacle Starcage's "put each card exiled with this
     /// artifact into its owner's graveyard, then create ... for each card put
     /// into a graveyard this way" — every exiled card lands in the SAME
-    /// graveyard pile, so the bare `TrackedSetSize` default is already
-    /// correct there). Set per effect-chain chunk from a lookback over
-    /// `builder.clauses()`, mirroring `bare_card_aggregate_source`. Consumed
+    /// graveyard pile, so the destination-count parse of the bare clause (the
+    /// tracked cards delivered to Graveyard, CR 614.6) applies there). Set per
+    /// effect-chain chunk from a lookback over `builder.clauses()`, mirroring `bare_card_aggregate_source`. Consumed
     /// by the Token "for each" dispatch (`oracle_effect::mod::try_parse_for_each_effect`)
     /// to bind a bare "card put into a/your/their graveyard this way" count to
     /// the dedicated `PutIntoGraveyard` cause only when a real Dig split
     /// actually precedes it.
     pub nearest_dig_rest_zone: Option<crate::types::zones::Zone>,
+    /// CR 608.2c + CR 122.1: the counter KIND a bare counter anaphor ("remove
+    /// those counters" / "remove them" / "remove all of them") in this chunk
+    /// refers back to, when the gating condition introduced the counters as a
+    /// typed count on the ability source ("Then if there are three or more
+    /// promotion counters on her, remove those counters" — Beckett Mariner;
+    /// Prize Pig; Cursed Recording; Treasure Map; Hostile Hostel). `None` when
+    /// there is no such antecedent, or the antecedent is every kind ("three or
+    /// more counters on it"), in which case the anaphor keeps its all-kinds
+    /// reading.
+    ///
+    /// Set per effect-chain chunk from that chunk's resolved condition (a
+    /// struct-literal chunk context, so it never leaks into the next chunk),
+    /// falling back to the kind an enclosing gate bound for the chunk. A gate
+    /// whose body spans several instructions ("remove those counters, transform
+    /// this artifact, and create …") binds its kind on the parent context for
+    /// the recursive body parse only, then restores it.
+    /// Consumed by `oracle_effect::counter::try_parse_remove_counter`.
+    pub counter_anaphor_kind: Option<crate::types::counter::CounterType>,
     /// Whether we are inside a replacement effect.
     #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
     pub in_replacement: bool,
@@ -408,6 +688,17 @@ pub struct ParseContext {
     /// card text or a DELAYED trigger created from a resolving effect chain. Gates
     /// delayed-only anaphoric subject resolution; see [`TriggerConditionScope`].
     pub trigger_condition_scope: TriggerConditionScope,
+    /// CR 603.7a + CR 109.4 (Matt R7-F5): while parsing a delayed-trigger
+    /// BODY whose temporal binding will stamp `ChosenPlayer { index }` as
+    /// the body's first player target at creation (delayed_trigger.rs), the
+    /// index the attack-endpoint bridge may resolve against that stamp.
+    /// `None` everywhere else — an immediate Choose→conditional has no
+    /// stamp, so bridging its `ChosenPlayer` endpoint to `PlayerScope::Target`
+    /// would consult no player or an unrelated declared target. Set with
+    /// save/set/restore at both temporal sites (prefix and suffix); inherited
+    /// — never reset — by [`ParseContext::clone_throwaway`], because every
+    /// probe taken under it parses the same stamped body.
+    pub stamped_delayed_chosen_player: Option<u8>,
     /// CR 608.2k + CR 601.2a: Event object that bare object pronouns in the
     /// current trigger body ("it", "them") should bind to. Spell-cast triggers
     /// set this to `TriggeringSource` so "Whenever you cast a spell, put it ..."
@@ -443,6 +734,16 @@ pub struct ParseContext {
     /// it into your graveyard as it resolves" is a replacement clause whose
     /// demonstrative belongs to its own grammar.
     pub demonstrative_object_ref: Option<TargetFilter>,
+    /// CR 608.2c + CR 601.2c: antecedent for a PLURAL demonstrative ("one of
+    /// those creatures") naming the set of creature targets an earlier
+    /// instruction announced. `Some(ParentTarget)` only when that set is the
+    /// chain's NEAREST earlier object referent (`chain_plural_target_antecedent`).
+    /// Same lifecycle as `chain_declared_slots`: taken before the chunk loop,
+    /// reassigned as the first statement of every iteration, restored after. A
+    /// nested chain whose builder is still empty (a delayed payload parsed as its
+    /// own chain) takes the enclosing chunk's value. `None` on every standalone
+    /// parse. Never serialized.
+    pub plural_demonstrative_object_ref: Option<TargetFilter>,
     /// Accumulated diagnostics for the current card parse (Phase 52, D-07).
     /// Replaces thread-local oracle_warnings accumulator.
     pub diagnostics: Vec<OracleDiagnostic>,
@@ -467,6 +768,30 @@ pub struct ParseContext {
     /// parse; the coordinated writer declines to the unbound gap on a different
     /// value. Set and consumed within a single chunk parse; never serialized.
     pub pending_player_scope: Option<PlayerFilter>,
+    /// Player scope already peeled from this chunk's subject or optional prefix.
+    /// The chain loop supplies its composed scope before parsing the body so a
+    /// bare choose cannot mistake another player's choice for the controller's.
+    pub clause_player_scope: Option<PlayerFilter>,
+    /// First-accept-wins optional scope peeled from this chunk ("any ... may").
+    /// Like `clause_player_scope`, it prevents a controller-only bare-choice prompt.
+    pub clause_opponent_may_scope: Option<OpponentMayScope>,
+    /// CR 608.2d + CR 115.10a: The chooser, other than the ability's controller,
+    /// that owns the bare choices of the predicate being lowered (`ClauseChooser`).
+    /// `TargetOnly`'s resolution-time chooser prompts only the ability's
+    /// controller, so a bare choice owned by it cannot declare resolution timing.
+    /// Set by the subject-predicate lowering around a printed subject's
+    /// predicate, and seeded by the chain chunk loop for a chunk that names no
+    /// subject of its own: from the carried player subject that a conjugated
+    /// continuation inherits; else from the latest subject or peeled scope, other
+    /// than the controller or the source, that an earlier chunk of the same
+    /// sentence names, failing closed when that chunk's subject is not recognized;
+    /// else, for a chunk opening with a conjugated verb, as an elided third person
+    /// (CR 608.2c). Inherited by the compound continuations that predicate
+    /// splits into; a continuation with a controller subject of its own clears it
+    /// for that conjunct. `None` outside such a predicate. The chain loop assigns it
+    /// again before every chunk, so a value left by the last chunk is never read;
+    /// never serialized.
+    pub clause_subject_chooser: Option<ClauseChooser>,
     /// CR 608.2c + CR 701.16a: Transient per-chunk `repeat_for` lifted from a
     /// fieldless-effect subject-predicate that carries a "for each <filter> …
     /// this way" SUFFIX count (Declaration in Stone's "investigate for each
@@ -531,6 +856,14 @@ pub struct ParseContext {
     /// printed abilities (CR 607.2d). Mirrors `chosen_player_count` as a
     /// parse-time accumulator (not serialized).
     pub pending_choice_type: Option<crate::types::ability::ChoiceType>,
+    /// CR 201.4a + CR 608.2c: the characteristic printed on the most recent
+    /// "choose a <characteristic> card name" instruction of this effect chain
+    /// ("nonland" → `TypeFilter::Non(Land)`), which `ChoiceType::CardName`
+    /// cannot carry. A later "… with that name" consumer that would let an
+    /// answer outside the characteristic act fails closed while this is
+    /// `Some`. Threaded across chunks beside `pending_choice_type`; parse-time
+    /// accumulator, never serialized.
+    pub pending_card_name_characteristic: Option<crate::types::ability::TypeFilter>,
     /// CR 105.4: gate for the printed chosen-colour object-filter qualifier.
     /// See `ChosenColorQualifierScope`, including its clone-inheritance rule.
     pub chosen_color_qualifier: ChosenColorQualifierScope,
@@ -608,6 +941,39 @@ pub struct ParseContext {
     /// outranks the scan. `None` (the default) leaves the ladder in charge, so
     /// every incumbent clause is unaffected.
     ///
+    /// The legacy bare-choose producer declares `Resolution` for a singular
+    /// "a/an <object> you control" phrase fully consumed by the target parser,
+    /// with chosen selection and no peeled actor scope, printed target, context
+    /// reference, or player target. The chunk loop strips optional quantifiers;
+    /// those chunks and exact counts fail the a/an gate. The declaration applies
+    /// at any chain position (later chunks, compound continuations and modal
+    /// modes alike), since the choice is not a target at any of them; the
+    /// engine's `TargetOnly` exemption in `defers_conditional_target_selection`
+    /// keeps later announced targets.
+    /// Partial and quantified choices leave this unset.
+    /// A peeled opponent-may chunk's own bare choice declares nothing, so the
+    /// accepting-player timing fallback keeps the timing it always produced for
+    /// it; a compound continuation's sub-link in such a chunk is still re-timed by
+    /// `target_choice_timing_for_clause_sub`. A non-controller subject, printed or
+    /// inherited by a conjugated continuation (`clause_subject_chooser`), keeps
+    /// the bare-choice producer from declaring `Resolution` on its own clause and
+    /// on the compound continuations it owns, which is the timing those clauses had
+    /// before the producer existed. The object-and-player producer declares
+    /// `Resolution` for every subject, as it always did. The bare choice's
+    /// `Resolution` declaration is withdrawn after the chain is built, in four
+    /// passes that restore the timing the choice had before the producer existed:
+    /// when the choice is repeated per player or object
+    /// (`withhold_resolution_timing_from_repeated_choices`); when the chain holds
+    /// another cast-time bare choice, such as another player's
+    /// (`withhold_resolution_timing_beside_a_cast_time_choice`); when a later
+    /// clause's printed "target" was bound to the choice or left unimplemented
+    /// (`withhold_resolution_timing_from_choices_feeding_printed_targets`, which
+    /// withdraws only that clause's antecedent choice); and when a later clause
+    /// reads the announced slots or pick (`withhold_resolution_timing_before_root_slot_readers`).
+    /// While later chunks are still being lowered, the in-loop readers see the
+    /// stamp as `Stack` (`bare_choice_resolution_is_pending`), so later clauses
+    /// lower as they did before the producer existed.
+    ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.
     pub declared_target_choice_timing: Option<TargetChoiceTiming>,
@@ -644,22 +1010,28 @@ pub struct ParseContext {
     /// parsing leaves this false so bare "it" defaults to SelfRef instead of
     /// inventing a parent target.
     pub parent_target_available: bool,
-    /// CR 608.2c + CR 406.6 + CR 607.2a: Whether the current effect-chain
-    /// chunk has an EARLIER clause (in the SAME resolution chain) that
-    /// produces an exile — a `ChangeZone`/`ChangeZoneAll` to `Zone::Exile`,
-    /// `ExileTop`, `Dig { destination: Some(Zone::Exile), .. }`,
-    /// `ExileFromTopUntil`, or any other exile-producer shape recognized by
-    /// `chain_clause_is_exile_producer`. When true, a singular "the exiled
-    /// card" anaphor in a LATER clause of this chain refers to that
-    /// same-chain exile and keeps its pre-existing same-chain binding
-    /// (`TrackedSet{0}` / `ParentTarget`). When false, the referenced exile
-    /// happened in an earlier, SEPARATELY-RESOLVED ability (e.g. an ETB
-    /// Imprint or synthesized Hideaway ETB), so the anaphor must bind
-    /// durably via `TargetFilter::ExiledBySource` (CR 607.1 linked
-    /// abilities) instead. Seeded per top-level `parse_effect_chain_ir` call
-    /// from the chain-local clause accumulator; defaults `false` via
-    /// `derive(Default)` so standalone clause parsing is unaffected.
-    pub chain_has_prior_exile_producer: bool,
+    /// CR 608.2c + CR 406.6 + CR 607.2a: What the EARLIER clauses of the
+    /// current effect-chain chunk (in the SAME resolution chain, joined with
+    /// the enclosing chain's state for a nested body) publish — see
+    /// [`ChainPriorPublishers`]. `IncludesExile` when one of them produces an
+    /// exile — a `ChangeZone`/`ChangeZoneAll` to `Zone::Exile`, `ExileTop`,
+    /// `Dig { destination: Some(Zone::Exile), .. }`, `ExileFromTopUntil`, or
+    /// any other exile-producer shape recognized by
+    /// `chain_clause_is_exile_producer`: a singular "the exiled card" anaphor
+    /// in a LATER clause of this chain then refers to that same-chain exile
+    /// and keeps its pre-existing same-chain binding (`TrackedSet{0}` /
+    /// `ParentTarget`). Otherwise the referenced exile happened in an
+    /// earlier, SEPARATELY-RESOLVED ability (e.g. an ETB Imprint or
+    /// synthesized Hideaway ETB), so the singular anaphor binds durably via
+    /// `TargetFilter::ExiledBySource` (CR 607.1 linked abilities), and a
+    /// return over `NonExileOnly` publishers binds the cards the linked
+    /// exile put into exile (`linked_exile_return_binding`: `ExiledBySource`
+    /// when printed on the source, the `Exiled`-caused members of the chain
+    /// set when an effect creates it). Seeded per
+    /// top-level `parse_effect_chain_ir` call from the chain-local clause
+    /// accumulator; defaults to `Absent` via `derive(Default)` so standalone
+    /// clause parsing is unaffected.
+    pub chain_prior_publishers: ChainPriorPublishers,
     /// CR 608.2c: The current effect-chain chunk's MOST-RECENT prior object
     /// referent is a just-created token (Token/CopyTokenOf/Populate), so a bare
     /// "it" anaphor in this chunk binds to that token (`TargetFilter::LastCreated`)
@@ -687,6 +1059,8 @@ pub struct ParseContext {
     /// `parse_target` binding (Embercleave's Equipment-ETB `ParentTarget`; Aura
     /// Graft's chained-referent `ParentTarget`).
     pub source_becomes_attachment_in_chain: bool,
+    /// CR 400.7j + CR 608.2c: the chain's most recent emitted instruction put a card onto the battlefield, so a following "it" can name that moved card.
+    pub prior_clause_moves_to_battlefield: bool,
     /// CR 608.2c: Full lowercased effect-chain text for cross-clause features
     /// like cultivate/Final-Parting split-destination detection on a search
     /// clause that does not include the put-destination phrase in its chunk.
@@ -783,6 +1157,18 @@ pub struct ParseContext {
     /// admitted inside a mode. Set to `ModalMode` on each mode's context by
     /// `parse_modal_mode_irs`; `WholeAbility` everywhere else.
     pub body_scope: BodyScope,
+    /// CR 608.2c: whether the next effect chain parsed on this context is its
+    /// ability's resolved root ([`ResolvedChainRoot`]). Set immediately before
+    /// the entry point's chain parse and taken by that parse on entry, so a
+    /// nested chain parsed inside it, or on a clone made afterwards, sees
+    /// `Unproven`. Never serialized.
+    pub resolved_chain_root: ResolvedChainRoot,
+    /// CR 608.2c: the card-level proof for the effects of this card's activated
+    /// abilities ([`ResolvedChainRoot`]), set once by the pipeline from the
+    /// card's gift keyword (MTGJSON or printed line) and read by the
+    /// activated-ability entry point. `Unproven` by default, so a context
+    /// built elsewhere proves nothing. Never serialized.
+    pub activated_chain_root: ResolvedChainRoot,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a
     /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that
@@ -794,8 +1180,9 @@ pub struct ParseContext {
     /// it lowers a `TrackedSet` put-onto-battlefield whose own clause text named
     /// no explicit origin; an impulse/cascade producer leaves this `None`, so
     /// the lowering keeps the exile default. Reset per effect chain in
-    /// `parse_effect_chain_ir`.
-    pub pending_tracked_set_origin: Option<Zone>,
+    /// `parse_effect_chain_ir`. The producer kind decides whether a bare
+    /// pronoun may name the set ([`Self::chosen_tracked_set_pending`]).
+    pub pending_tracked_set: Option<PendingTrackedSet>,
     /// CR 701.42a: The partner card name extracted from a meld instigator's
     /// own/control gate ("if you both own and control [self] and a [type] named
     /// [partner], exile them, then meld them into [result]"). The gate is parsed
@@ -842,7 +1229,7 @@ pub struct ParseContext {
     /// THIS revealed player's hand instead of the exile-only
     /// `TargetFilter::ExiledBySource` default — no exile ever happened, so
     /// `ExiledBySource` would resolve to an empty set and silently swallow the
-    /// cast permission. Mirrors `chain_has_prior_exile_producer`'s same-chain
+    /// cast permission. Mirrors `chain_prior_publishers`' same-chain
     /// scan, but for the hand-reveal producer shape. `None` when no such
     /// producer exists in this chain, or during standalone clause parsing.
     pub chain_prior_hand_reveal_target: Option<TargetFilter>,
@@ -865,11 +1252,21 @@ pub struct ParseContext {
     /// (`subject.rs` · `resolve_they_pronoun`). Seeded per chunk from the chain;
     /// `None` on every standalone parse.
     pub chain_prior_object_set: Option<TargetFilter>,
+    /// CR 608.2c + CR 701.26a/b: the population filter of the NEAREST earlier
+    /// clause of this chain when that clause is a mass tap/untap
+    /// (`SetTapState { scope: All }`), the instruction whose selection the
+    /// runtime snapshots before it acts (`tap_untap::selection_before_resolution`)
+    /// and publishes to a following grant on `ParentTarget`. A bare "it" that is
+    /// the affected object of the next instruction names each object of that
+    /// selection (Triton Tactics: "tap each creature … and it doesn't untap …").
+    /// Seeded per chunk from the chain; `None` on every standalone parse and in a
+    /// nested chain until its own builder holds such a clause. Never serialized.
+    pub chain_prior_mass_tap_selection: Option<TargetFilter>,
     /// True when the SAME chain's most recent producer was a self-library peek
     /// (look at the top N cards of YOUR library without exiling/moving them).
     /// The bare "from among them" cast anaphor that follows must route to the
     /// one-shot during-resolution cast (CR 608.2g), not the exile-and-grant
-    /// lingering path. Mirrors `chain_has_prior_exile_producer`.
+    /// lingering path. Mirrors `chain_prior_publishers`.
     // CR 608.2g + CR 701.20e
     pub chain_prior_self_library_peek: bool,
     /// CR 608.2c: the stop filter of the most recent earlier same-chain
@@ -920,13 +1317,24 @@ pub struct ParseContext {
     /// [`Self::clone_for_independent_body`] or [`Self::clone_throwaway`]. See
     /// [`TriggerZoneChangeProvenance`].
     pub trigger_zone_change: TriggerZoneChangeProvenance,
+    /// CR 603.1 + CR 608.2k: which objects the enclosing trigger's condition
+    /// names. Set once, when the trigger body's effect context is built
+    /// (`parse_trigger_line_with_index_ir`); `Unestablished` via
+    /// `derive(Default)` everywhere else. Consumed by the kinds-census pronoun
+    /// gate (`oracle_quantity::kinds_census_pronoun_self_antecedent`), which
+    /// reads "it" as the ability's own object only under `SourceOnly`. See
+    /// [`TriggerConditionObjects`].
+    pub trigger_condition_objects: TriggerConditionObjects,
     /// CR 608.2k: the owner a possessive PRONOUN ("its"/"his"/"her"/"their")
     /// characteristic binds to while this context is active. Set ONLY by
-    /// quantity interpreters parsing a clause whose subject position is known
-    /// (`parse_where_x_quantity_expression_with_owner`, for boon-granted
-    /// "it"/"that" perpetual tails, where the pronoun names the triggering
-    /// object). `None` (the default every other caller carries) preserves the
-    /// long-standing `Source` binding. Explicit self-references ("~'s",
+    /// quantity interpreters parsing a clause whose subject position is known:
+    /// the explicit owner of `parse_where_x_quantity_expression_with_owner`
+    /// (boon-granted "it"/"that" perpetual tails, where the pronoun names the
+    /// triggering object), or the antecedent rung
+    /// `PlayerAntecedents::characteristic_pronoun_owner` (a where-X tail in a
+    /// trigger body whose "it" names the trigger event's object). `None` (the
+    /// default every other caller carries) preserves the long-standing `Source`
+    /// binding. Explicit self-references ("~'s",
     /// "this creature's") NEVER consult this field — only the four genuinely
     /// anaphoric pronoun surfaces do.
     pub characteristic_pronoun_owner: Option<ObjectScope>,
@@ -982,6 +1390,13 @@ impl ParseContext {
                 }
                 _ => ControllerRef::ParentTargetController,
             }),
+            // CR 608.2k: "its" names the same object "it" does. Delegate to the
+            // single pronoun authority, so a nearer antecedent (a parent target,
+            // the source) keeps today's `Source` binding and only an "it" that
+            // names the trigger event's object moves the characteristic there.
+            characteristic_pronoun_owner: (crate::parser::oracle_effect::resolve_it_pronoun(self)
+                == TargetFilter::TriggeringSource)
+                .then_some(ObjectScope::EventSource),
         }
     }
 
@@ -1010,6 +1425,7 @@ impl ParseContext {
             relative_player_scope: self.relative_player_scope.clone(),
             declared_player_scope: self.declared_player_scope.clone(),
             prior_player_declaration: self.prior_player_declaration,
+            trigger_condition_scope: self.trigger_condition_scope,
             ..Self::default()
         }
     }
@@ -1065,7 +1481,38 @@ impl ParseContext {
     pub fn clone_for_independent_body(&self) -> Self {
         Self {
             trigger_zone_change: TriggerZoneChangeProvenance::none(),
+            // CR 603.12: the independent body's trigger event is not the
+            // enclosing condition, so that condition's object classification
+            // does not describe it.
+            trigger_condition_objects: TriggerConditionObjects::Unestablished,
             ..self.clone()
+        }
+    }
+
+    /// CR 603.7 + CR 608.2h: enter the body of a DELAYED triggered ability the
+    /// chain creates ("at the beginning of the next end step, …", "… at the
+    /// beginning of your next upkeep").
+    ///
+    /// The delayed ability resolves later, on its own trigger event, so the
+    /// enclosing trigger's condition classification no longer describes what
+    /// the body's "it" names — and by then a source that left the battlefield
+    /// is a new object (CR 400.7) whose counters ceased to exist (CR 122.2).
+    /// Resetting the classification to `Unestablished` makes every consumer
+    /// that requires `SourceOnly` (the kinds-census pronoun gate) fail closed
+    /// in the body. In place rather than a clone: the delayed body is parsed on
+    /// the chunk's own context, whose other state that chunk keeps.
+    pub fn enter_delayed_trigger_body(&mut self) {
+        self.trigger_condition_objects = TriggerConditionObjects::Unestablished;
+    }
+
+    /// CR 608.2c + CR 608.2k: the binding a bare "that spell" anaphor takes here.
+    /// A printed trigger body (`in_trigger`) always names its event's spell;
+    /// otherwise the handed-down `spell_anaphor_binding` decides.
+    pub(crate) fn effective_spell_anaphor_binding(&self) -> SpellAnaphorBinding {
+        if self.in_trigger {
+            SpellAnaphorBinding::EventSource
+        } else {
+            self.spell_anaphor_binding
         }
     }
 
@@ -1139,6 +1586,45 @@ mod tests {
             context: "parse_target could not classify".into(),
             text: text.into(),
             line_index: 0,
+        }
+    }
+
+    /// CR 608.2c + CR 608.2k: `in_trigger` dominates the handed-down binding; a
+    /// non-trigger body takes the handed-down binding unchanged.
+    #[test]
+    fn effective_spell_anaphor_binding_lets_in_trigger_dominate() {
+        for (in_trigger, binding, expected) in [
+            (
+                false,
+                SpellAnaphorBinding::ParentTarget,
+                SpellAnaphorBinding::ParentTarget,
+            ),
+            (
+                false,
+                SpellAnaphorBinding::EventSource,
+                SpellAnaphorBinding::EventSource,
+            ),
+            (
+                true,
+                SpellAnaphorBinding::ParentTarget,
+                SpellAnaphorBinding::EventSource,
+            ),
+            (
+                true,
+                SpellAnaphorBinding::EventSource,
+                SpellAnaphorBinding::EventSource,
+            ),
+        ] {
+            let ctx = ParseContext {
+                in_trigger,
+                spell_anaphor_binding: binding,
+                ..ParseContext::default()
+            };
+            assert_eq!(
+                ctx.effective_spell_anaphor_binding(),
+                expected,
+                "in_trigger={in_trigger}, binding={binding:?}"
+            );
         }
     }
 
@@ -1328,6 +1814,45 @@ mod tests {
         );
     }
 
+    /// CR 603.1 + CR 603.12: the condition-object classification defaults to
+    /// `Unestablished`, continues through an ordinary clone and a throwaway
+    /// sub-parse of the same body, and resets for an independent body, whose
+    /// own trigger event it does not describe.
+    #[test]
+    fn trigger_condition_objects_follow_the_body_they_describe() {
+        assert_eq!(
+            ParseContext::default().trigger_condition_objects,
+            TriggerConditionObjects::Unestablished
+        );
+        let ctx = ParseContext {
+            trigger_condition_objects: TriggerConditionObjects::SourceOnly,
+            ..Default::default()
+        };
+        assert_eq!(
+            ctx.clone().trigger_condition_objects,
+            TriggerConditionObjects::SourceOnly
+        );
+        assert_eq!(
+            ctx.clone_throwaway().trigger_condition_objects,
+            TriggerConditionObjects::SourceOnly
+        );
+        assert_eq!(
+            ctx.clone_for_independent_body().trigger_condition_objects,
+            TriggerConditionObjects::Unestablished
+        );
+        assert_eq!(
+            ctx.trigger_condition_objects,
+            TriggerConditionObjects::SourceOnly
+        );
+        // CR 603.7: a delayed body resolves on its own later trigger event.
+        let mut delayed_body = ctx.clone();
+        delayed_body.enter_delayed_trigger_body();
+        assert_eq!(
+            delayed_body.trigger_condition_objects,
+            TriggerConditionObjects::Unestablished
+        );
+    }
+
     fn phrase(subject: ControllerSubject, tense: ControllerTense) -> ControllerPhrase {
         ControllerPhrase {
             subject,
@@ -1460,5 +1985,114 @@ mod tests {
                 Some(expected_they)
             );
         }
+    }
+
+    /// CR 608.2k + CR 608.2c: the characteristic rung mirrors the single "it"
+    /// authority (`resolve_it_pronoun`). It names the trigger event's object
+    /// only where bare "it" does; every nearer or self antecedent leaves it
+    /// `None`, which keeps the `Source` default.
+    #[test]
+    fn characteristic_pronoun_owner_mirrors_it_pronoun() {
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let event_object = Some(ObjectScope::EventSource);
+        for (label, ctx, expected) in [
+            (
+                "typed creature trigger subject",
+                ParseContext {
+                    subject: Some(creature.clone()),
+                    ..Default::default()
+                },
+                event_object,
+            ),
+            (
+                "enchanted/equipped creature trigger subject",
+                ParseContext {
+                    subject: Some(TargetFilter::AttachedTo),
+                    ..Default::default()
+                },
+                event_object,
+            ),
+            (
+                "self subject, explicit triggering-source anaphor",
+                ParseContext {
+                    subject: Some(TargetFilter::SelfRef),
+                    object_pronoun_ref: Some(TargetFilter::TriggeringSource),
+                    ..Default::default()
+                },
+                event_object,
+            ),
+            ("no subject", ParseContext::default(), None),
+            (
+                "self subject",
+                ParseContext {
+                    subject: Some(TargetFilter::SelfRef),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "any subject",
+                ParseContext {
+                    subject: Some(TargetFilter::Any),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "cost-paid anchor",
+                ParseContext {
+                    subject: Some(TargetFilter::CostPaidObject),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "typed subject, nearer self anaphor",
+                ParseContext {
+                    subject: Some(creature.clone()),
+                    object_pronoun_ref: Some(TargetFilter::SelfRef),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "typed subject, nearer parent-target anaphor",
+                ParseContext {
+                    subject: Some(creature.clone()),
+                    object_pronoun_ref: Some(TargetFilter::ParentTarget),
+                    ..Default::default()
+                },
+                None,
+            ),
+        ] {
+            assert_eq!(
+                ctx.player_antecedents().characteristic_pronoun_owner,
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    /// CR 608.2k: the count slot's seed carries only the characteristic rung;
+    /// every player rung stays empty so relative controller phrases keep their
+    /// context-free binding.
+    #[test]
+    fn characteristic_owner_only_seed_carries_only_the_rung() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        };
+        assert_eq!(
+            PlayerAntecedents::characteristic_owner_only(&ctx),
+            PlayerAntecedents {
+                characteristic_pronoun_owner: Some(ObjectScope::EventSource),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            PlayerAntecedents::characteristic_owner_only(&ParseContext::default()),
+            PlayerAntecedents::default()
+        );
     }
 }

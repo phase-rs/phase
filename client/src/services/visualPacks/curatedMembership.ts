@@ -1,4 +1,5 @@
-import { selectedPrinting } from "../artSelection.ts";
+import basicLandArtCatalog from "../../../../crates/engine/data/basic-land-art-v1.json";
+import { selectedPrinting, selectSubmissionPrinting } from "../artSelection.ts";
 import { deriveImageUrl } from "../scryfall.ts";
 import type { PrintingEntry } from "../scryfall.ts";
 // Type-only, matching `artSelection.ts`: no runtime dependency is created from
@@ -8,7 +9,7 @@ import type { ArtChainEntry, CardArtOverride } from "../../stores/preferencesSto
 import { canonicalDescriptors, englishDescriptors } from "./browser/descriptors.ts";
 import type { CanonicalCardIdentity, DescriptorFace, ScryfallAssetDescriptor } from "./browser/descriptors.ts";
 import { decodeCandidateKey } from "./candidateKeys.ts";
-import { catalogRoot } from "./types.ts";
+import { catalogRoot, packId } from "./types.ts";
 import type { AssetKey, CatalogRoot, PackId } from "./types.ts";
 
 /**
@@ -16,8 +17,7 @@ import type { AssetKey, CatalogRoot, PackId } from "./types.ts";
  *
  * Declared structurally rather than imported because `ScryfallDataEntry` is
  * private to `services/scryfall.ts`. Note what is absent: these entries carry
- * no printing `id`, which is why a card with no selected printing can only be
- * expressed in the `canonical_card` asset form.
+ * no printing `id`, so images from this entry use the `canonical_card` asset form.
  */
 export interface CuratedCardEntry {
   readonly oracle_id: string;
@@ -40,11 +40,7 @@ export interface CuratedDeckPrinting {
 }
 
 export interface CuratedMembershipInput {
-  /**
-   * The pack the descriptors belong to. Supplied by the caller rather than
-   * hardcoded: the `curated` pack id is not admissible until the selector
-   * lands, and the planner has no other reason to know its own pack.
-   */
+  /** The pack the descriptors belong to. Curated packs include catalog choices. */
   readonly packId: PackId;
   /** The `scryfall-data.json` map, keyed by oracle id AND by lowercased name. */
   readonly cards: Readonly<Record<string, CuratedCardEntry>>;
@@ -63,13 +59,14 @@ export interface CuratedMembershipInput {
 export interface CuratedMembership {
   /** Ascending by `assetKey`, so the list is a function of its content. */
   readonly descriptors: readonly ScryfallAssetDescriptor[];
-  /** sha256 over the sorted `"<assetKey>\t<sourceUrl>"` lines. */
+  /** SHA-256 over each descriptor's asset key, source URL, and sorted unique candidate keys. */
   readonly membershipDigest: CatalogRoot;
 }
 
 /** `scryfall-data.json` prefixes token keys; tokens resolve through
  *  `tokenCandidateGroups`, so their images would download and never resolve. */
 const TOKEN_KEY_PREFIX = "token:";
+const CURATED_PACK = packId("curated");
 
 /**
  * The rung URLs one stored face offers.
@@ -112,36 +109,12 @@ function descriptorFaces(entry: CuratedCardEntry, faces: readonly ImageFace[]): 
  * entry, while with one it resolves the deck's printing — two different arts,
  * both displayed, at different sites.
  *
- * It is NOT needed to keep a deck card's plain renders on canonical art, and
- * this is an ACCEPTED DIVERGENCE rather than an oversight. Under an EMPTY
- * chain a deck card plans exactly one printing: the no-source answer is null
- * (no override, no chain, no source), the deck context yields the deck's
- * printing, and the exclusivity gate below therefore emits no canonical form.
- * That card's battlefield, hand and search renders resolve through the oracle
- * group onto the deck printing's `exact_printing` descriptor, so offline they
- * show the deck's art where online they would show canonical. Emitting both
- * forms to close the gap would be worse, not better: they would share this
- * card's oracle-group candidate keys and `sortMatches` orders
- * `canonical_card:` first, so canonical would win `sources[0]` for the DECK
- * render too — breaking the half of the feature that motivated it. Of the
- * three available behaviors this is the best one.
+ * With an empty chain and an annotated deck card, the deck's printing becomes
+ * the ordinary offline image. Its Oracle candidates let battlefield, hand,
+ * and search renders resolve even though their online image is canonical.
  *
- * Nothing is added on top of those answers. Two extras were tried and removed:
- * the chain winner beside a pinned `artOverride`, and a deck's own printing
- * beside whatever the chain resolves for that deck render. Neither is ever
- * displayed — an override suppresses the chain entirely, and `useCardImage`
- * consults a deck source only through its `else if (sourcePrinting)` branch,
- * reachable solely when `artChain` is empty because it follows
- * `else if (artChain.length > 0)`, or through a chain that itself names
- * `source_printing`; both are already what the call below returns. Each extra
- * would cost bytes on a feature whose whole purpose is fewer bytes, and would
- * put a second `exact_printing` under one card's oracle-group candidate keys —
- * which makes `unambiguousCompanion` see two candidates and drop rung pairing,
- * and lets `sortMatches` order `canonical_card:` ahead of `exact_printing:` so
- * the wrong art lands at `sources[0]`. Both `artChain` and `artOverrides` are
- * digest inputs, so un-pinning an override or switching chains changes the
- * digest, reports drift, and lets the delta sync fetch what is newly
- * displayed. That is what the drift mechanism is for.
+ * Preference and deck contexts select the printings themselves. Catalog
+ * choices are added separately after the primary art is decided.
  */
 function orderedSourceContexts(sources: readonly SourcePrinting[]): SourcePrinting[] {
   return [...sources].sort((left, right) => {
@@ -179,13 +152,17 @@ function selectedPrintings(
   return [...byId.values()];
 }
 
-/** Only one exact printing may answer broad oracle/name semantic lookup for a
- * card. Source-specific identity remains on every English descriptor. */
-function withoutBroadSemanticCandidates(descriptor: ScryfallAssetDescriptor): ScryfallAssetDescriptor {
+/** Keep source identity while limiting secondary render art to non-semantic
+ * lookups and supplemental art to exact lookups. */
+function withoutBroadSemanticCandidates(
+  descriptor: ScryfallAssetDescriptor,
+  scope: "secondary_render" | "exact_only",
+): ScryfallAssetDescriptor {
   return {
     ...descriptor,
     candidateKeys: descriptor.candidateKeys.filter((key) => {
       const [kind] = decodeCandidateKey(key);
+      if (scope === "exact_only") return kind === "english_printing" || kind === "source_printing";
       return kind !== "oracle_face" && kind !== "name_face";
     }),
   };
@@ -207,65 +184,61 @@ function cardDescriptors(
   // both on one form would silently rely on that.
   const oracleId = entry.oracle_id;
   const candidateOracleId = oracleId.toLowerCase();
-  const printings = selectedPrintings(
-    oracleId,
-    input.printings[oracleId] ?? [],
-    input,
-    sources,
-  );
-  const selected = printings.map((printing) => ({
-    printing,
-    descriptors: englishDescriptors(input.packId, {
+  const printings = input.printings[oracleId] ?? [];
+  const describePrinting = (printing: PrintingEntry) =>
+    englishDescriptors(input.packId, {
       id: printing.id,
       oracleId: candidateOracleId,
       set: printing.set,
       collector: printing.collector_number,
       name: entry.name,
       faces: descriptorFaces(entry, printing.faces),
-    }),
+    });
+  const selected = selectedPrintings(oracleId, printings, input, sources).map((printing) => ({
+    printing,
+    descriptors: describePrinting(printing),
   }));
   const primary = selected.find(({ descriptors }) => descriptors.length > 0)?.printing.id;
-  const exact = selected.flatMap(({ printing, descriptors }) =>
-    printing.id === primary ? descriptors : descriptors.map(withoutBroadSemanticCandidates));
-  // A card that produced NO `exact_printing` descriptor falls back to the
-  // canonical form, and one that produced any never emits it. The trigger is
-  // stated as "emitted nothing" rather than "selected nothing" because the
-  // invariant being protected is emission: the two forms share this card's
-  // oracle-group candidate keys, so a card reachable by BOTH returns two
-  // matches for every oracle-group lookup — and `sortMatches` orders by
-  // assetKey within a pack, where `canonical_card:` sorts before
-  // `exact_printing:`. The canonical art would become `sources[0]` and the
-  // WRONG printing would render, not merely a degraded rung pairing. A card
-  // emitting no `exact_printing` descriptor cannot be reachable by both, so
-  // this tests the invariant directly instead of through a proxy.
-  //
-  // Two situations reach it. No printing was selected: the card is absent from
-  // `scryfall-printings.json`, or the chain found no winner. Or a printing was
-  // selected and stores no image — `scryfall-printings.json` holds 696 such
-  // printings, null on `art_crop` as well as `normal` across every face, and
-  // 211 cards have no renderable printing at all. `faceImages` skips every rung
-  // for those, so the older `printings.length === 0` gate left them
-  // contributing nothing at all while the renderer, whose `overrideUrl` is null
-  // for the same reason, falls through to canonical art — 211 cards needing the
-  // network in an offline-play feature. All 211 do carry an image in
-  // `scryfall-data.json`, which is what the canonical form serves. Three more
-  // cards own image-less and renderable printings both, and fall back only when
-  // the chain picks an image-less one — which, measured under a `newest` chain,
-  // is all three of them.
-  //
-  // A card with SEVERAL selected printings, only some of them image-less, still
-  // emits the exact form alone. Its image-less render context falls back to
-  // canonical art online, and the one-form rule above is what forbids caching
-  // it; that residual is the price of the rule, not an oversight.
-  if (exact.length === 0) {
+  const descriptors = selected.flatMap(({ printing, descriptors }) =>
+    printing.id === primary
+      ? descriptors
+      : descriptors.map((value) => withoutBroadSemanticCandidates(value, "secondary_render")));
+  // A selected printing without images contributes no rungs. Use canonical
+  // art if none of the selected contexts produced an image.
+  if (primary === undefined) {
     const canonical: CanonicalCardIdentity = {
       oracleId: candidateOracleId,
       name: entry.name,
       faces: descriptorFaces(entry, entry.faces),
     };
-    return canonicalDescriptors(input.packId, canonical);
+    descriptors.push(...canonicalDescriptors(input.packId, canonical));
   }
-  return exact;
+
+  const lands = basicLandArtCatalog.lands;
+  if (!Object.prototype.hasOwnProperty.call(lands, candidateOracleId)) return descriptors;
+
+  // Keep keys on any printing already supplied by a selected context.
+  const seen = new Set(selected.filter((value) => value.descriptors.length > 0).map(({ printing }) => printing.id));
+  const addExactPrinting = (printing: PrintingEntry) => {
+    if (seen.has(printing.id)) return;
+    seen.add(printing.id);
+    descriptors.push(...describePrinting(printing).map((value) => withoutBroadSemanticCandidates(value, "exact_only")));
+  };
+  // Submission can bind a basic to a printing ordinary rendering does not
+  // select (an import over a general preference, or a preference past a stale
+  // pin), so every pack carries it for exact lookups.
+  for (const source of [undefined, ...sources]) {
+    const printing = selectSubmissionPrinting(oracleId, printings, input.artChain, input.artOverrides, source);
+    if (printing) addExactPrinting(printing);
+  }
+  if (input.packId !== CURATED_PACK) return descriptors;
+  for (const choice of lands[candidateOracleId as keyof typeof lands].choices) {
+    if (seen.has(choice.scryfall_id)) continue;
+    const printing = printings.find((row) =>
+      row.id === choice.scryfall_id && row.set === choice.set && row.collector_number === choice.collector_number);
+    if (printing) addExactPrinting(printing);
+  }
+  return descriptors;
 }
 
 async function sha256Hex(value: string): Promise<string> {
@@ -274,14 +247,17 @@ async function sha256Hex(value: string): Promise<string> {
 }
 
 /**
- * Plan the curated pack: one art per card under the user's configured art
- * chain, plus the printings their overrides and decklists pin.
+ * Plan ordinary art under the user's preferences and deck contexts.
+ * Include exact deck-submission printings in both pack types and exact
+ * catalog alternatives in curated packs.
  *
  * The digest covers each descriptor's source URL as well as its asset key. A
  * `canonical_card` key names no printing, so the bytes behind it are whatever
  * `scryfall-data.json` currently supplies — a pipeline regeneration can move
  * the URL under an unchanged key. Digesting keys alone would leave that
- * invisible and pin stale art with no path to a refresh.
+ * invisible and pin stale art with no path to a refresh. The digest also
+ * identifies installed lookup metadata for every pack, so changing which
+ * image answers a candidate can refresh the pack with cached bytes.
  */
 export async function planCuratedMembership(
   input: CuratedMembershipInput,
@@ -321,6 +297,7 @@ export async function planCuratedMembership(
 
   const descriptors = [...byAssetKey.values()].sort((a, b) =>
     a.assetKey < b.assetKey ? -1 : a.assetKey > b.assetKey ? 1 : 0);
-  const lines = descriptors.map((value) => `${value.assetKey}\t${value.sourceUrl}\n`).join("");
-  return { descriptors, membershipDigest: catalogRoot(await sha256Hex(lines)) };
+  const digestInput = JSON.stringify(descriptors.map(({ assetKey, sourceUrl, candidateKeys }) =>
+    [assetKey, sourceUrl, [...new Set(candidateKeys)].sort()]));
+  return { descriptors, membershipDigest: catalogRoot(await sha256Hex(digestInput)) };
 }

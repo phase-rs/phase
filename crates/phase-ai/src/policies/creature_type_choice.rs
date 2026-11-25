@@ -189,6 +189,7 @@ mod tests {
     fn decision_for(player: PlayerId, choice_type: ChoiceType) -> AiDecisionContext {
         AiDecisionContext {
             waiting_for: WaitingFor::NamedChoice {
+                decision_subject_id: None,
                 player,
                 choice_type,
                 options: ["Advisor", "Faerie", "Villain"]
@@ -489,6 +490,7 @@ mod tests {
         );
 
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             player: AI,
             choice_type: ChoiceType::CreatureType {
                 options: Vec::new(),

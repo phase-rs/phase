@@ -15,6 +15,7 @@
 //! the Worker already advertises so the two shells agree on name length.
 
 use crate::protocol::DraftLobbyMetadata;
+use engine::starter_decks::DeckData;
 
 /// Max display-name length, in characters. Matches `DISPLAY_NAME_MAX_LENGTH` in
 /// the Worker's `name-filter.ts`.
@@ -376,6 +377,27 @@ pub fn validate_report_match_result_fields(
     Ok(())
 }
 
+pub struct SubmitTournamentDeckFields<'a> {
+    pub code: &'a str,
+    pub player_token: &'a str,
+    pub deck: &'a DeckData,
+}
+
+pub fn validate_submit_tournament_deck_fields(
+    fields: SubmitTournamentDeckFields<'_>,
+) -> Result<(), String> {
+    validate_token("code", fields.code, MAX_GAME_CODE_LEN)?;
+    validate_token("player_token", fields.player_token, MAX_TOKEN_LEN)?;
+    // Bound the attacker-controlled deck through the SAME single authority that
+    // bounds a casual `CreateGameWithSettings`/`JoinGameWithPassword` deck — the
+    // tournament deck is the identical `DeckData`, just retained on the entrant
+    // rather than a game session. No deck LEGALITY is enforced (the tournament
+    // touches no `GameState`); resolution rejects anything unusable when the
+    // pairing's table is actually spawned.
+    crate::inbound_guard::validate_deck_payload("deck", fields.deck)?;
+    Ok(())
+}
+
 pub struct DropFromTournamentFields<'a> {
     pub code: &'a str,
     pub player_token: &'a str,
@@ -565,6 +587,18 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
                 outcome,
             })?;
         }
+        M::SubmitTournamentDeck {
+            code,
+            player_token,
+            deck,
+            request_id: _,
+        } => {
+            validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
+                code,
+                player_token,
+                deck,
+            })?;
+        }
         M::DropFromTournament {
             code,
             player_token,
@@ -672,6 +706,116 @@ mod tests {
         assert!(validate_optional_label("f", Some("Room"), MAX_ROOM_NAME_LEN).is_ok());
         let long = "r".repeat(41);
         assert!(validate_optional_label("f", Some(&long), MAX_ROOM_NAME_LEN).is_err());
+    }
+
+    #[test]
+    fn submit_tournament_deck_bounds_the_deck_via_the_shared_authority() {
+        // A normal (empty) deck passes.
+        assert!(
+            validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
+                code: "T",
+                player_token: "tok",
+                deck: &empty_deck(),
+            })
+            .is_ok()
+        );
+        // An over-sized main deck is refused by the same limit a casual game uses.
+        let mut oversized = empty_deck();
+        oversized.main_deck = vec!["Forest".to_string(); MAX_MAIN_DECK_ENTRIES + 1];
+        assert!(
+            validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
+                code: "T",
+                player_token: "tok",
+                deck: &oversized,
+            })
+            .is_err()
+        );
+    }
+
+    /// A tournament deck routes through the shared `inbound_guard::validate_deck_payload`,
+    /// so it is bounded on exactly the lists that shared authority covers — the
+    /// same ones a casual `CreateGameWithSettings` is, `sticker_sheets` now included
+    /// (every `DeckData` name list is bounded there). Persistence is bounded on two
+    /// further axes by `tournament`: `MAX_SINGLE_DECK_ENCODED_BYTES` caps one deck's
+    /// encoded size, `MAX_EVENT_DECK_ENCODED_BYTES` the summed encoded bytes of one
+    /// event's retained decks, and `broker::MAX_SNAPSHOT_ENCODED_BYTES` the complete
+    /// persisted broker (every field included).
+    #[test]
+    fn submit_tournament_deck_bounds_every_supplementary_list() {
+        let cases = [
+            (
+                "companion",
+                DeckData {
+                    companion: vec!["Card".into(); 5],
+                    ..Default::default()
+                },
+            ),
+            (
+                "attraction_deck",
+                DeckData {
+                    attraction_deck: vec!["Card".into(); 201],
+                    ..Default::default()
+                },
+            ),
+            (
+                "contraption_deck",
+                DeckData {
+                    contraption_deck: vec!["Card".into(); 201],
+                    ..Default::default()
+                },
+            ),
+            (
+                "signature_spell",
+                DeckData {
+                    signature_spell: vec!["Card".into(); 5],
+                    ..Default::default()
+                },
+            ),
+            (
+                "sticker_sheets",
+                DeckData {
+                    sticker_sheets: vec!["Sheet".into(); 201],
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (field, deck) in cases {
+            let err = guard_inbound(&M::SubmitTournamentDeck {
+                code: "T".into(),
+                player_token: "tok".into(),
+                deck,
+                request_id: None,
+            })
+            .unwrap_err();
+            assert!(err.contains(field), "{err}");
+        }
+
+        // CR 123.2a: a constructed sticker pool is "at least ten sticker sheets...
+        // There is no maximum". Eleven distinct supported sheets — one past the
+        // legal floor — must pass the shared guard; only an abusive count (above)
+        // is refused. REVERT-FAIL: a sticker cap of ten rejects this legal pool.
+        let legal_stickers = DeckData {
+            sticker_sheets: (0..11).map(|i| format!("Sticker Sheet {i}")).collect(),
+            ..Default::default()
+        };
+        guard_inbound(&M::SubmitTournamentDeck {
+            code: "T".into(),
+            player_token: "tok".into(),
+            deck: legal_stickers,
+            request_id: None,
+        })
+        .expect("eleven distinct sticker sheets are a legal pool (CR 123.2a)");
+
+        let mut invalid_name = empty_deck();
+        invalid_name.commander = vec!["x".repeat(MAX_DECK_CARD_NAME_LEN + 1)];
+        let err = guard_inbound(&M::SubmitTournamentDeck {
+            code: "T".into(),
+            player_token: "tok".into(),
+            deck: invalid_name,
+            request_id: None,
+        })
+        .unwrap_err();
+        assert!(err.contains("commander[0]"), "{err}");
     }
 
     #[test]
@@ -878,6 +1022,159 @@ mod tests {
         }
         let err = guard_inbound(&msg).unwrap_err();
         assert!(err.contains("scheme_deck[0]"));
+    }
+
+    // -- Printings sidecar (P2-V4) -------------------------------------------
+
+    /// The wire text of `msg` with `data.deck.printings` replaced by `printings`.
+    fn frame_with_printings(msg: &M, printings: serde_json::Value) -> String {
+        let mut frame = serde_json::to_value(msg).expect("lobby frame serializes");
+        frame["data"]["deck"]["printings"] = printings;
+        frame.to_string()
+    }
+
+    /// The sidecar of a parsed create/join frame.
+    fn parsed_printings(
+        parsed: crate::protocol::ParsedFrame,
+    ) -> (M, Vec<engine::types::card_printing::DeckPrinting>) {
+        let crate::protocol::ParsedFrame::Message(msg) = parsed else {
+            panic!("expected a parsed message, got {parsed:?}");
+        };
+        let printings = match &*msg {
+            M::CreateGameWithSettings { deck, .. } | M::JoinGameWithPassword { deck, .. } => {
+                deck.printings.clone()
+            }
+            other => panic!("not a deck-carrying frame: {other:?}"),
+        };
+        (*msg, printings)
+    }
+
+    /// Both deck-carrying frames, as the Worker receives them.
+    fn deck_carrying_frames() -> [(&'static str, M); 2] {
+        [
+            ("create", create_with("Alice", None)),
+            ("join", join_with("Bob")),
+        ]
+    }
+
+    #[test]
+    fn frame_refuses_a_sidecar_over_the_entry_cap_even_when_every_element_is_malformed() {
+        use crate::protocol::{parse_lobby_client_message, ParsedFrame};
+        for (label, msg) in deck_carrying_frames() {
+            let over = serde_json::json!(vec![0; 2049]);
+            let ParsedFrame::Malformed(reason) =
+                parse_lobby_client_message(&frame_with_printings(&msg, over))
+            else {
+                panic!("{label}: expected a malformed frame");
+            };
+            assert!(
+                reason.contains("printings must contain at most 2048 entries"),
+                "{label}: {reason}"
+            );
+
+            // Boundary and reach guard: 2048 malformed elements are all dropped and the
+            // deck is admitted, so the refusal above is the cap and not a frame error.
+            let at_cap = serde_json::json!(vec![0; 2048]);
+            let (_, printings) = parsed_printings(parse_lobby_client_message(
+                &frame_with_printings(&msg, at_cap),
+            ));
+            assert!(printings.is_empty(), "{label}");
+        }
+    }
+
+    #[test]
+    fn guard_refuses_an_oversized_sidecar_string_naming_the_field() {
+        use crate::protocol::parse_lobby_client_message;
+        for (label, msg) in deck_carrying_frames() {
+            let long_code = "s".repeat(33);
+            let printings = serde_json::json!([{
+                "section": "main_deck",
+                "name": "Plains",
+                "count": 1,
+                "printing": { "set_code": long_code, "collector_number": "1" },
+            }]);
+            // Reach guard: the frame parses, so the refusal below is the guard's.
+            let (parsed, _) = parsed_printings(parse_lobby_client_message(&frame_with_printings(
+                &msg, printings,
+            )));
+            let err = guard_inbound(&parsed).unwrap_err();
+            assert!(
+                err.contains("deck.printings[0].printing.set_code"),
+                "{label}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn frame_with_invalid_annotations_is_admitted_and_only_malformed_elements_dropped() {
+        use crate::protocol::parse_lobby_client_message;
+        use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+        let printing = |set_code: &str, collector_number: &str| {
+            CardPrinting::owner(set_code, collector_number)
+        };
+        let e1 = serde_json::json!({"section":"main_deck","name":"Plains","count":1,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e2 = serde_json::json!({"section":"mystery_zone","name":"Plains","count":1,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e3 = serde_json::json!(0);
+        let e4 = serde_json::json!({"section":"main_deck","name":"Plains","count":"one",
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e5 = serde_json::json!({"section":"main_deck","name":"","count":1,
+            "printing":{"set_code":"","collector_number":""}});
+        let e6 = serde_json::json!({"section":"main_deck","name":"Bad\nName","count":1,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e7 = serde_json::json!({"section":"main_deck","name":"No Such Card Anywhere","count":1,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e8 = serde_json::json!({"section":"main_deck","name":"Plains","count":0,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let expected = vec![
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "Plains".into(),
+                count: 1,
+                printing: printing("M21", "1"),
+            },
+            DeckPrinting {
+                section: DeckSection::Unknown,
+                name: "Plains".into(),
+                count: 1,
+                printing: printing("M21", "1"),
+            },
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: String::new(),
+                count: 1,
+                printing: printing("", ""),
+            },
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "Bad\nName".into(),
+                count: 1,
+                printing: printing("M21", "1"),
+            },
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "No Such Card Anywhere".into(),
+                count: 1,
+                printing: printing("M21", "1"),
+            },
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "Plains".into(),
+                count: 0,
+                printing: printing("M21", "1"),
+            },
+        ];
+        for (label, msg) in deck_carrying_frames() {
+            let printings = serde_json::json!([e1, e2, e3, e4, e5, e6, e7, e8]);
+            let (parsed, kept) = parsed_printings(parse_lobby_client_message(
+                &frame_with_printings(&msg, printings),
+            ));
+            // The decoder ran: the two structurally malformed elements are gone and the
+            // well-typed unusable ones survive, in input order.
+            assert_eq!(kept, expected, "{label}");
+            assert_eq!(guard_inbound(&parsed), Ok(()), "{label}");
+        }
     }
 
     // -- Tournament organizer ----------------------------------------------

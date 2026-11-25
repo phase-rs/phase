@@ -65,8 +65,11 @@ describe("resolveBackground", () => {
 });
 
 describe("BattlefieldBackground", () => {
-  afterEach(() => {
+  afterEach(async () => {
     cleanup();
+    // ArenaBackground starts its scene import in an effect and nothing waits
+    // for it, so a row must not end with that load still running.
+    await vi.dynamicImportSettled();
     useGameStore.setState({ gameMode: null, gameState: null });
     usePreferencesStore.setState(initialPreferences);
     vi.clearAllMocks();

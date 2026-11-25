@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
+import { afterEach, vi } from "vitest";
 
 import common from "./i18n/locales/en/common.json";
 import menu from "./i18n/locales/en/menu.json";
@@ -11,6 +12,18 @@ import draft from "./i18n/locales/en/draft.json";
 import settings from "./i18n/locales/en/settings.json";
 import multiplayer from "./i18n/locales/en/multiplayer.json";
 import tournament from "./i18n/locales/en/tournament.json";
+
+if (typeof window !== "undefined" && typeof window.Animation !== "undefined") {
+  const cancel = window.Animation.prototype.cancel;
+  window.Animation.prototype.cancel = function (...args) {
+    // Motion uses onfinish rather than finished. Happy DOM 21 eagerly creates
+    // finished, so observe its expected cancellation rejection before teardown.
+    void this.finished.catch((error: unknown) => {
+      if (!(error instanceof window.DOMException && error.name === "AbortError")) throw error;
+    });
+    return cancel.apply(this, args);
+  };
+}
 
 // Tests only ever assert against English copy, so we register a lean,
 // English-only i18next instance here instead of importing the app's `./i18n`
@@ -77,3 +90,9 @@ if (typeof globalThis.localStorage?.setItem !== "function") {
   }
 }
 
+// uiStore's deferred hover clear reads `document`; cancel it before happy-dom tears the environment down.
+// Imported lazily: a setup-file import would load uiStore before test files' `vi.mock` registrations apply.
+afterEach(async () => {
+  const { useUiStore } = await vi.importActual<typeof import("./stores/uiStore")>("./stores/uiStore");
+  useUiStore.getState().dismissPreview();
+});

@@ -26,7 +26,8 @@
   "home": {
     "resume": {
       "title": "Riprendi partita",
-      "description": "Continua l'ultima partita salvata dal suo turno e stato del campo attuali."
+      "description": "Continua l'ultima partita salvata dal suo turno e stato del campo attuali.",
+      "viewResult": "Vedi risultato"
     },
     "setup": {
       "title": "Gioca contro l'IA",
@@ -157,6 +158,7 @@
     "subscribe": "Iscriviti",
     "unsubscribe": "Annulla iscrizione",
     "lastRefreshed": "Ultimo aggiornamento: {{date}}",
+    "dataProvidedBy": "Dati forniti da",
     "addCustomFeed": "Aggiungi feed personalizzato",
     "add": "Aggiungi",
     "offlineUnavailable": "Gli aggiornamenti dei feed non sono disponibili offline.",

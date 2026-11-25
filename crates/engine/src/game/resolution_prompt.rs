@@ -89,7 +89,7 @@ pub(crate) fn probe_resolution(
         return ResolutionProbe::Prompted;
     }
     // The SAME re-entrancy guard `apply_confirmed_shortcut` holds across its own
-    // clone-and-drive. It suppresses ring accumulation and shortcut detection
+    // clone-and-drive. It suppresses play-trace recording and shortcut detection
     // inside the probe, which is exactly the recursion hazard a speculative
     // resolve would otherwise open.
     let _probe = SimulationProbeGuard::enter();
@@ -212,7 +212,7 @@ fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
 /// `ResolutionProbe::Prompted`, which OBSERVES the real resolver opening a real
 /// prompt on the real board. The arm only decides which classes are worth paying
 /// a clone for.
-fn effect_offers_choice(e: &Effect) -> bool {
+pub(crate) fn effect_offers_choice(e: &Effect) -> bool {
     match e {
         // Engine-set from the activation-payment snapshot, never a player prompt.
         Effect::NoteManaSpent | Effect::CompletePlayerAction { .. } => false,
@@ -295,6 +295,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
@@ -515,6 +516,9 @@ fn effect_offers_choice(e: &Effect) -> bool {
         // Jace tokens) — fail-closed MayPrompt.
         | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
+        // A revealed spell with targets/choices prompts (fail-closed: the AST
+        // gate cannot see that Boss libraries are all-token).
+        | Effect::HordePlayCard { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
         | Effect::Bolster { .. }
@@ -533,6 +537,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -565,8 +570,155 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
     // where it is a pure AST walk costing nothing, and dropped from the probe below.
     node_modifiers_offer_choice(a)
         || effect_offers_choice(&a.effect)
+        || a.coin_branches.is_some()
         || a.sub_ability.as_deref().is_some_and(chain_offers_choice)
         || a.else_ability.as_deref().is_some_and(chain_offers_choice)
+}
+
+/// CR 101.4 + CR 616.1f: rank a prevention continuation by its first prompt.
+/// The rider's own choice gates its event, and that event gates the chain.
+/// This reads the current board before dispatch, including live event recipients.
+pub(crate) fn prevention_rider_choice_rank(
+    state: &GameState,
+    rider: &ResolvedAbility,
+    amount: i32,
+    event_source: Option<crate::types::identifiers::ObjectId>,
+    rank: &impl Fn(crate::types::player::PlayerId) -> usize,
+) -> usize {
+    use crate::types::ability::TargetFilter;
+    use crate::types::game_state::PendingCounterAddition;
+    use crate::types::proposed_event::CounterPlacement;
+
+    if rider.optional || rider.optional_for.is_some() {
+        if let Some(player) = effects::optional_rider_chooser(state, rider) {
+            return rank(player);
+        }
+    } else if node_modifiers_offer_choice(rider) || effect_offers_choice(&rider.effect) {
+        return rank(rider.controller);
+    }
+
+    let mut earliest = usize::MAX;
+    let mut consider = |player| earliest = earliest.min(rank(player));
+    let quantity = |expr| {
+        crate::game::quantity::resolve_quantity_with_targets(state, expr, rider).max(0) as u32
+    };
+    crate::game::quantity::with_replacement_action_scope(Some(amount), || match &rider.effect {
+        Effect::PutCounter { .. } => {
+            for addition in effects::counters::resolved_counter_additions(state, rider) {
+                let PendingCounterAddition::Object {
+                    actor,
+                    object_id,
+                    counter_type,
+                    count,
+                    cause,
+                } = addition
+                else {
+                    continue;
+                };
+                if count > 0 {
+                    replacement::visit_proposed_event_choosers(
+                        state,
+                        &ProposedEvent::AddCounter {
+                            placement: CounterPlacement::Object {
+                                actor,
+                                object_id,
+                                counter_type,
+                                cause,
+                            },
+                            count,
+                            applied: Default::default(),
+                        },
+                        &mut consider,
+                    );
+                }
+            }
+        }
+        Effect::Draw { target, count } => {
+            let drawer = if *target == TargetFilter::PostReplacementSourceController {
+                event_source
+                    .and_then(|id| state.objects.get(&id))
+                    .map(|obj| obj.controller)
+            } else {
+                effects::resolve_player_for_context_ref(state, rider, target)
+            };
+            if let Some(player_id) = drawer {
+                let count = quantity(count);
+                if count > 0 {
+                    replacement::visit_draw_event_choosers(state, player_id, count, &mut consider);
+                }
+            }
+        }
+        Effect::GainLife { player, amount } => {
+            if let Some(event) = effects::life::resolve_life_loss_target(state, rider, Some(player))
+                .and_then(|player| {
+                    effects::life::proposed_life_gain(state, player, quantity(amount))
+                })
+            {
+                replacement::visit_proposed_event_choosers(state, &event, &mut consider);
+            }
+        }
+        Effect::LoseLife { target, amount } => {
+            if let Some(event) =
+                effects::life::resolve_life_loss_target(state, rider, target.as_ref()).and_then(
+                    |player| effects::life::proposed_life_loss(state, player, quantity(amount)),
+                )
+            {
+                replacement::visit_proposed_event_choosers(state, &event, &mut consider);
+            }
+        }
+        Effect::Token { .. } => {
+            if let Some((spec, owner, enter_tapped, count)) =
+                effects::token::resolve_token_spec(state, rider)
+                    .filter(|(_, _, _, count)| *count > 0)
+            {
+                replacement::visit_proposed_event_choosers(
+                    state,
+                    &ProposedEvent::CreateToken {
+                        redirected_to: None,
+                        owner,
+                        spec: Box::new(spec),
+                        copy: None,
+                        enter_tapped,
+                        count,
+                        appended: Vec::new(),
+                        applied: Default::default(),
+                    },
+                    &mut consider,
+                );
+            }
+        }
+        Effect::DealDamage {
+            amount,
+            damage_source: None,
+            ..
+        } => {
+            use effects::deal_damage as damage;
+            let ctx = damage::damage_context_from_ability(state, rider);
+            let recipients = rider.distribution.clone().unwrap_or_else(|| {
+                damage::damage_recipients(state, rider)
+                    .into_iter()
+                    .map(|target| (target, quantity(amount)))
+                    .collect()
+            });
+            for (target, amount) in recipients {
+                if let damage::DamageGateOutcome::Proposed(event) =
+                    damage::pre_replacement_damage_gate(state, &ctx, &target, amount, false)
+                {
+                    replacement::visit_proposed_event_choosers(state, &event, &mut consider);
+                }
+            }
+        }
+        _ => {}
+    });
+
+    if earliest != usize::MAX {
+        return earliest;
+    }
+    rider
+        .child_links()
+        .map(|(_, child)| prevention_rider_choice_rank(state, child, amount, event_source, rank))
+        .min()
+        .unwrap_or(usize::MAX)
 }
 
 /// CR 608.2d + CR 118.12: can this one node's executable modifiers (its
@@ -584,6 +736,7 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         effect: _,
         sub_ability: _,
         else_ability: _,
+        coin_branches: _, // CR 705.1 + CR 601.2c: announced outcome carriers, classified by chain_offers_choice
         // ---- choice-bearing: folded into the verdict below ----
         optional,
         optional_player: _, // selects the optional actor; `optional` already records the choice
@@ -605,7 +758,7 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         multi_target: _, // announce-time variable-count bounds (Resolution case caught by timing)
         target_constraints: _, // announce-time cross-target legality, no resolution prompt
         distribution: _, // CR 601.2d concrete pre-assigned portions (announce-time)
-        distribute: _, // CR 601.2d/603.3d unassigned division is an announce-time choice
+        distribute: _, // CR 601.2d announce-time; CR 608.2d: resolution_time_division
         targets: _,   // concrete announced target refs (already resolved)
         declares_chosen_group: _, // announce-time identity, no resolution prompt
         reads_chosen_group: _, // bound selected targets, no new choice
@@ -613,6 +766,7 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         reads_return_result: _, // consumes a settled value without a prompt
         source_id: _, // object id
         cast_occurrence: _, // finalized-cast provenance, no resolution-time choice
+        cycling_occurrence: _,
         source_incarnation: _, // self-transform epoch latch, no resolution-time choice
         announced_source_incarnation: _, // announcement-time source epoch, no resolution-time choice
         noted_mana_payment: _, // concrete activation-payment snapshot, no resolution-time choice
@@ -627,6 +781,7 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no choice
+        declared_player_target_slots: _, // CR 115.1 announce-time role identity, no choice
         controller: _,           // player id
         original_controller: _,  // player id
         scoped_player: _,        // player id (iteration binding)
@@ -661,9 +816,12 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         target_reads: _, // TargetReadOrigin tag (announce-time), no prompt
         entry_onset: _, // ContinuousEffectOnset tag, no prompt
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _,    // CR 608.2 iteration-relation tag; it offers no choice
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _,
         control_change_instruction: _,
     } = a;
 
@@ -678,6 +836,10 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
     }
     // CR 601.2c + CR 603.3d: a resolution-time target chooser announces targets.
     if target_chooser.is_some() {
+        return true;
+    }
+    // CR 608.2d: an untargeted division is chosen while applying the effect.
+    if crate::game::ability_utils::resolution_time_division(a).is_some() {
         return true;
     }
     // CR 608.2d: resolution-timed target selection is a resolution-time choice
@@ -778,9 +940,10 @@ mod tests {
         PtValue, QuantityExpr, TapStateChange, TargetFilter, TargetRef, UnlessPayModifier,
     };
     use crate::types::counter::CounterType;
+    use crate::types::game_state::DistributionUnit;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::proposed_event::{CounterPlacement, DrawEventStage};
+    use crate::types::proposed_event::{CounterCause, CounterPlacement, DrawEventStage};
     use crate::types::zones::Zone;
     use std::collections::BTreeMap;
 
@@ -822,6 +985,66 @@ mod tests {
         let mut divided = base.clone();
         divided.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
         assert!(!chain_offers_choice(&divided));
+    }
+
+    /// V5p: CR 608.2d — a division among a tracked-set population ("any number of
+    /// those Wolves") is chosen while the effect is applied, so the chain offers a
+    /// resolution choice. Announced-target divisions whose recipient is a context
+    /// ref (`ParentTarget` after an "instead" swap; a Stumpsquall-shaped counters
+    /// division) stay announce-time and choice-free (R2-F1).
+    #[test]
+    fn resolution_time_division_is_a_resolution_choice_only_for_tracked_sets() {
+        let damage = |target: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: fixed(3),
+                    target,
+                    damage_source: None,
+                    excess: None,
+                },
+                Vec::new(),
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let tracked = TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature(),
+            )),
+            caused_by: None,
+        };
+        for base in [damage(tracked.clone()), damage(TargetFilter::ParentTarget)] {
+            assert!(
+                !chain_offers_choice(&base),
+                "reach guard: the undivided base must be choice-free"
+            );
+        }
+
+        let mut tracked_division = damage(tracked);
+        tracked_division.distribute = Some(DistributionUnit::Damage);
+        assert!(chain_offers_choice(&tracked_division));
+
+        let mut parent_target_division = damage(TargetFilter::ParentTarget);
+        parent_target_division.distribute = Some(DistributionUnit::Damage);
+        assert!(!chain_offers_choice(&parent_target_division));
+
+        let mut counters = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: fixed(3),
+                target: TargetFilter::ParentTarget,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(
+            !chain_offers_choice(&counters),
+            "reach guard: the undivided counters base must be choice-free"
+        );
+        counters.distribute = Some(DistributionUnit::Counters("P1P1".to_string()));
+        assert!(!chain_offers_choice(&counters));
     }
 
     /// Snapshot every axis the witness reads.
@@ -1496,6 +1719,7 @@ mod tests {
         // being drawn as a candidate under a `> 0` gate.
         assert!(!replacement::event_is_accounted(
             &ProposedEvent::TokenEntry {
+                redirected_to: None,
                 entry_ref: victim,
                 enter_tapped: Default::default(),
                 enter_with_counters: Vec::new(),
@@ -1510,6 +1734,7 @@ mod tests {
                         actor: PlayerId(0),
                         object_id: victim,
                         counter_type: CounterType::Plus1Plus1,
+                        cause: CounterCause::Other,
                     },
                     count,
                     applied: Default::default(),
@@ -1524,6 +1749,8 @@ mod tests {
                     target: TargetRef::Player(PlayerId(1)),
                     amount: count,
                     is_combat: false,
+                    source_name: None,
+                    source_incarnation: None,
                     applied: Default::default(),
                 }),
                 accounted,

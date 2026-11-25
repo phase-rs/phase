@@ -484,6 +484,8 @@ fn devour_post_replacement_continuation_still_resolves() {
 
     let change_zone = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),

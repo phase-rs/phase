@@ -604,7 +604,7 @@ fn mass_exile_ltb_return_with_entry_modifier_is_not_paired() {
 /// the already-merged unmodified class (Worldgorger Dragon) must still report
 /// ZERO coverage gaps after the modifier-unsupported path was added — proving
 /// the coverage-honesty fix did not regress the supported class. Oracle text
-/// verbatim from `crates/engine/tests/fixtures/integration_cards.json.gz` (2026-07).
+/// verbatim from `crates/engine/tests/fixtures/integration_cards/` (2026-07).
 #[test]
 fn mass_exile_ltb_return_unmodified_class_reports_no_gaps() {
     use engine::game::coverage::{card_face_gaps, card_face_has_unimplemented_parts};
@@ -789,7 +789,13 @@ fn census_variant_names(body: &str) -> Vec<String> {
 /// it.
 #[test]
 fn render_net_effect_carrier_census() {
-    const EFFECT_VARIANT_PIN: usize = 238;
+    // 240 = base 237 + `Effect::CreateCardCopyByName` (Garth One-Eye) + `Effect::HordePlayCard` (Turtle Team-Up; bare-`u32`
+    // payload, reaches no `description`, so no RENDER_DESCEND arm) +
+    // `Effect::AbandonScheme` (CR 701.33b; fieldless, reaches no `description`).
+    // 241: + `Effect::ResumeDamageBatch` (internal paused damage batch; its portions carry
+    // `DamageContextSnapshot`, `TargetRef`, `ObjectId` and `EffectKind`, none of which reaches a
+    // `description`, so no RENDER_DESCEND arm).
+    const EFFECT_VARIANT_PIN: usize = 241;
     /// `(enum header, pinned variant count, the ONE variant the net destructures)`.
     const PAYLOAD_ENUM_PINS: &[(&str, usize, &str)] = &[
         ("pub enum CastingPermission {", 8, "ExileWithAltCost"),
@@ -1084,12 +1090,11 @@ fn as_enters_choose_line_with_source_enters_with_sentence_is_one_enters_with_cla
 /// to the right shape: the second ability ("When you gain control of this
 /// enchantment from another player, ...") is the gain-side
 /// `ChangesController`, and the first is the upkeep `GiveControl` of the
-/// enchantment to the scoped (active) player. The card nevertheless stays
-/// honestly unsupported: layer-2 control changes (Confiscate, Control Magic)
-/// emit no `ControllerChanged` (phase-rs/phase#9903), so `card_face_gaps`
-/// reports exactly the gain-side trigger until that emitter lands.
+/// enchantment to the scoped (active) player. Every control change a full
+/// layer evaluation derives publishes `ControllerChanged`, so the card has no
+/// coverage gap.
 #[test]
-fn risky_move_gain_side_control_trigger_parses_but_card_stays_unsupported() {
+fn risky_move_gain_side_control_trigger_parses_and_card_is_supported() {
     use engine::types::triggers::{ControlChangeSide, TriggerMode};
     let face = oracle_face_for(
         "Risky Move",
@@ -1098,10 +1103,7 @@ fn risky_move_gain_side_control_trigger_parses_but_card_stays_unsupported() {
         &[],
     );
     let gaps = engine::game::coverage::card_face_gaps(&face);
-    assert_eq!(
-        gaps,
-        vec![String::from("Trigger:ChangesController { side: Gains }")]
-    );
+    assert_eq!(gaps, Vec::<String>::new());
     assert_eq!(face.triggers.len(), 2, "{:#?}", face.triggers);
     let upkeep = &face.triggers[0];
     assert_eq!(upkeep.mode, TriggerMode::Phase);
@@ -1124,4 +1126,114 @@ fn risky_move_gain_side_control_trigger_parses_but_card_stays_unsupported() {
             side: ControlChangeSide::Gains
         }
     );
+}
+
+/// Coverage details show a token-creation count iff it is not exactly one.
+mod token_creation_details_render_every_non_unit_count {
+    use super::oracle_face_for;
+    use engine::game::coverage::{build_parse_details_for_face, ParsedItem};
+
+    fn token_creation_details(
+        name: &str,
+        text: &str,
+        types: &[&str],
+    ) -> Vec<Vec<(String, String)>> {
+        fn walk(items: &[ParsedItem], out: &mut Vec<Vec<(String, String)>>) {
+            for item in items {
+                if item.label == "Token" || item.label == "CopyTokenOf" {
+                    out.push(item.details.clone());
+                }
+                walk(&item.children, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(
+            &build_parse_details_for_face(&oracle_face_for(name, text, types, &[])),
+            &mut out,
+        );
+        assert_eq!(out.len(), 1, "{name}: {out:?}");
+        out
+    }
+
+    fn detail(name: &str, text: &str, key: &str) -> Option<String> {
+        token_creation_details(name, text, &["Instant"])[0]
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn multiply_count_renders() {
+        let rows = token_creation_details(
+            "Pest Infestation",
+            "Destroy up to X target artifacts and/or enchantments. Create twice X 1/1 black and green Pest creature tokens with \"When this token dies, you gain 1 life.\"",
+            &["Sorcery"],
+        );
+        assert_eq!(
+            rows[0]
+                .iter()
+                .find(|(k, _)| k == "token")
+                .map(|(_, v)| v.as_str()),
+            Some("2*X× +1/+1 Black/Green Pest (Creature Pest)")
+        );
+    }
+
+    #[test]
+    fn fixed_count_renders() {
+        assert_eq!(
+            detail(
+                "Raise the Alarm",
+                "Create two 1/1 white Soldier creature tokens.",
+                "token"
+            )
+            .as_deref(),
+            Some("2× +1/+1 White Soldier (Creature Soldier)")
+        );
+    }
+
+    #[test]
+    fn ref_count_renders() {
+        assert_eq!(
+            detail(
+                "Secure the Wastes",
+                "Create X 1/1 white Warrior creature tokens.",
+                "token"
+            )
+            .as_deref(),
+            Some("X× +1/+1 White Warrior (Creature Warrior)")
+        );
+    }
+
+    #[test]
+    fn unit_count_is_omitted() {
+        assert_eq!(
+            detail(
+                "Beast Within",
+                "Destroy target permanent. Its controller creates a 3/3 green Beast creature token.",
+                "token",
+            )
+            .as_deref(),
+            Some("+3/+3 Green Beast (Creature Beast)")
+        );
+    }
+
+    #[test]
+    fn copy_token_fixed_count_renders() {
+        assert_eq!(
+            detail(
+                "Saw in Half",
+                "Destroy target creature. If that creature dies this way, its controller creates two tokens that are copies of that creature, except their power is half that creature's power and their toughness is half that creature's toughness. Round up each time.",
+                "count",
+            )
+            .as_deref(),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn copy_token_unit_count_is_omitted() {
+        let text = "Create a token that's a copy of target creature you control.\nFlashback {5}{U}{U} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+        assert!(detail("Cackling Counterpart", text, "copies").is_some());
+        assert_eq!(detail("Cackling Counterpart", text, "count"), None);
+    }
 }

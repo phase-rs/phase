@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "SpellContext stores creation_illegal_referents so delayed block-history effects exclude targets illegal when created; older full-game and P2P peers would silently discard this record."
+}

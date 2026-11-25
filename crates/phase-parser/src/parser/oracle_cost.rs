@@ -1,7 +1,7 @@
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
 use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, eof, map, opt, peek, rest, value, verify};
+use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, rest, value, verify};
 use nom::error::ParseError;
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, separated_pair, terminated};
@@ -10,11 +10,13 @@ use nom::Parser;
 use super::oracle_effect::imperative::{parse_discard_card_filter, parse_say_phrase_payment};
 use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::bridge::nom_on_lower;
+use super::oracle_nom::error::{OracleError, OracleResult};
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::{
-    parse_cost_self_reference, split_counted_return_to_hand_object, CountedReturnObject,
+    parse_cost_self_reference, parse_cost_self_reference_for, split_counted_return_to_hand_object,
+    CostChannel, CountedReturnObject,
 };
 use super::oracle_static::parse_dynamic_x_clause;
 use super::oracle_target::{
@@ -29,9 +31,9 @@ use super::oracle_util::CountWord;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityCost, AggregateFunction, AttachmentReferent, BeholdCostAction, ChoiceType, Comparator,
-    ControllerRef, CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerScope,
-    QuantityExpr, QuantityRef, SacrificeCost, SacrificeRequirement, TapCreaturesRequirement,
-    TargetFilter, TypedFilter, EXILE_COST_X, REMOVE_COUNTER_COST_ALL,
+    ControllerRef, CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerFilter,
+    PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, SacrificeCost, SacrificeRequirement,
+    TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X, REMOVE_COUNTER_COST_ALL,
     REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
@@ -40,28 +42,58 @@ use crate::types::zones::Zone;
 /// Parse the cost portion before `:` in an Oracle activated ability.
 /// Input: the raw text before the colon, e.g., "{T}", "{2}{W}, Sacrifice a creature", "Pay 3 life".
 /// Returns an AbilityCost (possibly Composite for multi-part costs).
+///
+/// CR 602.1a: this is the source-cost channel ([`CostChannel::SourceCost`]) —
+/// a cost the source's own text imposes; in its sacrifice and exile legs a bare
+/// "it" names the source the same clause named first. The five `behold … and
+/// exile it` additional costs, whose "it" is the beheld card, never reach this
+/// function: `parse_additional_cost_line` hands them whole to
+/// [`parse_single_cost`], whose `parse_behold_cost` arm consumes them before any
+/// leg arm runs (here `split_cost_parts` would split them at " and " first). A
+/// resolving ability's own optional payment ("you may <cost>. When/If you do,
+/// …", CR 118.12 + CR 603.12), whose object pronoun names something that
+/// ability's text introduced, must go through [`parse_oracle_cost_in`] with
+/// [`CostChannel::ResolutionPayment`]; a keyword's printed [cost] paid at
+/// resolution (echo, cumulative upkeep) is still the source's own cost.
 pub fn parse_oracle_cost(text: &str) -> AbilityCost {
+    parse_oracle_cost_in(text, CostChannel::SourceCost)
+}
+
+/// [`parse_oracle_cost`] for a cost written on an explicit [`CostChannel`].
+pub(crate) fn parse_oracle_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
     let text = text.trim();
     let lower = text.to_lowercase();
 
-    if let Some(cost) = parse_oxford_mana_alternatives_nom(&lower)
-        .or_else(|| parse_binary_cost_alternatives_nom(&lower))
-    {
+    if let Some(cost) = parse_oxford_mana_alternatives_nom(&lower) {
         return cost;
     }
 
-    parse_oracle_cost_no_or(text)
+    let parts = split_cost_parts(text);
+    if let Some(cost) = parts
+        .alternative
+        .and_then(|(left, right)| parse_binary_cost_alternatives_nom(left, right, channel))
+    {
+        return cost;
+    }
+    parse_cost_components(text, parts.components, channel)
 }
 
 /// CR 118.12: parse exactly two top-level cost alternatives with full input
 /// consumption. Typed-leaf validation prevents noun filters containing "or"
 /// from becoming payment branches.
-fn parse_binary_cost_alternatives_nom(text: &str) -> Option<AbilityCost> {
-    let (left, right) = split_binary_cost_legs(text, " or ")?;
-    let costs = vec![
-        parse_oracle_cost_no_or(left),
-        parse_oracle_cost_no_or(right),
-    ];
+fn parse_binary_cost_alternatives_nom(
+    left: &str,
+    right: &str,
+    channel: CostChannel,
+) -> Option<AbilityCost> {
+    let (left, right) = validate_binary_cost_legs(left, right)?;
+    let costs = [left, right]
+        .into_iter()
+        .map(|leg| {
+            let lower = leg.to_lowercase();
+            parse_cost_components(&lower, split_cost_parts(&lower).components, channel)
+        })
+        .collect::<Vec<_>>();
     costs
         .iter()
         .all(is_concrete_cost_leg)
@@ -70,7 +102,8 @@ fn parse_binary_cost_alternatives_nom(text: &str) -> Option<AbilityCost> {
 
 /// CR 601.2f + CR 601.2h: two " and "-joined costs are both part of the total cost and both paid.
 pub(crate) fn parse_binary_cost_conjunction_nom(text: &str) -> Option<AbilityCost> {
-    let (left, right) = split_binary_cost_legs(text, " and ")?;
+    let (_, (left, right)) = split_once_on(text, " and ").ok()?;
+    let (left, right) = validate_binary_cost_legs(left, right)?;
     let costs = vec![parse_single_cost(left), parse_single_cost(right)];
     costs
         .iter()
@@ -78,20 +111,8 @@ pub(crate) fn parse_binary_cost_conjunction_nom(text: &str) -> Option<AbilityCos
         .then_some(AbilityCost::Composite { costs })
 }
 
-/// Splits `text` into exactly two non-empty legs at the first `delimiter`; a
-/// leg ending in ',' belongs to a longer list, so the split declines.
-fn split_binary_cost_legs<'a>(
-    text: &'a str,
-    delimiter: &'static str,
-) -> Option<(&'a str, &'a str)> {
-    type E<'a> = super::oracle_nom::error::OracleError<'a>;
-    let (_, (left, right)) = all_consuming(separated_pair(
-        take_until::<_, _, E<'_>>(delimiter),
-        tag(delimiter),
-        rest,
-    ))
-    .parse(text)
-    .ok()?;
+/// A leg ending in a comma belongs to a longer list.
+fn validate_binary_cost_legs<'a>(left: &'a str, right: &'a str) -> Option<(&'a str, &'a str)> {
     if left.is_empty()
         || right.is_empty()
         || left.trim_end().ends_with(',')
@@ -148,7 +169,7 @@ fn parse_oxford_mana_alternatives_nom(text: &str) -> Option<AbilityCost> {
 /// drop) rather than silently attaching a wrong or partially payable cost.
 pub(crate) fn parse_gerund_cost(phrase: &str) -> AbilityCost {
     let original = phrase.trim();
-    let parts = split_cost_parts(original);
+    let parts = split_cost_parts(original).components;
     let Some((first, rest)) = parts.split_first() else {
         return AbilityCost::Unimplemented {
             description: original.to_string(),
@@ -248,11 +269,8 @@ fn is_reveal_chosen_attribute_noop(part: &str) -> bool {
     ) || parse_creature_subtype(attr).is_some_and(|(_, len)| len == attr.len())
 }
 
-fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
-    let text = text.trim();
-
-    // Split on ", " for composite costs
-    let parts = fixup_from_among_remove_counter_parts(split_cost_parts(text));
+fn parse_cost_components(text: &str, components: Vec<&str>, channel: CostChannel) -> AbilityCost {
+    let parts = fixup_from_among_remove_counter_parts(components);
     // Drop no-op "reveal the <chosen attribute> you chose" components so the
     // remaining cost list is exactly the real costs (e.g. a single Sacrifice),
     // never a Composite carrying a phantom reveal-Sacrifice. Keep the original
@@ -267,8 +285,10 @@ fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
         .collect();
     let parts = if filtered.is_empty() { parts } else { filtered };
     if parts.len() > 1 {
-        let mut costs: Vec<AbilityCost> =
-            parts.iter().map(|p| parse_single_cost(p.trim())).collect();
+        let mut costs: Vec<AbilityCost> = parts
+            .iter()
+            .map(|p| parse_single_cost_in(p.trim(), channel))
+            .collect();
         // CR 601.2b: "Sacrifice A, B, and C" splits into ["Sacrifice A", "B", "C"].
         // Bare noun-phrase continuations after a verb-cost are additional instances
         // of that same cost. Applies to Sacrifice, Exile, and TapCreatures.
@@ -276,7 +296,7 @@ fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
         return AbilityCost::Composite { costs };
     }
 
-    parse_single_cost(parts.first().map_or(text, String::as_str))
+    parse_single_cost_in(parts.first().map_or(text, String::as_str), channel)
 }
 
 // CR 107.1a: Keep an explicit fractional rounding suffix inside its cost
@@ -299,14 +319,50 @@ fn parse_half_life_cost_prefix(input: &str) -> super::oracle_nom::error::OracleR
     .parse(input)
 }
 
-fn split_cost_parts(text: &str) -> Vec<&str> {
+/// CR 205.2b: a permanent can satisfy any of its card types. Here commas
+/// and the terminal "or" list the alternatives for a single sacrifice.
+fn parse_comma_type_list(input: &str) -> OracleResult<'_, &str> {
+    recognize(verify(
+        nom_primitives::parse_core_type_disjunction,
+        |types: &[crate::types::card_type::CoreType]| types.len() >= 3,
+    ))
+    .parse(input)
+}
+
+fn after_sacrifice_type_list(component: &str) -> Option<&str> {
+    let (nouns, _) = tag_no_case::<_, _, OracleError<'_>>("sacrifice ")
+        .parse(component)
+        .ok()?;
+    nom_on_lower(nouns, &nouns.to_ascii_lowercase(), |s| {
+        value(
+            (),
+            preceded(nom_primitives::parse_article, parse_comma_type_list),
+        )
+        .parse(s)
+    })
+    .map(|((), tail)| tail)
+}
+
+struct CostParts<'a> {
+    components: Vec<&'a str>,
+    alternative: Option<(&'a str, &'a str)>,
+}
+
+fn split_cost_parts(text: &str) -> CostParts<'_> {
     let mut parts = Vec::new();
+    let mut alternative = None;
     let mut start = 0;
     let mut brace_depth = 0u32;
     let bytes = text.as_bytes();
     let mut i = 0;
 
     while i < text.len() {
+        if i == start {
+            if let Some(tail) = after_sacrifice_type_list(text[start..].trim_start()) {
+                i = text.len() - tail.len();
+                continue;
+            }
+        }
         let ch = text[i..].chars().next().expect("valid UTF-8");
         match ch {
             '{' => brace_depth += 1,
@@ -338,6 +394,13 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
                 start = i + " and ".len();
                 i += " and ".len() - 1;
             }
+            ' ' if brace_depth == 0 && alternative.is_none() => {
+                if let Ok((right, _)) =
+                    tag_no_case::<_, _, OracleError<'_>>(" or ").parse(&text[i..])
+                {
+                    alternative = Some((&text[..i], right));
+                }
+            }
             _ => {}
         }
         i += ch.len_utf8();
@@ -346,7 +409,10 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
     if !last.is_empty() {
         parts.push(last);
     }
-    parts
+    CostParts {
+        components: parts,
+        alternative,
+    }
 }
 
 /// CR 601.2b / CR 602.2b + CR 122.1: "Remove N counters from among [type],
@@ -424,7 +490,11 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                 self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 ..
             } => last_verb = Some(PrecedingVerb::Discard),
-            AbilityCost::Unimplemented { description } if last_verb.is_some() => {
+            // A committed sacrifice list has its own verb. If it declined,
+            // its complete component must survive as an unpayable cost.
+            AbilityCost::Unimplemented { description }
+                if last_verb.is_some() && after_sacrifice_type_list(description).is_none() =>
+            {
                 if description.trim().is_empty() {
                     continue;
                 }
@@ -808,6 +878,11 @@ fn parse_remove_counter_target(target_text: &str) -> (Option<TargetFilter>, Coun
 }
 
 pub fn parse_single_cost(text: &str) -> AbilityCost {
+    parse_single_cost_in(text, CostChannel::SourceCost)
+}
+
+/// [`parse_single_cost`] for a cost leg written on an explicit [`CostChannel`].
+fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
     type E<'a> = super::oracle_nom::error::OracleError<'a>;
     let text = text.trim();
     let lower = text.to_lowercase();
@@ -875,10 +950,16 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         // self-ref combinator distinguishes the host (`~`/"cardname"/"this X" →
         // SelfRef) from a granted body's by-name reference to its granting object
         // (GRANTING_SELF_PLACEHOLDER → GrantingObject, e.g. Deconstruction
-        // Hammer's "Sacrifice Deconstruction Hammer").
+        // Hammer's "Sacrifice Deconstruction Hammer"). A bare "it" in a printed
+        // source-cost sacrifice leg names the source the same clause named first (Ior Ruin
+        // Expedition's "… from this enchantment and sacrifice it");
+        // `parse_cost_self_reference_for` binds it on `SourceCost` only. On
+        // `ResolutionPayment` (Gorbag of Minas Morgul's "you may sacrifice it")
+        // the antecedent is an object the trigger introduced, so the pronoun is
+        // left unbound.
         let self_filter = nom_on_lower(rest, &rest_lower, |i| {
             alt((
-                parse_cost_self_reference,
+                |i| parse_cost_self_reference_for(i, channel),
                 value(TargetFilter::SelfRef, tag("this ")),
             ))
             .parse(i)
@@ -1023,16 +1104,22 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 )
                 .parse(after_n)
                 {
-                    if let Ok((_, qty)) =
-                        nom_quantity::parse_for_each_clause_ref_complete(for_each_clause)
-                    {
-                        return AbilityCost::PayLife {
+                    return match nom_quantity::parse_for_each_clause_ref_complete(for_each_clause) {
+                        Ok((_, qty)) => AbilityCost::PayLife {
                             amount: QuantityExpr::Multiply {
                                 factor: n as i32,
                                 inner: Box::new(QuantityExpr::Ref { qty }),
                             },
-                        };
-                    }
+                        },
+                        // CR 119.4 + CR 601.2f: a multiplier the quantity grammar
+                        // cannot read (a counter-kind census of a pronoun, whose
+                        // object this cost cannot bind, or any other unread
+                        // clause) is a gap — never the flat "Pay N life" with the
+                        // "for each" dropped, which would under-charge the cost.
+                        Err(_) => AbilityCost::Unimplemented {
+                            description: text.to_string(),
+                        },
+                    };
                 }
                 // Flat "Pay N life" — no " for each " tail.
                 // The cost word ends at end-of-text or a sentence boundary; a
@@ -1105,7 +1192,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         // graveyard/hand", "Exile this artifact/creature/enchantment/land", or a
         // granted body naming its granting object ("Exile The Dominion Bracelet"
         // → GrantingObject).
-        if let Some((filter, zone)) = try_parse_self_exile_cost(&rest_lower) {
+        if let Some((filter, zone)) = try_parse_self_exile_cost(&rest_lower, channel) {
             return AbilityCost::Exile {
                 count: 1,
                 zone,
@@ -1368,6 +1455,72 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
+    // CR 118.3 + CR 119.3 + CR 115.10a: "have an opponent gain N life" (Invigorate)
+    // and "have each other player gain N life" (Reverent Silence, Skyshroud Cutter)
+    // — an effect performed as a cost. "An opponent" is CHOSEN by the payer during
+    // payment, not targeted; "each other player" (CR 102.3: teammates included)
+    // reaches every player but the payer. This arm is the explicit, tested
+    // authority for the recipient-cost shapes `AbilityCost::player_recipient_cost`
+    // recognizes; the effect fallback below would lower "each other player" to a
+    // per-player scope the cost payer cannot perform.
+    if let Some(((recipient, amount), _)) = nom_on_lower(text, &lower, |i| {
+        let (i, recipient) = preceded(
+            tag("have "),
+            alt((
+                value(
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                    tag("an opponent "),
+                ),
+                value(
+                    TargetFilter::PlayerMatching {
+                        player: Box::new(PlayerFilter::AllExcept {
+                            exclude: Box::new(PlayerFilter::Controller),
+                            relation: PlayerRelation::All,
+                        }),
+                    },
+                    tag("each other player "),
+                ),
+            )),
+        )
+        .parse(i)?;
+        let (i, _) = alt((tag("gains "), tag("gain "))).parse(i)?;
+        let (i, amount) = nom_primitives::parse_number(i)?;
+        let (i, _) = (tag(" life"), opt(tag(".")), eof).parse(i)?;
+        Ok((i, (recipient, amount)))
+    }) {
+        return AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::GainLife {
+                amount: QuantityExpr::Fixed {
+                    value: amount as i32,
+                },
+                player: recipient,
+            }),
+        };
+    }
+
+    // CR 115.1 vs CR 115.10a: a targeted or all-opponents life-gain recipient is not
+    // the chosen-recipient cost above. The effect fallback would lower "have target
+    // opponent gain N life" to the SAME `GainLife { Typed(Opponent) }` value, silently
+    // turning a target into a payer's choice; refuse instead. Scoped to the gain-life
+    // verb so other "have target opponent <verb>" costs are untouched.
+    if nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            (
+                tag("have "),
+                alt((tag("target opponent "), tag("each opponent "))),
+                alt((tag("gains "), tag("gain "))),
+            ),
+        )
+        .parse(i)
+    })
+    .is_some()
+    {
+        return AbilityCost::Unimplemented {
+            description: text.to_string(),
+        };
+    }
+
     // "reveal your hand" — reveal the controller's entire hand.
     // CR 701.20a: Reveal means show to all players. Used as alternative cost
     // (Land Grant class). Modeled as EffectCost wrapping Effect::RevealHand.
@@ -1385,18 +1538,28 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             }),
         };
     }
 
-    // "Reveal this card from your hand" / "Reveal this card in your hand" — reveal self cost
+    // CR 701.20a: "Reveal this card / ~ from your hand" — the source reveals itself.
     if nom_on_lower(text, &lower, |i| {
         value(
             (),
-            alt((
-                tag("reveal this card from your hand"),
-                tag("reveal this card in your hand"),
-            )),
+            (
+                tag("reveal "),
+                alt((
+                    value((), tag("this card")),
+                    value(
+                        (),
+                        verify(parse_cost_self_reference, |f| {
+                            matches!(f, TargetFilter::SelfRef)
+                        }),
+                    ),
+                )),
+                alt((tag(" from your hand"), tag(" in your hand"))),
+            ),
         )
         .parse(i)
     })
@@ -1419,8 +1582,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     }
 
     // "Reveal a [Type] card from your hand" — fallback for reveal shapes the
-    // strict `parse_reveal_from_hand_cost_body` grammar declines (self-name
-    // reveals).
+    // strict `parse_reveal_from_hand_cost_body` grammar declines.
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("reveal ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
         if let Ok((_, (before, _))) = split_once_on(&rest_lower, "from your hand") {
@@ -1491,7 +1653,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 if !num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit()) {
                     let actual_cost = after.original.trim();
                     if !actual_cost.is_empty() {
-                        let cost = parse_single_cost(actual_cost);
+                        let cost = parse_single_cost_in(actual_cost, channel);
                         if !matches!(cost, AbilityCost::Unimplemented { .. }) {
                             return cost;
                         }
@@ -1503,7 +1665,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 
     // Ability-word prefixed costs: "Cohort — {T}", "Boast — {1}", "Metalcraft — {T}",
     // "Exhaust — {N}", "Max speed — {N}"
-    if let Some(cost) = try_strip_ability_word_cost(text) {
+    if let Some(cost) = try_strip_ability_word_cost(text, channel) {
         return cost;
     }
 
@@ -2064,6 +2226,12 @@ fn ensure_another_sacrifice_filter(filter: TargetFilter, phrase: &str) -> Target
 fn parse_sacrifice_cost_filter(filter_text: &str) -> Option<TargetFilter> {
     let phrase = format!("target {filter_text}");
     let (base, rest) = parse_target(&phrase);
+    let lower = filter_text.to_ascii_lowercase();
+    if let Ok((suffix, _)) = parse_comma_type_list(&lower) {
+        // Only the bare list is modeled here. The target grammar can consume
+        // a selection mode such as "chosen at random" outside its filter.
+        return (suffix.is_empty() && rest.trim().is_empty()).then_some(base);
+    }
     // ORDER IS LOAD-BEARING: `another` is applied to the LEFT conjunct and the
     // union is folded AFTER — see `fold_article_led_type_union`'s doc comment for
     // why an artifact-ified source may still pay the right conjunct of
@@ -2114,7 +2282,17 @@ fn parse_sacrifice_cost_filter(filter_text: &str) -> Option<TargetFilter> {
 /// all ("one or more artifacts" — Radiant Lotus; "up to three permanents" —
 /// Baba Lysaga, Night Witch; "two +1/+1 counters" — Shichifukujin Dragon; "half
 /// the lands you control, rounded up" — Tectonic Split) — and closing it needs a
-/// count model this change does not add.
+/// count model this change does not add. A bare cost-position "it" reaches
+/// this seam only on `ResolutionPayment` (the reflexive optional-payment
+/// callers — oracle_modal's MayPay arm, Gorbag of Minas Morgul's "you may
+/// sacrifice it. When you do, choose one —", and
+/// oracle_trigger::split_reflexive_optional_payment /
+/// ::is_unsupported_disjunctive_reflexive_optional_payment, Flaxen Intruder's
+/// "you may sacrifice it. When you do, destroy target artifact or
+/// enchantment.", which `split_reflexive_optional_payment`'s payability filter
+/// then declines), where the grammar deliberately does not bind the pronoun and
+/// the phrase lowers to this information-free filter exactly as before; on
+/// `SourceCost` it lowers to `SelfRef` upstream.
 ///
 /// EXEMPTION 2 — a tail that opens a NEW CLAUSE (`,` `.` `;` or a leading
 /// conjunction) rather than modifying the noun. "sacrifice a creature, discard a
@@ -2166,7 +2344,10 @@ fn sacrifice_filter_lost_a_restriction(filter: &TargetFilter, tail: &str) -> boo
 /// is deliberately just `~`: the recipient-anaphoric "attached to it" of
 /// `oracle_nom::quantity::parse_for_each_attached_to_source` has no recipient in
 /// a cost, and no corpus sacrifice cost uses it.
-fn fold_attached_to_source_rider(filter: TargetFilter, tail: &str) -> (TargetFilter, &str) {
+pub(crate) fn fold_attached_to_source_rider(
+    filter: TargetFilter,
+    tail: &str,
+) -> (TargetFilter, &str) {
     if !matches!(filter, TargetFilter::Typed(_)) {
         return (filter, tail);
     }
@@ -2260,11 +2441,16 @@ fn try_parse_exile_with_aggregate_cost(lower: &str) -> Option<AbilityCost> {
 /// granted body names its granting object — The Dominion Bracelet's "Exile The
 /// Dominion Bracelet") and the zone (if specified). Also handles `~`
 /// (normalized card name) variants.
-fn try_parse_self_exile_cost(rest: &str) -> Option<(TargetFilter, Option<Zone>)> {
+fn try_parse_self_exile_cost(
+    rest: &str,
+    channel: CostChannel,
+) -> Option<(TargetFilter, Option<Zone>)> {
     let rest = rest.trim().trim_end_matches('.');
     // Bare "~" / "cardname" / granter placeholder means exile the referenced
     // object itself (from the battlefield, implicit zone).
-    if let Some((filter, tail)) = nom_on_lower(rest, rest, parse_cost_self_reference) {
+    if let Some((filter, tail)) =
+        nom_on_lower(rest, rest, |i| parse_cost_self_reference_for(i, channel))
+    {
         if tail.trim().is_empty() {
             return Some((filter, None));
         }
@@ -2455,13 +2641,13 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
 /// Strip ability-word cost prefixes like "Cohort — {T}", "Boast — {1}",
 /// "Exhaust — {3}", "Renew — {1}{G}", "{TK}{TK} — {T}".
 /// These are ability words or ticket costs that precede a standard cost.
-fn try_strip_ability_word_cost(text: &str) -> Option<AbilityCost> {
+fn try_strip_ability_word_cost(text: &str, channel: CostChannel) -> Option<AbilityCost> {
     let lower = text.to_lowercase();
     // Use split_short_label_prefix to generically strip ability word prefixes
     // (e.g. "Cohort — {T}", "Boast — {1}", "Exhaust — {3}") without
     // maintaining a hardcoded ability word list.
     if let Some((_label, rest)) = split_short_label_prefix(text, 4) {
-        let cost = parse_single_cost(rest.trim());
+        let cost = parse_single_cost_in(rest.trim(), channel);
         if !matches!(cost, AbilityCost::Unimplemented { .. }) {
             return Some(cost);
         }
@@ -2473,7 +2659,7 @@ fn try_strip_ability_word_cost(text: &str) -> Option<AbilityCost> {
             .or_else(|_| split_once_on(text, " \u{2013} "))
             .or_else(|_| split_once_on(text, " - "));
         if let Ok((_, (_, rest))) = dash_split {
-            let cost = parse_single_cost(rest.trim());
+            let cost = parse_single_cost_in(rest.trim(), channel);
             if !matches!(cost, AbilityCost::Unimplemented { .. }) {
                 return Some(cost);
             }
@@ -2580,12 +2766,158 @@ fn parse_mana_cost_nom(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
     use crate::types::ability::{
         ControllerRef, DiscardSelfScope, FilterProp, ObjectScope, QuantityExpr,
         SacrificeRequirement, SharedQuality, TypeFilter, TypedFilter,
     };
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
+
+    fn assert_sacrifice_type_list(cost: &AbilityCost, expected: &[TypeFilter]) {
+        fn collect(filter: &TargetFilter, leaves: &mut Vec<TypeFilter>) {
+            match filter {
+                TargetFilter::Or { filters } if !filters.is_empty() => {
+                    for branch in filters {
+                        collect(branch, leaves);
+                    }
+                }
+                TargetFilter::Typed(typed)
+                    if typed.properties.is_empty() && typed.controller.is_none() =>
+                {
+                    match typed.type_filters.as_slice() {
+                        [TypeFilter::AnyOf(types)] if !types.is_empty() => {
+                            leaves.extend_from_slice(types)
+                        }
+                        [single] => leaves.push(single.clone()),
+                        _ => panic!("expected one disjunctive type per branch: {typed:?}"),
+                    }
+                }
+                other => panic!("expected a typed disjunction: {other:?}"),
+            }
+        }
+        let AbilityCost::Sacrifice(sacrifice) = cost else {
+            panic!("expected one sacrifice: {cost:?}")
+        };
+        assert_eq!(sacrifice.requirement.fixed_count(), Some(1));
+        let mut types = Vec::new();
+        collect(&sacrifice.target, &mut types);
+        assert_eq!(types, expected);
+    }
+
+    #[test]
+    fn sacrifice_type_list_preserves_all_alternatives() {
+        use TypeFilter::*;
+        assert_sacrifice_type_list(
+            &parse_oracle_cost("Sacrifice an artifact, creature, or land"),
+            &[Artifact, Creature, Land],
+        );
+        assert_sacrifice_type_list(
+            &parse_oracle_cost(
+                "Sacrifice an artifact, creature, enchantment, land or planeswalker",
+            ),
+            &[Artifact, Creature, Enchantment, Land, Planeswalker],
+        );
+    }
+
+    #[test]
+    fn sacrifice_type_list_keeps_adjacent_costs() {
+        for text in [
+            "{1}, Sacrifice an artifact, creature, or land, Discard a card",
+            "{1}, Sacrifice an artifact, creature or land and discard a card",
+        ] {
+            let AbilityCost::Composite { costs } = parse_oracle_cost(text) else {
+                panic!("expected three costs: {text}")
+            };
+            assert_eq!(costs.len(), 3);
+            assert_eq!(costs[0], parse_oracle_cost("{1}"));
+            assert_sacrifice_type_list(
+                &costs[1],
+                &[TypeFilter::Artifact, TypeFilter::Creature, TypeFilter::Land],
+            );
+            assert_eq!(costs[2], parse_oracle_cost("Discard a card"));
+        }
+        let AbilityCost::OneOf { costs } =
+            parse_oracle_cost("Sacrifice an artifact, creature, or land or pay 2 life")
+        else {
+            panic!("expected two alternative costs")
+        };
+        assert_eq!(costs.len(), 2);
+        assert_sacrifice_type_list(
+            &costs[0],
+            &[TypeFilter::Artifact, TypeFilter::Creature, TypeFilter::Land],
+        );
+        assert_eq!(costs[1], parse_oracle_cost("Pay 2 life"));
+        assert_eq!(
+            parse_oracle_cost("{1}, {T}, Sacrifice an artifact"),
+            AbilityCost::Composite {
+                costs: vec![
+                    parse_oracle_cost("{1}"),
+                    AbilityCost::Tap,
+                    parse_oracle_cost("Sacrifice an artifact")
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn sacrifice_type_list_declines_unread_restrictions() {
+        assert_sacrifice_type_list(
+            &parse_oracle_cost("Sacrifice an artifact, creature, or land"),
+            &[TypeFilter::Artifact, TypeFilter::Creature, TypeFilter::Land],
+        );
+        for text in [
+            "Sacrifice an artifact, creature, or land with a frobnosticator",
+            "Sacrifice an artifact, creature, or landlocked",
+            "Sacrifice an artifact, creature, or land with a frobnosticator chosen at random",
+            "Sacrifice an artifact, creature, or land chosen at random",
+        ] {
+            assert_eq!(
+                parse_oracle_cost(text),
+                AbilityCost::Unimplemented {
+                    description: text.to_string()
+                },
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn sacrifice_type_list_keeps_a_declined_explicit_cost_after_other_costs() {
+        let list = "Sacrifice an artifact, creature, or land";
+        let restricted = format!("{list} with a frobnosticator");
+        for first in [
+            "{1}",
+            "Sacrifice a creature",
+            "Exile a card from your hand",
+            "Tap two untapped creatures you control",
+        ] {
+            let first_cost = parse_oracle_cost(first);
+            assert!(!first_cost.contains_unimplemented(), "{first}");
+            let AbilityCost::Composite { costs } = parse_oracle_cost(&format!("{first}, {list}"))
+            else {
+                panic!("expected two independent costs after {first}");
+            };
+            assert_eq!(costs.len(), 2);
+            assert_eq!(costs[0], first_cost);
+            assert_sacrifice_type_list(
+                &costs[1],
+                &[TypeFilter::Artifact, TypeFilter::Creature, TypeFilter::Land],
+            );
+            assert_eq!(
+                parse_oracle_cost(&format!("{first}, {restricted}")),
+                AbilityCost::Composite {
+                    costs: vec![
+                        first_cost,
+                        AbilityCost::Unimplemented {
+                            description: restricted.clone()
+                        }
+                    ]
+                },
+                "{first}"
+            );
+        }
+    }
 
     #[test]
     fn half_life_activation_cost_keeps_rounding_in_its_component() {
@@ -3861,6 +4193,124 @@ mod tests {
         );
     }
 
+    /// A printed cost leg whose object phrase is the bare pronoun "it" names
+    /// the source the same clause named first, exactly as "~" does. Base
+    /// encodes "sacrifice it" as an unrestricted `Typed { type_filters: [] }` —
+    /// a different, wider cost that lets the payer pick any permanent.
+    #[test]
+    fn cost_sacrifice_it_is_self_ref() {
+        assert_eq!(
+            parse_single_cost("sacrifice it"),
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
+        );
+        assert_eq!(
+            parse_oracle_cost("Sacrifice it"),
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
+        );
+    }
+
+    /// CR 602.1a vs CR 118.12 / CR 603.12: a bare "it" in a sacrifice or exile
+    /// leg binds the source only on the source-cost channel. On `ResolutionPayment` (Gorbag of
+    /// Minas Morgul's "you may sacrifice it. When you do, choose one —") the
+    /// antecedent is an object the trigger introduced, which the cost grammar
+    /// cannot know, so the pronoun is left unbound exactly as it was before the
+    /// channel existed. Each negative is paired with a reach-guard proving the
+    /// input reached the arm under test.
+    #[test]
+    fn cost_bare_it_binds_the_source_only_on_the_source_channel() {
+        // Sacrifice leg.
+        let source = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+        assert_eq!(
+            parse_oracle_cost_in("Sacrifice it", CostChannel::SourceCost),
+            source
+        );
+        assert_eq!(parse_oracle_cost("Sacrifice it"), source);
+        let sacrifice = parse_oracle_cost_in("Sacrifice it", CostChannel::ResolutionPayment);
+        assert!(
+            matches!(sacrifice, AbilityCost::Sacrifice(_)),
+            "reach-guard: the resolution-time phrase must still lower to a sacrifice cost: {sacrifice:?}"
+        );
+        assert_ne!(sacrifice, source, "the pronoun must not bind the source");
+        // Reach-guard: the host token still binds on the resolution channel.
+        assert_eq!(
+            parse_oracle_cost_in("Sacrifice ~", CostChannel::ResolutionPayment),
+            source
+        );
+
+        // Exile leg.
+        let exile_source = AbilityCost::Exile {
+            count: 1,
+            zone: None,
+            filter: Some(TargetFilter::SelfRef),
+        };
+        assert_eq!(
+            parse_oracle_cost_in("Exile it", CostChannel::SourceCost),
+            exile_source
+        );
+        let exile = parse_oracle_cost_in("Exile it", CostChannel::ResolutionPayment);
+        assert!(
+            matches!(
+                exile,
+                AbilityCost::EffectCost { .. } | AbilityCost::Exile { .. }
+            ),
+            "reach-guard: the resolution-time phrase must lower to a cost leg: {exile:?}"
+        );
+        assert_ne!(exile, exile_source, "the pronoun must not bind the source");
+    }
+
+    /// CR 201.5a: the granter arm still wins — a granted body naming its
+    /// granting object is `GrantingObject`, never `SelfRef` (Deconstruction
+    /// Hammer class). The host token must keep working beside it (reach-guard).
+    #[test]
+    fn cost_sacrifice_it_does_not_displace_the_granting_object_arm() {
+        assert_eq!(
+            parse_single_cost(&format!("Sacrifice {GRANTING_SELF_PLACEHOLDER}")),
+            AbilityCost::Sacrifice(SacrificeCost::new(
+                TargetFilter::GrantingObject { bound: None },
+                SacrificeRequirement::count(1),
+            ))
+        );
+        assert_eq!(
+            parse_single_cost("sacrifice ~"),
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
+        );
+    }
+
+    /// Hostile fixtures, each with a positive reach-guard in the same test: the
+    /// pronoun needs a word boundary (`item`, `itself`) and the head position
+    /// (Trap Digger's relative-clause "it" keeps its Land+Counters filter).
+    #[test]
+    fn cost_bare_it_requires_a_word_boundary_and_a_head_position() {
+        assert_eq!(
+            parse_single_cost("sacrifice it"),
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
+        );
+        assert!(!matches!(
+            parse_single_cost("sacrifice item"),
+            AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        ));
+        assert!(!matches!(
+            parse_single_cost("sacrifice itself"),
+            AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        ));
+        let digger = parse_single_cost("sacrifice a land with a trap counter on it");
+        assert!(
+            matches!(&digger, AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::Typed(tf),
+                requirement,
+            }) if requirement.fixed_count() == Some(1)
+                && tf.type_filters == vec![TypeFilter::Land]
+                && !tf.properties.is_empty()),
+            "Trap Digger's filter must keep Land+trap-counter, got {digger:?}"
+        );
+    }
+
     #[test]
     fn cost_return_self_to_hand() {
         assert_eq!(
@@ -3869,6 +4319,56 @@ mod tests {
                 count: 1,
                 filter: Some(TargetFilter::SelfRef),
                 from_zone: None,
+            }
+        );
+    }
+
+    /// The same class's second printed verb — "… and exile it:"
+    /// (Hourglass of the Lost, Trenzalore Clocktower). Base encodes it as an
+    /// `EffectCost { ChangeZone { target: ParentTarget } }`, which
+    /// `supports_effect_cost_payment` refuses, so the ability cannot be
+    /// activated at all. This row is RED at base, like the sacrifice rows above
+    /// (`cost_sacrifice_it_is_self_ref`); `cost_return_it_to_hand_stays_self_ref`
+    /// below and the granter row above
+    /// (`cost_sacrifice_it_does_not_displace_the_granting_object_arm`) are green
+    /// at base and must stay so.
+    #[test]
+    fn cost_exile_it_is_self_ref() {
+        assert_eq!(
+            parse_single_cost("exile it"),
+            AbilityCost::Exile {
+                count: 1,
+                zone: None,
+                filter: Some(TargetFilter::SelfRef),
+            }
+        );
+    }
+
+    /// PRESERVATION (Magosi, the Waterveil): this card's cost already lowers to
+    /// `SelfRef` through `try_parse_return_to_hand_cost`'s counted-object
+    /// fallback at base, so the fix is a no-op here — the value must not move.
+    #[test]
+    fn cost_return_it_to_hand_stays_self_ref() {
+        assert_eq!(
+            parse_oracle_cost(
+                "Remove an eon counter from this land and return it to its owner's hand"
+            ),
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::RemoveCounter {
+                        count: 1,
+                        counter_type: CounterMatch::OfType(
+                            crate::types::counter::CounterType::Generic("eon".to_string()),
+                        ),
+                        target: None,
+                        selection: CounterCostSelection::SingleObject,
+                    },
+                    AbilityCost::ReturnToHand {
+                        count: 1,
+                        filter: Some(TargetFilter::SelfRef),
+                        from_zone: None,
+                    },
+                ],
             }
         );
     }
@@ -4134,6 +4634,36 @@ mod tests {
                 },
             }
         );
+    }
+
+    /// CR 119.4 + CR 601.2f: a "Pay N life for each <clause>" whose clause the
+    /// quantity grammar cannot read — here the counter-kind census of a
+    /// pronoun, whose object a cost cannot bind — is an explicit gap, never the
+    /// flat "Pay N life" with the multiplier dropped (which under-charges).
+    #[test]
+    fn cost_pay_life_with_an_unread_for_each_is_a_gap() {
+        // Reach guard: Hand of Vecna's printed multiplier still reads.
+        let (_, hand) = nom_quantity::parse_for_each_clause_ref_complete("card in your hand")
+            .expect("for-each clause");
+        assert_eq!(
+            parse_oracle_cost("Pay 1 life for each card in your hand"),
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Multiply {
+                    factor: 1,
+                    inner: Box::new(QuantityExpr::Ref { qty: hand }),
+                },
+            }
+        );
+        for text in [
+            "Pay 1 life for each kind of counter on it",
+            "Pay 2 life for each kind of counter on them",
+        ] {
+            assert!(
+                matches!(parse_oracle_cost(text), AbilityCost::Unimplemented { .. }),
+                "{text:?}: {:?}",
+                parse_oracle_cost(text)
+            );
+        }
     }
 
     #[test]
@@ -5007,14 +5537,28 @@ mod tests {
 
     #[test]
     fn cost_reveal_self_from_hand() {
-        assert_eq!(
-            parse_oracle_cost("Reveal this card from your hand"),
+        for text in [
+            "Reveal this card from your hand",
+            "Reveal this card in your hand",
+            "Reveal ~ from your hand",
+        ] {
+            assert_eq!(
+                parse_oracle_cost(text),
+                AbilityCost::Reveal {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    shared_quality: None,
+                },
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            parse_oracle_cost("Reveal a Dragon card from your hand"),
             AbilityCost::Reveal {
-                count: QuantityExpr::Fixed { value: 1 },
-                filter: None,
-                shared_quality: None,
+                filter: Some(_),
+                ..
             }
-        );
+        ));
     }
 
     /// CR 701.20a + CR 107.3a: the Martyr cycle's "Reveal X <color> cards
@@ -5380,6 +5924,40 @@ mod tests {
         );
     }
 
+    /// CR 701.21a: the class's canonical printed line (Ior Ruin Expedition,
+    /// verbatim Scryfall text). The predicate naming the class is a cost leg
+    /// whose object phrase is the bare pronoun `it`
+    /// (`\b(sacrifice|exile)\s+it\b` in the pre-colon cost clause), and the
+    /// clause names its own source first ("… from this enchantment and sacrifice
+    /// it"). The `RemoveCounter::target` leg stays the canonical `None`; only the
+    /// sacrifice leg moves, from the unrestricted `Typed { type_filters: [] }`
+    /// to the source.
+    #[test]
+    fn cost_remove_quest_counters_and_sacrifice_it() {
+        let expected = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::RemoveCounter {
+                    count: 3,
+                    counter_type: CounterMatch::OfType(
+                        crate::types::counter::CounterType::Generic("quest".to_string()),
+                    ),
+                    target: None,
+                    selection: CounterCostSelection::SingleObject,
+                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+            ],
+        };
+        // The printed text and the `~`-normalized pipeline text lower identically.
+        assert_eq!(
+            parse_oracle_cost("Remove three quest counters from this enchantment and sacrifice it"),
+            expected
+        );
+        assert_eq!(
+            parse_oracle_cost("Remove three quest counters from ~ and sacrifice it"),
+            expected
+        );
+    }
+
     #[test]
     fn cost_cohort_tap_prefix() {
         assert_eq!(parse_oracle_cost("Cohort — {T}"), AbilityCost::Tap,);
@@ -5616,6 +6194,104 @@ mod tests {
                 },
             },
         );
+    }
+
+    /// CR 601.2f + CR 122.1: Deepwood Denizen — the rider counts +1/+1
+    /// counters summed over the controlled creature population.
+    #[test]
+    fn cost_reduction_for_each_counter_on_a_controlled_population() {
+        use crate::types::ability::{
+            ControllerRef, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+        };
+        use crate::types::counter::CounterType;
+        use crate::types::statics::CostModifyMode;
+
+        let reduction = try_parse_cost_reduction(
+            "This ability costs {1} less to activate for each +1/+1 counter on creatures you control.",
+        )
+        .expect("Deepwood Denizen discount should parse");
+        assert_eq!(reduction.mode, CostModifyMode::Reduce);
+        assert_eq!(reduction.amount_per, 1);
+        assert_eq!(reduction.condition, None);
+        assert_eq!(
+            reduction.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::CountersOnObjects {
+                    counter_type: Some(CounterType::Plus1Plus1),
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You)
+                    ),
+                },
+            },
+        );
+        // An unanchored population is declined: no cost reduction is produced.
+        assert!(
+            try_parse_cost_reduction(
+                "This ability costs {1} less to activate for each +1/+1 counter on creatures.",
+            )
+            .is_none(),
+            "an unanchored population must not produce a cost reduction"
+        );
+    }
+
+    /// CR 601.2c + CR 602.2b: Warrior's Blades — the equip discount counts the
+    /// +1/+1 counters on the creature the ability targets (Dragonfire Blade's
+    /// counter-kind sibling).
+    #[test]
+    fn cost_reduction_for_each_counter_on_creature_it_targets() {
+        use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef};
+        use crate::types::counter::CounterType;
+
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {1} less to activate for each +1/+1 counter on the creature it targets",
+        )
+        .expect("Warrior's Blades equip discount should parse");
+        assert_eq!(reduction.amount_per, 1);
+        assert_eq!(reduction.condition, None);
+        assert_eq!(
+            reduction.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Target,
+                    counter_type: Some(CounterType::Plus1Plus1),
+                },
+            },
+        );
+    }
+
+    /// CR 122.1 + CR 601.2f: the activated-ability cost-modification rider
+    /// never reads a counter-kind census it cannot bind — the pronoun census,
+    /// the "different" and "of the kinds of" forms — as a type phrase: no
+    /// reduction is produced, so the sentence stays an explicit gap. The
+    /// census over a named population still reads.
+    #[test]
+    fn cost_reduction_declines_an_unbound_counter_kind_census() {
+        use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+
+        let population = try_parse_cost_reduction(
+            "This ability costs {1} less to activate for each kind of counter among creatures \
+             you control.",
+        )
+        .expect("reach guard: the population census reads on this route");
+        assert_eq!(
+            population.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCounterKindsAmong {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You)
+                    ),
+                },
+            },
+        );
+        for text in [
+            "This ability costs {1} less to activate for each kind of counter on it.",
+            "This ability costs {1} less to activate for each kind of counter on them.",
+            "This ability costs {1} more to activate for each kind of counter on it.",
+            "This ability costs {1} less to activate for each different kind of counter on it.",
+            "This ability costs {1} less to activate for each of the kinds of counters on it.",
+        ] {
+            assert_eq!(try_parse_cost_reduction(text), None, "{text:?}");
+        }
     }
 
     /// #3223: the self cost-reduction *head* recognizer matches both the bare
@@ -5884,6 +6560,138 @@ mod tests {
         );
     }
 
+    fn opponent_gains(value: i32) -> AbilityCost {
+        AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::GainLife {
+                amount: QuantityExpr::Fixed { value },
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+            }),
+        }
+    }
+
+    /// CR 118.3 + CR 119.3 + CR 115.10a: "have an opponent gain N life" is an
+    /// effect-as-cost with a payer-chosen opponent recipient (Invigorate).
+    #[test]
+    fn have_an_opponent_gain_life_cost_parses_to_recipient_effect_cost() {
+        for text in [
+            "have an opponent gain 3 life",
+            "Have an opponent gain 3 life.",
+            "have an opponent gains 3 life",
+            "have an opponent gain three life",
+        ] {
+            assert_eq!(parse_oracle_cost(text), opponent_gains(3), "{text}");
+        }
+    }
+
+    /// CR 118.3 + CR 119.3 + CR 102.3: "have each other player gain N life" is an
+    /// effect-as-cost reaching every player but the payer (Reverent Silence,
+    /// Skyshroud Cutter), teammates included.
+    #[test]
+    fn have_each_other_player_gain_life_cost_parses_to_each_recipient_cost() {
+        let expected = AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 6 },
+                player: TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::AllExcept {
+                        exclude: Box::new(PlayerFilter::Controller),
+                        relation: PlayerRelation::All,
+                    }),
+                },
+            }),
+        };
+        for text in [
+            "have each other player gain 6 life",
+            "Have each other player gain 6 life.",
+            "have each other player gain six life",
+        ] {
+            assert_eq!(parse_oracle_cost(text), expected, "{text}");
+        }
+        match expected.player_recipient_cost() {
+            Some(crate::types::ability::PlayerRecipientCost::GainLife {
+                amount,
+                selection,
+                ..
+            }) => {
+                assert_eq!(amount, &QuantityExpr::Fixed { value: 6 });
+                assert_eq!(
+                    selection,
+                    crate::types::ability::CostRecipientSelection::Each
+                );
+            }
+            None => panic!("expected recipient cost, got {expected:?}"),
+        }
+    }
+
+    /// Only the chosen-opponent gain shape is a recipient cost. The positive
+    /// case is the reach-guard for every negative in this test.
+    #[test]
+    fn player_recipient_cost_recognizes_only_chosen_opponent_gain() {
+        let cost = parse_oracle_cost("have an opponent gain 3 life");
+        match cost.player_recipient_cost() {
+            Some(crate::types::ability::PlayerRecipientCost::GainLife {
+                amount,
+                recipient,
+                selection,
+            }) => {
+                assert_eq!(
+                    selection,
+                    crate::types::ability::CostRecipientSelection::ChosenOne
+                );
+                assert_eq!(amount, &QuantityExpr::Fixed { value: 3 });
+                assert_eq!(
+                    recipient,
+                    &TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent)
+                    )
+                );
+            }
+            None => panic!("expected recipient cost, got {cost:?}"),
+        }
+        // Unchanged: other payers keep refusing this shape.
+        assert!(!cost.supports_effect_cost_payment());
+        assert!(!cost.payability_verdict_is_resource_based());
+
+        // CR 115.1: a targeted recipient is not the payer's choice; each-opponent is
+        // not a single recipient. Both are refused rather than colliding.
+        for text in [
+            "have target opponent gain 3 life",
+            "have each opponent gain 3 life",
+        ] {
+            let parsed = parse_oracle_cost(text);
+            assert!(
+                matches!(parsed, AbilityCost::Unimplemented { .. }),
+                "{text} must stay unimplemented, got {parsed:?}"
+            );
+            assert_eq!(parsed.player_recipient_cost(), None, "{text}");
+        }
+
+        // Other effect-costs and life costs are not recipient costs.
+        assert_eq!(
+            parse_oracle_cost("reveal your hand").player_recipient_cost(),
+            None
+        );
+        let self_counter = AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }),
+        };
+        assert_eq!(self_counter.player_recipient_cost(), None);
+        let you_gain = AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            }),
+        };
+        assert_eq!(you_gain.player_recipient_cost(), None);
+        assert_eq!(
+            parse_oracle_cost("Pay 3 life").player_recipient_cost(),
+            None
+        );
+    }
     fn chosen_discard(filter: Option<TargetFilter>) -> AbilityCost {
         AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },

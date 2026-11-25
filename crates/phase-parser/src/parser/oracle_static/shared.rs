@@ -1,13 +1,18 @@
 // CR 604 / CR 613 — shared static parser infrastructure.
 
-use super::anthem::rewrite_self_pronoun_subject;
+use super::anthem::{rewrite_self_pronoun_subject, PrintedSubject};
 #[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::types::ability::{BlockPairDirection, PlayerScope};
+use nom::bytes::complete::is_not;
 use nom::character::complete::anychar;
-use nom::combinator::{map_opt, not, success, value};
+use nom::combinator::{map_opt, not, peek, success, value};
 use nom::multi::many1;
+
+use crate::parser::oracle_nom::error::oracle_err;
+use crate::types::card_type::PLANESWALKER_SUBTYPES;
 
 /// Whose spells and abilities a "can be the target of spells and abilities …
 /// as though it didn't have <quality>" clause opens its subject to.
@@ -447,7 +452,12 @@ pub(crate) fn try_parse_inverted_attached_subject_grant(
     let effect_tp = TextPair::new(&split.effect_text, &effect_lower);
     let predicate = nom_tag_tp(&effect_tp, "it ").or_else(|| nom_tag_tp(&effect_tp, "they "))?;
 
-    parse_continuous_gets_has(predicate.original, affected, description)
+    parse_continuous_gets_has(
+        predicate.original,
+        affected,
+        description,
+        PrintedSubject::Other,
+    )
 }
 
 /// CR 509.1c + CR 604.1 + CR 611.3a: the inverted `"As long as <cond>, <self-ref>
@@ -899,7 +909,11 @@ impl GrantedCastKeywordKind {
 /// pass binds each one once the affected set is known. Binding is **per
 /// quantity**, keyed on the scope the parser recorded for that individual
 /// counter read, so a static that reads counters on `~` AND on its recipient
-/// keeps both referents: the explicit `Source` read is never touched.
+/// keeps both referents: the explicit `Source` read is never touched. The
+/// counter-kind census of a pronoun ("for each kind of counter on it") reaches
+/// this pass as a `SelfRef` placeholder — from the anthem / continuous route's
+/// deferred entry, or from a combat tax on the source permanent itself — and is
+/// bound by the same pass (see `bind_anaphoric_counter_ref`).
 ///
 /// This is the quantity-axis twin of `StaticCondition::RecipientHasCounters`
 /// (the recipient analog of `HasCounters` on the condition axis) — the two
@@ -965,11 +979,37 @@ fn bind_anaphoric_counters_in_condition(cond: &mut StaticCondition, bound: Objec
 
 /// CR 608.2k: The leaf binder — retargets a deferred counter anaphor and leaves
 /// every other `QuantityRef` and every already-bound scope untouched.
+///
+/// Two pronoun forms reach it. The counter COUNT ("for each +1/+1 counter on
+/// it") parks the pronoun on `ObjectScope::Anaphoric`. The counter-KIND census
+/// ("for each kind of counter on it/them") arrives as `SelfRef`: the
+/// placeholder the anthem / continuous route's deferred entry
+/// (`oracle_quantity::parse_for_each_clause_deferred`) emits for a pronoun of
+/// either number, or a combat tax's census, which `parse_combat_tax_body` reads
+/// only for a tax on the source permanent itself (so it stays `SelfRef`). Every
+/// other entry declines the pronoun census, and an explicit "~" is declined by
+/// every census entry.
+///
+/// CR 611.3a + CR 613.4c: a self-scoped static keeps `SelfRef` (the pronoun
+/// names the source). In a per-recipient static the pronoun names each affected
+/// object, so the census is rebound to the identity filter that follows the
+/// recipient (`FilterProp::Another` is recipient-relative while a recipient is
+/// bound, `game::filter`). The rebound filter is no longer `SelfRef`, so a second
+/// lowering pass leaves it untouched.
 fn bind_anaphoric_counter_ref(qty: &mut QuantityRef, bound: ObjectScope) {
-    if let QuantityRef::CountersOn { scope, .. } = qty {
-        if *scope == ObjectScope::Anaphoric {
+    match qty {
+        QuantityRef::CountersOn { scope, .. } if *scope == ObjectScope::Anaphoric => {
             *scope = bound;
         }
+        QuantityRef::DistinctCounterKindsAmong { filter }
+            if bound == ObjectScope::Recipient && matches!(filter, TargetFilter::SelfRef) =>
+        {
+            *filter =
+                TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Not {
+                    prop: Box::new(FilterProp::Another),
+                }]));
+        }
+        _ => {}
     }
 }
 
@@ -1039,6 +1079,8 @@ fn continuous_modification_dynamic_quantity_mut(
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // Scalar designation payload: no quantity to extract.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -1054,15 +1096,14 @@ fn continuous_modification_dynamic_quantity_mut(
 
 /// CR 608.2k: Bind every **deferred** counter anaphor in a dynamic magnitude to
 /// `bound`. Mirrors `rebind_anaphoric_object_scope` (`oracle_effect/mod.rs`),
-/// the effect-side authority for the same pronoun, and touches only
-/// `ObjectScope::Anaphoric` — an explicit `Source` (`~`) or `Target` ("that
-/// creature") counter read in the same expression keeps its own referent.
+/// the effect-side authority for the same pronoun, and touches only the pronoun
+/// forms `bind_anaphoric_counter_ref` names — an explicit `Source` (`~`) or
+/// `Target` ("that creature") counter read in the same expression keeps its own
+/// referent.
 fn bind_anaphoric_counters(expr: &mut QuantityExpr, bound: ObjectScope) {
     match expr {
-        QuantityExpr::Ref {
-            qty: QuantityRef::CountersOn { scope, .. },
-        } if *scope == ObjectScope::Anaphoric => *scope = bound,
-        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::Ref { qty } => bind_anaphoric_counter_ref(qty, bound),
+        QuantityExpr::Fixed { .. } => {}
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -1224,7 +1265,9 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::WasStartingPlayer { .. }
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+            | StaticCondition::PlayerAttackedPlayer { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -1232,7 +1275,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::DuringOpponentsTurn
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
-            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceHasDealtDamage { .. }
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
             | StaticCondition::RingLevelAtLeast { .. }
@@ -1339,6 +1382,7 @@ fn prop_zone_truth(prop: &FilterProp, zone: Zone) -> SourceZoneTruth {
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -1410,6 +1454,7 @@ fn prop_zone_truth(prop: &FilterProp, zone: Zone) -> SourceZoneTruth {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -1494,10 +1539,12 @@ fn filter_zone_truth(filter: &TargetFilter, zone: Zone) -> SourceZoneTruth {
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -3011,6 +3058,132 @@ fn parse_compound_spell_and_ability_cost_tax(text: &str) -> Option<Vec<StaticDef
     Some(vec![cast_def, activate_def])
 }
 
+/// The head of an activated-ability cost clause conjoined to a preceding grant:
+/// "and <kind> abilities <scope> activate cost …". Returns the clause after the
+/// conjunction ("<kind> abilities <scope> activate cost …").
+fn parse_and_ability_cost_conjunct(input: &str) -> OracleResult<'_, &str> {
+    let (clause, _) = tag("and ").parse(input)?;
+    // The conjunct must sit in the conjunction's own sentence.
+    let (rest, sentence) = is_not(".").parse(clause)?;
+    let (head, _kind) = take_until(" abilities ").parse(sentence)?;
+    let (head, _) = tag(" abilities ").parse(head)?;
+    let (head, _scope) = take_until(" activate cost").parse(head)?;
+    tag(" activate cost").parse(head)?;
+    Ok((rest, clause))
+}
+
+/// The cost clause must END at "to activate": the single-line activated-ability
+/// cost parser tolerates (and silently drops) trailing text, so anything after
+/// "to activate" in a compound line would be lost.
+fn parse_activate_cost_clause_tail(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            take_until(" to activate"),
+            tag(" to activate"),
+            opt(tag(".")),
+            space0,
+            eof,
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 604.1 + CR 611.3a + CR 601.2f + CR 602.2b: Compound static that conjoins a
+/// continuous grant with an activated-ability cost modifier in one (optionally
+/// condition-scoped) sentence — "[<timing>,] <subject> <has|have|get|gets> <grant>
+/// and <kind> abilities <scope> activate cost {N} <less|more> to activate". The
+/// marquee member is Nahiri, Storm of Stone ("During your turn, creatures you
+/// control have first strike and equip abilities you activate cost {1} less to
+/// activate").
+///
+/// The single-return pipeline reads the whole predicate as a keyword list, so
+/// the cost conjunct never becomes a `ReduceAbilityCost`. This splits at the LAST
+/// "and" that opens an "<kind> abilities … activate cost" clause (so a multi-
+/// keyword grant such as "flying and first strike and equip abilities …" keeps
+/// its whole grant list) and types each half through the single-line pipeline:
+/// the grant half must be a `Continuous` static and the cost half a
+/// `ReduceAbilityCost` static. CR 604.1: a leading timing condition scopes the
+/// whole conjunction; the grant half carries it, so it is propagated onto the
+/// conditionless cost half.
+///
+/// Fail closed: once the conjunct shape is recognized, any half that does not
+/// type (or a cost clause with text after "to activate") yields NO statics, so
+/// the line stays an honest gap rather than a grant with a dropped conjunct.
+fn parse_compound_grant_and_ability_cost_modifier(text: &str) -> Option<Vec<StaticDefinition>> {
+    let (offset, cost_clause, _) =
+        nom_primitives::scan_last_at_word_boundaries_with_offset(text, |i| {
+            parse_and_ability_cost_conjunct(i)
+        })?;
+    let grant_clause = text[..offset].trim_end();
+    Some(type_grant_and_ability_cost_halves(text, grant_clause, cost_clause).unwrap_or_default())
+}
+
+fn type_grant_and_ability_cost_halves(
+    text: &str,
+    grant_clause: &str,
+    cost_clause: &str,
+) -> Option<Vec<StaticDefinition>> {
+    parse_activate_cost_clause_tail(cost_clause).ok()?;
+    let mut grant_def = parse_static_line(grant_clause)?;
+    let mut cost_def = parse_static_line(cost_clause)?;
+    if !matches!(grant_def.mode, StaticMode::Continuous)
+        || grant_def.modifications.is_empty()
+        || !matches!(cost_def.mode, StaticMode::ReduceAbilityCost { .. })
+    {
+        return None;
+    }
+    // CR 604.1: the shared leading condition gates both halves identically.
+    if cost_def.condition.is_none() {
+        cost_def.condition = grant_def.condition.clone();
+    }
+    grant_def.description = Some(text.to_string());
+    cost_def.description = Some(text.to_string());
+    Some(vec![grant_def, cost_def])
+}
+
+/// Split "<subject> costs <…> to cast and can be cast as though it had flash"
+/// into the cast-cost clause (through "to cast") and the lowercase subject.
+fn parse_cost_and_flash_clauses(input: &str) -> OracleResult<'_, (&str, &str)> {
+    let (rest, (cast_clause, (subject, _, _, _))) = nom::combinator::consumed((
+        take_until(" costs "),
+        tag(" costs "),
+        take_until(" to cast and can be cast as though it had flash"),
+        tag(" to cast"),
+    ))
+    .parse(input)?;
+    let (rest, _) = (
+        tag(" and can be cast as though it had flash"),
+        opt(tag(".")),
+        eof,
+    )
+        .parse(rest)?;
+    Ok((rest, (cast_clause, subject)))
+}
+
+/// CR 601.2f + CR 601.3b + CR 611.3a: Radagast of Rhosgobel — "The first
+/// creature spell you cast each turn costs {2} less to cast and can be cast as
+/// though it had flash." One shared nth-qualified subject yields a `ModifyCost`
+/// static and a gated `CastWithFlash` static.
+fn parse_nth_spell_cost_and_flash(text: &str) -> Option<Vec<StaticDefinition>> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let (_, (cast_clause, subject)) = parse_cost_and_flash_clauses(tp.lower).ok()?;
+    let (cast_tp, _) = tp.split_at(cast_clause.len());
+    let mut cost = parse_static_line(cast_tp.original)?;
+    if !matches!(cost.mode, StaticMode::ModifyCost { .. }) {
+        return None;
+    }
+    let flash = super::keyword_grant::nth_qualified_spell_grant(
+        subject,
+        StaticMode::CastWithFlash,
+        None,
+        text,
+    )?;
+    cost.description = Some(text.to_string());
+    Some(vec![cost, flash])
+}
+
 fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
@@ -3130,6 +3303,21 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     // timing condition. Must precede the single-return fallback, which keeps the
     // cast half and silently drops the "and abilities …" activate half.
     if let Some(defs) = parse_compound_spell_and_ability_cost_tax(&stripped) {
+        return defs;
+    }
+
+    // CR 604.1 + CR 611.3a + CR 601.2f: "[<timing>,] <subject> have <grant> and
+    // <kind> abilities <scope> activate cost {N} less to activate" (Nahiri, Storm
+    // of Stone) — one continuous grant + one activated-ability-cost static under
+    // the shared leading condition. Must precede the single-return fallback, which
+    // reads the cost conjunct as part of the keyword list.
+    if let Some(defs) = parse_compound_grant_and_ability_cost_modifier(&stripped) {
+        return defs;
+    }
+
+    // Must precede the single-return fallback, which keeps the cost half and
+    // drops the "and can be cast as though it had flash" grant (Radagast).
+    if let Some(defs) = parse_nth_spell_cost_and_flash(&stripped) {
         return defs;
     }
 
@@ -4172,16 +4360,70 @@ pub(crate) fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -
 /// target-anaphoric in spell bodies (Awaken the Sleeper), and a blanket arm would
 /// mis-bind every attached-subject static. See
 /// `parse_contraction_source_state_condition`.
+///
+/// `subject` is the host line's printed subject. It does not widen the SelfRef
+/// gate above; it only narrows which rewrite arms run inside it (the plural
+/// "they haven't dealt … damage yet" arm needs [`PrintedSubject::SourceNamed`]),
+/// because several callers hardcode `affected: SelfRef` for any subject.
 pub(crate) fn parse_affected_scoped_static_condition(
     text: &str,
     affected: Option<&TargetFilter>,
+    subject: PrintedSubject,
 ) -> Option<StaticCondition> {
     let text = text.trim().trim_end_matches('.');
     if matches!(affected, Some(TargetFilter::SelfRef)) {
-        parse_static_condition(&rewrite_self_pronoun_subject(text))
+        parse_static_condition(&rewrite_self_pronoun_subject(text, subject))
     } else {
         parse_static_condition(text)
     }
+}
+
+/// CR 611.3a: classify a static's host line by its printed subject — the ONE
+/// derivation of [`PrintedSubject`]. `SourceNamed` exactly when the line opens
+/// with the source's own self-reference vocabulary (`~` or a
+/// `SELF_REF_TYPE_PHRASES` entry such as "this creature" / "this Aura")
+/// followed by a word boundary that completes the subject; everything else
+/// ("enchanted creature", "creatures you control", "each artifact", a bare
+/// "it", "~'s …") is `Other`. A self-reference followed by any subject
+/// connective is not a complete subject: a coordinator (`subject_list_separator`
+/// or a bare " or ") or a connective (" together with ", " as well as ",
+/// " plus ", " along with ") makes it a compound ("~ and enchanted creature",
+/// "this creature or each other creature"), which is `Other`, so the plural
+/// "they" gate is never bound to the source alone. Coordinators inside the
+/// predicate ("~ can't attack or block", "~ has flying and haste") are not
+/// adjacent to the self-reference and stay `SourceNamed`.
+pub(crate) fn printed_subject(tp: &TextPair<'_>) -> PrintedSubject {
+    let mut source_named = (
+        crate::parser::oracle_nom::duration::parse_self_reference_subject,
+        peek(tag::<_, _, OracleError<'_>>(" ")),
+        not(peek(alt((
+            subject_list_separator,
+            value((), tag(" or ")),
+            value((), tag(" together with ")),
+            value((), tag(" as well as ")),
+            value((), tag(" plus ")),
+            value((), tag(" along with ")),
+        )))),
+    );
+    match source_named.parse(tp.lower.trim_start()) {
+        Ok(_) => PrintedSubject::SourceNamed,
+        Err(_) => PrintedSubject::Other,
+    }
+}
+
+/// Check if a static condition is `PlayerIsPoisoned { DefendingPlayer }`.
+/// Chained Throatseeker's printed "can't attack unless defending player is
+/// poisoned" is a valid attack restriction (CR 508.1c), but the engine does
+/// not yet evaluate a poison condition against each candidate defender during
+/// attack legality, so such a rider stays `Unrecognized` as an honest gap.
+fn is_defending_player_poisoned_for_attack_restriction(cond: &StaticCondition) -> bool {
+    matches!(
+        cond,
+        StaticCondition::PlayerIsPoisoned {
+            player: PlayerScope::DefendingPlayer
+        }
+    ) || matches!(cond, StaticCondition::Not { condition } if is_defending_player_poisoned_for_attack_restriction(condition))
+        || matches!(cond, StaticCondition::And { conditions } | StaticCondition::Or { conditions } if conditions.iter().any(is_defending_player_poisoned_for_attack_restriction))
 }
 
 /// Parse the trailing " unless [condition]" clause of a combat-restriction
@@ -4200,13 +4442,26 @@ pub(crate) fn parse_unless_static_condition(
     let original = unless_text.original.trim().trim_end_matches('.');
     let lower = original.to_lowercase();
     if let Ok((_, condition)) = nom_condition::parse_unless_condition(&lower) {
+        // CR 508.1c + CR 122.1f: "defending player is poisoned" is a valid attack
+        // restriction, but candidate-defender attack-legality evaluation does not
+        // support a poison condition yet. Keep the rider `Unrecognized` so the
+        // restriction remains an honest gap.
+        if is_defending_player_poisoned_for_attack_restriction(&condition) {
+            return Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::Unrecognized {
+                    text: format!("unless {original}"),
+                }),
+            });
+        }
         return Some(condition);
     }
     // CR 611.3a: "gets +X/+X unless <condition>" applies the grant precisely when
     // <condition> is false — fall back to the shared static-condition parser and
     // negate, so a recognized inner condition (e.g. Heroic Defiance's most-common-
     // color check) gates the grant instead of being swallowed as Unrecognized.
-    if let Some(condition) = parse_affected_scoped_static_condition(original, affected) {
+    if let Some(condition) =
+        parse_affected_scoped_static_condition(original, affected, printed_subject(tp))
+    {
         return Some(StaticCondition::Not {
             condition: Box::new(condition),
         });
@@ -4481,7 +4736,7 @@ pub(crate) fn parse_if_static_condition(
     affected: Option<&TargetFilter>,
 ) -> Option<StaticCondition> {
     let condition_text = split_trailing_if_condition_tp(tp)?;
-    parse_affected_scoped_static_condition(condition_text, affected)
+    parse_affected_scoped_static_condition(condition_text, affected, printed_subject(tp))
 }
 
 /// CR 611.3a: Parse the trailing " as long as [condition]" clause of a
@@ -4510,7 +4765,7 @@ pub(crate) fn parse_as_long_as_static_condition(
         return None;
     }
     let (_, as_long_as_text) = tp.split_around(" as long as ")?;
-    parse_affected_scoped_static_condition(as_long_as_text.original, affected)
+    parse_affected_scoped_static_condition(as_long_as_text.original, affected, printed_subject(tp))
 }
 
 /// Result of the combat-tax nom parse.
@@ -5338,7 +5593,10 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
                     add_property(
                         f,
                         FilterProp::CombatRelation {
-                            relation: CombatRelation::BlockingOrBlockedBy,
+                            relation: CombatRelation::BlockPairing {
+                                direction: BlockPairDirection::Either,
+                                scope: None,
+                            },
                             subject: CombatRelationSubject::Source,
                         },
                     )
@@ -6871,6 +7129,53 @@ pub(crate) fn parse_rule_static_tail_predicates(
     }
 }
 
+/// CR 205.3j + CR 508.1c: " [<Subtype>]s you control" defended scope ("can't
+/// attack Jaces you control"). A manual arm, not `value()`: the subtype is
+/// dynamic. Calls the plain-`fn` `parse_subtype` (plural-aware, so "Jaces"
+/// yields `("Jace", 5)` whole and no extra `"s"` literal follows), then requires
+/// `" you control"`, and gates the candidate through `PLANESWALKER_SUBTYPES` —
+/// a non-planeswalker subtype fails closed, preserving honest-red coverage.
+fn parse_subtype_planeswalkers_you_control_nom(
+    input: &str,
+) -> OracleResult<'_, crate::types::triggers::AttackTargetFilter> {
+    let (input, _) = tag(" ").parse(input)?;
+    let (subtype, consumed) = parse_subtype(input).ok_or_else(|| oracle_err(input))?;
+    let (input, _) = tag(" you control").parse(&input[consumed..])?;
+    if !PLANESWALKER_SUBTYPES.contains(&subtype.as_str()) {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        input,
+        crate::types::triggers::AttackTargetFilter::Planeswalker {
+            subtype: Some(subtype),
+        },
+    ))
+}
+
+/// Mixed-case sibling of [`parse_subtype_planeswalkers_you_control_nom`] for
+/// `parse_combat_tax_body`, which runs on original-case text (mana-symbol
+/// case-sensitivity). Structural tags are `tag_no_case`; `parse_subtype`
+/// returns the canonical subtype regardless of input case, so the yielded
+/// filter is identical to the lowercase path's. Same
+/// `PLANESWALKER_SUBTYPES` gate: a non-planeswalker subtype fails closed.
+pub(crate) fn parse_subtype_planeswalkers_you_control_mixed_case_nom(
+    input: &str,
+) -> OracleResult<'_, crate::types::triggers::AttackTargetFilter> {
+    let (input, _) = tag_no_case::<_, _, OracleError<'_>>(" ").parse(input)?;
+    let (subtype, consumed) = parse_subtype(input).ok_or_else(|| oracle_err(input))?;
+    let (input, _) =
+        tag_no_case::<_, _, OracleError<'_>>(" you control").parse(&input[consumed..])?;
+    if !PLANESWALKER_SUBTYPES.contains(&subtype.as_str()) {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        input,
+        crate::types::triggers::AttackTargetFilter::Planeswalker {
+            subtype: Some(subtype),
+        },
+    ))
+}
+
 /// Optional attack-target scope after "can't attack" (CR 508.1b + CR 508.1c).
 pub(crate) fn parse_cant_attack_defended_scope_nom(
     input: &str,
@@ -6879,22 +7184,60 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
     // CR 508.1c + CR 310.5: " you or permanents you control" defends battles too,
     // so it is a distinct filter from " you or planeswalkers you control". Both
     // longer phrases precede the bare " you" (nom `alt` is leftmost-match).
+    // CR 508.1b + CR 310.5: the singular " you or a permanent you control"
+    // (Immortal Obligation) names the same defended set as " you or permanents
+    // you control".
     opt(alt((
-        value(
-            AttackTargetFilter::PlayerOrPermanents,
-            tag(" you or permanents you control"),
+        preceded(
+            tag(" you or "),
+            alt((
+                value(
+                    AttackTargetFilter::PlayerOrPermanents,
+                    (
+                        alt((tag("permanents"), tag("a permanent"))),
+                        tag(" you control"),
+                    ),
+                ),
+                value(
+                    AttackTargetFilter::PlayerOrPlaneswalker,
+                    tag("planeswalkers you control"),
+                ),
+            )),
         ),
         value(
-            AttackTargetFilter::PlayerOrPlaneswalker,
-            tag(" you or planeswalkers you control"),
-        ),
-        value(
-            AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::Planeswalker { subtype: None },
             tag(" planeswalkers you control"),
         ),
+        // CR 205.3j: subtype-defended scope sits after the generic planeswalker
+        // arm and before bare " you" — longest-first, since nom `alt` is
+        // leftmost-match.
+        (|input| parse_subtype_planeswalkers_you_control_nom(input)),
         value(AttackTargetFilter::Player, tag(" you")),
     )))
     .parse(input)
+}
+
+/// CR 508.1c + CR 508.6: "a player it has already attacked this turn" — the
+/// defended-player scope of a self-referential attack restriction (Bloodthirster,
+/// Port Razer: "This creature can't attack a player it has already attacked this
+/// turn.").
+///
+/// The subject of "already attacked" is the permanent carrying the restriction,
+/// so the phrase is composed from the shared self-reference combinator (which
+/// covers `it`, `~`, `this creature`, `this permanent`, and the normalized card
+/// name — CR 201.5) rather than a fixed subject word. The verb phrase is the one
+/// both printed cards share; it is a perfect-tense form of CR 508.6's "attacked
+/// [a player]" and is the only axis the two printings vary on.
+pub(crate) fn parse_previously_attacked_player_scope_nom(
+    input: &str,
+) -> OracleResult<'_, crate::types::triggers::AttackTargetFilter> {
+    let (rest, _) = tag("a player ").parse(input)?;
+    let (rest, _) = crate::parser::oracle_nom::target::parse_self_reference.parse(rest)?;
+    let (rest, _) = tag(" has already attacked this turn").parse(rest)?;
+    Ok((
+        rest,
+        crate::types::triggers::AttackTargetFilter::PlayerAttackedBySourceThisTurn,
+    ))
 }
 
 pub(crate) fn parse_cant_attack_rule_static_predicate_nom(
@@ -6903,6 +7246,17 @@ pub(crate) fn parse_cant_attack_rule_static_predicate_nom(
     use crate::types::triggers::AttackTargetFilter;
 
     let (rest, _) = tag("can't attack").parse(input)?;
+    // CR 508.1c + CR 508.6: "a player it has already attacked this turn" must be
+    // tried BEFORE the bare " a player" arm below, which consumes only " a
+    // player" and leaves the history rider behind: the rider then reads as an
+    // unrelated tail, the subject-led production declines on it, and the line
+    // falls through to the blanket "can't attack" arm — Bloodthirster and Port
+    // Razer became unable to attack ANY player (issue #8064).
+    let (rest, previously_attacked) =
+        opt(preceded(space1, parse_previously_attacked_player_scope_nom)).parse(rest)?;
+    if let Some(defended) = previously_attacked {
+        return Ok((rest, Some(defended)));
+    }
     let (rest, owner_restriction) = opt(preceded(
         space1,
         alt((

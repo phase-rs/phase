@@ -399,6 +399,7 @@ fn format_metadata_declares_exactly_its_committed_field_list() {
             "description",
             "group",
             "legality_key",
+            "companion_slot",
             "default_config",
         ],
         "FormatMetadata's field list must match its committed shape exactly"

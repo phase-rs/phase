@@ -6,16 +6,16 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::character::complete::{alphanumeric1, space1};
+use nom::character::complete::{alphanumeric1, space0, space1};
 use nom::combinator::{map, not, opt, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::OracleResult;
 use super::primitives::{
     parse_article, parse_property_keyword, parse_pt_modifier, parse_superlative_adjective,
 };
-use super::quantity::{parse_quantity_expr_number, parse_quantity_ref};
+use super::quantity::{parse_number_disjunction, parse_quantity_expr_number, parse_quantity_ref};
 use crate::types::ability::{
     AggregateFunction, Comparator, FilterProp, ObjectProperty, PtStat, PtValueScope, QuantityExpr,
     SourceExclusion,
@@ -219,9 +219,11 @@ fn parse_with_inner(input: &str) -> OracleResult<'_, FilterProp> {
 /// - optional `base ` → `PtValueScope::Base` (CR 208.4b); otherwise `Current`.
 /// - stat selector: `power or toughness` (disjunction → `AnyOf` of two
 ///   `PtComparison`), `total power and toughness`, `power`, or `toughness`.
-/// - comparison tail: either the postfix `N or less` / `N or greater` form, or
-///   the infix `less than [or equal to] N` / `greater than [or equal to] N`
-///   form (resolving to LE/GE with an `Offset` for strict `<`/`>`).
+/// - comparison tail: either the postfix `N or less` / `N or greater` form, the
+///   infix `less than [or equal to] N` / `greater than [or equal to] N` form
+///   (resolving to LE/GE with an `Offset` for strict `<`/`>`), or the
+///   exact-value list `N or M` / `N, M, ..., or K` (each value an EQ
+///   comparison, combined into `AnyOf`).
 ///
 /// The conjunctive designation "base power and toughness N/M" is not a
 /// comparison and is parsed by [`parse_base_pt_designation`].
@@ -264,14 +266,29 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
         value(&[PtStat::Toughness][..], tag("toughness")),
     ))
     .parse(input)?;
-    let (rest, (comparator, value)) = parse_pt_comparison_tail(input)?;
+    let (rest, thresholds): (_, Vec<(Comparator, QuantityExpr)>) = alt((
+        // CR 208.1: "power 4, 5, or 6" — the stat equals any one of the listed
+        // values, so each value is its own EQ comparison.
+        map(preceded(space0, parse_number_disjunction), |values| {
+            values
+                .into_iter()
+                .map(|value| (Comparator::EQ, value))
+                .collect()
+        }),
+        map(parse_pt_comparison_tail, |threshold| vec![threshold]),
+    ))
+    .parse(input)?;
     let props: Vec<FilterProp> = stats
         .iter()
-        .map(|&stat| FilterProp::PtComparison {
-            stat,
-            scope,
-            comparator,
-            value: value.clone(),
+        .flat_map(|&stat| {
+            thresholds
+                .iter()
+                .map(move |(comparator, value)| FilterProp::PtComparison {
+                    stat,
+                    scope,
+                    comparator: *comparator,
+                    value: value.clone(),
+                })
         })
         .collect();
     let prop = if props.len() == 1 {
@@ -280,6 +297,67 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
         FilterProp::AnyOf { props }
     };
     Ok((rest, prop))
+}
+
+/// CR 208.1: Parse the source-relative lesser-power/toughness suffix shape
+/// without choosing its referent. The enclosing target parser owns that
+/// context-sensitive binding; keeping the grammar separate prevents a bare
+/// suffix from silently becoming a trigger-source or prior-target reference.
+pub fn parse_relative_pt_comparison(input: &str) -> OracleResult<'_, (PtStat, Comparator)> {
+    let (input, _) = tag("with").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, inclusive) = opt(terminated(tag("equal or"), space1)).parse(input)?;
+    let (input, _) = tag("lesser").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, stat) = alt((
+        value(PtStat::Power, tag("power")),
+        value(PtStat::Toughness, tag("toughness")),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        (
+            stat,
+            if inclusive.is_some() {
+                Comparator::LE
+            } else {
+                Comparator::LT
+            },
+        ),
+    ))
+}
+
+/// CR 202.3: Parse the numeric mana-value comparison tail after the shared
+/// `mana value ` / `converted mana cost ` head. This is deliberately limited to
+/// literal/X numeric grammar; contextual and superlative mana-value phrases
+/// remain owned by `oracle_target`.
+pub(crate) fn parse_mana_value_comparison_tail(input: &str) -> OracleResult<'_, FilterProp> {
+    if let Ok((after, values)) = parse_number_disjunction(input) {
+        let props = values
+            .into_iter()
+            .map(|value| FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value,
+            })
+            .collect();
+        return Ok((after, FilterProp::AnyOf { props }));
+    }
+
+    let (after_num_raw, value) = parse_quantity_expr_number(input)?;
+    let after_num = after_num_raw.trim_start();
+    let (after, (comparator, value)) = alt((
+        map(terminated(tag("or greater"), not(alphanumeric1)), {
+            let value = value.clone();
+            move |_| (Comparator::GE, value.clone())
+        }),
+        map(terminated(tag("or less"), not(alphanumeric1)), {
+            let value = value.clone();
+            move |_| (Comparator::LE, value.clone())
+        }),
+        map(not(tag("or")), move |_| (Comparator::EQ, value.clone())),
+    ))
+    .parse(after_num)?;
+    Ok((after, FilterProp::Cmc { comparator, value }))
 }
 
 /// CR 208.1 (power and toughness) + CR 202.3 (mana value): the HEAD of a
@@ -312,8 +390,37 @@ pub(crate) fn parse_superlative_property_head(
 /// CR 208.1: Possessive phrase introducing a creature's *own* stat in a
 /// self-referential P/T comparison — "its", "their", or "that creature's".
 /// All refer to the candidate object itself, not the ability source.
-fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
+pub(crate) fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
     alt((tag("its "), tag("their "), tag("that creature's "))).parse(input)
+}
+
+/// Peel a trailing spell P/T qualifier from a cost-modifier subject.
+/// A recognized stat with an invalid comparison is an error.
+pub fn split_spell_pt_qualifier(
+    subject: &str,
+) -> Result<(&str, Option<FilterProp>), nom::Err<super::error::OracleError<'_>>> {
+    use super::primitives::split_once_on;
+    use nom::combinator::{all_consuming, eof, peek};
+
+    let Ok((_, (prefix, tail))) = split_once_on(subject, " with ") else {
+        return Ok((subject, None));
+    };
+    if peek((
+        opt(tag::<_, _, super::error::OracleError<'_>>("base ")),
+        alt((
+            tag("power"),
+            tag("toughness"),
+            tag("total power and toughness"),
+        )),
+        alt((space1, eof)),
+    ))
+    .parse(tail)
+    .is_err()
+    {
+        return Ok((subject, None));
+    }
+    let (_, prop) = all_consuming(parse_pt_comparison).parse(tail)?;
+    Ok((prefix, Some(prop)))
 }
 
 /// CR 208.1: "toughness greater than <poss> power" → [`FilterProp::ToughnessGTPower`]
@@ -587,6 +694,24 @@ pub struct ControlledPermanentsConjunct {
     pub source_scope: SourceExclusion,
 }
 
+/// CR 205.2a + CR 110.1: the plural core-type noun that heads a bare plural
+/// permanent population ("creatures", "lands", ..., "permanents"). `None` is the
+/// bare "permanents" (no card-type restriction). Matches the noun only, with no
+/// word-boundary check: callers that need one compose it themselves. Shared by
+/// `parse_controlled_permanents_conjunct` and the counter-removal population
+/// classifier, so the plural-noun list lives in one place.
+pub fn parse_plural_core_type_noun(input: &str) -> OracleResult<'_, Option<CoreType>> {
+    alt((
+        value(Some(CoreType::Planeswalker), tag("planeswalkers")),
+        value(Some(CoreType::Creature), tag("creatures")),
+        value(Some(CoreType::Artifact), tag("artifacts")),
+        value(Some(CoreType::Enchantment), tag("enchantments")),
+        value(Some(CoreType::Land), tag("lands")),
+        value(None, tag("permanents")),
+    ))
+    .parse(input)
+}
+
 /// CR 614.1a + CR 109.1: SINGLE AUTHORITY for the controlled-permanent noun
 /// phrase that follows "…to you and " in a compound damage recipient.
 ///
@@ -618,14 +743,7 @@ pub fn parse_controlled_permanents_conjunct(
             (
                 opt(tag("one or more ")),
                 opt(tag("other ")),
-                alt((
-                    value(Some(CoreType::Planeswalker), tag("planeswalkers")),
-                    value(Some(CoreType::Creature), tag("creatures")),
-                    value(Some(CoreType::Artifact), tag("artifacts")),
-                    value(Some(CoreType::Enchantment), tag("enchantments")),
-                    value(Some(CoreType::Land), tag("lands")),
-                    value(None, tag("permanents")),
-                )),
+                parse_plural_core_type_noun,
             ),
             |(_, other, permanent_type)| {
                 (
@@ -671,6 +789,18 @@ pub fn parse_controlled_permanents_conjunct(
 mod tests {
     use super::*;
     use crate::types::mana::ManaColor;
+
+    #[test]
+    fn parse_relative_pt_comparison_lesser_and_equal() {
+        assert_eq!(
+            parse_relative_pt_comparison("with lesser power, return it"),
+            Ok((", return it", (PtStat::Power, Comparator::LT),))
+        );
+        assert_eq!(
+            parse_relative_pt_comparison("with equal or lesser toughness."),
+            Ok((".", (PtStat::Toughness, Comparator::LE)))
+        );
+    }
 
     /// CR 614.1a + CR 109.1: the single authority must cover every plural noun
     /// BOTH former copies knew, and must carry the "other" article rather than
@@ -1127,6 +1257,45 @@ mod tests {
         );
     }
 
+    /// CR 208.1: Sarkhan's Unsealing — "power 4, 5, or 6" is an exact-value
+    /// list, one EQ comparison per value, and the clause comma after it stays
+    /// in the remainder.
+    #[test]
+    fn pt_comparison_value_list_power() {
+        let (rest, p) =
+            parse_pt_comparison("power 4, 5, or 6, this enchantment deals 4 damage to any target.")
+                .unwrap();
+        assert_eq!(rest, ", this enchantment deals 4 damage to any target.");
+        let power_eq = |value| FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value },
+        };
+        assert_eq!(
+            p,
+            FilterProp::AnyOf {
+                props: vec![power_eq(4), power_eq(5), power_eq(6)],
+            }
+        );
+
+        // Arrogant Bloodlord: a comparator tail before a clause comma is not a
+        // list and keeps its LE reading and the comma.
+        let (rest, p) =
+            parse_pt_comparison("power 1 or less, destroy this creature at end of combat.")
+                .unwrap();
+        assert_eq!(rest, ", destroy this creature at end of combat.");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 1 },
+            }
+        );
+    }
+
     #[test]
     fn test_parse_pt_comparison_infix_less_than_literal() {
         // CR 208.1 + CR 107.1: "power less than 3" (infix form with a LITERAL
@@ -1418,5 +1587,58 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    /// CR 202.3: the shared numeric mana-value tail covers threshold,
+    /// exact-value-list, and malformed-tail behavior without accepting a
+    /// partially parsed comparator.
+    #[test]
+    fn mana_value_comparison_tail_is_shared_and_fails_closed() {
+        let fixed = |value| QuantityExpr::Fixed { value };
+        assert_eq!(
+            parse_mana_value_comparison_tail("4 or greater, rest"),
+            Ok((
+                ", rest",
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: fixed(4),
+                },
+            ))
+        );
+        assert_eq!(
+            parse_mana_value_comparison_tail("5 or less"),
+            Ok((
+                "",
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: fixed(5),
+                },
+            ))
+        );
+        assert_eq!(
+            parse_mana_value_comparison_tail("4, 5, or 6, rest"),
+            Ok((
+                ", rest",
+                FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: fixed(4),
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: fixed(5),
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: fixed(6),
+                        },
+                    ],
+                },
+            ))
+        );
+        assert!(parse_mana_value_comparison_tail("4 or blue").is_err());
+        assert!(parse_mana_value_comparison_tail("4 or").is_err());
+        assert!(parse_mana_value_comparison_tail("4 or greaterish").is_err());
     }
 }

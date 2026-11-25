@@ -1,5 +1,5 @@
 use crate::game::effects::choose_damage_source;
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{prevention_shield_is_refused, ReplacementDurationExpiry};
 use crate::types::ability::{
     CombatDamageScope, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
@@ -417,11 +417,14 @@ pub fn resolve(
         )
     );
 
-    // CR 615.11: A dynamic prevention amount is resolved to a concrete depletion
-    // count at effect-resolution time; the Next(n) shield itself is always static.
+    // CR 615.7 + CR 107.3a + CR 602.2b + CR 107.3i: the shield size is the
+    // announced value of X, snapshotted at effect resolution. `chosen_x` is the
+    // object's single X channel (`ability_utils::publish_announced_x`);
+    // `resolve_quantity_with_targets` is the resolver that reads it — the bare
+    // `resolve_quantity` passes `chosen_x = None` and would resolve "X" to 0.
     let amount = match amount_dynamic {
         Some(expr) => {
-            let n = resolve_quantity(state, &expr, ability.controller, ability.source_id);
+            let n = resolve_quantity_with_targets(state, &expr, ability);
             PreventionAmount::Next(u32::try_from(n.max(0)).unwrap_or(0))
         }
         None => amount,
@@ -596,9 +599,9 @@ pub fn resolve(
     // resolves context refs to their controller, which would mis-scope an
     // object-shield as a player-shield. Skip the player-filter inference in those cases.
     let event_context_target = if matches!(target, TargetFilter::EventTarget) {
-        crate::game::targeting::resolve_event_referent_permanents(state, &target, ability.source_id)
+        crate::game::targeting::resolve_event_referent_permanents_for(state, ability, &target)
             .into_iter()
-            .find(|&id| ability.target_pin_is_current(id, state))
+            .next()
             .map(TargetRef::Object)
     } else {
         None
@@ -1049,6 +1052,64 @@ mod tests {
             state.pending_damage_replacements[0].source_object,
             Some(source)
         );
+    }
+
+    #[test]
+    fn dynamic_variable_x_amount_uses_announced_chosen_x() {
+        // CR 107.3a + CR 615.7: the announced X of a counted prevention clause
+        // must size the shield. `resolve_quantity_with_targets` reads the
+        // resolving ability's `chosen_x`; the bare `resolve_quantity` passed
+        // `chosen_x = None` and resolved "X" to 0.
+        for (chosen_x, expected) in [(3u32, 3u32), (0u32, 0u32)] {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Alabaster Potion".to_string(),
+                Zone::Battlefield,
+            );
+
+            let mut ability = ResolvedAbility::new(
+                Effect::PreventDamage {
+                    amount: PreventionAmount::Next(1),
+                    amount_dynamic: Some(QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    }),
+                    target: TargetFilter::Any,
+                    recipient_scope: EffectScope::All,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            ability.chosen_x = Some(chosen_x);
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            // Reach guard: the dynamic branch installed exactly one shield,
+            // anchored to the resolving source.
+            assert_eq!(state.pending_damage_replacements.len(), 1);
+            assert_eq!(
+                state.pending_damage_replacements[0].source_object,
+                Some(source)
+            );
+            assert!(
+                matches!(
+                    state.pending_damage_replacements[0].shield_kind,
+                    ShieldKind::Prevention {
+                        amount: PreventionAmount::Next(n)
+                    } if n == expected
+                ),
+                "chosen_x {chosen_x} should install a Next({expected}) shield, got {:?}",
+                state.pending_damage_replacements[0].shield_kind
+            );
+        }
     }
 
     #[test]
@@ -1653,22 +1714,47 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
             is_combat: true,
+            source_name: None,
+            source_incarnation: None,
             applied: std::collections::HashSet::new(),
         };
-        let (survivors, tally) = crate::game::replacement::replace_combat_damage_batch(
+        let mut pass =
+            crate::game::replacement::CombatDamageReplacementPass::new(&state, [proposed]);
+        let outcome = crate::game::replacement::replace_combat_damage_batch(
             &mut state,
             &mut events,
-            vec![proposed],
+            &mut pass,
+            None,
         );
-        assert_eq!(survivors, vec![None], "all 3 combat damage prevented");
+        assert!(matches!(
+            outcome,
+            crate::game::replacement::CombatDamageReplacementOutcome::Complete
+        ));
+        let tally = pass.tally;
+        assert_eq!(
+            crate::game::replacement::settled_survivors(pass.resolved),
+            vec![None],
+            "all 3 combat damage prevented"
+        );
         // CR 615.7: the shield aggregated 3 prevented damage.
         let total: i32 = tally.values().sum();
         assert_eq!(total, 3);
 
+        // CR 615.13: the aggregate is keyed by (shield, recipient), and this
+        // batch has exactly one of each, so it is a single entry. Pin that
+        // structurally: the tally is a `HashMap`, so were a regression ever to
+        // split this across several entries, the `.next()` below would silently
+        // pick a nondeterministic one instead of failing.
+        assert_eq!(tally.len(), 1, "one shield, one recipient, one entry");
         // CR 615.5: fire the rider once against the aggregate prevented amount.
-        let (rid, &prevented) = tally.iter().next().unwrap();
+        let ((rid, recipient), &prevented) = tally.iter().next().unwrap();
+        // CR 120.3: the aggregate names the recipient it was prevented for.
+        assert_eq!(*recipient, TargetRef::Player(PlayerId(0)));
         let runtime = state
-            .replacement_rider(&state.pending_damage_replacements[rid.index()])
+            .replacement_rider(
+                &state.pending_damage_replacements
+                    [usize::try_from(rid.index()).expect("test shield index fits usize")],
+            )
             .cloned()
             .map(Box::new)
             .unwrap();

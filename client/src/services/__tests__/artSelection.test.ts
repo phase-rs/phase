@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { applyChain, selectedPrinting } from "../artSelection.ts";
+import { applyChain, selectedPrinting, selectSubmissionPrinting } from "../artSelection.ts";
 import type { PrintingEntry } from "../scryfall.ts";
 import type { ArtChainEntry, CardArtOverride } from "../../stores/preferencesStore.ts";
 
@@ -37,6 +37,30 @@ const EXTENDED = printing({
 const PRINTINGS = [NEWEST, BORDERLESS, EXTENDED];
 
 const NO_OVERRIDES: Record<string, CardArtOverride> = {};
+
+describe("selectSubmissionPrinting", () => {
+  const forest = "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6";
+  const chain: ArtChainEntry[] = [{ type: "newest" }];
+  const source = { setCode: "SLD", collectorNumber: "1" };
+
+  it("prefers the valid pin and falls through to the exact import and then the chain", () => {
+    const override = { scryfallId: EXTENDED.id, setCode: "wrong", collectorNumber: "wrong" };
+    expect(selectSubmissionPrinting(forest, PRINTINGS, chain, { [forest]: override }, source))
+      .toBe(EXTENDED);
+    const stale = { [forest]: { ...override, scryfallId: "absent" } };
+    expect(selectSubmissionPrinting(forest, PRINTINGS, chain, stale, source)).toBe(BORDERLESS);
+    expect(selectSubmissionPrinting(forest, PRINTINGS, chain, stale, { ...source, collectorNumber: "01" }))
+      .toBe(NEWEST);
+  });
+
+  it("uses renderer precedence outside the catalog, including inherited keys", () => {
+    expect(selectSubmissionPrinting("bolt", PRINTINGS, chain, NO_OVERRIDES, source)).toBe(NEWEST);
+    for (const oracleId of ["bolt", "constructor"]) {
+      const stale = { [oracleId]: { scryfallId: "absent", setCode: "sld", collectorNumber: "1" } };
+      expect(selectSubmissionPrinting(oracleId, PRINTINGS, chain, stale, source)).toBeNull();
+    }
+  });
+});
 
 describe("applyChain", () => {
   it("returns null when the card has no printings at all", () => {

@@ -52,7 +52,7 @@ pub fn resolve(
     }
 
     if !turned_ids.is_empty() {
-        state.last_revealed_ids = turned_ids;
+        super::record_revealed_result(state, turned_ids);
     }
 
     // CR 613: a turned-up card's restored characteristics require a layer
@@ -140,6 +140,8 @@ mod tests {
         let (source, exiled) = linked_face_down_creature(&mut state);
         let put_creature = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -310,7 +312,7 @@ mod tests {
             "the granted TurnFaceUp {{ SelfRef }} ability must flip the source face up"
         );
         assert_eq!(obj.name, "Hidden Assassin", "real face restored");
-        assert!(obj.card_types.subtypes.contains(&"Assassin".to_string()));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Assassin"));
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::TurnedFaceUp { object_id } if *object_id == id)));

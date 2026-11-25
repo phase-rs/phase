@@ -24,6 +24,17 @@ use crate::plan::PlanSnapshot;
 use crate::search::build_ai_context_with_session;
 use crate::session::AiSession;
 
+/// The engine's integration card fixture (real printed cards), loaded once per
+/// test binary for read-only callers.
+pub(crate) fn shared_integration_card_db() -> &'static engine::database::card_db::CardDatabase {
+    static DB: std::sync::OnceLock<engine::database::card_db::CardDatabase> =
+        std::sync::OnceLock::new();
+    DB.get_or_init(|| {
+        engine::database::card_db::CardDatabase::from_integration_fixture()
+            .expect("integration fixture should load")
+    })
+}
+
 /// The plan a plain midrange deck derives — land target **6**.
 ///
 /// REACHABILITY REQUIREMENT: every `AiSession::plan` entry written **on a

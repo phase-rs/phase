@@ -486,6 +486,7 @@ fn meld_renamed_non_meld_partner_is_noop() {
             granting_object: None,
             duration_event_source: None,
             source_name: String::new(),
+            bound_actor: None,
         });
     crate::game::layers::flush_layers(&mut state);
 
@@ -603,6 +604,8 @@ fn install_exile_redirect(
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -1087,6 +1090,8 @@ fn merged_commander_library_component_replacement_skips_arrival_shuffle_and_obse
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     AbilEffect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         destination: Zone::Graveyard,
                         origin: None,
                         target: TargetFilter::SelfRef,

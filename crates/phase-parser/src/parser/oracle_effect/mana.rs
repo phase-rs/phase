@@ -1,3 +1,4 @@
+use crate::parser::oracle_effect::lower::WhereXBinding;
 use crate::parser::oracle_nom::error::{oracle_err, OracleError};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
@@ -25,8 +26,10 @@ use super::super::oracle_keyword::parse_granted_keyword_fragment;
 use super::super::oracle_quantity::{
     parse_cda_quantity_with_context, parse_event_context_quantity,
 };
-use super::super::oracle_target::parse_type_phrase_folding;
-use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
+use super::super::oracle_target::{parse_cost_paid_object_reference, parse_type_phrase_folding};
+use super::super::oracle_util::{
+    parse_count_multiplier, parse_mana_production, parse_number, TextPair,
+};
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::TargetFilter;
 
@@ -70,6 +73,83 @@ fn try_parse_any_color_among_permanents_filter(
         return None;
     }
     Some(filter)
+}
+
+/// CR 105.4 + CR 106.5 + CR 608.2d: "Choose a color of <objects>. Add <count>
+/// mana of that color." as one production, recognized on the whole ability
+/// body (Meteor Crater: "{T}: Choose a color of a permanent you control. Add
+/// one mana of that color."; Corrupted Grafstone: "{T}: Choose a color of a
+/// card in your graveyard. Add one mana of that color."). The color is chosen
+/// while the mana is added, from the colors of the objects the phrase names,
+/// and with no colored object there is none to choose, so no mana (Corrupted
+/// Grafstone ruling: "Colorless cards have no color, so you can't add {C} this
+/// way."). That is `ManaProduction::AnyOneColorAmongPermanents`, the Mox Amber
+/// production, whose filter names its zone through `InZone`.
+/// `parse_choose_ast` declines the choose sentence on its own, because no
+/// `ChoiceType` carries a domain fixed by game state, and
+/// `collapse_ephemeral_color_choice_mana` reads only the unconstrained "Choose
+/// a color." (Astral Cornucopia). Declines unless the body is exactly the two
+/// sentences and ends at "of that color", the object phrase is a whole type
+/// phrase, and the mana sentence is a plain "of that color" production.
+pub(super) fn try_parse_color_of_objects_mana(text: &str, ctx: &ParseContext) -> Option<Effect> {
+    let lower = text.to_lowercase();
+    let (after_head, _) = tag::<_, _, OracleError<'_>>("choose a color of ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (mana_lower, phrase_lower) =
+        terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". "))
+            .parse(after_head)
+            .ok()?;
+    // The body ends at "of that color". Clause dispatch never runs on it, so
+    // nothing after the phrase, in this sentence or a later one, may survive
+    // to be dropped.
+    all_consuming((
+        take_until::<_, _, OracleError<'_>>(" mana of that color"),
+        tag(" mana of that color"),
+        opt(tag(".")),
+    ))
+    .parse(mana_lower)
+    .ok()?;
+    let phrase_start = lower.len() - after_head.len();
+    let phrase = text.get(phrase_start..phrase_start + phrase_lower.len())?;
+    let mana_sentence = text.get(lower.len() - mana_lower.len()..)?;
+    let (filter, remainder) = parse_type_phrase_folding(phrase);
+    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    // This grammar binds "that color", so the mana sentence reads no
+    // antecedent: it parses against a throwaway context, and a decline leaves
+    // the caller's untouched.
+    let mut throwaway = ParseContext {
+        parent_target_available: ctx.parent_target_available,
+        ..ParseContext::default()
+    };
+    let Effect::Mana {
+        produced:
+            ManaProduction::ChosenColor {
+                count,
+                contribution,
+                fixed_alternative: None,
+            },
+        restrictions,
+        grants,
+        expiry,
+        target: None,
+    } = try_parse_add_mana_effect_with_context(mana_sentence, &mut throwaway)?
+    else {
+        return None;
+    };
+    Some(Effect::Mana {
+        produced: ManaProduction::AnyOneColorAmongPermanents {
+            count,
+            filter,
+            contribution,
+        },
+        restrictions,
+        grants,
+        expiry,
+        target: None,
+    })
 }
 
 /// CR 106.1 + CR 109.1: Recognize "For each color among [type-phrase], add one
@@ -220,6 +300,12 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     let clause_lower = clause.to_lowercase();
     let clause_tp = TextPair::new(clause, &clause_lower);
     let (without_where_x, where_x_expression) = super::strip_trailing_where_x(clause_tp);
+    // CR 608.2c: captured beside the where-X text it will be read under, so a
+    // controller anaphor in the count ("where X is the number of Islands they
+    // control") binds to the player the chain declared rather than falling to
+    // `oracle_target`'s legacy `You` seed. Empty when nothing is in scope, which
+    // `bind_controller_phrase` fails closed on — see `WhereXBinding`.
+    let mana_antecedents = ctx.player_antecedents();
     let clause = without_where_x.original.trim().trim_end_matches(['.', '"']);
     // CR 605.1a + CR 107.4a: Track whether the "an additional " prefix was present
     // so that `ChosenColor`/`AnyOneColor` variants record their contribution role
@@ -240,7 +326,10 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     // `parse_mana_production_clause` so the where-X count is resolved here,
     // co-located with `apply_where_x_count_expression`.
     if let Some((count, color_options)) = parse_repeated_count_color_choice(clause) {
-        let (count, target) = apply_where_x_count_expression(count, where_x_expression.as_deref())?;
+        let (count, target) = apply_where_x_count_expression(
+            count,
+            WhereXBinding::new(where_x_expression.as_deref(), &mana_antecedents),
+        )?;
         return Some(Effect::Mana {
             produced: ManaProduction::AnyOneColor {
                 count,
@@ -319,8 +408,10 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     }
 
     if let Some((count, rest)) = parse_mana_count_prefix(clause) {
-        let (count, where_x_target) =
-            apply_where_x_count_expression(count, where_x_expression.as_deref())?;
+        let (count, where_x_target) = apply_where_x_count_expression(
+            count,
+            WhereXBinding::new(where_x_expression.as_deref(), &mana_antecedents),
+        )?;
         let rest = rest.trim().trim_end_matches(['.', '"']).trim();
         let rest_lower = rest.to_lowercase();
 
@@ -369,36 +460,52 @@ pub(super) fn try_parse_add_mana_effect_with_context(
             });
         }
 
-        // CR 106.7 + CR 106.1b: "mana of any type that a land [scope] could
-        // produce" — Reflecting Pool, Naga Vitalist, Incubation Druid, Cactus
-        // Preserve, Horizon of Progress. The trailing scope phrase is
-        // dispatched via `alt()` over the printed variants so future
-        // opponent-/player-scoped printings slot in by adding a tag without
-        // touching the runtime. Per "build for the class": the resulting
-        // `TargetFilter` carries `ControllerRef` so a single primitive covers
-        // every scoping variant.
-        if let Some((controller_ref, _)) = nom_on_lower(rest, &rest_lower, |i| {
+        // CR 106.7 + CR 106.1b: "mana of any type [that] <subject> could
+        // produce". The subject is one of two forms:
+        // - a census, "a land you control / an opponent controls" — Reflecting
+        //   Pool, Naga Vitalist, Incubation Druid, Cactus Preserve, Horizon of
+        //   Progress. The resulting `TargetFilter` carries `ControllerRef` so a
+        //   single primitive covers every scoping variant;
+        // - CR 608.2k + CR 400.7j: the cost referent, "the sacrificed land" —
+        //   Squandered Resources. `parse_cost_paid_object_reference` is the
+        //   shared authority for that phrase, so the noun and participle axes
+        //   (and the exile-cost gate) stay in one place.
+        // Each axis is one `alt()`, so a future printing slots in by adding a
+        // tag without touching the runtime.
+        let cost_context: &ParseContext = ctx;
+        if let Some((land_filter, _)) = nom_on_lower(rest, &rest_lower, |i| {
             preceded(
-                tag("mana of any type that a land "),
+                (tag("mana of any type "), opt(tag("that "))),
                 terminated(
                     alt((
-                        value(
-                            crate::types::ability::ControllerRef::You,
-                            tag("you control"),
+                        map(
+                            preceded(
+                                tag("a land "),
+                                alt((
+                                    value(
+                                        crate::types::ability::ControllerRef::You,
+                                        tag("you control"),
+                                    ),
+                                    value(
+                                        crate::types::ability::ControllerRef::Opponent,
+                                        tag("an opponent controls"),
+                                    ),
+                                )),
+                            ),
+                            |controller_ref| {
+                                TargetFilter::Typed(
+                                    crate::types::ability::TypedFilter::land()
+                                        .controller(controller_ref),
+                                )
+                            },
                         ),
-                        value(
-                            crate::types::ability::ControllerRef::Opponent,
-                            tag("an opponent controls"),
-                        ),
+                        |input| parse_cost_paid_object_reference(input, cost_context),
                     )),
                     tag(" could produce"),
                 ),
             )
             .parse(i)
         }) {
-            let land_filter = TargetFilter::Typed(
-                crate::types::ability::TypedFilter::land().controller(controller_ref),
-            );
             return Some(Effect::Mana {
                 produced: ManaProduction::AnyTypeProduceableBy { count, land_filter },
                 restrictions: vec![],
@@ -685,8 +792,10 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     let fallback_count = parse_mana_count_prefix(clause)
         .map(|(count, _)| count)
         .unwrap_or(QuantityExpr::Fixed { value: 1 });
-    let (fallback_count, fallback_target) =
-        apply_where_x_count_expression(fallback_count, where_x_expression.as_deref())?;
+    let (fallback_count, fallback_target) = apply_where_x_count_expression(
+        fallback_count,
+        WhereXBinding::new(where_x_expression.as_deref(), &mana_antecedents),
+    )?;
 
     // Scan for mana production type at word boundaries using nom combinators.
     let produced = scan_mana_production_type(&clause_lower, fallback_count.clone(), contribution)?;
@@ -1057,14 +1166,40 @@ pub(super) fn parse_colorless_mana_production(text: &str) -> Option<(QuantityExp
     }
 }
 
-/// Parse a count prefix for mana amounts: "that much", "that many", "X", or
-/// an English/digit number.
+/// Parse a count prefix for mana amounts: "that much", "that many",
+/// "twice/three times that much|many", "X", or an English/digit number.
 ///
 /// Uses nom combinators for the "X"/"x" prefix matching, falling back to
 /// `oracle_util::parse_number` for English words and digits.
 pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
     let trimmed = text.trim_start();
     let lower = trimmed.to_lowercase();
+
+    // CR 603.2c + CR 608.2h + CR 106.4: "add twice that much {G}" — a
+    // multiplicative prefix over the batched trigger's event-context amount.
+    // Compose the shared multiplier grammar with the shared "that much/many"
+    // reference so every factor ("twice", "three times", "5 times") produces
+    // `Multiply { factor, inner: EventContextAmount }`. Deliberately does not
+    // recurse into arbitrary count expressions: "twice X" is not part of this
+    // grammar (no printing), and `apply_where_x_count_expression` only binds a
+    // bare `Variable { X }`, so accepting "twice X" would silently drop a
+    // trailing "where X is …" definition.
+    if let Some((factor, rest)) = nom_on_lower(trimmed, &lower, parse_count_multiplier) {
+        let rest_lower = rest.to_lowercase();
+        if let Some((qty, after)) = nom_on_lower(
+            rest,
+            &rest_lower,
+            crate::parser::oracle_nom::quantity::parse_that_much_or_many,
+        ) {
+            return Some((
+                QuantityExpr::Multiply {
+                    factor,
+                    inner: Box::new(QuantityExpr::Ref { qty }),
+                },
+                after.trim_start(),
+            ));
+        }
+    }
 
     if let Some((qty, rest)) = nom_on_lower(
         trimmed,
@@ -1100,9 +1235,9 @@ pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)
 /// `apply_where_x_quantity_expression` for why such a node is dead at runtime.
 pub(super) fn apply_where_x_count_expression(
     count: QuantityExpr,
-    where_x_expression: Option<&str>,
+    where_x: WhereXBinding<'_>,
 ) -> Option<(QuantityExpr, Option<ManaTargetRole>)> {
-    match (&count, where_x_expression) {
+    match (&count, where_x.expression) {
         (
             QuantityExpr::Ref {
                 qty: QuantityRef::Variable { ref name },
@@ -1114,7 +1249,7 @@ pub(super) fn apply_where_x_count_expression(
             // `QuantityRef::Variable { name: "<oracle text>" }` is dead at runtime
             // (game/quantity.rs resolves a non-`X` variable name to 0), so the mana
             // clause produced ZERO mana while still reading as supported.
-            let count = super::parse_where_x_quantity_expression(expression)?;
+            let count = where_x.resolve_quantity(expression)?;
             Some((count, where_x_expression_target_filter(expression)))
         }
         _ => Some((count, None)),
@@ -2533,34 +2668,87 @@ fn parse_conditional_cant_be_countered_grant(lower: &str) -> Option<ManaSpellGra
     })
 }
 
+/// CR 106.6: The opening of an additional effect on the spell a mana unit is
+/// spent to cast. The active ("if you spend this mana to cast"), passive
+/// ("if this/that mana is spent to cast"), and "spent on" phrasings all name
+/// the same per-unit spend event.
+fn parse_if_mana_is_spent_to_cast(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag("if you spend this mana to cast ")),
+        value(
+            (),
+            (
+                tag("if "),
+                alt((tag("this"), tag("that"))),
+                tag(" mana is spent to cast "),
+            ),
+        ),
+        parse_if_that_mana_is_spent_on,
+    ))
+    .parse(input)
+}
+
 /// CR 106.6a + CR 614.1c: Parse mana whose spent-mana replacement effect has
-/// a counter-bearing battlefield entry result (Opal Palace class).
-fn parse_conditional_enters_with_counters_grant(lower: &str) -> Option<ManaSpellGrant> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("if you spend this mana to cast ")
-        .parse(lower)
-        .ok()?;
+/// a counter-bearing battlefield entry result:
+/// - "If you spend this mana to cast your commander, it enters with a number of
+///   additional +1/+1 counters on it equal to …" (Opal Palace)
+/// - "If this mana is spent to cast a creature spell, that creature enters with
+///   an additional +1/+1 counter on it." (Biophagus; Animal Attendant's
+///   "that mana … non-Human creature spell")
+/// - "If that mana is spent on a multicolored creature spell, that creature
+///   enters with an additional +1/+1 counter on it." (Guildmages' Forum)
+///
+/// This is also the single recognizer `swallow_check`'s sentence-scoped carrier
+/// helpers use to locate the rider's OWN clause (`mana_entry_counter_grant_*
+/// residual_sentences`), so recognition and lowering cannot disagree on which
+/// sentence produced the `EntersWithCounters` grant.
+pub(crate) fn parse_conditional_enters_with_counters_grant(lower: &str) -> Option<ManaSpellGrant> {
+    let (rest, ()) = parse_if_mana_is_spent_to_cast(lower).ok()?;
     let (rest, filter_text) = terminated(
-        take_until::<_, _, OracleError<'_>>(", it enters with a number of additional "),
-        tag(", it enters with a number of additional "),
+        take_until::<_, _, OracleError<'_>>(", "),
+        tag::<_, _, OracleError<'_>>(", "),
     )
     .parse(rest)
     .ok()?;
     let filter = parse_spend_trigger_filter(filter_text.trim())?;
-    let (rest, counter_type) = terminated(
-        nom_primitives::parse_counter_type_typed,
-        tag::<_, _, OracleError<'_>>(" counters on it equal to "),
-    )
+    // The entering permanent is the spell the mana was spent on, named either
+    // by pronoun ("it") or by its type ("that creature").
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it enters with "),
+        tag("that creature enters with "),
+    ))
     .parse(rest)
     .ok()?;
-    let (_, count) = all_consuming(terminated(
-        value(
-            QuantityExpr::Ref {
-                qty: QuantityRef::CommanderCastFromCommandZoneCount,
-            },
-            tag::<_, _, OracleError<'_>>(
-                "the number of times it's been cast from the command zone this game",
+    let (_, (counter_type, count)) = all_consuming(terminated(
+        alt((
+            // "an additional +1/+1 counter on it" — exactly one extra counter.
+            map(
+                delimited(
+                    tag::<_, _, OracleError<'_>>("an additional "),
+                    nom_primitives::parse_counter_type_typed,
+                    tag(" counter on it"),
+                ),
+                |counter_type| (counter_type, QuantityExpr::Fixed { value: 1 }),
             ),
-        ),
+            // "a number of additional +1/+1 counters on it equal to the number of
+            // times it's been cast from the command zone this game" (Opal Palace).
+            map(
+                (
+                    tag("a number of additional "),
+                    nom_primitives::parse_counter_type_typed,
+                    tag(" counters on it equal to "),
+                    tag("the number of times it's been cast from the command zone this game"),
+                ),
+                |(_, counter_type, _, _)| {
+                    (
+                        counter_type,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::CommanderCastFromCommandZoneCount,
+                        },
+                    )
+                },
+            ),
+        )),
         opt(char('.')),
     ))
     .parse(rest)
@@ -2664,7 +2852,15 @@ pub fn parse_mana_spend_trigger(lower: &str) -> Option<ManaSpellGrant> {
         return None;
     }
     // Parse the reflexive effect (scry N, gain N life, draw a card, copy that spell…).
-    let ability = super::parse_effect_chain(effect_text, AbilityKind::Activated);
+    // CR 603.7 + CR 608.2k: a mana-spend trigger's body has no announced parent
+    // target; hand down the event-source binding so the bare "that spell"
+    // anaphor keeps it (Primal Wellspring, Pyromancer's Goggles).
+    // Standalone mode, matching this builder's pre-existing entry point.
+    let ability = super::lower_ability_ir(&super::parse_ability_ir_standalone_with_spell_anaphor(
+        effect_text,
+        AbilityKind::Activated,
+        super::SpellAnaphorBinding::EventSource,
+    ));
     // COVERAGE-HONESTY ALLOWLIST — what it is actually for (CR 608.2c):
     // `parse_effect_chain` parses some spell-referencing effects only PARTIALLY and
     // silently swallows the remainder. Jade Orb of Dragonkind's "it enters with an
@@ -3316,6 +3512,67 @@ mod tests {
             panic!("expected Typed land filter");
         };
         assert_eq!(typed.controller, Some(ControllerRef::Opponent));
+    }
+
+    /// CR 106.7 + CR 608.2k: Squandered Resources — "any type the sacrificed
+    /// land could produce" names the cost referent, so it parses to
+    /// `AnyTypeProduceableBy` with `TargetFilter::CostPaidObject`, the same
+    /// variant the census form uses.
+    #[test]
+    fn sacrificed_land_could_produce_binds_the_cost_referent() {
+        use crate::types::ability::TargetFilter;
+        let effect =
+            try_parse_add_mana_effect("Add one mana of any type the sacrificed land could produce")
+                .expect("Squandered Resources clause must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        assert_eq!(
+            produced,
+            ManaProduction::AnyTypeProduceableBy {
+                count: QuantityExpr::Fixed { value: 1 },
+                land_filter: TargetFilter::CostPaidObject,
+            }
+        );
+    }
+
+    /// CR 608.2k: the referent form composes the optional relative pronoun and
+    /// every noun `parse_cost_paid_object_reference` accepts, not just "land".
+    #[test]
+    fn sacrificed_object_referent_accepts_that_and_other_nouns() {
+        use crate::types::ability::TargetFilter;
+        let effect = try_parse_add_mana_effect(
+            "Add one mana of any type that the sacrificed creature could produce",
+        )
+        .expect("noun and pronoun axes must compose");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        let ManaProduction::AnyTypeProduceableBy { land_filter, .. } = produced else {
+            panic!("expected AnyTypeProduceableBy, got {produced:?}");
+        };
+        assert_eq!(land_filter, TargetFilter::CostPaidObject);
+    }
+
+    /// Benthic Explorers' "that land" is an `EffectCost` referent this parser
+    /// does not bind, and "the exiled card" is an effect participle unless the
+    /// ability has an exile cost. Both must stay unparsed (coverage honest-red)
+    /// rather than fall into the census or the cost-referent arm. The
+    /// sacrificed-land form on the same parser is the paired positive.
+    #[test]
+    fn unbound_could_produce_referents_stay_unparsed() {
+        assert!(
+            try_parse_add_mana_effect("Add one mana of any type the sacrificed land could produce")
+                .is_some(),
+            "reach-guard: the referent arm is live"
+        );
+        assert!(
+            try_parse_add_mana_effect("Add one mana of any type that land could produce").is_none()
+        );
+        assert!(try_parse_add_mana_effect(
+            "Add one mana of any type the exiled card could produce"
+        )
+        .is_none());
     }
 
     /// CR 106.1 + CR 601.2h: "add an amount of {C} equal to the
@@ -4110,6 +4367,68 @@ mod tests {
         ));
     }
 
+    /// CR 106.6a + CR 614.1c: "that creature enters with an additional +1/+1
+    /// counter on it" riders across the three spend phrasings: Biophagus
+    /// ("this mana is spent to cast"), Animal Attendant ("that mana is spent to
+    /// cast"), and Guildmages' Forum ("that mana is spent on").
+    #[test]
+    fn parses_additional_counter_mana_entry_grants() {
+        let single_counter = |grants: Option<Vec<ManaSpellGrant>>| -> TargetFilter {
+            match grants.as_deref() {
+                Some(
+                    [ManaSpellGrant::EntersWithCounters {
+                        filter,
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }],
+                ) => filter.clone(),
+                other => panic!("expected a single +1/+1 entry-counter grant, got {other:?}"),
+            }
+        };
+
+        let biophagus = single_counter(parse_mana_spell_grant(
+            "if this mana is spent to cast a creature spell, that creature enters with an additional +1/+1 counter on it.",
+        ));
+        assert_eq!(
+            biophagus,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))
+        );
+
+        let animal_attendant = single_counter(parse_mana_spell_grant(
+            "if that mana is spent to cast a non-human creature spell, that creature enters with an additional +1/+1 counter on it.",
+        ));
+        let TargetFilter::Typed(typed) = &animal_attendant else {
+            panic!("Animal Attendant filter must be typed, got {animal_attendant:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert_ne!(
+            animal_attendant, biophagus,
+            "the non-Human qualifier must narrow the filter"
+        );
+
+        let guildmages_forum = single_counter(parse_mana_spell_grant(
+            "if that mana is spent on a multicolored creature spell, that creature enters with an additional +1/+1 counter on it.",
+        ));
+        assert_ne!(
+            guildmages_forum, biophagus,
+            "the multicolored qualifier must narrow the filter"
+        );
+
+        // Unconsumed tails and unprinted openings stay unparsed.
+        assert_eq!(
+            parse_mana_spell_grant(
+                "if this mana is spent to cast a creature spell, that creature enters with an additional +1/+1 counter on it and gains haste.",
+            ),
+            None
+        );
+        assert_eq!(
+            parse_mana_spell_grant(
+                "if this mana is spent on a creature spell, that creature enters with an additional +1/+1 counter on it.",
+            ),
+            None
+        );
+    }
+
     /// CR 106.6 + CR 702.10a: Hall of the Bandit Lord — any creature spell,
     /// permanent haste (no "until end of turn" rider).
     #[test]
@@ -4302,6 +4621,78 @@ mod tests {
             }
             other => panic!("expected Effect::Mana, got {other:?}"),
         }
+    }
+
+    /// CR 603.2c + CR 608.2h + CR 106.4: "add twice that much {G}" — the
+    /// batched attack trigger's event-context amount multiplied by two.
+    /// Revert probe: without the multiplier arm in `parse_mana_count_prefix`,
+    /// the whole clause returns `None`.
+    #[test]
+    fn parse_add_twice_that_much_green_multiplies_event_context_amount() {
+        let effect = try_parse_add_mana_effect("add twice that much {G}")
+            .expect("multiplier-prefixed event-context mana clause must parse");
+        match effect {
+            Effect::Mana {
+                produced:
+                    ManaProduction::AnyOneColor {
+                        count,
+                        color_options,
+                        ..
+                    },
+                target,
+                ..
+            } => {
+                assert_eq!(color_options, vec![ManaColor::Green]);
+                assert_eq!(target, None);
+                assert_eq!(
+                    count,
+                    QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        }),
+                    }
+                );
+            }
+            other => panic!("expected green AnyOneColor Mana, got {other:?}"),
+        }
+    }
+
+    /// Synthetic factor-three probe: no printed card uses "three times that
+    /// much" for mana. Fangorn uses "twice that much {G}" and Mana Seism uses
+    /// "add that much {C}".
+    /// This case verifies the same grammar keeps the factor and colorless tail.
+    #[test]
+    fn parse_add_three_times_that_much_colorless_parameterizes_factor() {
+        let effect = try_parse_add_mana_effect("add three times that much {C}")
+            .expect("parameterized multiplier must parse");
+        match effect {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(
+                count,
+                QuantityExpr::Multiply {
+                    factor: 3,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }),
+                }
+            ),
+            other => panic!("expected colorless Mana, got {other:?}"),
+        }
+    }
+
+    /// Synthetic rejection probe: no printed card adds "twice X {G}". Fangorn
+    /// multiplies a demonstrative amount, while Brigid, Doun's Mind uses bare
+    /// X with a trailing "where X is" definition. Decline the combined form
+    /// until its nested X can preserve the definition.
+    #[test]
+    fn parse_mana_count_prefix_declines_multiplier_over_bare_x() {
+        assert!(
+            parse_mana_count_prefix("twice X {G}").is_none(),
+            "multiplier over bare X must not parse"
+        );
     }
 
     /// CR 115.1 + CR 106.4: "Target player adds that much {C}" (Jetfire,

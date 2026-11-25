@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Parked noncombat damage batches (ParkedDamageBatch) gain prevention_tally, the per-(shield, recipient) CR 615.13 prevention accumulated across a pause; an older peer drops it and would republish a resumed batch's prevention per portion (PR #9867)"
+}

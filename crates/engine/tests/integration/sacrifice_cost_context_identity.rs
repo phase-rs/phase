@@ -62,6 +62,8 @@ fn fixture(stolen: bool, replacement: bool) -> (GameRunner, ObjectId, ObjectId) 
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: engine::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,
@@ -779,7 +781,7 @@ fn distinct_sources_and_ability_indices_keep_separate_selected_payments() {
         .map(|_| scenario.add_creature(P0, "Separate fodder", 1, 1).id())
         .collect();
     let mut runner = scenario.build();
-    for (source, pair) in sources.iter().zip(fodder.chunks_exact(2)) {
+    for (source, pair) in sources.iter().zip(fodder.as_chunks::<2>().0) {
         runner
             .act(GameAction::ActivateAbility {
                 source_id: *source,

@@ -4,20 +4,9 @@ import {
   type SupabaseClient,
 } from "@supabase/supabase-js";
 
-/**
- * Build-time config injected via Vite defines (see vite.config.ts). The anon
- * key is PUBLIC by design — Row-Level Security is the actual access control, so
- * shipping it in the client bundle is its intended use, not a leak. Both are
- * empty when a deployment doesn't configure Supabase (e.g. self-hosters), which
- * disables cloud sync and leaves file backup as the only data-portability path.
- *
- * The `typeof` guard keeps this module importable under Vitest, where the
- * defines may be absent.
- */
-const SUPABASE_URL =
-  typeof __SUPABASE_URL__ !== "undefined" ? __SUPABASE_URL__ : "";
-const SUPABASE_ANON_KEY =
-  typeof __SUPABASE_ANON_KEY__ !== "undefined" ? __SUPABASE_ANON_KEY__ : "";
+import { SUPABASE_CONFIG } from "./supabaseConfig";
+
+const { url: SUPABASE_URL, anonKey: SUPABASE_ANON_KEY } = SUPABASE_CONFIG;
 
 export function isSupabaseConfigured(): boolean {
   return SUPABASE_URL.length > 0 && SUPABASE_ANON_KEY.length > 0;

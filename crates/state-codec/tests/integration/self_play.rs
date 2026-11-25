@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::File;
-use std::io::{BufReader, Write};
+use std::io::Write;
 use std::time::{Duration, Instant};
 
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
 use engine::game::deck_loading::{
     load_and_hydrate_decks, resolve_deck_list, DeckList, PlayerDeckList,
 };
@@ -27,12 +26,7 @@ use serde_json::value::RawValue;
 use state_codec::{decode, encode, state_hash, Frame, FrameKind, WireState};
 
 fn database() -> CardDatabase {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../engine/tests/fixtures/integration_cards.json.gz");
-    CardDatabase::from_export_reader(flate2::read::GzDecoder::new(BufReader::new(
-        File::open(path).expect("committed card fixture opens"),
-    )))
-    .expect("committed card fixture loads")
+    CardDatabase::from_integration_fixture().expect("committed card fixture loads")
 }
 
 fn deck(db: &CardDatabase, green: bool) -> PlayerDeckList {
@@ -623,7 +617,7 @@ fn run(seed: u64, players: u8, cap: usize, require_terminal: bool) -> String {
         ai_decks: (2..players).map(|seat| deck(&db, seat % 2 == 1)).collect(),
         ..Default::default()
     };
-    let payload = resolve_deck_list(&db, &list);
+    let payload = resolve_deck_list(&db, &ComboTable::default(), &list);
     let mut state = GameState::new(FormatConfig::free_for_all(), players, seed);
     load_and_hydrate_decks(&mut state, &payload, Some(&db));
     engine::game::engine::start_game(&mut state);

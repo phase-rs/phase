@@ -550,152 +550,42 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(recommendation["advisory_action"], "update_branch_for_handler")
         self.assertEqual(recommendation["reason"], "conflicting")
 
-    def test_requested_changes_recent_current_head_stays_blocked(self) -> None:
-        packet = {
-            "pr": {
-                "number": 5099,
-                "state": "OPEN",
-                "headRefOid": "head",
-                "author_login": "contributor",
-                "reviewDecision": "CHANGES_REQUESTED",
-                "isInMergeQueue": False,
-                "comments": [],
-                "reviews": [
-                    {
-                        "author": "maintainer",
-                        "state": "CHANGES_REQUESTED",
-                        "submittedAt": self._days_ago(1),
-                        "commit": "head",
-                    }
-                ],
-            },
-            "ci": {"state": "green"},
-            "classification": {"hard_stop_paths": [], "surface": "backend"},
-            "latest_maintainer_review_commit": "head",
-            "policy_trace": [],
-            "policy": {
-                "requested_changes": {
-                    "warning_after_days": 7,
-                    "close_after_warning_days": 7,
-                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+    def test_requested_changes_current_head_stays_blocked_at_any_age(self) -> None:
+        """An unanswered formal request never ages into a warning or a close."""
+        for days in (1, 30):
+            with self.subTest(days=days):
+                packet = {
+                    "acting_login": "maintainer",
+                    "pr": {
+                        "number": 5099,
+                        "state": "OPEN",
+                        "headRefOid": "head",
+                        "author_login": "contributor",
+                        "reviewDecision": "CHANGES_REQUESTED",
+                        "isInMergeQueue": False,
+                        "comments": [],
+                        "reviews": [
+                            {
+                                "author": "maintainer",
+                                "state": "CHANGES_REQUESTED",
+                                "submittedAt": self._days_ago(days),
+                                "commit": "head",
+                            }
+                        ],
+                    },
+                    "ci": {"state": "green"},
+                    "classification": {"hard_stop_paths": [], "surface": "backend"},
+                    "latest_maintainer_review_commit": "head",
+                    "policy_trace": [],
                 }
-            },
-        }
 
-        recommendation = pr_review.recommend_from_packet(packet)
+                recommendation = pr_review.recommend_from_packet(packet)
 
-        self.assertEqual(recommendation["advisory_action"], "blocked")
-        self.assertEqual(recommendation["reason"], "changes_requested_current_head")
+                self.assertEqual(recommendation["advisory_action"], "blocked")
+                self.assertEqual(recommendation["reason"], "changes_requested_current_head")
 
-    def test_expiry_clock_survives_repeated_blocked_recordings(self) -> None:
-        """A re-recorded `blocked` event must not reset the requested-changes clock.
-
-        Every sweep appends a fresh `blocked` event for a still-blocked PR, and
-        `event_id` hashes the timestamp, so each pass is a distinct row. Anchoring
-        the expiry clock on the newest local event pinned `blocker_age` at ~0 and
-        silently disabled warn/close for every PR the loop had ever blocked.
-        """
-        packet = {
-            "pr": {
-                "number": 4132,
-                "state": "OPEN",
-                "headRefOid": "head",
-                "author_login": "contributor",
-                "reviewDecision": "CHANGES_REQUESTED",
-                "isInMergeQueue": False,
-                "comments": [],
-                "reviews": [
-                    {
-                        "author": "maintainer",
-                        "state": "CHANGES_REQUESTED",
-                        "submittedAt": self._days_ago(8),
-                        "commit": "head",
-                    }
-                ],
-            },
-            "ci": {"state": "green"},
-            "classification": {"hard_stop_paths": [], "surface": "backend"},
-            "latest_maintainer_review_commit": "head",
-            # The sweep re-blocked this head one minute ago. Under the old anchor
-            # this made blocker_age ~0 and the PR stayed `blocked` forever.
-            "local_current_event": {
-                "event_type": "blocked",
-                "outcome": "blocked",
-                "head_sha": "head",
-                "timestamp": self._minutes_ago(1),
-            },
-            "local_first_block_event": {
-                "event_type": "blocked",
-                "outcome": "blocked",
-                "head_sha": "head",
-                "timestamp": self._days_ago(8),
-            },
-            "policy_trace": [],
-            "policy": {
-                "requested_changes": {
-                    "warning_after_days": 7,
-                    "close_after_warning_days": 7,
-                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
-                }
-            },
-        }
-
-        recommendation = pr_review.recommend_from_packet(packet)
-
-        self.assertEqual(recommendation["advisory_action"], "warn_stale_changes_for_handler")
-        self.assertEqual(recommendation["reason"], "requested_changes_warning_due")
-
-    def test_expiry_clock_falls_back_to_first_local_block_without_formal_review(self) -> None:
-        """No formal CHANGES_REQUESTED: age from the FIRST local block, not the latest."""
-        packet = {
-            "pr": {
-                "number": 4589,
-                "state": "OPEN",
-                "headRefOid": "head",
-                "author_login": "contributor",
-                "reviewDecision": None,
-                "isInMergeQueue": False,
-                "comments": [],
-                "reviews": [],
-            },
-            "ci": {"state": "green"},
-            "classification": {"hard_stop_paths": [], "surface": "backend"},
-            "latest_maintainer_review_commit": None,
-            "local_current_event": {
-                "event_type": "blocked",
-                "outcome": "blocked",
-                "head_sha": "head",
-                "timestamp": self._minutes_ago(1),
-            },
-            "local_first_block_event": {
-                "event_type": "blocked",
-                "outcome": "blocked",
-                "head_sha": "head",
-                "timestamp": self._days_ago(9),
-            },
-            "policy_trace": [],
-            "policy": {
-                "requested_changes": {
-                    "warning_after_days": 7,
-                    "close_after_warning_days": 7,
-                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
-                }
-            },
-        }
-
-        recommendation = pr_review.recommend_from_packet(packet)
-
-        self.assertEqual(recommendation["advisory_action"], "warn_stale_changes_for_handler")
-        self.assertEqual(recommendation["reason"], "requested_changes_warning_due")
-
-    def test_posted_warning_does_not_orphan_a_local_only_block(self) -> None:
-        """The warning event must not erase the block it was posted about.
-
-        `local_block` reads only the newest event. Once the stale-changes warning is
-        recorded it becomes the newest event, so a head blocked only in the local log
-        (no formal CHANGES_REQUESTED) would flip `active` to False and its warning
-        could never mature into a close.
-        """
+    def test_later_non_block_event_does_not_erase_a_local_only_block(self) -> None:
+        """`local_block` reads only the newest event; the first block still counts."""
         packet = {
             "acting_login": "maintainer",
             "pr": {
@@ -711,249 +601,274 @@ class PrReviewTests(unittest.TestCase):
             "ci": {"state": "green"},
             "classification": {"hard_stop_paths": [], "surface": "backend"},
             "latest_maintainer_review_commit": None,
-            # Newest event is the warning we posted 8 days ago — NOT a block.
             "local_current_event": {
-                "event_type": "requested_changes_warning",
-                "outcome": "requested_changes_warning",
+                "event_type": "review",
+                "outcome": "review",
                 "head_sha": "head",
                 "timestamp": self._days_ago(8),
             },
-            "local_first_block_event": {
-                "event_type": "blocked",
-                "outcome": "blocked",
-                "head_sha": "head",
-                "timestamp": self._days_ago(16),
-            },
-            "policy_trace": [],
-            "policy": {
-                "requested_changes": {
-                    "warning_after_days": 7,
-                    "close_after_warning_days": 7,
-                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
-                }
-            },
-        }
-
-        state = pr_review.requested_changes_expiry_state(packet, local_block=False, author_followup_after_local_event=False)
-
-        self.assertTrue(state["active"], "a local-only block must survive its own warning")
-        self.assertEqual(state["blocker_timestamp"], packet["local_first_block_event"]["timestamp"])
-        self.assertTrue(state["close_due"], "warning older than close_after_warning_days must close")
-
-        recommendation = pr_review.recommend_from_packet(packet)
-        self.assertEqual(recommendation["advisory_action"], "close_stale_changes_for_handler")
-
-    def test_fresh_formal_review_restarts_expiry_clock(self) -> None:
-        """A NEW CHANGES_REQUESTED on the same head restarts the window (GitHub wins)."""
-        packet = {
-            "pr": {
-                "number": 4133,
-                "state": "OPEN",
-                "headRefOid": "head",
-                "author_login": "contributor",
-                "reviewDecision": "CHANGES_REQUESTED",
-                "isInMergeQueue": False,
-                "comments": [],
-                "reviews": [
-                    {
-                        "author": "maintainer",
-                        "state": "CHANGES_REQUESTED",
-                        "submittedAt": self._days_ago(1),
-                        "commit": "head",
-                    }
-                ],
-            },
-            "ci": {"state": "green"},
-            "classification": {"hard_stop_paths": [], "surface": "backend"},
-            "latest_maintainer_review_commit": "head",
-            "local_first_block_event": {
+            "local_latest_block_event": {
                 "event_type": "blocked",
                 "outcome": "blocked",
                 "head_sha": "head",
                 "timestamp": self._days_ago(30),
             },
             "policy_trace": [],
-            "policy": {
-                "requested_changes": {
-                    "warning_after_days": 7,
-                    "close_after_warning_days": 7,
-                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
-                }
-            },
         }
 
         recommendation = pr_review.recommend_from_packet(packet)
 
         self.assertEqual(recommendation["advisory_action"], "blocked")
+        self.assertEqual(recommendation["reason"], "changes_requested_current_head")
 
-    def test_first_block_events_by_pr_head_keeps_earliest_and_ignores_non_blocks(self) -> None:
-        events = [
-            {"pr": 1, "head_sha": "h", "outcome": "review", "timestamp": "2026-07-01T00:00:00Z"},
-            {"pr": 1, "head_sha": "h", "outcome": "blocked", "timestamp": "2026-07-02T00:00:00Z"},
-            {"pr": 1, "head_sha": "h", "outcome": "blocked", "timestamp": "2026-07-09T00:00:00Z"},
-            {"pr": 1, "head_sha": "other", "outcome": "blocked", "timestamp": "2026-07-05T00:00:00Z"},
-        ]
-
-        first = pr_review.first_block_events_by_pr_head(events)
-
-        self.assertEqual(first[(1, "h")]["timestamp"], "2026-07-02T00:00:00Z")
-        self.assertEqual(first[(1, "other")]["timestamp"], "2026-07-05T00:00:00Z")
-
-    def test_is_block_event_covers_every_routing_block_shape(self) -> None:
-        """The expiry anchor must recognize exactly the events routing calls blocking."""
-        for event_type in pr_review.LOCAL_BLOCK_EVENT_TYPES:
-            self.assertTrue(pr_review.is_block_event({"event_type": event_type}), event_type)
-        for outcome in pr_review.LOCAL_BLOCK_OUTCOMES:
-            self.assertTrue(pr_review.is_block_event({"outcome": outcome}), outcome)
-
-        self.assertFalse(pr_review.is_block_event({"event_type": "blocked", "outcome": "ci_failed"}))
-        self.assertFalse(pr_review.is_block_event({"event_type": "review"}))
-        self.assertFalse(pr_review.is_block_event({"outcome": "approved_enqueued"}))
-        self.assertFalse(pr_review.is_block_event(None))
-
-    def test_review_blocked_event_anchors_expiry(self) -> None:
-        """`review_blocked` routes as a block, so it must also anchor the expiry clock."""
-        events = [
-            {
-                "pr": 7,
-                "head_sha": "h",
-                "event_type": "review_blocked",
-                "timestamp": "2026-07-01T00:00:00Z",
-            },
-        ]
-
-        self.assertIn((7, "h"), pr_review.first_block_events_by_pr_head(events))
-
-    def test_requested_changes_warns_after_configured_age(self) -> None:
-        packet = {
-            "pr": {
-                "number": 5100,
-                "state": "OPEN",
-                "headRefOid": "head",
-                "author_login": "contributor",
-                "reviewDecision": "CHANGES_REQUESTED",
-                "isInMergeQueue": False,
-                "comments": [],
-            },
-            "ci": {"state": "green"},
-            "classification": {"hard_stop_paths": [], "surface": "backend"},
-            "latest_maintainer_review_commit": "head",
-            "local_current_event": {
-                "event_type": "changes_requested",
-                "outcome": "changes_requested",
-                "head_sha": "head",
-                "timestamp": self._days_ago(8),
-            },
-            "policy_trace": [],
-            "policy": {
-                "requested_changes": {
-                    "warning_after_days": 7,
-                    "close_after_warning_days": 7,
-                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
-                }
-            },
-        }
-
-        recommendation = pr_review.recommend_from_packet(packet)
-
-        self.assertEqual(recommendation["advisory_action"], "warn_stale_changes_for_handler")
-        self.assertEqual(recommendation["reason"], "requested_changes_warning_due")
-        self.assertEqual(
-            recommendation["requested_changes_expiry"]["warning_marker"],
-            pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+    def test_recorded_expiry_warning_keeps_the_block_it_warned_about(self) -> None:
+        """A logged warning is history: the first block holds, and a reply resurfaces review."""
+        warning_marker = pr_review.REQUESTED_CHANGES_EXPIRY_MARKER
+        cases = (
+            # (contributor replied after the warning, branch conflicts, action, reason)
+            (False, False, "blocked", "changes_requested_current_head"),
+            (True, False, "review", "author_followup_after_maintainer_activity"),
+            (True, True, "update_branch_for_handler", "conflicting_after_author_followup"),
         )
-
-    def test_requested_changes_warning_expires_to_close_handler(self) -> None:
-        packet = {
-            "acting_login": "maintainer",
-            "pr": {
-                "number": 5101,
-                "state": "OPEN",
-                "headRefOid": "head",
-                "author_login": "contributor",
-                "reviewDecision": "CHANGES_REQUESTED",
-                "isInMergeQueue": False,
-                "comments": [
+        for replied, conflicting, action, reason in cases:
+            with self.subTest(replied=replied, conflicting=conflicting):
+                comments = [
                     {
                         "author": "maintainer",
-                        "createdAt": self._days_ago(8),
-                        "body_excerpt": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                        "createdAt": self._days_ago(20),
+                        "body_excerpt": warning_marker,
                     }
-                ],
-                "reviews": [
-                    {
-                        "author": "maintainer",
-                        "state": "CHANGES_REQUESTED",
-                        "submittedAt": self._days_ago(20),
-                        "commit": "head",
-                    }
-                ],
-            },
-            "ci": {"state": "green"},
-            "classification": {"hard_stop_paths": [], "surface": "backend"},
-            "latest_maintainer_review_commit": "head",
-            "policy_trace": [],
-            "policy": {
-                "requested_changes": {
-                    "warning_after_days": 7,
-                    "close_after_warning_days": 7,
-                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                ]
+                if replied:
+                    comments.append(
+                        {
+                            "author": "contributor",
+                            "createdAt": self._days_ago(1),
+                            "body_excerpt": "Addressed the requested changes.",
+                        }
+                    )
+                warning_event = {
+                    "event_type": "requested_changes_warning",
+                    "outcome": "requested_changes_warning",
+                    "head_sha": "head",
+                    "timestamp": self._days_ago(20),
                 }
-            },
-        }
+                packet = {
+                    "acting_login": "maintainer",
+                    "pr": {
+                        "number": 5101,
+                        "state": "OPEN",
+                        "headRefOid": "head",
+                        "author_login": "contributor",
+                        "reviewDecision": "CHANGES_REQUESTED",
+                        "mergeStateStatus": "DIRTY" if conflicting else "CLEAN",
+                        "isInMergeQueue": False,
+                        "comments": comments,
+                        "reviews": [
+                            {
+                                "author": "maintainer",
+                                "state": "CHANGES_REQUESTED",
+                                "submittedAt": self._days_ago(30),
+                                "commit": "head",
+                            }
+                        ],
+                    },
+                    "ci": {"state": "green"},
+                    "classification": {"hard_stop_paths": [], "surface": "backend"},
+                    "latest_maintainer_review_commit": "head",
+                    "local_current_event": warning_event,
+                    "local_latest_block_event": {
+                        "event_type": "blocked",
+                        "outcome": "blocked",
+                        "head_sha": "head",
+                        "timestamp": self._days_ago(30),
+                    },
+                    "policy_trace": [],
+                }
+                packet["freshness"] = pr_review.review_freshness(
+                    packet["pr"], packet["acting_login"], warning_event, warning_event
+                )
 
-        recommendation = pr_review.recommend_from_packet(packet)
+                recommendation = pr_review.recommend_from_packet(packet)
 
-        self.assertEqual(recommendation["advisory_action"], "close_stale_changes_for_handler")
-        self.assertEqual(recommendation["reason"], "requested_changes_expired")
+                self.assertEqual(recommendation["advisory_action"], action)
+                self.assertEqual(recommendation["reason"], reason)
 
-    def test_requested_changes_warning_marker_survives_comment_excerpt(self) -> None:
+    def _route_logged_history(
+        self,
+        events: list[dict],
+        pr_overrides: dict,
+        parse_diff_updated: bool = False,
+    ) -> dict:
+        """Route one head the way packet_for_pr does: newest event plus first block."""
+        events = [
+            {"pr": 5110, "head_sha": "head", "timestamp": self._days_ago(20 - index), **event}
+            for index, event in enumerate(events)
+        ]
+        local_event = events[-1] if events else None
         pr = {
-            "number": 5103,
+            "number": 5110,
             "state": "OPEN",
             "headRefOid": "head",
-            "author": {"login": "contributor"},
-            "reviewDecision": "CHANGES_REQUESTED",
-            "comments": [
-                {
-                    "author": {"login": "maintainer"},
-                    "createdAt": self._days_ago(8),
-                    "body": ("x" * 350) + pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
-                }
-            ],
-            "reviews": [
-                {
-                    "author": {"login": "maintainer"},
-                    "state": "CHANGES_REQUESTED",
-                    "submittedAt": self._days_ago(20),
-                    "commit": {"oid": "head"},
-                }
-            ],
+            "author_login": "contributor",
+            "reviewDecision": None,
+            "mergeStateStatus": "CLEAN",
+            "isInMergeQueue": False,
+            "comments": [],
+            "reviews": [],
+            **pr_overrides,
         }
         packet = {
             "acting_login": "maintainer",
-            "pr": pr_review.compact_pr_view(pr, "maintainer"),
+            "pr": pr,
             "ci": {"state": "green"},
             "classification": {"hard_stop_paths": [], "surface": "backend"},
             "latest_maintainer_review_commit": "head",
+            "local_current_event": local_event,
+            "local_latest_block_event": pr_review.latest_block_events_by_pr_head(events).get(
+                (5110, "head")
+            ),
+            "parse_diff": {"present": True, "updated_at": self._days_ago(0)}
+            if parse_diff_updated
+            else {},
             "policy_trace": [],
-            "policy": {
-                "requested_changes": {
-                    "warning_after_days": 7,
-                    "close_after_warning_days": 7,
-                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
-                }
-            },
         }
-
-        recommendation = pr_review.recommend_from_packet(packet)
-
-        self.assertNotIn(
-            pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
-            packet["pr"]["comments"][0]["body_excerpt"],
+        packet["freshness"] = pr_review.review_freshness(
+            pr, "maintainer", local_event, local_event
         )
-        self.assertEqual(recommendation["advisory_action"], "close_stale_changes_for_handler")
-        self.assertEqual(recommendation["reason"], "requested_changes_expired")
+        return pr_review.recommend_from_packet(packet)
+
+    def test_logged_expiry_warning_is_not_an_active_block(self) -> None:
+        """A warning row never blocks on its own; only the block before it does."""
+        warning = {"event_type": "requested_changes_warning", "outcome": "requested_changes_warning"}
+        block = {"event_type": "blocked", "outcome": "blocked"}
+        changes_requested = {
+            "author": "maintainer",
+            "state": "CHANGES_REQUESTED",
+            "submittedAt": self._days_ago(30),
+            "commit": "head",
+        }
+        approved = {
+            "reviewDecision": "APPROVED",
+            "reviews": [
+                changes_requested,
+                {
+                    "author": "maintainer",
+                    "state": "APPROVED",
+                    "submittedAt": self._days_ago(2),
+                    "commit": "head",
+                },
+            ],
+        }
+        dismissed = {
+            "reviewDecision": "REVIEW_REQUIRED",
+            "reviews": [{**changes_requested, "state": "DISMISSED"}],
+        }
+        cases = (
+            (
+                "formal request, warning, then approval",
+                [warning],
+                approved,
+                False,
+                "approve_ready_for_handler",
+            ),
+            ("formal request, warning, then dismissal", [warning], dismissed, False, "review"),
+            (
+                "logged block, warning, then approval",
+                [block, warning],
+                approved,
+                False,
+                "approve_ready_for_handler",
+            ),
+            ("logged block, warning, then dismissal", [block, warning], dismissed, False, "review"),
+            (
+                "logged block, warning, approval, then a dequeued approved_enqueued record",
+                [block, warning, {"event_type": "approved_enqueued", "outcome": "approved_enqueued"}],
+                {
+                    "reviewDecision": "APPROVED",
+                    "reviews": [
+                        {**changes_requested, "state": "APPROVED", "submittedAt": self._days_ago(19)}
+                    ],
+                },
+                False,
+                "approve_ready_for_handler",
+            ),
+            (
+                "approval older than the logged block",
+                [block, {"event_type": "review"}],
+                {
+                    "reviewDecision": "APPROVED",
+                    "reviews": [{**changes_requested, "state": "APPROVED"}],
+                },
+                False,
+                "blocked",
+            ),
+            ("block, warning, parse-diff update", [block, warning], {}, True, "blocked"),
+            (
+                "block, warning, incomplete comment history",
+                [block, warning],
+                {"commentsComplete": False},
+                False,
+                "blocked",
+            ),
+        )
+        for name, events, pr_overrides, parse_diff_updated, action in cases:
+            with self.subTest(name):
+                recommendation = self._route_logged_history(
+                    events, pr_overrides, parse_diff_updated
+                )
+                self.assertEqual(recommendation["advisory_action"], action)
+
+    def test_author_followup_after_expiry_warning_survives_later_events(self) -> None:
+        """A reply to a posted warning resurfaces review after later log rows too."""
+        warning_comment = {
+            "author": "maintainer",
+            "createdAt": self._days_ago(12),
+            "body_excerpt": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+        }
+        reply = {
+            "author": "contributor",
+            "createdAt": self._days_ago(1),
+            "body_excerpt": "Addressed.",
+        }
+        changes_requested = {
+            "author": "maintainer",
+            "state": "CHANGES_REQUESTED",
+            "submittedAt": self._days_ago(30),
+            "commit": "head",
+        }
+        cases = (
+            (
+                "later non-blocking review event",
+                [{"event_type": "blocked", "outcome": "blocked"}, {"event_type": "review"}],
+                {"reviewDecision": "CHANGES_REQUESTED", "reviews": [changes_requested]},
+            ),
+            (
+                "approved and enqueued after the warning",
+                [{"event_type": "approved_enqueued", "outcome": "approved_enqueued"}],
+                {
+                    "reviewDecision": "APPROVED",
+                    "autoMergeRequest": {"enabledAt": self._days_ago(3)},
+                    "reviews": [
+                        {
+                            "author": "maintainer",
+                            "state": "APPROVED",
+                            "submittedAt": self._days_ago(4),
+                            "commit": "head",
+                        }
+                    ],
+                },
+            ),
+        )
+        for name, events, pr_overrides in cases:
+            with self.subTest(name):
+                recommendation = self._route_logged_history(
+                    events, {"comments": [warning_comment, reply], **pr_overrides}
+                )
+                self.assertEqual(recommendation["advisory_action"], "review")
+                self.assertEqual(
+                    recommendation["reason"], "author_followup_after_maintainer_activity"
+                )
 
     def test_author_followup_after_expiry_warning_resurfaces_review(self) -> None:
         packet = {
@@ -990,13 +905,6 @@ class PrReviewTests(unittest.TestCase):
             "classification": {"hard_stop_paths": [], "surface": "backend"},
             "latest_maintainer_review_commit": "head",
             "policy_trace": [],
-            "policy": {
-                "requested_changes": {
-                    "warning_after_days": 7,
-                    "close_after_warning_days": 7,
-                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
-                }
-            },
         }
 
         packet["freshness"] = pr_review.review_freshness(
@@ -1005,9 +913,56 @@ class PrReviewTests(unittest.TestCase):
         recommendation = pr_review.recommend_from_packet(packet)
 
         self.assertEqual(recommendation["advisory_action"], "review")
-        self.assertEqual(
-            recommendation["reason"], "author_followup_after_requested_changes_warning"
+        self.assertEqual(recommendation["reason"], "author_followup_after_maintainer_activity")
+
+    def test_requested_changes_warning_marker_survives_comment_excerpt(self) -> None:
+        pr = {
+            "number": 5103,
+            "state": "OPEN",
+            "headRefOid": "head",
+            "author": {"login": "contributor"},
+            "reviewDecision": "CHANGES_REQUESTED",
+            "comments": [
+                {
+                    "author": {"login": "maintainer"},
+                    "createdAt": self._days_ago(8),
+                    "body": ("x" * 350) + pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                },
+                {
+                    "author": {"login": "contributor"},
+                    "createdAt": self._days_ago(1),
+                    "body": "Addressed the requested changes.",
+                },
+            ],
+            "reviews": [
+                {
+                    "author": {"login": "maintainer"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": self._days_ago(20),
+                    "commit": {"oid": "head"},
+                }
+            ],
+        }
+        packet = {
+            "acting_login": "maintainer",
+            "pr": pr_review.compact_pr_view(pr, "maintainer"),
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+        }
+        packet["freshness"] = pr_review.review_freshness(
+            packet["pr"], packet["acting_login"], None, None
         )
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertNotIn(
+            pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+            packet["pr"]["comments"][0]["body_excerpt"],
+        )
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "author_followup_after_maintainer_activity")
 
     def test_author_review_after_expiry_warning_resurfaces_review(self) -> None:
         packet = {
@@ -1045,13 +1000,6 @@ class PrReviewTests(unittest.TestCase):
             "classification": {"hard_stop_paths": [], "surface": "backend"},
             "latest_maintainer_review_commit": "head",
             "policy_trace": [],
-            "policy": {
-                "requested_changes": {
-                    "warning_after_days": 7,
-                    "close_after_warning_days": 7,
-                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
-                }
-            },
         }
 
         packet["freshness"] = pr_review.review_freshness(
@@ -1060,9 +1008,7 @@ class PrReviewTests(unittest.TestCase):
         recommendation = pr_review.recommend_from_packet(packet)
 
         self.assertEqual(recommendation["advisory_action"], "review")
-        self.assertEqual(
-            recommendation["reason"], "author_followup_after_requested_changes_warning"
-        )
+        self.assertEqual(recommendation["reason"], "author_followup_after_maintainer_activity")
 
     def test_warning_followup_with_conflict_routes_to_update_branch(self) -> None:
         packet = {
@@ -1100,19 +1046,127 @@ class PrReviewTests(unittest.TestCase):
             "classification": {"hard_stop_paths": [], "surface": "backend"},
             "latest_maintainer_review_commit": "head",
             "policy_trace": [],
-            "policy": {
-                "requested_changes": {
-                    "warning_after_days": 7,
-                    "close_after_warning_days": 7,
-                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
-                }
-            },
         }
 
         recommendation = pr_review.recommend_from_packet(packet)
 
         self.assertEqual(recommendation["advisory_action"], "update_branch_for_handler")
         self.assertEqual(recommendation["reason"], "conflicting_after_author_followup")
+
+    def test_retired_expiry_events_are_read_but_never_recorded(self) -> None:
+        for event_type in ("requested_changes_warning", "stale_changes_closed"):
+            with self.subTest(event_type=event_type):
+                event = {"event_type": event_type, "pr": 1, "author": "contributor"}
+                self.assertIn(
+                    "not in the allowed vocabulary",
+                    pr_review.event_validation_error(event) or "",
+                )
+                self.assertIn(
+                    "not in the allowed vocabulary",
+                    pr_review.event_validation_error(
+                        {"event_type": "held", "pr": 1, "outcome": event_type}
+                    )
+                    or "",
+                )
+                self.assertEqual(pr_review.contributor_login_for_event(event), "contributor")
+        self.assertEqual(
+            pr_review.canonical_from_text("stale_changes_closed"), ("closed", "closed")
+        )
+
+    def _record_main(self, state_dir: Path, event: object, *extra: str) -> tuple[int, dict]:
+        """`record --event-json` through the real `main`, with its exit code and printed result."""
+        event_path = state_dir / "event.json"
+        event_path.write_text(json.dumps(event), encoding="utf-8")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = pr_review.main(
+                ["record", "--state-dir", str(state_dir), "--event-json", str(event_path), *extra]
+            )
+        return code, json.loads(output.getvalue())
+
+    def test_record_rejects_retired_expiry_events_even_with_force(self) -> None:
+        """Every case and `-`/`_`/space spelling, in the type, the outcome or the legacy `action` field."""
+        spellings = (
+            "requested_changes_warning",
+            "REQUESTED-CHANGES-WARNING",
+            "Requested Changes_Warning",
+            "stale_changes_closed",
+            "Stale-Changes-Closed",
+            " stale changes closed ",
+        )
+        shapes = (
+            lambda value: {"event_type": value},
+            lambda value: {"event_type": "held", "outcome": value},
+            lambda value: {"event_type": "review", "action": value},
+            lambda value: {"action": value},
+            # A malformed field beside the retired name changes nothing.
+            lambda value: {"event_type": value, "outcome": []},
+            lambda value: {"event_type": "unknown", "outcome": {"value": 1}, "action": value},
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            for shape in shapes:
+                for value in spellings:
+                    event = {"pr": 7, "head_sha": "h", **shape(value)}
+                    for extra in ((), ("--force",)):
+                        with self.subTest(event=event, extra=extra):
+                            code, result = self._record_main(state_dir, event, *extra)
+                            self.assertEqual((code, result["inserted"]), (1, False))
+                            self.assertIn("retired inactivity-expiry event", result["error"])
+                            self.assertIn("allowed_event_types", result)
+            self.assertEqual(pr_review.all_events(state_dir), [])
+
+    def test_record_refuses_malformed_outcomes_without_raising(self) -> None:
+        """An unknown type with a list or object outcome: refused without --force, forced with it, as before."""
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            for outcome in ([], ["stale_changes_closed"], {}, {"outcome": "requested_changes_warning"}):
+                event = {"event_type": "unknown", "outcome": outcome, "pr": 7}
+                with self.subTest(outcome=outcome):
+                    code, result = self._record_main(state_dir, event)
+                    self.assertEqual((code, result["inserted"]), (1, False))
+                    self.assertIn("event_type 'unknown' is not in the allowed vocabulary", result["error"])
+                    code, result = self._record_main(state_dir, event, "--force")
+                    self.assertEqual((code, result["inserted"], result["forced"]), (0, True, True))
+            self.assertEqual(len(pr_review.all_events(state_dir)), 4)
+
+    def test_latest_block_events_by_pr_head_keeps_latest_and_ignores_non_blocks(self) -> None:
+        events = [
+            {"pr": 1, "head_sha": "h", "outcome": "review", "timestamp": "2026-07-01T00:00:00Z"},
+            {"pr": 1, "head_sha": "h", "outcome": "blocked", "timestamp": "2026-07-02T00:00:00Z"},
+            {"pr": 1, "head_sha": "h", "outcome": "blocked", "timestamp": "2026-07-09T00:00:00Z"},
+            {"pr": 1, "head_sha": "other", "outcome": "blocked", "timestamp": "2026-07-05T00:00:00Z"},
+        ]
+
+        latest = pr_review.latest_block_events_by_pr_head(events)
+
+        self.assertEqual(latest[(1, "h")]["timestamp"], "2026-07-09T00:00:00Z")
+        self.assertEqual(latest[(1, "other")]["timestamp"], "2026-07-05T00:00:00Z")
+
+    def test_is_block_event_covers_every_routing_block_shape(self) -> None:
+        """The latest-block lookup must recognize exactly the events routing calls blocking."""
+        for event_type in pr_review.LOCAL_BLOCK_EVENT_TYPES:
+            self.assertTrue(pr_review.is_block_event({"event_type": event_type}), event_type)
+        for outcome in pr_review.LOCAL_BLOCK_OUTCOMES:
+            self.assertTrue(pr_review.is_block_event({"outcome": outcome}), outcome)
+
+        self.assertFalse(pr_review.is_block_event({"event_type": "blocked", "outcome": "ci_failed"}))
+        self.assertFalse(pr_review.is_block_event({"event_type": "review"}))
+        self.assertFalse(pr_review.is_block_event({"outcome": "approved_enqueued"}))
+        self.assertFalse(pr_review.is_block_event(None))
+
+    def test_review_blocked_event_counts_as_latest_block(self) -> None:
+        """`review_blocked` routes as a block, so it must also count as the latest block."""
+        events = [
+            {
+                "pr": 7,
+                "head_sha": "h",
+                "event_type": "review_blocked",
+                "timestamp": "2026-07-01T00:00:00Z",
+            },
+        ]
+
+        self.assertIn((7, "h"), pr_review.latest_block_events_by_pr_head(events))
 
     def test_proof_profile_flags_agent_coauthored_incomplete_template(self) -> None:
         profile = pr_review.proof_profile(
@@ -2306,14 +2360,6 @@ class PrReviewTests(unittest.TestCase):
             lines = (state_dir / "review-events.jsonl").read_text().strip().splitlines()
             self.assertEqual(len(lines), 1)
 
-    def test_event_skeleton_lists_expiry_event_types(self) -> None:
-        skeleton = pr_review.event_skeleton(
-            5103, {"headRefOid": "head", "author_login": "contributor"}
-        )
-
-        self.assertIn("requested_changes_warning", skeleton["event_type"])
-        self.assertIn("stale_changes_closed", skeleton["event_type"])
-
     def test_candidate_sort_orders_by_action_priority(self) -> None:
         candidates = [
             {"advisory_action": "skip", "pr": 10},
@@ -3096,6 +3142,38 @@ class PrReviewTests(unittest.TestCase):
         )
         self.assertTrue(failing["would_decline"])
         self.assertFalse(failing["decline"])
+
+    def test_artifact_admits_unresolved_final_review_only_with_its_box_unchecked(self) -> None:
+        head = "a" * 40
+        policy = pr_review.Policy(
+            {"admission": {"mode": "audit", "enforced_after": "2026-07-01T00:00:00Z"}}
+        )
+        box = pr_review.FINAL_REVIEW_CHECKBOX_LABEL
+        unresolved_line = self._artifact_body(head).replace(
+            "Final review-impl PASS", "Final review-impl UNRESOLVED"
+        )
+        cases = (
+            ("box unchecked", unresolved_line.replace(f"- [x] {box}", f"- [ ] {box}"), []),
+            ("box still checked", unresolved_line, ["invalid_required_verification_checkboxes"]),
+            (
+                "box unchecked twice and checked once",
+                unresolved_line.replace(f"- [x] {box}", f"- [ ] {box}\n- [ ] {box}\n- [x] {box}"),
+                ["invalid_required_verification_checkboxes"],
+            ),
+            (
+                "box missing",
+                unresolved_line.replace(f"- [x] {box}\n", ""),
+                ["invalid_required_verification_checkboxes"],
+            ),
+        )
+        for name, body, failures in cases:
+            with self.subTest(name):
+                profile = pr_review.artifact_profile(
+                    {"headRefOid": head, "createdAt": "2026-07-02T00:00:00Z", "body": body},
+                    policy,
+                )
+                self.assertEqual(profile["failures"], failures)
+                self.assertTrue(profile["final_review_unresolved"])
 
     def test_artifact_enforcement_requires_immutable_cutoff(self) -> None:
         head = "a" * 40
@@ -4212,19 +4290,6 @@ class IncrementalDashboardTests(unittest.TestCase):
         private_path.write_text(json.dumps({"contributor_standing": {"contributor": {"standing": "skip"}}}) + "\n")
         result = self.run_dashboard()
         self.assertEqual(self.row(result)["advisory_action"], "skip")
-        self.assertEqual(self.detail_calls(), [])
-
-    def test_elapsed_requested_changes_deadline_recomputes_without_detail_fetch(self) -> None:
-        self.nodes[1]["reviewDecision"] = "CHANGES_REQUESTED"
-        self.nodes[1]["reviews"] = self.connection([self.review("maintainer", "2026-10-05T09:00:00Z", "CHANGES_REQUESTED")])
-        with mock.patch.object(pr_review, "age_in_days", return_value=1):
-            first = self.run_dashboard()
-        self.assertNotEqual(self.row(first)["advisory_action"], "warn_stale_changes_for_handler")
-        self.calls.clear()
-        with mock.patch.object(pr_review, "age_in_days", return_value=8):
-            result = self.run_dashboard()
-        self.assertEqual(self.row(result)["advisory_action"], "warn_stale_changes_for_handler")
-        self.assertIn("warn_stale_changes_for_handler", result["sweep_candidates_by_action"])
         self.assertEqual(self.detail_calls(), [])
 
     def test_partial_graphql_and_page_failures_leave_cursor_and_outputs_unchanged(self) -> None:

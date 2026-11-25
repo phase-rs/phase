@@ -1,7 +1,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject, ObjectCounterDisplay } from "../../../adapter/types.ts";
+import type { AttackTarget, GameObject, ObjectCounterDisplay, PlayerId } from "../../../adapter/types.ts";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
@@ -808,5 +808,120 @@ describe("CardPreview nameless permanent", () => {
     expect(preview).not.toBeNull();
     expect(preview?.style.bottom).toBe("0px");
     source.remove();
+  });
+});
+
+describe("CardPreview attack target flag", () => {
+  const ATTACKER = 100;
+  const NON_ATTACKER = 300;
+
+  afterEach(() => {
+    // The spectator row sets `gameMode`; a leaked "spectate" would suppress every
+    // second-person assertion in the rows that follow.
+    useGameStore.setState({ gameMode: null });
+  });
+
+  /** `projected` is the engine's `attack_targets` entry; `null` models an ended relation. */
+  function previewAttacker(
+    previewed: number,
+    attackTarget: AttackTarget,
+    defendingPlayer: PlayerId,
+    projected: AttackTarget | null = attackTarget,
+  ) {
+    const objects = [
+      battlefieldObject({ id: ATTACKER, name: "Grizzly Bears" }),
+      battlefieldObject({
+        id: NON_ATTACKER,
+        name: "Pithing Needle",
+        chosen_attributes: [{ type: "CardName", value: "Lightning Bolt" }],
+      }),
+      battlefieldObject({ id: 201, name: "Jace Beleren", controller: 0, owner: 0 }),
+      battlefieldObject({ id: 202, name: "Jace Beleren", controller: 2, owner: 2 }),
+      battlefieldObject({ id: 203, name: "Invasion of Kaldheim", controller: 0, owner: 0 }),
+    ];
+    useGameStore.setState({
+      gameState: buildGameState({
+        objects: buildObjectMap(...objects),
+        battlefield: objects.map((o) => o.id),
+        combat: {
+          attackers: [
+            { object_id: ATTACKER, defending_player: defendingPlayer, attack_target: attackTarget },
+          ],
+          blocker_assignments: {},
+          blocker_to_attacker: {},
+          blockers_declared_by: [],
+          pending_blocker_declaration_events: [],
+          damage_assignments: {},
+          first_strike_done: false,
+          damage_step_index: null,
+          pending_damage: [],
+          regular_damage_done: false,
+        },
+        derived: { attack_targets: projected ? { [ATTACKER]: projected } : {} },
+      }),
+      spellCosts: {},
+    });
+    useUiStore.setState({ inspectedObjectId: previewed, altHeld: false });
+    render(<CardPreview cardName="Grizzly Bears" position={{ x: 20, y: 20 }} />);
+  }
+
+  it("flags an attack on the viewer's planeswalker", () => {
+    previewAttacker(ATTACKER, { type: "Planeswalker", data: 201 }, 0);
+    expect(screen.getByText("⚔ Attacking your planeswalker Jace Beleren")).toBeInTheDocument();
+  });
+
+  it("flags an attack on the viewer", () => {
+    previewAttacker(ATTACKER, { type: "Player", data: 0 }, 0);
+    expect(screen.getByText("⚔ Attacking you")).toBeInTheDocument();
+  });
+
+  it("names another player, and that player's planeswalker", () => {
+    previewAttacker(ATTACKER, { type: "Player", data: 2 }, 2);
+    expect(screen.getByText("⚔ Attacking Opp 3")).toBeInTheDocument();
+    cleanup();
+
+    previewAttacker(ATTACKER, { type: "Planeswalker", data: 202 }, 2);
+    expect(screen.getByText("⚔ Attacking Opp 3's planeswalker Jace Beleren")).toBeInTheDocument();
+  });
+
+  it("addresses a spectator in the third person, though seat 0 is their resolved id", () => {
+    // `usePlayerId()` answers seat 0 in spectate mode, so only the spectator gate keeps the
+    // viewer-relative arms from telling a spectator that seat 0's attackers target them.
+    useGameStore.setState({ gameMode: "spectate" });
+    previewAttacker(ATTACKER, { type: "Player", data: 0 }, 0);
+    expect(screen.getByText("⚔ Attacking Opp 1")).toBeInTheDocument();
+    expect(screen.queryByText("⚔ Attacking you")).toBeNull();
+    cleanup();
+
+    previewAttacker(ATTACKER, { type: "Planeswalker", data: 201 }, 0);
+    expect(screen.getByText("⚔ Attacking Opp 1's planeswalker Jace Beleren")).toBeInTheDocument();
+    expect(screen.queryByText(/your planeswalker/)).toBeNull();
+  });
+
+  it("reads the engine's current target: a planeswalker removed from combat is not named", () => {
+    // CR 506.4c: the declared target still names Jace, but the engine dropped the relation, so the
+    // creature is attacking without attacking any player, planeswalker, or battle.
+    previewAttacker(ATTACKER, { type: "Planeswalker", data: 202 }, 2, null);
+    expect(
+      screen.getByText("⚔ Attacking, but not any player, planeswalker, or battle"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Jace Beleren/)).toBeNull();
+    cleanup();
+
+    // Positive sibling: the same declaration while the relation is live names the planeswalker.
+    previewAttacker(ATTACKER, { type: "Planeswalker", data: 202 }, 2);
+    expect(screen.getByText("⚔ Attacking Opp 3's planeswalker Jace Beleren")).toBeInTheDocument();
+  });
+
+  it("names the battle being attacked", () => {
+    previewAttacker(ATTACKER, { type: "Battle", data: 203 }, 1);
+    expect(screen.getByText("⚔ Attacking battle Invasion of Kaldheim")).toBeInTheDocument();
+  });
+
+  it("shows no flag on a creature that is not attacking", () => {
+    previewAttacker(NON_ATTACKER, { type: "Player", data: 0 }, 0);
+    // Reach guard: the info panel rendered for the previewed object.
+    expect(screen.getByText("Card name: Lightning Bolt")).toBeInTheDocument();
+    expect(screen.queryByText(/Attacking/)).toBeNull();
   });
 });

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { useTranslation } from "react-i18next";
-import { Reorder } from "framer-motion";
+import { Trans, useTranslation } from "react-i18next";
+import { Reorder, useDragControls } from "framer-motion";
 
 import type { ReplacementCandidateSummary } from "../../adapter/types.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { RichLabel } from "../mana/RichLabel.tsx";
+import { flattenRichLabel, RichLabel } from "../mana/RichLabel.tsx";
 import { DialogShell } from "./DialogShell.tsx";
 
 const EMPTY_CANDIDATES: ReplacementCandidateSummary[] = [];
@@ -135,7 +135,6 @@ export function ReplacementModal() {
         title={t("replacement.title")}
         subtitle={t("replacement.chooseSubtitle")}
         size="md"
-        scrollable
       >
         <div className="px-3 py-3 lg:px-5 lg:py-5">
           <div className="flex flex-col gap-2">
@@ -186,7 +185,6 @@ export function ReplacementModal() {
           : t("replacement.orderSubtitleComposing")
       }
       size="md"
-      scrollable
       footer={
         <button
           type="button"
@@ -210,79 +208,20 @@ export function ReplacementModal() {
           onReorder={setOrder}
           className="flex flex-col gap-2"
         >
-          {order.map((candidateIndex, position) => {
-            const candidate = candidates[candidateIndex];
-            return (
-              <Reorder.Item
-                as="li"
-                // Index-keyed, not source-keyed: an optional replacement sends
-                // the same `source_id` twice, so source ids are not unique.
-                key={candidateIndex}
-                value={candidateIndex}
-                whileDrag={{ scale: 1.03, zIndex: 20 }}
-                // `!touch-none` (note the `!` — it emits `!important`) keeps a
-                // touch-drag reordering the list instead of scrolling the
-                // dialog. The bang is load-bearing and must not be "cleaned up":
-                // `Reorder.Item` writes its own INLINE `touch-action` for the
-                // drag axis (`pan-x` when `axis="y"`), and framer re-asserts it,
-                // so neither a plain `touch-none` class nor an inline
-                // `style={{ touchAction }}` survives — only an `!important` rule
-                // wins the cascade against it. Verified in-browser under touch
-                // emulation: without the bang the computed value is `pan-x` and
-                // a vertical touch-drag is claimed by page scroll. The
-                // codebase's other `touch-none` usages sit on plain elements
-                // driven by the hand-rolled pointer engine, where nothing
-                // competes with the class.
-                className="flex !touch-none cursor-grab items-start gap-2 rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 active:cursor-grabbing"
-                {...(candidate ? hoverProps(candidate.source_id) : {})}
-              >
-                <div className="flex-1 text-left">
-                  {/* Position is visually obvious from the list order but
-                      invisible to a screen reader, which reads rows in isolation. */}
-                  <span className="sr-only">
-                    {t("replacement.positionAnnounce", {
-                      position: position + 1,
-                      total: order.length,
-                    })}
-                  </span>
-                  <div className="font-semibold text-white">
-                    <RichLabel text={labelFor(candidateIndex)} size="sm" />
-                  </div>
-                  {candidate?.source_name && (
-                    <div className="mt-0.5 text-xs text-white/60">
-                      {candidate.source_name}
-                    </div>
-                  )}
-                </div>
-                {/* Arrow controls are the accessible path: a drag-only list is
-                    unusable by keyboard and screen-reader users. */}
-                <div className="flex flex-col gap-1">
-                  <button
-                    type="button"
-                    aria-label={t("replacement.moveUpNamed", {
-                      name: labelFor(candidateIndex),
-                    })}
-                    disabled={position === 0}
-                    onClick={() => move(position, position - 1)}
-                    className="min-h-8 rounded border border-white/10 px-2 text-white/80 transition hover:bg-white/10 disabled:opacity-30"
-                  >
-                    ▲
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={t("replacement.moveDownNamed", {
-                      name: labelFor(candidateIndex),
-                    })}
-                    disabled={position === order.length - 1}
-                    onClick={() => move(position, position + 1)}
-                    className="min-h-8 rounded border border-white/10 px-2 text-white/80 transition hover:bg-white/10 disabled:opacity-30"
-                  >
-                    ▼
-                  </button>
-                </div>
-              </Reorder.Item>
-            );
-          })}
+          {order.map((candidateIndex, position) => (
+            <ReplacementOrderRow
+              // Index-keyed, not source-keyed: an optional replacement sends
+              // the same `source_id` twice, so source ids are not unique.
+              key={candidateIndex}
+              candidateIndex={candidateIndex}
+              candidate={candidates[candidateIndex]}
+              label={labelFor(candidateIndex)}
+              position={position}
+              total={order.length}
+              hoverProps={hoverProps}
+              onMove={move}
+            />
+          ))}
         </Reorder.Group>
         <div className="mt-2 text-xs uppercase tracking-wide text-cyan-300/80">
           {lastAppliedDecides
@@ -305,9 +244,125 @@ export function ReplacementModal() {
         )}
         {rememberControl}
         <p className="mt-2 text-center text-xs text-white/40">
-          {t("replacement.dragHint")}
+          {/* The hint shows the grip's glyph, which a screen reader would read
+              out as a braille pattern, so it is hidden there as on the grip. */}
+          <Trans
+            t={t}
+            i18nKey="replacement.dragHint"
+            components={{ grip: <span aria-hidden /> }}
+          />
         </p>
       </div>
     </DialogShell>
+  );
+}
+
+interface ReplacementOrderRowProps {
+  candidateIndex: number;
+  candidate: ReplacementCandidateSummary | undefined;
+  label: string;
+  /** Zero-based place of this row in the current order. */
+  position: number;
+  total: number;
+  hoverProps: ReturnType<typeof useInspectHoverProps>;
+  onMove: (from: number, to: number) => void;
+}
+
+/**
+ * One row of the CR 616.1 ordering list, dragged only by its grip.
+ *
+ * A row that is its own drag source claims every vertical swipe that starts
+ * on it: the swipe would reorder the list instead of scrolling the dialog,
+ * and on a short screen the rows below the fold could not be reached. Instead
+ * the row runs with `dragListener={false}`, and the grip starts the drag
+ * through the row's own {@link useDragControls} (a hook, so each row is its
+ * own component, as PlayerArea's `MiddleRowCell` is). With no drag listener,
+ * framer writes no `touch-action` on the row, so only the grip is
+ * `touch-none` and a swipe anywhere else on the row scrolls.
+ */
+function ReplacementOrderRow({
+  candidateIndex,
+  candidate,
+  label,
+  position,
+  total,
+  hoverProps,
+  onMove,
+}: ReplacementOrderRowProps) {
+  const { t } = useTranslation("game");
+  const dragControls = useDragControls();
+  // An accessible name cannot hold the mana symbols `RichLabel` draws, so the
+  // row's controls name it in the same flattened text.
+  const spokenLabel = flattenRichLabel(label);
+  return (
+    <Reorder.Item
+      as="li"
+      value={candidateIndex}
+      dragListener={false}
+      dragControls={dragControls}
+      whileDrag={{ scale: 1.03, zIndex: 20 }}
+      className="flex items-start gap-2 rounded-[16px] border border-white/8 bg-white/5 py-3 pl-1 pr-4"
+      {...(candidate ? hoverProps(candidate.source_id) : {})}
+    >
+      {/* A 44px touch target that spans the row's content height. It takes no
+          tab stop: the arrow buttons are the keyboard path. `select-none`
+          keeps a mouse drag from starting a text selection; framer only
+          sets that on an element it listens on, and it does not listen on
+          the row. */}
+      <span
+        role="img"
+        aria-label={t("replacement.dragHandleNamed", { name: spokenLabel })}
+        onPointerDown={(event) => {
+          dragControls.start(event);
+          // The drag owns this press, so it stops here, as ColumnEdgeHandle's
+          // does. Passed on to the row's long-press handler, a finger that
+          // rests before it moves would open the card preview mid-drag.
+          event.stopPropagation();
+        }}
+        className="flex min-h-11 min-w-11 cursor-grab touch-none select-none items-center justify-center self-stretch text-lg leading-none text-white/50 active:cursor-grabbing"
+      >
+        <span aria-hidden>⠿</span>
+      </span>
+      <div className="flex-1 text-left">
+        {/* Position is visually obvious from the list order but
+            invisible to a screen reader, which reads rows in isolation. */}
+        <span className="sr-only">
+          {t("replacement.positionAnnounce", {
+            position: position + 1,
+            total,
+          })}
+        </span>
+        <div className="font-semibold text-white">
+          <RichLabel text={label} size="sm" />
+        </div>
+        {candidate?.source_name && (
+          <div className="mt-0.5 text-xs text-white/60">
+            {candidate.source_name}
+          </div>
+        )}
+      </div>
+      {/* Arrow controls are the accessible path: a drag-only list is
+          unusable by keyboard and screen-reader users. */}
+      <div className="flex flex-col gap-1">
+        <button
+          type="button"
+          aria-label={t("replacement.moveUpNamed", { name: spokenLabel })}
+          disabled={position === 0}
+          onClick={() => onMove(position, position - 1)}
+          className="min-h-8 rounded border border-white/10 px-2 text-white/80 transition hover:bg-white/10 disabled:opacity-30"
+        >
+          ▲
+        </button>
+        <button
+          type="button"
+          aria-label={t("replacement.moveDownNamed", { name: spokenLabel })}
+          disabled={position === total - 1}
+          onClick={() => onMove(position, position + 1)}
+          className="min-h-8 rounded border border-white/10 px-2 text-white/80 transition hover:bg-white/10 disabled:opacity-30"
+        >
+          ▼
+        </button>
+      </div>
+    </Reorder.Item>
   );
 }

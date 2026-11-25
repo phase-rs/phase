@@ -146,6 +146,9 @@ pub fn resolve(
         // cast from a graveyard" riders (Sevinne's Reclamation, issue #3283)
         // re-fire when a flashback copy resolves.
         copy_obj.cast_from_zone = None;
+        // CR 707.12: if this copy is later cast ("you may cast the copy"), it is
+        // cast from the zone the copied object is in.
+        copy_obj.copied_from_zone = Some(crate::game::game_object::CastOrigin::of(source_obj));
         copy_obj.cast_controller = None;
         // CR 707.10: no mana was spent to cast a spell copy — reset the
         // cast-payment stamps so spend-color riders ("if {W}{W} was spent to
@@ -297,6 +300,14 @@ pub fn resolve(
             crate::game::announcement_triggers::take_inline_trigger_span(state, events, copied_at);
         if !owned.is_empty() {
             crate::game::triggers::collect_triggers_into_deferred(state, &[spell_copied]);
+            // CR 603.2c: collected once, here. Claim the occurrence so no later collector of
+            // this action (the priority pass, the CopyRetarget walk) collects it again.
+            crate::game::announcement_triggers::claim_ordinary_collected_span(
+                state,
+                events,
+                copied_at,
+                copied_at + 1,
+            );
         }
     }
 
@@ -399,11 +410,13 @@ fn drain_spell_copied_observer_triggers(
     spell_copied_collected: bool,
 ) -> Result<(), EffectError> {
     if spell_copied_collected {
-        if let Some(wf) =
-            crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(
-                state, events,
-            )
-        {
+        // CR 603.2c: the resolving effect's buffer is the reducer action's, so
+        // the drain's window ranges are claimed for the post-action pipeline.
+        if let Some(wf) = crate::game::triggers::drain_on_action_buffer(
+            state,
+            events,
+            crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement,
+        ) {
             state.waiting_for = wf;
         }
     }
@@ -1008,11 +1021,8 @@ fn set_copied_kind_controller(kind: &mut StackEntryKind, controller: PlayerId) {
 
 fn set_resolved_controller_recursive(ability: &mut ResolvedAbility, controller: PlayerId) {
     ability.controller = controller;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        set_resolved_controller_recursive(sub_ability, controller);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        set_resolved_controller_recursive(else_ability, controller);
+    for (_, child) in ability.child_links_mut() {
+        set_resolved_controller_recursive(child, controller);
     }
 }
 
@@ -1024,11 +1034,8 @@ fn set_resolved_controller_recursive(ability: &mut ResolvedAbility, controller: 
 /// `source_id` and a second-generation copy could not find its source.
 pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, source_id: ObjectId) {
     ability.source_id = source_id;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        set_resolved_source_recursive(sub_ability, source_id);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        set_resolved_source_recursive(else_ability, source_id);
+    for (_, child) in ability.child_links_mut() {
+        set_resolved_source_recursive(child, source_id);
     }
 }
 
@@ -1065,11 +1072,8 @@ fn rewrite_copy_spell_object_targets(
         })
         .collect();
     ability.replace_target_occurrences(occurrences);
-    if let Some(sub) = ability.sub_ability.as_mut() {
-        rewrite_copy_spell_object_targets(sub, new_target, new_target_pin);
-    }
-    if let Some(else_ab) = ability.else_ability.as_mut() {
-        rewrite_copy_spell_object_targets(else_ab, new_target, new_target_pin);
+    for (_, child) in ability.child_links_mut() {
+        rewrite_copy_spell_object_targets(child, new_target, new_target_pin);
     }
 }
 
@@ -1087,11 +1091,8 @@ fn stack_entry_source_id_for_copy(kind: &StackEntryKind, copy_id: ObjectId) -> O
 /// the copied ability chain before the copy resolves.
 fn clear_cast_from_zone_recursive(ability: &mut ResolvedAbility) {
     ability.context.cast_from_zone = None;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        clear_cast_from_zone_recursive(sub_ability);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        clear_cast_from_zone_recursive(else_ability);
+    for (_, child) in ability.child_links_mut() {
+        clear_cast_from_zone_recursive(child);
     }
 }
 
@@ -2583,6 +2584,8 @@ mod tests {
         // Push original targeted spell (Anguished Unmaking-style)
         let original_ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: crate::types::zones::Zone::Exile,
                 target: TargetFilter::Any,
@@ -3014,6 +3017,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: Some(ObjectId(100)),
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3170,6 +3174,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: Some(ObjectId(100)),
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3247,6 +3252,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: Some(ObjectId(100)),
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3327,6 +3333,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         let copy_that_ability = ResolvedAbility::new(
             Effect::CopySpell {
@@ -3686,6 +3693,7 @@ mod tests {
                         .controller(crate::types::ability::ControllerRef::Opponent),
                 ),
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             hope_id,
@@ -4082,6 +4090,8 @@ mod tests {
         ) {
             let ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(origin),
                     destination,
                     target: TargetFilter::Any,
@@ -4503,6 +4513,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             incarnation: 0,

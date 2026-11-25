@@ -79,6 +79,15 @@ pub(crate) enum DocumentRelationIr {
         /// the selector.
         selector: Option<AbilityCondition>,
     },
+    /// CR 608.2c + CR 611.2c: A separate conditional paragraph whose plural
+    /// subject refers to the population affected by the preceding mass effect.
+    /// The relation keeps the producer and consumer identities explicit so the
+    /// lowering seam can fold the consumer into the producer without rescanning
+    /// a lowered ability vector for a lookalike shape.
+    CrossItemMassPopulationAnaphor {
+        producer: OracleItemId,
+        consumer: OracleItemId,
+    },
     /// CR 607.2d: A "choose a [value]" producer linked to an ability that reads
     /// "the chosen [value]" back. One parameterized relation; `LinkedChoiceKind`
     /// distinguishes the value kind and the consumer surface that reads it.
@@ -156,6 +165,11 @@ pub(crate) enum LinkedChoiceKind {
     /// exists, so a resolution-scoped choice with no durable reader stays
     /// non-persisted.
     PersistedPlayer { choosers: Vec<OracleItemId> },
+    /// CR 607.2d: A persisted as-enters "choose odd or even" producer linked to
+    /// the card's statics and replacements that read "the chosen quality".
+    /// Each `reader` has its `ManaValueParity` rebound from the resolution's
+    /// last named choice to the source's persisted choice.
+    PersistedParity { readers: Vec<OracleItemId> },
     /// CR 607.2d + CR 707.2c + CR 614.12a: An as-enters permanent-object choice
     /// gap (`chooser` — an Unimplemented ability whose Oracle text is
     /// "As … enters, choose <permanent>") linked to a

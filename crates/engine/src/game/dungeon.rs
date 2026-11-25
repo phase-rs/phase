@@ -1028,6 +1028,8 @@ pub fn room_effects(
         (DungeonId::BaldursGateWilderness, 5) => {
             let mut ability = simple(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Hand),
                     destination: Zone::Battlefield,
                     target: TargetFilter::Typed(TypedFilter::land()),
@@ -1164,6 +1166,7 @@ pub fn room_effects(
             simple(
                 Effect::CreateEmblem {
                     statics: vec![StaticDefinition {
+                        origin: Default::default(),
                         mode: StaticMode::Continuous,
                         affected: Some(TargetFilter::Typed(
                             TypedFilter::creature().controller(ControllerRef::You),
@@ -1191,6 +1194,7 @@ pub fn room_effects(
                         protection_does_not_remove: None,
                         room_door: None,
                         granting_object: None,
+                        bound_actor: None,
                     }],
                     triggers: Vec::new(),
                 },
@@ -1561,6 +1565,8 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
     );
     let mut change_zone = simple(
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Hand,
             target: TargetFilter::Any,

@@ -21,7 +21,7 @@
 //!   toughness (CR 122.1a). Reaching 0 toughness is CR 704.5f (put into the
 //!   graveyard), which is *not* a destruction, so indestructible (CR 702.12b)
 //!   does not save the creature.
-//! * CR 702.2b + CR 704.5h: a source with deathtouch makes *any* marked damage
+//! * CR 702.2b + CR 704.5h: a source with deathtouch makes *any* damage it deals
 //!   lethal, however large the body.
 //! * CR 120.3: for `DamageSource::Target` the first object target IS the source
 //!   and is excluded from the recipients, so the object being scored may not be
@@ -302,7 +302,8 @@ pub(crate) fn pending_damage_to_object(
             Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage { .. }
             | Effect::DamageAll { .. }
-            | Effect::ApplyPostReplacementDamage { .. } => return PendingDamage::Unresolved,
+            | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. } => return PendingDamage::Unresolved,
             _ => {}
         }
     }
@@ -323,7 +324,7 @@ pub(crate) fn pending_damage_to_object(
 ///    destruction, so CR 702.12b indestructible does NOT prevent it.
 /// 2. CR 702.12b: otherwise an indestructible creature ignores both
 ///    lethal-damage state-based actions.
-/// 3. CR 704.5h + CR 702.2b: any marked damage from a deathtouch source is
+/// 3. CR 704.5h + CR 702.2b: any damage dealt by a deathtouch source is
 ///    lethal to a creature with toughness greater than 0.
 /// 4. CR 704.5g: marked damage reaching the counter-reduced toughness.
 ///
@@ -344,7 +345,7 @@ pub(crate) fn outcome_is_lethal(target: &GameObject, outcome: &DamageOutcome) ->
     }
     let marked = target.damage_marked.saturating_add(outcome.marked);
     // CR 704.5h + CR 702.2b: deathtouch damage is lethal regardless of amount.
-    if outcome.deathtouch && marked > 0 {
+    if outcome.deathtouch {
         return true;
     }
     // CR 704.5g: lethal marked damage, measured against the reduced toughness.
@@ -423,7 +424,7 @@ struct DividedDamageFacts {
     /// CR 120.3d + CR 702.80a + CR 702.90c: the source has wither or infect, so
     /// its damage to a creature becomes -1/-1 counters instead of marked damage.
     wither_or_infect: bool,
-    /// CR 702.2b: the source has deathtouch, so any marked damage is lethal.
+    /// CR 702.2b: the source has deathtouch, so any damage it deals is lethal.
     deathtouch: bool,
 }
 

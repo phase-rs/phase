@@ -180,11 +180,7 @@ pub(crate) fn ability_is_sacrifice_outlet(ability: &AbilityDefinition) -> bool {
 
     // Gate 4: exclude pure-mana-producing sac outlets ("T, sacrifice this: add {G}").
     let effects = collect_chain_effects(ability);
-    if effects.iter().all(|e| matches!(e, Effect::Mana { .. })) {
-        return false;
-    }
-
-    true
+    !effects.iter().all(|e| matches!(e, Effect::Mana { .. }))
 }
 
 /// True if this ability is a sacrifice outlet with no mana component in the cost.
@@ -525,6 +521,8 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::land()),
@@ -566,6 +564,8 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -685,6 +685,8 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -709,6 +711,8 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::creature().properties(vec![

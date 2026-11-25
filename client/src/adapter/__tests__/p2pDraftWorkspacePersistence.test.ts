@@ -13,7 +13,9 @@ const persistenceMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../services/draftPersistence", () => persistenceMocks);
-vi.mock("../draft-adapter", () => ({
+vi.mock("../draft-adapter", async (importOriginal) => ({
+  draftViewPresentation: (await importOriginal<typeof import("../draft-adapter")>()).draftViewPresentation,
+  isSharedStackDistribution: (await importOriginal<typeof import("../draft-adapter")>()).isSharedStackDistribution,
   DraftAdapter: vi.fn().mockImplementation(function () {
     return { boosterPackPoolForGame: vi.fn(async () => null) };
   }),
@@ -213,7 +215,7 @@ describe("P2P draft workspace persistence", () => {
           order.push("workspace-view");
           return workspaceView.promise;
         }
-        return view("host");
+        return { ...view("host"), status: "Drafting" as const, seats: [] };
       }),
       submitPickForSeat: vi.fn(async () => {
         order.push("pick");
@@ -626,8 +628,12 @@ describe("P2P draft workspace persistence", () => {
     privateHost.adapter = { importSession: vi.fn(() => importedView.promise), getViewForSeat: vi.fn() };
     privateHost.persistSession = vi.fn();
     privateHost.recoverSettlementOutbox = vi.fn(async () => {});
+    const recordedSortLayouts = { deck: { sort: "color", columnCount: 2, columns: { colorless: 1 } } } as const;
     const restore = host.restoreFromPersisted(persisted({
-      0: workspace({ stale: { zone: "deck", row: 0, column: 0, order: 0 } }),
+      0: {
+        ...workspace({ stale: { zone: "deck", row: 0, column: 0, order: 0 } }),
+        recordedSortLayouts,
+      },
       1: workspace(),
     }));
 
@@ -637,6 +643,7 @@ describe("P2P draft workspace persistence", () => {
     expect(host.getHostWorkspaceState()?.placements).toEqual({
       fresh: { zone: "deck", row: 0, column: 0, order: 0 },
     });
+    expect(host.getHostWorkspaceState()?.recordedSortLayouts).toEqual(recordedSortLayouts);
     expect(privateHost.perSeatWorkspaceSnapshots.has(1)).toBe(true);
     expect(privateHost.persistSession).toHaveBeenCalledOnce();
   });
@@ -830,9 +837,13 @@ describe("P2P draft workspace persistence", () => {
   it("restores an exact host-owned update through reconnect to the guest", async () => {
     const host = makeHost();
     const privateHost = host as unknown as PrivateHost;
-    const state = workspace({
+    const initial = workspace({
       card: { zone: "sideboard", row: 1, column: 5, order: 0 },
     });
+    const state: DraftWorkspaceState = {
+      ...initial,
+      recordedSortLayouts: { deck: { sort: "color", columnCount: 2, columns: { colorless: 1 } } },
+    };
     privateHost.adapter = {
       setSeatConnected: vi.fn(async () => {}),
       getViewForSeat: vi.fn(async () => view("card")),
@@ -840,9 +851,14 @@ describe("P2P draft workspace persistence", () => {
     privateHost.persistSessionStrict = vi.fn(async () => {});
     await privateHost.handleGuestMessage(1, {
       type: "draft_workspace_update",
+      workspaceState: initial,
+    });
+    await privateHost.handleGuestMessage(1, {
+      type: "draft_workspace_update",
       workspaceState: state,
     });
     await privateHost.mutationQueue;
+    expect(privateHost.persistSessionStrict).toHaveBeenCalledTimes(2);
     privateHost.draftStarted = true;
     privateHost.seatTokens.set(1, "seat-1-token");
     privateHost.disconnectedSeats.set(1, { disconnectedAt: 0, timer: null });

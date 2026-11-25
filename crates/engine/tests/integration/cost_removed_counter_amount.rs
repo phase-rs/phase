@@ -56,6 +56,9 @@ use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 const ESSENCE_BOTTLE: &str = "{3}, {T}: Put an elixir counter on this artifact.\n{T}, Remove all elixir counters from this artifact: You gain 2 life for each elixir counter removed this way.";
+const CHANDRA_AWAKENED_INFERNO_ORACLE: &str = "This spell can't be countered.\n[+2]: Each opponent gets an emblem with \"At the beginning of your upkeep, this emblem deals 1 damage to you.\"\n[−3]: Chandra deals 3 damage to each non-Elemental creature.\n[−X]: Chandra deals X damage to target creature or planeswalker. If a permanent dealt damage this way would die this turn, exile it instead.";
+const WAY_OF_THE_MIND_SCULPTOR_ORACLE: &str = "When Way of the Mind Sculptor enters, empower Jace 5. (Put five loyalty counters on a Jace token you control. If you don't control one, first create a blue Jace planeswalker token with \"[−1]: Surveil 1\" and \"[−3]: Draw a card.\")\nWhenever you activate a loyalty ability, if you removed two or more loyalty counters to activate it, draw a card.";
+const JACE_THE_MIND_SCULPTOR_ORACLE: &str = "[+2]: Look at the top card of target player's library. You may put that card on the bottom of that player's library.\n[0]: Draw three cards, then put two cards from your hand on top of your library in any order.\n[−1]: Return target creature to its owner's hand.\n[−12]: Exile all cards from target player's library, then that player shuffles their hand into their library.";
 const MOLTEN_HYDRA: &str = "{1}{R}{R}: Put a +1/+1 counter on this creature.\n{T}, Remove all +1/+1 counters from this creature: It deals damage to any target equal to the number of +1/+1 counters removed this way.";
 const RELIC_AMULET: &str = "Whenever you cast an instant, sorcery, or Wizard spell, put a charge counter on this artifact.\n{2}, {T}, Remove all charge counters from this artifact: It deals that much damage to target creature.";
 const BLADEMANE_BAKU: &str = "Whenever you cast a Spirit or Arcane spell, you may put a ki counter on this creature.\n{1}, Remove X ki counters from this creature: For each counter removed, this creature gets +2/+0 until end of turn.";
@@ -1174,8 +1177,14 @@ fn kraj_nested_same_source_counter_cost_mana_payment_keeps_each_count() {
 // R2 — a counter-cost removal deferred by a replacement choice (CR 616.1)
 // ---------------------------------------------------------------------------
 //
-// No printed card replaces a counter removal, so these rows install the typed
-// optional replacement `ReplacementDefinition::new(RemoveCounter)
+// The printed corpus has no replacement for counter removal as an activation
+// cost. Deification is the closest printed case. It can preserve a planeswalker's
+// last loyalty counter from damage (CR 120.3c). In the loyalty tests, the
+// synthetic choice pauses payment of the printed Jace or Chandra ability
+// so we can check the count Way reads when payment completes
+// (CR 606.4 + CR 603.4 + CR 616.1).
+//
+// The bare fixture installs `ReplacementDefinition::new(RemoveCounter)
 // .mode(Optional { decline: None })` (the fixture of the effect-path tests in
 // `effects/counters.rs`). Its applier hands the event back unchanged, so
 // accepting and declining both remove what the cost asked for: the replacement
@@ -1207,7 +1216,7 @@ fn install_replacement_on_steward(
     obj.replacement_definitions.push(replacement);
     ReplacementId {
         source: holder,
-        index,
+        index: index as u64,
     }
 }
 
@@ -2073,6 +2082,7 @@ fn t3_child_execute(battery: ObjectId) -> AbilityDefinition {
             counter_type: None,
             count: QuantityExpr::Fixed { value: -1 },
             target: TargetFilter::SpecificObject { id: battery },
+            scope: engine::types::ability::EffectScope::Single,
         },
     )
     .sub_ability(AbilityDefinition::new(
@@ -2096,6 +2106,7 @@ fn t10_child_execute(battery: ObjectId) -> AbilityDefinition {
             counter_type: None,
             count: QuantityExpr::Fixed { value: -1 },
             target: TargetFilter::SpecificObject { id: battery },
+            scope: engine::types::ability::EffectScope::Single,
         },
     )
     .sub_ability(AbilityDefinition::new(
@@ -2354,6 +2365,7 @@ fn mill_child_at_its_prompt() -> (GameRunner, ObjectId, ObjectId, i32) {
                     counter_type: Some(counter("charge")),
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::SpecificObject { id: battery },
+                    scope: engine::types::ability::EffectScope::Single,
                 },
             )),
         ),
@@ -2648,6 +2660,7 @@ fn a_same_subject_child_removal_is_still_the_roots_child() {
             counter_type: Some(counter("elixir")),
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::SpecificObject { id: bottle },
+            scope: engine::types::ability::EffectScope::Single,
         },
     );
     install_replacement_on_steward(
@@ -2682,6 +2695,484 @@ fn a_same_subject_child_removal_is_still_the_roots_child() {
         "queue {resolved} < activation {activated}"
     );
     assert!(payment_ownership_is_clear(&runner));
+}
+
+/// CR 606.4 + CR 603.4: a paused root loyalty payment and its same-subject,
+/// same-type, same-count replacement child remain distinct. The trigger reads
+/// the root's `Some(1)` receipt, so Way does not draw even though the child
+/// removes another loyalty counter before the activation is completed.
+#[test]
+fn loyalty_cost_receipt_ignores_identical_same_subject_replacement_child() {
+    let mut scenario = replacement_board();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Card A", "Card B"]);
+    let way = scenario
+        .add_enchantment_to_hand_from_oracle(
+            P0,
+            "Way of the Mind Sculptor",
+            WAY_OF_THE_MIND_SCULPTOR_ORACLE,
+        )
+        .as_legendary()
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(way).resolve();
+    let jace = *runner
+        .state()
+        .last_created_token_ids
+        .first()
+        .expect("Way's printed Empower Jace ability created its Jace token");
+    assert!(
+        runner.state().objects[&jace].is_token,
+        "reach: use the real Jace token"
+    );
+    let child = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RemoveCounter {
+            counter_type: Some(CounterType::Loyalty),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SpecificObject { id: jace },
+            scope: engine::types::ability::EffectScope::Single,
+        },
+    );
+    install_replacement_on_steward(
+        &mut runner,
+        optional_replacement(ReplacementEvent::RemoveCounter, Some(child)),
+    );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: jace,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Jace's [−1] loyalty activation is announced");
+    assert_optional_replacement_prompt(&runner);
+    let saved = serde_json::to_string(runner.state()).expect("serialize paused root payment");
+    *runner.state_mut() = serde_json::from_str(&saved).expect("restore paused root payment");
+    choose_replacement(&mut runner, ACCEPT);
+    let held_root = |runner: &GameRunner| {
+        assert_optional_replacement_prompt(runner);
+        let Some(PendingCostMoveResume::LoyaltyActivation {
+            pw_id,
+            resolved,
+            paused_removal: Some(root),
+            ..
+        }) = &runner.state().pending_cost_move_resume
+        else {
+            panic!("the fixed loyalty payment must still own its paused removal");
+        };
+        assert_eq!(*pw_id, jace);
+        assert_eq!(resolved.context.loyalty_counters_removed, Some(1));
+        assert_eq!(resolved.context.cost_removed_counter_amount, None);
+        let child = removal_queue(runner.state())
+            .and_then(|queue| queue.in_flight.as_ref())
+            .expect("the replacement child still has a removal in flight");
+        assert_eq!(child.removal, root.in_flight.removal);
+        root.clone()
+    };
+    let before_save = held_root(&runner);
+    assert!(
+        !runner.state().stack.iter().any(|entry| matches!(
+            &entry.kind, StackEntryKind::ActivatedAbility { source_id, .. } if *source_id == jace
+        )),
+        "no activation fires before the child settles"
+    );
+    let saved =
+        serde_json::to_string(runner.state()).expect("serialize accepted root / open child");
+    *runner.state_mut() = serde_json::from_str(&saved).expect("restore accepted root / open child");
+    assert_eq!(
+        held_root(&runner),
+        before_save,
+        "round-trip preserves the exact paused root while the identical child awaits a choice"
+    );
+    let events = choose_replacement_events(&mut runner, DECLINE);
+    assert_eq!(counters_on(&runner, jace, &CounterType::Loyalty), 3);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::AbilityActivated {
+                source_id,
+                loyalty_counters_removed: Some(1),
+                ..
+            } if *source_id == jace
+        )),
+        "root proposal receipt is one, excluding the identical child"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::AbilityActivated { source_id, .. } if *source_id == jace
+            ))
+            .count(),
+        1,
+        "the fast owning activation completes exactly once after the child"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "priority resumes after the replacement child and root activation complete"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "known Some(1) does not fire Way"
+    );
+    let before = runner.state().players[0].library.len();
+    let hand_before = runner.state().players[0].hand.len();
+    runner.resolve_top();
+    let kept = match &runner.state().waiting_for {
+        WaitingFor::SurveilChoice { player: P0, cards } if cards.len() == 1 => cards[0],
+        waiting => panic!("expected Jace's Surveil 1 choice, got {waiting:?}"),
+    };
+    runner
+        .act(GameAction::SelectCards { cards: vec![kept] })
+        .expect("keep the card seen by the real Jace token's Surveil 1");
+    assert_eq!(runner.state().players[0].library.len(), before);
+    assert_eq!(runner.state().players[0].library[0], kept);
+    assert_eq!(runner.state().players[0].hand.len(), hand_before);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+}
+
+/// CR 602.2a–b; CR 603.2; CR 603.3b; CR 606.4: a replacement child creates a token
+/// that causes Soul Warden's trigger, but the activation must complete before
+/// the first priority window. The trigger then sits above the activated ability.
+#[test]
+fn fast_loyalty_owner_resumes_after_replacement_child_trigger_retires() {
+    const SOUL_WARDEN: &str = "Whenever another creature enters, you gain 1 life.";
+
+    let mut scenario = replacement_board();
+    scenario.at_phase(Phase::PreCombatMain);
+    let soul_warden = scenario
+        .add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN)
+        .id();
+    let way = scenario
+        .add_enchantment_to_hand_from_oracle(
+            P0,
+            "Way of the Mind Sculptor",
+            WAY_OF_THE_MIND_SCULPTOR_ORACLE,
+        )
+        .as_legendary()
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(way).resolve();
+    let jace = *runner
+        .state()
+        .last_created_token_ids
+        .first()
+        .expect("Way's printed Empower Jace ability created its Jace token");
+    assert!(
+        runner.state().objects[&jace].is_token,
+        "reach: use the real Jace token"
+    );
+    let life_before_activation = runner.state().players[0].life;
+    let child = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Token {
+            name: "Soldier Token".into(),
+            power: engine::types::ability::PtValue::Fixed(1),
+            toughness: engine::types::ability::PtValue::Fixed(1),
+            types: vec!["Creature".into(), "Soldier".into()],
+            colors: Vec::new(),
+            keywords: Vec::new(),
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
+            supertypes: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+        },
+    );
+    install_replacement_on_steward(
+        &mut runner,
+        optional_replacement(ReplacementEvent::RemoveCounter, Some(child)),
+    );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: jace,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Jace's loyalty activation enters its fast payment path");
+    assert_optional_replacement_prompt(&runner);
+    let child_entry = runner
+        .act(GameAction::ChooseReplacement { index: ACCEPT })
+        .expect("accept the root removal replacement");
+    assert!(
+        child_entry
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
+        "reach: the replacement child created its token"
+    );
+    assert_eq!(
+        child_entry
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::AbilityActivated {
+                    source_id,
+                    loyalty_counters_removed: Some(1),
+                    ..
+                } if *source_id == jace
+            ))
+            .count(),
+        1,
+        "the activation finishes once with the root's Some(1) receipt"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "priority opens only after the activation finishes"
+    );
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "both abilities are on the stack"
+    );
+    assert_eq!(
+        runner.state().stack.back().unwrap().source_id,
+        soul_warden,
+        "Soul Warden's trigger is above the activated Jace ability"
+    );
+    assert!(runner
+        .state()
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == jace));
+    assert_eq!(
+        runner.state().players[0].life,
+        life_before_activation,
+        "Soul Warden does not resolve during cost payment"
+    );
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().players[0].life,
+        life_before_activation + 1,
+        "life changes only when Soul Warden resolves"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Jace's ability remains below Warden"
+    );
+}
+
+/// CR 602.2b + CR 606.4 + CR 616.1: the targeted, generic activation-cost
+/// route parks its root removal, survives save/restore, and credits only the
+/// applied root even when the replacement child removes an identical loyalty
+/// counter from Jace before the activation is completed.
+#[test]
+fn targeted_loyalty_cost_receipt_survives_generic_pause_and_restore() {
+    let mut scenario = replacement_board();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Card A", "Card B"]);
+    scenario
+        .add_enchantment_from_oracle(
+            P0,
+            "Way of the Mind Sculptor",
+            WAY_OF_THE_MIND_SCULPTOR_ORACLE,
+        )
+        .as_legendary();
+    let target = scenario.add_creature(P0, "Target", 2, 2).id();
+    let jace = scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Jace, the Mind Sculptor",
+            "Jace",
+            4,
+            JACE_THE_MIND_SCULPTOR_ORACLE,
+        )
+        .id();
+    let mut runner = scenario.build();
+    let child = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RemoveCounter {
+            counter_type: Some(CounterType::Loyalty),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SpecificObject { id: jace },
+            scope: engine::types::ability::EffectScope::Single,
+        },
+    );
+    install_replacement_on_steward(
+        &mut runner,
+        optional_replacement(ReplacementEvent::RemoveCounter, Some(child)),
+    );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: jace,
+            ability_index: 2,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Jace's targeted [−1] activation is announced");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        })
+        .expect("declare the target before the generic cost payment");
+    assert_optional_replacement_prompt(&runner);
+    assert!(matches!(
+        runner.state().pending_cost_move_resume,
+        Some(PendingCostMoveResume::CounterCostRemovalPayment { .. })
+    ));
+    let saved = serde_json::to_string(runner.state()).expect("serialize generic paused payment");
+    *runner.state_mut() = serde_json::from_str(&saved).expect("restore generic paused payment");
+
+    choose_replacement(&mut runner, ACCEPT);
+    assert_optional_replacement_prompt(&runner);
+    assert!(
+        removal_queue(runner.state()).is_some(),
+        "reach: identical child removal is parked"
+    );
+    let events = choose_replacement_events(&mut runner, DECLINE);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::AbilityActivated {
+                source_id,
+                loyalty_counters_removed: Some(1),
+                ..
+            } if *source_id == jace
+        )),
+        "generic paused receipt is the root's one removed counter"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Way does not fire on known Some(1)"
+    );
+}
+
+/// CR 118.11 + CR 614.6: a declined optional replacement pays the original
+/// [−3] cost, while a fully prevented root pays with a known zero. The same
+/// real Way card supplies a positive reach guard for the threshold trigger.
+#[test]
+fn paused_loyalty_cost_decline_and_prevention_bind_actual_results() {
+    for (prevent, expected) in [(false, 3), (true, 0)] {
+        let mut scenario = replacement_board();
+        scenario.at_phase(Phase::PreCombatMain);
+        let way = scenario
+            .add_enchantment_to_hand_from_oracle(
+                P0,
+                "Way of the Mind Sculptor",
+                WAY_OF_THE_MIND_SCULPTOR_ORACLE,
+            )
+            .as_legendary()
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(way).resolve();
+        let jace = *runner
+            .state()
+            .last_created_token_ids
+            .first()
+            .expect("Way creates its printed Jace token");
+        install_optional_counter_removal_replacement(&mut runner);
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: jace,
+                ability_index: 1,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the real Jace token's printed [−3] is announced");
+        assert_optional_replacement_prompt(&runner);
+        if prevent {
+            stage_prevented_counter_removal(&mut runner);
+        }
+        let events = choose_replacement_events(&mut runner, if prevent { 0 } else { DECLINE });
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::AbilityActivated {
+                    source_id,
+                    loyalty_counters_removed: Some(count),
+                    ..
+                } if *source_id == jace && *count == expected
+            )),
+            "the completed cost records its actual root result: {events:?}"
+        );
+        assert_eq!(
+            runner.state().stack.len(),
+            if expected >= 2 { 2 } else { 1 },
+            "Way fires only for the declined, actually-paid [−3]"
+        );
+    }
+}
+
+/// CR 602.2b + 606.4 + 616.1: a printed variable loyalty cost can pause in the
+/// generic activation payment path, then bind its completed count after a
+/// replacement choice. Chandra's exact [−X] text at X=2 qualifies for Way.
+#[test]
+fn printed_chandra_x_two_resumes_generic_loyalty_payment_with_exact_receipt() {
+    let mut scenario = replacement_board();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Card A", "Card B"]);
+    let way = scenario
+        .add_enchantment_to_hand_from_oracle(
+            P0,
+            "Way of the Mind Sculptor",
+            WAY_OF_THE_MIND_SCULPTOR_ORACLE,
+        )
+        .as_legendary()
+        .id();
+    let target = scenario.add_creature(P0, "Target", 2, 2).id();
+    let chandra = scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Chandra, Awakened Inferno",
+            "Chandra",
+            6,
+            CHANDRA_AWAKENED_INFERNO_ORACLE,
+        )
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(way).resolve();
+    install_optional_counter_removal_replacement(&mut runner);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: chandra,
+            ability_index: 2,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("printed [−X] opens its announcement choices");
+    runner
+        .act(GameAction::ChooseX { value: 2 })
+        .expect("announce X=2");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(engine::types::ability::TargetRef::Object(target)),
+        })
+        .expect("finish the target choice before payment");
+    assert_optional_replacement_prompt(&runner);
+    let events = choose_replacement_events(&mut runner, DECLINE);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::AbilityActivated {
+                source_id,
+                loyalty_counters_removed: Some(2),
+                ..
+            } if *source_id == chandra
+        )),
+        "the paused generic path records exactly two removed loyalty counters"
+    );
+    assert_eq!(runner.state().stack.len(), 2, "Way triggers above Chandra");
 }
 
 /// The mana route's own prevented removal: the cursor resumes, adds no mana and
@@ -3261,6 +3752,7 @@ fn a_queued_child_rider_leaves_the_outer_unless_post_effect_paused() {
                 counter_type: None,
                 count: QuantityExpr::Fixed { value: -1 },
                 target: TargetFilter::SpecificObject { id: battery },
+                scope: engine::types::ability::EffectScope::Single,
             },
         )
         .sub_ability(AbilityDefinition::new(AbilityKind::Spell, Effect::Clash).sub_ability(lose(1)))

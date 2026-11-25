@@ -16,7 +16,7 @@ use crate::types::game_state::{
     GameState, PendingPerPlayerZoneChoice, ResolvingTriggerContext, WaitingFor,
     ZoneOpponentChooserPurpose,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -91,16 +91,15 @@ pub fn resolve(
     // CR 102.3: `Each(OtherPlayers)` is the same iteration with the controller
     // excluded ("for each OTHER player" — Kaya, Spirits' Justice).
     if let ZoneOwner::Each(scope) = zone_owner {
-        // CR 608.2c: each pick rebinds the chain's tracked set, so a `Tracked`
-        // pool read per player would read the previous player's picks. No
-        // producer emits this; refuse it rather than offer the wrong cards.
-        // (The random pick reads every pool before it publishes.)
-        if candidate_source == ZoneChoiceCandidateSource::Tracked {
-            return Err(EffectError::MissingParam(
-                "ChooseFromZone Each with a Tracked pool is not modelled for chosen picks"
-                    .to_string(),
-            ));
-        }
+        // CR 608.2c + CR 608.2d: each pick rebinds the chain's tracked set, so
+        // a `Tracked` pool ("For each opponent, choose a land card that player
+        // owns exiled this way" — Ensign Pavel Chekov) is pinned to the set the
+        // instruction names when the iteration begins. Every later player's
+        // pool reads that pinned set, never the previous player's picks. (The
+        // random pick reads every pool before it publishes.)
+        let tracked_pool = (candidate_source == ZoneChoiceCandidateSource::Tracked)
+            .then_some(state.chain_tracked_set_id)
+            .flatten();
         let players = per_player_iteration_population(state, ability, scope);
         // No pick has accumulated yet — the first one must start a fresh set.
         return advance_per_player_iteration(
@@ -111,6 +110,7 @@ pub fn resolve(
                 current: None,
                 nominee: None,
                 accumulated: false,
+                tracked_pool,
             },
             events,
         );
@@ -710,7 +710,7 @@ fn resolve_put_counter_pool(
 /// set, then the latest published tracked set, then explicit object targets.
 /// Captured ONCE at iteration start so per-member filtering reads a stable pool.
 fn resolve_category_pool(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
-    chain_tracked_set_cards(state)
+    chain_tracked_set_cards(state, ability)
         .or_else(|| {
             crate::game::targeting::latest_tracked_set_id(state)
                 .and_then(|id| state.tracked_object_sets.get(&id).cloned())
@@ -820,7 +820,7 @@ pub(crate) fn resolve_random_in_chain(
         // same outcome as this branch's all-pools-empty case.
         if let Ok(spec) = PerPlayerSpec::of(ability) {
             for player in per_player_iteration_population(state, ability, scope) {
-                let pool = spec.pool(state, ability, player);
+                let pool = spec.pool(state, ability, player, None);
                 let clamped = count.min(pool.len());
                 picked.extend(
                     pool.choose_multiple(state.rng.draw(RandomDraw::Outcome), clamped)
@@ -830,6 +830,7 @@ pub(crate) fn resolve_random_in_chain(
         }
         super::publish_fresh_tracked_set(state, picked.clone());
         ability.targets = picked.iter().map(|&id| TargetRef::Object(id)).collect();
+        ability.declared_player_target_slots.clear();
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,
@@ -929,7 +930,16 @@ impl PerPlayerSpec {
         }
     }
 
-    fn pool(&self, state: &GameState, ability: &ResolvedAbility, owner: PlayerId) -> Vec<ObjectId> {
+    /// `tracked_pool` is the iteration's pinned `Tracked` set
+    /// ([`PendingPerPlayerZoneChoice::tracked_pool`]); `None` reads the pool's
+    /// provenance live.
+    fn pool(
+        &self,
+        state: &GameState,
+        ability: &ResolvedAbility,
+        owner: PlayerId,
+        tracked_pool: Option<TrackedSetId>,
+    ) -> Vec<ObjectId> {
         if self.count == 0 {
             return Vec::new();
         }
@@ -944,14 +954,28 @@ impl PerPlayerSpec {
         // CR 608.2c + CR 608.2d: a source-bound pool names a set of objects;
         // each player's pick is the part of that set in their own zone(s).
         // `Direct` and `Legacy` read each player's zone(s) (CR 101.4).
-        match source_bound_candidates(
-            state,
-            ability,
-            self.zone,
-            &self.additional_zones,
-            self.filter.as_ref(),
-            self.candidate_source,
-        ) {
+        // CR 608.2c: a pinned `Tracked` pool reads the set the instruction
+        // named, not the chain set this iteration's own picks have rebound.
+        // CR 608.2c (D7): the pinned id is carried across this iteration's own
+        // rebinding, E3: raw members, equal for every player.
+        let bound = match (self.candidate_source, tracked_pool) {
+            (ZoneChoiceCandidateSource::Tracked, Some(set_id)) => Some(
+                state
+                    .tracked_object_sets
+                    .get(&set_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+            _ => source_bound_candidates(
+                state,
+                ability,
+                self.zone,
+                &self.additional_zones,
+                self.filter.as_ref(),
+                self.candidate_source,
+            ),
+        };
+        match bound {
             Some(bound) => cards.into_iter().filter(|id| bound.contains(id)).collect(),
             None => cards,
         }
@@ -1021,6 +1045,8 @@ struct PerPlayerCursor {
     /// CR 800.4g: the player elected to make the pending pool choice only.
     nominee: Option<PlayerId>,
     accumulated: bool,
+    /// CR 608.2c: the pinned `Tracked` pool set, if any.
+    tracked_pool: Option<TrackedSetId>,
 }
 
 impl PerPlayerCursor {
@@ -1031,6 +1057,7 @@ impl PerPlayerCursor {
             accumulated,
             current,
             nominee,
+            tracked_pool,
         } = frame;
         (
             ability,
@@ -1039,6 +1066,7 @@ impl PerPlayerCursor {
                 current,
                 nominee,
                 accumulated,
+                tracked_pool,
             },
         )
     }
@@ -1050,6 +1078,7 @@ impl PerPlayerCursor {
             accumulated: self.accumulated,
             current: self.current,
             nominee: self.nominee,
+            tracked_pool: self.tracked_pool,
         }
     }
 }
@@ -1088,11 +1117,14 @@ fn advance_per_player_iteration(
         mut current,
         mut nominee,
         accumulated,
+        tracked_pool,
     } = cursor;
     // CR 800.4a: a player who has left the game is no longer iterated.
     remaining.retain(|&player| players::is_alive(state, player));
     if let Some(owner) = current {
-        if !players::is_alive(state, owner) || spec.pool(state, ability, owner).is_empty() {
+        if !players::is_alive(state, owner)
+            || spec.pool(state, ability, owner, tracked_pool).is_empty()
+        {
             current = None;
         }
     }
@@ -1104,7 +1136,7 @@ fn advance_per_player_iteration(
             let eligible: Vec<PlayerId> = remaining
                 .iter()
                 .copied()
-                .filter(|&player| !spec.pool(state, ability, player).is_empty())
+                .filter(|&player| !spec.pool(state, ability, player, tracked_pool).is_empty())
                 .collect();
             let Some(&first) = eligible.first() else {
                 finish_per_player_iteration(state, ability, accumulated, events);
@@ -1133,6 +1165,7 @@ fn advance_per_player_iteration(
                             current: None,
                             nominee: None,
                             accumulated,
+                            tracked_pool,
                         }
                         .park(ability),
                     );
@@ -1176,11 +1209,12 @@ fn advance_per_player_iteration(
         current: Some(owner),
         nominee: maker.and(nominee),
         accumulated,
+        tracked_pool,
     };
     capture_per_player_trigger_context(state);
     match maker {
         Some(maker) => {
-            let cards = spec.pool(state, ability, owner);
+            let cards = spec.pool(state, ability, owner, tracked_pool);
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: maker,
                 count: spec.count.min(cards.len()),
@@ -1554,7 +1588,7 @@ pub(crate) fn migrate_legacy_per_player_frame_on_restore(
         return Err(UNESTABLISHED.to_string());
     }
     let spec = PerPlayerSpec::of(&frame.ability).map_err(|e| e.to_string())?;
-    let pool = spec.pool(state, &frame.ability, owner);
+    let pool = spec.pool(state, &frame.ability, owner, frame.tracked_pool);
     let consistent = prompt_cards
         .iter()
         .filter(|id| {
@@ -1677,7 +1711,7 @@ fn resolve_candidate_cards(
         ZoneChoiceCandidateSource::Legacy => {}
     }
 
-    if let Some(cards) = chain_tracked_set_cards(state) {
+    if let Some(cards) = chain_tracked_set_cards(state, ability) {
         return Ok(retain_matching_candidates(state, ability, cards, filter));
     }
 
@@ -1723,7 +1757,7 @@ fn source_bound_candidates(
         ZoneChoiceCandidateSource::Tracked => Some(retain_matching_candidates(
             state,
             ability,
-            chain_tracked_set_cards(state).unwrap_or_default(),
+            chain_tracked_set_cards(state, ability).unwrap_or_default(),
             filter,
         )),
         // CR 400.7j + CR 601.2h + CR 602.2b + CR 608.2d: the candidates are the
@@ -1834,9 +1868,14 @@ fn retain_matching_candidates(
         .collect()
 }
 
-fn chain_tracked_set_cards(state: &GameState) -> Option<Vec<ObjectId>> {
+/// CR 608.2c + CR 730.3c: the chain set's population for a chain-pool chooser:
+/// the members, then the components this reader finds (D2, D7). `None` when
+/// there is no chain set.
+fn chain_tracked_set_cards(state: &GameState, ability: &ResolvedAbility) -> Option<Vec<ObjectId>> {
     let chain_id = state.chain_tracked_set_id?;
-    state.tracked_object_sets.get(&chain_id).cloned()
+    state.tracked_object_sets.contains_key(&chain_id).then(|| {
+        crate::game::merge::tracked_set_found_objects(state, chain_id, Some(ability), None)
+    })
 }
 
 /// The shape a [`ZoneChoiceCandidateSource::LibraryTop`] pick requires,
@@ -2984,7 +3023,12 @@ mod tests {
             state.players[1].is_phased_out(),
             "P1 must read as phased out"
         );
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut setup_events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut setup_events,
+        );
         assert!(state.players[2].is_eliminated, "P2 must read as eliminated");
 
         let card1 = create_object(
@@ -3470,6 +3514,8 @@ mod tests {
         ];
         let change_zone = Box::new(ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -3692,6 +3738,8 @@ mod tests {
             sub_ability: Some(bottom),
             ..ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Library),
                     destination: Zone::Hand,
                     target: TargetFilter::Any,
@@ -3910,6 +3958,7 @@ mod tests {
     /// subject-exile list's single mover, which reads the chain set.
     fn exile_tracked_set() -> Effect {
         Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Exile,
             target: TargetFilter::TrackedSet {
@@ -4469,6 +4518,8 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let (x, g) = chain_set_with_graveyard_card(&mut state);
         let mut ability = random_graveyard_pick_then(Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Exile,
             target: TargetFilter::ParentTarget,
@@ -4550,6 +4601,7 @@ mod tests {
                 *zone_owner = ZoneOwner::TargetedPlayer;
             }
             ability.targets = targets;
+            ability.declared_player_target_slots.clear();
             ability
         };
         let earlier_set = || {
@@ -4949,22 +5001,17 @@ mod tests {
         }
     }
 
-    /// A chosen per-player pick with a `Tracked` pool is refused (each pick
-    /// rebinds the tracked set); the same pick from `Direct` opens a prompt.
+    /// CR 608.2c + CR 608.2d: a chosen per-player pick with a `Tracked` pool
+    /// offers only the tracked cards in that player's zone; the same pick from
+    /// `Direct` offers the whole zone.
     #[test]
-    fn chosen_per_player_pick_refuses_a_tracked_pool() {
-        for (source, refused) in [
-            (
-                crate::types::ability::ZoneChoiceCandidateSource::Tracked,
-                true,
-            ),
-            (
-                crate::types::ability::ZoneChoiceCandidateSource::Direct,
-                false,
-            ),
+    fn chosen_per_player_pick_reads_the_pinned_tracked_pool() {
+        for source in [
+            crate::types::ability::ZoneChoiceCandidateSource::Tracked,
+            crate::types::ability::ZoneChoiceCandidateSource::Direct,
         ] {
             let mut state = GameState::new_two_player(42);
-            let (named, _unrelated) = named_and_unrelated_graveyard_cards(&mut state);
+            let (named, unrelated) = named_and_unrelated_graveyard_cards(&mut state);
             state
                 .tracked_object_sets
                 .insert(TrackedSetId(1), vec![named]);
@@ -4991,14 +5038,25 @@ mod tests {
             );
             install_test_carrier(&mut state, ObjectId(100), PlayerId(0));
             let mut events = Vec::new();
-            let result = resolve(&mut state, &ability, &mut events);
-            assert_eq!(result.is_err(), refused, "{source:?}: {result:?}");
-            if !refused {
-                assert!(matches!(
-                    state.waiting_for,
-                    WaitingFor::ChooseFromZoneChoice { .. }
-                ));
-            }
+            resolve(&mut state, &ability, &mut events).expect("per-player pick opens");
+            let WaitingFor::ChooseFromZoneChoice { cards, player, .. } = &state.waiting_for else {
+                panic!(
+                    "{source:?}: expected a pool prompt, got {:?}",
+                    state.waiting_for
+                );
+            };
+            assert_eq!(*player, PlayerId(0));
+            let expected = match source {
+                crate::types::ability::ZoneChoiceCandidateSource::Tracked => vec![named],
+                _ => vec![named, unrelated],
+            };
+            assert_eq!(cards, &expected, "{source:?}");
+            let frame = state
+                .active_per_player_zone_choice()
+                .expect("the iteration is parked");
+            let pinned = (source == crate::types::ability::ZoneChoiceCandidateSource::Tracked)
+                .then_some(TrackedSetId(1));
+            assert_eq!(frame.tracked_pool, pinned, "{source:?}");
         }
     }
 
@@ -5281,6 +5339,7 @@ mod tests {
         // Portent's "put the rest of the exiled cards into your hand" tail.
         let continuation = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSet {
@@ -5538,6 +5597,7 @@ mod tests {
         // the chain machinery stashes a sub_ability when the iteration parks.
         let continuation = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSet {
@@ -5932,6 +5992,7 @@ mod tests {
             accumulated: false,
             current: Some(PlayerId(1)),
             nominee: None,
+            tracked_pool: None,
         });
 
         let mut events = Vec::new();
@@ -6085,6 +6146,7 @@ mod tests {
         );
         let continuation = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSet {
@@ -6617,7 +6679,12 @@ mod tests {
             *chooser = Chooser::Opponent.into();
         }
         ability.targets = vec![TargetRef::Player(PlayerId(1))];
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(1),
+            crate::types::events::LossReason::Conceded,
+            &mut Vec::new(),
+        );
         assert!(
             !players::is_alive(&state, PlayerId(1)) && players::is_alive(&state, PlayerId(0)),
             "reach: the targeted chooser left; the controller is still in the game"
@@ -6786,5 +6853,70 @@ mod tests {
             state.resolving_stack_entry.as_ref().map(|entry| entry.id),
             Some(first)
         );
+    }
+
+    /// R8. CR 730.3c + CR 608.2c: a chain-pool "choose from among" reader offers
+    /// every object the chain set finds, the components of a merged member
+    /// included; a membership-only set offers its members only.
+    ///
+    /// Nearest printed card: Necromantic Selection ("Destroy all creatures, then
+    /// return a creature card put into a graveyard this way to the battlefield
+    /// under your control. It's a black Zombie in addition to its other colors
+    /// and types. Exile Necromantic Selection."). SYNTHETIC: for now
+    /// that clause (and Starfall Invocation's, Zero Point Ballad's and Danse
+    /// Macabre's) parses to `Effect::Unimplemented`, so no printed card reaches
+    /// the chain-pool reader; the merge and the sacrifice are staged by hand.
+    ///
+    /// Before this change: the offer is `[host]` for both sources.
+    /// Mutation: revert the `chain_tracked_set_cards` routing -> `[host]`.
+    #[test]
+    fn r8_chain_pool_offers_the_components_the_set_finds() {
+        use crate::game::merge_tests::finding::{departed_merged, install_chain, sacrifice_effect};
+        use crate::types::ability::ZoneChoiceCandidateSource;
+        use crate::types::game_state::WaitingFor;
+
+        let choose = |source| Effect::ChooseFromZone {
+            count: 1,
+            zone: Zone::Graveyard,
+            additional_zones: Vec::new(),
+            zone_owner: ZoneOwner::Controller,
+            filter: None,
+            chooser: Chooser::Controller.into(),
+            candidate_source: source,
+            reciprocal_role: None,
+            gather_role: None,
+            up_to: false,
+            constraint: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+        };
+        for source in [
+            ZoneChoiceCandidateSource::Tracked,
+            ZoneChoiceCandidateSource::Legacy,
+        ] {
+            for membership_only in [false, true] {
+                let mut d = departed_merged(false);
+                if membership_only {
+                    d.state.tracked_set_member_origins.remove(&d.set);
+                }
+                let reader = install_chain(&mut d.state, vec![sacrifice_effect(), choose(source)]);
+                let mut events = Vec::new();
+                resolve(&mut d.state, &reader, &mut events).expect("the chooser resolves");
+                let WaitingFor::ChooseFromZoneChoice { cards, .. } = &d.state.waiting_for else {
+                    panic!(
+                        "reach guard: the chooser offers a pick, got {:?}",
+                        d.state.waiting_for
+                    );
+                };
+                let expected = if membership_only {
+                    vec![d.host]
+                } else {
+                    vec![d.host, d.rider]
+                };
+                assert_eq!(
+                    cards, &expected,
+                    "source {source:?}, membership_only {membership_only}"
+                );
+            }
+        }
     }
 }

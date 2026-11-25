@@ -12,7 +12,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, DebugCardEntrySource, GameState, LiminalEntry, PendingDebugCardEntries,
-    PendingLiminalEntryResume, WaitingFor,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::{PlayerCounterKind, PlayerId};
@@ -29,6 +29,7 @@ use super::effects::life::{
 use super::effects::player_counter::{
     try_add_player_counter_with_replacement, PlayerCounterAdditionOutcome,
 };
+use super::effects::token::TokenEntryMode;
 use super::engine::{
     action_rejection_for_engine_error, explicit_debug_permission_rejection, preflight_debug_action,
     EngineError,
@@ -39,6 +40,25 @@ use super::visibility::filter_action_rejection_for_viewer;
 use super::zones;
 use crate::database::CardDatabase;
 use crate::game::token_presets::TokenPtProvenance;
+
+/// CR 704.3 + CR 603.2c: the sandbox's state-based-action check and the
+/// trigger scan that follows it. A player who leaves in that check has the
+/// departure's triggers collected and its occurrences claimed
+/// (CR 603.10a), so the scan takes only what is unclaimed, and the queued
+/// departure triggers are then placed.
+fn run_state_based_actions_and_triggers(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    super::sba::check_state_based_actions(state, events);
+    let consumed = state.consumed_before_priority_trigger_events.clone();
+    let unclaimed =
+        super::triggers::filter_already_collected_trigger_events_from(state, events, 0, &consumed);
+    super::triggers::process_triggers(state, &unclaimed);
+    // CR 603.3 + CR 117.5: what a departure queued goes on the stack with them.
+    super::elimination::drain_or_clear_deferred_triggers_after_elimination(
+        state,
+        super::elimination::DepartureTriggers::ScannedByCaller,
+        events,
+    );
+}
 
 pub fn apply_debug_action(
     state: &mut GameState,
@@ -79,8 +99,7 @@ pub fn apply_debug_action(
                 }
                 crate::game::zone_pipeline::move_object(state, req, events);
                 if simulate {
-                    super::sba::check_state_based_actions(state, events);
-                    super::triggers::process_triggers(state, events);
+                    run_state_based_actions_and_triggers(state, events);
                 }
             }
             crate::game::layers::mark_layers_full(state);
@@ -135,6 +154,13 @@ pub fn apply_debug_action(
                     let delayed = super::triggers::check_delayed_triggers(state, events);
                     events.extend(delayed);
                     super::sba::check_state_based_actions(state, events); // CR 704
+                }
+                // CR 101.2 + CR 701.21a: a bar on the victim refuses the debug
+                // action rather than reporting a sacrifice that never moved.
+                super::sacrifice::SacrificeOutcome::Prohibited => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot sacrifice this permanent".to_string(),
+                    ));
                 }
                 super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(player) => {
                     state.waiting_for =
@@ -609,8 +635,7 @@ pub fn apply_debug_action(
         }
 
         DebugAction::RunStateBasedActions => {
-            super::sba::check_state_based_actions(state, events);
-            super::triggers::process_triggers(state, events);
+            run_state_based_actions_and_triggers(state, events);
         }
 
         DebugAction::CreateToken {
@@ -689,6 +714,7 @@ pub fn apply_debug_action(
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             };
             let proposed = ProposedEvent::CreateToken {
+                redirected_to: None,
                 owner,
                 spec: Box::new(spec),
                 copy: None,
@@ -904,8 +930,16 @@ fn apply_debug_counter_gain(
     // the action boundary restores its snapshot. No wrap, no clamp.
     let parked = match gain {
         DebugCounterGain::Counter(kind) => {
+            // A debug-console grant is neither a resolving effect nor a
+            // replacement — stamp fail-closed `Other`.
             match try_add_player_counter_with_replacement(
-                state, actor, player_id, kind, count, events,
+                state,
+                actor,
+                player_id,
+                kind,
+                count,
+                crate::types::proposed_event::CounterCause::Other,
+                events,
             )? {
                 PlayerCounterAdditionOutcome::Applied | PlayerCounterAdditionOutcome::Prevented => {
                     false
@@ -914,9 +948,14 @@ fn apply_debug_counter_gain(
             }
         }
         // `true` = settled (applied or prevented), `false` = parked.
-        DebugCounterGain::Energy => {
-            !try_add_energy_with_replacement(state, actor, player_id, count, events)?
-        }
+        DebugCounterGain::Energy => !try_add_energy_with_replacement(
+            state,
+            actor,
+            player_id,
+            count,
+            crate::types::proposed_event::CounterCause::Other,
+            events,
+        )?,
     };
     // CR 616.1: a parked ordering choice owns the rest of the event; its
     // resume runs the event's triggers and state-based actions.
@@ -1031,13 +1070,15 @@ fn apply_energy_delta(
 /// staging zone (typically `Zone::Hand`) with face data applied. Returns the
 /// resulting events and any new `WaitingFor` (e.g. replacement choice).
 ///
-/// CR 303.4f: For Auras / Equipment, the caller is expected to wire
-/// `attached_to` through `attach_to` / `attach_to_player` BEFORE invoking
-/// this function. When that happens, the post-ETB SBA pass (CR 704.5n) sees
-/// the attachment with a legal host and leaves it on the battlefield;
-/// otherwise SBA correctly moves the orphan to its owner's graveyard. Both
-/// behaviors are valid debug spawn paths — the choice belongs at the
-/// caller (the WASM `handle_debug_create_card` bridge).
+/// CR 303.4f: For a CARD Aura / Equipment, the caller is expected to wire
+/// `attached_to` through `attach_to` / `attach_to_player` BEFORE invoking this
+/// function when it takes the RAW branch. That staging pre-attachment is then
+/// severed by the card's own move (CR 400.7: an object that changes zones is a
+/// new object with no relation to its previous existence), so it survives only
+/// as the staging journal row — see the raw branch below. A real-entry card
+/// carries its host on the `ZoneChange` proposal instead. A TOKEN must not be
+/// pre-attached at all: its host rides the `TokenEntry` and its finalize
+/// attaches after birth.
 pub fn route_debug_create_to_battlefield(
     state: &mut GameState,
     object_id: ObjectId,
@@ -1046,11 +1087,30 @@ pub fn route_debug_create_to_battlefield(
 ) -> ActionResult {
     let mut events: Vec<GameEvent> = vec![];
 
+    // CR 111.1: a token has no prior zone; it is CREATED on the battlefield,
+    // never moved onto it from the staging zone (CR 111.8 would refuse that
+    // move). `run_etb` selects which half of the token entry runs, not whether
+    // the token exists — the token dispatch therefore sits above the raw
+    // placement below.
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.is_token)
+    {
+        return route_debug_token_to_battlefield(
+            state,
+            object_id,
+            attach_to,
+            TokenEntryMode::from_run_etb(run_etb),
+        );
+    }
+
     // "Run ETB effects" unchecked: place the staged object on the battlefield
     // raw — no replacement window, no ETB triggers, no SBA pass. This mirrors
     // `MoveToZone { simulate: false }`, letting a board position be staged
     // without the entering permanent's "when ~ enters" abilities going on the
-    // stack.
+    // stack. It applies to CARDS via `DebugCommand`; tokens take the forced
+    // token entry above.
     if !run_etb {
         // Debug staging — route through the pipeline under `DebugCommand`,
         // which makes no replacement consult AND runs no delivery tail
@@ -1064,14 +1124,6 @@ pub fn route_debug_create_to_battlefield(
         crate::game::zone_pipeline::move_object(state, req, &mut events);
         crate::game::layers::mark_layers_full(state);
         return ActionResult::applied(events, state.waiting_for.clone());
-    }
-
-    if state
-        .objects
-        .get(&object_id)
-        .is_some_and(|object| object.is_token)
-    {
-        return route_debug_token_to_battlefield(state, object_id, attach_to);
     }
 
     enter_battlefield_with_etb(state, object_id, attach_to, &mut events);
@@ -1112,6 +1164,7 @@ fn enter_battlefield_with_etb(
     }
 
     let mut proposed = ProposedEvent::ZoneChange {
+        library_placement: None,
         object_id,
         from,
         to: Zone::Battlefield,
@@ -1120,15 +1173,21 @@ fn enter_battlefield_with_etb(
         enter_tapped: Default::default(),
         enters_attacking: false,
         enter_with_counters: vec![],
+        enter_with_grants: None,
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        with_entry_effect: None,
+        co_entrants: None,
+        merged_departure: None,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
         enter_with_choices: None,
         discard_frame: None,
         performed_by: None,
+        ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         applied: HashSet::new(),
     };
     // CR 306.5b + CR 310.4b + CR 614.1c: seed the intrinsic enters-with
@@ -1150,7 +1209,6 @@ fn enter_battlefield_with_etb(
                 None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                None,
                 events,
             ) {
                 super::effects::change_zone::ZoneDeliveryResult::Done => {}
@@ -1171,11 +1229,14 @@ fn enter_battlefield_with_etb(
 /// CR 111.1 + CR 614.12: A token does not move from a staging zone onto the
 /// battlefield. Convert the debug-selected printed characteristics into the
 /// same liminal token projection used by copy-token effects, then consult the
-/// standard token-entry replacement and delivery pipeline.
+/// standard token-entry replacement and delivery pipeline (`Standard`), or
+/// commit it straight to the battlefield with its characteristic counters
+/// installed (`Forced`, the raw command contract).
 fn route_debug_token_to_battlefield(
     state: &mut GameState,
     object_id: ObjectId,
     attach_to: Option<AttachTarget>,
+    mode: TokenEntryMode,
 ) -> ActionResult {
     let mut events = Vec::new();
     let staged = state
@@ -1215,6 +1276,9 @@ fn route_debug_token_to_battlefield(
         controller: staged.controller,
         // Debug-token route stages no donor; empty mods are stamp-proof.
         donor: None,
+        // The debug sandbox stages one printed face as a token; no copy effect creates
+        // it (CR 707.8a).
+        double_faced: None,
     };
     let mut token = super::game_object::GameObject::new(
         object_id,
@@ -1235,6 +1299,7 @@ fn route_debug_token_to_battlefield(
     state.liminal_entries.insert(
         object_id,
         LiminalEntry {
+            copy_settlement: None,
             object: crate::types::game_state::LiminalEntrant::Token(
                 crate::types::game_state::TokenProjection::materialize(token),
             ),
@@ -1257,47 +1322,55 @@ fn route_debug_token_to_battlefield(
     );
 
     let proposed = ProposedEvent::TokenEntry {
+        redirected_to: None,
         entry_ref: object_id,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enter_with_counters: intrinsic_counters,
         enter_with_choices: None,
         applied: HashSet::new(),
     };
-    match replacement::replace_event(state, proposed, &mut events) {
-        ReplacementResult::Execute(event) => {
-            if state.has_post_replacement_drain() {
-                if let Some(waiting_for) =
-                    super::engine_replacement::apply_pending_post_replacement_effect(
+    match mode {
+        TokenEntryMode::Standard => {
+            match replacement::replace_event(state, proposed, &mut events) {
+                ReplacementResult::Execute(event) => {
+                    if super::effects::token::commit_liminal_token_entry_and_continue_copy_batch(
                         state,
-                        Some(object_id),
-                        None,
-                        Some(crate::types::replacements::ReplacementEvent::Moved),
-                        &mut events,
-                    )
-                {
-                    state.pending_liminal_entry_resume = Some(PendingLiminalEntryResume::Token {
-                        source_id: object_id,
-                        player: waiting_for.acting_player().unwrap_or(staged.controller),
                         event,
-                    });
-                    state.waiting_for = waiting_for;
-                    return ActionResult::applied(events, state.waiting_for.clone());
+                        &mut events,
+                    ) {
+                        super::triggers::process_triggers(state, &events);
+                        super::sba::check_state_based_actions(state, &mut events);
+                    }
+                }
+                ReplacementResult::Prevented => {
+                    state.liminal_entries.remove(&object_id);
+                }
+                ReplacementResult::NeedsChoice(player) => {
+                    state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                 }
             }
-            if super::effects::token::commit_liminal_token_entry_and_continue_copy_batch(
-                state,
-                event,
-                &mut events,
-            ) {
-                super::triggers::process_triggers(state, &events);
-                super::sba::check_state_based_actions(state, &mut events);
-            }
         }
-        ReplacementResult::Prevented => {
-            state.liminal_entries.remove(&object_id);
-        }
-        ReplacementResult::NeedsChoice(player) => {
-            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+        // CR 111.1 + CR 614.1: the proposal did not run `replace_event`. The
+        // commit installs the characteristic counters directly (CR 122.6a) and
+        // makes no as-enters host choice, so the route stays non-pausing by
+        // construction. CR 603.6a ETB triggers and the CR 704 SBA pass are NOT
+        // drained — the raw contract, identical to the `DebugCommand` card
+        // placement.
+        TokenEntryMode::Forced => {
+            let committed =
+                super::effects::token::commit_liminal_token_entry_with_replacement_state(
+                    state,
+                    proposed,
+                    &mut events,
+                    crate::types::game_state::TokenEntryEventEmission::Emit,
+                    Vec::new(),
+                    TokenEntryMode::Forced,
+                );
+            debug_assert!(
+                committed,
+                "a forced token entry installs its counters without consulting"
+            );
+            crate::game::layers::mark_layers_full(state);
         }
     }
 
@@ -1380,21 +1453,33 @@ pub fn create_debug_cards(
             } else {
                 zone
             };
+            // CR 303.4f: only a CARD takes the staging pre-attach; its arm is
+            // byte-identical to today (the raw move then severs the edge, since
+            // the move is an ordinary CR 400.7 zone change, and this PR pins
+            // that — it does not fix it). A TOKEN must not: the token route
+            // discards the staging incarnation and births a new one, so a
+            // staging attach would journal an attachment edit for an object
+            // that no longer exists (`apply_resolved_attachment` rejects it as
+            // `UnknownAttachment` / `StaleAttachment`). A token's `attach_to`
+            // rides the `TokenEntry` and its finalize attaches after birth —
+            // the only attachment edit the token journals.
+            let staging_attach = match creation_kind {
+                DebugCardCreationKind::Card => {
+                    (zone == Zone::Battlefield).then_some(attach_to).flatten()
+                }
+                DebugCardCreationKind::Token => None,
+            };
             let object_id = materialize_debug_card(
                 state,
                 &source,
                 owner,
-                if zone == Zone::Battlefield {
-                    attach_to
-                } else {
-                    None
-                },
+                staging_attach,
                 nonlegendary,
                 creation_kind,
                 initial_zone,
             );
             if zone == Zone::Battlefield {
-                let entry = route_debug_create_to_battlefield(state, object_id, false, None);
+                let entry = route_debug_create_to_battlefield(state, object_id, false, attach_to);
                 events.extend(entry.events);
             }
         }
@@ -4654,7 +4739,12 @@ mod tests {
             let mut runner = debug_runner(scenario);
             let p2 = PlayerId(2);
             let mut events = Vec::new();
-            crate::game::elimination::eliminate_player(runner.state_mut(), p2, &mut events);
+            crate::game::elimination::eliminate_player(
+                runner.state_mut(),
+                p2,
+                crate::types::events::LossReason::Conceded,
+                &mut events,
+            );
             let p2_life = life(&runner, p2);
             let revision = runner.state().state_revision;
 
@@ -5790,7 +5880,12 @@ mod tests {
                 let mut runner = debug_runner(three_player);
                 let p2 = PlayerId(2);
                 let mut events = Vec::new();
-                crate::game::elimination::eliminate_player(runner.state_mut(), p2, &mut events);
+                crate::game::elimination::eliminate_player(
+                    runner.state_mut(),
+                    p2,
+                    crate::types::events::LossReason::Conceded,
+                    &mut events,
+                );
                 let before = counter_rollback_set(&runner);
                 let error = runner
                     .act(give(p2, PlayerCounterKind::Experience, 1))

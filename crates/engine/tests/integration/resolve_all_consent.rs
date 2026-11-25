@@ -1354,7 +1354,12 @@ fn eliminating_a_consent_representative_drops_the_run_and_restores_living_priori
     state.priority_pass_count = 2;
     state.priority_passes.insert(P0);
 
-    eliminate_player(&mut state, P1, &mut Vec::new());
+    eliminate_player(
+        &mut state,
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
 
     assert!(state.players[P1.0 as usize].is_eliminated);
     assert!(state.resolve_all_consent_run.is_none());

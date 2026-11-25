@@ -80,7 +80,9 @@ fn declare(
     let mut prompts = Vec::new();
     loop {
         let action = match &runner.state().waiting_for {
-            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay },
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost {
+                index: if pay { 0 } else { 1 },
+            },
             WaitingFor::ChooseGiftRecipient { .. } => {
                 GameAction::ChooseGiftRecipient { opponent: P1 }
             }

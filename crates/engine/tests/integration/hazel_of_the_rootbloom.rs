@@ -620,7 +620,7 @@ fn thieving_skydiver_equipment_rider_condition_becomes_live() {
                 WaitingFor::OptionalCostChoice { .. } => {
                     events.extend(
                         runner
-                            .act(GameAction::DecideOptionalCost { pay: true })
+                            .act(GameAction::DecideOptionalCost { index: 0 })
                             .expect("P0 pays the kicker")
                             .events,
                     );

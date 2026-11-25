@@ -20,7 +20,7 @@ use crate::types::triggers::TriggerMode;
 
 use super::oracle::{find_activated_colon, strip_activated_constraints};
 use super::oracle_classifier::has_trigger_prefix;
-use super::oracle_cost::parse_oracle_cost;
+use super::oracle_cost::{parse_oracle_cost, parse_oracle_cost_in};
 #[cfg(test)]
 use super::oracle_effect::lower_ability_ir;
 use super::oracle_effect::{
@@ -37,13 +37,14 @@ use super::oracle_ir::effect_chain::{
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_ir::trigger::{
-    ModalIr, ReflexiveParent, ReflexiveParentIr, TriggerBody, TriggerIr,
+    ModalIr, ReflexiveConnector, ReflexiveParent, ReflexiveParentIr, TriggerBody, TriggerIr,
 };
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_at_word_boundaries, scan_preceded,
 };
+use super::oracle_nom::target::CostChannel;
 use super::oracle_quantity::parse_cda_quantity;
 #[cfg(test)]
 use super::oracle_static::parse_static_line;
@@ -1025,7 +1026,57 @@ fn classify_reflexive_modal_parent(trigger_line: String) -> (String, Option<Refl
             Some(ReflexiveModalParent::Mandatory),
         );
     }
+    if let Some((instruction, event)) = strip_terminal_reflexive_event_connector(&trigger_line)
+        .filter(|(instruction, _)| has_trigger_prefix(&instruction.to_lowercase()))
+    {
+        return (
+            instruction.to_string(),
+            Some(ReflexiveModalParent::EventThisWay(Box::new(event))),
+        );
+    }
     (trigger_line, None)
+}
+
+/// CR 603.12: the terminal "When <event> this way" connector of a mandatory
+/// reflexive modal header ("…, put a charge counter on it or remove one from
+/// it. When you remove a counter this way") — the instruction before it, and
+/// the event, parsed by the shared trigger-condition parser. An event the
+/// trigger parser does not recognize declines, so no never-firing reflexive is
+/// built.
+fn strip_terminal_reflexive_event_connector(
+    trigger_line: &str,
+) -> Option<(&str, crate::types::ability::TriggerDefinition)> {
+    let lower = trigger_line.to_lowercase();
+    let mut tail = lower.as_str();
+    let mut connector_start = None;
+    while let Ok((after, _)) =
+        terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". ")).parse(tail)
+    {
+        connector_start = Some(lower.len() - after.len());
+        tail = after;
+    }
+    let connector_start = connector_start?;
+    let tail = tail.trim().trim_end_matches(',').trim();
+    let (_, event_text) = terminated(
+        take_until::<_, _, OracleError<'_>>(" this way"),
+        (tag(" this way"), nom::combinator::eof),
+    )
+    .parse(tail)
+    .ok()?;
+    tag::<_, _, OracleError<'_>>("when ")
+        .parse(event_text)
+        .ok()?;
+    let event_original = trigger_line.get(connector_start..connector_start + event_text.len())?;
+    let (mode, mut event) = super::oracle_trigger::parse_trigger_condition(
+        event_original,
+        &mut ParseContext::default(),
+    );
+    if matches!(mode, TriggerMode::Unknown(_)) {
+        return None;
+    }
+    event.execute = None;
+    let instruction = trigger_line.get(..connector_start - 2)?.trim_end();
+    Some((instruction, event))
 }
 
 /// CR 603.12 + CR 603.4 + CR 608.2a: A reflexive modal can retain an
@@ -1041,8 +1092,17 @@ fn reflexive_modal_connector(
         // CR 115.1 + CR 608.2c: a target P/T threshold guard's
         // `TargetMatchesFilter { subject_slot: None }` reads the gated node's own
         // first object target, and a mode may announce its own target, so the
-        // guard cannot bind the antecedent "that creature" here; refuse it.
-        (Some((_, LeadingConditionRoute::TargetPtThreshold)), _) => {
+        // guard cannot bind the antecedent "that creature" here; refuse it. The
+        // own-target-controller route is produced only by the trailing strip,
+        // never by this leading one; it is refused here too rather than bound.
+        (
+            Some((
+                _,
+                LeadingConditionRoute::TargetPtThreshold
+                | LeadingConditionRoute::OwnTargetController,
+            )),
+            _,
+        ) => {
             return Err(Box::new(Effect::unimplemented(
                 "modal_reflexive_condition",
                 &header.raw,
@@ -1332,9 +1392,17 @@ pub(crate) fn lower_oracle_block_ir(
                 // the trigger parser already produced.
                 let body = match &reflexive_parent {
                     Some(ReflexiveModalParent::MayPay(cost_text)) => {
+                        // CR 118.12 + CR 603.12 + CR 608.2c: "you may <cost>. When
+                        // you do, …" is an optional payment made as the ability
+                        // resolves, not a printed source cost, so a bare "it" in
+                        // it names an object the trigger introduced (Gorbag of
+                        // Minas Morgul's "you may sacrifice it") and the cost
+                        // grammar's sacrifice and self-exile legs do not bind it
+                        // to the source.
+                        let cost = parse_oracle_cost_in(cost_text, CostChannel::ResolutionPayment);
                         TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
                             parent: ReflexiveParent::MayPay {
-                                cost: parse_oracle_cost(cost_text),
+                                cost: cost.clone(),
                                 payment_chain: Some(
                                     parse_ability_ir_with_context(
                                         cost_text,
@@ -1348,14 +1416,16 @@ pub(crate) fn lower_oracle_block_ir(
                                     .body,
                                 ),
                             },
-                            connector: reflexive_connector
-                                .clone()
-                                .expect("reflexive parent has a connector"),
+                            connector: ReflexiveConnector::Condition(
+                                reflexive_connector
+                                    .clone()
+                                    .expect("reflexive parent has a connector"),
+                            ),
                             effect_chain: EffectChainIr::single_clause(
                                 cost_text,
                                 AbilityKind::Spell,
                                 parsed_clause(Effect::PayCost {
-                                    cost: parse_oracle_cost(cost_text),
+                                    cost,
                                     scale: None,
                                     payer: TargetFilter::Controller,
                                 }),
@@ -1376,9 +1446,11 @@ pub(crate) fn lower_oracle_block_ir(
                         Some(TriggerBody::EffectChain(instruction)) => {
                             TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
                                 parent: ReflexiveParent::Mandatory { instruction },
-                                connector: reflexive_connector
-                                    .clone()
-                                    .expect("reflexive parent has a connector"),
+                                connector: ReflexiveConnector::Condition(
+                                    reflexive_connector
+                                        .clone()
+                                        .expect("reflexive parent has a connector"),
+                                ),
                                 effect_chain: payload.marker.clone(),
                                 modal: Some(payload.clone()),
                             }))
@@ -1396,6 +1468,34 @@ pub(crate) fn lower_oracle_block_ir(
                         )
                         | None => TriggerBody::Modal(Box::new(payload.clone())),
                     },
+                    // CR 603.12: an event-keyed reflexive ("When you remove a
+                    // counter this way") rides on the mandatory instruction the
+                    // trigger parser lowered, exactly as the "When you do" arm
+                    // does; an intervening-if guard on it is not modeled.
+                    Some(ReflexiveModalParent::EventThisWay(event)) => {
+                        match (trigger.body.take(), reflexive_connector.as_ref()) {
+                            (
+                                Some(TriggerBody::EffectChain(instruction)),
+                                Some(AbilityCondition::WhenYouDo),
+                            ) => TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
+                                parent: ReflexiveParent::Mandatory { instruction },
+                                connector: ReflexiveConnector::Event(event.clone()),
+                                effect_chain: payload.marker.clone(),
+                                modal: Some(payload.clone()),
+                            })),
+                            _ => TriggerBody::EffectChain(EffectChainIr::single_clause(
+                                &header.raw,
+                                AbilityKind::Spell,
+                                parsed_clause(Effect::unimplemented(
+                                    "modal_reflexive_event",
+                                    &header.raw,
+                                )),
+                                None,
+                                mode_ctx.actor.clone(),
+                                true,
+                            )),
+                        }
+                    }
                     None => TriggerBody::Modal(Box::new(payload.clone())),
                 };
                 trigger.body = Some(body);
@@ -1417,6 +1517,7 @@ pub(crate) fn lower_oracle_block_ir(
             // as-enters header. The execute choice is a typed replacement payload,
             // never a document-level pre-lowered node.
             let replacement = ReplacementIr {
+                history: Vec::new(),
                 definition: ReplacementDefinition::new(ReplacementEvent::Moved)
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
@@ -1718,13 +1819,23 @@ pub(crate) fn lower_oracle_block(
                     modal_ability.condition = reflexive_connector.clone();
                     Box::new(modal_ability)
                 }
+                // CR 603.12: an event-keyed reflexive rides on the mandatory
+                // instruction as a reflexive delayed trigger.
+                Some(ReflexiveModalParent::EventThisWay(event)) => Box::new(
+                    super::oracle_trigger::reflexive_event_trigger(event, modal_ability),
+                ),
                 // Plain triggered modal (Pip-Boy): the modal attaches directly.
                 None => Box::new(modal_ability),
             };
 
             for trigger in &mut triggers {
                 match (&reflexive_parent, trigger.execute.take()) {
-                    (Some(ReflexiveModalParent::Mandatory), Some(mut instruction)) => {
+                    (
+                        Some(
+                            ReflexiveModalParent::Mandatory | ReflexiveModalParent::EventThisWay(_),
+                        ),
+                        Some(mut instruction),
+                    ) => {
                         instruction.sub_ability = Some(execute.clone());
                         trigger.execute = Some(instruction);
                     }
@@ -1875,6 +1986,8 @@ fn lower_as_enters_anchor_word_modal(
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
+            origin: crate::types::ability::DefinitionOrigin::Characteristic,
         };
         result.statics.push(placeholder);
     }
@@ -2296,12 +2409,15 @@ fn split_inline_modal_parts(effect_body: &str) -> Option<(ModalHeaderAst, Vec<Mo
 /// `ctx` is the caller's body context, threaded to the marker and every mode
 /// exactly as the trigger modal path threads its live trigger-body context, so
 /// a trigger-only clause in a mode lowers with its event referent.
-pub(crate) fn try_parse_inline_modal_ability(
+pub(crate) fn try_parse_inline_modal_ability_with_provenance(
     effect_body: &str,
     ctx: &ParseContext,
-) -> Option<AbilityDefinition> {
+) -> Option<crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition>> {
     let modal = try_parse_inline_modal_ir(effect_body, ctx)?;
-    let mut ability = crate::parser::oracle_effect::lower_effect_chain_ir(&modal.marker);
+    let lowered =
+        crate::parser::oracle_effect::lower::lower_effect_chain_ir_with_provenance(&modal.marker);
+    let mut ability = lowered.value;
+    let mut history = lowered.history;
     crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
     // CR 603.3c + CR 700.2b: "you may choose one —" lets the controller choose
     // no mode, a choice made as the ability is put on the stack. The engine
@@ -2310,16 +2426,26 @@ pub(crate) fn try_parse_inline_modal_ability(
     if matches!(modal.optionality, ModalOptionality::MayDecline) {
         ability.optional = true;
     }
-    Some(
-        ability.with_modal(
-            modal.choice,
-            modal
-                .modes
-                .iter()
-                .map(|mode| crate::parser::oracle_effect::lower_ability_ir(&mode.ability))
-                .collect(),
-        ),
-    )
+    let value = ability.with_modal(
+        modal.choice,
+        modal
+            .modes
+            .iter()
+            .enumerate()
+            .map(|(index, mode)| {
+                let mut lowered =
+                    crate::parser::oracle_effect::lower_ability_ir_with_provenance(&mode.ability);
+                for record in &mut lowered.history {
+                    record.prepend(
+                        crate::parser::oracle_ir::history_provenance::InstructionStep::Mode(index),
+                    );
+                }
+                history.extend(lowered.history);
+                lowered.value
+            })
+            .collect(),
+    );
+    Some(crate::parser::oracle_ir::history_provenance::Lowered { value, history })
 }
 
 pub(crate) fn try_parse_inline_modal_ir(effect_body: &str, ctx: &ParseContext) -> Option<ModalIr> {
@@ -5365,7 +5491,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         };
         assert_eq!(
             reflexive.connector,
-            AbilityCondition::WhenYouDo,
+            ReflexiveConnector::Condition(AbilityCondition::WhenYouDo),
             "Caesar's native IR must retain its printed reflexive connector"
         );
         let modal = reflexive

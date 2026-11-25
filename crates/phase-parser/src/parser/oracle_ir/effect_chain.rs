@@ -9,16 +9,19 @@
 use serde::Serialize;
 
 use super::ast::{with_clause_chain_duration, ClauseBoundary, ContinuationAst, ParsedEffectClause};
+use super::context::PlayerAntecedents;
 use super::doc::{OracleDocBuilder, OracleSourceSpan, OracleUnitSource};
 use crate::parser::oracle_effect::lower::strip_trailing_duration;
 use crate::parser::oracle_nom::filter::ChosenColorGrantReference;
+use crate::parser::oracle_nom::primitives::scan_at_word_boundaries;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ChosenGroupId,
-    ControllerRef, CostReduction, DelayedTriggerCondition, Duration, Effect, ManaSpendPermission,
-    MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr, QuantityRef,
-    ReturnResultReadSpec, RoundingMode, SiblingCondition, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetReadOrigin, TargetSelectionMode, UnlessPayModifier,
+    ControllerRef, CostReduction, DelayedTriggerCondition, Duration, Effect, InstructionJoin,
+    ManaSpendPermission, MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr,
+    QuantityRef, RepeatForTiming, ReturnResultReadSpec, RoundingMode, SiblingCondition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetSelectionMode,
+    UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
@@ -902,6 +905,11 @@ pub(crate) struct ClauseIr {
     /// chunk loop's trailing-guard pass.
     #[serde(skip_serializing_if = "SiblingCondition::is_default")]
     pub(crate) sibling_condition: SiblingCondition,
+    /// CR 608.2c: lowered onto the node's `instruction_join`; written only by
+    /// the chunk loop when a verbless target chunk takes the previous chunk's
+    /// verb ("destroy target artifact, target creature, ...").
+    #[serde(skip_serializing_if = "InstructionJoin::is_own")]
+    pub(crate) instruction_join: InstructionJoin,
     /// The prior return instruction whose actual results a delayed clause names.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reads_return_result: Option<(ClauseId, ReturnResultReadSpec)>,
@@ -932,6 +940,12 @@ pub(crate) struct ClauseIr {
     pub(crate) accepting_player_bindings: Vec<AcceptingPlayerBinding>,
     /// CR 608.2c: "for each" / "N times" repeat quantity.
     pub(crate) repeat_for: Option<QuantityExpr>,
+    /// CR 608.2: the iteration relation of `repeat_for`. Set from a [`RepeatCount`]
+    /// at push; a direct write only resets it to `Sequential` beside its count
+    /// ("repeat this process" counts, `replace_with_gap`), so a
+    /// `SimultaneousInstances` never exists without its count.
+    #[serde(skip_serializing_if = "RepeatForTiming::is_sequential")]
+    pub(crate) repeat_timing: RepeatForTiming,
     /// Player scope iteration ("each opponent", "each player").
     pub(crate) player_scope: Option<PlayerFilter>,
     /// CR 101.4 + CR 800.4: Turn-order override for `player_scope` iteration.
@@ -948,6 +962,21 @@ pub(crate) struct ClauseIr {
     pub(crate) multi_target: Option<MultiTargetSpec>,
     /// CR 107.3i: "where X is <expr>" binding.
     pub(crate) where_x_expression: Option<String>,
+    /// CR 608.2c + CR 115.1a: the players a controller anaphor inside
+    /// [`Self::where_x_expression`]'s count ("they control", "that player
+    /// controls") may bind to, captured from the live context at the chunk that
+    /// set the expression. Travels with the expression because it is read with
+    /// it: the text says what to count, this says whose. Empty (the default)
+    /// means no antecedent was in scope, which fails closed to `oracle_target`'s
+    /// documented legacy seeds — the behavior before this field existed.
+    /// The set's characteristic rung carries, the same way, the object a
+    /// possessive pronoun in the count ("where X is its power") names (CR 608.2k).
+    ///
+    /// Skipped from `ClauseIr`'s `Serialize` (the parser trace surface) rather
+    /// than given a `Serialize` impl of its own: this is a lowering-time
+    /// binding, and keeping it out leaves the existing trace schema untouched.
+    #[serde(skip)]
+    pub(crate) where_x_player_antecedents: PlayerAntecedents,
     /// CR 118.12: Resolution-time "unless [player] pays" modifier carried by
     /// this clause.
     pub(crate) unless_pay: Option<UnlessPayModifier>,
@@ -1015,6 +1044,13 @@ pub(crate) struct ClauseIr {
     /// delayed payload and is consumed by `assemble_effect_chain`'s relocation step.
     #[serde(default, skip_serializing_if = "ClausePlacement::is_sibling")]
     pub(crate) placement: ClausePlacement,
+    /// CR 611.2a + CR 608.2c: the window this clause printed at its HEAD, as read by
+    /// the clause parser on the guard-free text it lowered (lifted from
+    /// `ParseContext::head_window` by the chain chunk loop). `assemble_effect_chain`
+    /// distributes it to the sentence's later coordinated clauses; `None` states
+    /// nothing to distribute, including for a clause whose window is trailing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) head_window: Option<Duration>,
     /// Construction seal: a private field forces all construction through
     /// [`ClauseIrBuilder`], so no call site can mint a clause without identity,
     /// source, disposition, and provenance (Plan 01 §5 construction gate).
@@ -1023,6 +1059,17 @@ pub(crate) struct ClauseIr {
 }
 
 impl ClauseIr {
+    /// CR 107.3i + CR 608.2c: this clause's where-X clause paired with the
+    /// antecedents its count's controller anaphor binds to. The single spelling
+    /// assembly uses, so the expression and its antecedents cannot drift apart
+    /// at a call site.
+    pub(crate) fn where_x_binding(&self) -> crate::parser::oracle_effect::lower::WhereXBinding<'_> {
+        crate::parser::oracle_effect::lower::WhereXBinding::new(
+            self.where_x_expression.as_deref(),
+            &self.where_x_player_antecedents,
+        )
+    }
+
     /// Turn this clause, in place, into an honest parser gap
     /// (`Effect::unimplemented(name, <printed fragment>)`) that carries NO
     /// executable metadata — exactly what [`ClauseIrBuilder::clause`] +
@@ -1043,6 +1090,7 @@ impl ClauseIr {
             reads_chosen_clause,
             target_reads,
             sibling_condition,
+            instruction_join,
             reads_return_result,
             source: _,
             disposition,
@@ -1053,12 +1101,14 @@ impl ClauseIr {
             opponent_may_scope,
             accepting_player_bindings,
             repeat_for,
+            repeat_timing,
             player_scope,
             starting_with,
             delayed_condition,
             prefix_delayed_condition,
             multi_target,
             where_x_expression,
+            where_x_player_antecedents,
             unless_pay,
             target_selection_mode,
             target_chooser,
@@ -1067,12 +1117,14 @@ impl ClauseIr {
             declared_player_group,
             chosen_color_grant,
             placement,
+            head_window,
             _sealed: _,
         } = self;
         *declares_chosen_clause = None;
         *reads_chosen_clause = None;
         *target_reads = TargetReadOrigin::OwnAnnouncement;
         *sibling_condition = SiblingCondition::Dependent;
+        *instruction_join = InstructionJoin::Own;
         *reads_return_result = None;
         *disposition = ClauseDisposition::Emit {
             followup: None,
@@ -1085,12 +1137,16 @@ impl ClauseIr {
         *opponent_may_scope = None;
         accepting_player_bindings.clear();
         *repeat_for = None;
+        *repeat_timing = RepeatForTiming::Sequential;
         *player_scope = None;
         *starting_with = None;
         *delayed_condition = None;
         *prefix_delayed_condition = None;
         *multi_target = None;
         *where_x_expression = None;
+        // The antecedents only ever qualify `where_x_expression`; with the
+        // expression cleared they have nothing to bind and are reset with it.
+        *where_x_player_antecedents = PlayerAntecedents::default();
         *unless_pay = None;
         *target_selection_mode = TargetSelectionMode::Chosen;
         *target_chooser = None;
@@ -1099,6 +1155,7 @@ impl ClauseIr {
         *declared_player_group = None;
         *chosen_color_grant = None;
         *placement = ClausePlacement::Sibling;
+        *head_window = None;
     }
 }
 
@@ -1267,6 +1324,7 @@ impl ClauseIrBuilder {
             prefix_delayed_condition: None,
             multi_target: None,
             where_x_expression: None,
+            where_x_player_antecedents: PlayerAntecedents::default(),
             unless_pay: None,
             target_selection_mode: TargetSelectionMode::Chosen,
             target_chooser: None,
@@ -1274,6 +1332,7 @@ impl ClauseIrBuilder {
             printed_color_choice: None,
             declared_player_group: None,
             placement: ClausePlacement::Sibling,
+            head_window: None,
         }
     }
 
@@ -1346,29 +1405,87 @@ impl ClauseIrBuilder {
         .is_optional(c.is_optional)
         .opponent_may_scope(c.opponent_may_scope)
         .accepting_player_bindings(c.accepting_player_bindings)
-        .repeat_for(c.repeat_for)
+        .repeat_for(RepeatCount::from_parts(c.repeat_for, c.repeat_timing))
         .player_scope(c.player_scope)
         .starting_with(c.starting_with)
         .delayed_condition(c.delayed_condition)
         .prefix_delayed_condition(c.prefix_delayed_condition)
         .multi_target(c.multi_target)
         .where_x_expression(c.where_x_expression)
+        .where_x_player_antecedents(c.where_x_player_antecedents)
         .unless_pay(c.unless_pay)
         .target_selection_mode(c.target_selection_mode)
         .target_chooser(c.target_chooser)
         .declared_target_choice_timing(c.declared_target_choice_timing)
         .printed_color_choice(c.printed_color_choice)
         .declared_player_group(c.declared_player_group)
+        .head_window(c.head_window)
         .push();
         if let Some(absorbed) = self.clauses.last_mut() {
             absorbed.target_reads = c.target_reads;
             absorbed.sibling_condition = c.sibling_condition;
+            absorbed.instruction_join = c.instruction_join;
         }
     }
 
     /// Consume the builder, yielding the source-ordered clause list.
     pub(crate) fn finish(self) -> Vec<ClauseIr> {
         self.clauses
+    }
+}
+
+/// A counted repeat (`repeat_for`) carried together with its iteration
+/// relation, from the peel that produced it to the [`ClauseIr`] push. Fields are
+/// private and constructors are named, so a timing cannot exist without its
+/// count (a `SimultaneousInstances` with no count is unrepresentable) and no
+/// caller can drop or re-derive the timing the peel stamped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RepeatCount {
+    count: QuantityExpr,
+    timing: RepeatForTiming,
+}
+
+impl RepeatCount {
+    /// CR 608.2c + CR 101.4: the single stamp authority — a leading
+    /// "for each <count>," peel. Every iteration is an instance of one
+    /// instruction.
+    pub(crate) fn for_each_prefix(count: QuantityExpr) -> Self {
+        Self {
+            count,
+            timing: RepeatForTiming::SimultaneousInstances,
+        }
+    }
+
+    /// A counted repeat whose repetitions are each done separately (Torment of
+    /// Hailfire's ruling, 2017-07-14: "Each repetition through this process is
+    /// done separately.").
+    pub(crate) fn sequential(count: QuantityExpr) -> Self {
+        Self {
+            count,
+            timing: RepeatForTiming::Sequential,
+        }
+    }
+
+    pub(crate) fn count(&self) -> &QuantityExpr {
+        &self.count
+    }
+
+    pub(crate) fn timing(&self) -> RepeatForTiming {
+        self.timing
+    }
+
+    /// Rebuilds a carrier from the sibling `ClauseIr` fields. A timing without
+    /// a count has nothing to relate and is dropped.
+    pub(crate) fn from_parts(count: Option<QuantityExpr>, timing: RepeatForTiming) -> Option<Self> {
+        count.map(|count| Self { count, timing })
+    }
+
+    /// Splits a carrier into the sibling fields; no carrier is `Sequential`.
+    pub(crate) fn into_parts(repeat: Option<Self>) -> (Option<QuantityExpr>, RepeatForTiming) {
+        match repeat {
+            Some(Self { count, timing }) => (Some(count), timing),
+            None => (None, RepeatForTiming::Sequential),
+        }
     }
 }
 
@@ -1386,13 +1503,14 @@ pub(crate) struct ClauseDraft<'a> {
     is_optional: bool,
     opponent_may_scope: Option<OpponentMayScope>,
     accepting_player_bindings: Vec<AcceptingPlayerBinding>,
-    repeat_for: Option<QuantityExpr>,
+    repeat_for: Option<RepeatCount>,
     player_scope: Option<PlayerFilter>,
     starting_with: Option<ControllerRef>,
     delayed_condition: Option<DelayedTriggerCondition>,
     prefix_delayed_condition: Option<DelayedTriggerCondition>,
     multi_target: Option<MultiTargetSpec>,
     where_x_expression: Option<String>,
+    where_x_player_antecedents: PlayerAntecedents,
     unless_pay: Option<UnlessPayModifier>,
     target_selection_mode: TargetSelectionMode,
     target_chooser: Option<TargetFilter>,
@@ -1400,6 +1518,7 @@ pub(crate) struct ClauseDraft<'a> {
     printed_color_choice: Option<ChoiceType>,
     declared_player_group: Option<ChosenGroupId>,
     placement: ClausePlacement,
+    head_window: Option<Duration>,
 }
 
 impl ClauseDraft<'_> {
@@ -1422,7 +1541,7 @@ impl ClauseDraft<'_> {
         self.accepting_player_bindings = v;
         self
     }
-    pub(crate) fn repeat_for(mut self, v: Option<QuantityExpr>) -> Self {
+    pub(crate) fn repeat_for(mut self, v: Option<RepeatCount>) -> Self {
         self.repeat_for = v;
         self
     }
@@ -1448,6 +1567,12 @@ impl ClauseDraft<'_> {
     }
     pub(crate) fn where_x_expression(mut self, v: Option<String>) -> Self {
         self.where_x_expression = v;
+        self
+    }
+    /// The antecedents a controller anaphor in the where-X count binds to. Set
+    /// alongside [`Self::where_x_expression`] from `ctx.player_antecedents()`.
+    pub(crate) fn where_x_player_antecedents(mut self, v: PlayerAntecedents) -> Self {
+        self.where_x_player_antecedents = v;
         self
     }
     pub(crate) fn unless_pay(mut self, v: Option<UnlessPayModifier>) -> Self {
@@ -1494,6 +1619,13 @@ impl ClauseDraft<'_> {
         self.declared_player_group = v;
         self
     }
+    /// CR 611.2a: declare the window this clause's text printed at its head (see
+    /// `ClauseIr::head_window`). The only writer is the chain chunk loop, lifting
+    /// `ParseContext::head_window` after the clause's main parse.
+    pub(crate) fn head_window(mut self, v: Option<Duration>) -> Self {
+        self.head_window = v;
+        self
+    }
 
     /// Mint the `ClauseId` + `ChainRelative` `OracleUnitSource` and commit the
     /// clause into the builder's source-ordered list.
@@ -1520,19 +1652,12 @@ impl ClauseDraft<'_> {
             // NOTE those two cards are cited for the RECOGNIZER's behaviour, not as
             // traffic through this seam: `starts_clause_text_or_conjugated` excludes
             // "its", so Dovin Baan's bare " and its ..." never splits and never
-            // reaches `push` at all. Its link is governed by
-            // `with_clause_chain_duration`'s sub-link walk, whose gate is still
-            // CARRIER-based and therefore still cannot tell an injected default from
-            // a printed window — measured, Dovin Baan, Edifice of Authority and
-            // Mythos of Vadrok carry a link stuck at `UntilEndOfTurn` under an
-            // `UntilNextTurnOf` head. Teferi's Protection is a fourth instance in a
-            // different shape and from a DIFFERENT CAUSE — carrier `None` (which
-            // would PASS the walk's gate), injected `UntilEndOfTurn` on the EMBEDDED
-            // effect duration, different recognizer — so the head window never
-            // reaches that link at all. Both are KNOWN REMAINING GAPS this seam does
-            // not fix, and the second is not closed by the injected-default class
-            // remedy alone; see the U1 section note in the 7923 integration test for
-            // the measured detail and tasks #138/#144 in `game/effects/effect.rs`.
+            // reaches `push` at all. Nor does the gate need to carry that class any
+            // more: #7962 removed the injection at the source, so this recognizer now
+            // emits the parsed `Option` verbatim (a printed `ForAsLongAs` for Braided
+            // Net, `None` for Dovin Baan / Xathrid Gorgon), and the link those cards
+            // leave unstamped is reached by `oracle_effect::assembly`'s
+            // sentence-scoped stamp instead of by this chunk-level seam.
             //
             // COUPLING: `strip_trailing_duration` finds only trailing windows, so a
             // conjunct printing a LEADING window of its own would read as unprinted.
@@ -1621,6 +1746,71 @@ impl ClauseDraft<'_> {
         let delayed_result_reader = self.delayed_condition.is_some()
             || self.prefix_delayed_condition.is_some()
             || matches!(&self.parsed.effect, Effect::CreateDelayedTrigger { .. });
+        if let Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target,
+            ..
+        } = &self.parsed.effect
+        {
+            if let Some(spec) = scan_at_word_boundaries(
+                &self.source_text.to_ascii_lowercase(),
+                crate::parser::oracle_effect::graveyard_arrival_return_spec,
+            ) {
+                // CR 400.7j + CR 608.2c: "this way" only reads the exact
+                // earlier destruction instruction in this chain.
+                let mut producers = self
+                    .builder
+                    .clauses
+                    .iter()
+                    .filter(|clause| matches!(clause.parsed.effect, Effect::DestroyAll { .. }));
+                let producer = producers.next().filter(|clause| {
+                    producers.next().is_none()
+                        && matches!(
+                            clause.disposition,
+                            ClauseDisposition::Emit {
+                                followup: None,
+                                intrinsic: None
+                            }
+                        )
+                        && matches!(clause.placement, ClausePlacement::Sibling)
+                        && clause.condition.is_none()
+                        && !clause.is_optional
+                        && clause.opponent_may_scope.is_none()
+                        && clause.repeat_for.is_none()
+                        && clause.player_scope.is_none()
+                        && clause.delayed_condition.is_none()
+                        && clause.prefix_delayed_condition.is_none()
+                        && clause.unless_pay.is_none()
+                        && self
+                            .builder
+                            .repeated_process_end
+                            .is_none_or(|end| clause.id >= end)
+                });
+                if let Some(producer) = producer.filter(|_| {
+                    *target == spec.noun
+                        && matches!(
+                            self.disposition,
+                            ClauseDisposition::Emit {
+                                followup: None,
+                                intrinsic: None
+                            }
+                        )
+                        && matches!(self.placement, ClausePlacement::Sibling)
+                        && !self.is_optional
+                        && self.opponent_may_scope.is_none()
+                        && self.repeat_for.is_none()
+                        && self.player_scope.is_none()
+                        && !delayed_result_reader
+                        && self.unless_pay.is_none()
+                }) {
+                    reads_return_result = Some((producer.id, spec));
+                    self.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
+                } else {
+                    self.parsed.effect = Effect::unimplemented("return", &self.source_text);
+                }
+            }
+        }
         if let Some(parsed_reader) = delayed_result_reader
             .then(|| {
                 crate::parser::oracle_effect::imperative::parse_returned_this_way_quantity(
@@ -1713,15 +1903,32 @@ impl ClauseDraft<'_> {
             .builder
             .slot
             .allocator()
-            .allocate_with_span(span, Some(&self.source_text))
+            .allocate_with_span(span.clone(), Some(&self.source_text))
             .expect("chain-relative clause span is contained by its chain item");
+        // Seal the history occurrence's clause envelope with the same source unit
+        // that owns its parsed instruction. Reminting an absorbed clause transports
+        // this envelope too; nested logical lineage remains on the pending record.
+        for record in &mut self.parsed.history {
+            // Rebase once per enclosing clause, preserving the same printed
+            // offsets for all fan-out copies while distinguishing later clauses.
+            if span.end_byte > span.start_byte {
+                record.occurrence.printed.enclose(
+                    &self.source_text.to_ascii_lowercase(),
+                    &self.builder.chain_text.to_ascii_lowercase(),
+                    span.start_byte,
+                );
+            }
+            record.occurrence.source = Some(source.clone());
+        }
         self.builder.next_clause_id += 1;
+        let (repeat_for, repeat_timing) = RepeatCount::into_parts(self.repeat_for);
         self.builder.clauses.push(ClauseIr {
             id,
             declares_chosen_clause,
             reads_chosen_clause,
             target_reads: TargetReadOrigin::OwnAnnouncement,
             sibling_condition: SiblingCondition::Dependent,
+            instruction_join: InstructionJoin::Own,
             reads_return_result,
             source,
             disposition: self.disposition,
@@ -1731,13 +1938,15 @@ impl ClauseDraft<'_> {
             is_optional: self.is_optional,
             opponent_may_scope: self.opponent_may_scope,
             accepting_player_bindings: self.accepting_player_bindings,
-            repeat_for: self.repeat_for,
+            repeat_for,
+            repeat_timing,
             player_scope: self.player_scope,
             starting_with: self.starting_with,
             delayed_condition: self.delayed_condition,
             prefix_delayed_condition: self.prefix_delayed_condition,
             multi_target: self.multi_target,
             where_x_expression: self.where_x_expression,
+            where_x_player_antecedents: self.where_x_player_antecedents,
             unless_pay: self.unless_pay,
             target_selection_mode: self.target_selection_mode,
             target_chooser: self.target_chooser,
@@ -1748,6 +1957,7 @@ impl ClauseDraft<'_> {
             ),
             declared_player_group: self.declared_player_group,
             placement: self.placement,
+            head_window: self.head_window,
             _sealed: (),
         });
     }

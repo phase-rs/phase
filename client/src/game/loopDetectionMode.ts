@@ -24,8 +24,6 @@ export function loopDetectionModeToQuery(mode: LoopDetectionMode): string | null
   switch (mode.type) {
     case "Off":
       return null;
-    case "On":
-      return "on";
     case "Interactive":
       return "interactive";
   }

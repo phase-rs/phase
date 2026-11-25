@@ -11,7 +11,7 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition as nom_condition;
 use super::super::oracle_nom::condition::{
-    inject_controller_you, parse_cast_using_teamwork_phrase,
+    inject_controller_you, parse_cast_using_teamwork_phrase, parse_pair_attack_predicate,
     parse_scoped_player_opponent_and_has_condition, parse_spell_target_superlative_suffix,
     parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
     DamagedThisWayRecipient,
@@ -21,9 +21,8 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
 use super::super::oracle_target::{
     parse_cost_paid_participle_object, parse_exile_cost_paid_object, parse_shared_quality,
-    parse_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
-    parse_word_bounded, parse_zone_word, peek_zone_boundary, slot_matches_anaphor, slot_zone_class,
-    AnaphorNoun, AnaphorZoneClass,
+    parse_target, parse_type_phrase_folding, parse_word_bounded, parse_zone_word,
+    peek_zone_boundary, slot_matches_anaphor, slot_zone_class, AnaphorNoun, AnaphorZoneClass,
 };
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 #[cfg(test)]
@@ -32,18 +31,23 @@ use super::sequence::parse_dig_from_among;
 use super::subject;
 use super::{parse_effect_clause_inner, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
-use crate::parser::oracle_ir::context::TriggerZoneChangeProvenance;
+use crate::parser::oracle_ir::context::{
+    SpellAnaphorBinding, TriggerConditionScope, TriggerZoneChangeProvenance,
+};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
 };
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin,
-    AttachCardinality, AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
-    CoinFlipResult, Comparator, ControllerRef, CostCategory, CountScope, DamageChannel, DigSource,
-    Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, ObjectScope, ParsedCondition,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SpentColor,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    damage_replacement_source_slot_filter, effect_references_target_player,
+    effect_stack_target_declaration_matching, payer_is_declared_target, AbilityCondition,
+    AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin, AttachCardinality,
+    AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult,
+    Comparator, ControllerRef, CostCategory, CountScope, DamageChannel, DigSource, Duration,
+    Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, LibraryPosition, ObjectScope,
+    ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    SpentColor, StaticCondition, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -51,6 +55,31 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::zones::Zone;
+
+/// CR 608.2c + CR 400.7 + CR 603.2: THE writer of a referent predicate — the only place in
+/// the parser that constructs `AbilityCondition::TargetMatchesFilter`. Every recognizer
+/// (leading router arm, suffix stripper, trigger-condition bridge) decides which referent
+/// the clause names (`subject`), whether its wording supplies the `use_lki` hint,
+/// and which characteristic it tests (`filter`). The runtime uses the target
+/// or event incarnation to choose live versus exit information (CR 608.2h).
+/// `subject_slot` selects a specific declared chain slot (`None` = the node's own referent).
+/// `negated` forms wrap the result with [`maybe_negate`].
+fn referent_condition(
+    filter: TargetFilter,
+    tense: ReferentTense,
+    subject: ObjectScope,
+    subject_slot: Option<usize>,
+) -> AbilityCondition {
+    AbilityCondition::TargetMatchesFilter {
+        filter,
+        use_lki: match tense {
+            ReferentTense::Present => false,
+            ReferentTense::Past => true,
+        },
+        subject_slot,
+        subject,
+    }
+}
 
 /// Wrap `cond` in `AbilityCondition::Not` when `negated` is true; otherwise
 /// return it unchanged. Replaces the per-leaf `negated: bool` fields that
@@ -140,6 +169,15 @@ fn type_filter_references_subtype(filter: &TypeFilter) -> bool {
 pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> {
     let lower = text.to_lowercase();
     let prefix_rest = parse_leading_conditional_prefix(&lower)?;
+    if nom_condition::parse_named_cycling_head(prefix_rest).is_ok() {
+        let (comma, _) = nom_condition::parse_named_game_cycling_condition(prefix_rest).ok()?;
+        let comma = TextPair::new(text, &lower).original_remainder(comma)?;
+        let guard = text.strip_suffix(comma)?; // allow-noncombinator: split at the TextPair-mapped comma
+        let (body, _) = tag::<_, _, OracleError<'_>>(",").parse(comma).ok()?;
+        let body = body.trim();
+        return (!body.is_empty()).then(|| (guard.trim().to_owned(), body.to_owned()));
+    }
+
     let condition_start_idx = lower.len() - prefix_rest.len();
 
     let mut paren_depth = 0u32;
@@ -313,9 +351,9 @@ pub(crate) fn strip_leading_general_conditional(
     (routed.map(|(condition, _)| condition), body)
 }
 
-/// Which recognizer family produced the gate a leading general conditional
-/// stripped, for a caller that must apply a family-specific binding guard to the
-/// clause it gates.
+/// Which recognizer family produced the gate a leading general conditional or a
+/// trailing "if" rider stripped, for a caller that must apply a family-specific
+/// binding guard to the clause it gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LeadingConditionRoute {
     /// Any recognizer this route's binding guard does not cover (sibling
@@ -329,6 +367,13 @@ pub(crate) enum LeadingConditionRoute {
     /// the gated instruction announces no target of its own. Also names an
     /// `And` / `Or` gate with such a member ([`LeadingConditionRoute::merge`]).
     TargetPtThreshold,
+    /// CR 608.2c: `bind_target_controller_condition` — a trailing gate on the
+    /// controller of the gated chain root's own single target (Skulking Killer,
+    /// Unified Will). On a false gate the engine runs only the gated root's
+    /// DIRECT sub, and only some shapes of it, so the assembled chain must
+    /// keep the gate readable and everything after the root reachable: see
+    /// `keep_own_target_gate_readable`.
+    OwnTargetController,
 }
 
 impl LeadingConditionRoute {
@@ -339,7 +384,14 @@ impl LeadingConditionRoute {
     pub(super) fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::General, Self::General) => Self::General,
+            // A P/T threshold member keeps the whole gate on that route, whose
+            // guard refuses an instruction that announces its own target. The
+            // own-target-controller check (`keep_own_target_gate_readable`)
+            // follows the suffix's own route, not this merged one.
             (Self::TargetPtThreshold, _) | (_, Self::TargetPtThreshold) => Self::TargetPtThreshold,
+            (Self::OwnTargetController, _) | (_, Self::OwnTargetController) => {
+                Self::OwnTargetController
+            }
         }
     }
 }
@@ -688,11 +740,12 @@ pub(super) fn strip_target_declaring_chosen_type_conditional(
     // source's chosen creature type.
     typed.properties.push(FilterProp::IsChosenCreatureType);
     Some((
-        AbilityCondition::TargetMatchesFilter {
-            filter: TargetFilter::Typed(typed),
-            use_lki: false,
-            subject_slot: Some(0),
-        },
+        referent_condition(
+            TargetFilter::Typed(typed),
+            ReferentTense::Present,
+            ObjectScope::Target,
+            Some(0),
+        ),
         rewritten_body,
     ))
 }
@@ -716,15 +769,11 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         }
     }
 
-    if let Some((_, rest)) = nom_on_lower(text, &lower, |i| {
-        value((), tag("if the gift wasn't promised, ")).parse(i)
-    }) {
-        return (
-            Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::additional_cost_paid_any()),
-            }),
-            rest.to_string(),
-        );
+    let gift = nom_on_lower(text, &lower, |input| {
+        terminated(preceded(tag("if "), parse_gift_promise), tag(", ")).parse(input)
+    });
+    if let Some((true, rest)) = gift {
+        return (Some(gift_promise_condition(true)), rest.to_string());
     }
 
     if alt((tag::<_, _, OracleError<'_>>("if "), tag("then if ")))
@@ -760,13 +809,14 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
             Some(AbilityCondition::And {
                 conditions: vec![
                     AbilityCondition::additional_cost_paid_any(),
-                    AbilityCondition::TargetMatchesFilter {
-                        filter: TypedFilter::creature()
+                    referent_condition(
+                        TypedFilter::creature()
                             .properties(vec![FilterProp::IsChosenCreatureType])
                             .into(),
-                        use_lki: false,
-                        subject_slot: None,
-                    },
+                        ReferentTense::Present,
+                        ObjectScope::Target,
+                        None,
+                    ),
                 ],
             }),
             rest.to_string(),
@@ -775,13 +825,14 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
 
     let mut alternative_mana_cost_conditional = false;
 
-    let body = if let Some(((), rest)) = nom_on_lower(text, &lower, |input| {
+    let body = if let Some((false, rest)) = gift {
+        Some(rest.to_string())
+    } else if let Some(((), rest)) = nom_on_lower(text, &lower, |input| {
         value(
             (),
             alt((
                 tag("if this spell's additional cost was paid, "),
                 tag("if evidence was collected, "),
-                tag("if the gift was promised, "),
             )),
         )
         .parse(input)
@@ -967,6 +1018,8 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
                     (stripped, AbilityCondition::AdditionalCostPaidInstead)
                 } else if alternative_mana_cost_conditional {
                     (body, AbilityCondition::AlternativeManaCostPaid)
+                } else if gift.is_some() {
+                    (body, gift_promise_condition(false))
                 } else {
                     (body, AbilityCondition::additional_cost_paid_any())
                 }
@@ -1070,7 +1123,8 @@ pub(super) fn strip_if_you_do_conditional_with_head(
     // `parse_zone_changed_this_way_clause` combinator in `oracle_nom::condition`.
     // The combinator covers past + present tense, single-word imperatives
     // (destroyed/exiled/sacrificed/returned/discarded/milled/countered) AND
-    // the multi-word "put onto the battlefield" verb, with subtype filters
+    // the multi-word destination-bound "put onto the battlefield" /
+    // "put into a graveyard" / "put into exile" verbs, with subtype filters
     // (Aura/Equipment/...) via `parse_type_phrase_folding`. Replaces the prior
     // hand-rolled past-tense / single-word / top-level-type-only matcher.
     if let Ok((rest, connector)) = alt((
@@ -1601,25 +1655,9 @@ pub(super) fn strip_cast_from_zone_conditional(text: &str) -> (Option<AbilityCon
     (None, text.to_string())
 }
 
-fn type_filter_to_core_type(tf: &TypeFilter) -> Option<CoreType> {
-    match tf {
-        TypeFilter::Creature => Some(CoreType::Creature),
-        TypeFilter::Land => Some(CoreType::Land),
-        TypeFilter::Artifact => Some(CoreType::Artifact),
-        TypeFilter::Enchantment => Some(CoreType::Enchantment),
-        TypeFilter::Instant => Some(CoreType::Instant),
-        TypeFilter::Sorcery => Some(CoreType::Sorcery),
-        TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
-        TypeFilter::Battle => Some(CoreType::Battle),
-        // CR 308.1: Kindred maps to its core type.
-        TypeFilter::Kindred => Some(CoreType::Kindred),
-        _ => None,
-    }
-}
-
-/// Inverse of [`type_filter_to_core_type`]: map a `CoreType` to the `TypeFilter`
+/// Inverse of `nom_condition::type_filter_to_core_type`: map a `CoreType` to the `TypeFilter`
 /// the engine uses to gate a present-target filter. Total over the card-type
-/// `CoreType` set; mirrors the explicit arms of `type_filter_to_core_type`.
+/// `CoreType` set; mirrors the explicit arms of the shared conversion.
 pub(super) fn core_type_to_type_filter(core: CoreType) -> TypeFilter {
     match core {
         CoreType::Creature => TypeFilter::Creature,
@@ -1680,14 +1718,15 @@ pub(super) fn card_type_condition_as_target_match(
     let [core] = card_types.as_slice() else {
         return None;
     };
-    Some(AbilityCondition::TargetMatchesFilter {
-        filter: TargetFilter::Typed(TypedFilter::new(core_type_to_type_filter(*core))),
+    Some(referent_condition(
         // CR 400.7: the damage target may already be dying/changing zones when the
         // riders evaluate; use last-known information so a creature that is being
         // destroyed this way still matches.
-        use_lki: true,
-        subject_slot: None,
-    })
+        TargetFilter::Typed(TypedFilter::new(core_type_to_type_filter(*core))),
+        ReferentTense::Past,
+        ObjectScope::Target,
+        None,
+    ))
 }
 
 /// CR 614.1c + CR 614.12: an anaphoric "if it's a <type>" gate on an "enters with …
@@ -1796,7 +1835,7 @@ fn parse_if_revealed_card_type_conditional(text: &str) -> Option<(AbilityConditi
     })?;
     let core_types: Vec<CoreType> = type_filters
         .iter()
-        .filter_map(type_filter_to_core_type)
+        .filter_map(nom_condition::type_filter_to_core_type)
         .collect();
     if core_types.is_empty() {
         return None;
@@ -1806,6 +1845,46 @@ fn parse_if_revealed_card_type_conditional(text: &str) -> Option<(AbilityConditi
             card_types: core_types,
             additional_filter,
             subtype_filter: None,
+        },
+        remainder_after_optional_comma(remainder).to_string(),
+    ))
+}
+
+/// CR 701.20a + CR 608.2c: `"If all cards revealed this way are <types> cards,
+/// …"` — gates a sub_ability on EVERY card the preceding reveal produced having
+/// the type (Game Preserve). The revealed set is the chain's tracked set, so
+/// the gate is "the members matching the type number all of the members"; an
+/// empty reveal satisfies it vacuously and moves nothing.
+fn parse_if_all_revealed_cards_type_conditional(text: &str) -> Option<(AbilityCondition, String)> {
+    let lower = text.to_lowercase();
+    let (type_filters, remainder) = nom_on_lower(text, &lower, |input| {
+        let (rest, _) = (
+            tag::<_, _, OracleError<'_>>("if all cards revealed this way are "),
+            opt(alt((tag("an "), tag("a ")))),
+        )
+            .parse(input)?;
+        let (rest, type_filters) = nom_quantity::parse_type_filter_list(rest)?;
+        let (rest, _) = alt((tag::<_, _, OracleError<'_>>(" cards"), tag(" card"))).parse(rest)?;
+        Ok((rest, type_filters))
+    })?;
+    let type_filter = match type_filters.as_slice() {
+        [] => return None,
+        [single] => single.clone(),
+        many => TypeFilter::AnyOf(many.to_vec()),
+    };
+    Some((
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::new(type_filter))),
+                    caused_by: None,
+                    destination: None,
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
         },
         remainder_after_optional_comma(remainder).to_string(),
     ))
@@ -1827,7 +1906,7 @@ fn parse_if_exiled_card_type_conditional(text: &str) -> Option<(AbilityCondition
     })?;
     let core_types: Vec<CoreType> = type_filters
         .iter()
-        .filter_map(type_filter_to_core_type)
+        .filter_map(nom_condition::type_filter_to_core_type)
         .collect();
     if core_types.is_empty() {
         return None;
@@ -1898,6 +1977,23 @@ fn parse_revealed_card_gate_suffix<'a>(
     {
         let leading_ws = after_type.len() - after_type.trim_start().len();
         return (&after_type[leading_ws + consumed..], Some(prop));
+    }
+    // CR 208.1 + CR 608.2c: a power/toughness bound on the revealed or
+    // just-moved card — "creature card with power less than or equal to
+    // Grenzo's power" (Grenzo, Dungeon Warden) — carried as the same
+    // `PtComparison` property the filter grammar already produces, so the
+    // threshold can be a dynamic characteristic of the ability's source. Only
+    // the printed "with …" suffix form is claimed here.
+    let trimmed = after_type.trim_start();
+    if tag::<_, _, OracleError<'_>>("with ").parse(trimmed).is_ok() {
+        if let Ok((rest, prop)) = crate::parser::oracle_nom::filter::parse_pt_comparison(trimmed) {
+            if matches!(
+                prop,
+                FilterProp::PtComparison { .. } | FilterProp::AnyOf { .. }
+            ) {
+                return (rest, Some(prop));
+            }
+        }
     }
     // CR 205.3m + CR 608.2c: postnominal shared-quality relative clause on a
     // revealed/exiled card gate — "creature card that shares a creature type
@@ -2007,7 +2103,7 @@ fn parse_its_a_card_type_gate_body<'a>(
         }
     }
     let type_word = type_str.rsplit(' ').next().unwrap_or(type_str);
-    let capitalized = format!("{}{}", &type_word[..1].to_uppercase(), &type_word[1..]);
+    let capitalized = format!("{}{}", type_word[..1].to_uppercase(), &type_word[1..]);
     // CR 608.2c: "permanent" is not a CoreType (it spans CR 110.1's permanent card
     // types). Build the condition via the existing parse_type_phrase_folding building block —
     // "permanent card" → TargetFilter::Typed(TypeFilter::Permanent) — and gate on it
@@ -2034,11 +2130,7 @@ fn parse_its_a_card_type_gate_body<'a>(
             }
             return Some((
                 maybe_negate(
-                    AbilityCondition::TargetMatchesFilter {
-                        filter,
-                        use_lki: false,
-                        subject_slot: None,
-                    },
+                    referent_condition(filter, ReferentTense::Present, ObjectScope::Target, None),
                     negated,
                 ),
                 after_type,
@@ -2205,6 +2297,9 @@ pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityConditio
     if let Some((condition, remainder)) = parse_if_revealed_card_type_conditional(text) {
         return (Some(condition), remainder);
     }
+    if let Some((condition, remainder)) = parse_if_all_revealed_cards_type_conditional(text) {
+        return (Some(condition), remainder);
+    }
     if let Some((condition, remainder)) = parse_if_exiled_card_type_conditional(text) {
         return (Some(condition), remainder);
     }
@@ -2295,17 +2390,16 @@ fn parse_its_a_type_condition(
 /// gating condition of an "instead" override. Composes three orthogonal axes:
 ///
 ///   - subject: `it`, `that creature`, `that permanent`, `that card`
-///   - tense: present (`is`/`'s`) → current state, past (`was`) → LKI
+///   - tense: present (`is`/`'s`) vs. past (`was`, sets `use_lki`)
 ///   - polarity: positive (`is`/`was`) vs. negative (`isn't`/`wasn't`/`is not`/`was not`)
 ///
-/// Past-tense forms set `use_lki: true` per CR 400.7 so the runtime evaluates
-/// the LKI snapshot rather than the current object state (matters when the
-/// parent sub_ability already moved the target before the check runs).
+/// The past-tense flag is a hint for event-record and legacy lookup paths;
+/// a pinned referent reads live or exit data by incarnation (CR 608.2h).
 fn parse_target_color_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
     let (rest, _) = parse_target_anaphoric_subject(input)?;
-    let (rest, (negated, use_lki)) = parse_target_anaphoric_tense_polarity(rest)?;
+    let (rest, (polarity, tense)) = parse_target_anaphoric_tense_polarity(rest)?;
     let (rest, _) = opt(tag("a ")).parse(rest)?;
     let (rest, first_color) = nom_primitives::parse_color(rest)?;
     // CR 105.2: Disjunctive color condition — "white or blue" etc.
@@ -2333,14 +2427,7 @@ fn parse_target_color_condition(
     };
     Ok((
         rest,
-        maybe_negate(
-            AbilityCondition::TargetMatchesFilter {
-                filter,
-                use_lki,
-                subject_slot: None,
-            },
-            negated,
-        ),
+        lower_referent_filter(filter, polarity, tense, ObjectScope::Target),
     ))
 }
 
@@ -2470,13 +2557,13 @@ fn parse_target_type_membership_condition<'a>(
         value(TargetAnaphorSubject::PronounIt, tag("it")),
     ))
     .parse(input)?;
-    let (rest, (negated, use_lki)) = parse_target_anaphoric_tense_polarity(rest)?;
+    let (rest, (polarity, tense)) = parse_target_anaphoric_tense_polarity(rest)?;
     match &subject {
         TargetAnaphorSubject::Demonstrative(noun, route) => {
             // CR 608.2c + CR 601.2c + CR 115.1 + CR 400.7: a DIVERGENT noun ("that
             // token", "that artifact", "that land", …) is claimed by this
-            // target-anaphor route only under a PRESENT-tense copula (`use_lki ==
-            // false`) whose enclosing effect chain declared an object target that
+            // target-anaphor route only under a PRESENT-tense copula whose
+            // enclosing effect chain declared an object target that
             // POSITIVELY names the noun. The declared target is the CR 601.2c announced
             // antecedent the CR 608.2c anaphor binds to.
             //
@@ -2490,7 +2577,7 @@ fn parse_target_type_membership_condition<'a>(
             if matches!(
                 route,
                 DemonstrativeRoute::TargetOnPresentTenseDeclaredTargetAgreement
-            ) && (use_lki
+            ) && (matches!(tense, ReferentTense::Past)
                 || !declared_object_target.is_some_and(|slot| {
                     slot_matches_anaphor(noun, AnaphorZoneClass::BattlefieldPermanent, slot)
                 }))
@@ -2507,8 +2594,7 @@ fn parse_target_type_membership_condition<'a>(
             // 1. A declared object target is present.
             // 2. The target slot is an object, not a player (CR 601.2c).
             // 3. The target slot is a battlefield permanent (CR 109.2).
-            // 4. The copula is present-tense (`!use_lki`) because active resolution
-            //    tests the permanent's current characteristics.
+            // 4. The copula is present-tense; the past form is not routed here.
             // 5. The condition text does not contain "card" or "cards" (CR 109.2 —
             //    descriptions that include the word "card" refer to non-battlefield
             //    objects, whereas descriptions without "card", "spell", etc. mean a
@@ -2516,7 +2602,7 @@ fn parse_target_type_membership_condition<'a>(
             let Some(slot) = declared_object_target else {
                 return Err(oracle_err(input));
             };
-            if use_lki
+            if matches!(tense, ReferentTense::Past)
                 || slot.is_player_scope()
                 || slot_zone_class(slot) != AnaphorZoneClass::BattlefieldPermanent
                 || condition_remainder_contains_card_word(rest)
@@ -2548,14 +2634,7 @@ fn parse_target_type_membership_condition<'a>(
     }
     Ok((
         remainder,
-        maybe_negate(
-            AbilityCondition::TargetMatchesFilter {
-                filter,
-                use_lki,
-                subject_slot: None,
-            },
-            negated,
-        ),
+        lower_referent_filter(filter, polarity, tense, ObjectScope::Target),
     ))
 }
 
@@ -2723,36 +2802,57 @@ fn parse_target_anaphoric_subject(
     .parse(input)
 }
 
-/// Consume the verb portion (tense + polarity) following a target-anaphoric
-/// subject. Returns `(negated, use_lki)`:
+#[derive(Clone, Copy)]
+enum ReferentPolarity {
+    Affirmative,
+    Negative,
+}
+
+#[derive(Clone, Copy)]
+enum ReferentTense {
+    Present,
+    Past,
+}
+
+/// Consume the verb portion (polarity + tense) following a target-anaphoric subject.
 ///
 ///   - `is` / `'s` → present, positive
 ///   - `is not` / `'s not` / `isn't` → present, negated
 ///   - `was` → past, positive
 ///   - `was not` / `wasn't` → past, negated
 ///
-/// Past-tense forms (CR 400.7) require LKI evaluation. Listed longest-first
-/// so `is not` wins over `is`.
+/// Past-tense forms set the AST's LKI hint. Listed longest-first so
+/// `is not` wins over `is`.
 fn parse_target_anaphoric_tense_polarity(
     input: &str,
-) -> super::super::oracle_nom::error::OracleResult<'_, (bool, bool)> {
+) -> OracleResult<'_, (ReferentPolarity, ReferentTense)> {
     alt((
         // Negated past — must precede positive past
-        value((true, true), alt((tag(" wasn't "), tag(" was not ")))),
+        value(
+            (ReferentPolarity::Negative, ReferentTense::Past),
+            alt((tag(" wasn't "), tag(" was not "))),
+        ),
         // Positive past
-        value((false, true), tag(" was ")),
-        // CR 400.7: past-tense possession ("it had mana value 3 or less", "that
-        // creature had power 2 or less") → LKI snapshot. None of the recognized
-        // reflexive predicates use a negated " hadn't "/" didn't have " form, so
-        // only the positive arm is supplied.
-        value((false, true), tag(" had ")),
+        value(
+            (ReferentPolarity::Affirmative, ReferentTense::Past),
+            tag(" was "),
+        ),
+        // Past-tense possession ("it had mana value 3 or less", "that creature
+        // had power 2 or less"). This vocabulary has no negated form.
+        value(
+            (ReferentPolarity::Affirmative, ReferentTense::Past),
+            tag(" had "),
+        ),
         // Negated present — must precede positive present
         value(
-            (true, false),
+            (ReferentPolarity::Negative, ReferentTense::Present),
             alt((tag(" isn't "), tag("'s not "), tag(" is not "))),
         ),
         // Positive present
-        value((false, false), alt((tag("'s "), tag(" is ")))),
+        value(
+            (ReferentPolarity::Affirmative, ReferentTense::Present),
+            alt((tag("'s "), tag(" is "))),
+        ),
     ))
     .parse(input)
 }
@@ -2784,14 +2884,15 @@ fn parse_target_attacked_this_turn_condition(
     Ok((
         rest,
         maybe_negate(
-            AbilityCondition::TargetMatchesFilter {
-                filter: TargetFilter::Typed(
+            referent_condition(
+                TargetFilter::Typed(
                     TypedFilter::creature()
                         .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
                 ),
-                use_lki: false,
-                subject_slot: None,
-            },
+                ReferentTense::Present,
+                ObjectScope::Target,
+                None,
+            ),
             negated,
         ),
     ))
@@ -2863,11 +2964,7 @@ fn parse_target_entered_this_turn_condition(input: &str) -> OracleResult<'_, Abi
     }
     Ok((
         rest,
-        AbilityCondition::TargetMatchesFilter {
-            filter,
-            use_lki: false,
-            subject_slot: None,
-        },
+        referent_condition(filter, ReferentTense::Present, ObjectScope::Target, None),
     ))
 }
 
@@ -2920,20 +3017,13 @@ fn parse_reflexive_object_property(input: &str) -> OracleResult<'_, FilterProp> 
             tag("dealt damage this turn"),
         ),
         // CR 110.5: tap status is a permanent's status (Brackish Blunder "if it
-        // was tapped"). The past-tense ("was tapped") form sets use_lki, reading
-        // the LKI snapshot's captured exit-time tap state — the antecedent (a
-        // bounced/destroyed permanent) has left the battlefield before the rider
-        // resolves (CR 110.5d: cards not on the battlefield are neither tapped nor
-        // untapped, so the live object cannot answer). The present-tense ("is
-        // tapped") form reads live state. Must precede `attacking`/`blocking`:
-        // distinct word, no shared prefix, but kept adjacent to the status leaves.
+        // was tapped"). An off-battlefield incarnation has no live tap status
+        // (CR 110.5d), so the resolving rider needs its exit snapshot (CR 608.2h).
         value(FilterProp::Tapped, tag("tapped")),
         // CR 110.5: untapped is the symmetric tap-status sibling ("if it was
         // untapped"). "untapped" is a distinct lexeme, not "not tapped" — it
         // shares no prefix with "tapped" (begins with "un"), so leaf order vs
-        // `tapped` is immaterial. Tense/polarity compose for free: past-tense
-        // "was untapped" sets use_lki (reads the snapshot), present-tense "is
-        // untapped" reads live state, and "isn't untapped" wraps in `Not`.
+        // `tapped` is immaterial. The verb parser supplies tense and polarity.
         value(FilterProp::Untapped, tag("untapped")),
         // CR 508.1b: combat status (Wisecrack "is attacking").
         value(FilterProp::Attacking { defender: None }, tag("attacking")),
@@ -2961,6 +3051,526 @@ fn parse_reflexive_object_property(input: &str) -> OracleResult<'_, FilterProp> 
     .parse(input)
 }
 
+/// CR 608.2c + CR 400.7: which spelling of a referent clause a recognizer claims. The owner
+/// combinator [`parse_referent_predicate`] composes one grammar from three orthogonal axes —
+/// the subject (`it`, `that creature|permanent|card`, possessive `that X's <stat>` /
+/// `X has <stat>`, bare possessive `its <stat>`), the tense/polarity, and the predicate leaf —
+/// and a surface selects which subject × form pairings a given recognizer is licensed to
+/// claim, so each entry point keeps exactly the claim set it had before the owner existed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReferentSurface {
+    /// `it | that creature|permanent|card` + tense + a reflexive leaf ("it was dealt damage
+    /// this turn", "it had mana value 3 or less").
+    Reflexive,
+    /// `that creature|permanent|card` + "'s <stat> is <threshold>" / " has <stat> <threshold>"
+    /// (demonstrative only: bare "it" stays source-scoped).
+    DemonstrativeStat,
+    /// "its mana value was N or less|greater" / "it has mana value N or less|greater".
+    ManaValueFixed,
+    /// "its mana value is <comparator> <quantity>".
+    ManaValueDynamic,
+    /// `it['s]|is [not] <supertype>` / `that creature|permanent|card is [not] <supertype>`.
+    Supertype,
+    /// "that land was nonbasic".
+    NonbasicLand,
+    /// Bare possessive "its power|toughness is <threshold>".
+    ItsStat,
+    /// `that spell|permanent` + "'s mana value was N or less|greater" / " has mana value N or
+    /// less|greater". The noun names the referent (see [`ReferentNoun`]). The present-tense
+    /// possessive "that spell's mana value is N or greater" keeps its quantity route
+    /// (`parse_inner_condition`; Prismari Pianist, Zaffai), so this surface does not claim it.
+    NounManaValue,
+}
+
+/// The noun of a demonstrative referent whose binding depends on the clause context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReferentNoun {
+    /// "that spell": a declared spell target (Reject Imperfection) or the spell the trigger
+    /// event names (Prismari Apprentice, Herald of Ilharg).
+    Spell,
+    /// "that permanent": the earlier instruction's declared target.
+    Object,
+}
+
+/// The characteristic a referent clause tests.
+enum ReferentPredicate {
+    Filter(TargetFilter),
+    /// A power/toughness comparison. The threshold is a fixed number, or `X` written as the
+    /// variable quantity.
+    Stat {
+        stat: PtStat,
+        comparator: Comparator,
+        threshold: QuantityExpr,
+    },
+}
+
+/// A parsed referent clause. The referent scope is the caller's decision.
+struct ReferentClause {
+    polarity: ReferentPolarity,
+    tense: ReferentTense,
+    predicate: ReferentPredicate,
+    /// The demonstrative noun, for the surfaces whose referent binding depends on it.
+    noun: Option<ReferentNoun>,
+}
+
+impl ReferentClause {
+    fn filter(filter: TargetFilter, polarity: ReferentPolarity, tense: ReferentTense) -> Self {
+        Self {
+            polarity,
+            tense,
+            predicate: ReferentPredicate::Filter(filter),
+            noun: None,
+        }
+    }
+}
+
+/// CR 202.3: "N or less" / "N or greater" for a mana-value threshold (only these two
+/// comparators exist in the printed vocabulary).
+fn parse_mana_value_or_threshold(input: &str) -> OracleResult<'_, (Comparator, i32)> {
+    let (rest, n) = nom_primitives::parse_number(input)?;
+    let (rest, _) = tag(" or ").parse(rest)?;
+    let (rest, comparator) = alt((
+        value(Comparator::LE, tag("less")),
+        value(Comparator::GE, tag("greater")),
+    ))
+    .parse(rest)?;
+    Ok((rest, (comparator, n as i32)))
+}
+
+fn mana_value_filter(comparator: Comparator, value: QuantityExpr) -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::default().properties(vec![FilterProp::Cmc { comparator, value }]),
+    )
+}
+
+fn stat_threshold_filter(
+    stat: PtStat,
+    comparator: Comparator,
+    threshold: QuantityExpr,
+) -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::default().properties(vec![FilterProp::PtComparison {
+            stat,
+            scope: PtValueScope::Current,
+            comparator,
+            value: threshold,
+        }]),
+    )
+}
+
+/// CR 608.2c: THE owner of the referent-predicate grammar (see [`ReferentSurface`]). Input is
+/// the lowercase clause text without its leading "if"; the remainder is returned so a
+/// clause-boundary splitter can decide what a trailing remainder means.
+fn parse_referent_predicate(
+    input: &str,
+    surface: ReferentSurface,
+) -> OracleResult<'_, ReferentClause> {
+    match surface {
+        ReferentSurface::Reflexive => {
+            let (rest, _) = parse_target_anaphoric_subject(input)?;
+            let (rest, (polarity, tense)) = parse_target_anaphoric_tense_polarity(rest)?;
+            let (rest, prop) = parse_reflexive_object_property(rest)?;
+            Ok((
+                rest,
+                ReferentClause::filter(
+                    TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
+                    polarity,
+                    tense,
+                ),
+            ))
+        }
+        ReferentSurface::DemonstrativeStat => {
+            let (rest, _) = parse_target_demonstrative_subject(input)?;
+            let (rest, stat) = alt((
+                // "that creature's power is N…" (existing possessive form).
+                delimited(tag("'s "), parse_reflexive_pt_stat, tag("is ")),
+                // CR 208.1 + CR 608.2c + CR 608.2h: present-tense possession "that
+                // creature has power N or greater" — the earlier instruction's target.
+                preceded(tag(" has "), parse_reflexive_pt_stat),
+            ))
+            .parse(rest)?;
+            let (rest, (comparator, value)) = parse_threshold_with_exactly(rest)?;
+            Ok((
+                rest,
+                ReferentClause {
+                    polarity: ReferentPolarity::Affirmative,
+                    tense: ReferentTense::Present,
+                    predicate: ReferentPredicate::Stat {
+                        stat,
+                        comparator,
+                        threshold: QuantityExpr::Fixed { value },
+                    },
+                    noun: None,
+                },
+            ))
+        }
+        ReferentSurface::ManaValueFixed => {
+            let (rest, (tense, (comparator, threshold))) = (
+                alt((
+                    value(ReferentTense::Past, tag("its mana value was ")),
+                    value(ReferentTense::Present, tag("it has mana value ")),
+                )),
+                parse_mana_value_or_threshold,
+            )
+                .parse(input)?;
+            Ok((
+                rest,
+                ReferentClause::filter(
+                    mana_value_filter(comparator, QuantityExpr::Fixed { value: threshold }),
+                    ReferentPolarity::Affirmative,
+                    tense,
+                ),
+            ))
+        }
+        ReferentSurface::ManaValueDynamic => {
+            let (rest, _) = tag("its mana value is ").parse(input)?;
+            let (comparator, qty) =
+                parse_dynamic_mana_value_threshold(rest).ok_or_else(|| oracle_err(input))?;
+            Ok((
+                "",
+                ReferentClause::filter(
+                    mana_value_filter(comparator, qty),
+                    ReferentPolarity::Affirmative,
+                    ReferentTense::Present,
+                ),
+            ))
+        }
+        ReferentSurface::NounManaValue => {
+            let (rest, noun) = preceded(
+                tag("that "),
+                alt((
+                    value(ReferentNoun::Spell, tag("spell")),
+                    value(ReferentNoun::Object, tag("permanent")),
+                )),
+            )
+            .parse(input)?;
+            // Preserve "was"/"has" in the AST hint. CR 608.2h chooses the
+            // actual read by the pinned object's presence in its expected zone.
+            let (rest, (tense, (comparator, threshold))) = (
+                alt((
+                    value(ReferentTense::Past, tag("'s mana value was ")),
+                    value(ReferentTense::Present, tag(" has mana value ")),
+                )),
+                parse_mana_value_or_threshold,
+            )
+                .parse(rest)?;
+            Ok((
+                rest,
+                ReferentClause {
+                    polarity: ReferentPolarity::Affirmative,
+                    tense,
+                    predicate: ReferentPredicate::Filter(mana_value_filter(
+                        comparator,
+                        QuantityExpr::Fixed { value: threshold },
+                    )),
+                    noun: Some(noun),
+                },
+            ))
+        }
+        ReferentSurface::Supertype => {
+            // CR 205.4: Coiling Rebirth uses a demonstrative subject in the routed
+            // condition; the specialized suffix accepts only "it".
+            let (rest, polarity) = alt((
+                parse_it_supertype_copula,
+                preceded(
+                    alt((
+                        tag("that creature"),
+                        tag("that permanent"),
+                        tag("that card"),
+                    )),
+                    alt((
+                        value(
+                            ReferentPolarity::Negative,
+                            alt((tag(" is not "), tag(" isn't "))),
+                        ),
+                        value(ReferentPolarity::Affirmative, tag(" is ")),
+                    )),
+                ),
+            ))
+            .parse(input)?;
+            parse_supertype_predicate(rest, polarity)
+        }
+        ReferentSurface::NonbasicLand => {
+            // CR 205.4 + CR 608.2h: Molten Rain's "was nonbasic" sets the LKI
+            // hint. If the land survives destruction, its current pin reads live.
+            let (rest, _) = tag("that land was nonbasic").parse(input)?;
+            Ok((
+                rest,
+                ReferentClause::filter(
+                    TargetFilter::Typed(TypedFilter::land().properties(vec![
+                        FilterProp::NotSupertype {
+                            value: Supertype::Basic,
+                        },
+                    ])),
+                    ReferentPolarity::Affirmative,
+                    ReferentTense::Past,
+                ),
+            ))
+        }
+        ReferentSurface::ItsStat => {
+            let (rest, stat) =
+                delimited(tag("its "), parse_reflexive_pt_stat, tag("is ")).parse(input)?;
+            let threshold = rest.trim_end_matches('.');
+            let (comparator, value) =
+                parse_comparison_suffix(threshold).ok_or_else(|| oracle_err(input))?;
+            let threshold = if tag::<_, _, OracleError<'_>>("x").parse(threshold).is_ok() {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                }
+            } else {
+                QuantityExpr::Fixed { value }
+            };
+            Ok((
+                "",
+                ReferentClause {
+                    polarity: ReferentPolarity::Affirmative,
+                    tense: ReferentTense::Present,
+                    predicate: ReferentPredicate::Stat {
+                        stat,
+                        comparator,
+                        threshold,
+                    },
+                    noun: None,
+                },
+            ))
+        }
+    }
+}
+
+/// Who a bare possessive "its <stat>" names, bound by [`bind_possessive_it`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ItsReferent {
+    /// The gated instruction's one declared object target (Ent's Fury).
+    Target,
+    /// The ability's own source (Amalia Benavides Aguirre, Lily Bowen).
+    Source,
+    /// The catch-all: the object a cost or trigger event supplied (Tribute to the World
+    /// Tree's entering creature).
+    CostPaid,
+}
+
+/// CR 115.1 + CR 608.2c + CR 208.1: when the gated instruction declares one object target,
+/// "its" refers to that target (Ent's Fury). Otherwise the existing source vs. cost/trigger
+/// referent rule applies (Amalia, Lily Bowen, Tribute to the World Tree). The instruction is
+/// parsed without its condition on a throwaway context; a multi-target or non-object
+/// instruction is not enough evidence to bind the anaphor to the first target slot.
+fn bind_possessive_it(ctx: &ParseContext, gated_instruction: &str) -> ItsReferent {
+    let has_single_object_target =
+        effect_target_filter(gated_instruction, ctx).is_some_and(|filter| {
+            !filter.is_context_ref() && super::lower::target_filter_is_single_object_target(&filter)
+        });
+    if has_single_object_target {
+        ItsReferent::Target
+    } else {
+        match ctx.subject {
+            Some(TargetFilter::Controller)
+            | Some(TargetFilter::Player)
+            | Some(TargetFilter::Any) => ItsReferent::Source,
+            None
+            | Some(
+                TargetFilter::None
+                | TargetFilter::SourceController
+                | TargetFilter::ControllerAndControlledPermanents { .. }
+                | TargetFilter::Opponent
+                | TargetFilter::SelfRef
+                | TargetFilter::GrantingObject { .. }
+                | TargetFilter::SourceOrPaired
+                | TargetFilter::Typed(_)
+                | TargetFilter::Not { .. }
+                | TargetFilter::Or { .. }
+                | TargetFilter::And { .. }
+                | TargetFilter::StackAbility { .. }
+                | TargetFilter::StackSpell
+                | TargetFilter::CastingSpell
+                | TargetFilter::SpecificObject { .. }
+                | TargetFilter::SpecificPlayer { .. }
+                | TargetFilter::PlayerWhoChoseLabel { .. }
+                | TargetFilter::PlayerMatching { .. }
+                | TargetFilter::Neighbor { .. }
+                | TargetFilter::ScopedPlayer
+                | TargetFilter::AttachedTo
+                | TargetFilter::LastCreated
+                | TargetFilter::LastRevealed
+                | TargetFilter::LastZoneChanged
+                | TargetFilter::CostPaidObject
+                | TargetFilter::AmassedArmy
+                | TargetFilter::ChosenCard
+                | TargetFilter::TrackedSet { .. }
+                | TargetFilter::TrackedSetFiltered { .. }
+                | TargetFilter::ChoiceAssignment { .. }
+                | TargetFilter::ExiledBySource
+                | TargetFilter::ExiledCardByIndex { .. }
+                | TargetFilter::TriggeringSpellController
+                | TargetFilter::TriggeringSpellOwner
+                | TargetFilter::TriggeringPlayer
+                | TargetFilter::TriggeringSource
+                | TargetFilter::AttackedPlayerOrPlaneswalker
+                | TargetFilter::EventTarget
+                | TargetFilter::TriggeringSourceController
+                | TargetFilter::EventTargetController
+                | TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::DeclaredPlayer { .. }
+                | TargetFilter::ParentTargetController
+                | TargetFilter::ParentTargetOwner
+                | TargetFilter::AffectedObjectOwner
+                | TargetFilter::SourceChosenPlayer
+                | TargetFilter::OriginalController
+                | TargetFilter::OriginalSource
+                | TargetFilter::PostReplacementSourceController
+                | TargetFilter::PostReplacementDamageSource
+                | TargetFilter::PostReplacementDamageTarget
+                | TargetFilter::PostReplacementDamageTargetOwner
+                | TargetFilter::DefendingPlayer
+                | TargetFilter::HasChosenName
+                | TargetFilter::ChosenDamageSource { .. }
+                | TargetFilter::Named { .. }
+                | TargetFilter::Owner
+                | TargetFilter::AllPlayers,
+            ) => ItsReferent::CostPaid,
+        }
+    }
+}
+
+/// CR 208.1 + CR 608.2c: lower a power/toughness comparison on a bound referent. A declared
+/// or event-supplied object is a referent predicate and goes through [`referent_condition`]
+/// (the same AST "that creature's power is N" builds). Two boundaries keep the quantity form:
+/// B1 — the ability's own `Source` ("its" is the permanent the ability belongs to, so the
+/// condition is a quantity comparison on the source, not a predicate on a declared, event or
+/// host object); B2 — a cost-paid referent whose threshold is written "X" (Welcome to the
+/// Fold's madness clause), which keeps the quantity form with the threshold as written (the
+/// variable `X`).
+fn lower_referent_stat(
+    referent: ItsReferent,
+    stat: PtStat,
+    comparator: Comparator,
+    threshold: QuantityExpr,
+) -> Option<AbilityCondition> {
+    let scope = match referent {
+        ItsReferent::Source => ObjectScope::Source,
+        ItsReferent::CostPaid if !matches!(threshold, QuantityExpr::Fixed { .. }) => {
+            ObjectScope::CostPaidObject
+        }
+        ItsReferent::Target | ItsReferent::CostPaid => {
+            return Some(referent_condition(
+                stat_threshold_filter(stat, comparator, threshold),
+                ReferentTense::Present,
+                ObjectScope::Target,
+                None,
+            ));
+        }
+    };
+    let qty = match stat {
+        PtStat::Power => QuantityRef::Power { scope },
+        PtStat::Toughness => QuantityRef::Toughness { scope },
+        PtStat::TotalPowerToughness => return None,
+    };
+    Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref { qty },
+        comparator,
+        rhs: threshold,
+    })
+}
+
+/// Lower a parsed clause whose referent is the node's own (`ObjectScope::Target`).
+fn lower_referent_clause(clause: ReferentClause, subject: ObjectScope) -> AbilityCondition {
+    let ReferentClause {
+        polarity,
+        tense,
+        predicate,
+        noun: _,
+    } = clause;
+    let filter = match predicate {
+        ReferentPredicate::Filter(filter) => filter,
+        ReferentPredicate::Stat {
+            stat,
+            comparator,
+            threshold,
+        } => stat_threshold_filter(stat, comparator, threshold),
+    };
+    lower_referent_filter(filter, polarity, tense, subject)
+}
+
+fn lower_referent_filter(
+    filter: TargetFilter,
+    polarity: ReferentPolarity,
+    tense: ReferentTense,
+    subject: ObjectScope,
+) -> AbilityCondition {
+    let negated = match polarity {
+        ReferentPolarity::Affirmative => false,
+        ReferentPolarity::Negative => true,
+    };
+    maybe_negate(referent_condition(filter, tense, subject, None), negated)
+}
+
+/// Owner + lowering for the router entry points (the remainder is returned for `all_consuming`).
+fn parse_referent_condition(
+    input: &str,
+    surface: ReferentSurface,
+) -> OracleResult<'_, AbilityCondition> {
+    let (rest, clause) = parse_referent_predicate(input, surface)?;
+    Ok((rest, lower_referent_clause(clause, ObjectScope::Target)))
+}
+
+/// CR 608.2c + CR 603.2: which referent "that spell" names in this clause, through the same
+/// authority the effect parser uses for the anaphor (`ParseContext::effective_spell_anaphor_binding`,
+/// `oracle_target.rs`). In a resolving spell's body the spell its earlier text announced
+/// (Reject Imperfection: "Counter target spell. If that spell's mana value was 3 or less, ...")
+/// is read through the announced target; in a triggered ability's body the spell the trigger
+/// event names (Prismari Apprentice, Herald of Ilharg: "Whenever you cast a creature spell, ...
+/// If that spell has mana value 5 or greater, ...") through `ObjectScope::EventSource`, even
+/// when the ability also declares a target of its own.
+fn spell_referent_scope(ctx: &ParseContext) -> ObjectScope {
+    match ctx.effective_spell_anaphor_binding() {
+        SpellAnaphorBinding::ParentTarget => ObjectScope::Target,
+        SpellAnaphorBinding::EventSource => ObjectScope::EventSource,
+    }
+}
+
+/// CR 202.3 + CR 608.2c: "that spell's mana value was N or less" / "that permanent's mana
+/// value was N or less" / "that spell has mana value N or greater" — the owner's noun
+/// surface. `that permanent` reads the earlier instruction's declared target
+/// (the P/T threshold family's binding guard applies); `that spell` binds through
+/// [`spell_referent_scope`].
+fn parse_referent_noun_mana_value_condition_text(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<(AbilityCondition, LeadingConditionRoute)> {
+    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (_, clause) =
+        all_consuming(|input| parse_referent_predicate(input, ReferentSurface::NounManaValue))
+            .parse(lower.as_str())
+            .ok()?;
+    let subject = match clause.noun? {
+        ReferentNoun::Spell => spell_referent_scope(ctx),
+        ReferentNoun::Object => ObjectScope::Target,
+    };
+    // The binding guard of the threshold route protects the `Target` reading (the condition
+    // reads the gated node's own first object target); an event-object reading has no such
+    // hazard — a node declaring its own target can still gate on the event spell.
+    let route = match subject {
+        ObjectScope::Target => LeadingConditionRoute::TargetPtThreshold,
+        ObjectScope::Source
+        | ObjectScope::Recipient
+        | ObjectScope::EventSource
+        | ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy
+        | ObjectScope::EventTarget
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
+        | ObjectScope::BatchSource
+        | ObjectScope::ChainRootTarget
+        | ObjectScope::GrantingObject
+        | ObjectScope::SpecificObject { .. } => LeadingConditionRoute::General,
+    };
+    Some((lower_referent_clause(clause, subject), route))
+}
+
 /// CR 608.2c + CR 400.7: target-anaphoric reflexive object-property gate — the
 /// rider condition for the "removal/bounce/damage, then conditional bonus"
 /// class ("it was dealt damage this turn", "it had mana value 3 or less", "that
@@ -2969,9 +3579,8 @@ fn parse_reflexive_object_property(input: &str) -> OracleResult<'_, FilterProp> 
 ///
 ///   - subject: `it` / `that creature` / `that permanent` / `that card`
 ///     (`parse_target_anaphoric_subject`)
-///   - tense + polarity: `parse_target_anaphoric_tense_polarity` →
-///     `(negated, use_lki)` — past tense (`was`/`had`) reads LKI per CR 400.7 /
-///     CR 608.2h; present tense (`is`) reads live state.
+///   - tense + polarity: `parse_target_anaphoric_tense_polarity` — past forms
+///     (`was`/`had`) set the LKI hint; a pin determines the actual read (CR 608.2h).
 ///   - predicate: a parameterized `FilterProp` axis
 ///     (`parse_reflexive_object_property`).
 ///
@@ -2980,20 +3589,7 @@ fn parse_reflexive_object_property(input: &str) -> OracleResult<'_, FilterProp> 
 fn parse_target_reflexive_property_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
-    let (rest, _) = parse_target_anaphoric_subject(input)?;
-    let (rest, (negated, use_lki)) = parse_target_anaphoric_tense_polarity(rest)?;
-    let (rest, prop) = parse_reflexive_object_property(rest)?;
-    Ok((
-        rest,
-        maybe_negate(
-            AbilityCondition::TargetMatchesFilter {
-                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
-                use_lki,
-                subject_slot: None,
-            },
-            negated,
-        ),
-    ))
+    parse_referent_condition(input, ReferentSurface::Reflexive)
 }
 
 fn parse_target_reflexive_property_condition_text(text: &str) -> Option<AbilityCondition> {
@@ -3052,34 +3648,7 @@ fn parse_threshold_with_exactly(input: &str) -> OracleResult<'_, (Comparator, i3
 fn parse_target_pt_threshold_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
-    let (rest, _) = parse_target_demonstrative_subject(input)?;
-    let (rest, stat) = alt((
-        // "that creature's power is N…" (existing possessive form).
-        delimited(tag("'s "), parse_reflexive_pt_stat, tag("is ")),
-        // CR 208.1 + CR 608.2c + CR 608.2h: present-tense possession "that
-        // creature has power N or greater" — the earlier instruction's target,
-        // read live at resolution.
-        // Kept beside the possessive form, not on the reflexive tense axis, so the
-        // demonstrative-only subject keeps bare "it" (source-scoped) unclaimed.
-        preceded(tag(" has "), parse_reflexive_pt_stat),
-    ))
-    .parse(rest)?;
-    let (rest, (comparator, value)) = parse_threshold_with_exactly(rest)?;
-    Ok((
-        rest,
-        AbilityCondition::TargetMatchesFilter {
-            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
-                FilterProp::PtComparison {
-                    stat,
-                    scope: PtValueScope::Current,
-                    comparator,
-                    value: QuantityExpr::Fixed { value },
-                },
-            ])),
-            use_lki: false,
-            subject_slot: None,
-        },
-    ))
+    parse_referent_condition(input, ReferentSurface::DemonstrativeStat)
 }
 
 fn parse_target_pt_threshold_condition_text(text: &str) -> Option<AbilityCondition> {
@@ -3155,7 +3724,7 @@ pub(super) fn try_parse_type_setting(text: &str) -> Option<AbilityDefinition> {
         .ok()?;
 
     let type_name = type_name.trim();
-    let capitalized = format!("{}{}", &type_name[..1].to_uppercase(), &type_name[1..]);
+    let capitalized = format!("{}{}", type_name[..1].to_uppercase(), &type_name[1..]);
     CoreType::from_str(&capitalized).ok()?;
 
     let mut remove_types = Vec::new();
@@ -3195,74 +3764,36 @@ pub(super) fn strip_turn_conditional(text: &str) -> (Option<AbilityCondition>, S
     (None, text.to_string())
 }
 
+/// CR 208.1 + CR 608.2c: strip a trailing "if its power|toughness is <threshold>" rider. The
+/// clause boundary is the only thing decided here: the grammar is the owner's
+/// ([`ReferentSurface::ItsStat`]), the binding of "its" is [`bind_possessive_it`], and the
+/// lowering is [`lower_referent_stat`].
+///
+/// The former "if that creature was/is a <type>" half is gone: it claimed no clause in the
+/// corpus, and the same words are claimed by the router (leading) and the suffix path with an
+/// identical AST (`TargetMatchesFilter`, `use_lki` by tense).
 pub(super) fn strip_property_conditional(
     text: &str,
     ctx: &ParseContext,
 ) -> (Option<AbilityCondition>, String) {
-    let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
-
-    // CR 608.2c + CR 608.2k + CR 208.1: "its power" binds the ability SOURCE for
-    // a player/phase-subject trigger (Amalia, Lily Bowen), or the clause-local
-    // object (CostPaidObject) for a target/entering-referent clause (Tribute,
-    // Ent's Fury). A player/phase subject ("you", "a player", any) has no
-    // clause-local object for "its" to bind, so the anaphor resolves to the
-    // ability source (CR 113.7a LKI); a target/typed-object subject supplies the
-    // referent the untargeted "its" reads (CR 608.2k).
-    let scope = match ctx.subject {
-        Some(TargetFilter::Controller) | Some(TargetFilter::Player) | Some(TargetFilter::Any) => {
-            ObjectScope::Source
-        }
-        _ => ObjectScope::CostPaidObject,
+    let Some((before, clause)) = parse_trailing_referent(text, |input| {
+        parse_referent_predicate(input, ReferentSurface::ItsStat)
+    }) else {
+        return (None, text.to_string());
     };
-
-    for (property, qty_ref) in &[
-        ("power", QuantityRef::Power { scope }),
-        ("toughness", QuantityRef::Toughness { scope }),
-    ] {
-        let pattern = format!(" if its {property} is ");
-        if let Some((before, after)) = tp.rsplit_around(&pattern) {
-            let after = after.lower.trim_end_matches('.');
-
-            if let Some((comparator, value)) = parse_comparison_suffix(after) {
-                return (
-                    Some(AbilityCondition::QuantityCheck {
-                        lhs: QuantityExpr::Ref {
-                            qty: qty_ref.clone(),
-                        },
-                        comparator,
-                        rhs: QuantityExpr::Fixed { value },
-                    }),
-                    before.original.to_string(),
-                );
-            }
-        }
+    let ReferentPredicate::Stat {
+        stat,
+        comparator,
+        threshold,
+    } = clause.predicate
+    else {
+        return (None, text.to_string());
+    };
+    let referent = bind_possessive_it(ctx, before);
+    match lower_referent_stat(referent, stat, comparator, threshold) {
+        Some(condition) => (Some(condition), before.to_string()),
+        None => (None, text.to_string()),
     }
-
-    for (pattern, use_lki) in &[
-        (" if that creature was a ", true),
-        (" if that creature was an ", true),
-        (" if that creature is a ", false),
-        (" if that creature is an ", false),
-    ] {
-        if let Some((before, after)) = tp.rsplit_around(pattern) {
-            let type_text = after.lower.trim_end_matches('.').trim();
-            let (filter, leftover) =
-                parse_type_phrase_folding_with_ctx(type_text, &mut ctx.clone_player_antecedents());
-            if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
-                return (
-                    Some(AbilityCondition::TargetMatchesFilter {
-                        filter,
-                        use_lki: *use_lki,
-                        subject_slot: None,
-                    }),
-                    before.original.to_string(),
-                );
-            }
-        }
-    }
-
-    (None, text.to_string())
 }
 
 // `PlayerProperty` / `parse_player_property_keyword` / `player_property_quantity`
@@ -3809,6 +4340,32 @@ fn build_zone_change_past_counter_condition(
     )
 }
 
+/// CR 608.2c + CR 122.1: the counter kind a condition counts on the ability
+/// SOURCE ("if there are three or more promotion counters on her" →
+/// `promotion`), which a later counter anaphor in the same instruction ("remove
+/// those counters") refers back to. `None` for a condition that counts no typed
+/// source counters — including an any-kind count ("three or more counters on
+/// it"), whose anaphor already means every kind.
+pub(super) fn source_counter_kind_counted_by(condition: &AbilityCondition) -> Option<CounterType> {
+    match condition {
+        AbilityCondition::QuantityCheck {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::CountersOn {
+                            scope: ObjectScope::Source,
+                            counter_type: Some(counter_type),
+                        },
+                },
+            ..
+        } => Some(counter_type.clone()),
+        AbilityCondition::And { conditions } => {
+            conditions.iter().find_map(source_counter_kind_counted_by)
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn strip_counter_conditional(
     text: &str,
     ctx: CounterConditionalContext,
@@ -4003,94 +4560,39 @@ pub(super) fn strip_counter_conditional(
 /// Handles the class of cards that conditionally apply effects based on target mana value
 /// (Fatal Push, Anoint with Affliction, Angrath, Cosmic Rebirth, etc.).
 pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityCondition>, String) {
-    let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
-
-    // Leading position, past tense: "If its mana value was N or less/greater, [effect]."
-    // CR 400.7: past-tense check → use_lki: true (LKI snapshot).
-    if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("if its mana value was ").parse(lower.as_str())
-    {
-        if let Some((condition, body)) = parse_leading_mana_value_condition_body(text, rest, true) {
-            return (Some(condition), body);
-        }
-    }
-
-    // Leading position, present tense: "If it has mana value N or less/greater, [effect]."
-    // CR 400.7: present-tense check → use_lki: false (current state). Covers Cosmic Rebirth.
-    if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("if it has mana value ").parse(lower.as_str())
-    {
-        if let Some((condition, body)) = parse_leading_mana_value_condition_body(text, rest, false)
+    // Leading "If its mana value was N or less/greater, [effect]" (LKI hint)
+    // and "If it has mana value N or less/greater, [effect]" (no hint).
+    // CR 608.2h: either tense can read a pinned exit snapshot if the object left.
+    if let Ok((tail, _)) = tag_no_case::<_, _, OracleError<'_>>("if ").parse(text) {
+        let lower = tail.to_lowercase();
+        if let Ok((rest, clause)) =
+            parse_referent_predicate(lower.as_str(), ReferentSurface::ManaValueFixed)
         {
-            return (Some(condition), body);
+            if let Ok((rest, _)) = preceded(
+                multispace0::<_, OracleError<'_>>,
+                terminated(tag(","), multispace0),
+            )
+            .parse(rest)
+            {
+                let consumed = lower.len() - rest.len();
+                return (
+                    Some(lower_referent_clause(clause, ObjectScope::Target)),
+                    tail[consumed..].to_string(),
+                );
+            }
         }
     }
 
-    // Suffix position: "[effect] if its mana value was N or less/greater."
-    if let Some((before, after)) = tp.rsplit_around(" if its mana value was ") {
-        if let Some((comparator, threshold)) = parse_mana_value_threshold(after.lower) {
-            let condition = AbilityCondition::TargetMatchesFilter {
-                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
-                    FilterProp::Cmc {
-                        comparator,
-                        value: QuantityExpr::Fixed { value: threshold },
-                    },
-                ])),
-                use_lki: true,
-                subject_slot: None,
-            };
-            return (
-                Some(condition),
-                before.original.trim_end_matches('.').trim().to_string(),
-            );
-        }
-    }
-
-    // Suffix position: "[effect] if its mana value is less than or equal to [quantity]."
-    if let Some((before, after)) = tp.rsplit_around(" if its mana value is ") {
-        if let Some((comparator, value)) = parse_dynamic_mana_value_threshold(after.lower) {
-            let condition = AbilityCondition::TargetMatchesFilter {
-                filter: TargetFilter::Typed(
-                    TypedFilter::default().properties(vec![FilterProp::Cmc { comparator, value }]),
-                ),
-                use_lki: false,
-                subject_slot: None,
-            };
-            return (
-                Some(condition),
-                before.original.trim_end_matches('.').trim().to_string(),
-            );
-        }
-    }
-
-    // Suffix position: "[effect] if it has mana value N or less/greater."
-    if let Some((before, after)) = tp.rsplit_around(" if it has mana value ") {
-        if let Some((comparator, threshold)) = parse_mana_value_threshold(after.lower) {
-            let prop = match comparator {
-                Comparator::LE => FilterProp::Cmc {
-                    comparator: Comparator::LE,
-                    value: QuantityExpr::Fixed { value: threshold },
-                },
-                Comparator::GE => FilterProp::Cmc {
-                    comparator: Comparator::GE,
-                    value: QuantityExpr::Fixed { value: threshold },
-                },
-                _ => return (None, text.to_string()),
-            };
-            let condition = AbilityCondition::TargetMatchesFilter {
-                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
-                use_lki: false,
-                subject_slot: None,
-            };
-            return (
-                Some(condition),
-                before.original.trim_end_matches('.').trim().to_string(),
-            );
-        }
-    }
-
-    (None, text.to_string())
+    // Suffix position: "[effect] if its mana value was N or less/greater" / "[effect] if it
+    // has mana value N or less/greater" (fixed threshold) and "[effect] if its mana value is
+    // less than or equal to [quantity]" (dynamic threshold).
+    strip_trailing_target_referent(text, |input| {
+        alt((
+            |input| parse_referent_predicate(input, ReferentSurface::ManaValueFixed),
+            |input| parse_referent_predicate(input, ReferentSurface::ManaValueDynamic),
+        ))
+        .parse(input)
+    })
 }
 
 /// CR 608.2c: Strip trailing "if it has the [least|greatest] <property> among
@@ -4318,40 +4820,6 @@ fn trailing_rider_subject(effect_text: &str, ctx: &ParseContext) -> Option<Targe
     }
 }
 
-/// Parse the body of a leading mana-value conditional — "`<N>` or less/greater, [effect]" —
-/// and compute the body offset into `original`. `use_lki` is threaded into the constructed
-/// `TargetMatchesFilter` condition: past-tense ("was") callers pass `true` (CR 400.7 — LKI
-/// snapshot), present-tense ("has") callers pass `false` (current state).
-fn parse_leading_mana_value_condition_body(
-    original: &str,
-    condition_and_body: &str,
-    use_lki: bool,
-) -> Option<(AbilityCondition, String)> {
-    let (rest, threshold) = nom_primitives::parse_number(condition_and_body).ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" or ").parse(rest).ok()?;
-    let (rest, comparator) = alt((
-        value(Comparator::LE, tag::<_, _, OracleError<'_>>("less")),
-        value(Comparator::GE, tag("greater")),
-    ))
-    .parse(rest)
-    .ok()?;
-    let rest = rest.trim_start();
-    let (rest, _) = tag::<_, _, OracleError<'_>>(",").parse(rest).ok()?;
-    let rest = rest.trim_start();
-    let body_start = original.len() - rest.len();
-    let condition = AbilityCondition::TargetMatchesFilter {
-        filter: TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
-            comparator,
-            value: QuantityExpr::Fixed {
-                value: threshold as i32,
-            },
-        }])),
-        use_lki,
-        subject_slot: None,
-    };
-    Some((condition, original[body_start..].to_string()))
-}
-
 fn parse_dynamic_mana_value_threshold(text: &str) -> Option<(Comparator, QuantityExpr)> {
     let text = text.trim().trim_end_matches('.');
     let (rest, comparator) = alt((
@@ -4379,95 +4847,60 @@ fn parse_dynamic_mana_value_threshold(text: &str) -> Option<(Comparator, Quantit
 }
 
 pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityCondition>, String) {
-    let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
-
-    if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("if that land was nonbasic, ").parse(lower.as_str())
-    {
-        let body_start = text.len() - rest.len();
-        return (
-            Some(nonbasic_land_lki_condition()),
-            text[body_start..].to_string(),
-        );
-    }
-
-    if let Some((before, after)) = tp.rsplit_around(" if that land was ") {
-        if all_consuming(alt((
-            tag::<_, _, OracleError<'_>>("nonbasic."),
-            tag("nonbasic"),
-        )))
-        .parse(after.lower.trim())
-        .is_ok()
+    // Leading "if that land was nonbasic, [effect]" (Molten Rain).
+    if let Ok((tail, _)) = tag_no_case::<_, _, OracleError<'_>>("if ").parse(text) {
+        let lower = tail.to_lowercase();
+        if let Ok((rest, clause)) =
+            parse_referent_predicate(lower.as_str(), ReferentSurface::NonbasicLand)
         {
-            return (
-                Some(nonbasic_land_lki_condition()),
-                before.original.trim_end_matches('.').trim().to_string(),
-            );
-        }
-    }
-
-    for (pattern, negated) in &[
-        (" if it's ", false),
-        (" if it is ", false),
-        (" if it isn't ", true),
-        (" if it's not ", true),
-        (" if it is not ", true),
-    ] {
-        if let Some((before, after)) = tp.rsplit_around(pattern) {
-            let supertype_text = after.lower.trim_end_matches('.').trim();
-            let parsed = parse_supertype_word(supertype_text);
-            let Ok((rest, supertype)) = parsed else {
-                continue;
-            };
-            if !rest.trim().is_empty() {
-                continue;
+            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(", ").parse(rest) {
+                let consumed = lower.len() - rest.len();
+                return (
+                    Some(lower_referent_clause(clause, ObjectScope::Target)),
+                    tail[consumed..].to_string(),
+                );
             }
-
-            let condition = AbilityCondition::TargetMatchesFilter {
-                filter: TargetFilter::Typed(
-                    TypedFilter::default()
-                        .properties(vec![FilterProp::HasSupertype { value: supertype }]),
-                ),
-                use_lki: false,
-                subject_slot: None,
-            };
-            return (
-                Some(maybe_negate(condition, *negated)),
-                before.original.trim_end_matches('.').trim().to_string(),
-            );
         }
     }
 
-    (None, text.to_string())
-}
-
-fn nonbasic_land_lki_condition() -> AbilityCondition {
-    AbilityCondition::TargetMatchesFilter {
-        filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
-            FilterProp::NotSupertype {
-                value: Supertype::Basic,
+    strip_trailing_target_referent(text, |input| {
+        alt((
+            |input| parse_referent_predicate(input, ReferentSurface::NonbasicLand),
+            |input| {
+                let (rest, polarity) = parse_it_supertype_copula(input)?;
+                parse_supertype_predicate(rest, polarity)
             },
-        ])),
-        use_lki: true,
-        subject_slot: None,
-    }
+        ))
+        .parse(input)
+    })
 }
 
-/// Parse "N or less" / "N or greater" from mana value threshold text.
-/// Uses nom combinators to extract the numeric threshold and comparison direction.
-fn parse_mana_value_threshold(text: &str) -> Option<(Comparator, i32)> {
-    let text = text.trim().trim_end_matches('.');
-    // Parse: number + " or " + "less"/"greater"
-    let (rest, n) = nom_primitives::parse_number(text).ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" or ").parse(rest).ok()?;
-    let (_, comparator) = alt((
-        value(Comparator::LE, tag::<_, _, OracleError<'_>>("less")),
-        value(Comparator::GE, tag("greater")),
-    ))
-    .parse(rest)
-    .ok()?;
-    Some((comparator, n as i32))
+fn parse_trailing_referent<'a>(
+    text: &'a str,
+    parse: impl for<'i> Fn(&'i str) -> OracleResult<'i, ReferentClause>,
+) -> Option<(&'a str, ReferentClause)> {
+    let boundary = find_trailing_condition_start(text)?;
+    let (suffix, _) = tag_no_case::<_, _, OracleError<'_>>(" if ")
+        .parse(&text[boundary..])
+        .ok()?;
+    let lower = suffix.trim().trim_end_matches('.').to_lowercase();
+    let (_, clause) = all_consuming(terminated(parse, multispace0))
+        .parse(lower.as_str())
+        .ok()?;
+    Some((&text[..boundary], clause))
+}
+
+fn strip_trailing_target_referent(
+    text: &str,
+    parse: impl for<'i> Fn(&'i str) -> OracleResult<'i, ReferentClause>,
+) -> (Option<AbilityCondition>, String) {
+    match parse_trailing_referent(text, parse) {
+        Some((before, clause)) => (
+            Some(lower_referent_clause(clause, ObjectScope::Target)),
+            before.trim_end_matches('.').trim().to_string(),
+        ),
+        None => (None, text.to_string()),
+    }
 }
 
 /// CR 608.2c: Start of the trailing condition clause. Normally the last
@@ -4476,23 +4909,7 @@ fn parse_mana_value_threshold(text: &str) -> Option<(Comparator, i32)> {
 /// chain's FIRST " if " so `parse_or_if_disjunction` sees every disjunct instead
 /// of the effect text swallowing the leading ones.
 fn find_trailing_condition_start(text: &str) -> Option<usize> {
-    let mut positions = top_level_if_positions(text);
-    let mut start = positions.pop()?;
-    while let Some(previous) = positions.pop() {
-        let continues_or_if_chain = start
-            .checked_sub(" or".len())
-            .and_then(|or_pos| text.get(or_pos..))
-            .is_some_and(|tail| tag::<_, _, OracleError<'_>>(" or if ").parse(tail).is_ok());
-        if !continues_or_if_chain {
-            break;
-        }
-        start = previous;
-    }
-    Some(start)
-}
-
-fn top_level_if_positions(text: &str) -> Vec<usize> {
-    let mut positions = Vec::new();
+    let mut start = None;
     let mut paren_depth = 0u32;
     let mut in_quotes = false;
 
@@ -4501,13 +4918,28 @@ fn top_level_if_positions(text: &str) -> Vec<usize> {
             '"' => in_quotes = !in_quotes,
             '(' if !in_quotes => paren_depth += 1,
             ')' if !in_quotes => paren_depth = paren_depth.saturating_sub(1),
-            _ if !in_quotes && paren_depth == 0 && text[index..].starts_with(" if ") => {
-                positions.push(index);
+            ' ' if !in_quotes
+                && paren_depth == 0
+                && tag_no_case::<_, _, OracleError<'_>>(" if ")
+                    .parse(&text[index..])
+                    .is_ok() =>
+            {
+                let continues_or_if_chain = index
+                    .checked_sub(" or".len())
+                    .and_then(|or_pos| text.get(or_pos..))
+                    .is_some_and(|tail| {
+                        tag_no_case::<_, _, OracleError<'_>>(" or if ")
+                            .parse(tail)
+                            .is_ok()
+                    });
+                if start.is_none() || !continues_or_if_chain {
+                    start = Some(index);
+                }
             }
             _ => {}
         }
     }
-    positions
+    start
 }
 
 /// CR 603.4 + CR 608.2h: Condition-text prefixes that cannot be re-homed onto
@@ -4655,13 +5087,32 @@ fn parse_trigger_event_target_exploited_by_source(input: &str) -> OracleResult<'
     Ok((rest, ()))
 }
 
+/// Test-only strip at a proven chain root: it hard-codes
+/// [`GatedInstructionPosition::ChainRoot`], so a test that uses it skips the
+/// entry points' root proof and the assembled-chain check
+/// (`keep_own_target_gate_readable`). Rows that rely on those add a full parse.
 #[cfg(test)]
 pub(super) fn strip_suffix_conditional(
     text: &str,
     ctx: &mut ParseContext,
 ) -> (Option<AbilityCondition>, String) {
-    let (routed, body) = strip_routed_suffix_conditional(text, ctx);
+    let (routed, body) =
+        strip_routed_suffix_conditional(text, ctx, GatedInstructionPosition::ChainRoot);
     (routed.map(|(condition, _)| condition), body)
+}
+
+/// CR 608.2c: whether `text` still carries a trailing condition the shared
+/// target-controller recognizer identifies. The suffix strip removes it when it
+/// binds, so a chunk that still carries it was refused (or never offered to the
+/// strip), and the caller turns the chunk into an explicit gap instead of
+/// lowering the instruction without its printed condition.
+pub(super) fn carries_unbound_target_controller_suffix(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    find_trailing_condition_start(&lower).is_some_and(|if_pos| {
+        let condition_text = lower[if_pos + " if ".len()..].trim_end_matches('.').trim();
+        let (condition_core, _) = peel_copy_retarget_tail_from_condition_text(condition_text);
+        parse_target_controller_control_condition_prefix(condition_core).is_some()
+    })
 }
 
 /// Strip a trailing "<effect> if <condition>" rider into a clause-level gate,
@@ -4671,6 +5122,7 @@ pub(super) fn strip_suffix_conditional(
 pub(super) fn strip_routed_suffix_conditional(
     text: &str,
     ctx: &mut ParseContext,
+    position: GatedInstructionPosition,
 ) -> (Option<(AbilityCondition, LeadingConditionRoute)>, String) {
     let general = |condition| Some((condition, LeadingConditionRoute::General));
     let lower = text.to_lowercase();
@@ -4776,6 +5228,45 @@ pub(super) fn strip_routed_suffix_conditional(
     if crate::parser::oracle_cost::is_self_cost_reduction_prefix(effect_prefix_lower) {
         return (None, text.to_string());
     }
+    // CR 608.2c + CR 608.2h + CR 122.1: This postfix guard reads the
+    // event player's live counters. The condition pass precedes clause
+    // subject staging. Require a proven trigger root and the same event
+    // player in both subjects; do not reinterpret a nearer player or let
+    // ScopedPlayer fall back to the controller.
+    if position == GatedInstructionPosition::ChainRoot
+        && ctx.in_trigger
+        && ctx.relative_player_scope == Some(ControllerRef::TriggeringPlayer)
+    {
+        if let Ok((_, (anaphor, kind))) =
+            all_consuming(nom_condition::parse_anaphoric_player_counter_absence)
+                .parse(condition_text)
+        {
+            let mut probe = ctx.clone_throwaway();
+            let names_event_player = |application: super::SubjectApplication| {
+                application.affected == TargetFilter::TriggeringPlayer
+            };
+            if subject::parse_subject_application(anaphor, &mut probe)
+                .is_some_and(names_event_player)
+                && subject::parse_leading_subject_application(effect_prefix, &mut probe)
+                    .is_some_and(names_event_player)
+            {
+                return (
+                    general(AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::PlayerCounter {
+                                kind,
+                                scope: CountScope::ScopedPlayer,
+                            },
+                        },
+                        comparator: Comparator::EQ,
+                        rhs: QuantityExpr::Fixed { value: 0 },
+                    }),
+                    effect_prefix.to_string(),
+                );
+            }
+            return (None, text.to_string());
+        }
+    }
     let effect_text = if let Some(tail) = copy_retarget_tail {
         format!("{effect_prefix}, and {tail}")
     } else {
@@ -4788,6 +5279,38 @@ pub(super) fn strip_routed_suffix_conditional(
 
     if let Some(cond) = parse_its_a_type_condition(condition_core, ctx) {
         return (general(cond), effect_text);
+    }
+
+    // CR 608.2c + CR 608.2h: a condition on the declared object target's
+    // controller gates its own instruction as it resolves (Skulking Killer,
+    // Unified Will) — never an intervening-if (CR 603.4).
+    //
+    // Once the shared grammar recognizes the text, an unbound referent returns
+    // the original clause here, so the recognizers below, which have no way to
+    // bind the referent, never see it; the chunk loop then records that clause
+    // as an explicit unimplemented gap (`carries_unbound_target_controller_suffix`).
+    // (The grammar is deliberately not reachable from `parse_inner_condition`.)
+    if let Some((referent, condition)) =
+        parse_target_controller_control_condition_parts(condition_core)
+    {
+        let Some(condition) =
+            bind_target_controller_condition(referent, &condition, effect_prefix, ctx, position)
+        else {
+            return (None, text.to_string());
+        };
+        return (
+            Some((condition, LeadingConditionRoute::OwnTargetController)),
+            effect_text,
+        );
+    } else if let Some(referent) = parse_target_controller_control_condition_prefix(condition_core)
+    {
+        // The grammar is only a prefix here (a trailing " and " / " or "
+        // connector), so the generic route parses the whole conjunction. When
+        // the referent cannot bind, fail closed before that route sees the
+        // text: it cannot bind the referent either.
+        if !target_controller_referent_binds(referent, effect_prefix, ctx, position) {
+            return (None, text.to_string());
+        }
     }
 
     if let Some(cond) = parse_no_mana_spent_to_cast_target_condition_text(condition_core) {
@@ -4806,16 +5329,29 @@ pub(super) fn strip_routed_suffix_conditional(
         return (general(cond), effect_text);
     }
 
-    if let Some((condition, route)) =
-        parse_triggering_spell_targets_filter_ability_condition(condition_core)
-            .map(|condition| (condition, LeadingConditionRoute::General))
-            .or_else(|| try_routed_nom_condition_as_ability_condition(condition_core, ctx))
-            .or_else(|| {
-                parse_condition_text_in(condition_core, ctx)
-                    .or_else(|| parse_control_count_as_ability_condition(condition_core))
-                    .map(|condition| (condition, LeadingConditionRoute::General))
-            })
+    // CR 603.7c + CR 603.7e + CR 400.7: a trailing condition on a delayed
+    // payload is checked against the delayed object's source and zone at the
+    // delayed trigger's fire/resolution boundary. The temporal suffix is the
+    // existing parser seam that proves this clause is such a payload; use the
+    // typed scope only while lowering its condition so ordinary trigger-body
+    // source-zone guards remain explicit gaps.
+    let previous_trigger_condition_scope = ctx.trigger_condition_scope;
+    if super::lower::strip_temporal_suffix(effect_prefix)
+        .1
+        .is_some()
     {
+        ctx.trigger_condition_scope = TriggerConditionScope::Delayed;
+    }
+    let condition_result = parse_triggering_spell_targets_filter_ability_condition(condition_core)
+        .map(|condition| (condition, LeadingConditionRoute::General))
+        .or_else(|| try_routed_nom_condition_as_ability_condition(condition_core, ctx))
+        .or_else(|| {
+            parse_condition_text_in(condition_core, ctx)
+                .or_else(|| parse_control_count_as_ability_condition(condition_core))
+                .map(|condition| (condition, LeadingConditionRoute::General))
+        });
+    ctx.trigger_condition_scope = previous_trigger_condition_scope;
+    if let Some((condition, route)) = condition_result {
         // CR 608.2c + CR 109.2: in an " or if " chain on a targeting effect, a
         // bare "it's a <type>" disjunct describes the effect's target, not a
         // revealed card (`RevealedHasCardType` would never see the target).
@@ -4851,6 +5387,311 @@ fn effect_has_declared_target(effect_text: &str, ctx: &ParseContext) -> bool {
 fn effect_target_filter(effect_text: &str, ctx: &ParseContext) -> Option<TargetFilter> {
     let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
     clause.effect.target_filter().cloned()
+}
+
+/// CR 115.1 + CR 601.2c: the roles production announces for one effect node,
+/// collected through the phase-ast declaration enumerator. The predicate
+/// records every candidate and returns false so no branch short-circuits.
+fn declared_roles_for_node(
+    effect: &Effect,
+    unless_pay: Option<&crate::types::ability::UnlessPayModifier>,
+) -> Vec<TargetFilter> {
+    // The fanout branch is not reached here (`fanout_player` false): every
+    // per-opponent fanout shape requires `multi_target`, and the caller
+    // declines that outright. A triggered GainControlAll that the engine
+    // excludes from the companion slot records a spurious Player here and is
+    // declined, a conservative false-decline.
+    let companion_player = effect_references_target_player(effect)
+        || unless_pay.is_some_and(|modifier| payer_is_declared_target(&modifier.payer));
+    let roles = std::cell::RefCell::new(Vec::new());
+    {
+        let predicate = |filter: &TargetFilter| {
+            roles.borrow_mut().push(filter.clone());
+            false
+        };
+        let _ = effect_stack_target_declaration_matching(
+            effect,
+            || companion_player,
+            || false,
+            &predicate,
+        );
+    }
+    roles
+        .into_inner()
+        .into_iter()
+        .filter(|filter| !filter.is_context_ref())
+        .collect()
+}
+
+/// CR 608.2b + CR 601.2c: whether any definition below `root` that the same
+/// ability announces for (sub, else and mode nodes and coin-flip outcome
+/// branches, recursively) announces a target of its own: an object or player
+/// role, a declared payer, or any optional, multi-target or distributed slot.
+///
+/// A root gated on its own target's controller must be the only announcer of
+/// its chain. When the root's target becomes illegal while a later
+/// instruction's target stays legal, the ability still resolves, but the
+/// engine does not keep the illegal head slot: the gate then reads no
+/// controller, counts zero and can turn true. Until the resolver keeps that
+/// slot, the combination is declined.
+pub(super) fn chain_announces_target_below(root: &AbilityDefinition) -> bool {
+    // The definitions the SAME ability announces targets for: its sub, else
+    // and mode nodes, and the outcome branches of a coin flip, whose targets
+    // the engine collects with the ability's own (`materialize_coin_branches`).
+    // CR 601.2c: those are the targets this spell or ability requires. A
+    // definition nested anywhere else in an effect (a token's quoted ability, a
+    // granted or delayed ability) is a separate ability whose targets are
+    // chosen when that ability is put on the stack (CR 602.2b / CR 603.3d), so
+    // it is not entered.
+    fn children(definition: &AbilityDefinition) -> impl Iterator<Item = &AbilityDefinition> {
+        let (won, lost) = match &*definition.effect {
+            Effect::FlipCoins {
+                win_effect,
+                lose_effect,
+                ..
+            } => (win_effect.as_deref(), lose_effect.as_deref()),
+            _ => (None, None),
+        };
+        definition
+            .sub_ability
+            .as_deref()
+            .into_iter()
+            .chain(definition.else_ability.as_deref())
+            .chain(definition.mode_abilities.iter())
+            .chain(won)
+            .chain(lost)
+    }
+    let mut pending: Vec<&AbilityDefinition> = children(root).collect();
+    while let Some(definition) = pending.pop() {
+        if definition.multi_target.is_some()
+            || definition.distribute.is_some()
+            || definition.optional_targeting
+            || definition.target_chooser.is_some()
+            || enumeration_returns_early(&definition.effect)
+            || !declared_roles_for_node(&definition.effect, definition.unless_pay.as_ref())
+                .is_empty()
+        {
+            return true;
+        }
+        pending.extend(children(definition));
+    }
+    false
+}
+
+/// CR 601.2c + CR 609.7: a node whose enumeration returns early. The source-scoped
+/// damage prevention branch of the phase-ast enumerator returns before the
+/// companion-player and quantity branches that the engine's slot builder falls
+/// through to, so the enumerated set is not proven complete for that node and
+/// the probe declines it (Dromoka's Command).
+fn enumeration_returns_early(effect: &Effect) -> bool {
+    damage_replacement_source_slot_filter(effect).is_some()
+}
+
+/// CR 115.1 + CR 608.2c: every announced role in the head effect and every
+/// descendant definition, or `None` when a node declares an ambiguous
+/// cardinality shape or a resolution-timed child role.
+///
+/// The walk follows `sub_ability`, `else_ability` and `mode_abilities`. That is
+/// a superset of what production announces (slot collection never visits an
+/// else branch), so an extra branch can only cause a harmless over-decline. A
+/// coin-flip branch definition nested inside an effect is not walked: those
+/// branches come from later sentences, not from a clause prefix. The head's own
+/// `repeat_for`, `player_scope` and `target_chooser` are not fields of the
+/// parsed clause; the caller declines the first two from the printed text
+/// (`head_stamps_clause_scope`) and the announcer override from the parse
+/// context (`stack_announced_roles`).
+/// Declined on the head and on every descendant: `multi_target` (every
+/// per-opponent fanout and every `EachDealsDamageEqualToPower` carries it),
+/// `distribute`, `optional_targeting`; on descendants also `repeat_for`,
+/// `player_scope` and `target_chooser`.
+fn announced_object_roles(clause: &super::ParsedEffectClause) -> Option<AnnouncedRoles> {
+    if clause.multi_target.is_some() || clause.distribute.is_some() || clause.optional_targeting {
+        return None;
+    }
+    if enumeration_returns_early(&clause.effect) {
+        return None;
+    }
+    let head = declared_roles_for_node(&clause.effect, clause.unless_pay.as_ref());
+    let mut descendants = Vec::new();
+    let mut children: Vec<&crate::types::ability::AbilityDefinition> = Vec::new();
+    if let Some(child) = clause.sub_ability.as_deref() {
+        children.push(child);
+    }
+    while let Some(definition) = children.pop() {
+        if definition.multi_target.is_some()
+            || definition.distribute.is_some()
+            || definition.optional_targeting
+            || definition.repeat_for.is_some()
+            || definition.player_scope.is_some()
+            || definition.target_chooser.is_some()
+        {
+            return None;
+        }
+        if enumeration_returns_early(&definition.effect) {
+            return None;
+        }
+        let child_roles =
+            declared_roles_for_node(&definition.effect, definition.unless_pay.as_ref());
+        if !child_roles.is_empty() && definition.target_choice_timing != TargetChoiceTiming::Stack {
+            return None;
+        }
+        descendants.extend(child_roles);
+        if let Some(child) = definition.sub_ability.as_deref() {
+            children.push(child);
+        }
+        if let Some(child) = definition.else_ability.as_deref() {
+            children.push(child);
+        }
+        children.extend(definition.mode_abilities.iter());
+    }
+    let shape = match clause.sub_ability {
+        None => GatedClauseShape::SingleInstruction,
+        Some(_) => GatedClauseShape::WithContinuation,
+    };
+    Some(AnnouncedRoles {
+        head,
+        descendants,
+        shape,
+    })
+}
+
+/// CR 601.2c + CR 608.2c: the announced roles of a clause tree, split by the
+/// node that owns them.
+///
+/// Ownership is what the suffix can bind. The condition is stamped on the HEAD
+/// definition (the suffix strip removes it from the head's text). The probe runs
+/// only when that head is the chain root ([`GatedInstructionPosition`]), and the
+/// engine evaluates a root's gate on the root itself before its effect, reading
+/// `parent_target_controller` (engine `ability_utils.rs`): the head's own
+/// `targets`, else its `effect_context_object`. Targets are assigned per node,
+/// and both a parent's targets and the snapshot its effect produces are handed
+/// parent to child, never child to parent, so the gated head reads only a role
+/// it announces itself.
+struct AnnouncedRoles {
+    /// Roles announced by the head effect and its own unless-payer.
+    head: Vec<TargetFilter>,
+    /// Roles announced anywhere below the head (sub, else and mode nodes).
+    descendants: Vec<TargetFilter>,
+    /// Whether the clause lowers to one node or to a head with a child.
+    shape: GatedClauseShape,
+}
+
+/// CR 608.2c: the node structure of the clause a suffix would gate.
+///
+/// A later printed instruction is appended below the clause's last node
+/// (assembly), and on a false gate the engine runs only the gated node's DIRECT
+/// sub when it is an independent instruction (engine `effects/mod.rs`, the
+/// condition-false path of `resolve_chain_body`). Below a head with a
+/// continuation child (a compound such as "gets -2/-2 and gains haste", or a
+/// `TargetOnly` head and its acting child) the next instruction sits under the
+/// continuation and would be skipped with it, so the suffix binds only a
+/// single-node clause and the other shape stays an explicit gap. Below a
+/// single-node clause the next instruction is that direct sub; whether it is
+/// one the false path runs is checked once the chain is finished
+/// (`keep_own_target_gate_readable`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatedClauseShape {
+    SingleInstruction,
+    WithContinuation,
+}
+
+impl AnnouncedRoles {
+    /// Every announced role, head first. Reach guards use the combined count.
+    #[cfg(test)]
+    fn all(&self) -> Vec<TargetFilter> {
+        self.head
+            .iter()
+            .chain(self.descendants.iter())
+            .cloned()
+            .collect()
+    }
+}
+
+/// CR 608.2c: the prefixes and suffixes production peels in the chunk loop
+/// AFTER the suffix-conditional strip, and stamps on the clause's `ClauseIr`
+/// as `repeat_for` / `player_scope` / the optional-effect scopes. The probe
+/// parses the text that still carries them while production later parses the
+/// stripped text, so a head carrying any of them is declined. The detectors
+/// are the production strippers themselves, not a second copy of their grammar.
+fn head_stamps_clause_scope(text: &str) -> bool {
+    let (optional, opponent_may, implicit_scope, _) =
+        super::lower::strip_optional_effect_prefix(text);
+    if optional || opponent_may.is_some() || implicit_scope.is_some() {
+        return true;
+    }
+    let (repeat_for, difference, _) = super::lower::strip_for_each_prefix_with_difference(text);
+    repeat_for.is_some()
+        || difference.is_some()
+        || crate::parser::clause_shell::peel_repeat_count_suffix(text)
+            .0
+            .is_some()
+        || crate::parser::clause_shell::peel_player_scope_subject(text, false)
+            .0
+            .is_some()
+        || super::lower::strip_prepositional_player_scope_subject(text)
+            .0
+            .is_some()
+}
+
+/// CR 115.1 + CR 115.10a + CR 601.2c: every role production announces for the
+/// instruction `effect_text`, read from the head effect and every descendant
+/// through the phase-ast enumerator. `None` when the text fails one of the gates
+/// below; `Some` means it passed them, and the role count it carries is what
+/// shows the input parsed (an unparsed clause announces no role).
+///
+/// The gates, in order: the printed text carries the word "target " (the
+/// timing ladder's target-declaring arms key on it, and both production
+/// re-timings of an enchanted/equipped host require its absence); no optional-count quantifier
+/// ("up to", "any number of") precedes any target phrase, whether or not the
+/// clause fixup stamped `multi_target` for this effect kind; the head carries
+/// no clause-scope prefix and no announcer override; the clause lowers to Stack
+/// timing; and no node declares an ambiguous cardinality shape.
+fn stack_announced_roles(effect_text: &str, ctx: &ParseContext) -> Option<AnnouncedRoles> {
+    if !nom_primitives::scan_contains(&effect_text.to_ascii_lowercase(), "target ")
+        || super::lower::text_declares_optional_target_count(effect_text)
+        || head_stamps_clause_scope(effect_text)
+    {
+        return None;
+    }
+    let mut probe_ctx = ctx.clone_throwaway();
+    let clause = super::parse_effect_clause(effect_text, &mut probe_ctx);
+    if probe_ctx.target_chooser.is_some() {
+        return None;
+    }
+    let timing = super::lower::target_choice_timing_for_parsed(
+        &clause,
+        effect_text,
+        None,
+        clause.multi_target.is_some(),
+        TargetSelectionMode::Chosen,
+    );
+    if timing != TargetChoiceTiming::Stack {
+        return None;
+    }
+    announced_object_roles(&clause)
+}
+
+/// CR 115.1: the one announced object target of an instruction (a
+/// spell's, a triggered ability's or an activated ability's), owned by the
+/// head the condition is attached to, or `None` when the declaration is not
+/// exactly one controller-capable object role. A companion player, a payer, a
+/// child role, or any other second role makes the suffix decline, and so does a
+/// clause with a continuation child ([`GatedClauseShape`]).
+fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<TargetFilter> {
+    let mut roles = stack_announced_roles(effect_text, ctx)?;
+    // Bind only a role the gated head can read at resolution: the head owns
+    // exactly one role. A descendant role is unreadable by the head when it is
+    // the only one, and makes the referent ambiguous when the head has one too.
+    if roles.head.len() != 1
+        || !roles.descendants.is_empty()
+        || roles.shape != GatedClauseShape::SingleInstruction
+    {
+        return None;
+    }
+    let filter = roles.head.pop()?;
+    (nom_condition::filter_guarantees_object_controller(&filter)
+        && !super::is_player_scoped_filter(&filter))
+    .then_some(filter)
 }
 
 pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, QuantityExpr)> {
@@ -4914,27 +5755,46 @@ fn parse_additional_cost_paid_gate_condition_text(text: &str) -> Option<AbilityC
     })
 }
 
-/// CR 601.2b + CR 702.33b (kicker) + CR 702.174b (gift): A plain conditional
-/// gate ("[effect] if <additional cost was paid>") — as opposed to the
-/// replacement "instead" fold — that all resolve to the shared
-/// `additional_cost_paid_any()` runtime check. Covers kicked, the gift-promised
-/// phrasing (Longstalk Brawl / Coiling Rebirth), and the generic
-/// "additional cost was paid" wording (used inside `And` gates).
-fn parse_additional_cost_paid_gate_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
-    let (rest, _) = alt((
-        value(
-            (),
-            (
-                alt((tag("it"), tag("that spell"), tag("this spell"))),
-                tag(" was kicked"),
-            ),
+/// CR 702.174k: The promised predicate refers to paying this spell's Gift cost.
+fn parse_gift_promise(input: &str) -> OracleResult<'_, bool> {
+    preceded(
+        tag("the gift "),
+        terminated(
+            alt((value(true, tag("wasn't")), value(false, tag("was")))),
+            tag(" promised"),
         ),
-        value((), tag("the gift was promised")),
-        value((), tag("this spell's additional cost was paid")),
-        value((), tag("its additional cost was paid")),
+    )
+    .parse(input)
+}
+
+fn gift_promise_condition(negated: bool) -> AbilityCondition {
+    maybe_negate(
+        AbilityCondition::additional_cost_paid_origin(AdditionalCostOrigin::Gift),
+        negated,
+    )
+}
+
+/// CR 601.2b + CR 702.33b + CR 702.174k: Plain additional-cost predicates,
+/// including the Gift predicate used inside conjunctions (Coiling Rebirth).
+fn parse_additional_cost_paid_gate_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
+    alt((
+        map(parse_gift_promise, gift_promise_condition),
+        map(
+            alt((
+                value(
+                    (),
+                    (
+                        alt((tag("it"), tag("that spell"), tag("this spell"))),
+                        tag(" was kicked"),
+                    ),
+                ),
+                value((), tag("this spell's additional cost was paid")),
+                value((), tag("its additional cost was paid")),
+            )),
+            |()| AbilityCondition::additional_cost_paid_any(),
+        ),
     ))
-    .parse(input)?;
-    Ok((rest, AbilityCondition::additional_cost_paid_any()))
+    .parse(input)
 }
 
 /// CR 601.2f + CR 608.2c: "<effect> if (this spell was | it was | it's) cast
@@ -5066,6 +5926,147 @@ fn parse_target_controller_poison_threshold(input: &str) -> OracleResult<'_, i32
     .parse(input)
 }
 
+/// The single declared object target of an instruction, with the controller
+/// its own type phrase introduced ("… an opponent controls").
+struct DeclaredObjectTarget {
+    filter: TargetFilter,
+    introduced_controller: Option<ControllerRef>,
+}
+
+/// CR 115.1: the instruction `effect_text` lowers to declares exactly one
+/// object target that can supply a controller (`probe_declared_target_slot`
+/// owns every guard: not a context reference, not a player, not a multi-role or
+/// multi-target slot). Parsed on a throwaway context so the caller's is
+/// untouched.
+fn declared_single_object_target(
+    effect_text: &str,
+    ctx: &ParseContext,
+) -> Option<DeclaredObjectTarget> {
+    let filter = probe_declared_target_slot(effect_text, ctx)?;
+    let introduced_controller = match &filter {
+        TargetFilter::Typed(tf) => tf.controller.clone(),
+        _ => None,
+    };
+    Some(DeclaredObjectTarget {
+        filter,
+        introduced_controller,
+    })
+}
+
+/// CR 608.2c + CR 115.1: whether the condition's subject has a matching
+/// antecedent in the gated instruction. "that opponent" requires the target's
+/// own type phrase to introduce the opponent; "that spell/creature/permanent"
+/// requires the declared slot's kind to match; "its" inherits the slot.
+fn referent_is_bound(
+    referent: nom_condition::TargetControllerReferent,
+    target: &DeclaredObjectTarget,
+) -> bool {
+    match referent {
+        nom_condition::TargetControllerReferent::IntroducedOpponent => {
+            target.introduced_controller == Some(ControllerRef::Opponent)
+        }
+        nom_condition::TargetControllerReferent::ObjectController { noun } => {
+            nom_condition::referent_noun_matches_slot(noun, &target.filter)
+        }
+    }
+}
+
+/// CR 608.2c: the shared target-controller grammar, parsed as a typed
+/// `StaticCondition`. `None` means the text is not this grammar at all; the
+/// antecedent guard belongs to the effect-side callers.
+fn parse_target_controller_control_condition_parts(
+    condition_text: &str,
+) -> Option<(nom_condition::TargetControllerReferent, StaticCondition)> {
+    let lower = condition_text.to_lowercase();
+    nom_parse_lower(&lower, |input| {
+        all_consuming(nom_condition::parse_target_controller_count_condition).parse(input)
+    })
+}
+
+/// CR 608.2c: the shared target-controller grammar as a prefix, so a trailing
+/// connector ("… and <condition>") cannot smuggle the unbound referent past the
+/// guard by failing the whole-text parse.
+fn parse_target_controller_control_condition_prefix(
+    condition_text: &str,
+) -> Option<nom_condition::TargetControllerReferent> {
+    let lower = condition_text.to_lowercase();
+    nom_parse_lower(&lower, |input| {
+        nom_condition::parse_target_controller_count_condition(input)
+    })
+    .map(|(referent, _condition)| referent)
+}
+
+/// CR 608.2c: where the instruction a trailing "if" gates sits in the effect
+/// chain being parsed, which decides the resolved node its gate is evaluated
+/// against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GatedInstructionPosition {
+    /// The first instruction of a chain its entry point proved to be the
+    /// ability's resolved root (`ResolvedChainRoot::Proven`: a triggered
+    /// ability's body, an activated ability's effect on a card without a gift
+    /// keyword, or the spell line of a card whose only non-keyword line it is
+    /// and whose spell is not rewritten at cast). The engine evaluates its gate
+    /// on its own resolved node before its effect, so a
+    /// target-controller read sees the targets this instruction announced.
+    ChainRoot,
+    /// Anything else, declined. For a later instruction (lowered as a
+    /// sub-ability), any mode of a modal body (the engine appends each later
+    /// chosen mode to the earlier one as a sub-ability, CR 700.2), a nested
+    /// remainder parse, a later spell paragraph, a fused half, a spliced card or
+    /// a gift spell's first line, the engine evaluates the gate first in the
+    /// parent's hand-off against the PARENT's resolved node (engine
+    /// `effects/mod.rs`, the `sub.condition` check before the sub is
+    /// dispatched), and only then on the sub itself; both must hold, so the
+    /// parent's targets would decide it. An overloaded spell announces no
+    /// targets (CR 702.96b), so its gate would read none; an awaken spell or an
+    /// Arcane splice host gets an instruction appended below it at cast, which
+    /// a false gate would skip; a spell with a second paragraph may get one
+    /// with a condition of its own. A root whose entry
+    /// point wires no proof (a reflexive body, a granted activated body) is
+    /// declined conservatively.
+    AfterInstruction,
+}
+
+/// CR 608.2c + CR 115.1: whether the referent of a recognized target-controller
+/// condition has an antecedent in the gated instruction's single declared
+/// object target, and the gate is evaluated where that target is readable: only
+/// the chain root's gate reads the root's own targets.
+fn target_controller_referent_binds(
+    referent: nom_condition::TargetControllerReferent,
+    effect_text: &str,
+    ctx: &ParseContext,
+    position: GatedInstructionPosition,
+) -> bool {
+    match position {
+        GatedInstructionPosition::ChainRoot => declared_single_object_target(effect_text, ctx)
+            .is_some_and(|target| referent_is_bound(referent, &target)),
+        GatedInstructionPosition::AfterInstruction => false,
+    }
+}
+
+/// CR 608.2c: a trailing condition on the controller of the gated
+/// instruction's single declared object target, returned only when its
+/// subject has an antecedent in that instruction (Skulking Killer, Unified
+/// Will). This is the one binding seam: the production suffix strip calls it
+/// and so do the tests, so no test-only copy of the branch exists.
+///
+/// The grammar itself lives in the single condition authority,
+/// `oracle_nom::condition::parse_target_controller_count_condition`; this seam
+/// keeps only the effect-side antecedent guard and the typed bridge.
+fn bind_target_controller_condition(
+    referent: nom_condition::TargetControllerReferent,
+    condition: &StaticCondition,
+    effect_text: &str,
+    ctx: &ParseContext,
+    position: GatedInstructionPosition,
+) -> Option<AbilityCondition> {
+    if !target_controller_referent_binds(referent, effect_text, ctx, position) {
+        return None;
+    }
+    let mut bridge_ctx = ctx.clone();
+    static_condition_to_ability_condition(condition, &mut bridge_ctx)
+}
+
 /// CR 601.2 + CR 608.2c: `parse_condition_text` for a clause in a known parse
 /// context. A cast-time battlefield snapshot (`ControllerControlledMatchingAsCast`)
 /// is stamped only on the cast spell's own ability chain
@@ -5142,7 +6143,9 @@ pub(super) fn reads_cast_time_snapshot(condition: &AbilityCondition) -> bool {
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
-        | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        | AbilityCondition::ScopedPlayerMatches { .. }
+        // Reads the turn-history attack ledger, not the spell's cast snapshot.
+        | AbilityCondition::PlayerAttackedPlayer { .. } => false,
     }
 }
 
@@ -5501,6 +6504,7 @@ pub(crate) fn parse_phase_name_set(
         ),
         value(vec![Phase::PreCombatMain], tag("precombat main phase")),
         value(vec![Phase::PostCombatMain], tag("postcombat main phase")),
+        value(vec![Phase::Untap], tag("untap step")),
         value(
             vec![Phase::Upkeep],
             alt((tag("upkeep step"), tag("upkeep"))),
@@ -5937,8 +6941,12 @@ fn build_instead_def(
         };
     };
 
-    let instead_def =
-        super::parse_child_ability_with_parent_target(&effect_text, kind, parent_target_available);
+    let instead_def = super::parse_child_ability_with_parent_target(
+        &effect_text,
+        kind,
+        parent_target_available,
+        ctx,
+    );
     let mut result = super::instead_override_definition(
         instead_def,
         AbilityCondition::ConditionInstead {
@@ -6088,6 +7096,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         rest_destination: alt_rest,
         rest_split_top_count: alt_rest_split_top_count,
         rest_order: alt_rest_order,
+        rest_library_position: alt_rest_library_position,
         enter_tapped: alt_enter_tapped,
         enters_attacking: alt_enters_attacking,
         ..
@@ -6116,6 +7125,79 @@ pub(crate) fn try_parse_dig_instead_alternative(
     // (same-clause "and the rest on the bottom..."); otherwise falls back to the
     // preceding Dig's (already-patched or None — a trailing PutRest continuation
     // patches both branches by rewriting into the chain).
+    let alt_rest_destination = alt_rest.or(*prev_rest);
+    // CR 608.2c ("read the whole text and apply the rules of English"):
+    // the remainder instruction is inherited ONLY when the alternative is
+    // silent about the remainder. Precedence mirrors `alt_rest` /
+    // `alt_rest_order` directly above and below:
+    //
+    //   1. the alternative named its own split      -> use it;
+    //   2. the alternative named a UNIFORM remainder
+    //      destination ("...put the rest on the bottom
+    //      of your library") -> `None`, except that a remainder
+    //      it sends to the TOP of the library is the degenerate
+    //      all-top split (CR 401.4) rather than a bottom
+    //      destination. An explicit one-position instruction is
+    //      not merely a different destination, it positively says
+    //      "all of it goes to one place", which overrides the base
+    //      branch's split instead of being contaminated by it;
+    //   3. the alternative said nothing about the
+    //      remainder             -> inherit the base branch's split,
+    //                               exactly as `prev_rest` and
+    //                               `prev_reveal` are inherited.
+    //
+    // Before this precedence existed, case 2 kept the base's split and the
+    // alternative branch tried to partition a remainder its own text had
+    // already sent uniformly to one position.
+    let alt_rest_split_top_count = alt_rest_split_top_count.map(|boxed| *boxed).or_else(|| {
+        if alt_rest.is_some() {
+            // CR 401.4: an alternative that puts its remainder on TOP names
+            // the degenerate all-top split, exactly as the same clause does on
+            // the base branch.
+            (alt_rest_library_position.as_deref() == Some(&LibraryPosition::Top))
+                .then(|| prev_count.clone())
+        } else {
+            prev_rest_split_top_count.clone()
+        }
+    });
+    // CR 701.20e + CR 608.2c: the alternative is its own from-among
+    // selection, so it declares its own remainder from the same fields the
+    // base selection's `DigFromAmong` continuation does. A trailing "put the
+    // rest …" clause re-declares both branches as routes.
+    let alt_rest_remainder = super::sequence::declared_selection_remainder(
+        alt_destination,
+        alt_keep_count,
+        alt_rest_destination,
+        alt_rest_split_top_count.is_some(),
+    );
+    // CR 401.4: fail closed on a remainder split the Dig resolver cannot
+    // honor, validated on the EFFECTIVE alternative — after it inherited the
+    // base branch's split and order — exactly as the base branch's
+    // continuation does (`unsupported_rest_split`).
+    let alt_effective_rest_order = alt_rest.map_or(*prev_rest_order, |_| alt_rest_order);
+    if super::sequence::unsupported_rest_split(
+        alt_rest_split_top_count.is_some(),
+        alt_effective_rest_order,
+        alt_keep_count,
+        alt_up_to,
+        alt_destination,
+    ) {
+        return Some(AbilityIr {
+            source_text: text.to_string(),
+            body: EffectChainIr::single_clause(
+                text,
+                kind,
+                parsed_clause(super::sequence::unsupported_rest_split_effect()),
+                None,
+                None,
+                false,
+            ),
+            shell: AbilityShellIr::default(),
+            die_results: vec![],
+            root_transforms: vec![AbilityRootTransform::AppendCondition(condition)],
+            modal: None,
+        });
+    }
     let alt_effect = Effect::Dig {
         player: prev_player.clone(),
         count: prev_count.clone(),
@@ -6124,37 +7206,10 @@ pub(crate) fn try_parse_dig_instead_alternative(
         keep_count_expr: alt_keep_count_expr,
         up_to: alt_up_to,
         filter: alt_filter,
-        rest_destination: alt_rest.or(*prev_rest),
-        // CR 608.2c ("read the whole text and apply the rules of English"):
-        // the remainder instruction is inherited ONLY when the alternative is
-        // silent about the remainder. Precedence mirrors `alt_rest` /
-        // `alt_rest_order` directly above and below:
-        //
-        //   1. the alternative named its own split      -> use it;
-        //   2. the alternative named a UNIFORM remainder
-        //      destination ("...put the rest on the bottom
-        //      of your library") -> `None`. An explicit
-        //      one-position instruction is not merely a
-        //      different destination, it positively says
-        //      "all of it goes to one place", which
-        //      overrides the base branch's split instead
-        //      of being contaminated by it;
-        //   3. the alternative said nothing about the
-        //      remainder             -> inherit the base branch's split,
-        //                               exactly as `prev_rest` and
-        //                               `prev_reveal` are inherited.
-        //
-        // Before this precedence existed, case 2 kept the base's split and the
-        // alternative branch tried to partition a remainder its own text had
-        // already sent uniformly to one position.
-        rest_split_top_count: alt_rest_split_top_count.map(|boxed| *boxed).or_else(|| {
-            if alt_rest.is_some() {
-                None
-            } else {
-                prev_rest_split_top_count.clone()
-            }
-        }),
-        rest_order: alt_rest.map_or(*prev_rest_order, |_| alt_rest_order),
+        rest_destination: alt_rest_destination,
+        rest_remainder: alt_rest_remainder,
+        rest_split_top_count: alt_rest_split_top_count,
+        rest_order: alt_effective_rest_order,
         reveal: *prev_reveal,
         enter_tapped: alt_enter_tapped,
         enters_attacking: alt_enters_attacking,
@@ -6334,6 +7389,81 @@ fn opponent_poison_at_least_as_quantity_check(count: u32) -> AbilityCondition {
     }
 }
 
+/// CR 508.6 + CR 608.2c: endpoint map for the retrospective player-pair
+/// attack test, shared by the positive and negated bridge arms below. Each
+/// endpoint maps only where meaning is preserved exactly (see the arm doc);
+/// unmapped endpoints fail the whole condition to `None` so coverage stays
+/// honest instead of silently rebinding.
+fn player_attack_endpoint_to_scope(scope: &ControllerRef) -> Option<PlayerScope> {
+    match scope {
+        ControllerRef::You => Some(PlayerScope::Controller),
+        ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::ChosenPlayer { .. } => Some(PlayerScope::Target),
+        ControllerRef::SourceChosenPlayer => Some(PlayerScope::SourceChosenPlayer),
+        ControllerRef::DefendingPlayer => Some(PlayerScope::DefendingPlayer),
+        ControllerRef::ScopedPlayer => Some(PlayerScope::ScopedPlayer),
+        // No exact mapping: `Opponent` needs an aggregate the source lacks,
+        // the target/event-relative refs name no single endpoint, and
+        // `DeclaredPlayer`/`TriggeringPlayer`/`EnchantedPlayer`/`ActivePlayer`
+        // have no `PlayerScope` counterpart. Each fails the condition to
+        // `None` (listed explicitly so a new `ControllerRef` breaks the
+        // build here instead of silently rebinding).
+        //
+        // CR 508.6 + CR 608.2c (Matt M2): `SpecificPlayer` is refused here
+        // too, even though the names line up. `PlayerScope::SpecificPlayer`
+        // is duration-timing-only — never produced by the parser, carrying
+        // no value reading — and the condition authority rejects it before
+        // evaluation, so mapping it would bridge a matching ledger entry to
+        // a condition that still yields false (or true under `Not`).
+        ControllerRef::Opponent
+        | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer
+        | ControllerRef::SpecificPlayer { .. }
+        | ControllerRef::DeclaredPlayer { .. } => None,
+    }
+}
+
+/// CR 122.1f + CR 109.5: Bridge `StaticCondition::PlayerIsPoisoned` to a
+/// `QuantityCheck` on the specific player's poison counter total (>= 1).
+/// The player scope carries the subject axis. Only scopes supported by
+/// `CountScope` (Controller, Opponents, All, ScopedPlayer, Owner,
+/// SourceChosenPlayer) are bridged; trigger-specific scopes (DefendingPlayer,
+/// Target, etc.) return `None` since they don't appear in static abilities.
+fn ability_condition_from_poisoned_player(player: &PlayerScope) -> Option<AbilityCondition> {
+    use crate::types::ability::QuantityRef;
+    use crate::types::player::PlayerCounterKind;
+
+    let scope = match player {
+        PlayerScope::Controller => CountScope::Controller,
+        PlayerScope::Opponent { aggregate: _ } => CountScope::Opponents,
+        PlayerScope::ScopedPlayer => CountScope::ScopedPlayer,
+        PlayerScope::AllPlayers { .. } => CountScope::All,
+        // Trigger-specific scopes not supported in static abilities
+        PlayerScope::DefendingPlayer
+        | PlayerScope::Target
+        | PlayerScope::RecipientController
+        | PlayerScope::ParentObjectTarget { .. }
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. } => return None,
+    };
+    Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: PlayerCounterKind::Poison,
+                scope,
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
 /// Bridge a `StaticCondition` (from the nom condition parser) to an
 /// `AbilityCondition`. Returns `None` for variants that have no
 /// effect-resolution equivalent — the caller falls through to the next strategy.
@@ -6375,6 +7505,51 @@ pub(crate) fn static_condition_to_ability_condition(
             Some(AbilityCondition::WasStartingPlayer {
                 controller: controller.clone(),
             })
+        }
+        // CR 508.6 + CR 608.2c: player-pair attack tests bridge
+        // endpoint-wise. Each endpoint maps only where meaning is
+        // preserved exactly: `You` reads the resolution controller;
+        // declared-target and chosen endpoints read the first
+        // `TargetRef::Player` (the V1 creation-time stamp carries the
+        // chosen player); `SourceChosenPlayer`, `DefendingPlayer`, and
+        // `ScopedPlayer` are scalar-identical on both axes. Aggregates
+        // (`Opponent`), event- and parent-relative anchors,
+        // `ActivePlayer`/`TriggeringPlayer`/`EnchantedPlayer`, and
+        // `SpecificPlayer` (Matt M2: its `PlayerScope` namesake is
+        // duration-timing-only and the condition authority rejects it,
+        // so mapping it would yield false despite a matching ledger)
+        // have no scalar counterpart -- lowering them would silently
+        // rebind (cf. `IsMonarch` below), so the whole condition stays
+        // unrepresented and coverage stays honest.
+        StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
+            // CR 603.7a + CR 109.4 (Matt R7-F5): a `ChosenPlayer` endpoint
+            // resolves against the target delayed-trigger creation stamps —
+            // and ONLY there. Outside the matching stamped body (an immediate
+            // Choose→conditional has no stamp; ordinary choice completion
+            // writes only `chosen_players`) the `Target` mapping below would
+            // consult no player or an unrelated declared target, so the
+            // whole condition stays unrepresented and coverage stays honest.
+            // The index must match the stamp exactly: creation stamps only
+            // the temporal binding's player.
+            for endpoint in [attacker, defender] {
+                if let ControllerRef::ChosenPlayer { index } = endpoint {
+                    if ctx.stamped_delayed_chosen_player != Some(*index) {
+                        return None;
+                    }
+                }
+            }
+            match (
+                player_attack_endpoint_to_scope(attacker),
+                player_attack_endpoint_to_scope(defender),
+            ) {
+                (Some(attacker), Some(defender)) => {
+                    Some(AbilityCondition::PlayerAttackedPlayer {
+                        attacker,
+                        defender,
+                    })
+                }
+                _ => None,
+            }
         }
         // CR 702.185c: "a spell was warped this turn" — 1:1 bridge (same `variant`).
         StaticCondition::SpellCastWithVariantThisTurn { variant } => {
@@ -6423,6 +7598,14 @@ pub(crate) fn static_condition_to_ability_condition(
         StaticCondition::IsRingBearer => Some(AbilityCondition::IsRingBearer),
         StaticCondition::OpponentPoisonAtLeast { count } => {
             Some(opponent_poison_at_least_as_quantity_check(*count))
+        }
+        // CR 122.1f + CR 109.5: "player is poisoned" — bridge to a quantity
+        // check on the player's poison counters. Mirrors the trigger-side
+        // `TriggerCondition::IsPoisoned` with the same subject scope axis.
+        // Only scopes supported by `CountScope` are bridged; trigger-specific
+        // scopes (DefendingPlayer, Target, etc.) return `None`.
+        StaticCondition::PlayerIsPoisoned { player } => {
+            ability_condition_from_poisoned_player(player)
         }
         StaticCondition::DayNightIs { state } => {
             Some(AbilityCondition::DayNightIs { state: *state })
@@ -6699,7 +7882,7 @@ pub(crate) fn static_condition_to_ability_condition(
         // Layer-6 gate (the conditional hexproof grant) with no effect-resolution
         // (`AbilityCondition`) equivalent. `Not(SourceHasDealtDamage)` is handled by
         // the inner Not sub-match's `_ => None` arm above.
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         // CR 110.5b + CR 611.2b: `IsTapped { scope }` is a duration-only
         // target-relative tap condition (Zygon Infiltrator's copy duration), not
@@ -6727,6 +7910,114 @@ pub(crate) fn static_condition_to_ability_condition(
         // so there is no attacker whose latched record could answer. The anchor
         // is structurally unavailable here, not merely unused.
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::None => None,
+    }
+}
+
+/// CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: a delayed ability's
+/// source-zone intervening-if is checked when the delayed object is put on the
+/// stack and again as it resolves, against the source incarnation that created
+/// it. Keep this bridge scoped to delayed-trigger bodies; ordinary effect
+/// conditions must remain strict gaps when no effect-time equivalent exists.
+fn static_condition_to_delayed_ability_condition(
+    sc: &StaticCondition,
+    ctx: &mut ParseContext,
+) -> Option<AbilityCondition> {
+    if !matches!(ctx.trigger_condition_scope, TriggerConditionScope::Delayed) {
+        return None;
+    }
+
+    match sc {
+        StaticCondition::SourceInZone { zone } => Some(AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone { zone: *zone }],
+                ..Default::default()
+            }),
+        }),
+        StaticCondition::Not { condition } => {
+            static_condition_to_delayed_ability_condition(condition, ctx).map(|condition| {
+                AbilityCondition::Not {
+                    condition: Box::new(condition),
+                }
+            })
+        }
+        StaticCondition::And { conditions } => Some(AbilityCondition::And {
+            conditions: conditions
+                .iter()
+                .map(|condition| static_condition_to_delayed_ability_condition(condition, ctx))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        StaticCondition::Or { conditions } => Some(AbilityCondition::Or {
+            conditions: conditions
+                .iter()
+                .map(|condition| static_condition_to_delayed_ability_condition(condition, ctx))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        // Only source-zone leaves and Boolean composition are admitted here.
+        // Every other leaf is explicit so a future StaticCondition variant
+        // forces a deliberate decision about delayed source-zone semantics.
+        StaticCondition::DevotionGE { .. }
+        | StaticCondition::IsPresent { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::QuantityQuality { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
+        | StaticCondition::IsInitiative
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::PlayerIsPoisoned { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::Unrecognized { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage { .. }
+        | StaticCondition::SourceExertedThisTurn
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::IsTapped { .. }
+        | StaticCondition::SourceIsFaceUp
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => None,
     }
 }
@@ -6812,6 +8103,41 @@ pub fn ability_condition_to_static_condition(ac: &AbilityCondition) -> Option<St
         AbilityCondition::Not { condition } => Some(StaticCondition::Not {
             condition: Box::new(ability_condition_to_static_condition(condition)?),
         }),
+        AbilityCondition::And { conditions } => Some(StaticCondition::And {
+            conditions: conditions
+                .iter()
+                .map(ability_condition_to_static_condition)
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        AbilityCondition::Or { conditions } => Some(StaticCondition::Or {
+            conditions: conditions
+                .iter()
+                .map(ability_condition_to_static_condition)
+                .collect::<Option<Vec<_>>>()?,
+        }),
+
+        // CR 603.7c + CR 603.7e + CR 400.7: invert only the exact source-zone
+        // filter emitted for a delayed payload. A typed filter with any
+        // additional type, controller, or property axis remains an ordinary
+        // `SourceMatchesFilter` and is intentionally not generalized into
+        // `SourceInZone`.
+        AbilityCondition::SourceMatchesFilter {
+            filter:
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }),
+        } if type_filters.is_empty()
+            && controller.is_none()
+            && properties.len() == 1
+            && matches!(properties.first(), Some(FilterProp::InZone { .. })) =>
+        {
+            let [FilterProp::InZone { zone }] = properties.as_slice() else {
+                unreachable!("guarded by the exact single InZone property check")
+            };
+            Some(StaticCondition::SourceInZone { zone: *zone })
+        }
 
         // Casting-context conditions — read `SpellContext` / cast history at
         // resolution time; no continuous-evaluation (`StaticCondition`)
@@ -6853,6 +8179,9 @@ pub fn ability_condition_to_static_condition(ac: &AbilityCondition) -> Option<St
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
         | AbilityCondition::ConditionInstead { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
+        // CR 508.6: retrospective player-pair test reads resolved targets;
+        // a resolution-flow guard with no continuous-effect form.
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::ScopedPlayerMatches { .. } => None,
         AbilityCondition::DiscardedCardMatchesFilter { .. } => None,
 
@@ -6881,9 +8210,7 @@ pub fn ability_condition_to_static_condition(ac: &AbilityCondition) -> Option<St
         | AbilityCondition::SourceMatchesFilter { .. }
         | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
         | AbilityCondition::DayNightIs { .. }
-        | AbilityCondition::ControllerControlsMatching { .. }
-        | AbilityCondition::And { .. }
-        | AbilityCondition::Or { .. } => None,
+        | AbilityCondition::ControllerControlsMatching { .. } => None,
     }
 }
 
@@ -7377,6 +8704,15 @@ pub(super) fn try_routed_nom_condition_as_ability_condition(
         return Some((condition, LeadingConditionRoute::TargetPtThreshold));
     }
 
+    // CR 202.3 + CR 608.2c: "that spell's mana value was 3 or less" (Reject Imperfection,
+    // Sound the Trumpets), "that permanent's mana value was 3 or less" (Carnivorous Canopy,
+    // Vindictive Triumph), "that spell has mana value 5 or greater" (Prismari Apprentice,
+    // Herald of Ilharg): the mana-value leaf of the threshold family, with the demonstrative
+    // noun deciding the referent.
+    if let Some(routed) = parse_referent_noun_mana_value_condition_text(lower.as_str(), ctx) {
+        return Some(routed);
+    }
+
     try_unrouted_nom_condition_tail(text, ctx)
         .map(|condition| (condition, LeadingConditionRoute::General))
 }
@@ -7524,14 +8860,15 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
             .parse()
             .unwrap_or(Keyword::Unknown(String::new()));
         if let Some(value) = keyword_presence_kind(&keyword) {
-            return Some(AbilityCondition::TargetMatchesFilter {
-                filter: TargetFilter::Typed(TypedFilter {
+            return Some(referent_condition(
+                TargetFilter::Typed(TypedFilter {
                     properties: vec![FilterProp::WithoutKeywordKind { value }],
                     ..Default::default()
                 }),
-                use_lki: false,
-                subject_slot: None,
-            });
+                ReferentTense::Present,
+                ObjectScope::Target,
+                None,
+            ));
         }
     }
 
@@ -7740,11 +9077,12 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
     // LKI mirrors the "it was a [type] card" branch below.
     if let Some((type_filter, negated)) = parse_a_type_was_verbed_this_way(&lower) {
         return Some(maybe_negate(
-            AbilityCondition::TargetMatchesFilter {
-                filter: TargetFilter::Typed(TypedFilter::new(type_filter)),
-                use_lki: true,
-                subject_slot: None,
-            },
+            referent_condition(
+                TargetFilter::Typed(TypedFilter::new(type_filter)),
+                ReferentTense::Past,
+                ObjectScope::Target,
+                None,
+            ),
             negated,
         ));
     }
@@ -7773,11 +9111,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                 );
             if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
                 return Some(maybe_negate(
-                    AbilityCondition::TargetMatchesFilter {
-                        filter,
-                        use_lki: true,
-                        subject_slot: None,
-                    },
+                    referent_condition(filter, ReferentTense::Past, ObjectScope::Target, None),
                     negated_lki,
                 ));
             }
@@ -7807,14 +9141,15 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
         );
         if let Ok((rest, (negated, prop))) = parse_status.parse(lower.as_str()) {
             if rest.trim().is_empty() {
-                let cond = AbilityCondition::TargetMatchesFilter {
-                    filter: TargetFilter::Typed(TypedFilter {
+                let cond = referent_condition(
+                    TargetFilter::Typed(TypedFilter {
                         properties: vec![prop],
                         ..Default::default()
                     }),
-                    use_lki: true,
-                    subject_slot: None,
-                };
+                    ReferentTense::Past,
+                    ObjectScope::Target,
+                    None,
+                );
                 return Some(maybe_negate(cond, negated));
             }
         }
@@ -7863,11 +9198,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                 );
             if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
                 return Some(maybe_negate(
-                    AbilityCondition::TargetMatchesFilter {
-                        filter,
-                        use_lki: false,
-                        subject_slot: None,
-                    },
+                    referent_condition(filter, ReferentTense::Present, ObjectScope::Target, None),
                     negated,
                 ));
             }
@@ -7957,11 +9288,12 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                     .any(type_filter_references_subtype)
             {
                 return Some(maybe_negate(
-                    AbilityCondition::TargetMatchesFilter {
-                        filter: filter.clone(),
-                        use_lki: false,
-                        subject_slot: None,
-                    },
+                    referent_condition(
+                        filter.clone(),
+                        ReferentTense::Present,
+                        ObjectScope::Target,
+                        None,
+                    ),
                     negated,
                 ));
             }
@@ -7992,14 +9324,15 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
             .parse()
             .unwrap_or(Keyword::Unknown(String::new()));
         if let Some(value) = keyword_presence_kind(&keyword) {
-            return Some(AbilityCondition::TargetMatchesFilter {
-                filter: TargetFilter::Typed(TypedFilter {
+            return Some(referent_condition(
+                TargetFilter::Typed(TypedFilter {
                     properties: vec![FilterProp::HasKeywordKind { value }],
                     ..Default::default()
                 }),
-                use_lki: false,
-                subject_slot: None,
-            });
+                ReferentTense::Present,
+                ObjectScope::Target,
+                None,
+            ));
         }
     }
 
@@ -8018,14 +9351,15 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
     {
         let cond =
             match subject {
-                StatusSubject::Anaphoric => AbilityCondition::TargetMatchesFilter {
-                    filter: TargetFilter::Typed(TypedFilter {
+                StatusSubject::Anaphoric => referent_condition(
+                    TargetFilter::Typed(TypedFilter {
                         properties: vec![prop],
                         ..Default::default()
                     }),
-                    use_lki: false,
-                    subject_slot: None,
-                },
+                    ReferentTense::Present,
+                    ObjectScope::Target,
+                    None,
+                ),
                 // CR 611.2b: a self-subject predicate with a dedicated precise
                 // `AbilityCondition` variant (e.g. "tapped" → `SourceIsTapped`) must
                 // route to that variant rather than the generic
@@ -8072,11 +9406,42 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
         }
     }
 
+    // CR 508.6 + CR 608.2c: "they <attack-predicate>" with a
+    // Choose(Player|Opponent) antecedent — "they" is the chosen player
+    // (Faramir's verbatim consequent). The pronoun binds per-context, so the
+    // dispatcher matches it here under the chain's `relative_player_scope`
+    // gate — but the attack SHAPE is not re-matched as complete sentences:
+    // the shared nom predicate (`parse_pair_attack_predicate`, polarity via
+    // `parse_didnt` plus endpoint) parses it, and the contextual index binds
+    // below before the shared bridge maps it to the stamped target.
+    // Full-consumption match only; every other scope falls through to the
+    // generic path unchanged (nom deliberately has no "they" subject, so an
+    // early scopeless pass keeps failing here exactly as before, preserving
+    // the chain's scope-enrichment passes).
+    if let Some(ControllerRef::ChosenPlayer { index }) = ctx.relative_player_scope.as_ref() {
+        let mut they_attacked_you = all_consuming((
+            tag::<_, _, OracleError<'_>>("they"),
+            parse_pair_attack_predicate,
+        ));
+        if they_attacked_you.parse(lower.as_str()).is_ok() {
+            let static_cond = StaticCondition::Not {
+                condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                    attacker: ControllerRef::ChosenPlayer { index: *index },
+                    defender: ControllerRef::You,
+                }),
+            };
+            if let Some(bridged) = static_condition_to_ability_condition(&static_cond, ctx) {
+                return Some(bridged);
+            }
+        }
+    }
+
     let (rest, condition) = parse_inner_condition(&lower).ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
-    static_condition_to_ability_condition(&condition, ctx)
+    static_condition_to_delayed_ability_condition(&condition, ctx)
+        .or_else(|| static_condition_to_ability_condition(&condition, ctx))
 }
 
 /// CR 109.4 + CR 109.5 + CR 608.2c: Consume the anaphoric control predicate
@@ -8097,7 +9462,9 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
 /// The subject identity is preserved by the consumer wrapping the filter in
 /// `AbilityCondition::TargetMatchesFilter`, which evaluates `ability.targets[0]`
 /// (the trigger subject / parent target).
-fn parse_anaphoric_control_predicate(input: &str) -> OracleResult<'_, (TargetFilter, bool, bool)> {
+fn parse_anaphoric_control_predicate(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, ReferentTense, bool)> {
     type E<'a> = OracleError<'a>;
 
     let controller_only =
@@ -8124,21 +9491,26 @@ fn parse_anaphoric_control_predicate(input: &str) -> OracleResult<'_, (TargetFil
 
     // Axis 1 — polarity. "you " then optional negator, then the control verb.
     let (rest, _) = tag::<_, _, E>("you ").parse(input)?;
-    let (rest, negator_lki) = opt(alt((
-        value(false, tag::<_, _, E>("don't ")),
-        value(false, tag("do not ")),
-        value(true, tag("didn't ")),
-        value(true, tag("did not ")),
+    let (rest, negative_tense) = opt(alt((
+        value(
+            ReferentTense::Present,
+            alt((tag::<_, _, E>("don't "), tag("do not "))),
+        ),
+        value(ReferentTense::Past, alt((tag("didn't "), tag("did not ")))),
     )))
     .parse(rest)?;
-    let negated = negator_lki.is_some();
-    // Axis 2 — tense. "controlled" → past (LKI); "control" → present.
-    let (rest, verb_lki) = alt((
-        value(true, tag::<_, _, E>("controlled ")),
-        value(false, tag("control ")),
+    let negated = negative_tense.is_some();
+    // Axis 2 — tense. A past auxiliary or a past control verb supplies LKI.
+    let (rest, verb_tense) = alt((
+        value(ReferentTense::Past, tag::<_, _, E>("controlled ")),
+        value(ReferentTense::Present, tag("control ")),
     ))
     .parse(rest)?;
-    let use_lki = negator_lki.unwrap_or(verb_lki) || verb_lki;
+    let tense = match (negative_tense, verb_tense) {
+        (Some(ReferentTense::Past), _)
+        | (None | Some(ReferentTense::Present), ReferentTense::Past) => ReferentTense::Past,
+        (None | Some(ReferentTense::Present), ReferentTense::Present) => ReferentTense::Present,
+    };
     // Axis 3 — subject.
     let (rest, filter) = alt((
         value(controller_only, tag::<_, _, E>("it")),
@@ -8159,19 +9531,15 @@ fn parse_anaphoric_control_predicate(input: &str) -> OracleResult<'_, (TargetFil
     ))
     .parse(rest)?;
 
-    Ok((rest, (filter, use_lki, negated)))
+    Ok((rest, (filter, tense, negated)))
 }
 
 fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCondition> {
-    let (_, (filter, use_lki, negated)) = all_consuming(parse_anaphoric_control_predicate)
+    let (_, (filter, tense, negated)) = all_consuming(parse_anaphoric_control_predicate)
         .parse(lower)
         .ok()?;
     Some(maybe_negate(
-        AbilityCondition::TargetMatchesFilter {
-            filter,
-            use_lki,
-            subject_slot: None,
-        },
+        referent_condition(filter, tense, ObjectScope::Target, None),
         negated,
     ))
 }
@@ -8188,11 +9556,12 @@ fn parse_opponent_controls_target(input: &str) -> OracleResult<'_, AbilityCondit
     let (rest, _) = alt((tag("that creature"), tag("that permanent"), tag("it"))).parse(rest)?;
     Ok((
         rest,
-        AbilityCondition::TargetMatchesFilter {
-            filter: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-            use_lki: false,
-            subject_slot: None,
-        },
+        referent_condition(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            ReferentTense::Present,
+            ObjectScope::Target,
+            None,
+        ),
     ))
 }
 
@@ -8274,7 +9643,7 @@ pub(super) fn strip_inverse_control_otherwise_connector(text: &str) -> Option<St
     let lower = text.to_lowercase();
     nom_on_lower(text, &lower, |input| {
         let (input, _) = tag::<_, _, OracleError<'_>>("if ").parse(input)?;
-        let (input, (_filter, _use_lki, negated)) = parse_anaphoric_control_predicate(input)?;
+        let (input, (_filter, _tense, negated)) = parse_anaphoric_control_predicate(input)?;
         // Only the negated "you don't control …" form is an else-connector.
         if !negated {
             return Err(nom::Err::Error(OracleError::new(
@@ -8700,11 +10069,12 @@ fn previous_effect_damage_recipient_to_condition(
             conditions: vec![
                 damage_was_dealt,
                 AbilityCondition::Not {
-                    condition: Box::new(AbilityCondition::TargetMatchesFilter {
-                        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
-                        use_lki: true,
-                        subject_slot: None,
-                    }),
+                    condition: Box::new(referent_condition(
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+                        ReferentTense::Past,
+                        ObjectScope::Target,
+                        None,
+                    )),
                 },
             ],
         },
@@ -8717,11 +10087,7 @@ fn previous_effect_damage_recipient_to_condition(
             conditions: vec![
                 damage_was_dealt,
                 AbilityCondition::HasObjectTarget,
-                AbilityCondition::TargetMatchesFilter {
-                    filter,
-                    use_lki: false,
-                    subject_slot: None,
-                },
+                referent_condition(filter, ReferentTense::Present, ObjectScope::Target, None),
             ],
         },
     }
@@ -8863,6 +10229,24 @@ fn parse_objects_share_quality_reference<'a>(
 }
 
 fn parse_die_result_condition(lower: &str) -> Option<AbilityCondition> {
+    // CR 706.2 + CR 608.2c: "the roll" a die-roll ability's body names is the
+    // roll it is resolving for — the triggering DieRolled event's result, which
+    // EventContextAmount reads (extract_amount_from_event); "If the roll was N
+    // or higher" gates the instruction it heads.
+    if let Ok((_, n)) = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("the roll was "),
+        terminated(nom_primitives::parse_number, tag(" or higher")),
+    ))
+    .parse(lower)
+    {
+        return Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        });
+    }
     let rest = tag::<_, _, OracleError<'_>>("the result is ")
         .parse(lower)
         .ok()
@@ -9287,59 +10671,45 @@ fn parse_zone_change_object_type_text(
 }
 
 fn parse_target_supertype_condition_text(lower: &str) -> Option<AbilityCondition> {
-    // CR 205.4: Subject anaphor + copula, tracking negation. "it" carries the
-    // `'s` contraction; the explicit "that creature/permanent/card" anaphors
-    // (Coiling Rebirth: "that creature isn't legendary") use the full copula.
-    let (rest, negated) = alt((
-        value(
-            true,
-            alt((
-                tag::<_, _, OracleError<'_>>("it is not "),
-                tag("it's not "),
-                tag("it isn't "),
-            )),
-        ),
-        value(false, alt((tag("it is "), tag("it's ")))),
-        value(
-            true,
-            (
-                alt((
-                    tag("that creature"),
-                    tag("that permanent"),
-                    tag("that card"),
-                )),
-                alt((tag(" is not "), tag(" isn't "))),
-            ),
-        ),
-        value(
-            false,
-            (
-                alt((
-                    tag("that creature"),
-                    tag("that permanent"),
-                    tag("that card"),
-                )),
-                tag(" is "),
-            ),
-        ),
-    ))
-    .parse(lower)
-    .ok()?;
-    let (rest, supertype) = parse_supertype_word(rest).ok()?;
+    let (rest, clause) = parse_referent_predicate(lower, ReferentSurface::Supertype).ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
+    Some(lower_referent_clause(clause, ObjectScope::Target))
+}
 
-    Some(maybe_negate(
-        AbilityCondition::TargetMatchesFilter {
-            filter: TargetFilter::Typed(
+fn parse_it_supertype_copula(input: &str) -> OracleResult<'_, ReferentPolarity> {
+    preceded(
+        tag("it"),
+        alt((
+            value(
+                ReferentPolarity::Negative,
+                alt((tag(" is not "), tag("'s not "), tag(" isn't "))),
+            ),
+            value(
+                ReferentPolarity::Affirmative,
+                alt((tag(" is "), tag("'s "))),
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_supertype_predicate(
+    input: &str,
+    polarity: ReferentPolarity,
+) -> OracleResult<'_, ReferentClause> {
+    let (rest, supertype) = parse_supertype_word(input)?;
+    Ok((
+        rest,
+        ReferentClause::filter(
+            TargetFilter::Typed(
                 TypedFilter::default()
                     .properties(vec![FilterProp::HasSupertype { value: supertype }]),
             ),
-            use_lki: false,
-            subject_slot: None,
-        },
-        negated,
+            polarity,
+            ReferentTense::Present,
+        ),
     ))
 }
 
@@ -9573,6 +10943,7 @@ fn parse_ability_use_count_condition(lower: &str) -> Option<(AbilityUseTally, Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_ir::context::ResolvedChainRoot;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::parser::parse_oracle_text;
     use crate::types::ability::{
@@ -9580,6 +10951,51 @@ mod tests {
         SharedQuality, SharedQualityRelation,
     };
     use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::player::PlayerCounterKind;
+
+    #[test]
+    fn player_counter_absence_requires_a_proven_event_antecedent() {
+        let printed = "that player gets two rad counters if they don't have any rad counters";
+        let mut event = ParseContext {
+            in_trigger: true,
+            relative_player_scope: Some(ControllerRef::TriggeringPlayer),
+            ..Default::default()
+        };
+        let (guard, instruction) = strip_suffix_conditional(printed, &mut event);
+        assert!(guard.is_some());
+        assert_eq!(instruction, "that player gets two rad counters");
+
+        for mut ctx in [
+            ParseContext::default(),
+            ParseContext {
+                in_trigger: true,
+                relative_player_scope: Some(ControllerRef::TargetPlayer),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                strip_suffix_conditional(printed, &mut ctx),
+                (None, printed.to_owned())
+            );
+        }
+        assert_eq!(
+            strip_routed_suffix_conditional(
+                printed,
+                &mut event,
+                GatedInstructionPosition::AfterInstruction,
+            ),
+            (None, printed.to_owned())
+        );
+    }
+
+    #[test]
+    fn player_counter_absence_parses_the_kind_not_a_fixed_rad_keyword() {
+        assert_eq!(
+            all_consuming(nom_condition::parse_anaphoric_player_counter_absence)
+                .parse("that player doesn’t have any poison counters"),
+            Ok(("", ("that player", PlayerCounterKind::Poison)))
+        );
+    }
 
     /// CR 608.2h: the static→ability bridge maps `QuantityQuality` 1:1 and never
     /// returns `None` for it — a dropped `None` would lower the effect to
@@ -9898,6 +11314,181 @@ mod tests {
             strip_suffix_conditional(original, &mut ParseContext::default());
         assert_eq!(condition, None);
         assert_eq!(remainder, original);
+    }
+
+    /// CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: the source-zone bridge is
+    /// deliberately exact and scoped to delayed bodies. The delayed intervening-if
+    /// path recovers the trigger-layer zone condition while ordinary effect
+    /// lowering remains an explicit gap. Recursive negation remains intact.
+    #[test]
+    fn source_in_zone_bridge_inverse_and_delayed_trigger_shape() {
+        for zone in [
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Zone::Exile,
+            Zone::Hand,
+            Zone::Library,
+            Zone::Command,
+        ] {
+            let static_condition = StaticCondition::SourceInZone { zone };
+            let expected_filter = TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone { zone }],
+                ..Default::default()
+            });
+            let ability_condition = AbilityCondition::SourceMatchesFilter {
+                filter: expected_filter.clone(),
+            };
+            assert_eq!(
+                static_condition_to_ability_condition(
+                    &static_condition,
+                    &mut ParseContext::default()
+                ),
+                None,
+                "ordinary source-zone guards remain explicit gaps for {zone:?}"
+            );
+            let mut delayed_ctx = ParseContext {
+                trigger_condition_scope: TriggerConditionScope::Delayed,
+                ..Default::default()
+            };
+            assert_eq!(
+                static_condition_to_delayed_ability_condition(&static_condition, &mut delayed_ctx),
+                Some(ability_condition.clone()),
+                "delayed source-zone bridge for {zone:?}"
+            );
+            assert_eq!(
+                ability_condition_to_static_condition(&ability_condition),
+                Some(static_condition.clone()),
+                "exact source-zone inverse for {zone:?}"
+            );
+            assert_eq!(
+                crate::parser::oracle_trigger::static_condition_to_trigger_condition(
+                    &static_condition
+                ),
+                Some(crate::types::ability::TriggerCondition::SourceInZone { zone }),
+                "delayed_intervening_if must recover TriggerCondition::SourceInZone for {zone:?}"
+            );
+
+            let negated_static = StaticCondition::Not {
+                condition: Box::new(static_condition.clone()),
+            };
+            let negated_ability = AbilityCondition::Not {
+                condition: Box::new(ability_condition.clone()),
+            };
+            assert_eq!(
+                static_condition_to_ability_condition(
+                    &negated_static,
+                    &mut ParseContext::default()
+                ),
+                None,
+                "ordinary negated source-zone guards remain explicit gaps for {zone:?}"
+            );
+            let mut delayed_ctx = ParseContext {
+                trigger_condition_scope: TriggerConditionScope::Delayed,
+                ..Default::default()
+            };
+            assert_eq!(
+                static_condition_to_delayed_ability_condition(&negated_static, &mut delayed_ctx),
+                Some(negated_ability.clone()),
+                "delayed negated source-zone bridge for {zone:?}"
+            );
+            assert_eq!(
+                ability_condition_to_static_condition(&negated_ability),
+                Some(negated_static.clone()),
+                "negated source-zone inverse for {zone:?}"
+            );
+            assert_eq!(
+                crate::parser::oracle_trigger::static_condition_to_trigger_condition(
+                    &negated_static
+                ),
+                Some(crate::types::ability::TriggerCondition::Not {
+                    condition: Box::new(crate::types::ability::TriggerCondition::SourceInZone {
+                        zone,
+                    }),
+                }),
+                "negated delayed intervening-if trigger for {zone:?}"
+            );
+        }
+
+        let broader = AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    },
+                    FilterProp::Token,
+                ],
+                ..Default::default()
+            }),
+        };
+        assert_eq!(
+            ability_condition_to_static_condition(&broader),
+            None,
+            "an extra property must not generalize through SourceInZone"
+        );
+    }
+
+    /// CR 603.7c + CR 603.7e + CR 400.7: delayed source-zone lowering is
+    /// fail-closed when a recursive boolean also contains a static-only
+    /// predicate with no effect-resolution equivalent.
+    #[test]
+    fn delayed_source_zone_mixed_condition_fails_closed() {
+        let source_in_zone = StaticCondition::SourceInZone {
+            zone: Zone::Battlefield,
+        };
+        let static_only = StaticCondition::SourceEnteredThisTurn;
+        let mut delayed_ctx = ParseContext {
+            trigger_condition_scope: TriggerConditionScope::Delayed,
+            ..Default::default()
+        };
+
+        let source_filter = AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }],
+                ..Default::default()
+            }),
+        };
+        let nested_source_zone = StaticCondition::Or {
+            conditions: vec![
+                source_in_zone.clone(),
+                StaticCondition::Not {
+                    condition: Box::new(source_in_zone.clone()),
+                },
+            ],
+        };
+        assert_eq!(
+            static_condition_to_delayed_ability_condition(&nested_source_zone, &mut delayed_ctx),
+            Some(AbilityCondition::Or {
+                conditions: vec![
+                    source_filter.clone(),
+                    AbilityCondition::Not {
+                        condition: Box::new(source_filter.clone()),
+                    },
+                ],
+            }),
+            "delayed source-zone boolean trees should recurse through Not/Or"
+        );
+
+        for condition in [
+            StaticCondition::And {
+                conditions: vec![source_in_zone.clone(), static_only.clone()],
+            },
+            StaticCondition::Or {
+                conditions: vec![source_in_zone.clone(), static_only.clone()],
+            },
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::And {
+                    conditions: vec![source_in_zone.clone(), static_only.clone()],
+                }),
+            },
+        ] {
+            assert_eq!(
+                static_condition_to_delayed_ability_condition(&condition, &mut delayed_ctx),
+                None,
+                "mixed delayed source-zone conditions must not partially lower: {condition:?}"
+            );
+        }
     }
 
     #[test]
@@ -10688,6 +12279,1972 @@ mod tests {
         let unrelated =
             parse_target_controller_poisoned_condition_text("its controller controls a Swamp");
         assert!(unrelated.is_none());
+    }
+
+    fn target_controller_count(filter: TargetFilter) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: nom_condition::inject_controller(
+                    filter,
+                    ControllerRef::ParentTargetController,
+                ),
+            },
+        }
+    }
+
+    /// CR 608.2c + CR 109.4: Skulking Killer's printed single sentence —
+    /// "When this creature enters, target creature an opponent controls gets
+    /// -2/-2 until end of turn if that opponent controls no other creatures."
+    /// The trailing clause counts the creatures the target's controller controls
+    /// other than the target, and the "until end of turn" body survives the
+    /// strip.
+    #[test]
+    fn target_controller_controls_no_other_condition_binds_target_controller() {
+        let mut ctx = ParseContext {
+            in_trigger: true,
+            ..Default::default()
+        };
+        let (cond, text) = strip_suffix_conditional(
+            "target creature an opponent controls gets -2/-2 until end of turn if that opponent controls no other creatures",
+            &mut ctx,
+        );
+        assert_eq!(
+            text,
+            "target creature an opponent controls gets -2/-2 until end of turn"
+        );
+        let expected = AbilityCondition::QuantityCheck {
+            lhs: target_controller_count(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget),
+                }],
+            ))),
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        };
+        assert_eq!(cond, Some(expected));
+    }
+
+    /// CR 608.2c + CR 109.4: Unified Will — "you control more creatures than
+    /// that spell's controller" compares your count to the target's controller's.
+    #[test]
+    fn you_control_more_than_target_controller_condition() {
+        let (cond, text) = strip_suffix_conditional(
+            "Counter target spell if you control more creatures than that spell's controller",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "Counter target spell");
+        let creatures = TargetFilter::Typed(TypedFilter::creature());
+        let expected = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: inject_controller_you(creatures.clone()),
+                },
+            },
+            comparator: Comparator::GT,
+            rhs: target_controller_count(creatures),
+        };
+        assert_eq!(cond, Some(expected));
+    }
+
+    /// CR 109.2b + CR 115.1: "that spell's controller" accepts a typed spell
+    /// slot ("Counter target creature spell" lowers to And([StackSpell, Typed])).
+    /// Synthetic: Essence Scatter's printed instruction under Unified Will's
+    /// printed suffix (nearest printed card: Unified Will).
+    #[test]
+    fn you_control_more_than_a_typed_spell_target_controller() {
+        let (cond, text) = strip_suffix_conditional(
+            "Counter target creature spell if you control more creatures than that spell's controller",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "Counter target creature spell");
+        assert!(cond.is_some(), "the typed spell slot must satisfy the noun");
+    }
+
+    /// CR 109.4 + CR 111.1: Kraul Whipcracker's "destroy target token an
+    /// opponent controls" is a property-only typed filter on the battlefield.
+    /// Synthetic: the printed instruction under a Skulking Killer-style suffix
+    /// (nearest printed card: Skulking Killer).
+    #[test]
+    fn property_only_token_target_binds_a_controller() {
+        let (cond, text) = strip_suffix_conditional(
+            "Destroy target token an opponent controls if its controller controls no other creatures",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "Destroy target token an opponent controls");
+        assert!(cond.is_some(), "a battlefield token has a controller");
+    }
+
+    /// Reach guard for a noun-rejection row on "Counter target creature spell":
+    /// the shared grammar recognizes `condition`, the operand announces exactly
+    /// one Stack-timed role, and the same operand binds under "that spell's
+    /// controller".
+    fn creature_spell_noun_reach_guard(condition: &str) {
+        let effect = "Counter target creature spell";
+        announced_roles_reaching_count(effect, condition, 1);
+        assert_full_strip_binds(
+            effect,
+            "you control more creatures than that spell's controller",
+        );
+    }
+
+    /// CR 115.1 + CR 109.2 + CR 109.2b: the named-permanent branch proves the whole
+    /// slot is a battlefield permanent; a typed creature SPELL does not.
+    /// Synthetic: Disenchant's, Kraul Whipcracker's and Essence Scatter's
+    /// printed instructions under Unified Will's comparison with a "that
+    /// permanent's" referent (nearest printed card: Unified Will).
+    #[test]
+    fn named_permanent_referent_requires_a_whole_battlefield_slot() {
+        let (cond, _) = strip_suffix_conditional(
+            "Destroy target artifact or enchantment if you control more creatures than that permanent's controller",
+            &mut ParseContext::default(),
+        );
+        assert!(cond.is_some(), "both branches are battlefield permanents");
+
+        let (cond, _) = strip_suffix_conditional(
+            "Destroy target token an opponent controls if you control more creatures than that permanent's controller",
+            &mut ParseContext::default(),
+        );
+        assert!(cond.is_some(), "a battlefield token is a permanent");
+
+        // Reach guards: the grammar recognizes the noun, the operand announces
+        // one Stack-timed spell role, and the spell-noun twin binds, so only the
+        // noun match can decline the row.
+        creature_spell_noun_reach_guard(
+            "you control more creatures than that permanent's controller",
+        );
+        let (cond, _) = strip_suffix_conditional(
+            "Counter target creature spell if you control more creatures than that permanent's controller",
+            &mut ParseContext::default(),
+        );
+        assert!(cond.is_none(), "a creature spell is not a permanent");
+    }
+
+    /// CR 109.2 + CR 109.2b: "that creature's controller" cannot name a creature spell
+    /// on the stack; only the spell noun can. Synthetic: Essence Scatter's
+    /// printed instruction under Unified Will's comparison with a "that
+    /// creature's" referent (nearest printed card: Unified Will).
+    #[test]
+    fn creature_noun_declines_a_creature_spell_slot() {
+        creature_spell_noun_reach_guard(
+            "you control more creatures than that creature's controller",
+        );
+        let (cond, _) = strip_suffix_conditional(
+            "Counter target creature spell if you control more creatures than that creature's controller",
+            &mut ParseContext::default(),
+        );
+        assert!(cond.is_none(), "a creature spell is not a creature");
+    }
+
+    /// CR 205.2a + CR 109.4: Disenchant's "destroy target artifact or
+    /// enchantment" is a typed disjunction; both branches are permanents.
+    /// Synthetic: the printed instruction under a Skulking Killer-style suffix
+    /// (nearest printed card: Skulking Killer).
+    #[test]
+    fn typed_disjunctive_permanent_target_binds_a_controller() {
+        let (cond, text) = strip_suffix_conditional(
+            "Destroy target artifact or enchantment if its controller controls no other creatures",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "Destroy target artifact or enchantment");
+        assert!(cond.is_some(), "both branches are battlefield permanents");
+    }
+
+    /// Grammar-only discriminator for the optional `other` axis. The phrase is a
+    /// synthetic exception to the real-card test contract: the checked
+    /// AtomicCards corpus has no printed "controls no creatures" destroy-artifact
+    /// instruction of this shape, so this test isolates the combinator and makes
+    /// no printed-support claim. Skulking Killer is the nearest printed analogue
+    /// ("When this creature enters, target creature an opponent controls gets
+    /// -2/-2 until end of turn if that opponent controls no other creatures"),
+    /// which is why the shared grammar must keep `other` optional rather than
+    /// requiring the exclusion.
+    #[test]
+    fn its_controller_controls_no_condition_omits_distinct_from() {
+        let (cond, text) = strip_suffix_conditional(
+            "Destroy target artifact if its controller controls no creatures",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "Destroy target artifact");
+        let expected = AbilityCondition::QuantityCheck {
+            lhs: target_controller_count(TargetFilter::Typed(TypedFilter::creature())),
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        };
+        assert_eq!(cond, Some(expected));
+    }
+
+    /// CR 109.4 + CR 608.2c: a counted population that already carries a
+    /// controller must decline instead of having that qualifier overwritten by
+    /// the target-controller injection. Both arms are paired with their
+    /// unqualified positive.
+    #[test]
+    fn target_controller_count_declines_controller_qualified_population() {
+        for condition in [
+            "its controller controls no creatures you control",
+            "you control more creatures you control than its controller",
+        ] {
+            assert!(
+                nom_condition::parse_target_controller_count_condition(condition).is_err(),
+                "a controller-qualified population must decline: {condition}"
+            );
+        }
+        for condition in [
+            "its controller controls no creatures",
+            "you control more creatures than its controller",
+        ] {
+            assert!(
+                nom_condition::parse_target_controller_count_condition(condition).is_ok(),
+                "reach guard: {condition}"
+            );
+        }
+    }
+
+    fn trigger_ctx() -> ParseContext {
+        ParseContext {
+            in_trigger: true,
+            ..Default::default()
+        }
+    }
+
+    /// Reach guard shared by every decline row: the condition is recognized by
+    /// the shared grammar, and the effect passes every gate in front of the role
+    /// count (it carries a printed "target ", is Stack-timed and has no
+    /// ambiguous cardinality), yielding exactly `expected` announced roles. An
+    /// early gate returns `None` and a parse failure announces no role, so
+    /// either fails the row instead of satisfying a later `is_none()`
+    /// vacuously.
+    fn announced_roles_reaching_count(
+        effect: &str,
+        condition: &str,
+        expected: usize,
+    ) -> Vec<TargetFilter> {
+        assert!(
+            parse_target_controller_control_condition_prefix(condition).is_some(),
+            "reach guard: {condition}"
+        );
+        let roles = stack_announced_roles(effect, &trigger_ctx())
+            .unwrap_or_else(|| {
+                panic!("reach guard: `{effect}` must parse to a Stack-timed declaration")
+            })
+            .all();
+        assert_eq!(roles.len(), expected, "{effect}: announced roles {roles:?}");
+        roles
+    }
+
+    /// The production suffix strip over `<effect> if <condition>`: the stripped
+    /// condition, the remaining clause text, and the input text.
+    fn full_strip(effect: &str, condition: &str) -> (Option<AbilityCondition>, String, String) {
+        let text = format!("{effect} if {condition}");
+        let (cond, body) = strip_suffix_conditional(&text, &mut trigger_ctx());
+        (cond, body, text)
+    }
+
+    fn assert_full_strip_declines(effect: &str, condition: &str) {
+        let (cond, body, text) = full_strip(effect, condition);
+        assert_eq!(cond, None, "the full strip must decline: {text}");
+        assert_eq!(body, text, "the declined text must be unchanged");
+    }
+
+    fn assert_full_strip_binds(effect: &str, condition: &str) {
+        let (cond, body, text) = full_strip(effect, condition);
+        assert!(cond.is_some(), "the full strip must bind: {text}");
+        assert_eq!(body, effect, "the effect text must survive the strip");
+    }
+
+    /// The parsed clause and its production timing for a Resolution-time reach
+    /// guard: the input parsed to a real effect (not `Unimplemented`) and the
+    /// timing decision, not a parse failure, is what removes the declaration.
+    fn clause_and_timing(
+        effect: &str,
+    ) -> (
+        crate::parser::oracle_ir::ast::ParsedEffectClause,
+        TargetChoiceTiming,
+    ) {
+        let clause = crate::parser::oracle_effect::parse_effect_clause(
+            effect,
+            &mut trigger_ctx().clone_throwaway(),
+        );
+        assert!(
+            !matches!(clause.effect, Effect::Unimplemented { .. }),
+            "reach guard: `{effect}` must parse"
+        );
+        let timing = crate::parser::oracle_effect::lower::target_choice_timing_for_parsed(
+            &clause,
+            effect,
+            None,
+            clause.multi_target.is_some(),
+            super::TargetSelectionMode::Chosen,
+        );
+        (clause, timing)
+    }
+
+    /// CR 115.4: "any other target" admits players, so it cannot prove an
+    /// object controller even when the filter is type-less (printed Screaming
+    /// Nemesis, "it deals that much damage to any other target").
+    ///
+    /// The probe cannot be the reach path here: the printed suffix text ends in
+    /// "target" with no trailing space, so the literal-"target " gate returns
+    /// before the domain check. The domain check is the second line of defence
+    /// and is exercised through the parsed clause instead: the effect lowers to
+    /// the type-less any-other filter, the production enumerator announces it as
+    /// the one role, and only `!is_any_target_filter` in
+    /// `filter_guarantees_object_controller` keeps it from binding.
+    #[test]
+    fn any_target_slot_cannot_bind_a_controller() {
+        let effect = "Deals that much damage to any other target";
+        let clause = crate::parser::oracle_effect::parse_effect_clause(
+            effect,
+            &mut trigger_ctx().clone_throwaway(),
+        );
+        let filter = clause
+            .effect
+            .target_filter()
+            .cloned()
+            .expect("reach guard: the effect lowers to a typed any-other slot");
+        assert!(
+            crate::types::ability::is_any_target_filter(&filter),
+            "reach guard: {filter:?} is the any-target domain"
+        );
+        assert_eq!(
+            declared_roles_for_node(&clause.effect, None),
+            vec![filter.clone()],
+            "the enumerator announces it as the one role"
+        );
+        assert!(!nom_condition::filter_guarantees_object_controller(&filter));
+        assert!(stack_announced_roles(effect, &trigger_ctx()).is_none());
+        assert_full_strip_declines(effect, "its controller controls no creatures");
+    }
+
+    /// CR 109.4: a single announced role whose domain cannot supply an object
+    /// controller declines. Each row reaches the domain check (it parses, is
+    /// Stack-timed and yields exactly one role), so a parse failure cannot
+    /// satisfy it.
+    /// Printed Noble Vestige (a player-or-planeswalker slot), printed Deathrite
+    /// Shaman (a graveyard card), printed Bump in the Night (a player).
+    #[test]
+    fn single_announced_role_outside_a_controller_domain_declines() {
+        let condition = "its controller controls no creatures";
+        for effect in [
+            "Prevent the next 1 damage that would be dealt to target player or planeswalker this turn",
+            "Exile target creature card from a graveyard",
+            "Target opponent loses 3 life",
+        ] {
+            let roles = announced_roles_reaching_count(effect, condition, 1);
+            assert!(
+                !nom_condition::filter_guarantees_object_controller(&roles[0])
+                    || crate::parser::oracle_effect::is_player_scoped_filter(&roles[0]),
+                "{effect}: {:?} must not supply an object controller",
+                roles[0]
+            );
+            assert!(probe_declared_target_slot(effect, &trigger_ctx()).is_none());
+            assert!(declared_single_object_target(effect, &trigger_ctx()).is_none());
+            assert_full_strip_declines(effect, condition);
+        }
+    }
+
+    /// CR 608.2c + CR 115.1: Skulking Killer / Unified Will shapes that must
+    /// keep binding at the full seam (the positives every decline row below is
+    /// the twin of). A compound clause adds no role through its context-ref
+    /// child, but it declines on its shape
+    /// (`gated_clause_with_a_continuation_child_is_an_explicit_gap`).
+    #[test]
+    fn single_announced_object_role_still_binds() {
+        let skulking = "Target creature an opponent controls gets -2/-2 until end of turn";
+        announced_roles_reaching_count(skulking, "that opponent controls no other creatures", 1);
+        assert_full_strip_binds(skulking, "that opponent controls no other creatures");
+        let unified = "Counter target spell";
+        announced_roles_reaching_count(
+            unified,
+            "you control more creatures than that spell's controller",
+            1,
+        );
+        assert_full_strip_binds(
+            unified,
+            "you control more creatures than that spell's controller",
+        );
+        // A child that only references the parent target adds no role
+        // (synthetic; nearest printed analogue: Skulking Killer's pump body).
+        let compound =
+            "Target creature gets -2/-2 until end of turn and gains haste until end of turn";
+        let (clause, _) = clause_and_timing(compound);
+        assert!(clause.sub_ability.is_some(), "reach guard: compound child");
+        announced_roles_reaching_count(compound, "its controller controls no creatures", 1);
+    }
+
+    /// CR 115.1 + CR 601.2c: every role the production enumerator records for a
+    /// shape reachable from clause text declines at the production suffix strip.
+    /// `roles` is the number of announced roles the row must reach (proving the
+    /// enumerator branch fired, so a role added or dropped there fails here).
+    /// Printed text unless marked synthetic; the damage compositions name their
+    /// nearest printed analogue. Branches with no clause-text producer found
+    /// (damage-replacement roles, mana multi-role, combat-relation slot,
+    /// per-opponent fanout, which the probe never passes `fanout_player` for)
+    /// are not in this table.
+    #[test]
+    fn every_reachable_enumerator_branch_declines_at_the_full_strip() {
+        let object = "its controller controls no creatures";
+
+        let rows: &[(&str, &str, &str, usize)] = &[
+            // paired subjects: printed Trade the Helm
+            (
+                "paired subjects",
+                "Exchange control of target artifact or creature you control and target artifact or creature an opponent controls",
+                object,
+                2,
+            ),
+            // Fight: printed Dromoka's Command mode
+            (
+                "fight",
+                "Target creature you control fights target creature you don't control",
+                object,
+                2,
+            ),
+            // MoveCounters: printed Fate Transfer
+            (
+                "move counters",
+                "Move all counters from target creature onto another target creature",
+                object,
+                2,
+            ),
+            // Attach: printed Brass Squire
+            (
+                "attach",
+                "Attach target Equipment you control to target creature you control",
+                object,
+                2,
+            ),
+            // copy recipient + donor: printed True Polymorph. "that permanent's
+            // controller" matches BOTH slots' kind, so only the two-role count
+            // (the recipient branch) declines it; the noun cannot.
+            (
+                "copy recipient",
+                "Target artifact or creature becomes a copy of another target artifact or creature",
+                "you control more creatures than that permanent's controller",
+                2,
+            ),
+            // quantity slot: synthetic damage composition; the printed operand
+            // analogue is Recurring Insight ("Draw cards equal to the number of
+            // cards in target opponent's hand").
+            (
+                "quantity slot",
+                "Deals damage to target creature equal to the number of cards in target opponent's hand",
+                object,
+                2,
+            ),
+            // head unless-payer: synthetic; the printed payer shape is Athreos,
+            // God of Passage ("unless target opponent pays 3 life").
+            (
+                "declared unless-payer",
+                "Destroy target creature unless target opponent pays 3 life",
+                object,
+                2,
+            ),
+            // child-only companion player: synthetic; nearest printed analogue
+            // Seismic Wave (any-target head replaced by a creature).
+            (
+                "child companion player",
+                "Deals 2 damage to target creature and 1 damage to each nonartifact creature target opponent controls",
+                object,
+                2,
+            ),
+            // targeted child: printed Master's Rebuke
+            (
+                "targeted child",
+                "Target creature you control deals damage equal to its power to target creature or planeswalker you don't control",
+                object,
+                2,
+            ),
+            // companion player alone: printed Ashiok, Sculptor of Fears
+            (
+                "companion player",
+                "Gain control of all creatures target opponent controls",
+                object,
+                1,
+            ),
+        ];
+        for (branch, effect, condition, roles) in rows {
+            announced_roles_reaching_count(effect, condition, *roles);
+            assert!(
+                probe_declared_target_slot(effect, &trigger_ctx()).is_none(),
+                "{branch}: the probe must decline"
+            );
+            assert_full_strip_declines(effect, condition);
+        }
+        // Reach guards the table cannot express: the copy row's slots are both
+        // permanent-kind, so the noun is not what declines it.
+        let copy_roles = announced_roles_reaching_count(rows[4].1, rows[4].2, 2);
+        assert!(copy_roles.iter().all(|role| {
+            nom_condition::referent_noun_matches_slot(
+                nom_condition::ObjectReferentNoun::Permanent,
+                role,
+            )
+        }));
+    }
+
+    /// CR 601.2c + CR 609.7: Dromoka's Command. The printed mode
+    /// announces ONE role, the damage source (the spell), through the
+    /// enumerator's source-slot branch, and that branch returns before the
+    /// companion and quantity branches the engine builder falls through to. The
+    /// enumerator's set is therefore not proven complete for the node, and the
+    /// probe declines it for that reason; the role count alone (one) would bind.
+    #[test]
+    fn source_scoped_damage_prevention_declines_because_the_enumerator_returns_early() {
+        let effect = "Prevent all damage target instant or sorcery spell would deal this turn";
+        let condition = "you control more creatures than that spell's controller";
+        let clause = crate::parser::oracle_effect::parse_effect_clause(
+            effect,
+            &mut trigger_ctx().clone_throwaway(),
+        );
+        assert!(
+            crate::types::ability::damage_replacement_source_slot_filter(&clause.effect).is_some(),
+            "reach guard: the source-slot branch fires"
+        );
+        let roles = declared_roles_for_node(&clause.effect, None);
+        assert_eq!(roles.len(), 1, "the enumerator records one role");
+        assert!(nom_condition::filter_guarantees_object_controller(
+            &roles[0]
+        ));
+        assert!(announced_object_roles(&clause).is_none());
+        assert_full_strip_declines(effect, condition);
+    }
+
+    /// CR 115.1a + CR 601.2c: `EachDealsDamageEqualToPower` is enumerated as its
+    /// recipient only, while production announces the sources first. It is safe
+    /// only because every construction site stamps `multi_target`, which the
+    /// probe declines. Printed Graceful Takedown and a synthetic
+    /// up-to-two row (nearest printed card: Allies at Last, whose recipient is
+    /// "target creature an opponent controls") pin both halves: the enumerator
+    /// yields ONE role, and the clause carries `multi_target`. The suffix is
+    /// synthetic (nearest printed card: Skulking Killer).
+    #[test]
+    fn each_deals_damage_declines_through_multi_target() {
+        let object = "its controller controls no creatures";
+        for effect in [
+            "Any number of target enchanted creatures you control and up to one other target creature you control each deal damage equal to their power to target creature you don't control",
+            "Up to two target creatures you control each deal damage equal to their power to another target creature",
+        ] {
+            let (clause, timing) = clause_and_timing(effect);
+            assert!(
+                matches!(clause.effect, Effect::EachDealsDamageEqualToPower { .. }),
+                "reach guard: {effect}"
+            );
+            assert_eq!(timing, TargetChoiceTiming::Stack);
+            assert_eq!(
+                declared_roles_for_node(&clause.effect, None).len(),
+                1,
+                "the enumerator records the recipient only"
+            );
+            assert!(clause.multi_target.is_some(), "the construction site sets it");
+            assert!(announced_object_roles(&clause).is_none());
+            assert_full_strip_declines(effect, object);
+        }
+    }
+
+    /// CR 115.6 + CR 601.2c: an optional-count quantifier declines whether or
+    /// not the clause fixup stamped `multi_target` for the effect kind. Counter
+    /// is one of the eight kinds it does not stamp, so the stamped field is blind
+    /// to it; the printed-text rule is not. Nearest printed analogue: Repulsive
+    /// Mutation's "counter up to one target spell".
+    #[test]
+    fn optional_count_declines_for_an_effect_kind_the_fixup_does_not_stamp() {
+        let effect = "Counter up to one target spell";
+        let condition = "you control more creatures than that spell's controller";
+        let (clause, timing) = clause_and_timing(effect);
+        assert!(matches!(clause.effect, Effect::Counter { .. }));
+        assert!(clause.multi_target.is_none(), "reach guard: unstamped");
+        assert_eq!(timing, TargetChoiceTiming::Stack);
+        assert_eq!(declared_roles_for_node(&clause.effect, None).len(), 1);
+        assert!(crate::parser::oracle_effect::lower::text_declares_optional_target_count(effect));
+        assert_full_strip_declines(effect, condition);
+        assert_full_strip_binds("Counter target spell", condition);
+    }
+
+    /// CR 608.2c: a head that production gives a clause scope after the suffix
+    /// strip (optional prefix, "for each" repeat, repeat count) declines; each
+    /// row would otherwise read as one Stack-timed object role. Synthetic rows;
+    /// each is a printed scope prefix or suffix on a printed instruction, under
+    /// a Skulking Killer-style suffix (nearest printed card: Skulking Killer).
+    #[test]
+    fn head_clause_scope_declines() {
+        let object = "its controller controls no creatures";
+        for effect in [
+            "You may destroy target creature",
+            "For each opponent, destroy target creature",
+            "Target creature gets -2/-2 until end of turn twice",
+        ] {
+            let (clause, timing) = clause_and_timing(effect);
+            assert_eq!(timing, TargetChoiceTiming::Stack);
+            assert_eq!(
+                declared_roles_for_node(&clause.effect, None).len(),
+                1,
+                "reach guard: one role without the scope gate: {effect}"
+            );
+            assert!(head_stamps_clause_scope(effect));
+            assert_full_strip_declines(effect, object);
+        }
+    }
+
+    /// CR 601.2c + CR 603.3d: a printed announcer override ("that player chooses
+    /// target creature") is a typed `target_chooser` the head clause does not
+    /// carry; the probe reads it from the parse context. Synthetic rows under a
+    /// Skulking Killer-style suffix (nearest printed card: Skulking Killer).
+    #[test]
+    fn target_chooser_override_declines() {
+        let object = "its controller controls no creatures";
+        for effect in [
+            "That player chooses target creature",
+            "Its controller chooses target creature",
+        ] {
+            let mut ctx = trigger_ctx().clone_throwaway();
+            let clause = crate::parser::oracle_effect::parse_effect_clause(effect, &mut ctx);
+            assert!(ctx.target_chooser.is_some(), "reach guard: {effect}");
+            assert_eq!(declared_roles_for_node(&clause.effect, None).len(), 1);
+            assert_full_strip_declines(effect, object);
+        }
+    }
+
+    /// CR 608.2c + CR 115.1: a primary filter scoped to a resolution-time chosen
+    /// player announces no slot (the enumerator's chosen-player gate), so the
+    /// probe sees zero roles and declines instead of binding. Synthetic text
+    /// under a Skulking Killer-style suffix (nearest printed card: Skulking
+    /// Killer).
+    #[test]
+    fn chosen_player_scoped_filter_declines() {
+        let ctx = ParseContext {
+            in_trigger: true,
+            relative_player_scope: Some(ControllerRef::ChosenPlayer { index: 0 }),
+            ..Default::default()
+        };
+        let effect = "Destroy target creature they control";
+        let clause =
+            crate::parser::oracle_effect::parse_effect_clause(effect, &mut ctx.clone_throwaway());
+        assert!(
+            matches!(
+                clause.effect.target_filter(),
+                Some(TargetFilter::Typed(tf))
+                    if matches!(tf.controller, Some(ControllerRef::ChosenPlayer { .. }))
+            ),
+            "reach guard: the primary filter is chosen-player scoped"
+        );
+        assert_eq!(
+            stack_announced_roles(effect, &ctx).map(|roles| roles.all()),
+            Some(vec![])
+        );
+        let text = format!("{effect} if its controller controls no creatures");
+        let (cond, body) = strip_suffix_conditional(&text, &mut ctx.clone());
+        assert_eq!(cond, None);
+        assert_eq!(body, text);
+    }
+
+    /// CR 115.10a: an enchanted-creature host written without the
+    /// word "target" is re-timed to Resolution by production after the probe's
+    /// view, so the literal-"target " gate must keep it from binding. Without
+    /// the gate the probe reads one Stack-timed object role. Synthetic text;
+    /// nearest printed shape: Predator's Gambit's "its controller controls no
+    /// other creatures" on an enchanted-creature host.
+    #[test]
+    fn host_written_without_target_declines() {
+        let effect = "Destroy enchanted creature";
+        let (clause, timing) = clause_and_timing(effect);
+        assert_eq!(timing, TargetChoiceTiming::Stack, "reach guard");
+        assert_eq!(declared_roles_for_node(&clause.effect, None).len(), 1);
+        assert!(stack_announced_roles(effect, &trigger_ctx()).is_none());
+        assert_full_strip_declines(effect, "its controller controls no creatures");
+    }
+
+    /// CR 608.2c + CR 115.1: the antecedent guard. Each row reaches the guard it
+    /// exercises and then declines at the production strip; the positive twin of
+    /// each stays in `single_announced_object_role_still_binds`.
+    #[test]
+    fn target_controller_control_condition_declines_without_antecedent() {
+        let ctx = trigger_ctx();
+        // Single object target with no opponent introduced by its own type
+        // phrase (Skulking Killer with the qualifier removed).
+        let effect = "Target creature gets -2/-2 until end of turn";
+        let condition = "that opponent controls no other creatures";
+        announced_roles_reaching_count(effect, condition, 1);
+        let target = declared_single_object_target(effect, &ctx).expect("single object target");
+        assert_eq!(target.introduced_controller, None);
+        assert_full_strip_declines(effect, condition);
+
+        // Player target (printed Bump in the Night frame): one role, a player.
+        let effect = "Target opponent loses 3 life";
+        let condition = "that opponent controls no creatures";
+        announced_roles_reaching_count(effect, condition, 1);
+        assert!(declared_single_object_target(effect, &ctx).is_none());
+        assert_full_strip_declines(effect, condition);
+
+        // Multi-target (synthetic multi-target Skulking Killer).
+        let effect = "Up to two target creatures an opponent controls get -2/-2 until end of turn";
+        let condition = "that opponent controls no other creatures";
+        let (clause, timing) = clause_and_timing(effect);
+        assert!(clause.multi_target.is_some(), "reach guard: multi_target");
+        assert_eq!(timing, TargetChoiceTiming::Stack);
+        assert!(stack_announced_roles(effect, &ctx).is_none());
+        assert_full_strip_declines(effect, condition);
+
+        // Printed Whitemane Lion: the bounce operand is a resolution choice (no
+        // printed "target").
+        let effect = "Return a creature you control to its owner's hand";
+        let condition = "you control more creatures than its controller";
+        let (clause, timing) = clause_and_timing(effect);
+        assert!(clause.effect.target_filter().is_some(), "operand populated");
+        // The ladder alone still reads Stack here; the printed text has no
+        // "target ", which is what keeps the operand from being an announcement.
+        assert_eq!(timing, TargetChoiceTiming::Stack, "reach guard");
+        assert!(!nom_primitives::scan_contains(
+            &effect.to_ascii_lowercase(),
+            "target "
+        ));
+        assert!(stack_announced_roles(effect, &ctx).is_none());
+        assert_full_strip_declines(effect, condition);
+
+        // Printed Prize Wall sticker recipient: a resolution-time choice.
+        let effect = "Put a sticker on a nonland permanent you own";
+        let condition = "you control more creatures than that permanent's controller";
+        let (_, timing) = clause_and_timing(effect);
+        assert_eq!(timing, TargetChoiceTiming::Resolution, "reach guard");
+        assert!(stack_announced_roles(effect, &ctx).is_none());
+        assert_full_strip_declines(effect, condition);
+
+        // Referent kind: Unified Will's spell noun and a creature noun cannot
+        // name an artifact slot; a permanent noun can.
+        let effect = "Destroy target artifact";
+        for condition in [
+            "you control more creatures than that spell's controller",
+            "you control more creatures than that creature's controller",
+        ] {
+            announced_roles_reaching_count(effect, condition, 1);
+            assert_full_strip_declines(effect, condition);
+        }
+        assert_full_strip_binds(
+            effect,
+            "you control more creatures than that permanent's controller",
+        );
+
+        // A trailing connector makes the whole-text parse fail; the prefix guard
+        // must still decline the unbound referent.
+        assert_full_strip_declines(
+            "Target opponent loses 3 life",
+            "you control more creatures than that spell's controller and you control a Swamp",
+        );
+    }
+
+    /// The one ability a full `parse_oracle_text` run produces for `text`, and
+    /// its parse warnings.
+    fn parse_single_ability(
+        text: &str,
+        name: &str,
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> (
+        AbilityDefinition,
+        Vec<crate::parser::oracle_ir::diagnostic::OracleDiagnostic>,
+    ) {
+        let types: Vec<String> = types.iter().map(|t| (*t).to_owned()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|t| (*t).to_owned()).collect();
+        let parsed = parse_oracle_text(text, name, &[], &types, &subtypes);
+        let [ability] = parsed.abilities.as_slice() else {
+            panic!("{text}: expected one ability, got {:?}", parsed.abilities);
+        };
+        (ability.clone(), parsed.parse_warnings)
+    }
+
+    /// Every definition below `head` along its sub-ability chain.
+    fn sub_chain(head: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        std::iter::successors(head.sub_ability.as_deref(), |def| {
+            def.sub_ability.as_deref()
+        })
+        .collect()
+    }
+
+    /// CR 601.2c + CR 608.2c: the suffix binds only a role the gated head owns,
+    /// on a single-node clause. Skulking Killer and Unified Will each announce
+    /// their single role on a head with nothing below it (the mirror image of
+    /// `child_only_target_suffix_is_an_explicit_gap`).
+    #[test]
+    fn bound_role_is_owned_by_the_head() {
+        for (effect, condition) in [
+            (
+                "Target creature an opponent controls gets -2/-2 until end of turn",
+                "that opponent controls no other creatures",
+            ),
+            (
+                "Counter target spell",
+                "you control more creatures than that spell's controller",
+            ),
+        ] {
+            let roles = stack_announced_roles(effect, &trigger_ctx()).expect("reach guard");
+            assert_eq!(roles.head.len(), 1, "{effect}: the head owns the role");
+            assert!(roles.descendants.is_empty(), "{effect}");
+            assert_eq!(roles.shape, GatedClauseShape::SingleInstruction, "{effect}");
+            assert_full_strip_binds(effect, condition);
+        }
+    }
+
+    /// CR 608.2c (in the order written): a clause whose head owns the single
+    /// role but has a continuation child is an explicit gap, because a later
+    /// independent instruction is appended below that child and a false gate
+    /// would skip it with the child. Full parsing with an independent "Draw a
+    /// card." after the clause: the head owns the only target, its child is a
+    /// condition-free, target-less continuation step, and the draw follows as
+    /// an independent instruction; no node carries a gate, and the gated
+    /// instruction is one explicit unimplemented gap naming the condition. Both
+    /// clauses are synthetic:
+    /// a compound head with a
+    /// targetless child (nearest printed analogue: Skulking Killer's "target
+    /// creature an opponent controls gets -2/-2 until end of turn"), and a
+    /// `TargetOnly` head whose child acts (nearest printed analogue: Chandra's
+    /// Ignition, "Target creature you control deals damage equal to its power to
+    /// each other creature and each opponent.").
+    #[test]
+    fn gated_clause_with_a_continuation_child_is_an_explicit_gap() {
+        let condition = "that creature's controller controls no other creatures";
+        for effect in [
+            "Target creature gets -2/-2 until end of turn and gains haste until end of turn",
+            "Target creature deals 2 damage to each other creature",
+        ] {
+            let roles = stack_announced_roles(effect, &trigger_ctx()).expect("reach guard");
+            assert_eq!(roles.head.len(), 1, "reach guard: {effect}: one head role");
+            assert!(roles.descendants.is_empty(), "reach guard: {effect}");
+            assert_eq!(roles.shape, GatedClauseShape::WithContinuation, "{effect}");
+            assert_full_strip_declines(effect, condition);
+
+            // Reach guard on the clause without its suffix: a targeted head, a
+            // target-less continuation child, then the independent draw.
+            let (head, warnings) = parse_single_ability(
+                &format!("{effect}. Draw a card."),
+                "Synthetic",
+                &["Instant"],
+                &[],
+            );
+            assert!(warnings.is_empty(), "reach guard: {effect}: {warnings:?}");
+            assert!(
+                head.effect
+                    .target_filter()
+                    .is_some_and(|filter| !filter.is_context_ref()),
+                "reach guard: {effect}: the head declares the target: {:?}",
+                head.effect
+            );
+            let children = sub_chain(&head);
+            let [continuation @ .., draw] = &children[..] else {
+                panic!("reach guard: {effect}: expected a child and the draw");
+            };
+            assert!(!continuation.is_empty(), "reach guard: {effect}");
+            for child in continuation {
+                assert!(
+                    child
+                        .effect
+                        .target_filter()
+                        .is_none_or(TargetFilter::is_context_ref),
+                    "reach guard: {effect}: the child declares no target: {:?}",
+                    child.effect
+                );
+                assert_eq!(
+                    child.sub_link,
+                    crate::types::ability::SubAbilityLink::ContinuationStep,
+                    "reach guard: {effect}"
+                );
+            }
+            assert_eq!(
+                draw.sub_link,
+                crate::types::ability::SubAbilityLink::SequentialSibling,
+                "reach guard: {effect}: the draw is an independent instruction"
+            );
+
+            let parsed = parse_oracle_text(
+                &format!("{effect} if {condition}. Draw a card."),
+                "Synthetic",
+                &[],
+                &["Instant".to_owned()],
+                &[],
+            );
+            assert_suffix_is_explicit_gap(&parsed, condition);
+        }
+    }
+
+    /// CR 601.2c + CR 608.2c: Coastal Wizard's printed ability
+    /// "{T}: Return this creature and another target creature to their owners'
+    /// hands." lowers the self-bounce head and the independently targeted second
+    /// bounce as separate nodes, so the only announced target is on the CHILD.
+    /// The gate would be stamped on the head, which reads only its own targets
+    /// and a snapshot handed down from a parent, so it cannot read the child's
+    /// slot; and gating the child alone would leave the head's self-bounce
+    /// ungated. The suffix "if that creature's controller controls no other
+    /// creatures" is synthetic. Full parsing: first assert the child-only slot
+    /// positively, then assert the instruction is an explicit unimplemented gap rather
+    /// than a controller gate on any node.
+    #[test]
+    fn child_only_target_suffix_is_an_explicit_gap() {
+        let printed = "Return this creature and another target creature to their owners' hands";
+        let condition = "that creature's controller controls no other creatures";
+        let activation_window = "Activate only during your turn, before attackers are declared.";
+        let types = ["Creature".to_owned()];
+        let subtypes = ["Human".to_owned(), "Wizard".to_owned()];
+
+        // Reach guard: the printed ability lowers to a child-only slot.
+        let (head, warnings) = parse_single_ability(
+            &format!("{{T}}: {printed}. {activation_window}"),
+            "Coastal Wizard",
+            &["Creature"],
+            &["Human", "Wizard"],
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(
+            matches!(
+                &*head.effect,
+                Effect::Bounce {
+                    target: TargetFilter::SelfRef,
+                    destination: None,
+                    ..
+                }
+            ),
+            "the head bounces this creature and declares no target: {:?}",
+            head.effect
+        );
+        let [child] = sub_chain(&head)[..] else {
+            panic!("expected one child, got {:?}", head.sub_ability);
+        };
+        assert!(
+            matches!(
+                &*child.effect,
+                Effect::Bounce { target, .. } if !target.is_context_ref()
+            ),
+            "the child owns the only announced target: {:?}",
+            child.effect
+        );
+        assert_eq!(child.target_choice_timing, TargetChoiceTiming::Stack);
+        let roles = stack_announced_roles(printed, &trigger_ctx()).expect("reach guard");
+        assert_eq!((roles.head.len(), roles.descendants.len()), (0, 1));
+        assert_full_strip_declines(printed, condition);
+
+        let parsed = parse_oracle_text(
+            &format!("{{T}}: {printed} if {condition}. {activation_window}"),
+            "Coastal Wizard",
+            &[],
+            &types,
+            &subtypes,
+        );
+        assert_suffix_is_explicit_gap(&parsed, condition);
+    }
+
+    /// CR 608.2c: a later instruction lowers as a sub-ability,
+    /// and the engine evaluates a sub-ability's gate against the PRECEDING
+    /// node, so a target-controller suffix on it would read the earlier
+    /// instruction's target. Such a suffix is an explicit gap even though the
+    /// same instruction, as a chain root, binds. Both texts are synthetic; the
+    /// nearest printed analogue of a second sentence that names its own target's
+    /// controller is Repulsive Mutation ("… Then counter up to one target spell
+    /// unless its controller pays …"), and the trigger row is Skulking Killer's
+    /// printed instruction behind a synthetic first sentence.
+    #[test]
+    fn target_controller_suffix_after_an_earlier_instruction_is_an_explicit_gap() {
+        for (text, types, gated_effect, condition) in [
+            (
+                "Tap target creature. Destroy target artifact if its controller controls no \
+                 creatures.",
+                "Instant",
+                "Destroy target artifact",
+                "its controller controls no creatures",
+            ),
+            (
+                "When this creature enters, you gain 1 life. Target creature an opponent \
+                 controls gets -2/-2 until end of turn if that opponent controls no other \
+                 creatures.",
+                "Creature",
+                "Target creature an opponent controls gets -2/-2 until end of turn",
+                "that opponent controls no other creatures",
+            ),
+        ] {
+            assert_full_strip_binds(gated_effect, condition);
+            let parsed = parse_oracle_text(text, "Synthetic", &[], &[types.to_owned()], &[]);
+            let definitions = all_chain_definitions(&parsed);
+            let [root, later] = definitions.as_slice() else {
+                panic!("reach guard: {text}: a root and one later instruction: {definitions:?}");
+            };
+            assert!(
+                root.effect.unimplemented_description().is_none(),
+                "reach guard: {text}: the earlier instruction parsed: {:?}",
+                root.effect
+            );
+            assert!(
+                later.effect.unimplemented_description().is_some(),
+                "{text}: the later, gated instruction is the gap: {:?}",
+                later.effect
+            );
+            assert_suffix_is_explicit_gap(&parsed, condition);
+        }
+    }
+
+    /// Every root definition `parsed` produced (spell and activated abilities,
+    /// trigger bodies) with its sub-ability chain.
+    fn all_chain_definitions(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+    ) -> Vec<AbilityDefinition> {
+        parsed
+            .abilities
+            .iter()
+            .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+            .flat_map(|root| {
+                std::iter::once(root.clone()).chain(sub_chain(root).into_iter().cloned())
+            })
+            .collect()
+    }
+
+    /// CR 608.2c: a chain is proven to be its ability's resolved root only at a
+    /// trigger body, an activated ability's effect on a card without a gift
+    /// keyword, or the spell line of a card whose only non-keyword line it is
+    /// and whose spell is not rewritten at cast. A second targeted
+    /// instruction joined to a first by " and " is a later chunk of the same
+    /// chain and declines (synthetic; printed shape: Gurmag Rakshasa, "target
+    /// creature an opponent controls gets -2/-2 until end of turn and target
+    /// creature you control gets +2/+2 until end of turn", reordered). This
+    /// row also declines without the root proof, so it is a positive witness
+    /// only; the proof's own declines are pinned by
+    /// `target_controller_suffix_on_a_later_spell_paragraph_is_an_explicit_gap`
+    /// and `target_controller_suffix_on_a_spell_rewritten_at_cast_is_an_explicit_gap`.
+    #[test]
+    fn target_controller_suffix_on_a_later_chunk_is_an_explicit_gap() {
+        let text = "When this creature enters, target creature you control gets +2/+2 until end \
+                    of turn and target creature an opponent controls gets -2/-2 until end of \
+                    turn if that opponent controls no other creatures.";
+        let gated_effect = "target creature an opponent controls gets -2/-2 until end of turn";
+        let condition = "that opponent controls no other creatures";
+        assert_full_strip_binds(gated_effect, condition);
+        let parsed = parse_oracle_text(text, "Synthetic", &[], &["Creature".to_owned()], &[]);
+        assert_suffix_is_explicit_gap(&parsed, condition);
+    }
+
+    /// The declined suffix is an explicit gap: no definition carries a
+    /// condition, and exactly one is an unimplemented node whose fragment
+    /// still names `condition`.
+    fn assert_suffix_is_explicit_gap(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+        condition: &str,
+    ) {
+        let definitions = all_chain_definitions(parsed);
+        for def in &definitions {
+            assert_eq!(def.condition, None, "{:?}", def.effect);
+        }
+        let gaps = definitions
+            .iter()
+            .filter(|def| {
+                def.effect
+                    .unimplemented_description()
+                    .is_some_and(|fragment| {
+                        nom_primitives::scan_contains(&fragment.to_lowercase(), condition)
+                    })
+            })
+            .count();
+        assert_eq!(gaps, 1, "one gap naming `{condition}`: {definitions:?}");
+    }
+
+    /// CR 608.2c: a card whose spell is rewritten at cast has no spell line
+    /// proven to be its spell's resolved root with its printed targets, and the
+    /// fact is read from the card's own printed keyword line (and, for gift,
+    /// the MTGJSON keyword), the input production supplies:
+    /// - fuse (CR 702.102d): Tear's printed text with the suffix, as a split
+    ///   card's half reaches the parser (with the export's
+    ///   `__force_keyword_extract__` sentinel instead of MTGJSON names);
+    /// - splice (CR 702.47a): Glacial Ray's printed splice line;
+    /// - gift (CR 702.174j): Long River's Pull's printed gift line, once with
+    ///   the MTGJSON gift keyword and once with the typed line alone (a
+    ///   multi-face card gets the sentinel instead of MTGJSON names);
+    /// - overload (CR 702.96b): Cyclonic Rift's printed overload line;
+    /// - awaken (CR 702.113a): Scatter to the Winds' printed awaken line;
+    /// - a splice host (CR 702.47b): the same spell line on an Arcane instant.
+    ///
+    /// Each spell line is synthetic ("Destroy target enchantment if its
+    /// controller controls no creatures."; nearest printed card: Tear, with
+    /// Skulking Killer's zero-count condition). The reach guard parses the same
+    /// spell line without a keyword line and asserts it binds.
+    #[test]
+    fn target_controller_suffix_on_a_spell_rewritten_at_cast_is_an_explicit_gap() {
+        fn fuse(keyword: &Keyword) -> bool {
+            matches!(keyword, Keyword::Fuse)
+        }
+        fn splice(keyword: &Keyword) -> bool {
+            matches!(keyword, Keyword::Splice { .. })
+        }
+        fn gift(keyword: &Keyword) -> bool {
+            matches!(keyword, Keyword::Gift(_))
+        }
+        fn overload(keyword: &Keyword) -> bool {
+            matches!(keyword, Keyword::Overload(_))
+        }
+        fn awaken(keyword: &Keyword) -> bool {
+            matches!(keyword, Keyword::Awaken { .. })
+        }
+        let condition = "its controller controls no creatures";
+        let spell = format!("Destroy target enchantment if {condition}.");
+        let (seam, _, _) = full_strip("Destroy target enchantment", condition);
+        assert!(seam.is_some(), "reach guard: the strip binds at a root");
+        let (plain, warnings) = parse_single_ability(&spell, "Synthetic", &["Instant"], &[]);
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert_eq!(
+            plain.condition, seam,
+            "reach guard: the bare spell line binds"
+        );
+
+        let split_face = vec!["__force_keyword_extract__".to_owned()];
+        let no_subtypes: Vec<String> = Vec::new();
+        for (text, keywords, subtypes, keyword_line) in [
+            (
+                format!(
+                    "{spell}\nFuse (You may cast one or both halves of this card from your \
+                     hand.)"
+                ),
+                split_face,
+                no_subtypes.clone(),
+                Some(fuse as fn(&Keyword) -> bool),
+            ),
+            (
+                format!(
+                    "{spell}\nSplice onto Arcane {{1}}{{R}} (As you cast an Arcane spell, you \
+                     may reveal this card from your hand and pay its splice cost. If you do, \
+                     add this card's effects to that spell.)"
+                ),
+                vec!["Splice".to_owned()],
+                no_subtypes.clone(),
+                Some(splice),
+            ),
+            (
+                format!(
+                    "Gift a card (You may promise an opponent a gift as you cast this spell. \
+                     If you do, they draw a card before its other effects.)\n{spell}"
+                ),
+                vec!["Gift".to_owned()],
+                no_subtypes.clone(),
+                Some(gift),
+            ),
+            (
+                format!(
+                    "Gift a card (You may promise an opponent a gift as you cast this spell. \
+                     If you do, they draw a card before its other effects.)\n{spell}"
+                ),
+                Vec::new(),
+                no_subtypes.clone(),
+                Some(gift),
+            ),
+            (
+                format!(
+                    "{spell}\nOverload {{6}}{{U}} (You may cast this spell for its overload \
+                     cost. If you do, change \"target\" in its text to \"each.\")"
+                ),
+                vec!["Overload".to_owned()],
+                no_subtypes.clone(),
+                Some(overload),
+            ),
+            (
+                format!(
+                    "{spell}\nAwaken 3\u{2014}{{4}}{{U}}{{U}} (If you cast this spell for \
+                     {{4}}{{U}}{{U}}, also put three +1/+1 counters on target land you control \
+                     and it becomes a 0/0 Elemental creature with haste. It's still a land.)"
+                ),
+                vec!["Awaken".to_owned()],
+                no_subtypes.clone(),
+                Some(awaken),
+            ),
+            (spell.clone(), Vec::new(), vec!["Arcane".to_owned()], None),
+        ] {
+            let typed: Vec<Keyword> = text
+                .lines()
+                .filter_map(|line| {
+                    let lower = crate::parser::oracle_util::strip_reminder_text(line)
+                        .trim()
+                        .to_lowercase();
+                    crate::parser::oracle_keyword::parse_router_keyword_fragment(&lower)
+                })
+                .collect();
+            match keyword_line {
+                Some(expected) => assert!(
+                    matches!(typed.as_slice(), [keyword] if expected(keyword)),
+                    "reach guard: {text}: the printed keyword line is typed: {typed:?}"
+                ),
+                None => assert!(typed.is_empty(), "reach guard: {text}: {typed:?}"),
+            }
+            let parsed = parse_oracle_text(
+                &text,
+                "Synthetic",
+                &keywords,
+                &["Instant".to_owned()],
+                &subtypes,
+            );
+            assert_suffix_is_explicit_gap(&parsed, condition);
+        }
+    }
+
+    /// CR 608.2c: a later spell paragraph that the parser emits
+    /// as its own spell ability is a root at parse time, but at cast the engine
+    /// appends it under the first spell ability (`combined_spell_ability_def`),
+    /// so its gate would read the first paragraph's target. Synthetic text on
+    /// Azorius Ploy's printed shape (two targeted paragraphs; its second
+    /// paragraph is the first line here). The reach guard proves the gated line
+    /// is a separate spell ability root before the gap is asserted.
+    #[test]
+    fn target_controller_suffix_on_a_later_spell_paragraph_is_an_explicit_gap() {
+        let condition = "its controller controls no creatures";
+        assert_full_strip_binds("Destroy target artifact", condition);
+        let text = format!(
+            "Prevent all combat damage that would be dealt to target creature this turn.\n\
+             Destroy target artifact if {condition}."
+        );
+        let parsed = parse_oracle_text(&text, "Synthetic", &[], &["Instant".to_owned()], &[]);
+        let [first, later] = parsed.abilities.as_slice() else {
+            panic!(
+                "reach guard: expected two spell abilities, got {:?}",
+                parsed.abilities
+            );
+        };
+        assert_eq!(first.kind, AbilityKind::Spell);
+        assert_eq!(later.kind, AbilityKind::Spell);
+        assert!(
+            later.effect.unimplemented_description().is_some(),
+            "the later paragraph, its own spell ability root, is the gap: {:?}",
+            later.effect
+        );
+        assert_suffix_is_explicit_gap(&parsed, condition);
+    }
+
+    /// CR 608.2c: a gated spell line on a card with a second non-keyword line
+    /// is an explicit gap. When a later paragraph is emitted as its own spell
+    /// ability (Azorius Ploy's printed shape: two targeted paragraphs), the
+    /// engine appends it below the first at cast (`combined_spell_ability_def`)
+    /// with any condition of its own, which a false gate would skip; the first
+    /// line is parsed before the second, so the card-level proof declines any
+    /// second non-keyword line. That is conservative for this synthetic row,
+    /// whose second line is an unconditional instruction. The reach guard
+    /// proves the first line alone binds.
+    #[test]
+    fn target_controller_suffix_on_a_spell_with_a_second_paragraph_is_an_explicit_gap() {
+        let condition = "its controller controls no creatures";
+        let first = format!("Destroy target artifact if {condition}.");
+        let (alone, warnings) = parse_single_ability(&first, "Synthetic", &["Instant"], &[]);
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert!(
+            alone.condition.is_some(),
+            "reach guard: the line alone binds"
+        );
+
+        let text = format!(
+            "{first}\nPrevent all combat damage that would be dealt to target creature this \
+             turn."
+        );
+        let parsed = parse_oracle_text(&text, "Synthetic", &[], &["Instant".to_owned()], &[]);
+        assert_suffix_is_explicit_gap(&parsed, condition);
+    }
+
+    /// CR 608.2c: the mirror positive. A card's only non-keyword line is its
+    /// spell's resolved root, and an unconditional later sentence on it is the
+    /// root's independent next instruction, which a false gate still runs, so
+    /// the suffix binds on the root and the later instruction stays ungated.
+    /// Synthetic text; nearest printed card: Unified Will.
+    #[test]
+    fn target_controller_suffix_on_the_only_spell_line_binds() {
+        let text = "Destroy target artifact if its controller controls no creatures. Draw a card.";
+        let parsed = parse_oracle_text(text, "Synthetic", &[], &["Instant".to_owned()], &[]);
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{:?}",
+            parsed.parse_warnings
+        );
+        let [root] = parsed.abilities.as_slice() else {
+            panic!("expected one spell ability, got {:?}", parsed.abilities);
+        };
+        let (seam, _, _) = full_strip(
+            "Destroy target artifact",
+            "its controller controls no creatures",
+        );
+        assert!(seam.is_some(), "reach guard: the strip binds at a root");
+        assert!(
+            matches!(*root.effect, Effect::Destroy { .. }),
+            "{:?}",
+            root.effect
+        );
+        assert_eq!(root.condition, seam);
+        let [draw] = sub_chain(root)[..] else {
+            panic!("expected one later instruction, got {:?}", root.sub_ability);
+        };
+        assert!(
+            matches!(*draw.effect, Effect::Draw { .. }),
+            "{:?}",
+            draw.effect
+        );
+        assert_eq!(draw.condition, None);
+        assert_eq!(
+            draw.sub_link,
+            crate::types::ability::SubAbilityLink::SequentialSibling,
+            "the draw is the root's independent next instruction"
+        );
+    }
+
+    /// CR 608.2c: a later instruction that a false gate would not run makes the
+    /// gated root an explicit gap. Into the Roil's printed kicked tail ("If this
+    /// spell was kicked, draw a card.") carries its own condition, so on a false
+    /// gate the engine would drop it with the gated root. Synthetic text:
+    /// Skulking Killer's printed instruction and suffix with Into the Roil's
+    /// printed kicker line and kicked tail. The reach guard parses the same text
+    /// with an unconditional tail and asserts it binds.
+    #[test]
+    fn target_controller_suffix_with_a_conditional_tail_is_an_explicit_gap() {
+        let gated = "Target creature an opponent controls gets -2/-2 until end of turn if that \
+                     opponent controls no other creatures.";
+        let kicker = "Kicker {1}{U} (You may pay an additional {1}{U} as you cast this spell.)";
+
+        let (bound, warnings) = parse_single_ability(
+            &format!("{kicker}\n{gated} Draw a card."),
+            "Synthetic",
+            &["Instant"],
+            &[],
+        );
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert!(
+            bound.condition.is_some(),
+            "reach guard: an unconditional tail binds"
+        );
+
+        let text = format!("{kicker}\n{gated} If this spell was kicked, draw a card.");
+        let (root, warnings) = parse_single_ability(&text, "Synthetic", &["Instant"], &[]);
+        let [tail] = sub_chain(&root)[..] else {
+            panic!(
+                "reach guard: expected the kicked tail, got {:?}",
+                root.sub_ability
+            );
+        };
+        assert!(
+            matches!(*tail.effect, Effect::Draw { .. }) && tail.condition.is_some(),
+            "reach guard: the tail is a conditional draw: {tail:?}"
+        );
+        assert_eq!(
+            tail.sub_link,
+            crate::types::ability::SubAbilityLink::SequentialSibling,
+            "reach guard: the tail is an independent instruction"
+        );
+        assert_eq!(root.condition, None, "{text}");
+        assert!(
+            root.effect
+                .unimplemented_description()
+                .is_some_and(|fragment| nom_primitives::scan_contains(
+                    fragment,
+                    "that opponent controls no other creatures"
+                )),
+            "the gated instruction must be an explicit gap: {:?} {warnings:?}",
+            root.effect
+        );
+    }
+
+    /// CR 608.2c: the assembled-chain check keeps the gate only when the root
+    /// has no else branch and its direct sub, if any, is an independent
+    /// instruction without a condition (the sub a false gate runs). Two
+    /// assembled shapes outside that are explicit gaps: a ", and" tail, which
+    /// lowers as a continuation step of the gated root, and an "Otherwise,"
+    /// branch, which the root carries as its else. The positive twin, an
+    /// independent next sentence, binds. Synthetic texts; nearest
+    /// printed card: Unified Will.
+    #[test]
+    fn target_controller_suffix_with_an_unrunnable_next_instruction_is_an_explicit_gap() {
+        let gated = "Destroy target artifact if its controller controls no creatures";
+        let (bound, warnings) = parse_single_ability(
+            &format!("{gated}. You gain 2 life."),
+            "Synthetic",
+            &["Instant"],
+            &[],
+        );
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert!(
+            bound.condition.is_some(),
+            "reach guard: an independent tail binds"
+        );
+
+        // Reach guard for the else row: the same "Otherwise," text under an
+        // ordinary gate lowers to an else branch on the gated root.
+        let (otherwise, _) = parse_single_ability(
+            "Destroy target artifact if you control an artifact. Otherwise, you gain 2 life.",
+            "Synthetic",
+            &["Instant"],
+            &[],
+        );
+        assert!(
+            otherwise.condition.is_some() && otherwise.else_ability.is_some(),
+            "reach guard: \"Otherwise,\" lowers to the root's else: {otherwise:?}"
+        );
+
+        for tail in [", and you gain 2 life.", ". Otherwise, you gain 2 life."] {
+            let text = format!("{gated}{tail}");
+            let (root, warnings) = parse_single_ability(&text, "Synthetic", &["Instant"], &[]);
+            if tail.starts_with(',') {
+                assert!(
+                    root.sub_ability.as_deref().is_some_and(|next| {
+                        next.sub_link == crate::types::ability::SubAbilityLink::ContinuationStep
+                            && next.condition.is_none()
+                    }),
+                    "reach guard: {text}: the tail is a continuation step: {root:?}"
+                );
+            }
+            assert_eq!(root.condition, None, "{text}");
+            assert!(
+                root.effect
+                    .unimplemented_description()
+                    .is_some_and(|fragment| nom_primitives::scan_contains(
+                        fragment,
+                        "its controller controls no creatures"
+                    )),
+                "{text}: the gated instruction must be an explicit gap: {:?} {warnings:?}",
+                root.effect
+            );
+        }
+    }
+
+    /// CR 608.2c: the building block `keep_own_target_gate_readable` turns the
+    /// gated root into a gap when the assembled root announces no target of its
+    /// own, even with no tail to reach. The gate is attached to a target-less
+    /// one-node chain ("Draw a card.") so that only the target check can fail.
+    /// The twin with a targeted root ("Destroy target artifact.") keeps the gate.
+    #[test]
+    fn own_target_gate_requires_the_assembled_root_to_declare_its_target() {
+        let (gate, _, _) = full_strip(
+            "Destroy target artifact",
+            "its controller controls no creatures",
+        );
+        let gate = gate.expect("reach guard: the strip binds at a root");
+        for (text, kept) in [("Draw a card.", false), ("Destroy target artifact.", true)] {
+            let mut ir = crate::parser::oracle_effect::parse_effect_chain_ir(
+                text,
+                AbilityKind::Spell,
+                &mut ParseContext::default(),
+            );
+            let [root] = ir.clauses.as_mut_slice() else {
+                panic!("reach guard: {text}: one clause");
+            };
+            root.condition = Some(gate.clone());
+            super::super::keep_own_target_gate_readable(&mut ir, &gate);
+            assert_eq!(ir.clauses[0].condition.is_some(), kept, "{text}");
+            assert_eq!(
+                ir.clauses[0]
+                    .parsed
+                    .effect
+                    .unimplemented_description()
+                    .is_some(),
+                !kept,
+                "{text}"
+            );
+        }
+    }
+
+    /// CR 608.2c: the engine wraps a gift card's first spell or activated
+    /// ability under a `GiftDelivery` root (`synthesize_gift`, an engine behaviour; for
+    /// a spell the gift effect happens first, CR 702.174j; Starforged Sword's
+    /// synthesized Equip sits under it), so an activated ability's effect on a
+    /// gift card is no resolved root and its suffix is an explicit gap. The
+    /// engine keys on the MTGJSON gift keyword, and the keyword router cannot
+    /// type every printed gift line, so the rows pass the MTGJSON keyword with
+    /// one printed line: Long River's Pull's (typed), Archival Whorl's "Gift a
+    /// Rhystic Study" and Octomancer's "Gift an Octopus" (both untyped); one
+    /// more row passes the typed line with no MTGJSON keyword (a multi-face
+    /// card gets the sentinel instead), which only the printed-line read
+    /// declines. Synthetic
+    /// text: those lines with `target_controller_suffix_on_an_activated_ability_binds`'s
+    /// activated ability. The reach guards parse the same activated line without
+    /// a gift line and assert it binds, and assert whether the router types
+    /// each gift line.
+    #[test]
+    fn target_controller_suffix_on_a_gift_cards_activated_ability_is_an_explicit_gap() {
+        let condition = "its controller controls no creatures";
+        let activated = format!("{{T}}: Destroy target artifact if {condition}.");
+        let (plain, warnings) = parse_single_ability(&activated, "Synthetic", &["Creature"], &[]);
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert!(
+            plain.condition.is_some(),
+            "reach guard: it binds without gift"
+        );
+
+        let mtgjson_gift = vec!["Gift".to_owned()];
+        for (gift, keywords, router_types_it) in [
+            (
+                "Gift a card (You may promise an opponent a gift as you cast this spell. If \
+                 you do, they draw a card before its other effects.)",
+                mtgjson_gift.clone(),
+                true,
+            ),
+            // The typed line alone, with no MTGJSON keyword (a multi-face card).
+            (
+                "Gift a card (You may promise an opponent a gift as you cast this spell. If \
+                 you do, they draw a card before its other effects.)",
+                Vec::new(),
+                true,
+            ),
+            ("Gift a Rhystic Study", mtgjson_gift.clone(), false),
+            (
+                "Gift an Octopus (You may promise an opponent a gift as you cast this spell. If \
+                 you do, when it enters, they create an 8/8 blue Octopus creature token.)",
+                mtgjson_gift.clone(),
+                false,
+            ),
+        ] {
+            let lower = crate::parser::oracle_util::strip_reminder_text(gift)
+                .trim()
+                .to_lowercase();
+            assert_eq!(
+                matches!(
+                    crate::parser::oracle_keyword::parse_router_keyword_fragment(&lower),
+                    Some(Keyword::Gift(_))
+                ),
+                router_types_it,
+                "reach guard: {gift}: whether the router types the gift line"
+            );
+            let text = format!("{gift}\n{activated}");
+            let parsed =
+                parse_oracle_text(&text, "Synthetic", &keywords, &["Creature".to_owned()], &[]);
+            assert!(
+                all_chain_definitions(&parsed)
+                    .iter()
+                    .any(|def| def.kind == AbilityKind::Activated
+                        && def.effect.unimplemented_description().is_some()),
+                "{gift}: the activated ability is the gap"
+            );
+            assert_suffix_is_explicit_gap(&parsed, condition);
+        }
+    }
+
+    /// CR 603.3d + CR 115.6: an "up to one" anywhere in a trigger body makes
+    /// trigger lowering stamp `optional_targeting` on the root, so the gated
+    /// root's own target becomes declinable and the single mandatory-role
+    /// proof no longer holds; the suffix is not bound. Skulking Killer's
+    /// printed trigger followed by a synthetic unconditional "Up to one target
+    /// creature you control gets +2/+2 until end of turn." (printed witness of
+    /// the stamp: Blue Dragon's later "up to one other target creature"). The
+    /// reach guards: the printed trigger alone binds with a mandatory target,
+    /// and the extended trigger's root target is stamped optional.
+    #[test]
+    fn target_controller_suffix_under_a_body_wide_optional_target_is_not_bound() {
+        let head = "When this creature enters, target creature an opponent controls gets -2/-2 \
+                    until end of turn";
+        let condition = "that opponent controls no other creatures";
+        let tail = "Up to one target creature you control gets +2/+2 until end of turn.";
+        let parse =
+            |text: &str| parse_oracle_text(text, "Synthetic", &[], &["Creature".to_owned()], &[]);
+        let execute = |parsed: &crate::parser::oracle::ParsedAbilities| {
+            let [trigger] = parsed.triggers.as_slice() else {
+                panic!("expected one trigger: {parsed:?}");
+            };
+            trigger.execute.as_deref().cloned().expect("trigger body")
+        };
+        let plain = execute(&parse(&format!("{head} if {condition}.")));
+        assert!(
+            plain.condition.is_some(),
+            "reach guard: the printed trigger binds"
+        );
+        assert!(
+            !plain.optional_targeting,
+            "reach guard: its target is mandatory"
+        );
+        let stamped = execute(&parse(&format!("{head}. {tail}")));
+        assert!(
+            stamped.optional_targeting,
+            "reach guard: the later \"up to one\" makes the root target declinable"
+        );
+
+        assert_suffix_is_explicit_gap(&parse(&format!("{head} if {condition}. {tail}")), condition);
+    }
+
+    /// CR 118.12 + CR 608.2c: a trigger-level unless-payment with a targeted
+    /// payer is hoisted before the body is parsed and stamped back on the
+    /// root, where the payer is announced before the body's own target; a
+    /// bound gate would read the payer. The body is therefore no proven root
+    /// and the suffix is not bound. Synthetic text: Athreos, God of Passage's
+    /// printed "unless target opponent pays 3 life" on a Skulking
+    /// Killer-style instruction. The reach guard parses the same trigger
+    /// without the payment and asserts it binds.
+    #[test]
+    fn target_controller_suffix_with_a_hoisted_targeted_payer_is_not_bound() {
+        let body = "When this creature enters, destroy target artifact if its controller \
+                    controls no creatures";
+        let execute = |text: &str| {
+            let parsed = parse_oracle_text(text, "Synthetic", &[], &["Creature".to_owned()], &[]);
+            let [trigger] = parsed.triggers.as_slice() else {
+                panic!("{text}: expected one trigger: {parsed:?}");
+            };
+            (
+                trigger.unless_pay.clone(),
+                trigger.execute.as_deref().cloned().expect("trigger body"),
+            )
+        };
+        let (payer, plain) = execute(&format!("{body}."));
+        assert!(payer.is_none());
+        assert!(plain.condition.is_some(), "reach guard: it binds unpaid");
+
+        let text = format!("{body} unless target opponent pays 3 life.");
+        let (payer, _) = execute(&text);
+        assert!(
+            payer.is_some_and(|modifier| payer_is_declared_target(&modifier.payer)),
+            "reach guard: the trigger hoisted a targeted payer"
+        );
+        // The hoisted payment is a populated condition slot of the same
+        // ability; the declined suffix must still be its own explicit gap.
+        assert_suffix_is_explicit_gap(
+            &parse_oracle_text(&text, "Synthetic", &[], &["Creature".to_owned()], &[]),
+            "its controller controls no creatures",
+        );
+    }
+
+    /// CR 608.2b + CR 608.2c: a gated root followed by an instruction that
+    /// announces its own target is an explicit gap. If the root's target became
+    /// illegal while the later target stayed legal, the ability would still
+    /// resolve, the engine would not keep the illegal head slot, and the gate
+    /// would read no controller (a count of zero). Rows: Skulking Killer's
+    /// printed instruction and suffix, as a spell, followed by Shatter's
+    /// printed "Destroy target artifact." (object target), a synthetic "Up to
+    /// one target creature gets +1/+1 until end of turn." (optional target), a
+    /// synthetic "Target player draws a card." (player target; nearest printed
+    /// analogue for all three: Run Away Together's two separately resolved
+    /// targets), a coin flip whose winning outcome is Shatter's instruction
+    /// (printed shape of a targeted coin outcome: Chaotic Strike), and the same
+    /// Shatter tail on Skulking Killer's printed trigger.
+    /// Reach guards: the same head followed by an untargeted "Draw a card."
+    /// binds, and each tail announces a target below the head.
+    #[test]
+    fn target_controller_suffix_with_a_separately_targeted_tail_is_an_explicit_gap() {
+        let gated = "target creature an opponent controls gets -2/-2 until end of turn if that \
+                     opponent controls no other creatures.";
+        let spell = format!("T{}", &gated[1..]);
+        let trigger = format!("When this creature enters, {gated}");
+        let roots = |text: &str, types: &str| {
+            let parsed = parse_oracle_text(text, "Synthetic", &[], &[types.to_owned()], &[]);
+            let root = match (parsed.abilities.as_slice(), parsed.triggers.as_slice()) {
+                ([ability], []) => ability.clone(),
+                ([], [trigger]) => trigger.execute.as_deref().expect("trigger body").clone(),
+                _ => panic!("{text}: expected one ability or trigger: {parsed:?}"),
+            };
+            (root, parsed.parse_warnings)
+        };
+        for (head, types) in [(&spell, "Instant"), (&trigger, "Creature")] {
+            let (bound, warnings) = roots(&format!("{head} Draw a card."), types);
+            assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+            assert!(
+                bound.condition.is_some(),
+                "reach guard: an untargeted tail binds"
+            );
+            assert!(!chain_announces_target_below(&bound), "reach guard");
+        }
+        // A target in a token's own quoted ability is announced when that
+        // ability is activated, not by this spell (CR 111.3 + CR 602.2b), so the
+        // gate stays. Ertha Jo, Frontier Mentor's printed token.
+        let token = "Create a 1/1 red Mercenary creature token with \"{T}: Target creature you \
+                     control gets +1/+0 until end of turn. Activate only as a sorcery.\"";
+        let (kept, warnings) = roots(&format!("{spell} {token}"), "Instant");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(
+            matches!(
+                kept.sub_ability.as_deref().map(|next| &*next.effect),
+                Some(Effect::Token { .. })
+            ),
+            "reach guard: the token creation follows the gated root: {kept:?}"
+        );
+        assert!(
+            kept.condition.is_some(),
+            "a target inside the token's quoted ability does not decline the gate"
+        );
+
+        // Chaotic Strike's printed coin tail: the winning outcome's target is
+        // announced by this spell with its own targets.
+        let coin = "Flip a coin. If you win the flip, target creature gets +1/+1 until end of \
+                    turn.";
+        let (flip, warnings) = roots(&format!("Draw a card. {coin}"), "Instant");
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert!(
+            sub_chain(&flip).iter().any(|def| matches!(
+                &*def.effect,
+                Effect::FlipCoins { win_effect: Some(won), .. }
+                    if won.effect.target_filter().is_some_and(|filter| !filter.is_context_ref())
+            )),
+            "reach guard: the lowered win branch owns a declared target: {flip:?}"
+        );
+
+        for (head, types, tail) in [
+            (&spell, "Instant", coin),
+            (&spell, "Instant", "Destroy target artifact."),
+            (
+                &spell,
+                "Instant",
+                "Up to one target creature gets +1/+1 until end of turn.",
+            ),
+            (&spell, "Instant", "Target player draws a card."),
+            (&trigger, "Creature", "Destroy target artifact."),
+        ] {
+            let text = format!("{head} {tail}");
+            let (root, warnings) = roots(&text, types);
+            assert!(
+                chain_announces_target_below(&root),
+                "reach guard: {text}: the tail announces its own target: {root:?}"
+            );
+            assert_eq!(root.condition, None, "{text}");
+            for def in sub_chain(&root) {
+                assert_eq!(def.condition, None, "{text}: {:?}", def.effect);
+            }
+            assert!(
+                root.effect
+                    .unimplemented_description()
+                    .is_some_and(|fragment| {
+                        nom_primitives::scan_contains(
+                            fragment,
+                            "that opponent controls no other creatures",
+                        )
+                    }),
+                "{text}: the gated instruction must be an explicit gap: {:?} {warnings:?}",
+                root.effect
+            );
+        }
+    }
+
+    /// CR 101.1 over CR 608.2b: Gilded Drake's printed "This ability still
+    /// resolves if its target becomes illegal." lets a trigger resolve with its
+    /// pruned target, where a gate on that target's controller would read no
+    /// controller. A trigger carrying that sentence gets no root proof.
+    /// Synthetic: Skulking Killer's printed trigger, an untargeted draw, and
+    /// that sentence. Reach guards: without the sentence the trigger binds,
+    /// and with it the trigger is stamped `StillResolves`.
+    #[test]
+    fn target_controller_suffix_on_a_still_resolves_trigger_is_not_bound() {
+        let body = "When this creature enters, target creature an opponent controls gets -2/-2 \
+                    until end of turn if that opponent controls no other creatures. Draw a card.";
+        let trigger = |text: &str| {
+            let parsed = parse_oracle_text(text, "Synthetic", &[], &["Creature".to_owned()], &[]);
+            let [trigger] = parsed.triggers.as_slice() else {
+                panic!("{text}: expected one trigger: {parsed:?}");
+            };
+            trigger.clone()
+        };
+        let plain = trigger(body);
+        assert!(
+            plain
+                .execute
+                .as_deref()
+                .is_some_and(|root| root.condition.is_some()),
+            "reach guard: the trigger binds without the override"
+        );
+        let overridden = trigger(&format!(
+            "{body} This ability still resolves if its target becomes illegal."
+        ));
+        let root = overridden.execute.as_deref().expect("trigger body");
+        assert_eq!(
+            root.illegal_targets_disposition,
+            crate::types::ability::IllegalTargetsDisposition::StillResolves,
+            "reach guard: the override sentence was recognized"
+        );
+        assert_suffix_is_explicit_gap(
+            &parse_oracle_text(
+                &format!("{body} This ability still resolves if its target becomes illegal."),
+                "Synthetic",
+                &[],
+                &["Creature".to_owned()],
+                &[],
+            ),
+            "that opponent controls no other creatures",
+        );
+    }
+
+    /// CR 608.2c: the assembled-chain check is total. If the first clause no
+    /// longer carries the gate it was asked to vouch for (a later composition
+    /// re-homed it, here under an `And`), the check cannot prove the gate is
+    /// readable, so the clause becomes an explicit gap rather than passing
+    /// silently. No input text reaches this today; the building block is pinned
+    /// directly. The reach guard is the same targeted root carrying the gate,
+    /// which the check keeps.
+    #[test]
+    fn own_target_gate_fails_closed_when_the_first_clause_lost_it() {
+        let (gate, _, _) = full_strip(
+            "Destroy target artifact",
+            "its controller controls no creatures",
+        );
+        let gate = gate.expect("reach guard: the strip binds at a root");
+        for (condition, kept) in [
+            (gate.clone(), true),
+            (
+                AbilityCondition::And {
+                    conditions: vec![AbilityCondition::effect_performed(), gate.clone()],
+                },
+                false,
+            ),
+        ] {
+            let mut ir = crate::parser::oracle_effect::parse_effect_chain_ir(
+                "Destroy target artifact.",
+                AbilityKind::Spell,
+                &mut ParseContext::default(),
+            );
+            let [root] = ir.clauses.as_mut_slice() else {
+                panic!("reach guard: one clause");
+            };
+            root.condition = Some(condition);
+            super::super::keep_own_target_gate_readable(&mut ir, &gate);
+            assert_eq!(
+                ir.clauses[0]
+                    .parsed
+                    .effect
+                    .unimplemented_description()
+                    .is_none(),
+                kept,
+                "{:?}",
+                ir.clauses[0].condition
+            );
+        }
+    }
+
+    /// CR 608.2c: the gate is checked on the ASSEMBLED chain. Stave Off's
+    /// printed "Target creature gains protection from the color of your choice
+    /// until end of turn." parses to one targeted node, but assembly wraps it
+    /// under a `Choose` root that announces no target, with the targeted grant
+    /// as a continuation step below. A gate on that root could not read the
+    /// target, and a false gate would skip everything after it, so the suffix
+    /// is an explicit gap. The suffix is synthetic. Reach guards: the clause
+    /// alone binds at the strip seam, and the printed card assembles under the
+    /// `Choose` root.
+    #[test]
+    fn target_controller_suffix_on_an_assembly_rerooted_chain_is_an_explicit_gap() {
+        let printed = "Target creature gains protection from the color of your choice until end \
+                       of turn";
+        let condition = "that creature's controller controls no other creatures";
+        assert_full_strip_binds(printed, condition);
+        let (plain, warnings) =
+            parse_single_ability(&format!("{printed}."), "Stave Off", &["Instant"], &[]);
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert!(
+            matches!(*plain.effect, Effect::Choose { .. })
+                && plain.effect.target_filter().is_none(),
+            "reach guard: assembly puts a target-less Choose root above the grant: {:?}",
+            plain.effect
+        );
+        assert!(
+            sub_chain(&plain).iter().any(|def| def
+                .effect
+                .target_filter()
+                .is_some_and(|filter| !filter.is_context_ref())),
+            "reach guard: the targeted grant sits below the root: {plain:?}"
+        );
+
+        let text = format!("{printed} if {condition}.");
+        let (root, warnings) = parse_single_ability(&text, "Stave Off", &["Instant"], &[]);
+        assert_eq!(root.condition, None, "{text}: {:?}", root.effect);
+        for def in sub_chain(&root) {
+            assert_eq!(def.condition, None, "{text}: {:?}", def.effect);
+        }
+        assert!(
+            root.effect
+                .unimplemented_description()
+                .is_some_and(|fragment| nom_primitives::scan_contains(fragment, condition)),
+            "the gated instruction must be an explicit gap: {:?} {warnings:?}",
+            root.effect
+        );
+    }
+
+    /// CR 602.2 + CR 608.2c: an activated ability's effect resolves as that
+    /// ability's root, so its entry point proves the root and the suffix binds
+    /// on it through full parsing. Synthetic text; nearest printed cards:
+    /// Skulking Killer (the zero-count condition) and Coastal Wizard (a
+    /// tap-activated targeted instruction).
+    #[test]
+    fn target_controller_suffix_on_an_activated_ability_binds() {
+        let effect = "Destroy target artifact";
+        let condition = "its controller controls no creatures";
+        let text = format!("{{T}}: {effect} if {condition}.");
+        let parsed = parse_oracle_text(&text, "Synthetic", &[], &["Creature".to_owned()], &[]);
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{:?}",
+            parsed.parse_warnings
+        );
+        let [root] = parsed.abilities.as_slice() else {
+            panic!("expected one activated ability, got {:?}", parsed.abilities);
+        };
+        assert_eq!(root.kind, AbilityKind::Activated);
+        assert!(
+            matches!(*root.effect, Effect::Destroy { .. }),
+            "{:?}",
+            root.effect
+        );
+        let (seam, _, _) = full_strip(effect, condition);
+        assert!(seam.is_some(), "reach guard: the strip binds at a root");
+        assert_eq!(root.condition, seam);
+    }
+
+    /// CR 608.2c: the resolved-root proof is consumed by the parse it is handed
+    /// to, so no chain parsed afterwards on the same context (or a clone of it)
+    /// inherits it. Two take points:
+    /// - the chain body takes it on entry (an ordinary instruction);
+    /// - the ability entry point holds it back from the recognizers that run
+    ///   before the chain body, so one that returns early leaves it consumed.
+    ///   Booster Tutor's printed "Open a sealed Magic booster pack, reveal the
+    ///   cards, and put one of them into your hand." is such a recognizer.
+    #[test]
+    fn resolved_root_proof_is_consumed_by_the_parse_it_is_handed_to() {
+        let proven = || ParseContext {
+            resolved_chain_root: ResolvedChainRoot::Proven,
+            ..Default::default()
+        };
+
+        let mut ctx = proven();
+        let _ = crate::parser::oracle_effect::parse_effect_chain_ir_ability_root(
+            "Destroy target artifact",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        assert_eq!(ctx.resolved_chain_root, ResolvedChainRoot::Unproven);
+
+        let booster = "Open a sealed Magic booster pack, reveal the cards, and put one of them \
+                       into your hand.";
+        let mut ctx = proven();
+        let ir = crate::parser::oracle_effect::parse_ability_ir_with_context(
+            booster,
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        assert!(
+            matches!(
+                *crate::parser::oracle_effect::lower_ability_ir(&ir).effect,
+                Effect::OpenBoosterPack { .. }
+            ),
+            "reach guard: the booster recognizer returns before the chain body"
+        );
+        assert_eq!(ctx.resolved_chain_root, ResolvedChainRoot::Unproven);
+    }
+
+    /// CR 700.2 + CR 608.2c: every mode of a modal body is
+    /// declined. The engine appends each later chosen mode to the earlier one as
+    /// a sub-ability and evaluates its gate against the earlier mode's node, so
+    /// "Choose two" with a tapped creature in mode 1 would read that creature's
+    /// controller. Mode bodies are parsed without a resolved-root proof, which
+    /// is what declines them here; the chunk loop's `BodyScope::ModalMode` arm
+    /// is a backstop this test does not isolate. Synthetic text; the gated mode
+    /// is Skulking Killer's printed instruction and the nearest printed modal
+    /// shape is any "Choose two" spell whose modes each target.
+    #[test]
+    fn target_controller_suffix_in_a_mode_is_an_explicit_gap() {
+        let condition = "that opponent controls no other creatures";
+        let gated_effect = "Target creature an opponent controls gets -2/-2 until end of turn";
+        assert_full_strip_binds(gated_effect, condition);
+        let text = format!(
+            "Choose two \u{2014}\n\u{2022} Tap target creature.\n\u{2022} {gated_effect} if \
+             {condition}."
+        );
+        let parsed = parse_oracle_text(&text, "Synthetic", &[], &["Instant".to_owned()], &[]);
+        let modal = parsed
+            .modal
+            .as_ref()
+            .expect("reach guard: the text is modal");
+        assert_eq!(
+            (modal.min_choices, modal.max_choices, modal.mode_count),
+            (2, 2, 2)
+        );
+        let [tap, _gated] = parsed.abilities.as_slice() else {
+            panic!("expected one ability per mode, got {:?}", parsed.abilities);
+        };
+        assert!(
+            tap.effect
+                .target_filter()
+                .is_some_and(|filter| !filter.is_context_ref()),
+            "reach guard: the first mode declares its own target: {:?}",
+            tap.effect
+        );
+        assert_suffix_is_explicit_gap(&parsed, condition);
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal
@@ -11600,6 +15157,7 @@ mod tests {
                     filter: TargetFilter::Typed(filter),
                     use_lki: false,
                     subject_slot: None,
+                    subject: ObjectScope::Target
                 } if filter.type_filters.iter().any(
                     |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Dragon"))
                 )
@@ -12436,9 +15994,10 @@ mod tests {
             lhs:
                 QuantityExpr::Ref {
                     qty:
-                        QuantityRef::SpellsCastThisTurn {
+                        QuantityRef::SpellsCast {
                             scope: crate::types::ability::CountScope::Controller,
                             filter: Some(TargetFilter::Or { filters }),
+                            window: crate::types::ability::TurnWindow::ThisTurn,
                         },
                 },
             comparator: Comparator::GE,
@@ -13010,6 +16569,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
+            subject: ObjectScope::Target,
         }) = cond
         else {
             panic!("expected TargetMatchesFilter, got {cond:?}");
@@ -13058,6 +16618,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
+            subject: ObjectScope::Target,
         }) = cond
         else {
             panic!("expected TargetMatchesFilter, got {cond:?}");
@@ -13203,7 +16764,7 @@ mod tests {
     /// **T11 — SHAPE.** The tense conjunct: a PAST-tense divergent-noun gate is
     /// declined even when the declared target agrees, because the zone-change
     /// route has no ` was ` arm and `strip_target_supertype_conditional` /
-    /// `nonbasic_land_lki_condition` still own that half (CR 400.7).
+    /// the owner's `NonbasicLand` surface still own that half (CR 400.7).
     ///
     /// Revert probe: delete `use_lki ||` from the gate and all three `None`s
     /// below become `Some`, which would strip Choking Sands / Molten Rain /
@@ -13289,6 +16850,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
+            subject: ObjectScope::Target,
         } = inner.as_ref()
         else {
             panic!("expected TargetMatchesFilter inside ConditionInstead, got {inner:?}");
@@ -13320,6 +16882,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
+            subject: ObjectScope::Target,
         }) = cond
         else {
             panic!("expected TargetMatchesFilter, got {cond:?}");
@@ -13501,6 +17064,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
+            subject: ObjectScope::Target,
         } = inner.as_ref()
         else {
             panic!("expected TargetMatchesFilter inside ConditionInstead, got {inner:?}");
@@ -14133,6 +17697,41 @@ mod tests {
         assert!(subtype_filter.is_none());
     }
 
+    /// CR 208.1 + CR 608.2c: the revealed/moved-card gate suffix must carry a
+    /// power comparison whose threshold is a dynamic characteristic of the
+    /// ability's source (Grenzo, Dungeon Warden: "creature card with power less
+    /// than or equal to ~'s power").
+    #[test]
+    fn strip_card_type_conditional_creature_with_source_power_bound() {
+        let (cond, body) = strip_card_type_conditional(
+            "If it's a creature card with power less than or equal to ~'s power, \
+             put it onto the battlefield.",
+        );
+        assert_eq!(body, "put it onto the battlefield.");
+        let Some(AbilityCondition::RevealedHasCardType {
+            card_types,
+            additional_filter,
+            ..
+        }) = cond
+        else {
+            panic!("expected RevealedHasCardType, got {cond:?}");
+        };
+        assert_eq!(card_types, vec![CoreType::Creature]);
+        assert_eq!(
+            additional_filter,
+            Some(FilterProp::PtComparison {
+                stat: crate::types::ability::PtStat::Power,
+                scope: crate::types::ability::PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    },
+                },
+            })
+        );
+    }
+
     /// CR 205.3m + CR 608.2c (Verification row 3): Descendants' Path —
     /// "If it's a creature card that shares a creature type with a creature you
     /// control, you may cast it …". The postnominal shared-quality clause must
@@ -14444,6 +18043,7 @@ mod tests {
                 }),
                 use_lki: false,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             }
         );
     }
@@ -14606,6 +18206,7 @@ mod tests {
                 filter: TargetFilter::Typed(tf),
                 use_lki,
                 subject_slot,
+                subject: ObjectScope::Target,
             } => {
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
                 assert_eq!(tf.controller, Some(ControllerRef::You));
@@ -14879,6 +18480,79 @@ mod tests {
         assert_eq!(colors, ManaColor::ALL.to_vec());
     }
 
+    /// CR 508.6 + CR 608.2c (Matt M2): the `SpecificPlayer` attack endpoint
+    /// is refused by the initial-verb bridge on either side.
+    /// `PlayerScope::SpecificPlayer` is duration-timing-only and the
+    /// condition authority rejects it, so mapping the endpoint would bridge
+    /// a matching ledger entry to a condition that still yields false (or
+    /// true under `Not`). CR 603.7a + CR 109.4 (Matt R7-F5): the
+    /// `ChosenPlayer` endpoint bridges only with the matching stamped
+    /// delayed context (creation stamps the temporal binding's player);
+    /// without it — or with a mismatched index — it stays unrepresented.
+    /// The declared-target positive still bridges to `Target`/`Controller`;
+    /// evaluation cells live in `player_attacked_player_predicate_matrix`.
+    #[test]
+    fn initial_verb_bridge_refuses_specific_player_attack_endpoint() {
+        use crate::types::player::PlayerId;
+
+        let p1 = PlayerId(1);
+        for (attacker, defender) in [
+            (ControllerRef::SpecificPlayer { id: p1 }, ControllerRef::You),
+            (ControllerRef::You, ControllerRef::SpecificPlayer { id: p1 }),
+        ] {
+            let sc = StaticCondition::PlayerAttackedPlayer { attacker, defender };
+            assert_eq!(
+                static_condition_to_ability_condition(&sc, &mut ParseContext::default()),
+                None
+            );
+        }
+        // CR 603.7a + CR 109.4 (Matt R7-F5): a `ChosenPlayer` endpoint
+        // resolves only against the target delayed-trigger creation stamps,
+        // so without the stamped context the bridge refuses it (the
+        // immediate Choose→conditional misfire). A non-matching index is
+        // refused too — creation stamps only the temporal binding's player.
+        // With the matching stamp the mapping keeps working (Faramir's path).
+        let sc = StaticCondition::PlayerAttackedPlayer {
+            attacker: ControllerRef::ChosenPlayer { index: 0 },
+            defender: ControllerRef::You,
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(&sc, &mut ParseContext::default()),
+            None,
+            "a ChosenPlayer attack endpoint without the stamped delayed \
+             context must stay unrepresented, not silently bind Target"
+        );
+        let mismatched = StaticCondition::PlayerAttackedPlayer {
+            attacker: ControllerRef::ChosenPlayer { index: 1 },
+            defender: ControllerRef::You,
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(
+                &mismatched,
+                &mut ParseContext {
+                    stamped_delayed_chosen_player: Some(0),
+                    ..ParseContext::default()
+                },
+            ),
+            None,
+            "a non-matching stamp index must also stay unrepresented"
+        );
+        assert_eq!(
+            static_condition_to_ability_condition(
+                &sc,
+                &mut ParseContext {
+                    stamped_delayed_chosen_player: Some(0),
+                    ..ParseContext::default()
+                },
+            ),
+            Some(AbilityCondition::PlayerAttackedPlayer {
+                attacker: PlayerScope::Target,
+                defender: PlayerScope::Controller,
+            }),
+            "a ChosenPlayer attack endpoint with the matching stamp must keep bridging"
+        );
+    }
+
     /// CR 614.1c + CR 614.12 (V-L6): only a single-core-type, unqualified,
     /// affirmative "if it's a <type>" gate converts to the entry-this-way gate.
     #[test]
@@ -14944,5 +18618,682 @@ mod tests {
             }),
             None
         );
+    }
+
+    /// CR 706.2 + CR 608.2c: "If the roll was N or higher" (Monoxa, Midway
+    /// Manager) reads the triggering die roll's result through the event-context
+    /// amount, `EventContextAmount >= N`, both as the building block and through
+    /// the production condition dispatcher. The grammar is exactly "the roll was
+    /// N or higher": a bare number or a trailing word stays unparsed, and the
+    /// "the result is" arm keeps its own reading.
+    #[test]
+    fn the_roll_was_n_or_higher_reads_the_triggering_roll() {
+        let at_least = |value: i32| AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value },
+        };
+        assert_eq!(
+            parse_die_result_condition("the roll was 4 or higher"),
+            Some(at_least(4))
+        );
+        assert_eq!(
+            parse_die_result_condition("the roll was 5 or higher"),
+            Some(at_least(5))
+        );
+        assert_eq!(
+            try_nom_condition_as_ability_condition(
+                "the roll was 4 or higher",
+                &mut ParseContext::default()
+            ),
+            Some(at_least(4)),
+            "the production dispatcher reaches the arm"
+        );
+        assert_eq!(parse_die_result_condition("the roll was 4"), None);
+        assert_eq!(
+            parse_die_result_condition("the roll was 4 or higher than"),
+            None
+        );
+        assert_eq!(
+            parse_die_result_condition("the result is 3 or less"),
+            Some(AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+                channel: DamageChannel::Total,
+            })
+        );
+    }
+}
+
+#[cfg(test)]
+mod referent_owner_tests {
+    //! The referent-predicate owner and its single writer (P3 S1b): the delegate-equality table
+    //! (every entry point that accepts a clause returns exactly the owner's condition) and the
+    //! source-level single-writer guard.
+
+    use super::*;
+
+    /// Real printed clauses (Oracle text verbatim from MTGJSON), lowercase, without the leading
+    /// "if": (card, clause, surface the owner must accept it on).
+    const OWNER_CLAUSES: &[(&str, &str, ReferentSurface)] = &[
+        (
+            "Sold Out",
+            "it was dealt damage this turn",
+            ReferentSurface::Reflexive,
+        ),
+        (
+            "Brackish Blunder",
+            "it was tapped",
+            ReferentSurface::Reflexive,
+        ),
+        (
+            "Consuming Ashes",
+            "it had mana value 3 or less",
+            ReferentSurface::Reflexive,
+        ),
+        (
+            "Driftgloom Coyote",
+            "that creature had power 2 or less",
+            ReferentSurface::Reflexive,
+        ),
+        (
+            "Wisecrack",
+            "that creature is attacking",
+            ReferentSurface::Reflexive,
+        ),
+        (
+            "Depressurize",
+            "that creature's power is 0 or less",
+            ReferentSurface::DemonstrativeStat,
+        ),
+        (
+            "Gore Vassal",
+            "that creature's toughness is 1 or greater",
+            ReferentSurface::DemonstrativeStat,
+        ),
+        (
+            "Strider, Ranger of the North",
+            "that creature has power 4 or greater",
+            ReferentSurface::DemonstrativeStat,
+        ),
+        (
+            "Fatal Push",
+            "it has mana value 2 or less",
+            ReferentSurface::ManaValueFixed,
+        ),
+        (
+            "Tainted Treats",
+            "its mana value was 4 or less",
+            ReferentSurface::ManaValueFixed,
+        ),
+        (
+            "Extinguish the Light",
+            "its mana value was 3 or less",
+            ReferentSurface::ManaValueFixed,
+        ),
+        (
+            "Cosmic Rebirth",
+            "it has mana value 3 or less",
+            ReferentSurface::ManaValueFixed,
+        ),
+        (
+            "Dispersal Shield",
+            "its mana value is less than or equal to the greatest mana value among permanents you control",
+            ReferentSurface::ManaValueDynamic,
+        ),
+        (
+            "Coiling Rebirth",
+            "that creature isn't legendary",
+            ReferentSurface::Supertype,
+        ),
+        ("Ancient Animus", "it's legendary", ReferentSurface::Supertype),
+        (
+            "Molten Rain",
+            "that land was nonbasic",
+            ReferentSurface::NonbasicLand,
+        ),
+        (
+            "Ent's Fury",
+            "its power is 4 or greater",
+            ReferentSurface::ItsStat,
+        ),
+        ("Savage Swipe", "its power is 2", ReferentSurface::ItsStat),
+        (
+            "Welcome to the Fold",
+            "its toughness is 2 or less",
+            ReferentSurface::ItsStat,
+        ),
+        (
+            "Tribute to the World Tree",
+            "its power is 3 or greater",
+            ReferentSurface::ItsStat,
+        ),
+        (
+            "Lily Bowen, Raging Grandma",
+            "its power is 16 or less",
+            ReferentSurface::ItsStat,
+        ),
+    ];
+
+    fn owner_condition(text: &str, surface: ReferentSurface) -> Option<AbilityCondition> {
+        let (rest, clause) = parse_referent_predicate(text, surface).ok()?;
+        rest.trim()
+            .is_empty()
+            .then(|| lower_referent_clause(clause, ObjectScope::Target))
+    }
+
+    /// Every clause is accepted by the owner on its surface and rejected on none of the claims
+    /// the entry points make (an entry point never accepts what the owner refuses).
+    #[test]
+    fn owner_accepts_every_printed_clause_on_its_surface() {
+        for (card, clause, surface) in OWNER_CLAUSES {
+            assert!(
+                parse_referent_predicate(clause, *surface).is_ok(),
+                "{card}: owner must accept {clause:?} on {surface:?}"
+            );
+        }
+    }
+
+    /// Router entry points: the leading-clause arms return exactly the owner's lowering.
+    #[test]
+    fn router_entry_points_return_the_owners_condition() {
+        for (card, clause, surface) in OWNER_CLAUSES {
+            let expected = owner_condition(clause, *surface).expect("owner accepts");
+            let entry = match surface {
+                ReferentSurface::Reflexive => {
+                    parse_target_reflexive_property_condition_text(clause)
+                }
+                ReferentSurface::DemonstrativeStat => {
+                    parse_target_pt_threshold_condition_text(clause)
+                }
+                ReferentSurface::Supertype => parse_target_supertype_condition_text(clause),
+                ReferentSurface::ManaValueFixed
+                | ReferentSurface::ManaValueDynamic
+                | ReferentSurface::NonbasicLand
+                | ReferentSurface::ItsStat
+                | ReferentSurface::NounManaValue => continue,
+            };
+            assert_eq!(entry, Some(expected), "{card}: router entry for {clause:?}");
+        }
+    }
+
+    /// Suffix strippers: the clause boundary is theirs, the condition is the owner's.
+    #[test]
+    fn suffix_strippers_return_the_owners_condition() {
+        let mana_value = [
+            (
+                "Fatal Push",
+                "Destroy target creature if it has mana value 2 or less",
+                "it has mana value 2 or less",
+                ReferentSurface::ManaValueFixed,
+            ),
+            (
+                "Anoint with Affliction",
+                "Exile target creature if it has mana value 3 or less",
+                "it has mana value 3 or less",
+                ReferentSurface::ManaValueFixed,
+            ),
+            (
+                "Dispersal Shield",
+                "Counter target spell if its mana value is less than or equal to the greatest mana value among permanents you control",
+                "its mana value is less than or equal to the greatest mana value among permanents you control",
+                ReferentSurface::ManaValueDynamic,
+            ),
+        ];
+        for (card, text, clause, surface) in mana_value {
+            let (condition, body) = strip_mana_value_conditional(text);
+            assert_eq!(
+                condition,
+                owner_condition(clause, surface),
+                "{card}: suffix mana value"
+            );
+            assert!(
+                !body.contains(" if "), // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                "{card}: body must drop the rider, got {body:?}"
+            );
+        }
+        // Leading forms: the owner's condition, then the body after the comma.
+        let (condition, body) =
+            strip_mana_value_conditional("If its mana value was 4 or less, create a Food token.");
+        assert_eq!(
+            condition,
+            owner_condition(
+                "its mana value was 4 or less",
+                ReferentSurface::ManaValueFixed
+            )
+        );
+        assert_eq!(body, "create a Food token.");
+        let (condition, body) = strip_mana_value_conditional(
+            "If it has mana value 3 or less, you may put it onto the battlefield.",
+        );
+        assert_eq!(
+            condition,
+            owner_condition(
+                "it has mana value 3 or less",
+                ReferentSurface::ManaValueFixed
+            )
+        );
+        assert_eq!(body, "you may put it onto the battlefield.");
+
+        // Supertype (Ancient Animus) and nonbasic (Molten Rain).
+        let (condition, body) = strip_target_supertype_conditional(
+            "Put a +1/+1 counter on target creature you control if it's legendary.",
+        );
+        assert_eq!(
+            condition,
+            owner_condition("it's legendary", ReferentSurface::Supertype)
+        );
+        assert_eq!(body, "Put a +1/+1 counter on target creature you control");
+        let (condition, body) = strip_target_supertype_conditional(
+            "If that land was nonbasic, ~ deals 2 damage to that land's controller.",
+        );
+        assert_eq!(
+            condition,
+            owner_condition("that land was nonbasic", ReferentSurface::NonbasicLand)
+        );
+        assert_eq!(body, "~ deals 2 damage to that land's controller.");
+    }
+
+    #[test]
+    fn referent_suffix_keeps_original_body_and_does_not_swallow_residue() {
+        let body = "Destroy target creature named İ";
+        let (condition, remainder) = strip_mana_value_conditional(
+            "Destroy target creature named İ IF IT HAS mana value 2 or less.",
+        );
+        assert_eq!(remainder, body);
+        assert_eq!(
+            condition,
+            owner_condition(
+                "it has mana value 2 or less",
+                ReferentSurface::ManaValueFixed
+            )
+        );
+
+        for text in [
+            "Destroy target creature if it has mana value 2 or less and is tapped.",
+            "Destroy target creature if it has mana value 2 or lesser.",
+            "Destroy target creature if it's tapped or if it has mana value 2 or less.",
+            "Create a token with \"Destroy this creature if it has mana value 2 or less.\"",
+            "Destroy target creature (if it has mana value 2 or less).",
+        ] {
+            assert_eq!(strip_mana_value_conditional(text), (None, text.to_string()));
+        }
+
+        let text = "Return target creature if that creature isn't legendary.";
+        assert_eq!(
+            strip_target_supertype_conditional(text),
+            (None, text.to_string())
+        );
+        assert!(parse_target_supertype_condition_text("that creature isn't legendary").is_some());
+    }
+
+    /// `strip_property_conditional`: the seven clauses of the corpus. Declared and event
+    /// referents are predicates on the referent (the owner's `PtComparison` form); the ability's
+    /// own source (B1) and a cost-paid "X" threshold (B2) keep the quantity form.
+    #[test]
+    fn property_conditional_routes_referent_clauses_through_the_owner() {
+        use crate::types::ability::PtStat;
+        let stat_filter = |stat, comparator, value| {
+            referent_condition(
+                stat_threshold_filter(stat, comparator, QuantityExpr::Fixed { value }),
+                ReferentTense::Present,
+                ObjectScope::Target,
+                None,
+            )
+        };
+        let quantity = |qty, comparator, rhs| AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref { qty },
+            comparator,
+            rhs,
+        };
+        let target_ctx = ParseContext::default();
+        // Ent's Fury / Savage Swipe / Welcome to the Fold: one declared object target.
+        for (card, text, stat, comparator, value) in [
+            (
+                "Ent's Fury",
+                "Put a +1/+1 counter on target creature you control if its power is 4 or greater",
+                PtStat::Power,
+                Comparator::GE,
+                4,
+            ),
+            (
+                "Savage Swipe",
+                "Target creature you control gets +2/+2 until end of turn if its power is 2",
+                PtStat::Power,
+                Comparator::EQ,
+                2,
+            ),
+            (
+                "Welcome to the Fold",
+                "Gain control of target creature if its toughness is 2 or less",
+                PtStat::Toughness,
+                Comparator::LE,
+                2,
+            ),
+        ] {
+            let (condition, body) = strip_property_conditional(text, &target_ctx);
+            assert_eq!(
+                condition,
+                Some(stat_filter(stat, comparator, value)),
+                "{card}"
+            );
+            assert!(
+                !body.contains(" if its "), // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                "{card}: rider stripped, got {body:?}"
+            );
+        }
+        // Tribute to the World Tree: the entering creature (cost-paid default, numeric threshold).
+        let (condition, _) =
+            strip_property_conditional("Draw a card if its power is 3 or greater", &target_ctx);
+        assert_eq!(
+            condition,
+            Some(stat_filter(PtStat::Power, Comparator::GE, 3)),
+            "Tribute"
+        );
+        // B2: Welcome to the Fold's madness clause keeps the quantity form, threshold `X`.
+        let (condition, _) = strip_property_conditional(
+            "Instead gain control of that creature if its toughness is X or less",
+            &target_ctx,
+        );
+        assert_eq!(
+            condition,
+            Some(quantity(
+                QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject
+                },
+                Comparator::LE,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                }
+            )),
+            "Welcome to the Fold madness clause (boundary B2)"
+        );
+        // B1: the ability's own source (player-subject trigger).
+        let source_ctx = ParseContext {
+            subject: Some(TargetFilter::Controller),
+            ..ParseContext::default()
+        };
+        let (condition, _) = strip_property_conditional(
+            "Double the number of +1/+1 counters on ~ if its power is 16 or less",
+            &source_ctx,
+        );
+        assert_eq!(
+            condition,
+            Some(quantity(
+                QuantityRef::Power {
+                    scope: ObjectScope::Source
+                },
+                Comparator::LE,
+                QuantityExpr::Fixed { value: 16 }
+            )),
+            "Lily Bowen (boundary B1)"
+        );
+    }
+
+    /// The type words the removed type half of `strip_property_conditional` once claimed are not
+    /// its business any more: it declines them (the router and the suffix path own them).
+    #[test]
+    fn property_conditional_no_longer_claims_type_clauses() {
+        let ctx = ParseContext::default();
+        for text in [
+            "Draw a card if that creature was a Goblin",
+            "Untap target land if that creature is a Goblin",
+            "Exile target creature if that creature was an Elemental",
+        ] {
+            assert_eq!(
+                strip_property_conditional(text, &ctx),
+                (None, text.to_string())
+            );
+        }
+    }
+
+    /// Strip every `#[cfg(test)] mod name { .. }` block (brace-matched, skipping string, char
+    /// and comment text) so the guard reads production code only.
+    fn production_source(source: &str) -> String {
+        let bytes: Vec<char> = source.chars().collect();
+        let mut out = String::new();
+        let mut i = 0;
+        // `#[cfg(test)]` and the `#[cfg(any(test, feature = "test-support"))]` helper modules.
+        let markers: Vec<Vec<char>> = [
+            "#[cfg(test)]",
+            "#[cfg(any(test, feature = \"test-support\"))]",
+        ]
+        .iter()
+        .map(|m| m.chars().collect())
+        .collect();
+        while i < bytes.len() {
+            if let Some(marker) = markers.iter().find(|m| bytes[i..].starts_with(m)) {
+                // Look ahead: `#[cfg(test)] mod name {` (inline module) vs another item.
+                let mut j = i + marker.len();
+                while j < bytes.len() && bytes[j].is_whitespace() {
+                    j += 1;
+                }
+                let mut k = j;
+                while k < bytes.len() && bytes[k] != '{' && bytes[k] != ';' {
+                    k += 1;
+                }
+                let item: String = bytes[j..k.min(bytes.len())].iter().collect();
+                if k < bytes.len() && bytes[k] == '{' && item.split_whitespace().any(|w| w == "mod")
+                {
+                    i = skip_braced(&bytes, k);
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// Index just past the `}` matching the `{` at `open`.
+    fn skip_braced(bytes: &[char], open: usize) -> usize {
+        let mut depth = 0usize;
+        let mut i = open;
+        while i < bytes.len() {
+            match bytes[i] {
+                '/' if bytes.get(i + 1) == Some(&'/') => {
+                    while i < bytes.len() && bytes[i] != '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                '"' => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != '"' {
+                        i += if bytes[i] == '\\' { 2 } else { 1 };
+                    }
+                }
+                '\'' => {
+                    // A char literal closes within three characters; a lifetime does not.
+                    if let Some(end) = (i + 2..=i + 3).find(|&e| bytes.get(e) == Some(&'\'')) {
+                        i = end;
+                    }
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        panic!("unbalanced braces");
+    }
+
+    /// Constructor occurrences of `AbilityCondition::TargetMatchesFilter {` in production code:
+    /// a brace body that is not a pattern (`..`, `_` binding), is not followed by `=>`, `|`, `=` or
+    /// `if` (a pattern position) and does not open a destructuring `let`. Returns the text before
+    /// each, to name its fn.
+    fn constructors(source: &str) -> Vec<String> {
+        let needle = "AbilityCondition::TargetMatchesFilter {";
+        // Comment lines name the variant in prose; they construct nothing.
+        let source: String = source
+            .lines()
+            .map(|line| {
+                let is_comment = line.trim_start().starts_with("//"); // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                if is_comment {
+                    ""
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let chars: Vec<char> = source.chars().collect();
+        let text: String = chars.iter().collect();
+        let mut found = Vec::new();
+        let mut from = 0;
+        while let Some(pos) = text[from..].find(needle) {
+            let start = from + pos;
+            let open = start + needle.len() - 1;
+            let open_chars = text[..open].chars().count();
+            let end_chars = skip_braced(&chars, open_chars);
+            let body: String = chars[open_chars..end_chars].iter().collect();
+            let after: String = chars[end_chars..chars.len().min(end_chars + 12)]
+                .iter()
+                .collect();
+            let after = after.trim_start();
+            // A destructuring `let` / `if let` / `while let` names every field explicitly (no `..`) and
+            // binds with `=` only after the pattern, so nothing before the needle on its line assigns.
+            let line_prefix = text[..start].rsplit('\n').next().unwrap_or("").trim_start();
+            let destructuring_let = ["let ", "if let ", "while let "]
+                .iter()
+                .any(|kw| line_prefix.starts_with(kw)) // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                && !line_prefix.contains('=');
+            let pattern = destructuring_let
+                || body.contains("..") // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                || body.contains(": _") // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                || after.starts_with("=>") // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                || after.starts_with('|')
+                || (after.starts_with('=') && !after.starts_with("==")) // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                || after.starts_with("if "); // allow-noncombinator: source-reading test instrument, not Oracle parsing
+            if !pattern {
+                found.push(text[..start].to_string());
+            }
+            from = start + needle.len();
+        }
+        found
+    }
+
+    /// Control for the guard's own instrument: it flags a constructor (also one bound by `let x =`), and ignores patterns,
+    /// comment prose and test modules.
+    #[test]
+    fn single_writer_guard_detects_a_planted_constructor() {
+        let source = r#"
+            fn writer() -> AbilityCondition {
+                AbilityCondition::TargetMatchesFilter { filter, use_lki, subject_slot, subject }
+            }
+            fn let_writer() -> AbilityCondition {
+                let built = AbilityCondition::TargetMatchesFilter { filter, use_lki, subject_slot, subject };
+                built
+            }
+            fn reader(c: &AbilityCondition) -> bool {
+                matches!(c, AbilityCondition::TargetMatchesFilter { filter, .. })
+            }
+            fn exhaustive_reader(c: &AbilityCondition) -> bool {
+                let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki: false, subject_slot: None, subject: ObjectScope::Target }) = c else {
+                    return false;
+                };
+                filter.is_none()
+            }
+            // AbilityCondition::TargetMatchesFilter { filter, use_lki, subject_slot, subject }
+            #[cfg(test)]
+            mod tests {
+                fn t() -> AbilityCondition {
+                    AbilityCondition::TargetMatchesFilter { filter, use_lki, subject_slot, subject }
+                }
+            }
+        "#;
+        let found = constructors(&production_source(source));
+        assert_eq!(found.len(), 2, "two planted constructors, got {found:?}");
+        assert!(found[0].contains("fn writer")); // allow-noncombinator: source-reading test instrument, not Oracle parsing
+        assert!(found[1].contains("fn let_writer")); // allow-noncombinator: source-reading test instrument, not Oracle parsing
+    }
+
+    /// Single writer, NO allow-list: the only constructor of `TargetMatchesFilter` in the
+    /// parser's production code is the one inside `referent_condition`.
+    #[test]
+    fn referent_condition_is_the_only_target_matches_filter_writer() {
+        let files = [
+            ("conditions.rs", include_str!("conditions.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+            ("lower.rs", include_str!("lower.rs")),
+            ("sequence.rs", include_str!("sequence.rs")),
+            ("oracle_trigger.rs", include_str!("../oracle_trigger.rs")),
+        ];
+        let mut writers = Vec::new();
+        for (name, source) in files {
+            for before in constructors(&production_source(source)) {
+                let owner_fn = before
+                    .rfind("\nfn ") // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                    .or_else(|| before.rfind("\npub(super) fn ")); // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                let signature: String = owner_fn
+                    .map(|at| before[at..].lines().nth(1).unwrap_or("").to_string())
+                    .unwrap_or_default();
+                writers.push(format!("{name}: {signature}"));
+            }
+        }
+        assert_eq!(
+            writers.len(),
+            1,
+            "exactly one production constructor expected, found {writers:?}"
+        );
+        assert!(
+            writers[0].contains("fn referent_condition"), // allow-noncombinator: source-reading test instrument, not Oracle parsing
+            "the single writer must be referent_condition, found {writers:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn named_cycling_split_commits_at_the_first_structural_suffix() {
+    use crate::types::ability::CyclingHistoryWindow;
+
+    // No printed card has these adversarial shapes. Yidaro, Wandering Monster
+    // is the nearest printed case.
+    let body = "counter nine or more times this game, then draw a card.";
+    for name in ["Yidaro, Wandering Monster", "Yidaro,   Wandering Monster"] {
+        let guard = format!("If you've cycled a card named {name} four or more times this game");
+        let text = format!("{guard},  {body}  ");
+        let (actual_guard, actual_body) =
+            split_leading_conditional(&text).expect("named game guard");
+        assert_eq!(actual_guard, guard);
+        assert_eq!(actual_body, body);
+        let lower = actual_guard.to_lowercase();
+        let (rest, condition) =
+            nom_condition::parse_inner_condition(parse_leading_conditional_prefix(&lower).unwrap())
+                .unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CardsCycled {
+                        scope: crate::types::ability::CountScope::Controller,
+                        window: CyclingHistoryWindow::ThisGame,
+                        name: Some("yidaro, wandering monster".into()),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        );
+    }
+    for suffix in [
+        "four or more times this turn",
+        "four or fewer times this game",
+        "four or more times this game during your turn",
+    ] {
+        let text =
+            format!("If you've cycled a card named Yidaro, Wandering Monster {suffix}, {body}");
+        assert_eq!(split_leading_conditional(&text), None, "{text}");
     }
 }

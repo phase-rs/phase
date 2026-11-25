@@ -5,6 +5,7 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::types::ability::PlayerScope;
+use crate::types::ability::TurnWindow;
 
 /// CR 113.6 + CR 201.2: Recognize the "sources with the chosen name" / "cards with
 /// the chosen name" subject phrase and map it to `TargetFilter::HasChosenName`.
@@ -132,13 +133,12 @@ fn strip_cost_mod_mana_value_qualifier(prefix: &str) -> (&str, Option<FilterProp
     }
 }
 
-/// Compose an optional mana-value `FilterProp::Cmc` (from
-/// `strip_cost_mod_mana_value_qualifier`) into the cost-modifier spell filter.
+/// Compose an optional qualifier into the cost-modifier spell filter.
 /// A typed filter absorbs the prop directly; an `Or` (or any non-`Typed`)
 /// filter is `And`-wrapped with a card+prop leaf; a bare mana-value gate with no
 /// type restriction ("spells you cast with mana value 4 or greater") becomes a
 /// card filter carrying the prop.
-fn compose_cost_mod_mana_value(
+fn compose_cost_mod_property(
     filter: Option<TargetFilter>,
     prop: Option<FilterProp>,
 ) -> Option<TargetFilter> {
@@ -739,6 +739,8 @@ pub(crate) fn try_parse_cost_modification(
         // the type words and the whole type+MV restriction is dropped (The Scarlet
         // Witch reduced EVERY spell, not just instants/sorceries — #5606).
         let (without_chosen, mana_value_prop) = strip_cost_mod_mana_value_qualifier(without_chosen);
+        let (without_chosen, pt_prop) =
+            crate::parser::oracle_nom::filter::split_spell_pt_qualifier(without_chosen).ok()?;
         let type_desc = without_chosen
             .trim_end_matches(" you cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             .trim_end_matches(" your opponents cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
@@ -790,7 +792,10 @@ pub(crate) fn try_parse_cost_modification(
             (tf, false) => tf,
         };
         // CR 202.3: fold the peeled mana-value gate back into the spell filter.
-        compose_cost_mod_mana_value(base_filter, mana_value_prop)
+        compose_cost_mod_property(
+            compose_cost_mod_property(base_filter, mana_value_prop),
+            pt_prop,
+        )
     } else {
         None
     };
@@ -841,7 +846,20 @@ pub(crate) fn try_parse_cost_modification(
     let mut dynamic_count = if let Some((_, after_for_each)) = cost_tp.split_around("for each ") {
         // Strip trailing period/punctuation
         let count_text = after_for_each.original.trim_end_matches('.');
-        super::oracle_quantity::parse_for_each_clause(count_text)
+        let count_lower = count_text.to_ascii_lowercase();
+        // CR 601.2f: "that spell" in a cost modifier is the spell being cast.
+        let named_like_spell =
+            all_consuming(nom_quantity::parse_cards_named_like_cost_modified_spell)
+                .parse(count_lower.as_str())
+                .ok()
+                .map(|(_, qty)| qty);
+        let population_union = all_consuming(nom_quantity::parse_for_each_population_union)
+            .parse(count_lower.as_str())
+            .ok()
+            .map(|(_, qty)| qty);
+        let count = named_like_spell
+            .or(population_union)
+            .or_else(|| super::oracle_quantity::parse_for_each_clause(count_text))
             .or_else(|| {
                 parse_cda_quantity(count_text).and_then(|expr| match expr {
                     QuantityExpr::Ref { qty } => Some(qty),
@@ -859,14 +877,36 @@ pub(crate) fn try_parse_cost_modification(
                 }
             })
             .or_else(|| {
-                let (count_filter, _) = parse_type_phrase_folding(count_text);
-                Some(QuantityRef::ObjectCount {
+                // CR 122.1 + CR 601.2f: a counter-kind census ("kind of
+                // counter on it", "different kind of counter on it", "of the
+                // kinds of counters on it") reaching this fallback is one every
+                // census reader above declined — its object has no binding on
+                // this route — and is never a type phrase. Reading it as one
+                // would count every object; decline the whole modification so
+                // the line stays an honest gap instead.
+                if super::oracle_quantity::names_counter_kind_quantifier(after_for_each.lower) {
+                    return None;
+                }
+                let (count_filter, remainder) = parse_type_phrase_folding(count_text);
+                // CR 601.2f: an unconstrained filter means the type phrase
+                // recognized nothing; counting every object would invent a
+                // reduction, so the clause stays unparsed instead (#7899).
+                // Also require full clause consumption — an unparsed qualifier
+                // would make the count apply more broadly than the text allows.
+                (remainder.trim().is_empty()
+                    && count_filter != TargetFilter::Typed(TypedFilter::default()))
+                .then_some(QuantityRef::ObjectCount {
                     filter: count_filter,
                 })
-            })
+            });
+        // A "for each" the readers above could not count leaves no reduction
+        // to state: decline rather than fall back to a flat {N}.
+        Some(count?)
     } else {
         None
     };
+    let has_unparsed_for_each =
+        dynamic_count.is_none() && cost_tp.split_around("for each ").is_some();
 
     if dynamic_count.is_none() && amount_is_variable_x {
         let (_, where_x_text) = super::oracle_effect::strip_trailing_where_x(cost_tp);
@@ -882,6 +922,12 @@ pub(crate) fn try_parse_cost_modification(
     // and no dynamic_count silently under-reduces by {1} (Drag to the Underworld
     // class when the where-X clause fails to lower).
     if amount_is_variable_x && dynamic_count.is_none() {
+        return None;
+    }
+
+    // CR 601.2f: a "for each" clause whose count did not parse must not
+    // degrade to a flat per-unit change.
+    if has_unparsed_for_each {
         return None;
     }
 
@@ -1219,13 +1265,14 @@ pub(crate) fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCon
     }
     Some(StaticCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: if filter == TargetFilter::Any {
                     None
                 } else {
                     Some(filter)
                 },
+                window: TurnWindow::ThisTurn,
             },
         },
         comparator: Comparator::GE,
@@ -1820,6 +1867,12 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
                 *player = antecedent.clone();
             }
         }
+        // CR 122.1f + CR 109.5: same scoped-subject rebind as the monarch arm.
+        StaticCondition::PlayerIsPoisoned { player } => {
+            if matches!(player, PlayerScope::ScopedPlayer) {
+                *player = antecedent.clone();
+            }
+        }
         // Only boolean structure carries nested static conditions. Quantities
         // and filters are separate scopes, so this clause does not rebind them.
         StaticCondition::DevotionGE { .. }
@@ -1848,6 +1901,9 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // Attack-pair endpoints are absolute player refs, not the designation
+        // anaphor: nothing to rebind, like its last-turn analog above.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
@@ -1855,7 +1911,7 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -2215,6 +2271,10 @@ pub(crate) fn accept_enforceable_condition(
 ///   `"gets +N/+M as long as X"` / `"has <keyword> as long as X"` grant branch,
 ///   and the whole-predicate `Continuous` default beneath it that carries the
 ///   trailing `"unless"` rider (Heroic Defiance).
+/// - `oracle_static::grammar::parse_enchanted_equipped_predicate`'s PATTERN 3b
+///   source-hosted restriction companion, which gates a peeled "Otherwise"
+///   restriction conjunct on the complement of the head condition (Burden of
+///   Proof).
 pub(crate) fn attach_gated_condition(
     def: &mut StaticDefinition,
     condition: StaticCondition,

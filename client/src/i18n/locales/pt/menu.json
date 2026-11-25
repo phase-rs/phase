@@ -26,7 +26,8 @@
   "home": {
     "resume": {
       "title": "Continuar Jogo",
-      "description": "Continue a última partida salva a partir do turno e do estado de tabuleiro atuais."
+      "description": "Continue a última partida salva a partir do turno e do estado de tabuleiro atuais.",
+      "viewResult": "Ver resultado"
     },
     "setup": {
       "title": "Jogar contra IA",
@@ -157,6 +158,7 @@
     "subscribe": "Inscrever-se",
     "unsubscribe": "Cancelar inscrição",
     "lastRefreshed": "Última atualização: {{date}}",
+    "dataProvidedBy": "Dados fornecidos por",
     "addCustomFeed": "Adicionar Feed Personalizado",
     "add": "Adicionar",
     "offlineUnavailable": "As atualizações de feeds não estão disponíveis offline.",

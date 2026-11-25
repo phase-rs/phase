@@ -116,8 +116,8 @@ fn claim_indices(
         .extend(occurrences);
 }
 
-/// Records that an ordinary collector outside this module (a paused cost span)
-/// already collected `events[start..end]`, so announcement staging at the end
+/// Records that an ordinary collector outside this module (a paused cost span, or
+/// `copy_spell`'s inline `SpellCopied` collection) already collected `events[start..end]`, so announcement staging at the end
 /// of the action does not collect them a second time.
 pub(crate) fn claim_ordinary_collected_span(
     state: &mut GameState,
@@ -149,6 +149,7 @@ fn retained_by_cost_owners(state: &GameState) -> Vec<GameEvent> {
         Some(
             PendingCostMoveResume::WardSacrificePayment { .. }
             | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
             | PendingCostMoveResume::Foretell { .. }
             | PendingCostMoveResume::CollectEvidencePayment { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
@@ -157,6 +158,7 @@ fn retained_by_cost_owners(state: &GameState) -> Vec<GameEvent> {
             | PendingCostMoveResume::LoyaltyActivation { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+            | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
             | PendingCostMoveResume::TurnFaceUpCostMove { .. },
         )
         | None => {}
@@ -204,11 +206,21 @@ fn announcement_owned_from(state: &GameState, start: usize) -> Option<usize> {
 /// the carrier holds until the announcement's drain; classifying the span's
 /// contexts through `triggers::partition_collected_mana_frame_contexts` is the
 /// follow-up route.
+///
+/// An inline span has two owners: the live announcement, which stages it into
+/// its carrier here, and a parked combat damage batch, which takes custody of its
+/// answering action's events at that action's boundary
+/// (`combat_damage::take_answer_events_into_batch`). Nothing is staged here for
+/// the batch; the caller collects nothing inline, and the batch's one placement
+/// collects those events once it completes (CR 510.2 + CR 510.3a + CR 603.3b).
 pub(crate) fn take_inline_trigger_span(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     start: usize,
 ) -> std::ops::Range<usize> {
+    if state.combat_damage_batch_parked() {
+        return start..start;
+    }
     let Some(owned_from) = announcement_owned_from(state, start) else {
         return start..events.len();
     };
@@ -575,6 +587,7 @@ fn take_completed_cast_prefix(state: &mut GameState, owner: PendingCastOwner) ->
             PendingCostMoveResume::SacrificeForCost { .. }
             | PendingCostMoveResume::WardSacrificePayment { .. }
             | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
             | PendingCostMoveResume::Foretell { .. }
             | PendingCostMoveResume::CollectEvidencePayment { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
@@ -584,6 +597,7 @@ fn take_completed_cast_prefix(state: &mut GameState, owner: PendingCastOwner) ->
             | PendingCostMoveResume::LoyaltyActivation { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::PlayerScopeUnlessSettlement(_)
             | PendingCostMoveResume::TurnFaceUpCostMove { .. },
         )
         | None => Vec::new(),

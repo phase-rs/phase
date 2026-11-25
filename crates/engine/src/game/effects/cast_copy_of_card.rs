@@ -57,13 +57,22 @@ pub fn resolve(
         // last known context before collecting the affected objects.
         let effective_filter =
             crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
-        let tracked_set_id = tracked_set_id_from_filter(&effective_filter)
-            .or_else(|| crate::game::targeting::latest_tracked_set_id(state));
-        source_ids = tracked_set_id
-            .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+        // CR 730.3c: the members, then the components this reader finds (D2, D7, D4).
+        let binding = tracked_set_binding_from_filter(&effective_filter)
+            .or_else(|| crate::game::targeting::latest_tracked_set_id(state).map(|id| (id, None)));
+        source_ids = binding
+            .map(|(id, caused_by)| {
+                crate::game::merge::tracked_set_found_objects(
+                    state,
+                    id,
+                    Some(ability),
+                    caused_by.as_ref(),
+                )
+            })
             .unwrap_or_default()
             .into_iter()
             .filter(|id| matches_target_filter(state, *id, &effective_filter, &ctx))
+            .filter(|id| copy_castable_from_original_zone(state, *id, ability.controller))
             .collect();
 
         if !source_ids.is_empty() {
@@ -89,6 +98,10 @@ pub fn resolve(
                 count: None,
             };
             resume.sub_ability = None;
+            // CR 707.12a: under a "copy that card N times" loop the
+            // `repeat_for` driver owns the iterations; this resume is the rest
+            // of the CURRENT iteration and must not re-enter the loop.
+            resume.repeat_for = None;
             super::append_to_pending_continuation(state, Some(Box::new(resume)));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
@@ -113,6 +126,9 @@ pub fn resolve(
     }
 
     for (index, source_id) in source_ids.iter().copied().enumerate() {
+        if !copy_castable_from_original_zone(state, source_id, ability.controller) {
+            continue;
+        }
         let copy_id =
             cast_one_copy(state, source_id, ability, events).map_err(EffectError::InvalidParam)?;
 
@@ -134,6 +150,8 @@ pub fn resolve(
                 count: None,
             };
             resume.sub_ability = None;
+            // The rest of this iteration only (see the choice resume above).
+            resume.repeat_for = None;
             if index + 1 < source_ids.len() {
                 if source_positions.len() == source_ids.len() {
                     // The remaining sources are this ability's own target
@@ -165,6 +183,26 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 707.12 + CR 601.3 + CR 113.6f: the copy is created in the original's
+/// zone and cast from there, and it copies the original's own restriction on
+/// where it may be cast from (Haakon, Stromgald Scourge). A copy that can't be
+/// cast from that zone by `caster` (CR 109.5: "your graveyard" is the caster's)
+/// is neither offered nor created. A missing source is left to `cast_one_copy`,
+/// which reports it.
+fn copy_castable_from_original_zone(
+    state: &GameState,
+    source_id: ObjectId,
+    caster: crate::types::player::PlayerId,
+) -> bool {
+    state.objects.get(&source_id).is_none_or(|source| {
+        crate::game::restrictions::restrictions_permit_cast_origin(
+            &source.casting_restrictions,
+            caster,
+            Some(crate::game::game_object::CastOrigin::of(source)),
+        )
+    })
+}
+
 fn references_tracked_set(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => true,
@@ -176,13 +214,18 @@ fn references_tracked_set(filter: &TargetFilter) -> bool {
     }
 }
 
-fn tracked_set_id_from_filter(filter: &TargetFilter) -> Option<TrackedSetId> {
+/// CR 608.2c: the tracked set a (possibly composed) filter reads, with that
+/// node's `caused_by` (D4).
+fn tracked_set_binding_from_filter(
+    filter: &TargetFilter,
+) -> Option<(TrackedSetId, Option<crate::types::ability::ThisWayCause>)> {
     match filter {
-        TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => Some(*id),
+        TargetFilter::TrackedSet { id } => Some((*id, None)),
+        TargetFilter::TrackedSetFiltered { id, caused_by, .. } => Some((*id, *caused_by)),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().find_map(tracked_set_id_from_filter)
+            filters.iter().find_map(tracked_set_binding_from_filter)
         }
-        TargetFilter::Not { filter } => tracked_set_id_from_filter(filter),
+        TargetFilter::Not { filter } => tracked_set_binding_from_filter(filter),
         _ => None,
     }
 }
@@ -193,12 +236,17 @@ fn cast_one_copy(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<ObjectId, String> {
-    let (mut source, card_id, origin_zone) = {
+    let (mut source, card_id, origin) = {
         let Some(source) = state.objects.get(&source_id) else {
             return Err(format!("copy source {source_id:?} not found"));
         };
-        (source.clone(), source.card_id, source.zone)
+        (
+            source.clone(),
+            source.card_id,
+            crate::game::game_object::CastOrigin::of(source),
+        )
     };
+    let origin_zone = origin.zone;
     // CR 123.1 + CR 707.2 + CR 707.12: the copy has the card's copiable values;
     // stickers and their changes aren't among them. Stripped before anything
     // (the spell ability, the keyword snapshot) is derived from the clone.
@@ -232,6 +280,7 @@ fn cast_one_copy(
     copy.prepared_copy_source = None;
     // CR 707.12: The copy is created in the same zone as the source object before casting.
     copy.cast_from_zone = Some(origin_zone);
+    copy.copied_from_zone = Some(origin);
     copy.cost_x_paid = None;
     copy.kickers_paid.clear();
     copy.additional_cost_payment_count = 0;

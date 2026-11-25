@@ -68,6 +68,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::{EtbTapState, Zone};
@@ -242,6 +243,8 @@ fn graveyard_exile_replacement(description: &str) -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -329,4 +332,168 @@ fn chandra_redirected_graveyard_card_stays_out_of_hand() {
             .contains(&card),
         "the redirect means the card never actually reached the graveyard"
     );
+}
+
+const CONFIDANT_ORACLE: &str = concat!(
+    "Lifelink\n",
+    "At the beginning of your end step, if you gained life this turn, surveil 1. ",
+    "If you put a card with mana value less than or equal to the amount of life you gained ",
+    "this turn into your graveyard this way, put that card into your hand.",
+);
+
+const OVERRUN: (&str, &str, &str) = (
+    "Overrun",
+    "{2}{G}{G}{G}",
+    "Creatures you control get +3/+3 and gain trample until end of turn. (Each of those creatures can deal excess combat damage to the player or planeswalker it's attacking.)",
+);
+const COLLECTIVE_UNCONSCIOUS: (&str, &str, &str) = (
+    "Collective Unconscious",
+    "{4}{G}{G}",
+    "Draw a card for each creature you control.",
+);
+
+fn setup_confidant(
+    (name, mana_cost, oracle): (&str, &str, &str),
+) -> (GameRunner, ObjectId, ObjectId, [ObjectId; 2]) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    let confidant = scenario
+        .add_creature_from_oracle(P0, "Enlightened Confidant", 2, 1, CONFIDANT_ORACLE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{W}"))
+        .with_subtypes(vec!["Kor", "Cleric"])
+        .id();
+    let top = scenario
+        .add_spell_to_library_top(P0, name, false)
+        .with_mana_cost(parse_mtgjson_mana_cost(mana_cost))
+        .from_oracle_text(oracle)
+        .id();
+    let passages = std::array::from_fn(|_| {
+        scenario.add_basic_land(P0, ManaColor::White);
+        scenario.add_basic_land(P0, ManaColor::White);
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Whitesun's Passage", true, "You gain 5 life.")
+            .with_mana_cost(parse_mtgjson_mana_cost("{1}{W}"))
+            .id()
+    });
+    (scenario.build(), confidant, top, passages)
+}
+
+fn assert_confidant_trigger(runner: &GameRunner, confidant: ObjectId) {
+    // CR 513.1 and CR 603.4: the end step starts with the life-gated trigger.
+    assert_eq!(runner.state().phase, Phase::End);
+    assert_eq!(runner.state().stack.len(), 1);
+    let trigger = &runner.state().stack[0];
+    assert_eq!(trigger.source_id, confidant);
+    assert_eq!(trigger.controller, P0);
+}
+
+fn start_confidant_trigger(runner: &mut GameRunner, confidant: ObjectId, passage: ObjectId) {
+    runner.cast(passage).resolve().assert_life_delta(P0, 5);
+    runner.advance_to_end_step();
+    assert_confidant_trigger(runner, confidant);
+}
+
+fn resolve_confidant_surveil(
+    runner: &mut GameRunner,
+    confidant: ObjectId,
+    top: ObjectId,
+    keep: &[ObjectId],
+) {
+    runner.resolve_top();
+    // CR 701.25a: the trigger's controller chooses what to do with the library top.
+    assert!(matches!(
+        &runner.state().waiting_for,
+        WaitingFor::SurveilChoice { player, cards } if *player == P0 && cards.as_slice() == [top]
+    ));
+    runner
+        .act(GameAction::SelectCards {
+            cards: keep.to_vec(),
+        })
+        .expect("Confidant's surveil choice must succeed");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    // CR 608.2c and CR 400.7j: "that card" is the surveilled object that moved.
+    assert_eq!(runner.state().objects[&confidant].zone, Zone::Battlefield);
+}
+
+#[test]
+fn enlightened_confidant_returns_only_a_surveilled_card_within_the_life_gained() {
+    // CR 202.3 and CR 608.2h: compare the actual mana value against 5 life gained.
+    for (fixture, expected) in [
+        (OVERRUN, Zone::Hand),
+        (COLLECTIVE_UNCONSCIOUS, Zone::Graveyard),
+    ] {
+        let (mut runner, confidant, top, [passage, _]) = setup_confidant(fixture);
+        start_confidant_trigger(&mut runner, confidant, passage);
+        resolve_confidant_surveil(&mut runner, confidant, top, &[]);
+
+        assert_eq!(runner.state().objects[&top].zone, expected, "{}", fixture.0);
+        // CR 608.2c: the qualifying Passage was put there by spell resolution.
+        assert_eq!(runner.state().objects[&passage].zone, Zone::Graveyard);
+    }
+}
+
+#[test]
+fn enlightened_confidant_leaves_a_qualifying_card_kept_on_top() {
+    let (mut runner, confidant, top, [passage, _]) = setup_confidant(OVERRUN);
+    start_confidant_trigger(&mut runner, confidant, passage);
+    resolve_confidant_surveil(&mut runner, confidant, top, &[top]);
+
+    // CR 701.25a: a card kept on top never enters the graveyard.
+    assert_eq!(runner.state().objects[&top].zone, Zone::Library);
+    assert_eq!(runner.state().players[P0.0 as usize].library[0], top);
+    assert_eq!(runner.state().objects[&passage].zone, Zone::Graveyard);
+}
+
+#[test]
+fn enlightened_confidant_does_not_trigger_when_life_is_gained_after_end_step_begins() {
+    let (mut runner, confidant, top, [passage, _]) = setup_confidant(OVERRUN);
+    runner.advance_to_end_step();
+    assert_eq!(runner.state().phase, Phase::End);
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life_gained_this_turn,
+        0
+    );
+    assert!(runner.state().stack.is_empty());
+
+    // CR 603.4: the condition had to be true when the end step began.
+    runner.cast(passage).commit();
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, passage);
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life_gained_this_turn,
+        5
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().phase, Phase::End);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().objects[&top].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&confidant].zone, Zone::Battlefield);
+}
+
+#[test]
+fn enlightened_confidant_counts_life_gained_in_response_to_the_trigger() {
+    let (mut runner, confidant, top, [passage, response]) = setup_confidant(COLLECTIVE_UNCONSCIOUS);
+    start_confidant_trigger(&mut runner, confidant, passage);
+
+    runner.cast(response).commit();
+    assert_eq!(runner.state().stack.len(), 2);
+    assert_eq!(runner.state().stack[1].source_id, response);
+    runner.resolve_top();
+    assert_confidant_trigger(&runner, confidant);
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life_gained_this_turn,
+        10
+    );
+
+    resolve_confidant_surveil(&mut runner, confidant, top, &[]);
+    // CR 608.2h: the threshold is measured as the rider applies.
+    assert_eq!(runner.state().objects[&top].zone, Zone::Hand);
 }

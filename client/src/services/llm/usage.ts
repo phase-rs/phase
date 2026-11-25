@@ -17,12 +17,21 @@ interface UsageTotals {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  /** Input tokens written to the prompt cache, which Anthropic reports apart. */
+  cacheCreationInputTokens: number;
 }
 
 const totals = new Map<string, UsageTotals>();
 
 function emptyTotals(): UsageTotals {
-  return { calls: 0, promptChars: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 };
+  return {
+    calls: 0,
+    promptChars: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    cacheCreationInputTokens: 0,
+  };
 }
 
 /**
@@ -41,11 +50,17 @@ export function recordLlmUsage(
   running.inputTokens += usage?.inputTokens ?? 0;
   running.outputTokens += usage?.outputTokens ?? 0;
   running.cachedInputTokens += usage?.cachedInputTokens ?? 0;
+  running.cacheCreationInputTokens += usage?.cacheCreationInputTokens ?? 0;
   totals.set(scope, running);
 
+  // Anthropic counts cache reads and writes apart from `inputTokens`, so a
+  // cached or message-thread turn's prompt is only whole with both shown.
   const reported = usage?.inputTokens != null
     ? `${usage.inputTokens} in / ${usage.outputTokens ?? "?"} out tokens`
       + (usage.cachedInputTokens ? ` (${usage.cachedInputTokens} cached)` : "")
+      + (usage.cacheCreationInputTokens
+        ? ` (${usage.cacheCreationInputTokens} written to cache)`
+        : "")
     : "no token count reported";
   console.info(
     `[LLM ${scope}] ${label}: prompt ${promptChars ?? "?"} chars, ${reported}; `

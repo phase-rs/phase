@@ -5,27 +5,26 @@ import { useCardImage } from "../../hooks/useCardImage";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { usePrintingsLoaded } from "../../hooks/usePrintingsLoaded";
 import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
-import type { DeckEntry, ParsedDeck } from "../../services/deckParser";
-import type { SourcePrinting } from "../../hooks/useCardImage";
+import { deckEntryKey, type DeckEntry, type ParsedDeck } from "../../services/deckParser";
 import type { ScryfallCard } from "../../services/scryfall";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import type { GameFormat } from "../../adapter/types";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
 import { PrintingPickerModal } from "./PrintingPickerModal";
 import { mouseHoverPreview, type CardHoverHandler } from "./hoverPreview";
-import { groupAccent, groupKey, groupRank, type DeckGroup, type GroupMode } from "./deckGrouping";
+import { groupAccent, groupKey, groupRank, printingLabel, repeatedEntryNames, type DeckGroup, type GroupMode } from "./deckGrouping";
 import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 
 interface DeckStackProps {
   deck: ParsedDeck;
   commanders: string[];
   cardDataCache: Map<string, ScryfallCard>;
-  onAddCard: (name: string) => void;
+  onAddCard: (entry: DeckEntry) => void;
   /** CR 100.2a: engine-resolved copy-limit predicate — disables the `+` on a
    *  card already at its ceiling for this format. */
   canAddCard: (name: string) => boolean;
-  onRemoveCard: (name: string, section: "main" | "sideboard") => void;
-  onMoveCard: (name: string, from: "main" | "sideboard") => void;
+  onRemoveCard: (entry: DeckEntry, section: "main" | "sideboard") => void;
+  onMoveCard: (entry: DeckEntry, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: CardHoverHandler;
   /** Deck format — resolves the sideboard policy so the second section
@@ -39,14 +38,12 @@ interface DeckStackProps {
 
 type DeckStackSection = "commander" | "main" | "sideboard";
 
-interface DeckStackItem {
-  count: number;
-  name: string;
+interface DeckStackItem extends DeckEntry {
   section: DeckStackSection;
   groupTitle: DeckGroup | null;
   sortKey: [number, number, string];
   scryfallId?: string;
-  sourcePrinting?: SourcePrinting;
+  printingLabel?: string;
 }
 
 type DeckStackTitle = DeckGroup | "maybeboardGroup" | "sideboardGroup";
@@ -92,6 +89,7 @@ function createDeckStackItems(
   }
 
   const mainItems: DeckStackItem[] = [];
+  const mainRepeatedNames = repeatedEntryNames(deck.main);
   for (const entry of deck.main) {
     const card = cardDataCache.get(entry.name);
     mainItems.push({
@@ -99,6 +97,7 @@ function createDeckStackItems(
       name: entry.name,
       scryfallId: card?.id,
       sourcePrinting: entry.sourcePrinting,
+      printingLabel: printingLabel(entry, mainRepeatedNames),
       section: "main",
       groupTitle: groupKey(mode, card),
       sortKey: [groupRank(mode, card), card?.cmc ?? 0, entry.name.toLowerCase()],
@@ -106,6 +105,7 @@ function createDeckStackItems(
   }
 
   const sideboardItems: DeckStackItem[] = [];
+  const sideboardRepeatedNames = repeatedEntryNames(deck.sideboard);
   for (const entry of deck.sideboard) {
     const card = cardDataCache.get(entry.name);
     sideboardItems.push({
@@ -113,6 +113,7 @@ function createDeckStackItems(
       name: entry.name,
       scryfallId: card?.id,
       sourcePrinting: entry.sourcePrinting,
+      printingLabel: printingLabel(entry, sideboardRepeatedNames),
       section: "sideboard",
       groupTitle: groupKey(mode, card),
       sortKey: [groupRank(mode, card), card?.cmc ?? 0, entry.name.toLowerCase()],
@@ -178,9 +179,9 @@ function DeckStackCard({
   className?: string;
   canAdd: boolean;
   isMaybeboard: boolean;
-  onAddCard: (name: string) => void;
-  onRemoveCard: (name: string, section: "main" | "sideboard") => void;
-  onMoveCard: (name: string, from: "main" | "sideboard") => void;
+  onAddCard: (entry: DeckEntry) => void;
+  onRemoveCard: (entry: DeckEntry, section: "main" | "sideboard") => void;
+  onMoveCard: (entry: DeckEntry, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: CardHoverHandler;
   onContextMenu?: (cardName: string, x: number, y: number) => void;
@@ -197,6 +198,12 @@ function DeckStackCard({
     sourcePrinting: item.sourcePrinting,
   };
   const showAddButton = item.section === "main";
+  // Same-name tiles differ only by printing, so their controls name it too.
+  const controlName = item.printingLabel ? `${item.name} (${item.printingLabel})` : item.name;
+  const removeLabel =
+    item.section === "commander"
+      ? t("stack.removeCommander", { name: item.name })
+      : t("stack.removeOne", { name: controlName });
   // The commander isn't part of the main/maybeboard partition, so it has no
   // move target. Main cards move out to the sideboard/maybeboard; second-section
   // cards move back to main — the destination is shown on the button label so
@@ -217,19 +224,19 @@ function DeckStackCard({
       onRemoveCommander(item.name);
       return;
     }
-    onRemoveCard(item.name, item.section);
+    onRemoveCard(item, item.section);
   };
 
   const handleAdd = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!canAdd) return;
-    onAddCard(item.name);
+    onAddCard(item);
   };
 
   const handleMove = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (item.section === "commander") return;
-    onMoveCard(item.name, item.section);
+    onMoveCard(item, item.section);
   };
 
   return (
@@ -279,7 +286,8 @@ function DeckStackCard({
             onClick={handleAdd}
             disabled={!canAdd}
             className="absolute right-10 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/78 text-sm font-bold text-emerald-300 transition hover:bg-emerald-500/85 hover:text-white disabled:cursor-not-allowed disabled:text-slate-500 disabled:hover:bg-black/78"
-            title={canAdd ? t("stack.addOne", { name: item.name }) : t("stack.copyLimit", { name: item.name })}
+            aria-label={canAdd ? t("stack.addOne", { name: controlName }) : t("stack.copyLimit", { name: controlName })}
+            title={canAdd ? t("stack.addOne", { name: controlName }) : t("stack.copyLimit", { name: controlName })}
           >
             +
           </button>
@@ -287,11 +295,8 @@ function DeckStackCard({
         <button
           onClick={handleRemove}
           className="absolute right-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/78 text-sm font-bold text-red-300 transition hover:bg-red-500/85 hover:text-white"
-          title={
-            item.section === "commander"
-              ? t("stack.removeCommander", { name: item.name })
-              : t("stack.removeOne", { name: item.name })
-          }
+          aria-label={removeLabel}
+          title={removeLabel}
         >
           -
         </button>
@@ -314,16 +319,17 @@ function DeckStackCard({
         {/* The overlay is pointer-events-none so the card body stays tappable
             for preview; the move pill re-enables pointer events for itself. */}
         <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end gap-1 bg-gradient-to-t from-black via-black/70 to-transparent px-2 pb-2 pt-8">
-          <div className="min-w-0 flex-1 truncate text-[11px] font-medium text-white">
-            {item.name}
+          <div className="min-w-0 flex-1 text-[11px] font-medium text-white">
+            <div className="truncate">{item.name}</div>
+            {item.printingLabel && <div className="whitespace-nowrap text-[9px] text-slate-400">{item.printingLabel}</div>}
           </div>
           {showMove && (
             <button
               type="button"
               onClick={handleMove}
               className="pointer-events-auto inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-full bg-black/78 px-2 py-1 text-[10px] font-semibold text-sky-300 transition hover:bg-sky-500/85 hover:text-white"
-              aria-label={t("card.moveToTarget", { name: item.name, target: moveTargetLabel })}
-              title={t("card.moveToTarget", { name: item.name, target: moveTargetLabel })}
+              aria-label={t("card.moveToTarget", { name: controlName, target: moveTargetLabel })}
+              title={t("card.moveToTarget", { name: controlName, target: moveTargetLabel })}
             >
               <span aria-hidden="true">→</span>
               {moveTargetLabel}
@@ -360,10 +366,10 @@ function DeckStackSectionLane({
    *  to the Main Deck lane below the Lands subsection). */
   extraGroups?: DeckStackGroup[];
   isMaybeboard: boolean;
-  onAddCard: (name: string) => void;
+  onAddCard: (entry: DeckEntry) => void;
   canAddCard: (item: DeckStackItem) => boolean;
-  onRemoveCard: (name: string, section: "main" | "sideboard") => void;
-  onMoveCard: (name: string, from: "main" | "sideboard") => void;
+  onRemoveCard: (entry: DeckEntry, section: "main" | "sideboard") => void;
+  onMoveCard: (entry: DeckEntry, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: CardHoverHandler;
   onContextMenu?: (cardName: string, x: number, y: number) => void;
@@ -417,7 +423,7 @@ function DeckStackSectionLane({
                 >
                   {group.entries.map((item, itemIndex) => (
                     <DeckStackCard
-                      key={`${item.section}:${item.name}`}
+                      key={`${item.section}:${deckEntryKey(item)}`}
                       item={item}
                       zIndex={group.entries.length - itemIndex}
                       canAdd={canAddCard(item)}

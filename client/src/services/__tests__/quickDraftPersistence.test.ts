@@ -25,7 +25,15 @@ import {
   saveQuickDraftSession,
 } from "../quickDraftPersistence";
 import { ACTIVE_QUICK_DRAFT_KEY, DRAFT_RUN_KEY_PREFIX, QUICK_DRAFT_KEY_PREFIX } from "../../constants/storage";
-import { createDraftWorkspaceState } from "../../components/draft/workspace/workspacePlacement";
+import { EMPTY_DRAFT_POOL_GROUPS, type DraftCardInstance, type DraftPoolGroups } from "../../adapter/draft-adapter";
+import {
+  createDraftWorkspaceState,
+  moveWorkspaceInstance,
+  rebuildWorkspaceZone,
+  reconcileWorkspaceState,
+  resolveWorkspacePickPlacement,
+} from "../../components/draft/workspace/workspacePlacement";
+import type { DraftBoardPreferences } from "../../components/draft/workspace/workspacePreferences";
 
 const uiState = {
   phase: "deckbuilding" as const,
@@ -125,6 +133,48 @@ describe("quick draft persistence coordinator", () => {
       mainDeck: ["Spell"],
       workspace: null,
     });
+  });
+
+  it("returns a sideboarded card to its sorted deck column after reload", async () => {
+    const pool: DraftCardInstance[] = [
+      { instance_id: "pacifism", name: "Pacifism", set_code: "M20", collector_number: "32",
+        rarity: "common", colors: ["W"], cmc: 2, type_line: "Enchantment — Aura" },
+      { instance_id: "satyr", name: "Satyr Enchanter", set_code: "M19", collector_number: "223",
+        rarity: "uncommon", colors: ["G", "W"], cmc: 3, type_line: "Creature — Satyr Druid" },
+      { instance_id: "manalith", name: "Manalith", set_code: "M19", collector_number: "239",
+        rarity: "common", colors: [], cmc: 3, type_line: "Artifact" },
+    ];
+    const [pacifism, satyr, manalith] = pool;
+    const kinds = ["white", "multicolor", "colorless"] as const;
+    const poolGroups: DraftPoolGroups = {
+      ...EMPTY_DRAFT_POOL_GROUPS,
+      color_groups: pool.map((card, index) => ({
+        kind: kinds[index], total: 1, cards: [{ card, count: 1, instance_ids: [card.instance_id] }],
+      })),
+    };
+    const preferences: DraftBoardPreferences = { sort: "color", columnCount: 2, rows: "one", showHeaders: true };
+    const initial = reconcileWorkspaceState(createDraftWorkspaceState(), pool);
+    const sorted = rebuildWorkspaceZone(initial, "deck", pool, poolGroups, preferences);
+    expect(pool.map(({ instance_id }) => sorted.placements[instance_id].column)).toEqual([0, 1, 1]);
+
+    const workspace = moveWorkspaceInstance(
+      sorted, pool, poolGroups, { deck: preferences, sideboard: preferences }, manalith.instance_id,
+      { zone: "sideboard", column: 0, beforeInstanceId: null },
+    );
+    expect(workspace.placements[manalith.instance_id].zone).toBe("sideboard");
+    expect(resolveWorkspacePickPlacement(manalith, "deck", pool, poolGroups, workspace, preferences).column)
+      .toBe(1);
+    await saveQuickDraftSession("sorted", "session", { ...uiState, workspace });
+
+    // Reload starts with fresh placement code and the workspace read from storage.
+    vi.resetModules();
+    const { resolveWorkspacePickPlacement: resolveAfterReload } = await import(
+      "../../components/draft/workspace/workspacePlacement"
+    );
+    const restored = (await loadQuickDraftSession("sorted"))?.workspace;
+    expect(restored?.placements[pacifism.instance_id].column).toBe(0);
+    expect(restored?.placements[satyr.instance_id].column).toBe(1);
+    expect(resolveAfterReload(manalith, "deck", pool, poolGroups, restored!, preferences).column).toBe(1);
   });
 
   it("uses the canonical workspace validator when loading persisted state", async () => {

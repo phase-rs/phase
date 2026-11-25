@@ -265,7 +265,7 @@ fn historical_multi_id_cost_record_still_excludes_every_paid_object_after_restor
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept the optional additional cost");
     assert!(
         matches!(
