@@ -18119,7 +18119,13 @@ fn auto_tap_mana_sources_inner(
                     );
                     unsettled_start = events.len();
                 }
-                let override_value = production_override_for_option(&ability_def, &option);
+                let resolved = super::ability_utils::build_resolved_from_def(
+                    &ability_def,
+                    option.object_id,
+                    player,
+                );
+                let resolved = mana_abilities::apply_condition_instead_mana_swap(state, &resolved);
+                let override_value = production_override_for_option(&resolved.effect, &option);
                 // CR 602.2a + CR 602.2b: bind the activation and its still-unpaid
                 // cursor before any independent funding can suspend this frame.
                 let Ok(prepared) = mana_abilities::prepare_mana_ability_excluding(
@@ -19417,39 +19423,37 @@ fn planned_mana_sub_costs_fundable(
 }
 
 pub(crate) fn production_override_for_option(
-    ability_def: &crate::types::ability::AbilityDefinition,
+    effect: &Effect,
     option: &ManaSourceOption,
 ) -> Option<crate::types::game_state::ProductionOverride> {
+    let Effect::Mana { produced, .. } = effect else {
+        return None;
+    };
+
     // CR 106.3: a same-color bundle is only a planning estimate. Replay the
     // chosen color while the mana resolver evaluates the live output amount.
-    if matches!(&*ability_def.effect, Effect::Mana { produced, .. }
-        if mana_sources::single_color_production_count(produced).is_some())
-    {
+    if mana_sources::single_color_production_count(produced).is_some() {
         return Some(crate::types::game_state::ProductionOverride::SingleColor(
             option.mana_type,
         ));
     }
 
-    // When `taps_for_mana_overrides` is non-empty, `atomic_combination` includes
-    // the aura bonus types appended by `land_mana_options`. Cap to the land's own
-    // portion so the land's ability does not over-produce — the aura bonus is
-    // resolved separately via `state.pending_taps_for_mana_overrides`.
-    let aura_count = option.taps_for_mana_overrides.len();
-    if let Some(combo) = option.atomic_combination.as_ref() {
-        let land_end = combo.len().saturating_sub(aura_count);
-        let land_combo = &combo[..land_end];
-        if land_combo.len() > 1 {
-            return Some(crate::types::game_state::ProductionOverride::Combination(
-                land_combo.to_vec(),
-            ));
-        }
-        // For 1 or 0 land types, fall through to the per-ability-type check.
-        // `option.mana_type` already mirrors the land's own color.
+    // CR 605.3b + CR 614.15: carry a chosen combination into resolution.
+    // Deterministic bundles resolve their type and amount against live state.
+    if matches!(
+        produced,
+        crate::types::ability::ManaProduction::ChoiceAmongCombinations { .. }
+    ) {
+        // The option also includes aura bonus units, which resolve separately.
+        let combo = option.atomic_combination.as_ref()?;
+        let land_end = combo
+            .len()
+            .saturating_sub(option.taps_for_mana_overrides.len());
+        return Some(crate::types::game_state::ProductionOverride::Combination(
+            combo[..land_end].to_vec(),
+        ));
     }
 
-    let Effect::Mana { produced, .. } = &*ability_def.effect else {
-        return None;
-    };
     match produced {
         crate::types::ability::ManaProduction::AnyOneColor { .. }
         | crate::types::ability::ManaProduction::AnyCombination { .. }

@@ -4,11 +4,12 @@ use crate::game::functioning_abilities::static_kind_present;
 use crate::game::game_object::ObjectIncarnationRefExt;
 pub use crate::types::ability::is_mana_ability;
 use crate::types::ability::{
-    cost_has_component, is_chosen_remove_counter_cost_count, produces_mana_on_activation,
-    AbilityCondition, AbilityCost, AbilityDefinition, CardSelectionMode, ChoiceValue,
-    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, DoubleTarget, Effect,
-    ManaProduction, ObjectSelectionCardinality, QuantityExpr, QuantityRef, ResolvedAbility,
-    TapCreaturesSelectionMode, TargetFilter, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
+    cost_has_component, could_be_triggered_mana_ability_body, is_chosen_remove_counter_cost_count,
+    produces_mana_on_activation, AbilityCondition, AbilityCost, AbilityDefinition,
+    CardSelectionMode, ChoiceValue, ChosenAttribute, ContinuousModification,
+    CostPaidObjectSnapshot, DoubleTarget, Effect, ManaProduction, ObjectSelectionCardinality,
+    QuantityExpr, QuantityRef, ResolvedAbility, TapCreaturesSelectionMode, TargetFilter,
+    TriggerDefinition, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent, ManaTapState};
@@ -28,6 +29,7 @@ use crate::types::mana::{
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticModeKind;
+use crate::types::triggers::trigger_mode_observes_mana_event;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 
@@ -262,6 +264,27 @@ pub fn is_triggered_mana_ability(
                 | GameEvent::ManaAdded { .. }
         )
     )
+}
+
+/// CR 605.1b + CR 605.2: static (event-free, stateless) classification of a
+/// trigger definition as a triggered mana ability: its mode observes a mana
+/// event AND its body could add mana without requiring a target. Pure over the
+/// AST — takes no `&GameState` (CR 605.2: a mana ability remains one even when
+/// the game state would not let it produce mana), mirroring `is_mana_ability`'s
+/// purity rule.
+///
+/// Relationship to the sibling: the event-bound [`is_triggered_mana_ability`]
+/// ROUTES occurrences (it needs a `ResolvedAbility` + the triggering event and
+/// additionally requires an all-mana chain, since inline resolution skips
+/// priority); this CLASSIFIES definitions (per CR 605.1/605.1b, ignoring other
+/// effects and taking no event) for characteristic queries like
+/// `HasManaAbility`.
+pub fn is_triggered_mana_ability_definition(def: &TriggerDefinition) -> bool {
+    trigger_mode_observes_mana_event(&def.mode)
+        && def
+            .execute
+            .as_deref()
+            .is_some_and(could_be_triggered_mana_ability_body)
 }
 
 /// CR 608.2d + CR 106.12a: distinct mana types carried by a tap/production
@@ -7069,6 +7092,81 @@ mod tests {
 
     use crate::game::test_fixtures::mana_fixture_roles;
 
+    /// CR 605.1b: the static triggered-mana-ability classifier is the
+    /// conjunction of the mode half (observes a mana event) and the body half
+    /// (could add mana, untargeted). Scaffolding rows — the behavior proof is
+    /// the Raggadragga runtime test; the body half's own legs are pinned by
+    /// `could_be_triggered_mana_ability_body`'s suite.
+    #[test]
+    fn triggered_mana_ability_definition_is_mode_and_body_conjunction() {
+        let mana_body = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+        };
+        let non_mana_body = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+        };
+        let classified = |mode: TriggerMode, execute: Option<AbilityDefinition>| {
+            let mut def = TriggerDefinition::new(mode);
+            def.execute = execute.map(Box::new);
+            is_triggered_mana_ability_definition(&def)
+        };
+
+        // Mana modes x mana body = true.
+        for mode in [
+            TriggerMode::TapsForMana,
+            TriggerMode::ManaAbilityProduced,
+            TriggerMode::ManaAdded,
+        ] {
+            assert!(classified(mode.clone(), Some(mana_body())), "{mode:?}");
+        }
+        // Mana modes x non-mana body = false (Treasure Nabber shape).
+        for mode in [
+            TriggerMode::TapsForMana,
+            TriggerMode::ManaAbilityProduced,
+            TriggerMode::ManaAdded,
+        ] {
+            assert!(!classified(mode.clone(), Some(non_mana_body())), "{mode:?}");
+        }
+        // Excluded modes x mana body = false (Lotus Cobra shape).
+        for mode in [
+            TriggerMode::Unknown("X".to_string()),
+            TriggerMode::AbilityActivated,
+            TriggerMode::ManaExpend,
+            TriggerMode::Taps,
+            TriggerMode::ChangesZone,
+            TriggerMode::SpellCast,
+            TriggerMode::Attacks,
+        ] {
+            assert!(!classified(mode.clone(), Some(mana_body())), "{mode:?}");
+        }
+        // No body = false on every mode.
+        for mode in [
+            TriggerMode::TapsForMana,
+            TriggerMode::ManaAbilityProduced,
+            TriggerMode::ManaAdded,
+            TriggerMode::ChangesZone,
+        ] {
+            assert!(!classified(mode.clone(), None), "{mode:?}");
+        }
+    }
+
     /// CR 601.2g + CR 605.3b: a mana ability's own sub-cost that funds an outer
     /// automatic payment (`sub_cost_demand` present) never chooses its rows on
     /// its own. With no live payment (its parent resumed after a pause) it plans
@@ -9940,11 +10038,10 @@ mod tests {
 
     /// CR 614.1a positive case: the `Add {C}{C}{C} instead` sub-ability is a
     /// replacement effect (the word "instead" per CR 614.1a). When its `And`
-    /// condition is satisfied (all three Urza lands controlled), the delta
-    /// replaces the base `Add {C}` production and the pool ends with three
-    /// colorless mana.
+    /// condition is satisfied (all three Urza lands controlled), it replaces the
+    /// base production with one production of three colorless mana.
     #[test]
-    fn resolve_mana_ability_conditional_urza_delta() {
+    fn resolve_mana_ability_conditional_urza_swap() {
         let mut state = GameState::new_two_player(42);
         let tower = create_object(
             &mut state,
@@ -9992,7 +10089,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Mana {
                     produced: ManaProduction::Colorless {
-                        count: QuantityExpr::Fixed { value: 2 },
+                        count: QuantityExpr::Fixed { value: 3 },
                     },
                     restrictions: vec![],
                     grants: vec![],
@@ -10000,23 +10097,25 @@ mod tests {
                     target: None,
                 },
             )
-            .condition(AbilityCondition::And {
-                conditions: vec![
-                    AbilityCondition::ControllerControlsMatching {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::land()
-                                .subtype("Mine".to_string())
-                                .controller(ControllerRef::You),
-                        ),
-                    },
-                    AbilityCondition::ControllerControlsMatching {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::land()
-                                .subtype("Power-Plant".to_string())
-                                .controller(ControllerRef::You),
-                        ),
-                    },
-                ],
+            .condition(AbilityCondition::ConditionInstead {
+                inner: Box::new(AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::ControllerControlsMatching {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::land()
+                                    .subtype("Mine".to_string())
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                        AbilityCondition::ControllerControlsMatching {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::land()
+                                    .subtype("Power-Plant".to_string())
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                    ],
+                }),
             }),
         );
 
@@ -10032,11 +10131,10 @@ mod tests {
     /// CR 614.1a negative case: when the sub-ability's "instead" replacement
     /// (CR 614.1a) cannot fire because its condition is false (here, Urza's
     /// Power-Plant is missing), only the base `Add {C}` resolves and the
-    /// `And { Mine, Power-Plant }` delta does not apply — the pool ends with
-    /// one colorless, not three. Mirrors
-    /// `resolve_mana_ability_conditional_urza_delta` but omits Power-Plant.
+    /// `And { Mine, Power-Plant }` condition leaves the pool with one colorless. Mirrors
+    /// `resolve_mana_ability_conditional_urza_swap` but omits Power-Plant.
     #[test]
-    fn resolve_mana_ability_urza_delta_skips_when_companion_land_missing() {
+    fn resolve_mana_ability_urza_swap_skips_when_companion_land_missing() {
         let mut state = GameState::new_two_player(42);
         let tower = create_object(
             &mut state,
@@ -10079,7 +10177,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Mana {
                     produced: ManaProduction::Colorless {
-                        count: QuantityExpr::Fixed { value: 2 },
+                        count: QuantityExpr::Fixed { value: 3 },
                     },
                     restrictions: vec![],
                     grants: vec![],
@@ -10087,23 +10185,25 @@ mod tests {
                     target: None,
                 },
             )
-            .condition(AbilityCondition::And {
-                conditions: vec![
-                    AbilityCondition::ControllerControlsMatching {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::land()
-                                .subtype("Mine".to_string())
-                                .controller(ControllerRef::You),
-                        ),
-                    },
-                    AbilityCondition::ControllerControlsMatching {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::land()
-                                .subtype("Power-Plant".to_string())
-                                .controller(ControllerRef::You),
-                        ),
-                    },
-                ],
+            .condition(AbilityCondition::ConditionInstead {
+                inner: Box::new(AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::ControllerControlsMatching {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::land()
+                                    .subtype("Mine".to_string())
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                        AbilityCondition::ControllerControlsMatching {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::land()
+                                    .subtype("Power-Plant".to_string())
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                    ],
+                }),
             }),
         );
 

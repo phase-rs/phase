@@ -9351,22 +9351,26 @@ fn evaluate_replacement_condition(
             _ => false,
         },
         // CR 121.1 + CR 504.1 + CR 614.6: "except the first one you draw in
-        // each of your draw steps" — applies to every Draw EXCEPT the active
+        // each of your draw steps" — applies to every Draw EXCEPT a turn
         // player's first draw of the draw step. Returns `false` (suppress
-        // replacement) when this would be the first draw of the active player
+        // replacement) when this would be the first draw of a turn player
         // in the draw step (`cards_drawn_this_step == 0`); `true` otherwise.
+        // CR 805.4 + CR 805.4b: on a shared team turn each player on the
+        // active team draws in that team's draw step, and "your draw step" is
+        // the active team's draw step for each member (CR 805.4a), so each of
+        // them is exempt, not only `state.active_player`.
         ReplacementCondition::ExceptFirstDrawInDrawStep => match event {
             ProposedEvent::Draw { player_id, .. } => {
                 let in_draw_step = state.phase == crate::types::phase::Phase::Draw;
-                let drawer_is_active = *player_id == state.active_player;
+                let drawer_is_active = super::players::is_turn_player(state, *player_id);
                 let already_drawn = state
                     .players
                     .iter()
                     .find(|p| p.id == *player_id)
                     .map(|p| p.cards_drawn_this_step)
                     .unwrap_or(0);
-                // Suppress when this would be the FIRST draw of the active
-                // player's draw step.
+                // Suppress when this would be a turn player's FIRST draw of the
+                // draw step.
                 !(in_draw_step && drawer_is_active && already_drawn == 0)
             }
             _ => false,
@@ -34331,6 +34335,67 @@ mod tests {
                 &draw_event(PlayerId(1)),
             ),
             "draw step draws by the non-active player must replace"
+        );
+    }
+
+    /// CR 805.4b + CR 805.9 — on a shared team turn (Two-Headed Giant) every
+    /// player on the active team draws in, and is an active player of, that
+    /// team's draw step, so `ExceptFirstDrawInDrawStep` exempts each of their
+    /// first draws, not only `state.active_player`'s. A player on the nonactive
+    /// team is still replaced.
+    #[test]
+    fn except_first_draw_in_draw_step_exempts_each_shared_turn_player() {
+        let condition = ReplacementCondition::ExceptFirstDrawInDrawStep;
+        let source = ObjectId(10);
+        let mut state = GameState::new(crate::types::FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.phase = crate::types::phase::Phase::Draw;
+
+        let draw_event = |player_id: PlayerId| ProposedEvent::Draw {
+            player_id,
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+
+        // P1 is P0's teammate: their first draw of the team's draw step is exempt.
+        assert!(
+            !evaluate_replacement_condition(
+                &condition,
+                PlayerId(1),
+                source,
+                &state,
+                None,
+                &draw_event(PlayerId(1)),
+            ),
+            "the active team's second player's first draw-step draw must NOT replace"
+        );
+
+        // P1's second draw in that step replaces.
+        state.players[1].cards_drawn_this_step = 1;
+        assert!(
+            evaluate_replacement_condition(
+                &condition,
+                PlayerId(1),
+                source,
+                &state,
+                None,
+                &draw_event(PlayerId(1)),
+            ),
+            "a later draw by the active team's second player must replace"
+        );
+
+        // P2 is on the nonactive team: not a turn player, so the draw replaces.
+        assert!(
+            evaluate_replacement_condition(
+                &condition,
+                PlayerId(2),
+                source,
+                &state,
+                None,
+                &draw_event(PlayerId(2)),
+            ),
+            "a nonactive-team player's first draw during the draw step must replace"
         );
     }
 

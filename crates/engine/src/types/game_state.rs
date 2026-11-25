@@ -25422,21 +25422,26 @@ pub enum WaitingFor {
         #[serde(default)]
         scoped_players: Vec<PlayerId>,
     },
-    /// CR 101.4 + CR 701.21a: The player protects exactly `count` of the
-    /// eligible permanents; every other in-scope permanent is sacrificed after
-    /// all scoped players have chosen. Used by the generic exact keeper
-    /// constraint, not a card-specific choice shape.
+    /// CR 101.4 + CR 701.21a: The player protects exactly, or up to,
+    /// `required_count` of the eligible permanents; every other in-scope
+    /// permanent is sacrificed after all scoped players have chosen. Used by
+    /// the generic keeper-count constraint, not a card-specific choice shape.
     KeepExactPermanentsChoice {
         player: PlayerId,
         target_player: PlayerId,
         eligible: Vec<ObjectId>,
-        /// Exact number of permanents the engine requires the player to keep,
-        /// already capped to this prompt's eligible pool under CR 609.3's
-        /// "do as much as possible" rule. Display clients render this value
-        /// directly; they must not derive a second legality rule from
-        /// `eligible.len()`.
+        /// The most permanents the player may keep: the printed keeper count,
+        /// deliberately NOT capped to `eligible.len()`, because the resume
+        /// hands it unchanged to the next seat. An exact prompt exists only
+        /// when `eligible.len()` exceeds it (CR 609.3 auto-keeps otherwise).
+        /// Display clients render this value directly; they must not derive
+        /// a second legality rule from `eligible.len()`.
         #[serde(alias = "count")]
         required_count: usize,
+        /// The fewest permanents the player may keep; `None` means exactly
+        /// `required_count`. `Some(0)` is an "up to" keeper (Covetous Elegy).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        minimum_count: Option<usize>,
         /// CR 608.2c + CR 122.1: the keeper mark the instruction owes, with its count
         /// already resolved (CR 608.2h). The `ResolvedAbility` is gone by the time
         /// `GameAction::ChooseKeptPermanents` resumes, so the mark rides here.
@@ -27874,13 +27879,20 @@ pub struct StackResolutionSession {
     #[serde(default)]
     pub cursor: usize,
     pub representatives: BTreeSet<PlayerId>,
-    /// AI representatives whose verified pass is a policy authorization for
+    /// AI semantic owners whose verified pass is a policy authorization for
     /// later priority windows in this exact fenced cohort. Absence is
-    /// conservative: that representative must receive an explicit decision
+    /// conservative: that owner must receive an explicit decision
     /// unless its standing pass covers the window
-    /// (`priority::standing_priority_pass`).
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub verified_pass_representatives: BTreeSet<PlayerId>,
+    /// (`priority::standing_priority_pass`). CR 805.5b: authorization is
+    /// per individual seat — one teammate's verified pass never authorizes
+    /// another member's window. The alias keeps pre-rename persisted
+    /// sessions (which stored representatives) deserializing.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeSet::is_empty",
+        alias = "verified_pass_representatives"
+    )]
+    pub verified_pass_owners: BTreeSet<PlayerId>,
     #[serde(default)]
     pub budget: StackResolutionBudget,
     #[serde(default)]
@@ -64498,7 +64510,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 entries: vec![StackResolutionEntryFence::capture(&entry)],
                 cursor: 0,
                 representatives: [PlayerId(0)].into_iter().collect(),
-                verified_pass_representatives: BTreeSet::new(),
+                verified_pass_owners: BTreeSet::new(),
                 budget: StackResolutionBudget::Unlimited,
                 policy: StackResolutionPolicy::Committed,
                 auto_pass_overlay: StackResolutionAutoPassOverlay {

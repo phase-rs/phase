@@ -2083,8 +2083,12 @@ pub(crate) fn foretell_cost(state: &GameState, object_id: ObjectId) -> Option<Ma
 /// CR 702.143a-b: A player may foretell a card from hand any time they have
 /// priority during their turn by paying {2}. This is a special action and does
 /// not use the stack.
+/// CR 805.5a: "their turn" is the team's turn — any living teammate of the
+/// active player may foretell when the team has priority.
 pub fn can_foretell_card(state: &GameState, player: PlayerId, object_id: ObjectId) -> bool {
-    if state.active_player != player {
+    // CR 702.143a + CR 805.5a: the acting seat may be any living teammate of
+    // the active player, through the shared membership authority.
+    if !super::restrictions::acts_on_active_turn(state, player) {
         return false;
     }
 
@@ -2456,7 +2460,9 @@ pub fn handle_foretell(
     card_id: CardId,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if state.active_player != player {
+    // CR 702.143a + CR 805.5a: as in `can_foretell_card` — the acting seat may
+    // be any living teammate of the active player, not only the representative.
+    if !super::restrictions::acts_on_active_turn(state, player) {
         return Err(EngineError::ActionNotAllowed(
             "Foretell is legal only during your turn".to_string(),
         ));

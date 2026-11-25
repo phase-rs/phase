@@ -364,7 +364,7 @@ fn persisted_coherent_stack_session_defers_queued_triggers_to_session_resume() {
         )],
         cursor: 0,
         representatives,
-        verified_pass_representatives: BTreeSet::new(),
+        verified_pass_owners: BTreeSet::new(),
         budget: StackResolutionBudget::Unlimited,
         policy: StackResolutionPolicy::Committed,
         auto_pass_overlay: StackResolutionAutoPassOverlay {

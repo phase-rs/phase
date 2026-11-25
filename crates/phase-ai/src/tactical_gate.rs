@@ -10430,6 +10430,13 @@ mod tests {
         runner.act(target.unwrap()).unwrap();
         let mut paid = false;
         while !runner.state().stack.is_empty() {
+            // CR 805.5b: the holding team passes together. Passing only the
+            // representative stalls a shared-team window, so the stack would
+            // never empty here.
+            if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                let _ = runner.pass_holding_team();
+                continue;
+            }
             let state = runner.state();
             let action = match &state.waiting_for {
                 WaitingFor::UnlessPayment { player, .. } if *player == P0 => {

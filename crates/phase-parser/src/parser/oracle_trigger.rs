@@ -3502,10 +3502,7 @@ pub(crate) fn lower_trigger_ir_with_provenance(
     // resolve immediately, including their non-mana clauses. The mixed-chain
     // resolver cannot do that for a linked paid cast; expose the composition
     // as a gap rather than queueing a supported ordinary triggered ability.
-    if matches!(
-        def.mode,
-        TriggerMode::TapsForMana | TriggerMode::ManaAdded | TriggerMode::ManaAbilityProduced
-    ) {
+    if crate::types::triggers::trigger_mode_observes_mana_event(&def.mode) {
         if let Some(execute) = def.execute.as_deref_mut() {
             if crate::types::ability::could_be_triggered_mana_ability_body(execute) {
                 super::oracle_effect::refuse_linked_paid_cast_in_mana_ability(

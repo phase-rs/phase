@@ -736,6 +736,28 @@ describe("getBoardChoiceView", () => {
     expect(choice?.selection).toEqual({ type: "exactCount", count: 5 });
   });
 
+  it("maps an up-to keeper's engine bounds to a range that confirms with nothing kept", () => {
+    const choice = getBoardChoiceView({
+      type: "KeepExactPermanentsChoice",
+      data: {
+        player: 0,
+        target_player: 0,
+        eligible: [10],
+        required_count: 2,
+        minimum_count: 0,
+        source_id: 50,
+        remaining_players: [],
+        all_kept: [],
+        scoped_players: [0],
+      },
+    });
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(choice.selection).toEqual({ type: "rangeCount", min: 0, max: 2 });
+    expect(canConfirmBoardChoice(choice, [], undefined)).toBe(true);
+  });
+
   it("maps simple StationTarget and Ring-bearer choices to immediate single actions", () => {
     const station = getBoardChoiceView({
       type: "StationTarget",

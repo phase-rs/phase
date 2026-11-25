@@ -11060,6 +11060,119 @@ fn paid_unless_reflexive_continuation_keeps_its_condition() {
     }
 }
 
+/// CR 605.1 + CR 608.2c + CR 118.12a: Power Sink's plural qualifier — "tap all
+/// lands with mana abilities they control" — reaches the shared type-phrase
+/// with-arm via TapAll and must keep HasManaAbility on the tap target instead
+/// of silently dropping it; "they control" resolves to the declining
+/// unless-payer (the counter target's controller), not the caster. The "lose
+/// all unspent mana" tail stays an explicit Unimplemented node (honest gap, not
+/// a silent drop).
+#[test]
+fn power_sink_plural_mana_abilities_keeps_qualifier() {
+    let parsed = parse_card(
+        "Counter target spell unless its controller pays {X}. If that player doesn't, they \
+         tap all lands with mana abilities they control and lose all unspent mana.",
+        "Power Sink",
+        &[],
+        &["Instant"],
+    );
+    let tap = parsed
+        .abilities
+        .iter()
+        .flat_map(chain_defs)
+        .find(|def| {
+            matches!(
+                def.effect.as_ref(),
+                Effect::SetTapState {
+                    scope: EffectScope::All,
+                    state: TapStateChange::Tap,
+                    ..
+                }
+            )
+        })
+        .unwrap_or_else(|| panic!("Power Sink: tap-all clause: {:#?}", parsed.abilities));
+    let Effect::SetTapState { target, .. } = tap.effect.as_ref() else {
+        unreachable!("matcher above guarantees SetTapState");
+    };
+    let TargetFilter::Typed(tf) = target else {
+        panic!("Power Sink: tap target must stay Typed, got {target:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Land),
+        "Power Sink: tap target must stay Land, got {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::HasManaAbility),
+        "Power Sink: tap target must keep HasManaAbility, got {:?}",
+        tf.properties
+    );
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::ParentTargetController),
+        "Power Sink: CR 608.2c resolves \"they control\" to the declining \
+         unless-payer (the counter target's controller, CR 109.4), not the caster"
+    );
+    // Honesty reach-guard (deliberate non-fix): "and lose all unspent mana" has
+    // no mana-drain effect, so it must stay an explicit Unimplemented node —
+    // the suite would catch a re-silencing, and coverage stays red through the
+    // gap channel rather than confirmed_misparse.
+    assert!(
+        parsed.abilities.iter().flat_map(chain_defs).any(
+            |def| matches!(def.effect.as_ref(), Effect::Unimplemented { description, .. }
+                if description
+                    .as_deref()
+                    .is_some_and(|d| d.contains("lose all unspent mana")))
+        ),
+        "Power Sink: the mana-drain tail must stay an explicit gap: {:#?}",
+        parsed.abilities
+    );
+}
+
+/// CR 608.2c + CR 118.12a: Frightful Delusion's connector-less consequence
+/// ("That player discards a card.") already binds through the subject route to
+/// the counter target's controller — the F1 seed never fires for it (no bare
+/// reflexive connector) and must not move it. R-FD1: the discard is
+/// unconditional (it happens even when they pay).
+#[test]
+fn frightful_delusion_that_player_discard_stays_bound_and_unconditional() {
+    let parsed = parse_card(
+        "Counter target spell unless its controller pays {1}. That player discards a card.",
+        "Frightful Delusion",
+        &[],
+        &["Instant"],
+    );
+    let discard = parsed
+        .abilities
+        .iter()
+        .flat_map(chain_defs)
+        .find(|def| matches!(def.effect.as_ref(), Effect::Discard { .. }))
+        .unwrap_or_else(|| {
+            panic!(
+                "Frightful Delusion: discard clause: {:#?}",
+                parsed.abilities
+            )
+        });
+    let Effect::Discard { target, .. } = discard.effect.as_ref() else {
+        unreachable!("matcher above guarantees Discard");
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTargetController,
+        "Frightful Delusion: \"that player\" names the counter target's controller"
+    );
+    assert!(
+        discard.condition.is_none(),
+        "Frightful Delusion: R-FD1, the discard is unconditional: {:?}",
+        discard.condition
+    );
+    assert!(
+        !parsed.abilities.iter().any(ability_chain_has_unimplemented),
+        "reach-guard: Frightful Delusion lowers with no gaps: {:#?}",
+        parsed.abilities
+    );
+}
+
 /// CR 118.12a + CR 608.2c: the honesty rule is class-level — an unless-outcome head
 /// ("If it deals damage to you this way,") that lowers to no condition fails closed,
 /// instead of tapping the creature every upkeep.
@@ -72469,7 +72582,7 @@ fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
         }) if matches!(count.as_ref(), QuantityExpr::Fixed { value: 7 })
     ));
     let Effect::ChooseAndSacrificeRest {
-        keeper_constraint: Some(KeeperConstraint::ExactCount { count }),
+        keeper_constraint: Some(KeeperConstraint::Count { count }),
         choose_filter,
         sacrifice_filter,
         ..
@@ -72479,6 +72592,7 @@ fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
     };
     assert_eq!(choose_filter, sacrifice_filter);
     assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+    assert!(!count.is_up_to(), "an exact keeper count is not an up-to");
     assert_eq!(
         def.sub_link,
         crate::types::ability::SubAbilityLink::ContinuationStep,
@@ -87312,16 +87426,13 @@ fn keeper_dispose_counter_head_lowers_to_the_effect_field() {
 }
 
 /// N1 — the head-verb axis. A subject the grammar does not model declines
-/// BEFORE the quantifier, so Archfiend of Depravity ("that player chooses"),
-/// Natural Balance ("each player who controls six or more lands"), Tragic
-/// Arrogance and The Eternal Wanderer ("For each player, you choose") keep
-/// their current parse. Paired positive: the same sentence with a modelled
+/// BEFORE the quantifier, so Natural Balance ("each player who controls six or
+/// more lands"), Tragic Arrogance and The Eternal Wanderer ("For each player,
+/// you choose") keep their current parse. Paired positive: the same sentence with a modelled
 /// subject is accepted.
 #[test]
 fn keeper_dispose_head_declines_an_unmodelled_subject() {
     for declined in [
-        // Archfiend of Depravity, verbatim trigger body.
-        "that player chooses up to two creatures they control, then sacrifices the rest",
         // Natural Balance, verbatim first sentence.
         "each player who controls six or more lands chooses five lands they control and sacrifices the rest",
         // Tragic Arrogance / The Eternal Wanderer [-4] head.
@@ -87337,6 +87448,45 @@ fn keeper_dispose_head_declines_an_unmodelled_subject() {
             .is_some(),
         "the same sentence with a modelled subject must be accepted"
     );
+}
+
+/// V6 — the "that player" subject (Archfiend of Depravity's trigger body) is
+/// accepted only for choose + up-to + sacrifice. The per-player Counter + UpTo
+/// and Destroy decline arms and the `ThatPlayer` exact decline arm refuse every
+/// other combination. Each `None` row differs from the Archfiend body in one
+/// axis only (head, verb or quantifier).
+#[test]
+fn keeper_dispose_head_accepts_the_that_player_subject() {
+    // Paired positive for every `None` row: Archfiend of Depravity's verbatim
+    // trigger body, lowercased.
+    let archfiend = keeper_head(
+        "that player chooses up to two creatures they control, then sacrifices the rest.",
+    )
+    .expect("Archfiend of Depravity's \"that player chooses\" body must be accepted");
+    assert_eq!(archfiend.scope, KeeperChooserScope::ThatPlayer);
+    assert_eq!(archfiend.head, KeeperHead::Choose);
+    assert_eq!(archfiend.quantifier, KeeperQuantifier::UpTo(2));
+    assert_eq!(archfiend.verb, KeeperDisposalVerb::Sacrifice);
+
+    for declined in [
+        // Synthetic — no printed card; nearest printed card: Archfiend of Depravity.
+        // The Counter + UpTo decline arm (differs only in the head).
+        "that player puts a +1/+1 counter on up to two creatures they control, then sacrifices the rest.",
+        // Synthetic — no printed card; nearest printed card: Archfiend of Depravity.
+        // The per-player Destroy decline arm (differs only in the verb).
+        "that player chooses up to two creatures they control, then destroys the rest.",
+        // Synthetic — no printed card; nearest printed card: Archfiend of Depravity.
+        // The `ThatPlayer` exact decline arm (differs only in the quantifier).
+        "that player chooses two creatures they control, then sacrifices the rest.",
+        // Synthetic — no printed card; nearest printed card: Archfiend of Depravity.
+        // The `ThatPlayer` exact decline arm, counter head.
+        "that player puts a +1/+1 counter on two creatures they control, then sacrifices the rest.",
+    ] {
+        assert!(
+            keeper_head(declined).is_none(),
+            "the gate must refuse this \"that player\" combination: {declined}"
+        );
+    }
 }
 
 /// N2 — the quantifier axis. A category list or a "from among" head prints no
@@ -87504,21 +87654,129 @@ fn keeper_dispose_head_declines_a_complement_domain_tail() {
     );
 }
 
-/// N6 — the gate's `(EachPlayer | EachOpponent, UpTo, _)` arm. Covetous Elegy
-/// is its only card: `KeeperConstraint` has exactly one variant, `ExactCount`.
-/// Minimal pair on the quantifier alone.
+/// N6 — CR 101.4 + CR 701.21a: the gate's per-player
+/// `(EachPlayer | EachOpponent, Choose, UpTo, Sacrifice)` arm accepts Covetous
+/// Elegy, while its zero-card `(EachPlayer | EachOpponent, Counter, UpTo,
+/// Sacrifice)` sibling declines. The counter rows are a minimal pair on the
+/// quantifier alone, so widening the accept arm to any head reddens the
+/// synthetic negative.
 #[test]
-fn keeper_dispose_gate_declines_a_per_player_up_to_keeper_count() {
+fn keeper_dispose_gate_accepts_a_per_player_up_to_choose_keeper() {
     // Covetous Elegy, verbatim first sentence.
+    let covetous = keeper_head(
+        "each player chooses up to two creatures they control, then sacrifices the rest.",
+    )
+    .expect("Covetous Elegy's per-player up-to keeper must be accepted");
+    assert_eq!(covetous.quantifier, KeeperQuantifier::UpTo(2));
+    assert_eq!(covetous.scope, KeeperChooserScope::EachPlayer);
+    assert_eq!(covetous.verb, KeeperDisposalVerb::Sacrifice);
+    assert_eq!(covetous.head, KeeperHead::Choose);
+
+    // Paired positive: Promise of Loyalty's exact counter head is accepted, so
+    // the decline below is the gate on the quantifier.
+    assert!(
+        keeper_head(
+            "each player puts a vow counter on a creature they control and sacrifices the rest."
+        )
+        .is_some(),
+        "the printed exact counter head must be accepted"
+    );
+
+    // Synthetic — no printed card nominates a per-player keeper by counter with an up-to count.
     assert!(keeper_head(
-        "each player chooses up to two creatures they control, then sacrifices the rest."
+        "each player puts a +1/+1 counter on up to two creatures they control, then sacrifices the rest."
     )
     .is_none());
+
+    // Synthetic — no printed card nominates a per-player keeper by counter with an up-to count.
+    // Exact twin of the negative above: only the quantifier differs.
+    let exact_twin = keeper_head(
+        "each player puts a +1/+1 counter on two creatures they control, then sacrifices the rest.",
+    )
+    .expect("the exact-count counter twin must be accepted");
+    assert_eq!(exact_twin.quantifier, KeeperQuantifier::Exact(2));
+    assert!(matches!(exact_twin.head, KeeperHead::Counter { .. }));
+    assert_eq!(exact_twin.scope, KeeperChooserScope::EachPlayer);
+    assert_eq!(exact_twin.verb, KeeperDisposalVerb::Sacrifice);
+}
+
+const COVETOUS_ELEGY_ORACLE: &str = "Each player chooses up to two creatures they control, then sacrifices the rest. Then you create a tapped Treasure token for each creature your opponents control.";
+
+/// V8 — CR 101.4 + CR 701.21a + CR 111.10a: Covetous Elegy lowers to an
+/// up-to-two per-player keeper root whose following sentence is a tapped
+/// Treasure sibling counting the caster's opponents' creatures. Reverting the
+/// gate's per-player up-to arm returns the base `TargetOnly` root.
+#[test]
+fn covetous_elegy_lowers_to_an_up_to_keeper_and_a_treasure_sibling() {
+    let parsed = sorcery(COVETOUS_ELEGY_ORACLE, "Covetous Elegy");
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(parsed.statics.is_empty(), "{:?}", parsed.statics);
     assert!(
-        keeper_head("each player chooses two creatures they control, then sacrifices the rest.")
-            .is_some(),
-        "the exact-count minimal pair must be accepted"
+        parsed.parse_warnings.is_empty(),
+        "no clause may be swallowed: {:?}",
+        parsed.parse_warnings
     );
+
+    let root = &parsed.abilities[0];
+    let Effect::ChooseAndSacrificeRest {
+        keeper_constraint: Some(KeeperConstraint::Count { count }),
+        keeper_counter: None,
+        choose_filter: TargetFilter::Typed(filter),
+        ..
+    } = root.effect.as_ref()
+    else {
+        panic!("expected an up-to keeper root, got {:?}", root.effect);
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 })
+    );
+    assert_eq!(*filter, TypedFilter::creature());
+    assert!(filter.controller.is_none());
+    assert_eq!(root.player_scope, Some(PlayerFilter::All));
+
+    let token = root
+        .sub_ability
+        .as_deref()
+        .expect("the Treasure sentence must chain as a sub-ability");
+    assert_eq!(
+        token.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling
+    );
+    assert_eq!(token.player_scope, None);
+    let Effect::Token {
+        name,
+        tapped,
+        count,
+        owner,
+        ..
+    } = token.effect.as_ref()
+    else {
+        panic!("expected a Treasure token sub, got {:?}", token.effect);
+    };
+    assert_eq!(name, "Treasure");
+    assert!(*tapped);
+    assert_eq!(*owner, TargetFilter::Controller);
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent)
+                ),
+            },
+        }
+    );
+
+    let mut chain = Some(root);
+    while let Some(def) = chain {
+        assert!(
+            !matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+            "no clause may lower to Unimplemented: {:?}",
+            def.effect
+        );
+        chain = def.sub_ability.as_deref();
+    }
 }
 
 /// N7 — the gate's `(EachPlayer | EachOpponent, _, Destroy)` arm. CR 701.8a
@@ -87784,7 +88042,7 @@ fn promise_of_loyalty_binds_outer_tracked_set_inner_selfref() {
         matches!(
             keeper.effect.as_ref(),
             Effect::ChooseAndSacrificeRest {
-                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                keeper_constraint: Some(KeeperConstraint::Count {
                     count: QuantityExpr::Fixed { value: 1 }
                 }),
                 keeper_counter: Some(KeeperCounterMark {
@@ -88483,7 +88741,7 @@ fn keeper_dispose_trigger_entry_points_scope_to_the_printed_players() {
         matches!(
             limited_body.effect.as_ref(),
             Effect::ChooseAndSacrificeRest {
-                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                keeper_constraint: Some(KeeperConstraint::Count {
                     count: QuantityExpr::Fixed { value: 5 }
                 }),
                 choose_filter: TargetFilter::Typed(filter),
@@ -88522,6 +88780,189 @@ fn keeper_dispose_trigger_entry_points_scope_to_the_printed_players() {
         Some(PlayerFilter::Opponent),
         "\"each opponent\" must scope the iteration to the opponents"
     );
+}
+
+/// Verbatim Oracle text (Scryfall, 2026-11-24).
+const ARCHFIEND_OF_DEPRAVITY_ORACLE: &str = "Flying\nAt the beginning of each opponent's end step, that player chooses up to two creatures they control, then sacrifices the rest.";
+
+/// V5 — CR 603.2b + CR 102.1 + CR 805.4d: Archfiend of Depravity's trigger
+/// body lowers to one up-to keeper scoped to the trigger's player. Ruling
+/// (2014-11-24): "This choice doesn't target the creatures", so the body has
+/// no target chooser and no `TargetOnly` root (the reverted parse).
+#[test]
+fn archfiend_of_depravity_lowers_to_a_trigger_scoped_up_to_keeper() {
+    use crate::types::ability::TriggerConstraint;
+    let parsed = parse_oracle_text(
+        ARCHFIEND_OF_DEPRAVITY_ORACLE,
+        "Archfiend of Depravity",
+        &["Flying".to_string()],
+        &["Creature".to_string()],
+        &["Demon".to_string()],
+    );
+    assert_eq!(parsed.triggers.len(), 1, "one end-step trigger");
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::End));
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn)
+    );
+    let body = trigger
+        .execute
+        .as_deref()
+        .expect("the trigger must carry a body");
+    let Effect::ChooseAndSacrificeRest {
+        keeper_constraint: Some(KeeperConstraint::Count { count }),
+        keeper_counter: None,
+        total_power_cap: None,
+        choose_filter: TargetFilter::Typed(filter),
+        ..
+    } = body.effect.as_ref()
+    else {
+        panic!(
+            "Archfiend must lower to an up-to keeper, got {:?}",
+            body.effect
+        );
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 })
+    );
+    assert!(
+        filter.type_filters.contains(&TypeFilter::Creature),
+        "the keeper domain is creatures: {filter:?}"
+    );
+    assert!(
+        filter.controller.is_none(),
+        "the seat rides on player_scope, not on the keeper filter: {filter:?}"
+    );
+    assert_eq!(body.player_scope, Some(PlayerFilter::TriggeringPlayer));
+    assert!(
+        body.sub_ability.is_none(),
+        "one link: {:?}",
+        body.sub_ability
+    );
+    assert!(body.effect.unimplemented_description().is_none());
+    assert!(body.target_chooser.is_none(), "the choice does not target");
+}
+
+/// V7 — building block: `that_player_keeper_scope` binds only a trigger
+/// event's player, and a player the chain itself declared outranks it (the
+/// shared binder's precedence). Row (a) is the paired positive; every `None`
+/// row differs from it in exactly one field.
+#[test]
+fn that_player_keeper_scope_binds_only_a_trigger_event_player() {
+    let ctx = |in_trigger: bool,
+               relative: Option<ControllerRef>,
+               declared: Option<ControllerRef>| ParseContext {
+        in_trigger,
+        relative_player_scope: relative,
+        declared_player_scope: declared,
+        ..ParseContext::default()
+    };
+    // (a) "at the beginning of each opponent's <step>, that player …".
+    assert_eq!(
+        that_player_keeper_scope(&ctx(true, Some(ControllerRef::ScopedPlayer), None)),
+        Some(PlayerFilter::TriggeringPlayer)
+    );
+    // (b) an event head's player.
+    assert_eq!(
+        that_player_keeper_scope(&ctx(true, Some(ControllerRef::TriggeringPlayer), None)),
+        Some(PlayerFilter::TriggeringPlayer)
+    );
+    // (c) a chain-declared target player outranks the trigger's player.
+    assert_eq!(
+        that_player_keeper_scope(&ctx(
+            true,
+            Some(ControllerRef::ScopedPlayer),
+            Some(ControllerRef::TargetPlayer)
+        )),
+        None
+    );
+    // (d) a chain-declared announced player outranks it too.
+    assert_eq!(
+        that_player_keeper_scope(&ctx(
+            true,
+            Some(ControllerRef::ScopedPlayer),
+            Some(ControllerRef::DeclaredPlayer {
+                group: ChosenGroupId::declared_player(0),
+            })
+        )),
+        None
+    );
+    // (e) not a trigger.
+    assert_eq!(
+        that_player_keeper_scope(&ctx(false, Some(ControllerRef::ScopedPlayer), None)),
+        None
+    );
+    // (f) no antecedent.
+    assert_eq!(that_player_keeper_scope(&ctx(true, None, None)), None);
+    // (g) a defending player is not the trigger event's player.
+    assert_eq!(
+        that_player_keeper_scope(&ctx(true, Some(ControllerRef::DefendingPlayer), None)),
+        None
+    );
+}
+
+/// V8 — charter decision 3: a "that player" keeper with no trigger-bound
+/// antecedent is one honest `Effect::unimplemented` over the whole
+/// instruction, never the general chain parser's targeted shape. Paired
+/// positive reach guard: V5, where the same body under a phase-trigger
+/// antecedent lowers fully.
+#[test]
+fn that_player_keeper_without_a_trigger_player_is_an_honest_gap() {
+    const BODY: &str =
+        "that player chooses up to two creatures they control, then sacrifices the rest";
+
+    fn chain_has_keeper_or_target_only(def: &AbilityDefinition) -> bool {
+        let mut node = Some(def);
+        while let Some(link) = node {
+            if matches!(
+                link.effect.as_ref(),
+                Effect::ChooseAndSacrificeRest { .. } | Effect::TargetOnly { .. }
+            ) {
+                return true;
+            }
+            node = link.sub_ability.as_deref();
+        }
+        false
+    }
+
+    // (a) Synthetic — no printed card; nearest printed card: Archfiend of Depravity.
+    let spell = sorcery(
+        "That player chooses up to two creatures they control, then sacrifices the rest.",
+        "Synthetic Unbound That Player",
+    );
+    let root = &spell.abilities[0];
+    assert!(
+        root.effect
+            .unimplemented_description()
+            .is_some_and(|fragment| fragment.eq_ignore_ascii_case(BODY)),
+        "an unbound \"that player\" keeper must be one honest gap, got {:?}",
+        root.effect
+    );
+    assert!(!chain_has_keeper_or_target_only(root), "{root:?}");
+
+    // (b) Synthetic — no printed card; nearest printed card: Archfiend of Depravity.
+    let attack = parse_oracle_text(
+        "Whenever this creature attacks a player, that player chooses up to two creatures they control, then sacrifices the rest.",
+        "Synthetic Defending That Player",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let body = attack.triggers[0]
+        .execute
+        .as_deref()
+        .expect("the trigger must carry a body");
+    assert!(
+        body.effect
+            .unimplemented_description()
+            .is_some_and(|fragment| fragment.eq_ignore_ascii_case(BODY)),
+        "a defending-player antecedent is not the trigger event's player, got {:?}",
+        body.effect
+    );
+    assert!(!chain_has_keeper_or_target_only(body), "{body:?}");
 }
 
 // ---------------------------------------------------------------------------
