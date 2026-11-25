@@ -2383,3 +2383,374 @@ fn teammate_until_stack_empty_preserves_representative_counterspell_on_bolt_wind
         "P1's preference must stay honored"
     );
 }
+
+// Review-3 (F1, F2) regression imports.
+use engine::game::companion::can_activate_companion;
+use engine::game::deck_loading::DeckEntry;
+use engine::game::players::team_life_total;
+use engine::types::card::CardFace;
+use engine::types::display_only::DisplayOnly;
+use engine::types::game_state::PriorityPassingMode;
+use engine::types::player::CompanionInfo;
+
+/// Parks P0 with two Soul Warden triggers on the stack ("Whenever another
+/// creature enters, you gain 1 life.") from P0's Raise the Alarm ("Create two
+/// 1/1 white Soldier creature tokens."), installs P0's Own Resolve All
+/// (Committed) session, and drives one unanimous pass cycle: the session
+/// auto-drives P0's own pass, then P1/P2/P3 pass explicitly. Returns the
+/// runner with the batch consumed, plus P1's Stifle ("Counter target activated
+/// or triggered ability. (Mana abilities can't be targeted.)").
+fn committed_warden_pass_cycle(full_control_p1: bool) -> (GameRunner, ObjectId) {
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let mut sc = team_turn_board();
+    sc.add_real_card(P0, "Soul Warden", Zone::Battlefield, db);
+    let alarm = sc.add_real_card(P0, "Raise the Alarm", Zone::Hand, db);
+    sc.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+        ],
+    );
+    let stifle = sc.add_real_card(P1, "Stifle", Zone::Hand, db);
+    sc.with_mana_pool(
+        P1,
+        vec![ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])],
+    );
+    let mut runner = sc.build();
+    park_p0(&mut runner);
+    if full_control_p1 {
+        game_engine::apply(
+            runner.state_mut(),
+            P1,
+            GameAction::SetPriorityPassingMode {
+                mode: PriorityPassingMode::FullControl,
+            },
+        )
+        .expect("P1 enables Full Control");
+    }
+
+    // P0 casts Raise the Alarm; both teams pass so it resolves.
+    let _committed = runner.cast(alarm).commit();
+    assert_eq!(runner.stack_names(), ["Raise the Alarm"]);
+    runner
+        .pass_holding_team()
+        .expect("active team passes over the Alarm");
+    runner
+        .pass_holding_team()
+        .expect("opposing team passes; the Alarm resolves");
+    // The Alarm resolved into two Soldier tokens and two identical Warden
+    // triggers, which queue without an ordering prompt (nothing to order).
+    assert_eq!(runner.stack_names(), ["Soul Warden", "Soul Warden"]);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "priority must return to P0, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // P0 chooses resolve-until-stack-empty; the session auto-drives P0's own
+    // pass, then P1/P2/P3 pass explicitly: one unanimous pass cycle.
+    game_engine::apply(
+        runner.state_mut(),
+        P0,
+        GameAction::BeginResolveAll {
+            max_resolutions: 0,
+            scope: ResolveAllScope::Own,
+        },
+    )
+    .expect("P0 begins Own Resolve All");
+    assert!(
+        runner.state().priority_passes.contains(&P0),
+        "the session must auto-drive P0's own pass"
+    );
+    for (seat, name) in [(P1, "P1"), (P2, "P2"), (P3, "P3")] {
+        game_engine::apply(runner.state_mut(), seat, GameAction::PassPriority)
+            .unwrap_or_else(|err| panic!("{name} passes explicitly: {err:?}"));
+    }
+    (runner, stifle)
+}
+
+/// CR 732.2b + CR 805.5b: a Committed batch checks Full Control for every
+/// living member of each participant's team, not just the representatives.
+/// With P1's Full Control on, one unanimous pass cycle resolves exactly one
+/// Warden trigger and leaves the second pending with Stifle castable.
+/// Regression (maintainer Review-3 F1): the authorization read only P0 and
+/// P2, so both triggers resolved and P1 never got the window after the first.
+#[test]
+fn committed_batch_stops_for_teammate_full_control_window() {
+    let (mut runner, stifle) = committed_warden_pass_cycle(true);
+
+    assert_eq!(
+        runner.stack_names(),
+        ["Soul Warden"],
+        "exactly one trigger must resolve under the unanimous cycle"
+    );
+    assert_eq!(
+        team_life_total(runner.state(), P0),
+        31,
+        "one resolved trigger gains exactly 1 team life"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "priority must return to P0 with the second trigger pending, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // P1 Stifles the pending trigger through the public boundary.
+    let pending = runner
+        .state()
+        .stack
+        .back()
+        .expect("the second trigger stays pending")
+        .id;
+    teammate_cast(&mut runner, P1, stifle, TargetRef::Object(pending));
+    assert_eq!(runner.stack_names(), ["Soul Warden", "Stifle"]);
+    runner
+        .pass_holding_team()
+        .expect("first pass round over Stifle");
+    runner
+        .pass_holding_team()
+        .expect("second pass round; Stifle resolves");
+    assert!(
+        runner.state().stack.is_empty(),
+        "Stifle must counter the pending trigger"
+    );
+    assert_eq!(
+        team_life_total(runner.state(), P0),
+        31,
+        "the countered trigger gains no life"
+    );
+    assert_eq!(
+        runner.state().objects[&stifle].zone,
+        Zone::Graveyard,
+        "Stifle must have been cast"
+    );
+}
+
+/// Control for `committed_batch_stops_for_teammate_full_control_window`: with
+/// no Full Control anywhere, the same unanimous cycle batches both triggers.
+/// Without this row the main test could pass vacuously (a session that never
+/// batches also leaves "one pending" false — the limit must demonstrably be
+/// the Full Control check, not a session that resolves one at a time anyway).
+#[test]
+fn committed_batch_without_full_control_resolves_both_triggers() {
+    let (runner, _) = committed_warden_pass_cycle(false);
+
+    assert!(
+        runner.state().stack.is_empty(),
+        "both triggers must resolve without Full Control, got {:?}",
+        runner.stack_names()
+    );
+    assert_eq!(
+        team_life_total(runner.state(), P0),
+        32,
+        "both resolved triggers gain exactly 2 team life"
+    );
+}
+
+/// Declares Kaheera, the Orphanguard as `player`'s companion (fixture setup:
+/// the deckbuilding condition is not under test). Kaheera's Oracle text
+/// (client/public/card-data.json): "Companion — Each creature card in your
+/// starting deck is a Cat, Elemental, Nightmare, Dinosaur, or Beast card. (If
+/// this card is your chosen companion, you may put it into your hand from
+/// outside the game for {3} as a sorcery.)"
+fn set_declared_kaheera(runner: &mut GameRunner, player: PlayerId) {
+    runner.state_mut().players[player.0 as usize].companion = Some(CompanionInfo {
+        card: DeckEntry {
+            card: CardFace {
+                name: "Kaheera, the Orphanguard".to_string(),
+                ..Default::default()
+            },
+            count: 1,
+        },
+        used: false,
+        printing: DisplayOnly::default(),
+    });
+}
+
+/// Stages a team main-phase window with an empty stack, priority parked on
+/// P0, and `player` holding 3 green in pool for the {3} companion cost.
+fn kaheera_board(player: PlayerId) -> GameRunner {
+    let mut sc = team_turn_board();
+    sc.with_mana_pool(
+        player,
+        vec![
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = sc.build();
+    park_p0(&mut runner);
+    set_declared_kaheera(&mut runner, player);
+    assert!(
+        runner.state().stack.is_empty(),
+        "the companion window needs an empty stack"
+    );
+    runner
+}
+
+/// CR 116.2g + CR 702.139a + CR 805.5a: P1's companion special action is
+/// offered and accepted on the team's main phase while priority is parked on
+/// P0. Regression (maintainer Review-3 F2): the timing check required the
+/// exact active player, so the teammate was never offered the action and a
+/// direct submission failed because the active seat is P0.
+#[test]
+fn teammate_companion_offered_and_accepted_on_team_main_phase() {
+    let mut runner = kaheera_board(P1);
+
+    let (actions, _, _) = ai_support::legal_actions_for_viewer(runner.state(), P1);
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, GameAction::CompanionToHand)),
+        "P1 must be offered the companion action on the team's turn, got {actions:?}"
+    );
+    let result = game_engine::apply(runner.state_mut(), P1, GameAction::CompanionToHand)
+        .expect("teammate companion action must be accepted on team priority");
+    assert!(
+        runner.state().players[P1.0 as usize]
+            .companion
+            .as_ref()
+            .is_some_and(|companion| companion.used),
+        "the companion must be marked used"
+    );
+    assert!(
+        runner.state().objects.values().any(|object| {
+            object.owner == P1
+                && object.zone == Zone::Hand
+                && object.name == "Kaheera, the Orphanguard"
+        }),
+        "Kaheera must move to P1's hand"
+    );
+    assert_eq!(
+        runner.state().players[P1.0 as usize].mana_pool.total(),
+        0,
+        "the {{3}} companion cost must be paid"
+    );
+    assert!(
+        result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::CompanionMovedToHand { player, card_name }
+                if *player == P1 && card_name == "Kaheera, the Orphanguard"
+        )),
+        "the companion move must emit its event"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P1
+        ),
+        "post: the actor holds the window, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 116.2g + CR 805.5a: the teammate's companion action stays refused on
+/// the opposing team's turn. P2's own offer on the same window is the reach
+/// guard: the window supports companion offers, only the team scoping
+/// excludes P1.
+#[test]
+fn teammate_companion_refused_on_opposing_team_turn() {
+    let mut runner = kaheera_board(P1);
+    runner.state_mut().players[P2.0 as usize]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
+    runner.state_mut().players[P2.0 as usize]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
+    runner.state_mut().players[P2.0 as usize]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
+    set_declared_kaheera(&mut runner, P2);
+    // The opposing team's main-phase window, empty stack.
+    runner.state_mut().active_player = P2;
+    runner.state_mut().priority_player = P2;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P2 };
+
+    let (p2_actions, _, _) = ai_support::legal_actions_for_viewer(runner.state(), P2);
+    assert!(
+        p2_actions
+            .iter()
+            .any(|action| matches!(action, GameAction::CompanionToHand)),
+        "reach guard: P2 must be offered the companion action on its own turn, got {p2_actions:?}"
+    );
+    assert!(
+        !can_activate_companion(runner.state(), P1),
+        "P1's companion timing must fail on the opposing team's turn"
+    );
+    let (p1_actions, _, _) = ai_support::legal_actions_for_viewer(runner.state(), P1);
+    assert!(
+        !p1_actions
+            .iter()
+            .any(|action| matches!(action, GameAction::CompanionToHand)),
+        "P1 must not be offered the companion action on the opposing turn"
+    );
+    assert!(
+        game_engine::apply(runner.state_mut(), P1, GameAction::CompanionToHand).is_err(),
+        "the public boundary must refuse P1's companion action on the opposing turn"
+    );
+    assert!(
+        runner.state().players[P1.0 as usize]
+            .companion
+            .as_ref()
+            .is_some_and(|companion| !companion.used),
+        "the refused action must not mark the companion used"
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .all(|object| object.name != "Kaheera, the Orphanguard"
+                || object.zone != Zone::Hand
+                || object.owner != P1),
+        "the refused action must not move Kaheera to P1's hand"
+    );
+}
+
+/// CR 116.2g + CR 805.5a: the teammate's companion action stays refused
+/// outside main phases, even on the team's own turn with team priority. P1 is
+/// an authorized submitter on this window, so the refusal error proves the
+/// attempt reached the sorcery-speed timing check.
+#[test]
+fn teammate_companion_refused_outside_main_phase() {
+    let mut runner = kaheera_board(P1);
+    runner.state_mut().phase = Phase::Upkeep;
+    // Reach guards: the companion is declared, unused and funded; the stack
+    // is empty; P0's team holds its own turn and priority.
+    assert!(
+        runner.state().players[P1.0 as usize]
+            .companion
+            .as_ref()
+            .is_some_and(|companion| !companion.used),
+        "reach guard: P1's companion is declared and unused"
+    );
+    assert_eq!(
+        runner.state().players[P1.0 as usize].mana_pool.total(),
+        3,
+        "reach guard: P1 can pay {{3}}"
+    );
+    assert!(runner.state().stack.is_empty(), "reach guard: empty stack");
+    assert_eq!(runner.state().active_player, P0, "reach guard: own turn");
+
+    let (actions, _, _) = ai_support::legal_actions_for_viewer(runner.state(), P1);
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, GameAction::CompanionToHand)),
+        "P1 must not be offered the companion action outside main phases"
+    );
+    let err = game_engine::apply(runner.state_mut(), P1, GameAction::CompanionToHand)
+        .expect_err("the public boundary must refuse the companion action outside main phases");
+    assert!(
+        matches!(err, game_engine::EngineError::InvalidAction(ref msg) if msg.contains("sorcery speed")),
+        "the refusal must come from the timing check, got {err:?}"
+    );
+}
