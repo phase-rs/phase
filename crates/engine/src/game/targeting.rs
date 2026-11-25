@@ -996,9 +996,27 @@ pub(crate) enum TriggeringSpell<'a> {
 /// trigger went on the stack. Read the resolving carrier, not a possibly fresh
 /// executing branch. Never manufacture a pin from a later same-id object.
 pub(crate) fn triggering_spell_identity(state: &GameState) -> Option<ObjectIncarnationRef> {
-    let GameEvent::SpellCast { object_id, .. } = state.current_trigger_event.as_ref()? else {
+    triggering_spell_identity_for_event(state, state.current_trigger_event.as_ref()?)
+}
+
+pub(crate) fn triggering_spell_identity_for_event(
+    state: &GameState,
+    event: &GameEvent,
+) -> Option<ObjectIncarnationRef> {
+    let GameEvent::SpellCast {
+        object_id,
+        cast_incarnation,
+        ..
+    } = event
+    else {
         return None;
     };
+    if let Some(incarnation) = cast_incarnation {
+        return Some(ObjectIncarnationRef::of(*object_id, *incarnation));
+    }
+    if state.current_trigger_event.as_ref() != Some(event) {
+        return None;
+    }
     state
         .resolving_stack_entry
         .as_ref()
@@ -1015,11 +1033,19 @@ pub(crate) fn triggering_spell_identity(state: &GameState) -> Option<ObjectIncar
 /// pinned incarnation, when a pin exists) → the pinned or newest departed
 /// record → `Gone`.
 pub(crate) fn triggering_spell(state: &GameState) -> Option<TriggeringSpell<'_>> {
-    let GameEvent::SpellCast { object_id, .. } = state.current_trigger_event.as_ref()? else {
+    triggering_spell_for_event(state, state.current_trigger_event.as_ref()?)
+}
+
+/// CR 400.7: Use the event's own incarnation even before resolution installs it.
+pub(crate) fn triggering_spell_for_event<'a>(
+    state: &'a GameState,
+    event: &GameEvent,
+) -> Option<TriggeringSpell<'a>> {
+    let GameEvent::SpellCast { object_id, .. } = event else {
         return None;
     };
     let object_id = *object_id;
-    let pin = triggering_spell_identity(state);
+    let pin = triggering_spell_identity_for_event(state, event);
 
     let on_stack = state.objects.get(&object_id).is_some_and(|obj| {
         obj.zone == Zone::Stack && pin.is_none_or(|pin| pin.incarnation == obj.incarnation)
@@ -6091,6 +6117,8 @@ mod tests {
             object_id: spell_id,
             controller: PlayerId(0),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         assert_eq!(
             resolve_event_context_target(&state, &TargetFilter::StackSpell, ObjectId(20)),
@@ -10116,6 +10144,8 @@ mod tests {
             object_id: ObjectId(100),
             card_id: CardId(1),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         assert!(
             triggering_activation(&state).is_none(),
@@ -11147,6 +11177,8 @@ mod inferred_source_anaphor_tests {
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         assert_eq!(
             referents(&state, &ability, &TargetFilter::ParentTarget),
@@ -11194,6 +11226,8 @@ mod inferred_source_anaphor_tests {
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
     }
 

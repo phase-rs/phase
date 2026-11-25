@@ -114,7 +114,14 @@ mod tests {
             entry.ability_mut().unwrap().context.triggering_spell =
                 Some(ObjectIncarnationRef::of(ballista, incarnation));
             state.resolving_stack_entry = Some(entry.clone());
-            state.current_trigger_event = event.clone();
+            let mut cast_event = event.clone();
+            if let Some(GameEvent::SpellCast {
+                cast_incarnation, ..
+            }) = &mut cast_event
+            {
+                *cast_incarnation = Some(incarnation);
+            }
+            state.current_trigger_event = cast_event;
             let mut events = Vec::new();
             resolve(state, entry.ability().unwrap(), &mut events).unwrap();
             events

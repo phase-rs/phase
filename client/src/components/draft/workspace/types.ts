@@ -1,4 +1,8 @@
+import type { DraftPoolGroupKind } from "../../../adapter/draft-adapter";
+import type { DraftBoardSort } from "./workspacePreferences";
+
 export const DRAFT_WORKSPACE_SCHEMA_VERSION = 1 as const;
+export const DRAFT_WORKSPACE_COLUMN_MIN = 2;
 export const DRAFT_WORKSPACE_COLUMN_MAX = 20;
 export const MAX_MATERIALIZED_VIRTUAL_BASICS = 1000;
 export const MAX_DRAFT_WORKSPACE_NETWORK_PLACEMENTS = 4096;
@@ -19,10 +23,25 @@ export interface DraftWorkspaceVirtualBasic {
   name: string;
 }
 
+export const SORT_GROUP_KINDS: Readonly<Record<DraftBoardSort, ReadonlySet<DraftPoolGroupKind>>> = {
+  cmc: new Set(["mana_value0", "mana_value1", "mana_value2", "mana_value3", "mana_value4", "mana_value5", "mana_value6_plus"]),
+  color: new Set(["white", "blue", "black", "red", "green", "multicolor", "colorless"]),
+  rarity: new Set(["mythic", "rare", "uncommon", "common", "rarity_other"]),
+  type: new Set(["creature", "instant", "sorcery", "enchantment", "artifact", "planeswalker", "land", "other"]),
+};
+
+export interface RecordedSortLayout {
+  readonly sort: Exclude<DraftBoardSort, "cmc">;
+  readonly columnCount: number;
+  readonly columns: Readonly<Partial<Record<DraftPoolGroupKind, number>>>;
+}
+
 export interface DraftWorkspaceState {
   schemaVersion: typeof DRAFT_WORKSPACE_SCHEMA_VERSION;
   placements: Record<string, DraftCardPlacement>;
   virtualBasics: DraftWorkspaceVirtualBasic[];
+  /** Group columns from the last sort, including groups that have since left the zone. */
+  readonly recordedSortLayouts?: Readonly<Partial<Record<DraftZone, RecordedSortLayout>>>;
 }
 
 export function isPlainRecord(value: unknown): value is Record<PropertyKey, unknown> {
@@ -52,13 +71,56 @@ function isSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value);
 }
 
+function validateRecordedSortLayouts(raw: unknown): DraftWorkspaceState["recordedSortLayouts"] {
+  if (!isPlainRecord(raw)) return undefined;
+
+  const zoneKeys = Reflect.ownKeys(raw);
+  const layouts: Partial<Record<DraftZone, RecordedSortLayout>> = {};
+  for (const zone of zoneKeys) {
+    if (
+      (zone !== "deck" && zone !== "sideboard")
+      || !Object.prototype.propertyIsEnumerable.call(raw, zone)
+    ) return undefined;
+
+    const layout = raw[zone];
+    if (!isPlainRecord(layout) || !hasExactEnumerableKeys(layout, ["sort", "columnCount", "columns"])) {
+      return undefined;
+    }
+    const { sort, columnCount, columns: rawColumns } = layout;
+    if (sort !== "color" && sort !== "rarity" && sort !== "type") return undefined;
+    if (
+      !isSafeInteger(columnCount)
+      || columnCount < DRAFT_WORKSPACE_COLUMN_MIN
+      || columnCount > DRAFT_WORKSPACE_COLUMN_MAX
+      || !isPlainRecord(rawColumns)
+    ) return undefined;
+
+    const columns: Partial<Record<DraftPoolGroupKind, number>> = {};
+    for (const kind of Reflect.ownKeys(rawColumns)) {
+      if (
+        typeof kind !== "string"
+        || !SORT_GROUP_KINDS[sort].has(kind as DraftPoolGroupKind)
+        || !Object.prototype.propertyIsEnumerable.call(rawColumns, kind)
+      ) return undefined;
+      const column = rawColumns[kind];
+      if (!isSafeInteger(column) || column < 0 || column >= columnCount) return undefined;
+      columns[kind as DraftPoolGroupKind] = column;
+    }
+    layouts[zone] = { sort, columnCount, columns };
+  }
+  return layouts;
+}
+
 export function validateWorkspaceState(
   raw: unknown,
   { maxPlacementCount }: { maxPlacementCount?: number } = {},
 ): DraftWorkspaceState | { error: string } {
   try {
     if (!isPlainRecord(raw)) return { error: "workspace state must be a plain object" };
-    if (!hasExactEnumerableKeys(raw, ["schemaVersion", "placements", "virtualBasics"])) {
+    const fields = ["schemaVersion", "placements", "virtualBasics"];
+    const hasRecordedSortLayouts = Object.prototype.hasOwnProperty.call(raw, "recordedSortLayouts");
+    if (hasRecordedSortLayouts) fields.push("recordedSortLayouts");
+    if (!hasExactEnumerableKeys(raw, fields)) {
       return { error: "workspace state has invalid fields" };
     }
     if (raw.schemaVersion !== DRAFT_WORKSPACE_SCHEMA_VERSION) {
@@ -144,7 +206,11 @@ export function validateWorkspaceState(
       virtualBasics.push({ instanceId: basic.instanceId, name: basic.name });
     }
 
-    return { schemaVersion: DRAFT_WORKSPACE_SCHEMA_VERSION, placements, virtualBasics };
+    const workspace = { schemaVersion: DRAFT_WORKSPACE_SCHEMA_VERSION, placements, virtualBasics };
+    if (!hasRecordedSortLayouts) return workspace;
+    const recordedSortLayouts = validateRecordedSortLayouts(raw.recordedSortLayouts);
+    if (recordedSortLayouts === undefined) return { error: "workspace state has invalid recorded sort layouts" };
+    return { ...workspace, recordedSortLayouts };
   } catch {
     return { error: "workspace state could not be inspected" };
   }

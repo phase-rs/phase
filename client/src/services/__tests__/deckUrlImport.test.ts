@@ -6,16 +6,15 @@ import { resolveCommander } from "../commanderResolution";
 import { detectAndParseDeck, type ParsedDeck } from "../deckParser";
 import { useConnectivityStore } from "../../stores/connectivityStore";
 
-// resolveCommander delegates commander eligibility to the WASM engine; every
-// fixture below carries an explicit commander/sideboard so resolveCommander
-// short-circuits before this is ever called, but mock it so the module graph
-// never touches WASM during the test run.
+import { inferCommander } from "../engineRuntime";
+
 vi.mock("../engineRuntime", () => ({
-  isCardCommanderEligible: vi.fn().mockResolvedValue(true),
+  inferCommander: vi.fn(),
 }));
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  vi.mocked(inferCommander).mockReset().mockResolvedValue(null);
   useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
 });
 
@@ -270,6 +269,17 @@ describe("fetchDeckFromUrl — format coverage", () => {
       detectAndParseDeck(await fetchDeckFromUrl("https://moxfield.com/decks/sample")),
     );
     assertShape(deck, shape);
+    if (shape === "mainOnly") {
+      const rows = [
+        { name: "Mountain", count: 17 },
+        { name: "Shock", count: 2 },
+        { name: "Goblin Tutor", count: 1 },
+      ];
+      expect(vi.mocked(inferCommander).mock.calls).toEqual([[rows]]);
+      expect(deck.main).toEqual(rows);
+    } else {
+      expect(inferCommander).not.toHaveBeenCalled();
+    }
   });
 
   it("preserves a companion alongside main + sideboard", async () => {

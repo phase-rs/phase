@@ -1088,10 +1088,14 @@ pub enum CategoryChooserScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum KeeperConstraint {
-    /// The chooser must protect exactly this many eligible permanents. If fewer
-    /// are eligible, the instruction does as much as possible and protects all
-    /// of them (CR 609.3).
-    ExactCount { count: QuantityExpr },
+    /// CR 101.4 + CR 701.21a: the chooser protects `count` eligible permanents.
+    /// A bare count is exact; if fewer are eligible, the chooser protects all of
+    /// them (CR 609.3). A `QuantityExpr::UpTo` count lets the chooser protect any
+    /// number from zero to its bound (Covetous Elegy: "Players may choose fewer
+    /// than two creatures even if they control two or more creatures.").
+    /// `exact_count` is the legacy serialized tag.
+    #[serde(alias = "exact_count")]
+    Count { count: QuantityExpr },
 }
 
 /// CR 122.1 + CR 608.2c: the counter a keeper-and-dispose instruction places to
@@ -7600,6 +7604,19 @@ pub enum FilterProp {
         comparator: Comparator,
         count: u8,
     },
+    /// CR 205.2a: Matches objects by distinct card-type count ("a card with two
+    /// or more card types" — Rendmaw, Creaking Nest; Visitor from Planet Q).
+    /// Counts distinct [`CoreType`] values of the object's `core_types`, the same
+    /// source type matching reads: supertypes (CR 205.4a) and subtypes (CR 205.3)
+    /// never count, and a Tribal single counts 1 under any wording. The
+    /// Tribal+Kindred pair vector is empty and Boss/Event never appear on a
+    /// playable card, so the stored-value count equals the CR 205.2a count on
+    /// every reachable object. Parameterized over [`Comparator`] like
+    /// `ColorCount`, so other thresholds need no new variant.
+    CardTypeCount {
+        comparator: Comparator,
+        count: u8,
+    },
     /// CR 107.4 + CR 202.1: Matches objects whose count of colored mana symbols
     /// in the printed mana cost satisfies `comparator` against `value`.
     /// `color: Some(c)` counts symbols contributing to color `c` (hybrid /
@@ -8112,6 +8129,7 @@ impl FilterProp {
             | FilterProp::HasColor { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -9359,6 +9377,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -9622,6 +9641,7 @@ pub fn filter_prop_contains(prop: &FilterProp, leaf: &dyn Fn(&TargetFilter) -> b
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -9921,6 +9941,7 @@ pub fn filter_prop_grammar_any(
             | FilterProp::HasColor { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -10586,6 +10607,7 @@ pub fn rewrite_filter_prop<C>(
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -13082,6 +13104,7 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -19349,6 +19372,19 @@ pub enum ParsedCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         specific: Option<crate::types::dungeon::DungeonId>,
     },
+    /// CR 725.1 + CR 109.5: True when the activating player holds the monarch
+    /// designation. Crown of Gondor's equip discount uses this condition in an
+    /// activation instruction (CR 602.1b) applied during total cost determination
+    /// (CR 602.2b + CR 601.2f). Like the city's blessing, the enduring story and
+    /// dungeon completion, it reads a status off the scoped player, so
+    /// `static_condition_to_restriction_condition` converts it exactly.
+    ///
+    /// Activator-relative like `HasCityBlessing`, because the printed clause is
+    /// addressed to whoever is activating ("if you're"). CR 602.2 lets an
+    /// `activator_filter` of `PlayerFilter::All` make the activator someone
+    /// other than the source's controller, and the designation read must follow
+    /// that player. The leaf is false when no player is the monarch.
+    IsMonarch,
     /// CR 702.178a: True when the SOURCE's player has max speed — its
     /// controller on the battlefield, its owner anywhere else, per the "Max
     /// Speed" glossary entry (sense 2). Unlike its designation siblings above,
@@ -26536,7 +26572,7 @@ pub enum Effect {
         /// unchosen permanents are sacrificed — the printed order. CR 614.1: replacement
         /// effects "apply continuously as events happen", so a would-be multiplier that
         /// is itself about to be sacrificed must still be on the battlefield when the
-        /// mark is placed. Only valid together with `KeeperConstraint::ExactCount`;
+        /// mark is placed. Only valid together with `KeeperConstraint::Count`;
         /// `choose_and_sacrifice_rest::resolve` refuses any other mode.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         keeper_counter: Option<KeeperCounterMark>,
@@ -29784,6 +29820,7 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -34687,7 +34724,7 @@ macro_rules! define_effect_quantity_walk {
     /// (`ChangeZoneAll`/`PutAtLibraryPosition`/`Conjure`/`Counter`'s
     /// countered-spell destination), `UntilCondition::CumulativeThreshold`
     /// (`ExileFromTopUntil`), `GuessSubject::Proposition` (`OpponentGuess`),
-    /// `KeeperConstraint::ExactCount` and `KeeperCounterMark::count`
+    /// `KeeperConstraint::Count` and `KeeperCounterMark::count`
     /// (`ChooseAndSacrificeRest`), and each `ConjureCard::count`.
     ///
     /// Deliberately NOT walked: quantities inside deferred definition
@@ -35056,7 +35093,7 @@ macro_rules! define_effect_quantity_walk {
                 // live when the chooser prompt is built.
                 if let Some(constraint) = keeper_constraint {
                     match constraint {
-                        KeeperConstraint::ExactCount { count } => f(count),
+                        KeeperConstraint::Count { count } => f(count),
                     }
                 }
                 // CR 608.2c + CR 122.1: the printed keeper mark's count.
@@ -39631,19 +39668,11 @@ pub enum AbilityCondition {
         )]
         subject: ObjectScope,
     },
-    /// CR 601.2c + CR 608.2c + CR 115.1: True iff the parent ability actually has
-    /// at least one *object* target. Guards reflexive-target riders ("If that
-    /// creature …, …") against the optional-declined-target case: when a
-    /// variable-number-of-targets antecedent ("destroy up to one target
-    /// creature") is announced with zero targets (CR 601.2c), the anaphor "that
-    /// creature" has no antecedent (CR 608.2c — read the whole text), so the
-    /// rider must not fire. `evaluate_condition` checks the resolved ability's
-    /// declared targets (CR 115.1) for a `TargetRef::Object`, with NO
-    /// `TriggeringSource` fallback (unlike `TargetMatchesFilter`), so a declined
-    /// optional target reads false. The lowering pass conjoins this with the
-    /// reflexive sub-condition (`And{[HasObjectTarget, …]}`) only when the
-    /// antecedent's `multi_target.min_is_fixed_zero()` — a no-op for
-    /// mandatory-single-target cards (`multi_target == None`).
+    /// CR 608.2c + CR 601.2c + CR 115.6: Guard reflexive object riders
+    /// against an absent antecedent, including a declined optional target.
+    /// Referent selection follows the resolver's chain and event-context rules.
+    /// This guard alone does not establish that an object received damage;
+    /// damage riders must also check the preceding instruction's actual result.
     HasObjectTarget,
     /// CR 608.2c + CR 603.2: "if it targets a [filter]" on a triggered ability —
     /// gates the sub_ability on whether the triggering spell's chosen targets
@@ -48557,7 +48586,7 @@ mod tests {
     }
 
     /// V-QE: `ChooseAndSacrificeRest`'s TWO secondary quantity slots —
-    /// `keeper_constraint`'s `ExactCount { count }` and `keeper_counter`'s
+    /// `keeper_constraint`'s `Count { count }` and `keeper_counter`'s
     /// `KeeperCounterMark::count` — are both visited, and in that order. No
     /// pre-existing completeness test enumerated the CSR arm's slots (grepped
     /// this module for a `for_each_quantity_expr` walk keyed to
@@ -48573,7 +48602,7 @@ mod tests {
             choose_filter: TargetFilter::Typed(TypedFilter::creature()),
             sacrifice_filter: TargetFilter::Typed(TypedFilter::creature()),
             total_power_cap: None,
-            keeper_constraint: Some(KeeperConstraint::ExactCount {
+            keeper_constraint: Some(KeeperConstraint::Count {
                 count: keeper_count.clone(),
             }),
             keeper_counter: Some(KeeperCounterMark {
@@ -48585,7 +48614,7 @@ mod tests {
         effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
         assert_eq!(visited, vec![keeper_count, mark_count]);
 
-        // A `keeper_counter: None` construction yields only the `ExactCount` expr.
+        // A `keeper_counter: None` construction yields only the `Count` expr.
         let Effect::ChooseAndSacrificeRest {
             keeper_counter: mark_slot,
             ..
@@ -48602,6 +48631,33 @@ mod tests {
         let mut visited_none = Vec::new();
         none_effect.for_each_quantity_expr(&mut |quantity| visited_none.push(quantity.clone()));
         assert_eq!(visited_none, vec![QuantityExpr::Fixed { value: 1 }]);
+    }
+
+    /// CR 101.4 + CR 701.21a: `KeeperConstraint::Count` still reads the legacy
+    /// `exact_count` tag (saved games, older card data), serializes the new
+    /// `count` tag, and round-trips an "up to" count (Covetous Elegy).
+    #[test]
+    fn keeper_constraint_count_reads_the_legacy_exact_count_tag() {
+        let legacy: KeeperConstraint =
+            serde_json::from_str(r#"{"type":"exact_count","count":{"type":"Fixed","value":5}}"#)
+                .expect("legacy exact_count tag must deserialize");
+        assert_eq!(
+            legacy,
+            KeeperConstraint::Count {
+                count: QuantityExpr::Fixed { value: 5 }
+            }
+        );
+        let written = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(written["type"], "count");
+
+        let up_to = KeeperConstraint::Count {
+            count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }),
+        };
+        let json = serde_json::to_string(&up_to).unwrap();
+        let back: KeeperConstraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, up_to);
+        let KeeperConstraint::Count { count } = &back;
+        assert!(count.is_up_to());
     }
 
     /// CR 109.1: `with_own_cast_exclusion` injects the `Another` marker and

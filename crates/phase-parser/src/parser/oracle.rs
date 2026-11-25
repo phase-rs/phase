@@ -245,17 +245,40 @@ fn definition_grants_flashback(def: &AbilityDefinition) -> bool {
 }
 
 pub fn parse_attack_exert_header(input: &str) -> OracleResult<'_, Option<StaticCondition>> {
+    map(parse_attack_exert_header_parts, |header| header.condition).parse(input)
+}
+
+/// CR 508.1g + CR 701.43a: the parts of an "[if <condition>, ]you may exert <object> as
+/// <subject> attacks" header, so the swallow audit can tie the gate to the same attacker
+/// without re-implementing this grammar.
+pub(super) struct AttackExertHeader<'a> {
+    pub condition: Option<StaticCondition>,
+    pub exerted_object: &'a str,
+    pub attacking_subject: &'a str,
+}
+
+pub(super) fn parse_attack_exert_header_parts(
+    input: &str,
+) -> OracleResult<'_, AttackExertHeader<'_>> {
     let (input, condition) = opt(preceded(
         tag("if "),
         terminated(parse_inner_condition, tag(", ")),
     ))
     .parse(input)?;
     let (input, _) = tag("you may exert ").parse(input)?;
-    let (input, _) = take_until(" as ").parse(input)?;
+    let (input, exerted_object) = take_until(" as ").parse(input)?;
     let (input, _) = tag(" as ").parse(input)?;
-    let (input, _) = alt((tag("it"), tag("he"), tag("she"), tag("they"))).parse(input)?;
+    let (input, attacking_subject) =
+        alt((tag("it"), tag("he"), tag("she"), tag("they"))).parse(input)?;
     let (input, _) = tag(" attacks").parse(input)?;
-    Ok((input, condition))
+    Ok((
+        input,
+        AttackExertHeader {
+            condition,
+            exerted_object,
+            attacking_subject,
+        },
+    ))
 }
 
 pub fn parse_unknown_conditioned_attack_exert_header(input: &str) -> OracleResult<'_, ()> {
@@ -5249,6 +5272,7 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         &result,
         &tracks,
     );
+    crate::parser::oracle_effect::reject_unbound_life_loss_difference(&mut result);
     let mut swallow_diagnostics = Vec::new();
     super::swallow_check::check_swallowed_clauses(
         &audit_items,

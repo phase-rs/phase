@@ -21,11 +21,12 @@ use super::turn_control;
 
 pub const HIDDEN_CARD_NAME: &str = "Hidden Card";
 
-/// Resolution-only look-result provenance is never part of a viewer snapshot.
+/// Resolution-only look and damage provenance is never part of a viewer snapshot.
 /// The engine retains it for the active loop, while clients need only the
 /// public prompt and the card identities they are otherwise allowed to see.
 fn redact_parent_target_iteration_members(ability: &mut crate::types::ability::ResolvedAbility) {
     ability.context.parent_target_iteration_members = None;
+    ability.context.damage_delivery_owner = None;
     for (_, child) in ability.child_links_mut() {
         redact_parent_target_iteration_members(child);
     }
@@ -2032,6 +2033,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     filtered.next_delayed_trigger_token = 0;
     filtered.next_delayed_trigger_instance = 0;
     filtered.next_resolution_cast_offer_id = 0;
+    filtered.next_damage_delivery_owner_id = 0;
     filtered.pending_trigger_firing = None;
     filtered.stack_trigger_firings.clear();
     filtered.resolving_trigger_firing = None;
@@ -2117,6 +2119,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // it so no viewer snapshot carries either the seed or its stream position.
     filtered.rng_word_pos = 0;
     filtered.rng = crate::types::game_state::GameRng::seed_from_u64(0);
+    // Reserved outside-game card identities are private continuation state,
+    // like the existing token and meld projections. The chooser's authorized
+    // replacement summaries below carry the displayed candidate information.
     filtered.liminal_entries.clear();
     filtered.pending_liminal_entry_resume = None;
 
@@ -2134,6 +2139,14 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // submit no replacement action and must not receive its private source IDs.
     if !replacement_choice_authorized {
         filtered.pending_replacement = None;
+    } else if let Some(pending) = &mut filtered.pending_replacement {
+        pending.damage_delivery_owner = None;
+    }
+    if let Some(post) = &mut filtered.pending_damage_post_loss {
+        post.damage_delivery_owner = None;
+    }
+    if let Some(post) = &mut filtered.pending_damage_post_counter {
+        post.damage_delivery_owner = None;
     }
 
     filtered.active_library_searches.retain(|_, search| {
@@ -2332,6 +2345,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         )
     {
         redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+        redact_spell_cast_event(event, state, viewer);
     }
     // CR 708.5: an entry held across answers records the card under a face-down entrant, which
     // no player but its controller may look at, so it is hidden from this viewer as the object is.
@@ -3256,6 +3270,17 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             }
         }
     }
+    // CR 101.4 + CR 701.20a: player-scoped hand-reveal selections remain
+    // private until the APNAP carrier settles. Preserve the participant rows
+    // for protocol shape, but remove each selection's hidden identities and
+    // cardinality from viewers without access to that player's hand.
+    if let Some(pending) = filtered.pending_player_scope_reveal.as_mut() {
+        for (player, selected) in &mut pending.selections {
+            if !can_view_private_for_player(*player) {
+                selected.clear();
+            }
+        }
+    }
     if let Some(batch) = filtered.pending_search_found_batch.as_mut() {
         if !can_view_private_for_player(batch.searcher) {
             for identity in batch
@@ -4028,10 +4053,15 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // after every `waiting_for` rebuild above (`PayCost` re-clones the authoritative resume,
     // restoring unredacted causes) and before the hidden-identity pass, whose set omits
     // face-down battlefield entrants.
+    // The projected state also keeps cast causes independently of the event list.
+    // Apply the same cast mask to retained events and rebuilt prompt copies.
+    let mut redact_cast = |event: &mut GameEvent| redact_spell_cast_event(event, state, viewer);
+    filtered.for_each_trigger_event_carrier_mut(&mut redact_cast);
     filtered
         .waiting_for
         .for_each_prompt_trigger_event_mut(&mut |event| {
-            redact_ability_triggered_causes(event, &held_entry_hidden_ids)
+            redact_ability_triggered_causes(event, &held_entry_hidden_ids);
+            redact_cast(event);
         });
 
     redact_hidden_library_identity_carriers(&mut filtered, &hidden_library_ids);
@@ -4287,27 +4317,10 @@ pub fn filter_events_for_viewer(
             event_visible_to_viewer(event, state, viewer, hidden_search_viewers)
         })
         .map(|(event, _)| match event {
-            // `CardId` is assigned from the pre-shuffle object sequence when a
-            // deck loads. An opponent can use it to recover hidden deck order,
-            // including the identity of a face-down spell; only the public
-            // stack-object reference is safe to retain here.
-            GameEvent::SpellCast {
-                controller,
-                object_id,
-                ..
-            } if !viewer_has_private_access_to_player(state, viewer, *controller)
-                && (spectator
-                    || state
-                        .objects
-                        .get(object_id)
-                        .is_some_and(|obj| obj.face_down)) =>
-            {
-                GameEvent::SpellCast {
-                    card_id: CardId(0),
-                    controller: *controller,
-                    object_id: *object_id,
-                    cast_mana_value: None,
-                }
+            GameEvent::SpellCast { .. } => {
+                let mut cast = event.clone();
+                redact_spell_cast_event(&mut cast, state, Some(viewer));
+                cast
             }
             // CR 401.2: a revealed card that now sits in a library at a hidden
             // position keeps its name (reveal order, no position) but loses the
@@ -4825,6 +4838,41 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     // so it leaves with the name, live and base value alike.
     obj.printing = DisplayOnly::default();
     obj.base_printing = DisplayOnly::default();
+}
+
+/// CR 400.2 + CR 708.5: projected casts keep their public stack references.
+/// A viewer without private access cannot see the stable card ID or associated
+/// cast facts for a face-down spell. Spectators receive the same mask on all casts.
+fn redact_spell_cast_event(event: &mut GameEvent, state: &GameState, viewer: Option<PlayerId>) {
+    match event {
+        GameEvent::SpellCast {
+            card_id,
+            controller,
+            object_id,
+            cast_mana_value,
+            cast_mana_spent,
+            cast_incarnation,
+        } if !viewer.is_some_and(|viewer| {
+            viewer_has_private_access_to_player(state, viewer, *controller)
+        }) && (viewer
+            .is_none_or(|viewer| !state.players.iter().any(|player| player.id == viewer))
+            || state
+                .objects
+                .get(object_id)
+                .is_some_and(|object| object.face_down)) =>
+        {
+            *card_id = CardId(0);
+            *cast_mana_value = None;
+            *cast_mana_spent = None;
+            *cast_incarnation = None;
+        }
+        GameEvent::AbilityTriggered { causes, .. } => {
+            for cause in causes {
+                redact_spell_cast_event(cause, state, viewer);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The retained event shapes that carry a `ZoneChangeRecord` or a `TriggerSourceContext`:
@@ -10043,87 +10091,188 @@ mod tests {
         }
     }
 
+    fn cast_projection_fixture() -> (GameState, [GameEvent; 3]) {
+        use crate::types::mana::ManaCostShard;
+
+        let mut state = GameState::new_two_player(42);
+        let events = [
+            (CardId(701), P1, "Den Protector", true, 0, 3, 13),
+            (CardId(702), P0, "Opt", false, 1, 2, 17),
+            (CardId(703), P1, "Glimmer of Genius", false, 4, 5, 29),
+        ]
+        .map(
+            |(card_id, controller, name, face_down, mana_value, spent, incarnation)| {
+                let object_id =
+                    create_object(&mut state, card_id, controller, name.into(), Zone::Stack);
+                let spell = state.objects.get_mut(&object_id).unwrap();
+                spell.face_down = face_down;
+                if !face_down {
+                    spell.mana_cost = ManaCost::Cost {
+                        shards: vec![ManaCostShard::Blue],
+                        generic: mana_value - 1,
+                    };
+                }
+                spell.mana_spent_to_cast_amount = spent;
+                spell.incarnation = incarnation;
+                let event = GameEvent::spell_cast(spell, controller);
+                assert_eq!(
+                    event,
+                    GameEvent::SpellCast {
+                        card_id,
+                        controller,
+                        object_id,
+                        cast_mana_value: Some(mana_value),
+                        cast_mana_spent: Some(spent),
+                        cast_incarnation: Some(incarnation),
+                    }
+                );
+                event
+            },
+        );
+        (state, events)
+    }
+
+    fn cast_without_identifying_facts(event: &GameEvent) -> GameEvent {
+        let GameEvent::SpellCast {
+            controller,
+            object_id,
+            ..
+        } = event
+        else {
+            panic!("expected a spell cast");
+        };
+        GameEvent::SpellCast {
+            card_id: CardId(0),
+            controller: *controller,
+            object_id: *object_id,
+            cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
+        }
+    }
+
     #[test]
     fn opponent_spell_cast_hides_stable_card_id_but_keeps_public_stack_reference() {
-        let mut state = GameState::new_two_player(42);
-        let face_down_spell = create_object(
-            &mut state,
-            CardId(701),
-            PlayerId(1),
-            "Secret Morph".to_string(),
-            Zone::Stack,
-        );
-        state.objects.get_mut(&face_down_spell).unwrap().face_down = true;
-        let own_spell = create_object(
-            &mut state,
-            CardId(702),
-            PlayerId(0),
-            "Known Spell".to_string(),
-            Zone::Stack,
-        );
-        let opponent_face_up_spell = create_object(
-            &mut state,
-            CardId(703),
-            PlayerId(1),
-            "Known Opponent Spell".to_string(),
-            Zone::Stack,
-        );
-        let events = vec![
-            GameEvent::SpellCast {
-                card_id: CardId(701),
-                controller: PlayerId(1),
-                object_id: face_down_spell,
-                cast_mana_value: Some(4),
-            },
-            GameEvent::SpellCast {
-                card_id: CardId(702),
-                controller: PlayerId(0),
-                object_id: own_spell,
-                cast_mana_value: Some(4),
-            },
-            GameEvent::SpellCast {
-                card_id: CardId(703),
-                controller: PlayerId(1),
-                object_id: opponent_face_up_spell,
-                cast_mana_value: Some(4),
-            },
-        ];
-
-        let viewer = filter_events_for_viewer(&events, &state, PlayerId(0));
-        assert!(matches!(
-            viewer.as_slice(),
+        let (state, events) = cast_projection_fixture();
+        let [hidden, own, public] = &events;
+        assert_eq!(
+            filter_events_for_viewer(&events, &state, P0),
             [
-                GameEvent::SpellCast {
-                    card_id: CardId(0),
-                    controller: PlayerId(1),
-                    object_id,
-                    cast_mana_value: None,
-                },
-                GameEvent::SpellCast {
-                    card_id: CardId(702),
-                    controller: PlayerId(0),
-                    object_id: own_object_id,
-                    cast_mana_value: Some(4),
-                },
-                GameEvent::SpellCast {
-                    card_id: CardId(703),
-                    controller: PlayerId(1),
-                    object_id: face_up_object_id,
-                    cast_mana_value: Some(4),
-                },
-            ] if *object_id == face_down_spell
-                && *own_object_id == own_spell
-                && *face_up_object_id == opponent_face_up_spell
-        ));
+                cast_without_identifying_facts(hidden),
+                own.clone(),
+                public.clone()
+            ]
+        );
+        assert_eq!(filter_events_for_viewer(&events, &state, P1), events);
+        assert_eq!(
+            filter_events_for_viewer(&events, &state, PlayerId(u8::MAX)),
+            events.each_ref().map(cast_without_identifying_facts)
+        );
+    }
 
-        let spectator = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));
-        assert!(spectator.iter().all(|event| matches!(
-            event,
-            GameEvent::SpellCast {
-                card_id: CardId(0),
+    #[test]
+    fn state_projection_redacts_retained_spell_cast_facts() {
+        use crate::types::events::TriggeredAbilityOrigin;
+
+        let (mut state, [hidden, _, public]) = cast_projection_fixture();
+        let birgi = create_object(
+            &mut state,
+            CardId(704),
+            P1,
+            "Birgi, God of Storytelling".into(),
+            Zone::Battlefield,
+        );
+        for cast in [&hidden, &public] {
+            let GameEvent::SpellCast {
+                card_id,
+                controller,
+                object_id,
+                cast_mana_spent: Some(spent),
                 ..
+            } = *cast
+            else {
+                panic!("expected a populated cast");
+            };
+            state.stack.push_back(StackEntry {
+                id: object_id,
+                source_id: object_id,
+                controller,
+                kind: StackEntryKind::Spell {
+                    card_id,
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: spent,
+                },
+            });
+            let trigger = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            state.stack.push_back(StackEntry {
+                id: trigger,
+                source_id: birgi,
+                controller: P1,
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: birgi,
+                    ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], birgi, P1)),
+                    condition: None,
+                    trigger_event: Some(cast.clone()),
+                    description: None,
+                    source_name: "Birgi, God of Storytelling".to_string(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state.stack_trigger_event_batches.insert(
+                trigger,
+                vec![GameEvent::AbilityTriggered {
+                    stack_entry: Some(trigger),
+                    source_id: birgi,
+                    controller: P1,
+                    origin: TriggeredAbilityOrigin::SourceAbility,
+                    causes: vec![cast.clone()],
+                }],
+            );
+        }
+
+        fn retained_casts(state: &GameState) -> Vec<(&GameEvent, &GameEvent)> {
+            state
+                .stack
+                .iter()
+                .filter_map(|entry| match &entry.kind {
+                    StackEntryKind::TriggeredAbility { trigger_event, .. } => {
+                        let batch = &state.stack_trigger_event_batches[&entry.id];
+                        let [GameEvent::AbilityTriggered { causes, .. }] = batch.as_slice() else {
+                            panic!("expected a retained nested cause");
+                        };
+                        let [nested] = causes.as_slice() else {
+                            panic!("expected exactly one nested cause");
+                        };
+                        Some((trigger_event.as_ref().expect("retained cast"), nested))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let masked_hidden = cast_without_identifying_facts(&hidden);
+        let masked_public = cast_without_identifying_facts(&public);
+        for (viewer, expected) in [
+            (P1, [&hidden, &public]),
+            (P0, [&masked_hidden, &public]),
+            (PlayerId(u8::MAX), [&masked_hidden, &masked_public]),
+        ] {
+            let projected = filter_state_for_viewer(&state, viewer);
+            let observed = retained_casts(&projected);
+            assert_eq!(observed.len(), 2);
+            for ((direct, nested), expected) in observed.into_iter().zip(expected) {
+                assert_eq!(direct, expected, "direct state cast for {viewer:?}");
+                assert_eq!(nested, expected, "nested state cast for {viewer:?}");
             }
-        )));
+            assert_eq!(
+                retained_casts(&state),
+                [(&hidden, &hidden), (&public, &public)]
+            );
+        }
     }
 
     #[test]

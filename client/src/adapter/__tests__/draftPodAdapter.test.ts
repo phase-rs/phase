@@ -17,7 +17,7 @@ import type { DraftPodHostConfig, DraftPodHostEvent, DraftPodListing } from "../
 import { DraftPodGuestAdapter } from "../draftPodGuestAdapter";
 import type { DraftPodGuestEvent } from "../draftPodGuestAdapter";
 import type { DraftPlayerView, RestorableDraftSessionVerdict } from "../draft-adapter";
-import { admitDraft27HostValue } from "../draft-compatibility";
+import { classifyDraft27Compatibility } from "../draft-compatibility";
 import {
   loadDraftHostSession,
   type DraftHostSessionLoadResult,
@@ -184,7 +184,7 @@ function mockView(status: string): DraftPlayerView {
 }
 
 function admittedHostSession(session: PersistedDraftHostSession): DraftHostSessionLoadResult {
-  return { type: "admitted", session, raw: session };
+  return { type: "admitted", session };
 }
 
 /**
@@ -306,7 +306,7 @@ describe("DraftPodHostAdapter", () => {
       tournamentFormat: session.tournamentFormat,
       podPolicy: session.podPolicy,
       persistenceId: session.persistenceId,
-      recovery: { session, raw: session },
+      recovery: { session },
     })).rejects.toMatchObject({ name: "Draft27IncompatibilityError" });
 
     expect(hostRoom).not.toHaveBeenCalled();
@@ -341,7 +341,7 @@ describe("DraftPodHostAdapter", () => {
       tournamentFormat: session.tournamentFormat,
       podPolicy: session.podPolicy,
       persistenceId: session.persistenceId,
-      recovery: { session, raw: session, isCurrent: () => false },
+      recovery: { session, isCurrent: () => false },
     })).rejects.toThrow("initialization aborted");
 
     expect(hostRoom).not.toHaveBeenCalled();
@@ -374,14 +374,14 @@ describe("DraftPodHostAdapter", () => {
       tournamentFormat: session.tournamentFormat,
       podPolicy: session.podPolicy,
       persistenceId: session.persistenceId,
-      recovery: { session, raw: session },
+      recovery: { session },
       signal,
     });
 
     it("refuses a recovery the engine refuses before hostRoom or host allocation", async () => {
       const { hostRoom } = await import("../../network/connection");
       // Reach: the client's top-level check admits the saved session.
-      expect(admitDraft27HostValue(session).ok).toBe(true);
+      expect(classifyDraft27Compatibility(session).ok).toBe(true);
       mockCheckRestorableSession.mockResolvedValueOnce({ type: "Incompatible" });
 
       await expect(adapter.initialize(recovering())).rejects.toMatchObject({
@@ -398,7 +398,7 @@ describe("DraftPodHostAdapter", () => {
     it("rejects with the check's own error before hostRoom when the engine cannot answer", async () => {
       const { hostRoom } = await import("../../network/connection");
       // Reach: the client's top-level check admits the saved session.
-      expect(admitDraft27HostValue(session).ok).toBe(true);
+      expect(classifyDraft27Compatibility(session).ok).toBe(true);
       mockCheckRestorableSession.mockRejectedValueOnce(new Error("draft engine unavailable"));
 
       await expect(adapter.initialize(recovering())).rejects.toThrow("draft engine unavailable");

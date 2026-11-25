@@ -27,7 +27,7 @@ use crate::types::counter::{parse_counter_type, CounterMatch};
 use crate::types::zones::Zone;
 
 pub use crate::types::text_grammar::{
-    parse_color_property, parse_property_filter, parse_zone_filter,
+    parse_card_type_count_property, parse_color_property, parse_property_filter, parse_zone_filter,
 };
 
 /// CR 201.2 + CR 201.2a: "not named <name>" — a NAME predicate, lowered to
@@ -183,6 +183,25 @@ fn parse_base_pt_designation(input: &str) -> OracleResult<'_, [FilterProp; 2]> {
 /// surrounding "with " grammar, so this matches the bare predicate only.
 pub fn parse_no_abilities(input: &str) -> OracleResult<'_, FilterProp> {
     value(FilterProp::HasNoAbilities, tag("no abilities")).parse(input)
+}
+
+/// CR 605.1: an object with a mana ability — an activated or triggered ability
+/// meeting the mana-ability criteria. Narrow primitive shared by the
+/// target-suffix scanner (oracle_target.rs) and the search-library filter
+/// scanner (oracle_effect/search.rs); each call site supplies its own
+/// surrounding "with " grammar, so this matches the bare predicate only.
+/// Both number forms are printed Oracle text: singular "a mana ability"
+/// (Raggadragga clause 2) and plural "mana abilities" (Power Sink: "tap all
+/// lands with mana abilities they control"). The predicate is "has ≥1 mana
+/// ability" regardless of subject number, so both lower to HasManaAbility.
+/// The two heads ("a ..." vs "mana ...") are disjoint, so alt order is
+/// immaterial.
+pub fn parse_mana_ability(input: &str) -> OracleResult<'_, FilterProp> {
+    alt((
+        value(FilterProp::HasManaAbility, tag("a mana ability")),
+        value(FilterProp::HasManaAbility, tag("mana abilities")),
+    ))
+    .parse(input)
 }
 
 /// Parse the inner content of a "with" clause.
@@ -1013,6 +1032,42 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_mana_ability() {
+        // CR 605.1: bare "a mana ability" predicate → HasManaAbility,
+        // fully consumed.
+        let (rest, prop) = parse_mana_ability("a mana ability").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_mana_ability_residual() {
+        // Only the bare predicate is consumed; trailing grammar is left for the
+        // call site's scanner.
+        let (rest, prop) = parse_mana_ability("a mana ability and more").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, " and more");
+    }
+
+    #[test]
+    fn test_parse_mana_ability_failure() {
+        assert!(parse_mana_ability("flying").is_err());
+    }
+
+    #[test]
+    fn test_parse_mana_ability_plural() {
+        // CR 605.1: plural "mana abilities" (Power Sink: "tap all lands with
+        // mana abilities they control") lowers to the same HasManaAbility
+        // predicate; trailing grammar is left for the call site's scanner.
+        let (rest, prop) = parse_mana_ability("mana abilities").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, "");
+        let (rest, prop) = parse_mana_ability("mana abilities they control").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, " they control");
+    }
+
+    #[test]
     fn test_parse_with_power() {
         let (rest, p) = parse_with_property("with power 3 or greater").unwrap();
         assert_eq!(
@@ -1483,6 +1538,43 @@ mod tests {
             }
         );
         assert_eq!(rest3, "");
+    }
+
+    #[test]
+    fn test_parse_card_type_count_property() {
+        // Positive (reach-guard for the rejections below): the printed form.
+        let (rest, p) = parse_card_type_count_property("with two or more card types").unwrap();
+        assert_eq!(
+            p,
+            FilterProp::CardTypeCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }
+        );
+        assert_eq!(rest, "");
+
+        // The digit form parses identically (same `parse_number` axis).
+        let (rest, p) = parse_card_type_count_property("with 2 or more card types").unwrap();
+        assert_eq!(
+            p,
+            FilterProp::CardTypeCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }
+        );
+        assert_eq!(rest, "");
+
+        // Trailing text is left unconsumed for the caller (the play-subject
+        // arm's effect-comma check relies on this).
+        let (rest, _) =
+            parse_card_type_count_property("with two or more card types, draw a card").unwrap();
+        assert_eq!(rest, ", draw a card");
+
+        // Unprinted forms are rejected (fail closed, never partial).
+        assert!(parse_card_type_count_property("with two card types").is_err());
+        assert!(parse_card_type_count_property("with exactly two card types").is_err());
+        assert!(parse_card_type_count_property("with two or fewer card types").is_err());
+        assert!(parse_card_type_count_property("with two or more card type").is_err());
     }
 
     /// V-FORMS (SHAPE) — CR 105.4. The printed chosen-colour qualifier must

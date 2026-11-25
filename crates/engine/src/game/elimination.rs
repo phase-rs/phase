@@ -440,6 +440,25 @@ impl LookedBackDeparture {
     }
 }
 
+/// CR 810.8a: a living loss root departs first, followed by its living
+/// shared-life teammates. A seat already out of the game adds no departure.
+pub(crate) fn living_loss_departure_seats(
+    state: &GameState,
+    root: PlayerId,
+) -> impl Iterator<Item = PlayerId> + '_ {
+    players::is_alive(state, root)
+        .then_some(root)
+        .into_iter()
+        .flat_map(move |root| {
+            let teammates = super::topology::has_shared_life(state, root)
+                .then(|| players::teammates(state, root))
+                .into_iter()
+                .flatten()
+                .filter(move |&seat| players::is_alive(state, seat));
+            std::iter::once(root).chain(teammates)
+        })
+}
+
 pub(crate) fn eliminate_players(
     state: &mut GameState,
     losses: &BTreeMap<PlayerId, BTreeSet<LossReason>>,
@@ -479,19 +498,8 @@ pub(crate) fn eliminate_players(
     };
 
     for (&player, reasons) in losses {
-        if !players::is_alive(state, player) {
-            continue;
-        }
-        record(player, reasons);
-        // Team loss rides with shared life: CR 810.8a in 2HG (CR 810.8b for a
-        // concession), and CR 810.8a-via-904.13b for Archenemy Commander heroes
-        // (the archenemy has no teammates, so the fold is a no-op there).
-        if super::topology::has_shared_life(state, player) {
-            for teammate in players::teammates(state, player) {
-                if players::is_alive(state, teammate) {
-                    record(teammate, reasons);
-                }
-            }
+        for seat in living_loss_departure_seats(state, player) {
+            record(seat, reasons);
         }
     }
     let leaving_set: HashSet<PlayerId> = leaving.iter().map(|&(player, _)| player).collect();
@@ -1070,6 +1078,7 @@ pub(crate) fn eliminate_players(
         {
             debug_assert!(false, "scoped search elimination resume failed: {error}");
         }
+        super::effects::finish_player_scope_reveal_if_complete(state, events);
 
         // CR 800.4a + CR 800.4g: a copy announcement is reconciled with the
         // players still in the game: its prefix is replayed on the current
@@ -2201,6 +2210,14 @@ fn do_eliminate(
             }
             true
         });
+    if let Err(error) =
+        super::effects::settle_player_scope_reveal_after_departure(state, player, events)
+    {
+        debug_assert!(
+            false,
+            "player-scope reveal elimination resume failed: {error}"
+        );
+    }
     if let Some(pending) = state.pending_scoped_library_search.as_mut() {
         match &mut pending.phase {
             crate::types::game_state::ScopedLibrarySearchPhase::CollectAcceptance {
@@ -2256,6 +2273,12 @@ fn do_eliminate(
                 search_keys.retain(|searcher| *searcher != player);
             }
         }
+    }
+    if let Some(pending) = state.pending_player_scope_reveal.as_mut() {
+        pending.players.retain(|participant| *participant != player);
+        pending
+            .selections
+            .retain(|(participant, _)| *participant != player);
     }
     // CR 800.4a: "all objects … owned by that player leave the game", so a
     // departed seat has no hand left to discard and iterating it can only be a
@@ -3075,6 +3098,7 @@ fn retire_parked_resolution_work(state: &mut GameState) {
     state.pending_damage_post_counter = None;
     state.pending_exile_from_top_until = None;
     state.pending_scoped_library_search = None;
+    state.pending_player_scope_reveal = None;
     state.pending_library_search_delivery = None;
     state.pending_search_found_batch = None;
     state.pending_die_roll_instruction = None;
@@ -3379,6 +3403,7 @@ mod tests {
 
     fn pending_replacement_for(expected_event: ProposedEvent) -> PendingReplacement {
         PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: expected_event,
             token_substitute: None,
@@ -5294,6 +5319,7 @@ mod tests {
 
         // Parked OBJECT-REFERENTIAL replacement: affected_player reads O's controller.
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::AddCounter {
                 placement: CounterPlacement::Object {
@@ -5439,6 +5465,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
@@ -5503,6 +5530,7 @@ mod tests {
         );
         state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(0), found));
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::SearchFound {
                 searcher: PlayerId(0),
@@ -5561,6 +5589,7 @@ mod tests {
 
         // Chooser C = P0 (survivor). Player-keyed parked Draw.
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
@@ -5648,6 +5677,7 @@ mod tests {
     fn opponent_leaving_preserves_living_choosers_draw_replacement() {
         let mut state = setup_three_player();
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),

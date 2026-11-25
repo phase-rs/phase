@@ -769,15 +769,11 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         }
     }
 
-    if let Some((_, rest)) = nom_on_lower(text, &lower, |i| {
-        value((), tag("if the gift wasn't promised, ")).parse(i)
-    }) {
-        return (
-            Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::additional_cost_paid_any()),
-            }),
-            rest.to_string(),
-        );
+    let gift = nom_on_lower(text, &lower, |input| {
+        terminated(preceded(tag("if "), parse_gift_promise), tag(", ")).parse(input)
+    });
+    if let Some((true, rest)) = gift {
+        return (Some(gift_promise_condition(true)), rest.to_string());
     }
 
     if alt((tag::<_, _, OracleError<'_>>("if "), tag("then if ")))
@@ -829,13 +825,14 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
 
     let mut alternative_mana_cost_conditional = false;
 
-    let body = if let Some(((), rest)) = nom_on_lower(text, &lower, |input| {
+    let body = if let Some((false, rest)) = gift {
+        Some(rest.to_string())
+    } else if let Some(((), rest)) = nom_on_lower(text, &lower, |input| {
         value(
             (),
             alt((
                 tag("if this spell's additional cost was paid, "),
                 tag("if evidence was collected, "),
-                tag("if the gift was promised, "),
             )),
         )
         .parse(input)
@@ -1021,6 +1018,8 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
                     (stripped, AbilityCondition::AdditionalCostPaidInstead)
                 } else if alternative_mana_cost_conditional {
                     (body, AbilityCondition::AlternativeManaCostPaid)
+                } else if gift.is_some() {
+                    (body, gift_promise_condition(false))
                 } else {
                     (body, AbilityCondition::additional_cost_paid_any())
                 }
@@ -1412,6 +1411,20 @@ pub(super) fn strip_if_you_do_conditional_with_context(
             remainder,
         },
     }
+}
+
+/// CR 608.2c + CR 118.12a: whether a reflexive-strip condition is a BARE
+/// outcome gate — exactly the affirmative `effect_performed` ("If they do",
+/// "If that player does") or its negation ("If they don't", "If that player
+/// doesn't"). Composed from the two existing `AbilityCondition` predicates;
+/// nothing is re-matched.
+///
+/// The unless-payer seeding rung admits only this pair: a `WhenYouDo` marker,
+/// a deferred guard, a zone-change head, a reveal gate, or an `And`-wrapped
+/// composition is a different conditional family whose body anaphor (if any)
+/// resolves through its own scope.
+pub(super) fn is_bare_reflexive_outcome_gate(condition: &AbilityCondition) -> bool {
+    condition.is_optional_effect_performed() || condition.is_not_optional_effect_performed()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5756,27 +5769,46 @@ fn parse_additional_cost_paid_gate_condition_text(text: &str) -> Option<AbilityC
     })
 }
 
-/// CR 601.2b + CR 702.33b (kicker) + CR 702.174b (gift): A plain conditional
-/// gate ("[effect] if <additional cost was paid>") — as opposed to the
-/// replacement "instead" fold — that all resolve to the shared
-/// `additional_cost_paid_any()` runtime check. Covers kicked, the gift-promised
-/// phrasing (Longstalk Brawl / Coiling Rebirth), and the generic
-/// "additional cost was paid" wording (used inside `And` gates).
-fn parse_additional_cost_paid_gate_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
-    let (rest, _) = alt((
-        value(
-            (),
-            (
-                alt((tag("it"), tag("that spell"), tag("this spell"))),
-                tag(" was kicked"),
-            ),
+/// CR 702.174k: The promised predicate refers to paying this spell's Gift cost.
+fn parse_gift_promise(input: &str) -> OracleResult<'_, bool> {
+    preceded(
+        tag("the gift "),
+        terminated(
+            alt((value(true, tag("wasn't")), value(false, tag("was")))),
+            tag(" promised"),
         ),
-        value((), tag("the gift was promised")),
-        value((), tag("this spell's additional cost was paid")),
-        value((), tag("its additional cost was paid")),
+    )
+    .parse(input)
+}
+
+fn gift_promise_condition(negated: bool) -> AbilityCondition {
+    maybe_negate(
+        AbilityCondition::additional_cost_paid_origin(AdditionalCostOrigin::Gift),
+        negated,
+    )
+}
+
+/// CR 601.2b + CR 702.33b + CR 702.174k: Plain additional-cost predicates,
+/// including the Gift predicate used inside conjunctions (Coiling Rebirth).
+fn parse_additional_cost_paid_gate_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
+    alt((
+        map(parse_gift_promise, gift_promise_condition),
+        map(
+            alt((
+                value(
+                    (),
+                    (
+                        alt((tag("it"), tag("that spell"), tag("this spell"))),
+                        tag(" was kicked"),
+                    ),
+                ),
+                value((), tag("this spell's additional cost was paid")),
+                value((), tag("its additional cost was paid")),
+            )),
+            |()| AbilityCondition::additional_cost_paid_any(),
+        ),
     ))
-    .parse(input)?;
-    Ok((rest, AbilityCondition::additional_cost_paid_any()))
+    .parse(input)
 }
 
 /// CR 601.2f + CR 608.2c: "<effect> if (this spell was | it was | it's) cast
@@ -10934,6 +10966,51 @@ mod tests {
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::player::PlayerCounterKind;
+
+    /// CR 608.2c + CR 118.12a: the unless-payer seeding gate admits exactly the
+    /// bare affirmative/negated outcome pair — every other reflexive-strip
+    /// output (markers, guards, heads, compositions) is excluded.
+    #[test]
+    fn bare_reflexive_outcome_gate_admits_only_the_affirmative_negated_pair() {
+        // Admitted: the bare pair.
+        assert!(is_bare_reflexive_outcome_gate(
+            &AbilityCondition::effect_performed()
+        ));
+        assert!(is_bare_reflexive_outcome_gate(&AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        }));
+        // Excluded: every other reflexive-strip family.
+        let excluded = [
+            // "When you do" creation marker, bare and guard-composed (the
+            // deferred-marker shape).
+            AbilityCondition::WhenYouDo,
+            AbilityCondition::when_you_do_with_guard(AbilityCondition::IsYourTurn),
+            // The reveal-until creation gate (its own guard family).
+            super::super::reveal_this_way_gate_condition(),
+            // A negated DIFFERENT signal is not the negated outcome.
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::current_scope_succeeded()),
+            },
+            // Zone-change "this way" heads.
+            AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::ParentTarget,
+                destination: None,
+            },
+            // `And` compositions, even ones CONTAINING the outcome signal.
+            AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::effect_performed(),
+                    AbilityCondition::IsYourTurn,
+                ],
+            },
+        ];
+        for condition in &excluded {
+            assert!(
+                !is_bare_reflexive_outcome_gate(condition),
+                "excluded: {condition:?}"
+            );
+        }
+    }
 
     #[test]
     fn player_counter_absence_requires_a_proven_event_antecedent() {

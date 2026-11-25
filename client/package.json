@@ -19,6 +19,7 @@
     "build-storybook": "pnpm run protocol:generate && storybook build -c storybook -o storybook-static",
     "test": "pnpm run protocol:generate && vitest",
     "test:integration": "pnpm run protocol:generate && vitest run --config vitest.integration.config.ts",
+    "test:e2e": "playwright test",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
@@ -72,6 +73,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.21.0",
+    "@playwright/test": "1.64.1",
     "@storybook/addon-a11y": "10.6.2",
     "@storybook/addon-docs": "10.6.2",
     "@storybook/react-vite": "10.6.2",

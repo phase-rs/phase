@@ -303,6 +303,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
@@ -768,6 +769,8 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::Historic
         | FilterProp::NotHistoric
         | FilterProp::IsChosenCardType
+        // CR 205.2a: distinct core card-type count.
+        | FilterProp::CardTypeCount { .. }
         // CR 303.4 + CR 301.5: both read the attachment's subtype (Aura /
         // Equipment) to decide the relationship.
         | FilterProp::EnchantedBy
@@ -1154,6 +1157,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
@@ -1983,13 +1987,11 @@ fn scoped_player_or_controller(
     source_controller: Option<PlayerId>,
     scoped_iteration_player: Option<PlayerId>,
 ) -> Option<PlayerId> {
-    // CR 109.5 + CR 120.3: `ControllerRef::ScopedPlayer` first uses an
-    // ability-scoped binding, then the per-player binding from
-    // DamageEachPlayer quantity resolution; `source_controller` remains the
-    // fallback for "you"/"your" when no scoped player is active.
-    ability
-        .and_then(|a| a.scoped_player)
-        .or(scoped_iteration_player)
+    // CR 109.5 + CR 120.3: damage quantities can explicitly bind
+    // `ControllerRef::ScopedPlayer` to the current recipient while "you"
+    // stays bound to the ability's controller.
+    scoped_iteration_player
+        .or_else(|| ability.and_then(|a| a.scoped_player))
         .or_else(|| crate::game::quantity::triggering_event_player(state))
         .or(source_controller)
 }
@@ -3150,6 +3152,7 @@ fn filter_prop_contains_input(
             | FilterProp::HasColor { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -3936,6 +3939,7 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -4525,6 +4529,7 @@ fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -5270,6 +5275,19 @@ fn controller_ref_face_state(
     }
 }
 
+/// CR 205.2a: number of distinct card types in a `core_types` list — the single
+/// counting authority for `FilterProp::CardTypeCount` on every evaluation path
+/// (live object, spell record, zone-change record, face). Supertypes and
+/// subtypes live on other fields and never count; each `CoreType` value counts
+/// once no matter how many times it was granted.
+fn distinct_core_type_count(core_types: &[CoreType]) -> i32 {
+    let mut seen = HashSet::new();
+    for core_type in core_types {
+        seen.insert(*core_type);
+    }
+    i32::try_from(seen.len()).unwrap_or(i32::MAX)
+}
+
 /// CR 205 + CR 202: Evaluate one `FilterProp` against a bare `CardFace`.
 ///
 /// `Some(true)` / `Some(false)` = the property has a context-free reading and
@@ -5301,6 +5319,11 @@ pub fn context_free_prop_matches_face(face: &CardFace, prop: &FilterProp) -> Opt
         FilterProp::NotColor { color } => Some(!face_colors(face).contains(color)),
         FilterProp::ColorCount { comparator, count } => Some(comparator.evaluate(
             i32::try_from(face_colors(face).len()).unwrap_or(i32::MAX),
+            i32::from(*count),
+        )),
+        // CR 205.2a: printed card-type line.
+        FilterProp::CardTypeCount { comparator, count } => Some(comparator.evaluate(
+            distinct_core_type_count(&face.card_type.core_types),
             i32::from(*count),
         )),
         // CR 702: printed keyword line. The keyword authorities in
@@ -6030,6 +6053,39 @@ impl BattlefieldEntrantProjection {
         pre_entry: Cow<'_, GameState>,
         body: &GameObject,
     ) -> Option<Self> {
+        Self::from_no_zone_on_pre_entry_board(pre_entry, body, true)
+    }
+
+    pub(crate) fn for_outside_game_card(state: &GameState, event: &ProposedEvent) -> Option<Self> {
+        let ProposedEvent::OutsideGameCardEntry {
+            entry_ref,
+            destination: Zone::Battlefield,
+            enter_tapped,
+            enter_with_choices,
+            controller_override,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        let entry = state.outside_game_card_entry(*entry_ref)?;
+        let mut body = entry.object.projected().clone();
+        body.controller = controller_override.unwrap_or(entry.controller);
+        body.tapped = enter_tapped.resolve(false);
+        body.timestamp = state.next_timestamp;
+        body.chosen_attributes.extend(
+            crate::types::proposed_event::EntryChoices::of(enter_with_choices)
+                .iter()
+                .cloned(),
+        );
+        Self::from_no_zone_on_pre_entry_board(Cow::Borrowed(state), &body, false)
+    }
+
+    fn from_no_zone_on_pre_entry_board(
+        pre_entry: Cow<'_, GameState>,
+        body: &GameObject,
+        token: bool,
+    ) -> Option<Self> {
         let mut placed = body.clone();
         placed.phase_status = crate::game::game_object::PhaseStatus::PhasedIn;
         if placed.zone != Zone::Battlefield {
@@ -6038,22 +6094,27 @@ impl BattlefieldEntrantProjection {
         let entrant = placed.id;
         let pins = crate::game::layers::EntryPopulationRewrites::for_token(&pre_entry, &placed);
         #[cfg(any(test, feature = "test-support"))]
-        TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
-            let mut counts = work.get();
-            counts.projections += 1;
-            counts.projection_state_clones += usize::from(matches!(pre_entry, Cow::Borrowed(_)));
-            work.set(counts);
-        });
+        if token {
+            TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.projections += 1;
+                counts.projection_state_clones +=
+                    usize::from(matches!(pre_entry, Cow::Borrowed(_)));
+                work.set(counts);
+            });
+        }
         let mut scratch = pre_entry.into_owned();
         scratch.liminal_entries.remove(&entrant);
         if scratch.battlefield.contains(&entrant) {
             scratch.objects.insert(entrant, placed);
-        } else {
+        } else if token {
             crate::game::effects::token::place_liminal_token_on_battlefield(
                 &mut scratch,
                 entrant,
                 placed,
             );
+        } else {
+            crate::game::zones::place_new_object(&mut scratch, placed);
         }
         pins.apply(&mut scratch);
         Some(Self::finish(scratch, None, entrant, None))
@@ -6657,6 +6718,10 @@ pub fn matches_target_filter_on_battlefield_entry(
     ctx: &FilterContext<'_>,
 ) -> bool {
     match event {
+        ProposedEvent::OutsideGameCardEntry { .. } => {
+            BattlefieldEntrantProjection::for_outside_game_card(state, event)
+                .is_some_and(|projection| projection.matches(filter, ctx))
+        }
         ProposedEvent::ZoneChange {
             object_id,
             to,
@@ -9722,6 +9787,7 @@ pub(super) fn filter_reads_pt(filter: &TargetFilter) -> bool {
             | FilterProp::HasColor { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -10112,6 +10178,13 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::NotHistoric => !spell_record_matches_property(record, &FilterProp::Historic),
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(record.colors.len() as i32, i32::from(*count))
+        }
+        // CR 205.2a: distinct card types on the cast-time record.
+        FilterProp::CardTypeCount { comparator, count } => {
+            comparator.evaluate(
+                distinct_core_type_count(&record.core_types),
+                i32::from(*count),
+            )
         }
         FilterProp::Cmc { comparator, value } => match value {
             QuantityExpr::Fixed { value: v } => comparator.evaluate(record.mana_value as i32, *v),
@@ -11654,12 +11727,20 @@ fn matches_filter_prop(
             }
             !obj.kickers_paid.is_empty()
         }
-        // CR 605.1: Delegate to the single mana-ability classifier instead of
-        // duplicating the definition at the filter layer.
-        FilterProp::HasManaAbility => obj
-            .abilities
-            .iter()
-            .any(crate::game::mana_abilities::is_mana_ability),
+        // CR 605.1: both mana-ability categories — an activated one (CR 605.1a,
+        // via the single activated classifier) or a triggered one (CR 605.1b,
+        // via the static definition classifier over the live trigger list).
+        // Both arms read live lists, so granted abilities count (R-PS3).
+        FilterProp::HasManaAbility => {
+            obj.abilities
+                .iter()
+                .any(crate::game::mana_abilities::is_mana_ability)
+                || obj.trigger_definitions.iter_all().any(|entry| {
+                    crate::game::mana_abilities::is_triggered_mana_ability_definition(
+                        &entry.definition,
+                    )
+                })
+        }
         // CR 113.1 + CR 113.3: "no abilities" means no keyword abilities and
         // no activated, triggered, replacement, or static abilities.
         FilterProp::HasNoAbilities => object_has_no_abilities(obj),
@@ -12017,6 +12098,11 @@ fn matches_filter_prop(
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(obj.effective_colors().len() as i32, i32::from(*count))
         }
+        // CR 205.2a: distinct card types of the candidate object.
+        FilterProp::CardTypeCount { comparator, count } => comparator.evaluate(
+            distinct_core_type_count(&obj.card_types.core_types),
+            i32::from(*count),
+        ),
         FilterProp::HasSupertype { value } => obj.card_types.supertypes.contains(value),
         // CR 202.2 + CR 709.4b: Object does NOT have this color (combined colors
         // off the stack for a split card).
@@ -12684,6 +12770,13 @@ fn zone_change_record_matches_property(
         FilterProp::NotColor { color } => !record.colors.contains(color),
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(record.colors.len() as i32, i32::from(*count))
+        }
+        // CR 205.2a: distinct card types on the zone-change snapshot.
+        FilterProp::CardTypeCount { comparator, count } => {
+            comparator.evaluate(
+                distinct_core_type_count(&record.core_types),
+                i32::from(*count),
+            )
         }
         // CR 208.1 / CR 107.2: `toughness > power` comparison on the snapshot.
         FilterProp::ToughnessGTPower => record.toughness.unwrap_or(0) > record.power.unwrap_or(0),
@@ -29062,6 +29155,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::PtComparison { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -30816,6 +30910,7 @@ mod entry_projection_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         let record = |proposed: ProposedEvent| PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed,
             token_substitute: None,

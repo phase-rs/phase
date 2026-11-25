@@ -18,7 +18,7 @@ vi.mock("../scryfall", async (importOriginal) => ({
   ...await importOriginal<typeof Scryfall>(),
   getCardPrintings: io.printings,
 }));
-vi.mock("../engineRuntime", () => ({ deckSupplyForFormat: io.supply, isCardCommanderEligible: vi.fn() }));
+vi.mock("../engineRuntime", () => ({ deckSupplyForFormat: io.supply }));
 
 const A: PrintingEntry = {
   id: "a", set: "aaa", set_name: "A", collector_number: "001", released_at: "2000-01-01",

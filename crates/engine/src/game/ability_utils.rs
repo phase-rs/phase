@@ -6262,6 +6262,7 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -28826,6 +28827,8 @@ mod tests {
             controller: PlayerId(1),
             object_id: triggering_spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         let mut events = Vec::new();
         crate::game::effects::exchange_control::resolve(&mut state, &mixed, &mut events).unwrap();

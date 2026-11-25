@@ -12794,6 +12794,9 @@ pub(crate) fn battlefield_entry_in_progress(state: &GameState) -> bool {
 fn parked_replacement_modifies_an_entry(state: &GameState, proposed: &ProposedEvent) -> bool {
     match proposed {
         ProposedEvent::ZoneChange { to, .. } => *to == Zone::Battlefield,
+        ProposedEvent::OutsideGameCardEntry { destination, .. } => {
+            *destination == Zone::Battlefield
+        }
         ProposedEvent::TokenEntry { .. } | ProposedEvent::CreateToken { .. } => true,
         other => other
             .affected_object_id()
@@ -13319,15 +13322,23 @@ fn event_attacker_from_trigger_event(
 /// CR 601.2i + CR 400.7: Bind the exact spell object and incarnation a
 /// spell-cast trigger's "that spell" / self-cast "this spell" names, at the
 /// moment the triggered ability is put on the stack. `None` for any trigger
-/// event other than `SpellCast`, or when its spell is no longer on the stack.
+/// event other than `SpellCast`, or for a legacy event without a live stack spell.
 /// Mirrors `event_attacker_from_trigger_event`'s shape.
 fn triggering_spell_pin(
     state: &GameState,
     trigger_event: Option<&GameEvent>,
 ) -> Option<ObjectIncarnationRef> {
-    let GameEvent::SpellCast { object_id, .. } = trigger_event? else {
+    let GameEvent::SpellCast {
+        object_id,
+        cast_incarnation,
+        ..
+    } = trigger_event?
+    else {
         return None;
     };
+    if let Some(incarnation) = cast_incarnation {
+        return Some(ObjectIncarnationRef::of(*object_id, *incarnation));
+    }
     let obj = state.objects.get(object_id)?;
     (obj.zone == Zone::Stack).then(|| ObjectIncarnationRef::from_object(obj))
 }
@@ -16930,6 +16941,7 @@ fn latched_property_kind(
         | FilterProp::HasColor { .. }
         | FilterProp::NotColor { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::WithKeyword { .. }
         | FilterProp::WithoutKeyword { .. }
@@ -19611,6 +19623,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp, reader: BindingReader) -> boo
         | FilterProp::HasSupertype { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::ManaCostIn { .. }
         | FilterProp::HasXInManaCost
@@ -22202,6 +22215,14 @@ fn trigger_condition_anchors_resolvable(
         None => {}
     }
     match condition {
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+            [lhs, rhs].into_iter().all(|expr| {
+                super::quantity::trigger_quantity_payment_is_known(state, expr, trigger_event)
+            })
+        }
+        TriggerCondition::QuantityQuality { quantity, .. } => {
+            super::quantity::trigger_quantity_payment_is_known(state, quantity, trigger_event)
+        }
         TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
             conditions.iter().all(|inner| {
                 trigger_condition_anchors_resolvable(
@@ -30935,6 +30956,8 @@ pub mod tests {
                 controller: player,
                 object_id: spell,
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
 
@@ -32433,6 +32456,8 @@ pub mod tests {
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -32487,6 +32512,8 @@ pub mod tests {
             controller: PlayerId(0),
             object_id: creature_spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -32541,6 +32568,8 @@ pub mod tests {
             controller: PlayerId(1),
             object_id: spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -38492,6 +38521,8 @@ pub mod tests {
                 object_id: source,
                 card_id: CardId(0x98),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }),
             modal: Some(ModalChoice {
                 min_choices: 1,
@@ -38597,6 +38628,8 @@ pub mod tests {
                 object_id: source,
                 card_id: CardId(0x98),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }),
             modal: Some(ModalChoice {
                 min_choices: 1,
@@ -40581,6 +40614,8 @@ pub mod tests {
             controller: PlayerId(0),
             object_id: spell_id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -47035,43 +47070,48 @@ pub mod tests {
             ],
         };
 
-        let event = GameEvent::SpellCast {
+        let event = |cast_mana_spent| GameEvent::SpellCast {
             card_id: CardId(2),
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
+            cast_mana_spent,
+            cast_incarnation: None,
         };
 
         // 2 mana spent: 2 > 3 false, 2 > 4 false — trigger does NOT fire.
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 2;
         assert!(
-            !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(2)))
+            ),
             "Increment must not fire when mana spent (2) <= both power (3) and toughness (4)"
         );
 
         // 4 mana spent: 4 > 3 true — trigger fires even though 4 > 4 is false.
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 4;
         assert!(
-            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(4)))
+            ),
             "Increment must fire when mana spent (4) > power (3), regardless of toughness"
         );
 
         // 5 mana spent: 5 > 3 and 5 > 4 — fires.
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 5;
         assert!(
-            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(5)))
+            ),
             "Increment must fire when mana spent (5) exceeds both power and toughness"
         );
 
@@ -47081,23 +47121,25 @@ pub mod tests {
             obj.power = Some(1);
             obj.toughness = Some(2);
         }
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 2;
         assert!(
-            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(2)))
+            ),
             "Topiary Lecturer: 2 mana spent > power (1) must fire Increment"
         );
 
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 1;
         assert!(
-            !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(1)))
+            ),
             "Topiary Lecturer: 1 mana spent must not exceed power (1) or toughness (2)"
         );
     }
@@ -47118,11 +47160,6 @@ pub mod tests {
             "Test Spell".to_string(),
             Zone::Stack,
         );
-        {
-            let obj = state.objects.get_mut(&spell).unwrap();
-            obj.mana_cost = ManaCost::generic(4);
-        }
-
         let condition = TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::ManaSpentToCast {
@@ -47137,31 +47174,56 @@ pub mod tests {
                 },
             },
         };
-        let event = GameEvent::SpellCast {
+        let event = |cast_mana_spent| GameEvent::SpellCast {
             card_id: CardId(2),
             controller: PlayerId(1),
             object_id: spell,
-            cast_mana_value: None,
+            cast_mana_value: Some(4),
+            cast_mana_spent,
+            cast_incarnation: None,
         };
 
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 4;
         assert!(
-            !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(4)))
+            ),
             "spent 4 on mana value 4 must not satisfy a strict less-than condition"
         );
 
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 3;
         assert!(
-            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(3)))
+            ),
             "spent 3 on mana value 4 must satisfy a strict less-than condition"
+        );
+
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(0)))
+            ),
+            "a recorded zero payment is less than the mana value"
+        );
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(None))
+            ),
+            "an unknown legacy payment cannot satisfy the comparison"
         );
     }
 
@@ -47188,6 +47250,8 @@ pub mod tests {
             controller: PlayerId(1),
             object_id: spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
 
         state
@@ -47247,6 +47311,8 @@ pub mod tests {
             controller: PlayerId(0),
             object_id: ObjectId(1000),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
 
         // Case A: first qualifying spell — record has exactly one X-cost cast.
@@ -47526,6 +47592,8 @@ pub mod tests {
                 controller: PlayerId(0),
                 object_id: opponent_spell,
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
         assert!(
@@ -47551,6 +47619,8 @@ pub mod tests {
                 controller: PlayerId(1),
                 object_id: controller_spell,
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
 
@@ -50222,6 +50292,8 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(2),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
 
@@ -50268,6 +50340,8 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(1),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
 
@@ -50331,6 +50405,8 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(2),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
 
@@ -50375,6 +50451,8 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(1),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
 
@@ -50455,6 +50533,8 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(2),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
 
@@ -50512,6 +50592,8 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(1),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
 
@@ -50553,6 +50635,8 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(1),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
 
@@ -50592,6 +50676,8 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(1),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
 
@@ -50673,6 +50759,8 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(2),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
 
@@ -50761,6 +50849,8 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(2),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
 
@@ -50844,6 +50934,8 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(1),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }],
         );
 
@@ -64658,6 +64750,8 @@ pub mod tests {
             object_id: ObjectId(999),
             controller,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
 
         // Attacking: the copy trigger lands on the stack.
@@ -65362,6 +65456,8 @@ mod pending_trigger_pin_reassignment_tests {
                     object_id: spell_id,
                     card_id: spell_card_id,
                     cast_mana_value: None,
+                    cast_mana_spent: None,
+                    cast_incarnation: None,
                 }),
                 description: None,
                 source_name: String::new(),

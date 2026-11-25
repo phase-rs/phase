@@ -1029,6 +1029,18 @@ fn end_step_triggers(runner: &mut GameRunner) -> (Vec<String>, Vec<String>) {
                     .act(GameAction::DecideOptionalEffect { accept: true })
                     .expect("accept the optional effect");
             }
+            // CR 101.4 + CR 701.21a: Archfiend of Depravity's keep prompt, answered
+            // within the engine's published bound.
+            WaitingFor::KeepExactPermanentsChoice {
+                eligible,
+                required_count,
+                ..
+            } => {
+                let kept: Vec<_> = eligible.iter().take(*required_count).copied().collect();
+                runner
+                    .act(GameAction::ChooseKeptPermanents { kept })
+                    .expect("keep within the published bound");
+            }
             other => panic!("unexpected prompt in P0's turn: {other:?}"),
         }
     }

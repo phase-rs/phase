@@ -27461,6 +27461,8 @@ mod tests {
                         object_id: spell,
                         card_id: CardId(1),
                         cast_mana_value: None,
+                        cast_mana_spent: None,
+                        cast_incarnation: None,
                     }),
                     description: None,
                     source_name: String::new(),

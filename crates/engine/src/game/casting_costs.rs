@@ -124,12 +124,7 @@ pub(crate) fn commit_copy_cast(
     let origin = copy
         .cast_from_zone
         .unwrap_or(crate::types::zones::Zone::Exile);
-    events.push(GameEvent::SpellCast {
-        card_id: copy.card_id,
-        controller,
-        object_id: copy_id,
-        cast_mana_value: Some(copy.spell_mana_value()),
-    });
+    events.push(GameEvent::spell_cast(&copy, controller));
     let occurrence = crate::game::restrictions::record_spell_cast_from_zone(
         state,
         controller,
@@ -205,12 +200,7 @@ fn end_until_event_durations_on_cast(
             })
         })
         .map(|_| super::triggers::trigger_source_context_for_latch(state, spell));
-    let cast = GameEvent::SpellCast {
-        card_id: spell.card_id,
-        controller: spell.controller,
-        object_id,
-        cast_mana_value: Some(spell.spell_mana_value()),
-    };
+    let cast = GameEvent::spell_cast(spell, spell.controller);
     let ended: Vec<u64> = state
         .transient_continuous_effects
         .iter()
@@ -16127,18 +16117,13 @@ fn finalize_cast_with_phyrexian_choices_inner(
     {
         state.spell_cast_reversal = None;
     }
-    events.push(GameEvent::SpellCast {
-        card_id,
-        controller: player,
-        object_id,
-        cast_mana_value: Some(
-            state
-                .objects
-                .get(&object_id)
-                .expect("finalized spell must remain available for cast event")
-                .spell_mana_value(),
-        ),
-    });
+    events.push(GameEvent::spell_cast(
+        state
+            .objects
+            .get(&object_id)
+            .expect("finalized spell must remain available for cast event"),
+        player,
+    ));
 
     // CR 608.2c + CR 608.2g + CR 601.2i: A paid during-resolution cast is the
     // "performed optional" the moment its spell is on the stack and its mana is

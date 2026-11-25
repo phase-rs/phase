@@ -2456,7 +2456,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             if let Some(x) = total_power_cap {
                 acc = acc.or(scan_quantity_expr(x, mode));
             }
-            if let Some(KeeperConstraint::ExactCount { count }) = keeper_constraint {
+            if let Some(KeeperConstraint::Count { count }) = keeper_constraint {
                 acc = acc.or(scan_quantity_expr(count, mode));
             }
             // CR 608.2c + CR 122.1: the printed keeper mark's count.
@@ -4844,7 +4844,7 @@ fn scan_parsed_condition(x: &ParsedCondition, mode: ScanMode) -> Axes<'_> {
         ParsedCondition::PlayerCountAtLeast { filter, minimum: _ } => {
             scan_player_filter(filter, mode)
         }
-        ParsedCondition::IsOpponentsTurn => Axes::NONE,
+        ParsedCondition::IsOpponentsTurn | ParsedCondition::IsMonarch => Axes::NONE,
         // CR 601.2c: the targets the spell being cast has chosen.
         ParsedCondition::SourceMatchesFilter { filter }
         | ParsedCondition::SpellTargetsFilter { filter } => {
@@ -6506,6 +6506,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes<'_> {
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType

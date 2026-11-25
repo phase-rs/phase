@@ -1190,7 +1190,7 @@ fn apply_rounding_postmodifier(count: QuantityExpr, noun: &str) -> (QuantityExpr
 /// context ("that much", "the damage prevented this way"), the cda grammar, the
 /// chunk's bare-card aggregate ("those cards"), the where-X core (without the
 /// printed-name possessive arm), then the "the difference" placeholder that
-/// only the token carrier rebinds. A `Sum` whose operands read different object
+/// the enclosing comparison rebinds. A `Sum` whose operands read different object
 /// pronouns is a miss (the operand-anaphor guard).
 pub(crate) fn parse_equal_to_count(quantity: &str, ctx: &mut ParseContext) -> Option<QuantityExpr> {
     let lower = quantity
@@ -2016,6 +2016,20 @@ fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
     }
     result.push_str(&haystack[last_end..]);
     result
+}
+
+/// CR 201.5c + CR 205.3j / CR 205.3m: a single-word printed (short) name
+/// refers to the card only where it is used as a name. When that word is also
+/// a subtype, type-reference occurrences ("each Garruk you control",
+/// "non-Gideon creatures", "a Lukka planeswalker") stay literal via the
+/// preserving replacer's guards; a non-subtype word ("target Charix") is the
+/// card's name wherever it appears in its printed case.
+fn replace_single_word_self_name(haystack: &str, name: &str) -> String {
+    if is_subtype_word(&name.to_lowercase()) {
+        replace_all_words_case_sensitive_preserving_subtype_status_refs(haystack, name, "~")
+    } else {
+        replace_all_words_case_sensitive(haystack, name, "~")
+    }
 }
 
 /// Replace all occurrences of `needle` in `haystack` with `replacement`,
@@ -2981,14 +2995,8 @@ pub fn normalize_card_name_refs_reporting(
     // matching generic English words in Oracle text (e.g., "this scheme in motion").
     result = if effective_name.contains(' ') {
         replace_all_words(&result, effective_name, "~")
-    } else if is_subtype_word(&effective_name.to_lowercase()) {
-        replace_all_words_case_sensitive_preserving_subtype_status_refs(
-            &result,
-            effective_name,
-            "~",
-        )
     } else {
-        replace_all_words_case_sensitive(&result, effective_name, "~")
+        replace_single_word_self_name(&result, effective_name)
     };
 
     // CR 201.5c: some multi-word names use a first-and-last-word printed short
@@ -3023,12 +3031,16 @@ pub fn normalize_card_name_refs_reporting(
     // additional untap step" on Untap, Upkeep, Draw) or a keyword ("has storm"
     // on Storm, Force of Nature; CR 702.40a). A multi-word short name stays
     // case-insensitive, like a multi-word full name.
+    //
+    // CR 201.5c + CR 205.3j / CR 205.3m: a subtype-word short name keeps its
+    // type-reference occurrences literal ("each Garruk you control"), exactly
+    // like a single-word subtype full name.
     let comma_short_name = comma_short_self_name(card_name);
     if let Some(short_name) = comma_short_name {
         result = if short_name.contains(' ') {
             replace_all_words(&result, short_name, "~")
         } else {
-            replace_all_words_case_sensitive(&result, short_name, "~")
+            replace_single_word_self_name(&result, short_name)
         };
     }
 
@@ -4095,6 +4107,60 @@ mod tests {
                 "Haliya, Guided by Light"
             ),
             "Whenever ~ or another creature enters"
+        );
+    }
+
+    /// CR 201.5c + CR 205.3j / CR 205.3m: a comma short name that is also a
+    /// planeswalker subtype refers to the card only where it is used as a name.
+    /// Type-reference occurrences ("each Garruk you control", "non-Gideon
+    /// creatures", "a Lukka planeswalker", "non-Quintorius planeswalker card")
+    /// stay literal, while subject occurrences in the same text still fold to
+    /// `~`. Full Oracle text, asserted against the full normalized string.
+    #[test]
+    fn normalize_comma_short_subtype_name_keeps_type_references_literal() {
+        let garruk = "[0]: Create two 2/2 black and green Wolf creature tokens with \"When this token dies, put a loyalty counter on each Garruk you control.\"\n[\u{2212}3]: Destroy target creature. Draw a card.\n[\u{2212}6]: You get an emblem with \"Creatures you control get +3/+3 and have trample.\"";
+        assert_eq!(
+            normalize_card_name_refs(garruk, "Garruk, Cursed Huntsman"),
+            "[0]: Create two 2/2 black and green Wolf creature tokens with \"When ~ dies, put a loyalty counter on each Garruk you control.\"\n[\u{2212}3]: Destroy target creature. Draw a card.\n[\u{2212}6]: You get an emblem with \"Creatures you control get +3/+3 and have trample.\""
+        );
+
+        let gideon = "Whenever you attack with two or more non-Gideon creatures, put a +1/+1 counter on each of those creatures.\n[+2]: Until end of turn, Gideon becomes a 5/5 white Soldier creature that's still a planeswalker. Prevent all damage that would be dealt to him this turn. (He can't attack if he was cast this turn.)\n[\u{2212}9]: Exile Gideon and each creature your opponents control.";
+        assert_eq!(
+            normalize_card_name_refs(gideon, "Gideon, the Oathsworn"),
+            "Whenever you attack with two or more non-Gideon creatures, put a +1/+1 counter on each of those creatures.\n[+2]: Until end of turn, ~ becomes a 5/5 white Soldier creature that's still a planeswalker. Prevent all damage that would be dealt to him this turn. (He can't attack if he was cast this turn.)\n[\u{2212}9]: Exile ~ and each creature your opponents control."
+        );
+
+        let lukka = "[+1]: Exile the top three cards of your library. Creature cards exiled this way gain \"You may cast this card from exile as long as you control a Lukka planeswalker.\"";
+        assert_eq!(
+            normalize_card_name_refs(lukka, "Lukka, Coppercoat Outcast"),
+            lukka
+        );
+
+        let quintorius = "As long as Quintorius entered this turn, you may activate the loyalty abilities of planeswalkers you control twice this turn rather than only once.\n[0]: Proliferate. You gain 3 life.\n[\u{2212}1]: Seek a non-Quintorius planeswalker card.\n[\u{2212}3]: Create a 2/2 colorless Wizard Soldier creature token named Cadet. Then put a +1/+1 counter on each creature you control.";
+        assert_eq!(
+            normalize_card_name_refs(quintorius, "Quintorius, Fate Splitter"),
+            "As long as ~ entered this turn, you may activate the loyalty abilities of planeswalkers you control twice this turn rather than only once.\n[0]: Proliferate. You gain 3 life.\n[\u{2212}1]: Seek a non-Quintorius planeswalker card.\n[\u{2212}3]: Create a 2/2 colorless Wizard Soldier creature token named Cadet. Then put a +1/+1 counter on each creature you control."
+        );
+    }
+
+    /// CR 201.5c: a comma short name that is not a subtype word is the card's
+    /// name in every case-matching position, including after a determiner
+    /// ("that target Charix") — the subtype gate's else arm.
+    #[test]
+    fn normalize_comma_short_non_subtype_name_still_folds_after_determiner() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Spells your opponents cast that target Charix cost {2} more to cast.\n{3}: Charix gets +X/-X until end of turn, where X is the number of Islands you control.",
+                "Charix, the Raging Isle"
+            ),
+            "Spells your opponents cast that target ~ cost {2} more to cast.\n{3}: ~ gets +X/-X until end of turn, where X is the number of Islands you control."
+        );
+        assert_eq!(
+            normalize_card_name_refs(
+                "Equip abilities you activate that target Cloud cost {2} less to activate.",
+                "Cloud, Planet's Champion"
+            ),
+            "Equip abilities you activate that target ~ cost {2} less to activate."
         );
     }
 

@@ -2620,9 +2620,16 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with a mana ability").parse(remaining)
+        // CR 605.1: bare "a mana ability" predicate lives in
+        // oracle_nom/filter.rs; this arm supplies the "with " lead, mirroring
+        // the no-abilities arm below.
+        if let Ok((rest, prop)) = preceded(
+            (tag::<_, _, OracleError<'_>>("with"), space1),
+            nom_filter::parse_mana_ability,
+        )
+        .parse(remaining)
         {
-            suffix.properties.push(FilterProp::HasManaAbility);
+            suffix.properties.push(prop);
             remaining = rest.trim_start();
             continue;
         }
