@@ -2018,7 +2018,12 @@ fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
     result
 }
 
-/// CR 201.5c + CR 205.3j / CR 205.3m: a single-word printed (short) name refers to the card only where it is used as a name. When that word is also a subtype, type-reference occurrences ("each Garruk you control", "non-Gideon creatures", "a Lukka planeswalker") stay literal via the preserving replacer's guards; a non-subtype word ("target Charix") is always the card's name.
+/// CR 201.5c + CR 205.3j / CR 205.3m: a single-word printed (short) name
+/// refers to the card only where it is used as a name. When that word is also
+/// a subtype, type-reference occurrences ("each Garruk you control",
+/// "non-Gideon creatures", "a Lukka planeswalker") stay literal via the
+/// preserving replacer's guards; a non-subtype word ("target Charix") is the
+/// card's name wherever it appears in its printed case.
 fn replace_single_word_self_name(haystack: &str, name: &str) -> String {
     if is_subtype_word(&name.to_lowercase()) {
         replace_all_words_case_sensitive_preserving_subtype_status_refs(haystack, name, "~")
@@ -3026,7 +3031,10 @@ pub fn normalize_card_name_refs_reporting(
     // additional untap step" on Untap, Upkeep, Draw) or a keyword ("has storm"
     // on Storm, Force of Nature; CR 702.40a). A multi-word short name stays
     // case-insensitive, like a multi-word full name.
-    // CR 201.5c + CR 205.3j / CR 205.3m: a subtype-word short name keeps its type-reference occurrences literal ("each Garruk you control"), exactly like a single-word subtype full name.
+    //
+    // CR 201.5c + CR 205.3j / CR 205.3m: a subtype-word short name keeps its
+    // type-reference occurrences literal ("each Garruk you control"), exactly
+    // like a single-word subtype full name.
     let comma_short_name = comma_short_self_name(card_name);
     if let Some(short_name) = comma_short_name {
         result = if short_name.contains(' ') {

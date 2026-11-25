@@ -1381,6 +1381,7 @@ face = [
   { key = "lt. cmdr. geordi la forge", class = "other", clauses = ["If you would put one or more charge counters on an artifact you control, put twice that many charge counters on that artifact instead."] },
   { key = "lucky clover", class = "dropped_qualifier", clauses = ["Whenever you cast an Adventure instant or sorcery spell, copy it."] },
   { key = "ludevic, necrogenius", class = "cost_wrong", clauses = ["{X}{U}{U}{B}{B}, Exile X creature cards from your graveyard: Transform Ludevic."] },
+  { key = "lukka, coppercoat outcast", class = "wrong_object", clauses = ["Each creature you control deals damage equal to its power to each opponent."] },
   { key = "lumbering battlement", class = "wrong_duration", clauses = ["When this creature enters, exile any number of other nontoken creatures you control until it leaves the battlefield."] },
   { key = "lumbering megasloth", class = "wrong_count", clauses = ["This spell costs {1} less to cast for each counter among players and permanents."] },
   { key = "luminate primordial", class = "target_wrong", clauses = ["When this creature enters, for each opponent, exile up to one target creature that player controls and that player gains life equal to its power."] },
