@@ -213,6 +213,13 @@
 //! The staged parent's inline size fits within the existing bucket's slack;
 //! keep the 16,384 ceiling.
 //!
+//! On x86_64-unknown-linux-gnu (`nightly-2026-11-19`), the merged
+//! top-of-library permission branch measured 16,400 B. Its new look snapshot
+//! and synchronous cast latch already occupy one pointer each. Boxing
+//! `pending_library_search_delivery`, populated only during search delivery,
+//! reduced its inline footprint from 72 B to 8 B and brought `GameState` to
+//! 16,336 B under the existing 16,384 B ceiling.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!

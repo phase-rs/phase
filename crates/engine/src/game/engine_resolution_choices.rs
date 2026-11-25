@@ -2243,12 +2243,12 @@ fn finalize_standard_search_selection(
     }
     if has_delivery {
         let hidden_search_audiences = hidden_search_audiences_for_search(state, player);
-        state.pending_library_search_delivery = Some(
+        state.pending_library_search_delivery = Some(Box::new(
             crate::types::game_state::LibrarySearchDeliveryResume::Standard {
                 searcher: player,
                 hidden_search_audiences,
             },
-        );
+        ));
     } else {
         // CR 701.23a + CR 701.24a: no leading found-card movement belongs to
         // this protocol (fail-to-find or a leading Shuffle), so the zero-move
@@ -12544,7 +12544,9 @@ pub(crate) fn settle_pending_library_search_delivery(
     if let Some(resume) = state.pending_library_search_delivery.take() {
         let _ = run_batch_completion(
             state,
-            crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled { resume },
+            crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
+                resume: *resume,
+            },
             events,
         );
     }

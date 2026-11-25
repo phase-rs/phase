@@ -31811,8 +31811,9 @@ declare_game_state! {
     /// Typed cleanup waiting for an ordinary search's leading ChangeZone to
     /// settle. The chain walker consumes it synchronously; the paused
     /// ChangeZone drain consumes the same value after its final member lands.
+    /// Boxed because it is populated only while a search delivery settles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_library_search_delivery: Option<LibrarySearchDeliveryResume>,
+    pub pending_library_search_delivery: Option<Box<LibrarySearchDeliveryResume>>,
     /// Exact-incarnation audience provenance from a search delivery that
     /// settled in the current action. It is cleared at the next outer action
     /// boundary and never appears in a viewer projection.
@@ -75420,13 +75421,13 @@ mod restored_exact_attack_authority_tests {
                 // A scoped search delivery's "after the search" tail.
                 16 => {
                     state.pending_library_search_delivery =
-                        Some(LibrarySearchDeliveryResume::Scoped {
+                        Some(Box::new(LibrarySearchDeliveryResume::Scoped {
                             player: P0,
                             source_id: attacker,
                             search_keys: vec![],
                             grants: vec![],
                             after_scope: Some(node.clone()),
-                        });
+                        }));
                     state.waiting_for.clone()
                 }
                 // A player-scope sacrifice choice's ability.

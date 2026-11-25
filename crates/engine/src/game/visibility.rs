@@ -2163,7 +2163,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     if let Some(crate::types::game_state::LibrarySearchDeliveryResume::Standard {
         hidden_search_audiences,
         ..
-    }) = filtered.pending_library_search_delivery.as_mut()
+    }) = filtered.pending_library_search_delivery.as_deref_mut()
     {
         hidden_search_audiences.clear();
     }
@@ -5392,7 +5392,7 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
     if let Some(crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
         after_scope: Some(after_scope),
         ..
-    }) = state.pending_library_search_delivery.as_mut()
+    }) = state.pending_library_search_delivery.as_deref_mut()
     {
         redact_ability_payment(after_scope, hidden_ids);
     }
@@ -8762,13 +8762,13 @@ mod tests {
                 2,
                 Box::new(|state: &mut GameState| {
                     state.pending_library_search_delivery =
-                        Some(LibrarySearchDeliveryResume::Scoped {
+                        Some(Box::new(LibrarySearchDeliveryResume::Scoped {
                             player: owner,
                             source_id: paid,
                             search_keys: vec![owner],
                             grants: Vec::new(),
                             after_scope: Some(effect()),
-                        });
+                        }));
                 }),
             ),
             (
