@@ -2181,6 +2181,7 @@ struct CleanupLossBoard {
     goblin_incarnation: u64,
     konrad: Option<ObjectId>,
     aura: ObjectId,
+    aura_owner: PlayerId,
     older: Option<PendingTriggerContext>,
 }
 
@@ -2198,7 +2199,9 @@ fn cleanup_loss_board(commander: bool, seed_older: bool) -> CleanupLossBoard {
     }
     let chieftain = sc.add_real_card(P0, "Goblin Chieftain", Zone::Battlefield, db);
     // Chieftain is the Aura's only legal host on entry.
-    let aura = sc.add_real_card(P1, "Holy Strength", Zone::Battlefield, db);
+    // Keep the cleanup chooser alive when inspecting a previously deferred context.
+    let aura_owner = if seed_older { PlayerId(2) } else { P1 };
+    let aura = sc.add_real_card(aura_owner, "Holy Strength", Zone::Battlefield, db);
     let goblin = sc.add_real_card(
         P0,
         if commander {
@@ -2240,7 +2243,7 @@ fn cleanup_loss_board(commander: bool, seed_older: bool) -> CleanupLossBoard {
         runner.state().objects[&aura].attached_to,
         Some(chieftain.into())
     );
-    assert_eq!(runner.state().objects[&aura].owner, P1);
+    assert_eq!(runner.state().objects[&aura].owner, aura_owner);
     assert_eq!(runner.state().objects[&chieftain].toughness, Some(2));
     assert_eq!(runner.state().objects[&goblin].toughness, Some(1));
 
@@ -2370,6 +2373,7 @@ fn cleanup_loss_board(commander: bool, seed_older: bool) -> CleanupLossBoard {
         goblin_incarnation,
         konrad,
         aura,
+        aura_owner,
         older,
     }
 }
@@ -2379,12 +2383,13 @@ fn lose_during_cleanup(board: &mut CleanupLossBoard) {
         board.runner.state_mut(),
         P0,
         GameAction::Debug(DebugAction::SetLife {
-            player_id: P1,
+            player_id: board.aura_owner,
             life: 0,
         }),
     )
-    .expect("authorized debug SetLife of the cleanup chooser");
-    assert_eq!(loss_seats(&result.events), [P1]);
+    .expect("authorized debug SetLife of the Aura's owner during cleanup");
+    assert_eq!(loss_seats(&result.events), [board.aura_owner]);
+    assert_eq!(eliminated(&board.runner, P1), board.aura_owner == P1);
     let debug = result
         .events
         .iter()
@@ -2393,7 +2398,9 @@ fn lose_during_cleanup(board: &mut CleanupLossBoard) {
     let loss = result
         .events
         .iter()
-        .position(|event| matches!(event, GameEvent::PlayerLost { player_id: P1, .. }))
+        .position(|event| {
+            matches!(event, GameEvent::PlayerLost { player_id, .. } if *player_id == board.aura_owner)
+        })
         .expect("real terminal departure");
     assert!(debug < loss);
     assert!(
@@ -2558,10 +2565,6 @@ fn terminal_cleanup_loss_parks_the_exact_sba_batch_for_the_commander_answer() {
             expected.sort_unstable();
             assert_eq!(victims, expected, "one context for each real death");
         }
-        if seeded {
-            continue;
-        }
-
         board
             .runner
             .act(GameAction::DecideOptionalEffect { accept: true })
@@ -2582,10 +2585,29 @@ fn terminal_cleanup_loss_parks_the_exact_sba_batch_for_the_commander_answer() {
         sources.sort_unstable();
         let mut expected = expected.to_vec();
         expected.push(konrad);
+        if let Some(older) = &board.older {
+            expected.push(older.pending.source_id);
+            let occurrences = state
+                .pending_trigger_order
+                .as_ref()
+                .expect("in-flight commander answer order")
+                .groups
+                .iter()
+                .flat_map(|group| &group.triggers)
+                .filter(|context| {
+                    context.pending.source_id == older.pending.source_id
+                        && context.pending.trigger_event == older.pending.trigger_event
+                })
+                .count();
+            assert_eq!(
+                occurrences, 1,
+                "one placement of the older Ordinary trigger"
+            );
+        }
         expected.sort_unstable();
         assert_eq!(
             sources, expected,
-            "exactly one extra Konrad trigger for the answer"
+            "the answer adds one Konrad trigger and drains any older Ordinary context"
         );
         board
             .runner
@@ -2601,6 +2623,7 @@ fn terminal_cleanup_loss_parks_the_exact_sba_batch_for_the_commander_answer() {
             13
         );
         assert!(state.stack.is_empty());
+        assert!(state.deferred_triggers.is_empty());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 }
