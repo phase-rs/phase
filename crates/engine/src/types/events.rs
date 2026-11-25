@@ -837,6 +837,7 @@ impl EventObjectSnapshot {
             | FilterProp::HasColor { .. }
             | FilterProp::NotColor { .. }
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::NotSupertype { .. }
             | FilterProp::Historic

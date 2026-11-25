@@ -6,7 +6,7 @@ use nom::combinator::{
     all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::multi::separated_list1;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
@@ -258,6 +258,40 @@ fn is_search_result_put_onto_battlefield_restatement(lower: &str) -> bool {
     parse_search_result_put_onto_battlefield_restatement(bare)
         .map(|(rest, _)| rest.trim().is_empty())
         .unwrap_or(false)
+}
+
+/// CR 608.2c: True when `before_lower` contains "draft a card from " followed by
+/// "spellbook" as its terminal noun phrase before " and ".
+fn is_spellbook_draft_bare_and_prefix(before_lower: &str) -> bool {
+    (
+        take_until::<_, _, OracleError<'_>>("draft a card from "),
+        tag("draft a card from "),
+        take_until("spellbook"),
+        tag("spellbook"),
+        eof,
+    )
+        .parse(before_lower.trim_end())
+        .is_ok()
+}
+
+/// CR 608.2c: Parses the destination rider for a compound spellbook draft:
+/// "put it onto the battlefield[ tapped]" or "exile it". Unmodeled riders like
+/// "exile it face down" fail to match so they fall through honestly.
+fn parse_spellbook_draft_destination_rider(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = alt((
+        value(
+            (),
+            pair(
+                tag::<_, _, OracleError<'_>>("put it onto the battlefield"),
+                opt(tag(" tapped")),
+            ),
+        ),
+        value((), tag("exile it")),
+    ))
+    .parse(input)?;
+    let (input, _) =
+        alt((value((), eof), value((), tag(".")), value((), tag(",")))).parse(input)?;
+    Ok((input, ()))
 }
 
 /// CR 701.24b + CR 608.2c: Parse a later search-result instruction that puts
@@ -1761,6 +1795,20 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         // so the follow-up absorber's library-only arm misses them.
                         let search_put_destination = has_search_prefix
                             && is_search_result_put_onto_battlefield_restatement(remainder_trimmed);
+                        // CR 608.2c: "draft a card from [X]'s spellbook and put it
+                        // onto the battlefield [tapped]" (Brood Astronomer) /
+                        // "draft a card from [X]'s spellbook and exile it"
+                        // (Kayla's Kindling) — the destination rider completes the
+                        // draft action and must NOT be bisected into a separate
+                        // clause. The draft parser (`try_parse_spellbook_draft`)
+                        // owns this compound action; bisecting it creates a
+                        // destination-less DraftFromSpellbook (defaulting to Hand)
+                        // plus an unanchored ChangeZone that erroneously targets
+                        // the source permanent.
+                        let spellbook_draft_continuation =
+                            is_spellbook_draft_bare_and_prefix(&before_lower)
+                                && parse_spellbook_draft_destination_rider(remainder_trimmed)
+                                    .is_ok();
                         // CR 707.9: ", except <body> and <body> [and …]" — inside
                         // a copy-effect except clause, " and " is an internal
                         // delimiter between recognised body shapes (SetName, P/T,
@@ -1995,7 +2043,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || mass_exile_union_continuation
                         || loses_all_other_card_types_continuation
                         || shared_equal_to_quantity_conjunct
-                        || inside_prefix_comma_and_continuation;
+                        || inside_prefix_comma_and_continuation
+                        || spellbook_draft_continuation;
                         if !suppress
                             && (starts_bare_and_clause(remainder_trimmed)
                                 || reveal_hand_continues_with_conjugated_verb(
@@ -18931,5 +18980,50 @@ mod loyalty_symbol_clause_start_tests {
             "{def:#?}"
         );
         assert!(removal.sub_ability.is_none(), "{def:#?}");
+    }
+
+    /// CR 608.2c: "draft a card from the Planets Spellbook and put it onto the battlefield tapped"
+    /// (Brood Astronomer) must NOT be bisected at bare ` and ` into a draft node and a separate
+    /// put-onto-battlefield node. The draft destination rider belongs to the draft effect.
+    #[test]
+    fn spellbook_draft_destination_rider_is_not_bisected_at_bare_and() {
+        // Brood Astronomer (un-apostrophized spellbook name, tapped rider)
+        let astronomer = split_clause_sequence(
+            "If you do, draft a card from the Planets Spellbook and put it onto the battlefield tapped.",
+        );
+        assert_eq!(
+            astronomer.len(),
+            1,
+            "draft and put tapped must stay one chunk: {astronomer:?}"
+        );
+
+        // Adaptive Armorer / Dragon Typhoon (put onto battlefield without tapped)
+        let armorer = split_clause_sequence(
+            "draft a card from Adaptive Armorer's spellbook and put it onto the battlefield.",
+        );
+        assert_eq!(
+            armorer.len(),
+            1,
+            "draft and put must stay one chunk: {armorer:?}"
+        );
+
+        // Kayla's Kindling (" and exile it")
+        let kindling =
+            split_clause_sequence("draft a card from this creature's spellbook and exile it.");
+        assert_eq!(
+            kindling.len(),
+            1,
+            "draft and exile it must stay one chunk: {kindling:?}"
+        );
+
+        // Negative reach-guard: an unmodeled rider like "face down" is NOT suppressed.
+        let face_down = split_clause_sequence(
+            "draft a card from this creature's spellbook and exile it face down.",
+        );
+        assert_eq!(
+            face_down.len(),
+            2,
+            "unmodeled rider must split: {face_down:?}"
+        );
     }
 }

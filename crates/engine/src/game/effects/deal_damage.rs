@@ -1,5 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
+use super::{
+    current_damage_delivery_owner, damage_deliveries_since, damage_delivery_mark,
+    fold_snapshots_into_chain_awaiting_delivery, fold_snapshots_into_stack_awaiting_delivery,
+    new_awaiting_damage_result_from_snapshots, record_damage_delivery, RecordedDamageDealt,
+};
 use crate::game::ability_utils::append_to_sub_chain;
 use crate::game::effects::counters;
 use crate::game::effects::player_counter;
@@ -13,10 +18,11 @@ use crate::game::quantity::{
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
-    DamageKindFilter, DamageSource, DeferredDamageChoice, EachDamageRecipient, Effect, EffectError,
-    EffectKind, EventOutcomes, ExcessRecipient, ParkedDamageBatch, PlayerFilter, QuantityExpr,
-    RawDamagePortion, ReplacedDamagePortion, ResolvedAbility, SplitDamagePortion, SubAbilityLink,
-    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetRef,
+    DamageInstructionResult, DamageKindFilter, DamageSource, DeferredDamageChoice,
+    EachDamageRecipient, Effect, EffectError, EffectKind, EventOutcomes, ExcessRecipient,
+    ParkedDamageBatch, PlayerFilter, QuantityExpr, RawDamagePortion, ReplacedDamagePortion,
+    ResolvedAbility, SplitDamagePortion, SubAbilityLink, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -26,7 +32,7 @@ use crate::types::game_state::{
     GameState, HeldBatchRider, PendingContinuation, PendingDamagePostCounter, PreventedDamageEntry,
     ResidentDrainPolicy, RiderTiming, TriggerSourceRead, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{DamageDeliveryOwnerId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{Keyword, KeywordKind, MatchedProtectionQuality};
 use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::{CounterCause, ProposedEvent};
@@ -701,6 +707,7 @@ fn park_damage_context(state: &mut GameState, ctx: &DamageContext) {
         pending.excess_recipient = ctx.excess_recipient;
         pending.lifelink_bonus = ctx.lifelink_bonus;
         pending.source_incarnation = ctx.source_incarnation;
+        pending.damage_delivery_owner = current_damage_delivery_owner();
     }
 }
 
@@ -904,6 +911,9 @@ pub(crate) fn apply_damage_after_replacement(
                     // resume consumes; the shared funnel drain skips combat
                     // stashes.
                     state.pending_damage_post_counter = Some(Box::new(PendingDamagePostCounter {
+                        damage_delivery_owner: (!is_combat)
+                            .then(current_damage_delivery_owner)
+                            .flatten(),
                         ctx: DamageContextSnapshot::from(ctx),
                         target: (*t).clone(),
                         actual_amount,
@@ -1339,6 +1349,7 @@ fn park_player_damage_results(
     );
     state.pending_damage_post_loss =
         Some(Box::new(crate::types::game_state::PendingDamagePostLoss {
+            damage_delivery_owner: (!is_combat).then(current_damage_delivery_owner).flatten(),
             source_id: ctx.source_id,
             source_incarnation: ctx.source_incarnation,
             controller: ctx.controller,
@@ -1431,6 +1442,18 @@ pub(crate) fn emit_damage_dealt_and_record(
                 .map(|object| object.incarnation),
             TargetRef::Player(_) => None,
         };
+        if !is_combat {
+            record_damage_delivery(RecordedDamageDealt {
+                target: target.clone(),
+                amount: dealt_amount,
+                excess: dealt_excess,
+                object_pin: match target {
+                    TargetRef::Object(id) => target_incarnation
+                        .map(|incarnation| ObjectIncarnationRef::of(*id, incarnation)),
+                    TargetRef::Player(_) => None,
+                },
+            });
+        }
         // CR 608.2i + CR 608.2h: Snapshot the damage source's characteristics at
         // damage time so look-back source-filter queries ("opponents who were
         // dealt combat damage by ~ or a Dragon this turn") evaluate against the
@@ -2105,13 +2128,28 @@ pub(crate) fn resolve_instruction(
 /// ability has an existing `sub_ability` chain, it is appended to the tail so
 /// downstream effects still fire after the batch completes. `damage_source_id`
 /// controls which object's keywords/LKI drive each resumed damage event.
+///
+/// `dealt_before_pause` is the instruction's own events up to the pause, which
+/// decide what the stashed tail can learn of its result ([`stashed_tail`]).
 fn stash_remaining_damage_chain(
     state: &mut GameState,
     ability: &ResolvedAbility,
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
+    dealt_before_pause: &[RecordedDamageDealt],
 ) {
-    if let Some(head) = remaining_damage_head(state, ability, damage_source_id, remaining) {
+    if ability.sub_ability.is_none() && crate::game::effects::is_damage_continuation_node(ability) {
+        if let Some(owner) = current_damage_delivery_owner() {
+            fold_snapshots_into_stack_awaiting_delivery(state, owner, dealt_before_pause);
+        }
+    }
+    if let Some(head) = remaining_damage_head(
+        state,
+        ability,
+        damage_source_id,
+        remaining,
+        dealt_before_pause,
+    ) {
         append_to_pending_continuation(state, Some(Box::new(head)));
     }
 }
@@ -2431,6 +2469,7 @@ fn run_damage_batch_phases(
                             prevention_tally,
                         },
                         boundary,
+                        &[],
                     );
                 }
             }
@@ -2467,6 +2506,7 @@ fn run_damage_batch_phases(
                         prevention_tally,
                     },
                     boundary,
+                    &[],
                 );
             }
         }
@@ -2483,6 +2523,7 @@ fn run_damage_batch_phases(
     state.damage_event_losses = Some(EventLosses::Recording(outcomes.unwrap_or_default()));
     // Phase C: delivery (CR 120.4c). A delivery that waits on a choice (a lifelink gain's
     // replacements) parks the survivors after it; the parked batch still owns the completion.
+    let dealing_from = damage_delivery_mark();
     for (index, (ctx, event)) in replaced.iter().enumerate() {
         if let ProposedEvent::Damage { target, .. } = event {
             if !recipient_present(state, target) {
@@ -2511,6 +2552,7 @@ fn run_damage_batch_phases(
                     ..ParkedDamageBatch::default()
                 },
                 boundary,
+                &damage_deliveries_since(dealing_from),
             );
         }
     }
@@ -2561,6 +2603,7 @@ fn run_damage_batch_phases(
                     ..ParkedDamageBatch::default()
                 },
                 boundary,
+                &damage_deliveries_since(dealing_from),
             );
         }
     }
@@ -2596,6 +2639,7 @@ fn run_damage_batch_phases(
                     ..ParkedDamageBatch::default()
                 },
                 boundary,
+                &damage_deliveries_since(dealing_from),
             );
         }
     }
@@ -2889,11 +2933,10 @@ pub(crate) fn defer_choice_behind_earlier_players(
 ) -> bool {
     let order = crate::game::players::apnap_order(state);
     let chooser_rank = player_rank(&order, chooser);
-    let Some(ProposedEvent::Damage { source_id, .. }) = state
-        .pending_replacement
-        .as_ref()
-        .map(|pending| &pending.proposed)
-    else {
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return false;
+    };
+    let ProposedEvent::Damage { source_id, .. } = &pending.proposed else {
         return false;
     };
     let Some(frame) = state.active_ability_continuation() else {
@@ -2907,9 +2950,10 @@ pub(crate) fn defer_choice_behind_earlier_players(
     else {
         return false;
     };
-    if !awaiting
-        .as_ref()
-        .is_some_and(|portion| portion.source == *source_id)
+    if frame.chain.context.damage_delivery_owner != pending.damage_delivery_owner
+        || !awaiting
+            .as_ref()
+            .is_some_and(|portion| portion.source == *source_id)
     {
         return false;
     }
@@ -3002,6 +3046,7 @@ pub(crate) fn park_damage_batch(
     awaiting: Option<RawDamagePortion>,
     parked: ParkedDamageBatch,
     boundary: ChildStackDepth,
+    dealt_before_pause: &[RecordedDamageDealt],
 ) -> Result<DamageTail, EffectError> {
     let replaced = replaced
         .iter()
@@ -3036,6 +3081,7 @@ pub(crate) fn park_damage_batch(
         ability,
     );
     let mut node = node;
+    node.context.damage_delivery_owner = current_damage_delivery_owner();
     // CR 113.7a + CR 608.2h: the parked members resume through the parent's latch,
     // filtered per member (`member_damage_context`), exactly as they were built.
     node.trigger_source = ability.trigger_source.clone();
@@ -3049,8 +3095,14 @@ pub(crate) fn park_damage_batch(
         return Ok(DamageTail::Caller);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
-        let tail = stashed_tail(state, sub, ability);
+        let tail = stashed_tail(state, sub, ability, dealt_before_pause);
         state.park_ability_continuation(PendingContinuation::new(Box::new(tail), state));
+    } else if matches!(ability.effect, Effect::ResumeDamageBatch { .. }) {
+        // CR 608.2c: a resumed batch re-pausing mid-delivery folds any portions it
+        // delivered into the already-parked rider awaiting this instruction's completion.
+        if let Some(owner) = current_damage_delivery_owner() {
+            fold_snapshots_into_stack_awaiting_delivery(state, owner, dealt_before_pause);
+        }
     }
     state.park_ability_continuation(pending);
     Ok(DamageTail::Stashed)
@@ -3064,18 +3116,20 @@ pub(crate) fn hold_riders_for_awaited_portion<T>(
     state: &mut GameState,
     answer: impl FnOnce(&mut GameState) -> T,
 ) -> T {
-    let Some(source) =
+    let Some((source, owner)) =
         state
             .pending_replacement
             .as_ref()
             .and_then(|pending| match &pending.proposed {
-                ProposedEvent::Damage { source_id, .. } => Some(*source_id),
+                ProposedEvent::Damage { source_id, .. } => {
+                    Some((*source_id, pending.damage_delivery_owner))
+                }
                 _ => None,
             })
     else {
         return answer(state);
     };
-    if awaiting_batch(state, source).is_none() {
+    if awaiting_batch(state, source, owner).is_none() {
         return answer(state);
     }
     // CR 608.2f + CR 700.1: the answer re-scans its portion under the guards its batch read
@@ -3099,7 +3153,7 @@ pub(crate) fn hold_riders_for_awaited_portion<T>(
     }));
     // CR 615.13: the answered portion's prevention is part of its batch's one application, so
     // the answer accumulates onto the tally the batch parked.
-    let parked_tally = awaiting_batch(state, source)
+    let parked_tally = awaiting_batch(state, source, owner)
         .and_then(|batch| batch.context.parked_damage_batch.as_deref())
         .map(|parked| tally_map_from_record_entries(&parked.prevention_tally))
         .unwrap_or_default();
@@ -3111,7 +3165,7 @@ pub(crate) fn hold_riders_for_awaited_portion<T>(
     // CR 614.9: a capped redirect the answer applied splits a portion off into the batch too.
     let split = take_split_portions(state);
     state.damage_batch_ledger = saved;
-    if let Some(batch) = awaiting_batch(state, source) {
+    if let Some(batch) = awaiting_batch(state, source, owner) {
         if batch.context.parked_damage_batch.is_some()
             || !held.is_empty()
             || !split.is_empty()
@@ -3129,20 +3183,26 @@ pub(crate) fn hold_riders_for_awaited_portion<T>(
     result
 }
 
-/// CR 120.1: the topmost parked two-phase batch awaiting the portion `source` deals.
-fn awaiting_batch(state: &mut GameState, source: ObjectId) -> Option<&mut ResolvedAbility> {
+/// CR 120.1 + CR 616.1: a parked batch recognizes its own pending portion.
+/// An older ownerless choice can still settle an ownerless batch.
+fn awaiting_batch(
+    state: &mut GameState,
+    source: ObjectId,
+    owner: Option<DamageDeliveryOwnerId>,
+) -> Option<&mut ResolvedAbility> {
     state
         .resolution_stack
         .ability_continuations_from_top_mut()
         .map(|pending| pending.chain.as_mut())
         .find(|chain| {
-            matches!(
-                &chain.effect,
-                Effect::ResumeDamageBatch {
-                    awaiting: Some(portion),
-                    ..
-                } if portion.source == source
-            )
+            chain.context.damage_delivery_owner == owner
+                && matches!(
+                    &chain.effect,
+                    Effect::ResumeDamageBatch {
+                        awaiting: Some(portion),
+                        ..
+                    } if portion.source == source
+                )
         })
 }
 
@@ -3151,14 +3211,13 @@ fn awaiting_batch(state: &mut GameState, source: ObjectId) -> Option<&mut Resolv
 /// are replaced, instead of being dealt at once. `false` when the event is not the portion the
 /// active batch awaits, so the caller delivers it.
 ///
-/// The portion is known by its source (CR 120.1): a replacement may change its recipient
-/// (Pariah: "All damage that would be dealt to you is dealt to enchanted creature instead.")
-/// and its amount, never the object dealing it. One choice stands at a time, so the topmost
-/// batch awaiting that source is the one the answer belongs to.
+/// Redirection preserves the instruction owner and the source (CR 120.1).
+/// Independently nested damage can reuse that source while the batch waits.
 pub(crate) fn return_answered_portion_to_batch(
     state: &mut GameState,
     ctx: &DamageContext,
     event: &ProposedEvent,
+    owner: Option<DamageDeliveryOwnerId>,
 ) -> bool {
     let ProposedEvent::Damage {
         source_id,
@@ -3170,26 +3229,14 @@ pub(crate) fn return_answered_portion_to_batch(
     else {
         return false;
     };
-    // The batch is the topmost continuation: the answer may have raised a rider's frames
-    // above it (Test of Faith's counters after its shield was chosen).
-    let Some((replaced, awaiting)) = state
-        .resolution_stack
-        .ability_continuations_from_top_mut()
-        .find_map(|pending| match &mut pending.chain.effect {
-            Effect::ResumeDamageBatch {
-                replaced,
-                awaiting: awaiting @ Some(_),
-                ..
-            } if awaiting
-                .as_ref()
-                .is_some_and(|portion| portion.source == *source_id) =>
-            {
-                Some((replaced, awaiting))
-            }
-            _ => None,
-        })
-    else {
+    let Some(batch) = awaiting_batch(state, *source_id, owner) else {
         return false;
+    };
+    let Effect::ResumeDamageBatch {
+        replaced, awaiting, ..
+    } = &mut batch.effect
+    else {
+        unreachable!("awaiting_batch only returns a paused batch");
     };
     *awaiting = None;
     replaced.push(ReplacedDamagePortion {
@@ -3275,12 +3322,13 @@ fn remaining_damage_head(
     ability: &ResolvedAbility,
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
+    dealt_before_pause: &[RecordedDamageDealt],
 ) -> Option<ResolvedAbility> {
     let head = remaining_damage_chain(state, ability, damage_source_id, remaining);
     let tail = ability
         .sub_ability
         .as_ref()
-        .map(|sub| stashed_tail(state, sub, ability));
+        .map(|sub| stashed_tail(state, sub, ability, dealt_before_pause));
     match head {
         Some(mut head) => {
             if let Some(tail) = tail {
@@ -3317,6 +3365,8 @@ fn remaining_damage_chain(
         let mut node = build_remaining_damage_node(ability, damage_source_id, target, amount);
         node.trigger_source = ability.trigger_source.clone();
         let mut node = keep_chain_identity(state, node, ability);
+        node.context.direct_damage_result = Some(DamageInstructionResult::ContinuationPortion);
+        node.context.damage_delivery_owner = current_damage_delivery_owner();
         if own_source {
             node.source_incarnation = ability.source_incarnation;
             node.announced_source_incarnation = ability.announced_source_incarnation;
@@ -3349,13 +3399,27 @@ fn remaining_damage_chain(
 /// a kicker survives the park (Hurloon Battle Hymn, "If this spell was kicked, you
 /// gain 4 life."). The context object is `None` because `resolve_chain_body` has
 /// already set it recursively on `ability`.
+///
+/// CR 608.2c + CR 616.1: the tail is this instruction's direct child, so it reads
+/// this instruction's damage result — never one `ability` inherited from an earlier
+/// damage instruction. A tail not yet awaiting delivery starts `AwaitingDelivery`
+/// seeded with `dealt_before_pause`; a continuation portion's tail that already
+/// awaits delivery folds `dealt_before_pause` into its existing accumulator.
 fn stashed_tail(
     state: &mut GameState,
     sub: &ResolvedAbility,
     ability: &ResolvedAbility,
+    dealt_before_pause: &[RecordedDamageDealt],
 ) -> ResolvedAbility {
     let mut tail = sub.clone();
-    if crate::game::effects::should_propagate_parent_targets(ability, &tail) {
+    let owner = current_damage_delivery_owner();
+    if let Some(owner) = owner {
+        fold_snapshots_into_chain_awaiting_delivery(&mut tail, owner, dealt_before_pause);
+    }
+    let propagate_parent_targets = !state.current_step_targets_hydrated_from_event_context;
+    if propagate_parent_targets
+        && crate::game::effects::should_propagate_parent_targets(ability, &tail)
+    {
         tail.mirror_targets_from(ability);
     }
     crate::game::effects::apply_parent_chain_context(&mut tail, ability, None, state);
@@ -3370,11 +3434,26 @@ fn stashed_tail(
         .is_some_and(|condition| condition.is_instead_override())
     {
         if let Some(base) = tail.else_ability.as_deref_mut() {
-            if crate::game::effects::should_propagate_parent_targets(ability, base) {
+            if propagate_parent_targets
+                && crate::game::effects::should_propagate_parent_targets(ability, base)
+            {
                 base.mirror_targets_from(ability);
             }
             crate::game::effects::apply_parent_chain_context(base, ability, None, state);
         }
+    }
+    if !crate::game::effects::chain_awaits_damage_delivery(&tail, owner) {
+        // A fresh repeated instruction shares one capture across its iterations.
+        // Its first parked reader must receive deliveries from earlier iterations,
+        // while a continuation adds only the portion it just delivered.
+        let owned_prefix = (owner.is_some() && !super::is_damage_continuation_node(ability))
+            .then(|| damage_deliveries_since(0));
+        let awaiting = new_awaiting_damage_result_from_snapshots(
+            state,
+            ability,
+            owned_prefix.as_deref().unwrap_or(dealt_before_pause),
+        );
+        tail.set_direct_damage_result(Some(awaiting), owner);
     }
     tail
 }
@@ -3627,6 +3706,7 @@ fn pause_for_resolution_division(
     let mut node = ability.clone();
     node.sub_ability = None;
     node.else_ability = None;
+    node.context.damage_delivery_owner = current_damage_delivery_owner();
     state.waiting_for = crate::types::game_state::WaitingFor::DistributeAmong {
         player,
         total,
@@ -3651,13 +3731,33 @@ fn stash_remaining_distribution(
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
     splice: RemainingDamageSplice,
+    dealt_before_pause: &[RecordedDamageDealt],
 ) {
     match splice {
         RemainingDamageSplice::AfterContinuation => {
-            stash_remaining_damage_chain(state, ability, damage_source_id, remaining);
+            stash_remaining_damage_chain(
+                state,
+                ability,
+                damage_source_id,
+                remaining,
+                dealt_before_pause,
+            );
         }
         RemainingDamageSplice::BeforeContinuation => {
-            if let Some(head) = remaining_damage_head(state, ability, damage_source_id, remaining) {
+            if ability.sub_ability.is_none()
+                && crate::game::effects::is_damage_continuation_node(ability)
+            {
+                if let Some(owner) = current_damage_delivery_owner() {
+                    fold_snapshots_into_stack_awaiting_delivery(state, owner, dealt_before_pause);
+                }
+            }
+            if let Some(head) = remaining_damage_head(
+                state,
+                ability,
+                damage_source_id,
+                remaining,
+                dealt_before_pause,
+            ) {
                 super::prepend_to_pending_continuation(state, head);
             }
         }
@@ -3755,6 +3855,7 @@ fn resolve_with_splice(
     // CR 608.2c + CR 616.1: a rider that left its prompt standing holds the remaining
     // recipients behind its answer (`park_recipients_behind_paused_rider`).
     let boundary = state.resolution_stack.capture_child_boundary();
+    let dealing_from = damage_delivery_mark();
     if let Some(distribution) = &ability.distribution {
         for (i, (target, amount)) in distribution.iter().enumerate() {
             match apply_damage_to_target(state, &ctx, target.clone(), *amount, false, events)? {
@@ -3777,7 +3878,14 @@ fn resolve_with_splice(
                     // after the replacement choice resolves. Stash each as a chained
                     // DealDamage continuation keyed to the same damage-source id.
                     let remaining = distribution[i + 1..].iter().map(|(t, a)| (t.clone(), *a));
-                    stash_remaining_distribution(state, ability, ctx.source_id, remaining, splice);
+                    stash_remaining_distribution(
+                        state,
+                        ability,
+                        ctx.source_id,
+                        remaining,
+                        splice,
+                        &damage_deliveries_since(dealing_from),
+                    );
                     return Ok(DamageTail::Stashed);
                 }
             }
@@ -3805,7 +3913,13 @@ fn resolve_with_splice(
                     let remaining = effective_targets[i + 1..]
                         .iter()
                         .map(|t| (t.clone(), num_dmg));
-                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    stash_remaining_damage_chain(
+                        state,
+                        ability,
+                        ctx.source_id,
+                        remaining,
+                        &damage_deliveries_since(dealing_from),
+                    );
                     return Ok(DamageTail::Stashed);
                 }
             }
@@ -4670,6 +4784,7 @@ fn resolve_all_portions(
         .collect();
 
     let boundary = state.resolution_stack.capture_child_boundary();
+    let dealing_from = damage_delivery_mark();
     for (i, (target, num_dmg)) in recipient_amounts.iter().enumerate() {
         match apply_damage_to_target(state, &ctx, target.clone(), *num_dmg, false, events)? {
             // CR 608.2c + CR 616.1: a rider that left its prompt standing (Dralnu, Lich Lord's
@@ -4693,7 +4808,13 @@ fn resolve_all_portions(
                 // the replacement choice resolves — chain them as DealDamage
                 // continuations keyed to the same damage-source id.
                 let remaining = recipient_amounts[i + 1..].iter().cloned();
-                stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                stash_remaining_damage_chain(
+                    state,
+                    ability,
+                    ctx.source_id,
+                    remaining,
+                    &damage_deliveries_since(dealing_from),
+                );
                 // Tag the stashed chain with the parent `EffectKind::DamageAll` so the
                 // drain re-emits the parent event the non-pause tail fires.
                 mark_pending_continuation_parent(state, EffectKind::DamageAll);
@@ -5300,6 +5421,7 @@ fn resolve_each_player_portions(
         .collect();
 
     let boundary = state.resolution_stack.capture_child_boundary();
+    let dealing_from = damage_delivery_mark();
     for (i, pid) in player_ids.iter().enumerate() {
         // CR 120.3: Resolve quantity scoped to this player. Thread the ability's
         // object targets so an `ObjectManaValue { scope: Target }` leaf (Lady
@@ -5353,7 +5475,13 @@ fn resolve_each_player_portions(
                     }
                     continue;
                 }
-                stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                stash_remaining_damage_chain(
+                    state,
+                    ability,
+                    ctx.source_id,
+                    remaining,
+                    &damage_deliveries_since(dealing_from),
+                );
                 // Tag the stashed chain with the parent `EffectKind::DamageEachPlayer`
                 // so the drain re-emits the parent event the non-pause tail fires.
                 mark_pending_continuation_parent(state, EffectKind::DamageEachPlayer);
@@ -5709,6 +5837,196 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn damage_ownership_keeps_one_repeated_prefix_and_excludes_same_source_child() {
+        use crate::types::ability::DamageInstructionResult;
+
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(200);
+        let ctx = DamageContext::fallback(source, PlayerId(0));
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let rider = ResolvedAbility::new(
+            Effect::unimplemented("damage reader probe", "damage reader probe"),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let event = |target, amount| ProposedEvent::Damage {
+            source_id: source,
+            target: TargetRef::Player(target),
+            amount,
+            is_combat: false,
+            source_name: None,
+            source_incarnation: None,
+            applied: HashSet::new(),
+        };
+        let original_owner = Some(DamageDeliveryOwnerId(1));
+        let mut events = Vec::new();
+        let _original_capture = super::super::DamageDeliveryScope::enter(original_owner);
+        apply_damage_after_replacement(&mut state, &ctx, event(PlayerId(1), 1), false, &mut events);
+        let later_iteration = damage_delivery_mark();
+        {
+            let _independent_capture =
+                super::super::DamageDeliveryScope::enter(Some(DamageDeliveryOwnerId(2)));
+            apply_damage_after_replacement(
+                &mut state,
+                &ctx,
+                event(PlayerId(0), 2),
+                false,
+                &mut events,
+            );
+            let receipts = damage_deliveries_since(0);
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].target, TargetRef::Player(PlayerId(0)));
+            assert_eq!(receipts[0].amount, 2);
+        }
+        assert_eq!(damage_delivery_mark(), later_iteration);
+        apply_damage_after_replacement(&mut state, &ctx, event(PlayerId(1), 3), false, &mut events);
+        let park = stashed_tail(
+            &mut state,
+            &rider,
+            &ability,
+            &damage_deliveries_since(later_iteration),
+        );
+        assert_eq!(park.context.damage_delivery_owner, original_owner);
+        assert!(matches!(
+            park.context.direct_damage_result,
+            Some(DamageInstructionResult::AwaitingDelivery { amount: 4, .. })
+        ));
+        assert_eq!((state.players[0].life, state.players[1].life), (18, 16));
+    }
+
+    /// CR 120.1 + CR 616.1: distinct owned deliveries by the same source
+    /// cannot settle each other's parked batch or populate each other's reader.
+    #[test]
+    fn damage_ownership_same_source_no_tail_and_legacy_batch_handback() {
+        use crate::types::ability::{AwaitedDamageRecipient, DamageInstructionResult};
+
+        for batch_owner in [Some(DamageDeliveryOwnerId(1)), None] {
+            let mut state = GameState::new_two_player(42);
+            let source = ObjectId(200);
+            let ctx = DamageContext::fallback(source, PlayerId(0));
+            let original = RawDamagePortion {
+                source,
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 3,
+            };
+            let mut reader = ResolvedAbility::new(
+                Effect::unimplemented("damage reader probe", "damage reader probe"),
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            reader.set_direct_damage_result(
+                Some(DamageInstructionResult::AwaitingDelivery {
+                    amount: 0,
+                    excess: None,
+                    recipient: AwaitedDamageRecipient::None,
+                    fight_fought_creature: None,
+                }),
+                batch_owner,
+            );
+            state.park_ability_continuation(PendingContinuation::new(Box::new(reader), &state));
+            let mut batch = ResolvedAbility::new(
+                Effect::ResumeDamageBatch {
+                    kind: EffectKind::DamageAll,
+                    replaced: vec![],
+                    remaining: vec![],
+                    awaiting: Some(original.clone()),
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            batch.context.damage_delivery_owner = batch_owner;
+            state.park_ability_continuation(PendingContinuation::new(Box::new(batch), &state));
+
+            let event = |target, amount| ProposedEvent::Damage {
+                source_id: source,
+                target,
+                amount,
+                is_combat: false,
+                source_name: None,
+                source_incarnation: None,
+                applied: HashSet::new(),
+            };
+            let independent_target = TargetRef::Player(PlayerId(0));
+            let independent = event(independent_target.clone(), 2);
+            let independent_owner = Some(DamageDeliveryOwnerId(2));
+            let mut events = Vec::new();
+            super::super::resume_damage_delivery(&mut state, independent_owner, |state| {
+                assert!(!return_answered_portion_to_batch(
+                    state,
+                    &ctx,
+                    &independent,
+                    independent_owner
+                ));
+                apply_damage_after_replacement(state, &ctx, independent, false, &mut events);
+            });
+            assert_eq!((state.players[0].life, state.players[1].life), (18, 20));
+            let batch = awaiting_batch(&mut state, source, batch_owner)
+                .expect("old portion is still waiting");
+            assert!(matches!(
+                &batch.effect,
+                Effect::ResumeDamageBatch { awaiting: Some(portion), replaced, .. }
+                    if *portion == original && replaced.is_empty()
+            ));
+            assert!(batch.context.parked_damage_batch.is_none());
+
+            let answer = event(original.target.clone(), original.amount);
+            assert!(return_answered_portion_to_batch(
+                &mut state,
+                &ctx,
+                &answer,
+                batch_owner
+            ));
+            assert!(awaiting_batch(&mut state, source, batch_owner).is_none());
+            assert_eq!((state.players[0].life, state.players[1].life), (18, 20));
+            let batch = state
+                .take_active_ability_continuation()
+                .unwrap()
+                .expect("take the answered batch");
+            super::super::resume_damage_delivery(&mut state, batch_owner, |state| {
+                resolve_resume_damage_batch(state, &batch.pending.chain, &mut events).unwrap();
+            });
+            assert_eq!((state.players[0].life, state.players[1].life), (18, 17));
+            let hits: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::DamageDealt {
+                        source_id,
+                        target,
+                        amount,
+                        ..
+                    } => Some((*source_id, target.clone(), *amount)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                hits,
+                [
+                    (source, independent_target, 2),
+                    (source, original.target, 3)
+                ]
+            );
+            assert!(matches!(
+                state.active_ability_continuation().unwrap().chain.context.direct_damage_result,
+                Some(DamageInstructionResult::AwaitingDelivery { amount, .. })
+                    if amount == if batch_owner.is_some() { 3 } else { 0 }
+            ));
+        }
+    }
 
     /// CR 103.4 + CR 904.5 + CR 119.1: P1 is the archenemy with a 40-life
     /// baseline, while P0 and P2 are heroes with 20-life baselines.
@@ -7696,6 +8014,7 @@ mod tests {
 
         let stash = |source: ObjectId, stage: DamagePostLossStage| {
             Some(Box::new(PendingDamagePostLoss {
+                damage_delivery_owner: None,
                 source_id: source,
                 source_incarnation: None,
                 controller: PlayerId(1),
@@ -7745,6 +8064,7 @@ mod tests {
         toxic_poison: u32,
     ) -> crate::types::game_state::PendingDamagePostLoss {
         crate::types::game_state::PendingDamagePostLoss {
+            damage_delivery_owner: None,
             source_id: source,
             source_incarnation: None,
             controller: PlayerId(1),
@@ -11976,6 +12296,67 @@ mod tests {
         assert!(deal_damage_resolved(&events));
     }
 
+    /// CR 608.2c + CR 608.2d: When a `DamageTail::Caller` instruction pauses at
+    /// `WaitingFor::DistributeAmong` (`ResolutionCandidates`), `resolve_chain_body`
+    /// seeds `AwaitingDelivery` on the parked rider. Answering via `apply_as_current`
+    /// resumes the division under its delivery owner and publishes the owned
+    /// receipts, so the rider sees the divided total (5).
+    #[test]
+    fn resolution_division_pauses_then_publishes_awaited_damage_result() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 2, 9, true);
+        let w2 = division_creature(&mut state, 3, PlayerId(0), 2, 9, true);
+        let giant = division_creature(&mut state, 4, PlayerId(1), 5, 5, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1, w2]);
+
+        let mut gain_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            master,
+            PlayerId(0),
+        );
+        gain_life.sub_link = crate::types::ability::SubAbilityLink::SequentialSibling;
+
+        let mut node = wolves_division_node(giant, master);
+        node.sub_ability = Some(Box::new(gain_life));
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &node, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::DistributeAmong {
+                scope: DistributionScope::ResolutionCandidates { .. },
+                ..
+            }
+        ));
+
+        let result = crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::DistributeAmong {
+                distribution: vec![(TargetRef::Object(w1), 1), (TargetRef::Object(w2), 4)],
+            },
+        )
+        .expect("DistributeAmong answer must succeed");
+
+        assert_eq!(state.objects[&w1].damage_marked, 1);
+        assert_eq!(state.objects[&w2].damage_marked, 4);
+        assert_eq!(state.players[0].life, 25);
+        assert!(result.events.iter().any(|e| matches!(
+            e,
+            GameEvent::LifeChanged {
+                player_id,
+                amount: 5,
+                ..
+            } if *player_id == PlayerId(0)
+        )));
+    }
+
     /// V5r siblings (R2-F1): announced-target divisions keep reporting their
     /// targets as recipients — including a `ParentTarget` division node with no
     /// stamped split (the post-"instead"-swap shape).
@@ -12123,6 +12504,7 @@ mod tests {
             src,
             [(r1.clone(), 1), (r2.clone(), 2)],
             RemainingDamageSplice::BeforeContinuation,
+            &[],
         );
         assert_eq!(
             active_chain_summary(&before),
@@ -12136,6 +12518,7 @@ mod tests {
             src,
             [(r1.clone(), 1), (r2.clone(), 2)],
             RemainingDamageSplice::AfterContinuation,
+            &[],
         );
         assert_eq!(
             active_chain_summary(&after),

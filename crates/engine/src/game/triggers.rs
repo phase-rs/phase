@@ -12794,6 +12794,9 @@ pub(crate) fn battlefield_entry_in_progress(state: &GameState) -> bool {
 fn parked_replacement_modifies_an_entry(state: &GameState, proposed: &ProposedEvent) -> bool {
     match proposed {
         ProposedEvent::ZoneChange { to, .. } => *to == Zone::Battlefield,
+        ProposedEvent::OutsideGameCardEntry { destination, .. } => {
+            *destination == Zone::Battlefield
+        }
         ProposedEvent::TokenEntry { .. } | ProposedEvent::CreateToken { .. } => true,
         other => other
             .affected_object_id()
@@ -16938,6 +16941,7 @@ fn latched_property_kind(
         | FilterProp::HasColor { .. }
         | FilterProp::NotColor { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::WithKeyword { .. }
         | FilterProp::WithoutKeyword { .. }
@@ -19619,6 +19623,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp, reader: BindingReader) -> boo
         | FilterProp::HasSupertype { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::ManaCostIn { .. }
         | FilterProp::HasXInManaCost
