@@ -6887,6 +6887,28 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::ChooseBranch { index },
         ) => {
+            // CR 614.6 + CR 616.1: a branch answer to a parked token substitute
+            // applies the substitute to its decider's part of the event; any
+            // other branch choice resolves as before.
+            if super::replacement::parked_token_substitute(
+                state,
+                source_id,
+                crate::types::game_state::TokenSubstituteChoice::Branch,
+            ) {
+                if index >= branches.len() {
+                    return Err(EngineError::InvalidAction(format!(
+                        "branch index {index} is outside 0..{}",
+                        branches.len()
+                    )));
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    super::engine_replacement::resume_token_substitute(
+                        state,
+                        super::replacement::TokenSubstituteAnswer::Branch(index),
+                        events,
+                    )?,
+                ));
+            }
             set_priority(state, player);
             // Computed before `branches` moves into the selection: the exact
             // predicate the enters-counter capture keys on.

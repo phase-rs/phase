@@ -34448,49 +34448,44 @@ fn cyclops_gladiator_if_you_do_damage_back_reads_targets_power_not_sources() {
 /// power/toughness" class (issue #8460).
 ///
 /// Each row is a real card's VERBATIM Oracle text run through the production
-/// parser, and the expectation is the full multiset of `Power`/`Toughness`
+/// parser, and the expectation is the full multiset of object-stat
 /// scopes in its parse — so a scope that moves anywhere in the card, not just
 /// at the node under test, reds this table.
 ///
-/// The two halves of the table are the two readings of the same English phrase:
+/// The table distinguishes three readings of the same English phrase:
 ///
 /// * `Target` — the clause announces its own "target creature", so CR 115.1
 ///   makes that announced target the antecedent (Thickest in the Thicket,
 ///   Soul's Might, Nantuko Mentor).
-/// * `CostPaidObject` — the antecedent is the CR 608.2k referent named by the
-///   ability's cost or trigger condition, with no announced creature target for
-///   the demonstrative to bind to instead. **Minsc & Boo, Timeless Heroes is the
-///   named non-regression constraint for #8460**: its reflexive "~ deals X
-///   damage to any target, where X is that creature's power" announces
-///   `TargetFilter::Any`, and X must keep reading the creature sacrificed by the
-///   −2 ability. Hamletback Goliath (trigger referent) and Shadowheart, Dark
-///   Justiciar (sacrifice cost) hold the same reading from the other two
-///   directions.
+/// * `CostPaidObject` — a cost or a creature sacrificed during resolution
+///   (Shadowheart and the reflexive ability from Minsc & Boo's −2).
+/// * `EventSource` — the creature named by the trigger condition (Hamletback
+///   Goliath and Monkey Cage).
 #[test]
 fn where_x_that_creature_stat_binds_target_only_when_the_clause_announces_one() {
-    /// Collect every `QuantityRef::Power`/`Toughness` scope in a parse, in
+    /// Collect every `QuantityRef::Power`/`Toughness`/`ObjectManaValue` scope in a parse, in
     /// document order. Serializing the whole `ParsedAbilities` reaches nodes no
     /// hand-written index chain would (sub-abilities, else-branches, granted
     /// definitions), so a scope that moves anywhere is visible here.
-    fn power_scopes(value: &serde_json::Value, out: &mut Vec<String>) {
+    fn stat_scopes(value: &serde_json::Value, out: &mut Vec<String>) {
         match value {
             serde_json::Value::Object(map) => {
                 if let (Some(serde_json::Value::String(kind)), Some(scope)) =
                     (map.get("type"), map.get("scope"))
                 {
-                    if kind == "Power" || kind == "Toughness" {
+                    if matches!(kind.as_str(), "Power" | "Toughness" | "ObjectManaValue") {
                         if let Some(serde_json::Value::String(name)) = scope.get("type") {
                             out.push(format!("{kind}/{name}"));
                         }
                     }
                 }
                 for nested in map.values() {
-                    power_scopes(nested, out);
+                    stat_scopes(nested, out);
                 }
             }
             serde_json::Value::Array(items) => {
                 for nested in items {
-                    power_scopes(nested, out);
+                    stat_scopes(nested, out);
                 }
             }
             _ => {}
@@ -34526,13 +34521,19 @@ fn where_x_that_creature_stat_binds_target_only_when_the_clause_announces_one() 
             "Hamletback Goliath",
             &["Creature"],
             "Whenever another creature enters, you may put X +1/+1 counters on this creature, where X is that creature's power.",
-            &["Power/CostPaidObject"],
+            &["Power/EventSource"],
         ),
         (
             "Shadowheart, Dark Justiciar",
             &["Creature"],
-            "{1}{B}, {T}, Sacrifice another creature: Draw X cards, where X is that creature's power.",
+            "{1}{B}, {T}, Sacrifice another creature: Draw X cards, where X is that creature's power.\nChoose a Background (You can have a Background as a second commander.)",
             &["Power/CostPaidObject"],
+        ),
+        (
+            "Monkey Cage",
+            &["Artifact"],
+            "When a creature enters, sacrifice this artifact and create X 2/2 green Monkey creature tokens, where X is that creature's mana value.",
+            &["ObjectManaValue/EventSource"],
         ),
     ];
 
@@ -34541,7 +34542,7 @@ fn where_x_that_creature_stat_binds_target_only_when_the_clause_announces_one() 
         let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
         let value = serde_json::to_value(&parsed).expect("ParsedAbilities must serialize");
         let mut scopes = Vec::new();
-        power_scopes(&value, &mut scopes);
+        stat_scopes(&value, &mut scopes);
         assert_eq!(
             scopes, *expected,
             "{name}: per-object power/toughness scopes changed"

@@ -3889,6 +3889,10 @@ pub enum ManaProduction {
     /// Per CR 106.7 the union ignores cost-payability of the surveyed lands'
     /// mana abilities — only the resulting *type set* matters. CR 106.5 applies
     /// when the union is empty (e.g. no matching lands → no mana).
+    /// `land_filter` may also be the cost referent `TargetFilter::CostPaidObject`
+    /// ("the sacrificed land could produce" — Squandered Resources, CR 608.2k),
+    /// read from the referent's LKI (`LKISnapshot::produceable_mana_types`,
+    /// CR 608.2h) rather than a battlefield census.
     AnyTypeProduceableBy {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
@@ -3940,10 +3944,16 @@ pub enum ManaProduction {
     /// variant is deliberately NOT parameterized: no mana ability reads either.
     DistinctColorsAmongPermanents { filter: TargetFilter },
     /// CR 106.1 + CR 109.1: Produce N mana of one chosen color from the distinct
-    /// colors present among permanents matching `filter`. Mox Amber class:
-    /// "{T}: Add one mana of any color among legendary creatures and
-    /// planeswalkers you control." Colors resolve dynamically at activation
-    /// time; CR 106.5 applies when no matching permanent is colored.
+    /// colors present among the objects matching `filter`: permanents, unless
+    /// `filter` names another zone through `FilterProp::InZone`, as
+    /// `effects::mana::distinct_colors_among_permanents` reads it. Mox Amber
+    /// class: "{T}: Add one mana of any color among legendary creatures and
+    /// planeswalkers you control." CR 105.4 + CR 608.2d: "Choose a color of
+    /// <objects>. Add one mana of that color." lowers here too, because that
+    /// choice is made while this production resolves, from the colors of the
+    /// objects it names (Meteor Crater: "a permanent you control"; Corrupted
+    /// Grafstone: "a card in your graveyard"). Colors resolve dynamically at
+    /// activation time; CR 106.5 applies when no matching object is colored.
     AnyOneColorAmongPermanents {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
@@ -12523,10 +12533,9 @@ pub enum ObjectScope {
     EventSource,
     /// CR 608.2k: The specific untargeted object previously referred to by
     /// this ability's cost OR trigger condition. Resolved (first match wins)
-    /// via `ResolvedAbility.cost_paid_object` → trigger-event source →
-    /// `effect_context_object`. Subsumes the former `EventContextSource*`
-    /// trio (CR 117.1 + CR 400.7j cost referent and CR 603.2 trigger
-    /// referent are the two enumerated members of CR 608.2k's single clause).
+    /// via `ResolvedAbility.cost_paid_object`, then the same-resolution effect
+    /// object, then the trigger-event source. Where-X references to a trigger's
+    /// object use `EventSource` directly.
     CostPaidObject,
     /// CR 608.2k: A deferred anaphoric **pronoun** ("it" / "its") whose object
     /// referent is bound at parse time. The parser rebinds this to a concrete
@@ -31916,6 +31925,23 @@ impl Effect {
         )
     }
 
+    /// CR 608.2c + CR 115.6: whether this is a counter (CR 122.1) or
+    /// life-total (CR 119.3) instruction that names no target. The shared
+    /// shape authority for the instructions an activated mana ability performs
+    /// in written order before its production (`inline_mana_preamble`: Empowered
+    /// Autogenerator's "Put a charge counter on this artifact.") and for the
+    /// earlier instructions the CR 106.7 reader performs on a scratch state
+    /// before a later mana amount.
+    pub fn is_decision_free_state_instruction(&self) -> bool {
+        matches!(
+            self,
+            Effect::PutCounter { .. }
+                | Effect::RemoveCounter { .. }
+                | Effect::GainLife { .. }
+                | Effect::LoseLife { .. }
+        ) && extract_target_filter_from_effect(self).is_none()
+    }
+
     /// CR 608.2c: true for the structural "repeat this process" directive
     /// node (`RuntimeHandled { RepeatProcess }`).
     pub fn is_repeat_directive(&self) -> bool {
@@ -34693,7 +34719,9 @@ impl Effect {
     pub fn publishes_created_referent(&self) -> bool {
         crate::types::ability_visit::visit_effect_scoped(
             self,
-            crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+            crate::types::ability_visit::WalkScope::descending(
+                crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+            ),
             &mut |effect| {
                 if effect.created_referent_publication().is_some() {
                     ControlFlow::Break(())
@@ -37890,18 +37918,10 @@ pub fn inline_mana_preamble(ability_def: &AbilityDefinition) -> Option<&AbilityD
         if matches!(node.effect.as_ref(), Effect::Mana { .. }) {
             return preceding.then_some(node);
         }
-        let choice_free = matches!(
-            node.effect.as_ref(),
-            Effect::PutCounter { .. }
-                | Effect::RemoveCounter { .. }
-                | Effect::GainLife { .. }
-                | Effect::LoseLife { .. }
-        );
-        if !choice_free
+        if !node.effect.is_decision_free_state_instruction()
             || node.condition.is_some()
             || node.optional
             || node.multi_target.is_some()
-            || extract_target_filter_from_effect(&node.effect).is_some()
         {
             return None;
         }
@@ -39207,6 +39227,31 @@ impl AbilityDefinition {
                 .condition
                 .as_ref()
                 .is_some_and(AbilityCondition::is_optional_effect_performed)
+    }
+
+    /// CR 602.2a + CR 608.2c: whether any node of this printed ability reads
+    /// its per-turn `tally` ([`AbilityCondition::reads_ability_use_count`]).
+    ///
+    /// The whole definition tree is walked, not just `condition`: the gated
+    /// clause sits on whichever chain node carries it (Dragon Whelp's
+    /// `SequentialSibling` holding `CreateDelayedTrigger`, Soulbright Seeker's
+    /// mana sub), and a modal ability's modes are ways it resolves.
+    pub fn reads_ability_use_count(&self, tally: AbilityUseTally) -> bool {
+        self.condition
+            .as_ref()
+            .is_some_and(|condition| condition.reads_ability_use_count(tally))
+            || self
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| sub.reads_ability_use_count(tally))
+            || self
+                .else_ability
+                .as_deref()
+                .is_some_and(|other| other.reads_ability_use_count(tally))
+            || self
+                .mode_abilities
+                .iter()
+                .any(|mode| mode.reads_ability_use_count(tally))
     }
 }
 
@@ -40573,6 +40618,33 @@ impl AbilityCondition {
             AbilityCondition::Not { condition }
                 if condition.is_optional_effect_performed()
         )
+    }
+
+    /// CR 602.2a + CR 608.2c: whether this condition reads its own ability's
+    /// per-turn `tally` (`AbilityUseCountThisTurn`), through `And` / `Or` /
+    /// `Not` / `ConditionInstead`.
+    ///
+    /// Two readers rely on it. The loop firewall (`analysis::resource`) retains
+    /// a count any condition reads. The CR 106.7 walker (`game::could_produce`)
+    /// projects the use ledgers through one hypothetical resolution only for an
+    /// ability that reads one. Every other condition answers `false`, the
+    /// fail-closed direction for both: a missed reader keeps the firewall's
+    /// count and leaves the walker reading the gate both ways (the live
+    /// ledger), never deciding it against a ledger that was not projected.
+    pub fn reads_ability_use_count(&self, tally: AbilityUseTally) -> bool {
+        match self {
+            AbilityCondition::AbilityUseCountThisTurn { tally: read, .. } => *read == tally,
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions
+                    .iter()
+                    .any(|condition| condition.reads_ability_use_count(tally))
+            }
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                condition.reads_ability_use_count(tally)
+            }
+            _ => false,
+        }
     }
 
     /// Default `min_count` for `AdditionalCostPaid` is 1 (any single payment).

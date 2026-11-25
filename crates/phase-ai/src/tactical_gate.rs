@@ -1107,8 +1107,17 @@ fn trigger_is_proven_irrelevant(
         .valid_source
         .as_ref()
         .is_some_and(|filter| target_filter_is_proven_disjoint_from_spell(filter, spell));
+    // CR 701.9a + CR 702.29c: Both self hooks require discarding their source from hand.
+    // A battlefield source is already outside hand. The off-zone scan only visits
+    // a definition in hand if it functions there.
+    let self_discard_outside_hand = matches!(
+        definition.mode,
+        TriggerMode::Cycled | TriggerMode::Discarded
+    ) && definition.valid_card == Some(TargetFilter::SelfRef)
+        && !trigger_definition_functions_in_zone(definition, Zone::Hand);
     disjoint_cast_hook
         || disjoint_target_hook
+        || self_discard_outside_hand
         || matches!(definition.mode, TriggerMode::Attacks)
         || (matches!(definition.mode, TriggerMode::ChangesZone)
             && definition.zone_change_clauses.is_empty()
@@ -2297,6 +2306,16 @@ mod tests {
 
     fn funded_zero_congregate_state() -> (GameState, ObjectId) {
         let mut scenario = GameScenario::new();
+        let congregate = add_funded_congregate(&mut scenario);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        (state.clone(), congregate)
+    }
+
+    fn add_funded_congregate(scenario: &mut GameScenario) -> ObjectId {
         scenario.at_phase(Phase::PreCombatMain);
         let congregate = scenario
             .add_spell_to_hand_from_oracle(P0, "Congregate", true, CONGREGATE_ORACLE)
@@ -2307,12 +2326,7 @@ mod tests {
             .id();
         scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 3));
         scenario.with_mana_pool(P0, pooled_mana(ManaType::White, 1));
-        let mut runner = scenario.build();
-        let state = runner.state_mut();
-        state.active_player = P0;
-        state.priority_player = P0;
-        state.waiting_for = WaitingFor::Priority { player: P0 };
-        (state.clone(), congregate)
+        congregate
     }
 
     fn funded_zero_harvest_state() -> (GameState, ObjectId) {
@@ -2943,6 +2957,126 @@ mod tests {
             .target_player(P0)
             .resolve();
         outcome.assert_life_delta(P0, 2);
+    }
+
+    const TITANOTH_REX_ORACLE: &str = "Trample\nCycling {1}{G} ({1}{G}, Discard this card: Draw a card.)\nWhen you cycle this card, put a trample counter on target creature you control.";
+
+    fn assert_zero_congregate_ignores_self_discard(
+        state: &GameState,
+        congregate: ObjectId,
+        source: ObjectId,
+        mode: TriggerMode,
+    ) {
+        let object = &state.objects[&source];
+        assert!(spell_identity_is_available_to_caster(state, P0, object));
+        assert!(active_trigger_definitions(state, object).any(|active| {
+            let definition = active.definition;
+            definition.mode == mode
+                && definition.valid_card == Some(TargetFilter::SelfRef)
+                && trigger_definition_functions_in_zone(definition, object.zone)
+        }));
+        assert!(
+            !zero_cast_is_retained(state, congregate),
+            "known-zero Congregate must be rejected with {} in {:?}",
+            object.name,
+            object.zone
+        );
+    }
+
+    #[test]
+    fn zero_congregate_ignores_exiled_titanoth_rex() {
+        let mut scenario = GameScenario::new();
+        let congregate = add_funded_congregate(&mut scenario);
+        let rex = scenario
+            .add_creature_from_oracle(P1, "Titanoth Rex", 11, 11, TITANOTH_REX_ORACLE)
+            .id();
+        let swords = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Swords to Plowshares",
+                true,
+                "Exile target creature. Its controller gains life equal to its power.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::White],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::White, 1));
+        let mut runner = scenario.build();
+        let outcome = runner.cast(swords).target_objects(&[rex]).resolve();
+        outcome.assert_zone(&[rex], Zone::Exile);
+        outcome.assert_life_delta(P1, 11);
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { player } if *player == P0
+        ));
+        assert!(outcome.state().stack.is_empty());
+        assert!(outcome.state().battlefield.is_empty());
+        assert_zero_congregate_ignores_self_discard(
+            outcome.state(),
+            congregate,
+            rex,
+            TriggerMode::Cycled,
+        );
+    }
+
+    #[test]
+    fn zero_congregate_ignores_graveyard_titanoth_rex() {
+        let mut scenario = GameScenario::new();
+        let congregate = add_funded_congregate(&mut scenario);
+        let rex = scenario
+            .add_creature_to_graveyard(P0, "Titanoth Rex", 11, 11)
+            .from_oracle_text(TITANOTH_REX_ORACLE)
+            .id();
+        let runner = scenario.build();
+        assert_zero_congregate_ignores_self_discard(
+            runner.state(),
+            congregate,
+            rex,
+            TriggerMode::Cycled,
+        );
+    }
+
+    #[test]
+    fn zero_congregate_ignores_graveyard_titanbones() {
+        let mut scenario = GameScenario::new();
+        let congregate = add_funded_congregate(&mut scenario);
+        let titanbones = scenario
+            .add_creature_to_graveyard(P0, "Titanbones, Towering Heart", 4, 3)
+            .from_oracle_text("Reach\nWhenever you gain life, put two +1/+1 counters on Titanbones.\nWhen you discard this card, you gain 3 life.")
+            .id();
+        let runner = scenario.build();
+        assert_zero_congregate_ignores_self_discard(
+            runner.state(),
+            congregate,
+            titanbones,
+            TriggerMode::Discarded,
+        );
+    }
+
+    #[test]
+    fn zero_congregate_is_retained_for_graveyard_cast_trigger() {
+        let mut scenario = GameScenario::new();
+        let congregate = add_funded_congregate(&mut scenario);
+        let phoenix = scenario
+            .add_creature_to_graveyard(P0, "Managorger Phoenix", 2, 2)
+            .from_oracle_text("Flying\nManagorger Phoenix can't block.\nWhenever you cast a spell, if Managorger Phoenix is in your graveyard, put a flame counter on Managorger Phoenix for each {R} in that spell's mana cost. If Managorger Phoenix has five or more flame counters on it, return it to the battlefield and it perpetually gets +1/+1.")
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state();
+        let object = &state.objects[&phoenix];
+        assert!(active_trigger_definitions(state, object).any(|active| {
+            active.definition.mode == TriggerMode::SpellCast
+                && trigger_definition_functions_in_zone(active.definition, object.zone)
+        }));
+        assert!(has_relevant_functioning_trigger(state, congregate));
+        assert!(zero_cast_is_retained(state, congregate));
+        let committed = runner.cast(congregate).target_player(P0).commit();
+        assert!(committed.state().stack.iter().any(|entry| {
+            entry.source_id == phoenix
+                && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        }));
     }
 
     #[test]

@@ -13698,13 +13698,13 @@ fn parse_copy_count_replacement(lower: &str, original_text: &str) -> Option<Repl
 
 /// CR 614.1a + CR 608.2d: "If you would create one or more tokens, you may
 /// instead create that many <token A> or that many <token B>" (Jinnie Fay).
+/// Scoped to the controller's own token creations (`token_owner_scope`), like every 'you would create' sibling.
 fn parse_optional_token_substitution_choice(
     lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    use nom::combinator::{map, peek, success};
+    use nom::combinator::{map, peek};
     use nom::multi::separated_list1;
-    use nom::sequence::preceded;
 
     fn parse_jinnie_token_branch_segment(input: &str) -> OracleResult<'_, &str> {
         alt((
@@ -13715,10 +13715,13 @@ fn parse_optional_token_substitution_choice(
         .parse(input)
     }
 
-    let (segments, remainder) = nom_on_lower(original_text, lower, |input| {
-        let (input, ()) = preceded(
-            tag("if you would create one or more tokens, "),
-            preceded(tag("you may instead "), success(())),
+    let ((owner_scope, segments), remainder) = nom_on_lower(original_text, lower, |input| {
+        let (input, owner_scope) = terminated(
+            value(
+                ControllerRef::You,
+                tag("if you would create one or more tokens, "),
+            ),
+            tag("you may instead "),
         )
         .parse(input)?;
         let (input, _) = tag("create ").parse(input)?;
@@ -13727,10 +13730,13 @@ fn parse_optional_token_substitution_choice(
                 .parse(input)?;
         Ok((
             input,
-            segments
-                .into_iter()
-                .map(|segment| segment.to_string())
-                .collect::<Vec<_>>(),
+            (
+                owner_scope,
+                segments
+                    .into_iter()
+                    .map(|segment| segment.to_string())
+                    .collect::<Vec<_>>(),
+            ),
         ))
     })?;
 
@@ -13759,6 +13765,8 @@ fn parse_optional_token_substitution_choice(
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            // CR 109.5 + CR 111.2: "If you would create" — "you" is this object's controller and the creator of a token is its owner, so the substitution reaches only its controller's token creations (the "you would create" tag maps to ControllerRef::You, as in every sibling).
+            .token_owner_scope(owner_scope)
             .mode(ReplacementMode::Optional { decline: None })
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -29513,6 +29521,28 @@ mod tests {
         assert_eq!(
             def.quantity_modification,
             Some(QuantityModification::DOUBLE)
+        );
+        assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
+    }
+
+    /// CR 109.5 + CR 111.2: the optional token substitution scopes to its controller's tokens.
+    #[test]
+    fn optional_token_substitution_choice_scopes_to_controller() {
+        let def = parse_replacement_line(
+            "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.",
+            "Jinnie Fay, Jetmir's Second",
+        )
+        .expect("Jinnie Fay's optional token substitution must lower to a replacement");
+        // Reach guards: the optional-substitution-choice constructor built `def`.
+        assert_eq!(def.event, ReplacementEvent::CreateToken);
+        assert_eq!(def.mode, ReplacementMode::Optional { decline: None });
+        let Some(execute) = def.execute.as_deref() else {
+            panic!("expected an execute ability, got {:?}", def.execute);
+        };
+        assert!(
+            matches!(&*execute.effect, Effect::ChooseOneOf { branches, .. } if branches.len() == 2),
+            "expected a two-branch ChooseOneOf, got {:?}",
+            execute.effect
         );
         assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
     }
