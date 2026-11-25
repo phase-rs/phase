@@ -418,7 +418,10 @@ fn firebender_two_attackers_each_copy_duplicates_its_own_trigger() {
             .find(|entry| entry.id == observed_id)
             .and_then(|entry| match &entry.kind {
                 StackEntryKind::TriggeredAbility { source_id, .. } => Some(*source_id),
-                _ => None,
+                StackEntryKind::Spell { .. }
+                | StackEntryKind::ActivatedAbility { .. }
+                | StackEntryKind::KeywordAction { .. }
+                | StackEntryKind::CombatDamage { .. } => None,
             })
             .expect("observed entry names a triggered source");
         assert!(
