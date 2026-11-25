@@ -1987,13 +1987,11 @@ fn scoped_player_or_controller(
     source_controller: Option<PlayerId>,
     scoped_iteration_player: Option<PlayerId>,
 ) -> Option<PlayerId> {
-    // CR 109.5 + CR 120.3: `ControllerRef::ScopedPlayer` first uses an
-    // ability-scoped binding, then the per-player binding from
-    // DamageEachPlayer quantity resolution; `source_controller` remains the
-    // fallback for "you"/"your" when no scoped player is active.
-    ability
-        .and_then(|a| a.scoped_player)
-        .or(scoped_iteration_player)
+    // CR 109.5 + CR 120.3: damage quantities can explicitly bind
+    // `ControllerRef::ScopedPlayer` to the current recipient while "you"
+    // stays bound to the ability's controller.
+    scoped_iteration_player
+        .or_else(|| ability.and_then(|a| a.scoped_player))
         .or_else(|| crate::game::quantity::triggering_event_player(state))
         .or(source_controller)
 }

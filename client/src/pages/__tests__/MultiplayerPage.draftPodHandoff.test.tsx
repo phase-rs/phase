@@ -131,7 +131,7 @@ import { adHocLobbySource, useMultiplayerStore, type LobbySource } from "../../s
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 import { useConnectivityStore } from "../../stores/connectivityStore";
 import { DraftPodGuestAdapter } from "../../adapter/draftPodGuestAdapter";
-import { admitDraft27GuestView, Draft27IncompatibilityError } from "../../adapter/draft-compatibility";
+import { classifyDraft27Compatibility, Draft27IncompatibilityError } from "../../adapter/draft-compatibility";
 import { useDraftPodStore } from "../../stores/draftPodStore";
 
 /** The guest's refusal of the FIFO player view draft-core publishes, from the shared fixture. */
@@ -140,7 +140,7 @@ function fifoViewRefusal(): Draft27IncompatibilityError {
     dirname(fileURLToPath(import.meta.url)),
     "../../../../fixtures/draft-contract/fifo_legacy_admission.json",
   ), "utf8")) as { queued_view: unknown };
-  const admission = admitDraft27GuestView(fixture.queued_view);
+  const admission = classifyDraft27Compatibility(fixture.queued_view);
   if (admission.ok) throw new Error("Expected the guest to refuse the fixture's FIFO view");
   return new Draft27IncompatibilityError(admission.error);
 }

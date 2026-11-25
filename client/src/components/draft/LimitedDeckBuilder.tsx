@@ -96,6 +96,7 @@ const EMPTY_MAIN_DECK: string[] = [];
 const EMPTY_LAND_COUNTS: Record<string, number> = {};
 const DECKBUILDING_INTERACTION = {
   interactionGeneration: 0,
+  interactionGenerationCause: "lifecycle",
   pickInteractionLocked: false,
   pendingPickIntent: null,
 } as const;

@@ -114,6 +114,8 @@ fn spell_cast_event(spell_id: ObjectId) -> GameEvent {
         controller: P0,
         object_id: spell_id,
         cast_mana_value: None,
+        cast_mana_spent: None,
+        cast_incarnation: None,
     }
 }
 

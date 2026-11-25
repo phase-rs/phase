@@ -223,6 +223,8 @@ fn check_delayed_triggers_matches_noncreature_spell_cast_directly() {
         controller: P0,
         object_id: spell,
         cast_mana_value: None,
+        cast_mana_spent: None,
+        cast_incarnation: None,
     };
     let stacked = check_delayed_triggers(state, &[spell_cast]);
     assert!(
