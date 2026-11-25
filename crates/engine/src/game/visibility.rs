@@ -2258,10 +2258,19 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // CR 400.2 + CR 402.3: stack trigger events retain independent LKI records.
     // Apply the same hidden-object decision used by the zone-change journal
     // before either the state or its derived stack context reaches a client.
+    // Departed trigger records ride along: their entries keep their own trigger
+    // event. (Departed activations and spells need no chain — neither kind
+    // carries a trigger event, so the match below could never fire for them.)
     for entry in filtered
         .stack
         .iter_mut()
         .chain(filtered.resolving_stack_entry.iter_mut())
+        .chain(
+            filtered
+                .departed_triggered_abilities
+                .iter_mut()
+                .map(|(_, entry)| entry),
+        )
     {
         if let StackEntryKind::TriggeredAbility {
             trigger_event: Some(event),
@@ -2459,8 +2468,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // hidden-object redaction in every carrier the projection retains:
     // installed delayed triggers, queued/ordering/deferred triggers, and stack
     // entries. (`resolution_stack` and the paused-resolution resumes are blanked
-    // above; the departed tables hold spells and activated abilities, never delayed
-    // abilities; a departed activated ability takes this same per-entry redaction,
+    // above; the departed tables hold spells and abilities, never delayed
+    // abilities; a departed ability takes this same per-entry redaction,
     // CR 400.2: it was public on the stack.)
     // CR 601.2h + CR 113.7a: the same carriers latch their source's payment snapshots in
     // `ResolvedAbility::trigger_source`; a hidden mana source's entry is blanked there too,
@@ -2480,6 +2489,12 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         .chain(
             filtered
                 .departed_activated_abilities
+                .iter_mut()
+                .map(|(_, entry)| entry),
+        )
+        .chain(
+            filtered
+                .departed_triggered_abilities
                 .iter_mut()
                 .map(|(_, entry)| entry),
         )
@@ -5632,6 +5647,11 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
     state
         .departed_activated_abilities
         .retain(|_, entry| !hidden_ids.contains(&entry.source_id));
+    // Same for a departed triggered ability: it names its source and carries
+    // that source's ability. Projection only.
+    state
+        .departed_triggered_abilities
+        .retain(|_, entry| !hidden_ids.contains(&entry.source_id));
     // CR 601.2h + CR 400.2: only public-id departed spells remain; each keeps its entry and
     // object, and loses the last-known identity of any hidden mana source that paid for it.
     // A read-only pass selects the incarnations that name a hidden source; only those are
@@ -6203,6 +6223,12 @@ fn redact_hidden_library_identity_carriers(
                 .iter_mut()
                 .map(|(_, entry)| entry),
         )
+        .chain(
+            filtered
+                .departed_triggered_abilities
+                .iter_mut()
+                .map(|(_, entry)| entry),
+        )
     {
         match &mut entry.kind {
             StackEntryKind::Spell {
@@ -6517,6 +6543,77 @@ mod tests {
                 "owner LKI retention after a move to {destination:?}"
             );
         }
+    }
+
+    /// CR 400.2: a departed trigger record whose source is hidden from the
+    /// viewer is dropped from the projection, as a departed activation record
+    /// is; a public source's record is kept. SHAPE test: the records are
+    /// seeded, not written by the production writer (V1 drives that path).
+    #[test]
+    fn departed_trigger_with_hidden_source_is_dropped_for_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let secret = create_object(
+            &mut state,
+            CardId(7),
+            owner,
+            "Sentinel Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let public = create_object(
+            &mut state,
+            CardId(8),
+            owner,
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let departed_trigger = |id: ObjectId, source_id: ObjectId| StackEntry {
+            id,
+            source_id,
+            controller: owner,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], source_id, owner)),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        };
+        let hidden_id = ObjectId(901);
+        let kept_id = ObjectId(902);
+        state
+            .departed_triggered_abilities
+            .insert(hidden_id, departed_trigger(hidden_id, secret));
+        state
+            .departed_triggered_abilities
+            .insert(kept_id, departed_trigger(kept_id, public));
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, secret, Zone::Hand, &mut events);
+
+        assert!(
+            state.departed_triggered_abilities.contains_key(&hidden_id)
+                && state.departed_triggered_abilities.contains_key(&kept_id),
+            "reach guard: authoritative state keeps both records"
+        );
+        let opponent = filter_state_for_viewer(&state, PlayerId(1));
+        assert!(
+            !opponent
+                .departed_triggered_abilities
+                .contains_key(&hidden_id),
+            "the hidden source's departed trigger is dropped for the opponent"
+        );
+        assert!(
+            opponent.departed_triggered_abilities.contains_key(&kept_id),
+            "reach guard: the public source's departed trigger is kept"
+        );
+        assert!(
+            state.departed_triggered_abilities.contains_key(&hidden_id),
+            "authoritative state keeps the hidden source's record"
+        );
     }
 
     /// CR 400.2 + CR 400.7: the cast-history, entry, sacrifice, damage and attack-declaration
@@ -7138,6 +7235,30 @@ mod tests {
                 },
             },
         );
+        // A departed trigger of the same public source gets the per-entry
+        // redaction a live stack entry gets. Seeds `ability` (trigger-source
+        // payment + linked members, sub/else chain), never an activation
+        // record — production never latches one onto a trigger.
+        let departed_trigger = ObjectId(805);
+        state.departed_triggered_abilities.insert(
+            departed_trigger,
+            StackEntry {
+                id: departed_trigger,
+                source_id: paid,
+                controller: owner,
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: paid,
+                    ability: Box::new(ability.clone()),
+                    condition: None,
+                    trigger_event: Some(event.clone()),
+                    description: None,
+                    source_name: "Paid Permanent".to_string(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            },
+        );
         let departed_activation_record = |state: &GameState| {
             state.departed_activated_abilities[&departed_activation]
                 .ability()
@@ -7384,6 +7505,26 @@ mod tests {
                     }
                 }
             }
+            for (id, entry) in state.departed_triggered_abilities.iter() {
+                if let Some(ability) = entry.ability() {
+                    push(
+                        &format!("departed trigger {id:?} ability"),
+                        &from_ability(ability),
+                    );
+                    if let Some(sub) = ability.sub_ability.as_deref() {
+                        push(
+                            &format!("departed trigger {id:?} sub_ability"),
+                            &from_ability(sub),
+                        );
+                    }
+                    if let Some(other) = ability.else_ability.as_deref() {
+                        push(
+                            &format!("departed trigger {id:?} else_ability"),
+                            &from_ability(other),
+                        );
+                    }
+                }
+            }
             for (_, incarnations) in state.departed_stack_spells.iter() {
                 for (incarnation, spell) in incarnations.iter() {
                     if !spell.object.mana_spent_source_snapshots.is_empty() {
@@ -7456,6 +7597,9 @@ mod tests {
             "departed activation ObjectId(804) ability",
             "departed activation ObjectId(804) sub_ability",
             "departed activation ObjectId(804) else_ability",
+            "departed trigger ObjectId(805) ability",
+            "departed trigger ObjectId(805) sub_ability",
+            "departed trigger ObjectId(805) else_ability",
         ];
         for label in expected_labels {
             assert!(
@@ -7558,6 +7702,7 @@ mod tests {
             "/transient_continuous_effects/",
             "/departed_stack_spells/",
             "/departed_activated_abilities/",
+            "/departed_triggered_abilities/",
         ] {
             assert!(
                 raw_linked
@@ -9681,7 +9826,7 @@ mod tests {
             entries: vec![StackResolutionEntryFence::capture(&entry)],
             cursor: 0,
             representatives: std::collections::BTreeSet::from([PlayerId(0)]),
-            verified_pass_representatives: std::collections::BTreeSet::new(),
+            verified_pass_owners: std::collections::BTreeSet::new(),
             budget: StackResolutionBudget::from_legacy_max_resolutions(3),
             policy: StackResolutionPolicy::Committed,
             auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -16879,8 +17024,36 @@ mod tests {
                 },
             );
         }
+        // Same for departed trigger records.
+        for (id, object) in [(ObjectId(812), library_card), (ObjectId(813), permanent)] {
+            state.departed_triggered_abilities.insert(
+                id,
+                StackEntry {
+                    id,
+                    source_id: permanent,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id: permanent,
+                        ability: Box::new(with_context(object, &state)),
+                        condition: None,
+                        trigger_event: None,
+                        description: None,
+                        source_name: String::new(),
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    },
+                },
+            );
+        }
         let departed_context = |state: &GameState, id: ObjectId| {
             state.departed_activated_abilities[&id]
+                .ability()
+                .and_then(|ability| ability.effect_context_object.as_ref())
+                .map(|snapshot| snapshot.object_id)
+        };
+        let departed_trigger_context = |state: &GameState, id: ObjectId| {
+            state.departed_triggered_abilities[&id]
                 .ability()
                 .and_then(|ability| ability.effect_context_object.as_ref())
                 .map(|snapshot| snapshot.object_id)
@@ -16944,6 +17117,14 @@ mod tests {
                 (None, Some(permanent)),
                 "departed activation carriers, viewer {viewer:?}"
             );
+            assert_eq!(
+                (
+                    departed_trigger_context(&projected, ObjectId(812)),
+                    departed_trigger_context(&projected, ObjectId(813)),
+                ),
+                (None, Some(permanent)),
+                "departed trigger carriers, viewer {viewer:?}"
+            );
         }
         let projected = filter_state_for_unseated_viewer(&state);
         assert!(projected.last_revealed_ids.is_empty());
@@ -16952,11 +17133,17 @@ mod tests {
             vec![stripped(&library_event), permanent_event.clone()]
         );
         assert_eq!(departed_context(&projected, ObjectId(810)), None);
+        assert_eq!(departed_trigger_context(&projected, ObjectId(812)), None);
         assert_eq!(state.last_revealed_ids, vec![library_card]);
         assert_eq!(
             departed_context(&state, ObjectId(810)),
             Some(library_card),
             "the rules state keeps the departed record's context"
+        );
+        assert_eq!(
+            departed_trigger_context(&state, ObjectId(812)),
+            Some(library_card),
+            "the rules state keeps the departed trigger's context"
         );
         assert!(matches!(
             &state.current_trigger_events[0],

@@ -183,7 +183,6 @@ expression: "&ir"
             },
             "description": "{3}: Return ~ to its owner's hand.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

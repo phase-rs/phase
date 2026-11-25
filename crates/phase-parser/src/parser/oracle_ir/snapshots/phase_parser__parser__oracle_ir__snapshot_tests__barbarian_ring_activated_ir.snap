@@ -151,7 +151,6 @@ expression: "&ir"
             },
             "description": "{T}: Add {R}. ~ deals 1 damage to you.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
@@ -300,7 +299,6 @@ expression: "&ir"
             ],
             "description": "Threshold — {R}, {T}, Sacrifice ~: It deals 2 damage to any target. Activate only if there are seven or more cards in your graveyard.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

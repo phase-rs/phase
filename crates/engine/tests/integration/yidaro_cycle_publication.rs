@@ -2067,17 +2067,24 @@ fn phase3_v1_counts_repeated_cycles_across_turn_windows() {
 }
 
 fn priority_for(runner: &mut GameRunner, seat: PlayerId, player_count: usize) {
+    // CR 805.5a (F8-class driver): `seat` acts when its team holds priority —
+    // a parked shared-team window never rotates the holder to a teammate.
+    // Identical to holder rotation in individual-turn formats.
     for _ in 0..player_count {
-        let WaitingFor::Priority { player } = runner.state().waiting_for else {
+        let WaitingFor::Priority { .. } = runner.state().waiting_for else {
             panic!("expected priority while rotating to {seat:?}");
         };
-        if player == seat {
+        if engine::game::turn_control::decision_owners(runner.state()).contains(&seat) {
             return;
         }
-        act(runner, GameAction::PassPriority);
+        runner
+            .pass_holding_team()
+            .expect("team pass rotates priority");
     }
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == seat)
+        engine::game::turn_control::decision_owners(runner.state()).contains(&seat),
+        "expected {seat:?} able to act, got {:?}",
+        runner.state().waiting_for
     );
 }
 
@@ -2107,7 +2114,15 @@ fn cycle_population(
                 |runner: &GameRunner| engine::game::players::team_life_total(runner.state(), seat);
             let life_before = paid_life(&runner);
             let index = wraith_index(&runner, card);
-            let events = act(&mut runner, activation(card, index, CastPaymentMode::Auto));
+            // CR 805.5a: the cycling seat submits its own activation — on a
+            // parked team window the holder is its representative, not itself.
+            let events = engine::game::engine::apply(
+                runner.state_mut(),
+                seat,
+                activation(card, index, CastPaymentMode::Auto),
+            )
+            .expect("seat cycles its own wraith")
+            .events;
             assert_eq!(paid_life(&runner), life_before - 2);
             assert_eq!(cycle_events(&events), [(seat, card)]);
             last_cycle = events
@@ -2142,7 +2157,12 @@ fn cycle_population(
                     runner.state().waiting_for,
                     WaitingFor::Priority { .. }
                 ));
-                act(&mut runner, GameAction::PassPriority);
+                // CR 805.5b (F8-class driver): pass the whole holding team —
+                // passing only the parked holder stalls a shared-team window.
+                // Identical to a holder pass in individual-turn formats.
+                runner
+                    .pass_holding_team()
+                    .expect("team pass settles the cycle");
             }
             assert!(runner.state().stack.is_empty());
             let WaitingFor::Priority { player } = runner.state().waiting_for else {

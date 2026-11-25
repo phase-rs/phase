@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "commander",
   "version": 1,
-  "updated": "2026-11-24T00:00:00Z",
+  "updated": "2026-11-25T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/commander",
   "decks": [
     {
@@ -2641,10 +2641,6 @@
         },
         {
           "count": 1,
-          "name": "Drowned Jungle"
-        },
-        {
-          "count": 1,
           "name": "Hedge Shredder"
         },
         {
@@ -2686,6 +2682,10 @@
         {
           "count": 1,
           "name": "Maskwood Nexus"
+        },
+        {
+          "count": 1,
+          "name": "Drowner of Truth"
         }
       ],
       "sideboard": []

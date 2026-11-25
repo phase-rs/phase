@@ -45,8 +45,10 @@ fn mana(types: &[ManaType]) -> Vec<ManaUnit> {
         .collect()
 }
 
+/// CR 805.5b: the holding team passes — every living member that has not yet passed (one seat in
+/// an individual-turn format).
 fn pass(runner: &mut GameRunner) {
-    runner.act(GameAction::PassPriority).expect("pass");
+    runner.pass_holding_team().expect("pass");
 }
 
 fn concede(runner: &mut GameRunner, player: PlayerId) {
@@ -184,7 +186,7 @@ fn archenemy_board() -> GameScenario {
 }
 
 /// CR 805.5b: a team's pass stays the team's when the player who made it leaves and a teammate
-/// remains.
+/// remains. The team passes only once every living member has, so each hero's pass is recorded.
 #[test]
 fn a_team_keeps_its_pass_when_its_representative_leaves() {
     let mut runner = archenemy(archenemy_board());
@@ -197,11 +199,135 @@ fn a_team_keeps_its_pass_when_its_representative_leaves() {
             .iter()
             .copied()
             .collect::<Vec<_>>(),
-        [P1]
+        [P1, P2, P3]
     );
     concede(&mut runner, P1);
     pass(&mut runner);
     assert_ne!(runner.state().phase, Phase::PreCombatMain);
+}
+
+fn passes(runner: &GameRunner) -> Vec<PlayerId> {
+    runner.state().priority_passes.iter().copied().collect()
+}
+
+/// An Archenemy game where the heroes (P1, P2, P3) are the active team. The archenemy (P0)
+/// has cast Lightning Bolt at `bolt_target` and passed, so the heroes hold priority (P1, their
+/// representative) with the Bolt on the stack. P2 holds Counterspell with {U}{U}.
+fn bolt_awaiting_the_heroes(bolt_target: PlayerId) -> (GameRunner, ObjectId, ObjectId) {
+    let db = shared_card_db().expect("card db");
+    let mut scenario = archenemy_board();
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    scenario.with_mana_pool(P0, mana(&[ManaType::Red]));
+    let counterspell = scenario.add_real_card(P2, "Counterspell", Zone::Hand, db);
+    scenario.with_mana_pool(P2, mana(&[ManaType::Blue, ManaType::Blue]));
+    let mut runner = archenemy(scenario);
+
+    // The heroes pass.
+    pass(&mut runner);
+    assert_eq!(priority_seat(&runner), Some(P0));
+    // P0 casts the Bolt; CR 117.3c: the caster receives priority afterward.
+    runner.cast(bolt).target_player(bolt_target).commit();
+    assert_eq!(priority_seat(&runner), Some(P0));
+    assert_eq!(runner.stack_names(), ["Lightning Bolt"]);
+    // P0's whole team passes.
+    pass(&mut runner);
+    assert_eq!(priority_seat(&runner), Some(P1));
+    assert_eq!(passes(&runner), [P0]);
+    (runner, bolt, counterspell)
+}
+
+/// CR 104.3a + CR 800.4a + CR 805.5b: the representative's departure drops only its own pass
+/// record. P2 stays unpassed and can still answer the Bolt after P3 passes.
+#[test]
+fn a_departed_heros_pass_is_not_given_to_an_unpassed_teammate() {
+    let (mut runner, bolt, counterspell) = bolt_awaiting_the_heroes(P2);
+    let p2_life = runner.state().players[2].life;
+
+    // P1 passes alone.
+    engine::game::engine::apply(runner.state_mut(), P1, GameAction::PassPriority)
+        .expect("P1 passes alone");
+    // Reach guard: a partial team pass with the Bolt still on the stack.
+    assert_eq!(passes(&runner), [P0, P1]);
+    assert_eq!(runner.stack_names(), ["Lightning Bolt"]);
+
+    concede(&mut runner, P1);
+
+    // Revert-failing: P1's record is gone and P2 is NOT passed.
+    assert_eq!(passes(&runner), [P0]);
+    // The dead holder is re-seated to a surviving hero.
+    assert!(
+        matches!(priority_seat(&runner), Some(P2 | P3)),
+        "priority must re-seat to a surviving hero, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // A teammate's pass is accepted on the team's window.
+    engine::game::engine::apply(runner.state_mut(), P3, GameAction::PassPriority)
+        .expect("P3 passes on the team's window");
+
+    // Revert-failing: the round is NOT complete — the Bolt still waits and P2 holds.
+    assert_eq!(runner.stack_names(), ["Lightning Bolt"]);
+    assert_eq!(passes(&runner), [P0, P3]);
+    assert_eq!(priority_seat(&runner), Some(P2));
+
+    // Positive: P2 answers with Counterspell.
+    runner.cast(counterspell).target_object(bolt).commit();
+    assert_eq!(runner.stack_names(), ["Lightning Bolt", "Counterspell"]);
+
+    // Drain the stack.
+    for _ in 0..6 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        pass(&mut runner);
+    }
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().objects[&bolt].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[2].life, p2_life);
+}
+
+/// CR 800.4a + CR 805.5b: a non-representative teammate's departure never passes the
+/// representative. P1 stays unpassed, and its own later pass completes the round.
+#[test]
+fn a_departed_teammates_pass_is_not_given_to_its_representative() {
+    let (mut runner, _bolt, _counterspell) = bolt_awaiting_the_heroes(P3);
+    let p3_life = runner.state().players[3].life;
+
+    // A teammate passes while P1 holds.
+    engine::game::engine::apply(runner.state_mut(), P2, GameAction::PassPriority)
+        .expect("P2 passes while P1 holds");
+    // Reach guard.
+    assert_eq!(passes(&runner), [P0, P2]);
+    assert_eq!(priority_seat(&runner), Some(P1));
+
+    concede(&mut runner, P2);
+
+    // Revert-failing: P2's record is gone and P1 is NOT passed.
+    assert_eq!(passes(&runner), [P0]);
+    // The holder is alive, so there is no re-seat.
+    assert_eq!(priority_seat(&runner), Some(P1));
+
+    engine::game::engine::apply(runner.state_mut(), P3, GameAction::PassPriority)
+        .expect("P3 passes on the team's window");
+
+    // Revert-failing: the Bolt still waits and P1 holds.
+    assert_eq!(runner.stack_names(), ["Lightning Bolt"]);
+    assert_eq!(passes(&runner), [P0, P3]);
+    assert_eq!(priority_seat(&runner), Some(P1));
+
+    // Positive: P1's own pass completes the round — the Bolt resolves.
+    engine::game::engine::apply(runner.state_mut(), P1, GameAction::PassPriority)
+        .expect("P1 passes");
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().players[3].life, p3_life - 3);
 }
 
 /// CR 805.4a + CR 805.8: "skips their next combat phase" recorded for one member of the active

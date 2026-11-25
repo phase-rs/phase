@@ -1554,8 +1554,9 @@ fn words_of_wind_in_the_two_headed_giant_draw_step_still_draws_the_teammate() {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
+        // CR 805.5b: pass the whole holding team toward the draw step.
         runner
-            .act(GameAction::PassPriority)
+            .pass_holding_team()
             .expect("priority passes toward the draw step");
     }
     let (chooser, _) = pending_return_choice(&runner);

@@ -288,7 +288,10 @@ fn settle(runner: &mut GameRunner, targets: &mut Vec<TargetRef>, events: &mut Ve
                 if runner.state().stack.is_empty() {
                     return;
                 }
-                GameAction::PassPriority
+                // CR 805.5b: the holding team passes only once every living member
+                // has passed, so a shared-team window needs each teammate's pass.
+                events.extend(runner.pass_holding_team().expect("the holding team passes"));
+                continue;
             }
             WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
                 order: (0..triggers.len()).collect(),

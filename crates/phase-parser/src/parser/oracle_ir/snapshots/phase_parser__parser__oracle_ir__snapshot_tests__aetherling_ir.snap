@@ -166,7 +166,6 @@ expression: "&ir"
             },
             "description": "{U}: Exile ~. Return it to the battlefield under its owner's control at the beginning of the next end step.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
@@ -291,7 +290,6 @@ expression: "&ir"
             },
             "description": "{U}: ~ can't be blocked this turn.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
@@ -403,7 +401,6 @@ expression: "&ir"
             },
             "description": "{1}: ~ gets +1/-1 until end of turn.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
@@ -515,7 +512,6 @@ expression: "&ir"
             },
             "description": "{1}: ~ gets -1/+1 until end of turn.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

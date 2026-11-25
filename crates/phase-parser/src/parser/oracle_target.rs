@@ -3971,7 +3971,7 @@ fn parse_type_phrase_folding_unbound<'a>(
                     // changed which downstream condition-builder claimed the
                     // clause and regressed that specialized parser (issue
                     // #6321 / PR #6533 review —
-                    // urzas_lands_share_delta_shape /
+                    // urzas_lands_share_conditional_mana_swap_shape /
                     // legacy_misparses_are_now_honest_gaps). Staying out of
                     // every noncreature category's way, not just this one
                     // land cycle, is why the check is by vocabulary
@@ -24682,7 +24682,7 @@ mod tests {
     /// `Typed{Subtype("Urza's"), Subtype("Mine")}` filter with an empty
     /// remainder, which changes which downstream condition-builder claims the
     /// clause and regresses the dedicated Urza-lands
-    /// `ControllerControlsMatching` parser (`urzas_lands_share_delta_shape` /
+    /// `ControllerControlsMatching` parser (`urzas_lands_share_conditional_mana_swap_shape` /
     /// `legacy_misparses_are_now_honest_gaps` in oracle_tests.rs /
     /// oracle_condition.rs — issue #6321 / PR #6533 review), which
     /// deliberately extracts only the discriminating second word ("Mine" —
