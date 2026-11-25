@@ -46023,6 +46023,139 @@ fn event_trigger_heads_carry_the_window_as_an_event_time_gate() {
         }))
     );
     assert_eq!(portal_mage.constraint, None);
+    // CR 508.7: the body is the reselection of the announced attacking creature.
+    assert_reselects_target_attacking_creature(&portal_mage, "Portal Mage");
+
+    let signpost = parse_trigger_line(
+        "When this artifact enters during the declare attackers step, you may reselect which player or permanent target attacking creature is attacking. (It can't attack its controller or their permanents.)",
+        "Misleading Signpost",
+    );
+    assert_eq!(signpost.mode, TriggerMode::ChangesZone);
+    assert_eq!(signpost.destination, Some(Zone::Battlefield));
+    assert_eq!(
+        signpost.condition,
+        Some(event_time(TriggerCondition::CurrentPhaseIs {
+            phases: vec![Phase::DeclareAttackers],
+        }))
+    );
+    assert_reselects_target_attacking_creature(&signpost, "Misleading Signpost");
+}
+
+/// CR 508.7 + CR 603.5: the optional body is `Effect::ReselectAttackTarget`
+/// naming a targeted attacking creature, with no unimplemented gap.
+fn assert_reselects_target_attacking_creature(trigger: &TriggerDefinition, name: &str) {
+    let body = trigger.execute.as_ref().expect("reselection body");
+    assert!(body.optional, "{name}: \"you may\" is optional: {body:?}");
+    assert!(!has_unimplemented(body), "{name}: {body:?}");
+    let Effect::ReselectAttackTarget { target } = &*body.effect else {
+        panic!(
+            "{name}: expected ReselectAttackTarget, got {:?}",
+            body.effect
+        );
+    };
+    let TargetFilter::Typed(typed) = target else {
+        panic!("{name}: expected a typed creature filter, got {target:?}");
+    };
+    assert!(
+        typed.type_filters.contains(&TypeFilter::Creature),
+        "{name}: {typed:?}"
+    );
+    assert!(
+        filter_contains_filter_prop(target, &|prop| matches!(prop, FilterProp::Attacking { .. })),
+        "{name}: {target:?}"
+    );
+}
+
+/// Whether any effect reachable from `def` is `Effect::ReselectAttackTarget`.
+fn reaches_reselect_attack_target(def: &AbilityDefinition) -> bool {
+    let mut found = false;
+    let _ = crate::types::ability_visit::visit_ability_def(def, &mut |effect| {
+        found |= matches!(effect, Effect::ReselectAttackTarget { .. });
+        std::ops::ControlFlow::Continue(())
+    });
+    found
+}
+
+/// CR 508.7: the anchored reselection production claims only an announced
+/// target subject. The per-attacker "that creature" forms (Windshaper Planetar,
+/// Tuvok) and the player-only self form (Capricopian) stay unimplemented, while
+/// Misleading Signpost's full Oracle text parses to the reselection.
+#[test]
+fn reselect_production_keeps_out_of_claim_subjects_unimplemented() {
+    let defs = |text: &str, name: &str, keywords: &[&str], types: &[&str], subtypes: &[&str]| {
+        let parsed = parse_oracle_text(
+            text,
+            name,
+            &owned_strings(keywords),
+            &owned_strings(types),
+            &owned_strings(subtypes),
+        );
+        parsed
+            .abilities
+            .into_iter()
+            .chain(
+                parsed
+                    .triggers
+                    .into_iter()
+                    .filter_map(|t| t.execute.map(|b| *b)),
+            )
+            .collect::<Vec<AbilityDefinition>>()
+    };
+
+    let signpost = defs(
+        "Flash
+When this artifact enters during the declare attackers step, you may reselect which player or permanent target attacking creature is attacking. (It can't attack its controller or their permanents.)
+{T}: Add {U}.",
+        "Misleading Signpost",
+        &["Flash"],
+        &["Artifact"],
+        &[],
+    );
+    assert!(
+        signpost
+            .iter()
+            .any(|def| matches!(&*def.effect, Effect::ReselectAttackTarget { .. })),
+        "{signpost:?}"
+    );
+    assert!(
+        signpost.iter().all(|def| !has_unimplemented(def)),
+        "{signpost:?}"
+    );
+
+    for (text, name, keywords, subtypes) in [
+        (
+            "Flash
+Flying
+When this creature enters during the declare attackers step, for each attacking creature, you may reselect which player or permanent that creature is attacking. (It can't attack its controller or their permanents.)",
+            "Windshaper Planetar",
+            &["Flash", "Flying"][..],
+            &["Angel"][..],
+        ),
+        (
+            "Flash
+When Tuvok enters during the declare attackers step, choose up to two target attacking creatures. For each of them, you may reselect which player or permanent that creature is attacking. (A creature can't attack its controller.)",
+            "Tuvok, Chief Tactical Officer",
+            &["Flash"][..],
+            &["Vulcan", "Officer"][..],
+        ),
+        (
+            "This creature enters with X +1/+1 counters on it.
+{2}: Put a +1/+1 counter on this creature, then you may reselect which player this creature is attacking. Only the player this creature is attacking may activate this ability and only during the declare attackers step. (It can't attack its controller.)",
+            "Capricopian",
+            &[][..],
+            &["Goat", "Hydra"][..],
+        ),
+    ] {
+        let parsed = defs(text, name, keywords, &["Creature"], subtypes);
+        assert!(
+            parsed.iter().any(has_unimplemented),
+            "{name}: the reselection clause stays unimplemented: {parsed:?}"
+        );
+        assert!(
+            parsed.iter().all(|def| !reaches_reselect_attack_target(def)),
+            "{name}: {parsed:?}"
+        );
+    }
 }
 
 /// CR 603.2 + CR 603.4: the event window composes with a genuine intervening

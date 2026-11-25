@@ -423,6 +423,7 @@ pub(crate) fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::BecomeUnprepared { .. }
         | Effect::BecomeSaddled { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
         // Digital-only Alchemy (no CR entry): installing the boon opens no

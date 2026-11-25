@@ -1170,6 +1170,8 @@ pub(crate) enum ImperativeFamilyAst {
     },
     /// CR 506.4: Remove a creature from combat.
     RemoveFromCombat(TargetFilter),
+    /// CR 508.7: reselect what an attacking creature is attacking.
+    ReselectAttackTarget(TargetFilter),
     Shuffle(ShuffleImperativeAst),
     Put(PutImperativeAst),
     YouMay {
@@ -1265,6 +1267,7 @@ impl ImperativeFamilyAst {
             | Self::RollDie { .. }
             | Self::FlipCoins { .. }
             | Self::RemoveFromCombat(..)
+            | Self::ReselectAttackTarget(..)
             | Self::Shuffle(..)
             | Self::Put(..)
             | Self::YouMay { .. }
@@ -3630,6 +3633,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::Conjure { .. }
         | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }

@@ -13925,6 +13925,7 @@ pub(crate) fn seed_event_referent_pins(
                 | Effect::GiveControl { .. }
                 | Effect::RemoveFromCombat { .. }
                 | Effect::BecomeBlocked { .. }
+                | Effect::ReselectAttackTarget { .. }
                 | Effect::Conjure { .. }
                 | Effect::CreateCardCopyByName { .. }
                 | Effect::Intensify { .. }

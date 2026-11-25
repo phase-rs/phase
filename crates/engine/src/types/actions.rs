@@ -164,8 +164,9 @@ pub enum GameAction {
         source_id: ObjectId,
         partner_id: ObjectId,
     },
-    /// CR 508.4a: select the engine-enumerated destination for a permanent
-    /// entering the battlefield attacking.
+    /// CR 508.4a / CR 508.7: select the engine-enumerated destination for a
+    /// permanent entering the battlefield attacking, or for an attacking
+    /// creature whose attacked player or permanent is reselected.
     ChooseEntryAttackTarget {
         target: AttackTarget,
     },

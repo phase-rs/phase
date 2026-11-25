@@ -3312,6 +3312,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::SetRoomDoorLock { target, .. }
         | Effect::RemoveFromCombat { target }
         | Effect::BecomeBlocked { target }
+        | Effect::ReselectAttackTarget { target }
         | Effect::ApplyPerpetual { target, .. }
         | Effect::TurnFaceUp { target }
         | Effect::TurnFaceDown { target, .. }
@@ -6776,6 +6777,14 @@ fn rw_effect(
         // non-attacker/already-blocked target (mirrors RemoveFromCombat above,
         // NOT the maximal-conservative fallback).
         Effect::BecomeBlocked { target } => {
+            let mut p = ext_write(StateKind::TurnStructure);
+            flag_legacy_write_target(&mut p, target);
+            (p, None)
+        }
+        // CR 508.7: reselecting what an attacking creature attacks rewrites its
+        // combat attacked relation — a turn/combat-structure write, a no-op on a
+        // non-attacker (mirrors BecomeBlocked above).
+        Effect::ReselectAttackTarget { target } => {
             let mut p = ext_write(StateKind::TurnStructure);
             flag_legacy_write_target(&mut p, target);
             (p, None)

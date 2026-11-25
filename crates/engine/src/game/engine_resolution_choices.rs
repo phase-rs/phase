@@ -2729,6 +2729,7 @@ pub(super) fn handle_resolution_choice(
                 player,
                 object_id,
                 valid_targets,
+                purpose,
             },
             GameAction::ChooseEntryAttackTarget { target },
         ) => {
@@ -2741,15 +2742,24 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             state.waiting_for = WaitingFor::Priority { player };
-            if let Some(defending_player) =
-                crate::game::combat::entry_attack_target_defender(state, player, target)
-            {
-                crate::game::combat::enter_attacking_at_target(
-                    state,
-                    object_id,
-                    defending_player,
-                    target,
-                );
+            match purpose {
+                crate::types::game_state::AttackTargetChoicePurpose::EnterAttacking => {
+                    if let Some(defending_player) =
+                        crate::game::combat::entry_attack_target_defender(state, player, target)
+                    {
+                        crate::game::combat::enter_attacking_at_target(
+                            state,
+                            object_id,
+                            defending_player,
+                            target,
+                        );
+                    }
+                }
+                // CR 508.7: the chooser reselects; legality is the attacking
+                // creature's controller's (CR 508.7c), re-validated by the writer.
+                crate::types::game_state::AttackTargetChoicePurpose::Reselect => {
+                    crate::game::combat::reselect_attack_target(state, object_id, target);
+                }
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }

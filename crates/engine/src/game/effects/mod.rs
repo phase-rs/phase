@@ -232,6 +232,7 @@ pub mod remember_card;
 pub mod remove_all_damage;
 pub mod remove_from_combat;
 pub mod renown;
+pub mod reselect_attack_target;
 pub mod return_as_aura;
 pub mod reveal;
 pub mod reveal_chosen_numbers;
@@ -6975,6 +6976,7 @@ fn effect_enters_battlefield(effect: &Effect) -> bool {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::ChooseOneOf { .. }
@@ -7632,6 +7634,7 @@ impl MovedObjectsSource {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
@@ -8118,6 +8121,7 @@ fn effect_may_name_moved_objects(effect: &Effect, source: MovedObjectsSource) ->
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::Conjure { .. }
         | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
@@ -8355,6 +8359,7 @@ fn node_with_entry_modifications(
         | Effect::AssembleContraptionsFromRollDifference
         | Effect::Attach { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::BecomeCopy { .. }
         | Effect::BecomeMonarch { .. }
         | Effect::BecomePrepared { .. }
@@ -11010,6 +11015,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::Conjure { .. }
         | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
@@ -12224,6 +12230,7 @@ fn effect_fields_read_filter_population(
         Effect::GiveControl { target, recipient } => has_filter(target) || has_filter(recipient),
         Effect::RemoveFromCombat { target } => has_filter(target),
         Effect::BecomeBlocked { target } => has_filter(target),
+        Effect::ReselectAttackTarget { target } => has_filter(target),
         Effect::ApplyPerpetual {
             target,
             modification,
@@ -16523,6 +16530,9 @@ fn resolve_legacy_effect(
         Effect::BecomeSaddled { .. } => saddle::resolve(state, ability, events),
         Effect::BecomeBlocked { .. } => {
             become_blocked::resolve_become_blocked(state, ability, events)
+        }
+        Effect::ReselectAttackTarget { .. } => {
+            reselect_attack_target::resolve(state, ability, events)
         }
         Effect::SetClassLevel { .. } => set_class_level::resolve(state, ability, events),
         Effect::CreateDelayedTrigger { .. } => delayed_trigger::resolve(state, ability, events),

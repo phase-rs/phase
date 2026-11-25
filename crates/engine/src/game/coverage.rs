@@ -4700,6 +4700,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::BecomeSaddled { target }
         | Effect::BecomeBlocked { target }
+        | Effect::ReselectAttackTarget { target }
         | Effect::PairWith { target } => {
             d.push(("target".into(), fmt_target(target)));
         }

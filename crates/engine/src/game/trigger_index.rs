@@ -1031,6 +1031,9 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         // off the `AttackerBecameBlocked` GameEvent (see the event→key
         // map above), not off `EffectResolved`, so this kind emits no key here.
         | EffectKind::BecomeBlocked
+        // CR 508.7a: a reselected creature is not considered to have attacked
+        // again, so a reselection keys no attack trigger.
+        | EffectKind::ReselectAttackTarget
         | EffectKind::Conjure
         | EffectKind::CreateCardCopyByName
         | EffectKind::Intensify

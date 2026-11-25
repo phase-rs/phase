@@ -11939,6 +11939,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::Conjure { .. }
         | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
@@ -16917,6 +16918,7 @@ impl Effect {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
@@ -17227,6 +17229,7 @@ pub fn indicated_action_commit(effect: &Effect) -> IndicatedActionCommit {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::Conjure { .. }
         | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
@@ -27409,6 +27412,13 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 508.7 + CR 508.7a: reselect which player, planeswalker, or battle the
+    /// target attacking creature is attacking. It stays attacking and is still
+    /// considered to have attacked what it was declared attacking.
+    ReselectAttackTarget {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// Digital-only keyword action (no CR entry): Conjure creates a card from outside
     /// the game and places it into a specified zone. Unlike tokens, conjured cards are
     /// "real" cards with full characteristics (mana value, types, abilities, etc.).
@@ -32285,6 +32295,7 @@ impl Effect {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
@@ -32539,6 +32550,7 @@ impl Effect {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
@@ -32658,6 +32670,7 @@ impl Effect {
             | Effect::GiveControl { target, .. }
             | Effect::RemoveFromCombat { target, .. }
             | Effect::BecomeBlocked { target, .. }
+            | Effect::ReselectAttackTarget { target, .. }
             | Effect::PutSticker { target, .. }
             | Effect::ApplySticker { target, .. }
             | Effect::ProliferateTarget { target, .. }
@@ -33314,6 +33327,7 @@ impl Effect {
             | Effect::GiveControl { target, .. }
             | Effect::RemoveFromCombat { target, .. }
             | Effect::BecomeBlocked { target, .. }
+            | Effect::ReselectAttackTarget { target, .. }
             | Effect::PutSticker { target, .. }
             | Effect::ApplySticker { target, .. }
             | Effect::ProliferateTarget { target, .. }
@@ -34209,6 +34223,7 @@ impl Effect {
             | Effect::AssembleContraptionOnSprocket { .. }
             | Effect::Attach { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::BecomeCopy { .. }
             | Effect::BecomeMonarch { .. }
             | Effect::BecomePrepared { .. }
@@ -34438,6 +34453,7 @@ impl Effect {
             | Effect::AssembleContraptionsFromRollDifference
             | Effect::Attach { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::BecomeCopy { .. }
             | Effect::BecomeMonarch { .. }
             | Effect::BecomePrepared { .. }
@@ -35346,6 +35362,7 @@ macro_rules! define_effect_quantity_walk {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
@@ -35715,6 +35732,7 @@ macro_rules! define_nested_definition_walk {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
@@ -35919,6 +35937,7 @@ impl Effect {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::ChangeTargets { .. }
             | Effect::AddRestriction { .. }
             | Effect::AddTargetReplacement { .. }
@@ -36194,6 +36213,7 @@ impl Effect {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::ChangeTargets { .. }
             | Effect::AddRestriction { .. }
             | Effect::AddTargetReplacement { .. }
@@ -36548,6 +36568,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GiveControl { .. } => "GiveControl",
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
         Effect::BecomeBlocked { .. } => "BecomeBlocked",
+        Effect::ReselectAttackTarget { .. } => "ReselectAttackTarget",
         Effect::Conjure { .. } => "Conjure",
         Effect::CreateCardCopyByName { .. } => "CreateCardCopyByName",
         Effect::Intensify { .. } => "Intensify",
@@ -36808,6 +36829,7 @@ pub enum EffectKind {
     GiveControl,
     RemoveFromCombat,
     BecomeBlocked,
+    ReselectAttackTarget,
     Conjure,
     CreateCardCopyByName,
     Intensify,
@@ -37106,6 +37128,7 @@ impl From<&Effect> for EffectKind {
             Effect::GiveControl { .. } => EffectKind::GiveControl,
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
             Effect::BecomeBlocked { .. } => EffectKind::BecomeBlocked,
+            Effect::ReselectAttackTarget { .. } => EffectKind::ReselectAttackTarget,
             Effect::Conjure { .. } => EffectKind::Conjure,
             Effect::CreateCardCopyByName { .. } => EffectKind::CreateCardCopyByName,
             Effect::Intensify { .. } => EffectKind::Intensify,

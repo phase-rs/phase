@@ -2016,6 +2016,11 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
+        Effect::ReselectAttackTarget { target } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            acc
+        }
         Effect::SetClassLevel { level: _ } => Axes::NONE,
         // CR 732.2a is the OPERATIVE rule for this arm, and the mode split is the same one
         // the sibling descending arms already ship: under `Conservative` this stays the
@@ -7499,6 +7504,7 @@ pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
@@ -9798,6 +9804,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::BecomeUnprepared { scope: EffectScope::Single, .. }
         | Effect::BecomeSaddled { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
         | Effect::CreateBoon { .. }
@@ -10229,6 +10236,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         }
         | Effect::BecomeSaddled { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
         | Effect::CreateBoon { .. }

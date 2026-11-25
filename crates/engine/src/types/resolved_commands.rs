@@ -518,18 +518,19 @@ pub enum ResolvedContinuousEffectReplayInvariantError {
 }
 /// One exact effect-driven combat-membership edit (CR 506.3 / CR 506.4).
 ///
-/// The five production authorities — `enter_attacking`,
-/// `place_attacking_alongside`, `place_blocking`, `mark_attacker_blocked`, and
-/// `remove_object_from_combat` — all edit the one membership structure
+/// The production authorities — `enter_attacking`,
+/// `place_attacking_alongside`, `place_blocking`, `mark_attacker_blocked`,
+/// `remove_object_from_combat`, `retire_incoming_attack_relations_journaled`,
+/// and `reselect_attack_target` — all edit the one membership structure
 /// (`CombatState.attackers` plus the two blocker maps), so they share a single
-/// parameterized command rather than five sibling variants.
+/// parameterized command rather than sibling variants.
 ///
 /// The parameterization axis stays inside one CR section, as the categorical
 /// boundary rule requires: CR 506.3a-g govern putting a permanent onto the
 /// battlefield "attacking or blocking" in one breath, CR 506.4 governs removal,
 /// and the declaration-side rules delegate back to it — CR 509.1g ends with
-/// "See rule 506.4." CR 508.4 and CR 509.1g/h are the entry points; CR 506 is
-/// the section that actually defines membership.
+/// "See rule 506.4." CR 508.4, CR 508.7 and CR 509.1g/h are the entry points;
+/// CR 506 is the section that actually defines membership.
 ///
 /// Turn-based declaration (CR 508.1 / CR 509.1) is deliberately NOT part of this
 /// family: it does not use the stack and validates before mutating.
@@ -587,6 +588,29 @@ pub enum ResolvedCombatMembershipEdit {
     /// any role of its own. The applier requires the same attackers still attack
     /// this exact object before retiring their edges.
     RetireAttacked { expected_attacked_by: Vec<ObjectId> },
+    /// CR 508.7 + CR 508.7a: the object's attacked relation was reselected. It
+    /// stays attacking (not a new CR 508.4 attacker) and its declaration history
+    /// is unchanged. `expected_*` pin the relation it had, so a replay installs
+    /// the edit only onto that exact relation; `resulting_*` are the recorded
+    /// choice, installed verbatim.
+    Reselect {
+        expected_attack_target: AttackTarget,
+        expected_attack_target_identity: Option<ObjectIncarnationRef>,
+        resulting_defending_player: PlayerId,
+        resulting_attack_target: AttackTarget,
+        resulting_attack_target_identity: Option<ObjectIncarnationRef>,
+    },
+}
+
+/// CR 400.7: whether a recorded permanent pin names exactly the permanent an
+/// attacked relation targets. A player relation carries no pin, and a legacy
+/// (pre-incarnation) identity never names a specific incarnation.
+fn pin_names_attack_target(target: &AttackTarget, pin: &ObjectIncarnationRef) -> bool {
+    pin.incarnation != LEGACY_INCARNATION
+        && match target {
+            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => *id == pin.object_id,
+            AttackTarget::Player(_) => false,
+        }
 }
 
 /// Typed failure while applying one already-resolved combat-membership edit.
@@ -633,6 +657,14 @@ pub enum ResolvedCombatMembershipReplayInvariantError {
         object: ObjectId,
         expected: Vec<ObjectId>,
         found: Vec<ObjectId>,
+    },
+    #[error(
+        "combat-membership reselection precondition mismatch for {object:?}: expected {expected:?}, found {found:?}"
+    )]
+    ReselectPreconditionMismatch {
+        object: ObjectId,
+        expected: Box<(AttackTarget, Option<ObjectIncarnationRef>)>,
+        found: Box<(AttackTarget, Option<ObjectIncarnationRef>)>,
     },
 }
 
@@ -3798,14 +3830,7 @@ impl ResolvedRulesJournal {
                         resulting_attack_target,
                         resulting_attack_target_identity: Some(pin),
                         ..
-                    } if pin.incarnation == LEGACY_INCARNATION
-                        || match resulting_attack_target {
-                            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => {
-                                *id != pin.object_id
-                            }
-                            AttackTarget::Player(_) => true,
-                        } =>
-                    {
+                    } if !pin_names_attack_target(resulting_attack_target, pin) => {
                         return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                             "combat-membership attack has incoherent permanent identity"
                                 .to_string(),
@@ -3844,11 +3869,71 @@ impl ResolvedRulesJournal {
                             "combat-membership retirement ends no attacked relation".to_string(),
                         ));
                     }
+                    // CR 508.7: re-choosing the current relation changes
+                    // nothing, so it is not a reselection that was journaled.
+                    ResolvedCombatMembershipEdit::Reselect {
+                        expected_attack_target,
+                        expected_attack_target_identity,
+                        resulting_attack_target,
+                        resulting_attack_target_identity,
+                        ..
+                    } if (resulting_attack_target, resulting_attack_target_identity)
+                        == (expected_attack_target, expected_attack_target_identity) =>
+                    {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership reselection changes no attacked relation"
+                                .to_string(),
+                        ));
+                    }
+                    // CR 400.7 + CR 506.4c: a prior player relation has no pin; a
+                    // prior permanent relation is pinned to that permanent, or is
+                    // unpinned when the relation was retired (attacking nothing).
+                    ResolvedCombatMembershipEdit::Reselect {
+                        expected_attack_target,
+                        expected_attack_target_identity,
+                        ..
+                    } if match (expected_attack_target, expected_attack_target_identity) {
+                        (AttackTarget::Player(_), Some(_)) => true,
+                        (AttackTarget::Player(_), None)
+                        | (AttackTarget::Planeswalker(_) | AttackTarget::Battle(_), None) => false,
+                        (
+                            target @ (AttackTarget::Planeswalker(_) | AttackTarget::Battle(_)),
+                            Some(pin),
+                        ) => !pin_names_attack_target(target, pin),
+                    } =>
+                    {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership reselection has incoherent prior identity"
+                                .to_string(),
+                        ));
+                    }
+                    // CR 400.7 + CR 508.7c: a reselected player has no pin; a
+                    // reselected permanent is pinned to that exact permanent.
+                    ResolvedCombatMembershipEdit::Reselect {
+                        resulting_attack_target,
+                        resulting_attack_target_identity,
+                        ..
+                    } if match (resulting_attack_target, resulting_attack_target_identity) {
+                        (AttackTarget::Player(_), Some(_))
+                        | (AttackTarget::Planeswalker(_) | AttackTarget::Battle(_), None) => true,
+                        (AttackTarget::Player(_), None) => false,
+                        (
+                            target @ (AttackTarget::Planeswalker(_) | AttackTarget::Battle(_)),
+                            Some(pin),
+                        ) => !pin_names_attack_target(target, pin),
+                    } =>
+                    {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership reselection has incoherent resulting identity"
+                                .to_string(),
+                        ));
+                    }
                     ResolvedCombatMembershipEdit::Attack { .. }
                     | ResolvedCombatMembershipEdit::Block { .. }
                     | ResolvedCombatMembershipEdit::MarkBlocked
                     | ResolvedCombatMembershipEdit::Remove { .. }
-                    | ResolvedCombatMembershipEdit::RetireAttacked { .. } => {}
+                    | ResolvedCombatMembershipEdit::RetireAttacked { .. }
+                    | ResolvedCombatMembershipEdit::Reselect { .. } => {}
                 }
             }
             ResolvedRulesCommand::ControllerOverride(command) => {

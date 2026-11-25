@@ -4755,11 +4755,17 @@ fn an_owner_asks_the_attack_target_with_its_frame_in_place() {
             player,
             object_id,
             valid_targets,
+            purpose,
         } = &state.waiting_for
         else {
             unreachable!("checked by the driver");
         };
         assert_eq!((*player, *object_id), (P0, jammer), "{what}");
+        assert_eq!(
+            *purpose,
+            engine::types::game_state::AttackTargetChoicePurpose::EnterAttacking,
+            "{what}"
+        );
         assert!(valid_targets.len() >= 2, "{what}: {valid_targets:?}");
         assert!(
             stack_frames(state).contains(&FrameKind::ChangeZone),
@@ -5098,11 +5104,17 @@ fn a_seat_frame_asks_the_attack_target_after_the_entry() {
             player,
             object_id,
             valid_targets,
+            purpose,
         } = &state.waiting_for
         else {
             unreachable!("checked by the driver");
         };
         assert_eq!((*player, *object_id), (P0, jammer), "{what}");
+        assert_eq!(
+            *purpose,
+            engine::types::game_state::AttackTargetChoicePurpose::EnterAttacking,
+            "{what}"
+        );
         assert!(
             valid_targets.contains(&AttackTarget::Player(P2)),
             "{what}: {valid_targets:?}"

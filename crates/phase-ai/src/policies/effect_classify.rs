@@ -644,6 +644,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::RememberCard { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         // CR 725.1: crowning a player OTHER than yourself ("target opponent
         // becomes the monarch"). Whether handing out the designation helps you
         // is card-specific — Jared Carthalion wants an opponent crowned so it

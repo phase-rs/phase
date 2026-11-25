@@ -1507,6 +1507,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::GiveControl { .. } => {}
         Effect::RemoveFromCombat { .. } => {}
         Effect::BecomeBlocked { .. } => {}
+        Effect::ReselectAttackTarget { .. } => {}
         Effect::Conjure { .. } => {}
         Effect::CreateCardCopyByName { .. } => {}
         Effect::ApplyPerpetual { .. } => {}
