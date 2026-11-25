@@ -216,8 +216,9 @@
 //! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-11-18`) at
 //! 16,416 B, with a const `size_of` probe, when the CR 508.5 removed-attacker
 //! defender record landed: `CombatState::removed_attacker_defenders`, a 24 B
-//! `Vec` held inline in `GameState::combat` and written only when an attacker
-//! is removed from combat in place, plus padding. It is not a large
+//! `Vec` held inline in `GameState::combat` and written whenever an attacking
+//! creature is removed from combat, in place or by leaving the battlefield,
+//! plus padding. It is not a large
 //! rarely-populated struct, so the ceiling moves by the rule to
 //! 16,416.next_multiple_of(256) + 256 = 16,896.
 //!
