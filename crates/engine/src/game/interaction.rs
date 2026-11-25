@@ -4716,14 +4716,20 @@ fn selection_projection(
             action: SelectionAction::KeepWithinPower,
             source_id: Some(*source_id),
         }),
+        // CR 101.4 + CR 701.21a: exact (`minimum_count == None`) or up-to
+        // keeper; the engine publishes both bounds.
         WaitingFor::KeepExactPermanentsChoice {
             eligible,
             required_count,
+            minimum_count,
             source_id,
             ..
         } => Some(SelectionProjection {
             object_ids: eligible.clone(),
-            constraint: count_constraint(*required_count, *required_count),
+            constraint: count_constraint(
+                minimum_count.unwrap_or(*required_count),
+                *required_count,
+            ),
             confirm: ConfirmSemantics::Explicit,
             intent: InteractionIntentCode::Keep,
             action: SelectionAction::KeepExact,
