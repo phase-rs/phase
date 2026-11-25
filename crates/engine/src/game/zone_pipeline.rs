@@ -5272,6 +5272,14 @@ pub(crate) fn deliver_staged_destroy_batch(
     let mut owner = new_staged_owner(state, &reqs, logical_zone_change_group, staged, None);
     owner.completion = Some(BatchCompletion::DestroyPopulationSettled {
         ability: Box::new(ability.clone()),
+        pending_return_result_producer: ability.declares_return_result.map(|id| {
+            (
+                state
+                    .active_return_result_occurrence
+                    .expect("destroy result has an active occurrence"),
+                id,
+            )
+        }),
         settled_destroyed: None,
     });
     let boundary = state.resolution_stack.capture_child_boundary();
@@ -6486,6 +6494,42 @@ fn settle_batch_owner(
         Some(crate::types::game_state::BatchCompletion::ChangeZonePopulationSettled { .. })
     );
     if let Some(mut completion) = completion {
+        if let BatchCompletion::DestroyPopulationSettled {
+            pending_return_result_producer: Some((occurrence_id, result_id)),
+            ..
+        } = &completion
+        {
+            // CR 400.7j + CR 614.6 + CR 730.3c/e: publish the actual arrivals
+            // before the following instruction reads them. A merged permanent
+            // can produce component arrivals with a different destination.
+            let group = &pending.logical_zone_change_group;
+            let mut records = crate::types::game_state::settled_logical_zone_change_records(group);
+            let announced_successors: HashSet<_> = records
+                .iter()
+                .filter_map(|record| record.recorded_zone_change_successor())
+                .collect();
+            records.extend(
+                group
+                    .all_origin_occurrences
+                    .iter()
+                    .filter_map(|occurrence| {
+                        let GameEvent::ZoneChanged { record, .. } = &occurrence.event else {
+                            return None;
+                        };
+                        let successor = record.recorded_zone_change_successor()?;
+                        let object = state.objects.get(&successor.object_id)?;
+                        let survivor = object.split_from_merge_survivor?;
+                        (record.from_zone.is_none()
+                            && !announced_successors.contains(&successor)
+                            && announced_successors.contains(&survivor)
+                            && object.incarnation == successor.incarnation
+                            && object.zone == record.to_zone)
+                            .then(|| (**record).clone())
+                    }),
+            );
+            crate::game::effects::publish_return_result(state, *occurrence_id, *result_id, records)
+                .expect("destroy publishes to its retained occurrence exactly once");
+        }
         crate::types::game_state::settle_batch_delivery_outcome(
             &mut completion,
             state,
@@ -18219,6 +18263,7 @@ mod staged_batch_tests {
                     source,
                     PlayerId(0),
                 )),
+                pending_return_result_producer: None,
                 settled_destroyed: None,
             }
         } else {
@@ -19783,6 +19828,7 @@ mod staged_batch_tests {
                 source,
                 PlayerId(0),
             )),
+            pending_return_result_producer: None,
             settled_destroyed: None,
         };
         crate::types::game_state::settle_batch_delivery_outcome(
