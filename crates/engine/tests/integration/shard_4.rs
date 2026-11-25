@@ -228,6 +228,7 @@ mod kav_landseeker_delayed_sacrifice;
 mod kaya_geist_hunter;
 mod kaya_spirits_justice_per_opponent_exile;
 mod kaysa_green_anthem;
+mod keeper_up_to_cardinality;
 mod kellan_daring_traveler_mana_value_gate;
 mod ketramose_exile_trigger_gate_4952;
 mod keyword_activation_cancel;

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "KeeperConstraint::ExactCount is renamed Count (serialized tag \"count\"; \"exact_count\" still deserializes) and WaitingFor::KeepExactPermanentsChoice gains optional minimum_count for up-to keeper prompts. An older peer cannot parse the new tag inside ability definitions and would treat an up-to keep prompt as exact."
+}
