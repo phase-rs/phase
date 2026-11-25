@@ -20,7 +20,7 @@
 //! spawn; the caller validates the runtime, then marks hosted and records the
 //! binding, or rolls the game back.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use engine::database::{CardDatabase, ComboTable};
@@ -38,11 +38,14 @@ use crate::session::SessionManager;
 /// Binds hosted tournament pairings to the game sessions serving them. The
 /// tournament core is deliberately `game_code`-free (see `tournament.rs`
 /// `begin_hosting`: "Freeing the live game is the server layer's concern (its
-/// own `active_matches`)"); this map IS that concern.
+/// own `active_matches`). This manager also remembers which released bindings
+/// the native server may recover after a result-less retirement.
 #[derive(Debug, Default)]
 pub struct TournamentHostingManager {
     /// `(tournament_code, pairing_id) -> spawned game_code`.
     active_matches: HashMap<(String, PairingId), String>,
+    /// Pairings for which the server removed a live binding without a result.
+    pending_rehosts: HashMap<String, HashSet<PairingId>>,
 }
 
 /// A spawned hosted tournament match.
@@ -89,13 +92,6 @@ impl TournamentHostingManager {
     /// torn-down game. The core's `hosted` provenance is durable and untouched;
     /// only this server-layer binding is dropped.
     ///
-    /// Also the recovery hook for a hosted game that ends WITHOUT a reported
-    /// result (abandon, disconnect grace-expiry): dropping the binding leaves
-    /// the pairing `outcome.is_none()` and still hosted-eligible, so
-    /// [`TournamentManager::hostable_pairings`] returns it again and a later
-    /// spawn tick re-hosts it with a bumped host generation (the fence a stale
-    /// terminal is checked against). Without the drop the pairing would point at
-    /// a removed game with no recovery path.
     pub fn forget(&mut self, code: &str, pairing_id: PairingId) -> Option<String> {
         self.active_matches.remove(&(code.to_string(), pairing_id))
     }
@@ -106,17 +102,62 @@ impl TournamentHostingManager {
     pub fn bind(&mut self, code: &str, pairing_id: PairingId, game_code: String) {
         self.active_matches
             .insert((code.to_string(), pairing_id), game_code);
+        if let Some(pending) = self.pending_rehosts.get_mut(code) {
+            pending.remove(&pairing_id);
+            if pending.is_empty() {
+                self.pending_rehosts.remove(code);
+            }
+        }
     }
 
-    /// Forget the binding of one game by its `game_code` (reverse lookup),
-    /// returning the `(tournament, pairing)` it served. The per-game teardown
-    /// paths that end a hosted game WITHOUT a reported result (disconnect
-    /// grace-expiry, abandon) call this so no binding points at a removed game;
-    /// the freed pairing re-hosts on a later tick (see [`Self::forget`]).
-    pub fn forget_game(&mut self, game_code: &str) -> Option<(String, PairingId)> {
+    /// Release the exact binding of a game retired without a reported result.
+    /// The trusted reaper may serve the freed pairing if it is still ready.
+    pub fn queue_rehost(&mut self, game_code: &str) -> Option<(String, PairingId)> {
         let key = self.tournament_for_game_code(game_code)?;
         self.active_matches.remove(&key);
+        self.pending_rehosts
+            .entry(key.0.clone())
+            .or_default()
+            .insert(key.1);
         Some(key)
+    }
+
+    pub fn pending_rehost_tournaments(&self) -> Vec<String> {
+        self.pending_rehosts.keys().cloned().collect()
+    }
+
+    /// The core owns pairing readiness. The shell also excludes any pairing
+    /// that already has a live game.
+    pub fn unserved_ready_matches(
+        &self,
+        code: &str,
+        tournaments: &TournamentManager,
+    ) -> Vec<HostablePairing> {
+        tournaments
+            .hostable_pairings(code)
+            .into_iter()
+            .filter(|pairing| self.game_code_for(code, pairing.pairing_id).is_none())
+            .collect()
+    }
+
+    /// Pick only pending rehosts that are still ready. Pending entries live
+    /// through transient creation failures and are removed on bind or when
+    /// the core no longer has a ready pairing.
+    pub fn pending_rehost_matches(
+        &mut self,
+        code: &str,
+        tournaments: &TournamentManager,
+    ) -> Vec<HostablePairing> {
+        let mut ready = self.unserved_ready_matches(code, tournaments);
+        let Some(pending) = self.pending_rehosts.get_mut(code) else {
+            return Vec::new();
+        };
+        ready.retain(|pairing| pending.contains(&pairing.pairing_id));
+        pending.retain(|id| ready.iter().any(|pairing| pairing.pairing_id == *id));
+        if pending.is_empty() {
+            self.pending_rehosts.remove(code);
+        }
+        ready
     }
 
     /// Drop every binding for a whole tournament and return the freed game
@@ -125,6 +166,7 @@ impl TournamentHostingManager {
     /// this only releases the server-layer bindings and hands back the games to
     /// reap.
     pub fn forget_tournament(&mut self, code: &str) -> Vec<String> {
+        self.pending_rehosts.remove(code);
         let keys: Vec<(String, PairingId)> = self
             .active_matches
             .keys()
@@ -136,9 +178,10 @@ impl TournamentHostingManager {
             .collect()
     }
 
-    /// Create and start a game for every pairing the core reports hostable and
-    /// this manager is not already serving. For each pairing: legality-check and
-    /// resolve both seats' submitted decks, then create → join → start the game.
+    /// Create and start games for the selected unserved ready matches. The
+    /// caller holds the broker and hosting locks from selection through bind.
+    /// For each pairing, legality-check and resolve both seats' decks, then
+    /// create → join → start the game.
     ///
     /// The returned spawns are NOT yet hosted or bound — the caller interposes
     /// the Full-runtime binding, then marks each hosted and calls [`Self::bind`]
@@ -150,20 +193,15 @@ impl TournamentHostingManager {
     /// insertion (mirroring the lobby create path): tournament hosting can never
     /// push the server past its configured game ceiling.
     pub fn spawn_ready_matches(
-        &self,
         code: &str,
-        tournaments: &TournamentManager,
+        ready: Vec<HostablePairing>,
         game_mgr: &mut SessionManager,
         db: &Arc<CardDatabase>,
         combos: &ComboTable,
         max_games: usize,
     ) -> Vec<TournamentMatchSpawn> {
         let mut spawns = Vec::new();
-        for hostable in tournaments.hostable_pairings(code) {
-            let key = (code.to_string(), hostable.pairing_id);
-            if self.active_matches.contains_key(&key) {
-                continue;
-            }
+        for hostable in ready {
             // Capacity gate, checked against the live registry before each
             // create (each spawn increments `game_count`). Stop the whole tick
             // once full — further pairings would only fail the same way.
@@ -398,8 +436,14 @@ mod tests {
         let mut game_mgr = SessionManager::new();
         let db = Arc::new(CardDatabase::default());
         let combos = ComboTable::default();
-        let spawns =
-            hosting.spawn_ready_matches("T", &tournaments, &mut game_mgr, &db, &combos, 100);
+        let spawns = TournamentHostingManager::spawn_ready_matches(
+            "T",
+            hosting.unserved_ready_matches("T", &tournaments),
+            &mut game_mgr,
+            &db,
+            &combos,
+            100,
+        );
 
         assert!(spawns.is_empty(), "unresolvable decks spawn no game");
         assert_eq!(game_mgr.game_count(), 0);
@@ -410,15 +454,8 @@ mod tests {
         );
     }
 
-    /// Capacity is enforced against the live registry: at the ceiling, no game
-    /// is created even for a ready pairing.
-    #[test]
-    fn spawn_respects_game_capacity() {
-        let env = FakeEnv::new();
-        let tournaments = ready_tournament(&env, 4);
-        assert_eq!(tournaments.hostable_pairings("T").len(), 2);
-        let hosting = TournamentHostingManager::new();
-        let db = Arc::new(
+    fn forest_db() -> Arc<CardDatabase> {
+        Arc::new(
             CardDatabase::from_json_str(
                 &serde_json::json!({
                     "forest": {
@@ -436,12 +473,29 @@ mod tests {
                 .to_string(),
             )
             .expect("the same legal deck can be resolved below capacity"),
-        );
+        )
+    }
+
+    /// Capacity is enforced against the live registry: at the ceiling, no game
+    /// is created even for a ready pairing.
+    #[test]
+    fn spawn_respects_game_capacity() {
+        let env = FakeEnv::new();
+        let tournaments = ready_tournament(&env, 4);
+        assert_eq!(tournaments.hostable_pairings("T").len(), 2);
+        let hosting = TournamentHostingManager::new();
+        let db = forest_db();
         let combos = ComboTable::default();
         for (limit, expected_count) in [(0, 0), (1, 1), (3, 2)] {
             let mut game_mgr = SessionManager::new();
-            let spawns =
-                hosting.spawn_ready_matches("T", &tournaments, &mut game_mgr, &db, &combos, limit);
+            let spawns = TournamentHostingManager::spawn_ready_matches(
+                "T",
+                hosting.unserved_ready_matches("T", &tournaments),
+                &mut game_mgr,
+                &db,
+                &combos,
+                limit,
+            );
             assert_eq!(spawns.len(), expected_count, "spawn count at limit {limit}");
             assert_eq!(
                 game_mgr.game_count(),
@@ -449,6 +503,62 @@ mod tests {
                 "live games at limit {limit}"
             );
         }
+    }
+
+    #[test]
+    fn recovery_selects_only_released_bindings_and_keeps_them_through_capacity_failure() {
+        let env = FakeEnv::new();
+        let mut tournaments = ready_tournament(&env, 4);
+        let mut hosting = TournamentHostingManager::new();
+        let ready = hosting.unserved_ready_matches("T", &tournaments);
+        assert_eq!(ready.len(), 2);
+        let pairing = ready[0].pairing_id;
+        tournaments.begin_hosting("T", pairing, &env).unwrap();
+        hosting.bind("T", pairing, "OLD".to_string());
+
+        assert_eq!(hosting.queue_rehost("unrelated"), None);
+        assert!(hosting.pending_rehost_tournaments().is_empty());
+        assert_eq!(
+            hosting.queue_rehost("OLD"),
+            Some(("T".to_string(), pairing))
+        );
+        assert_eq!(hosting.game_code_for("T", pairing), None);
+        let retry = hosting.pending_rehost_matches("T", &tournaments);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].pairing_id, pairing);
+
+        let mut games = SessionManager::new();
+        let db = forest_db();
+        let combos = ComboTable::default();
+        let spawns =
+            TournamentHostingManager::spawn_ready_matches("T", retry, &mut games, &db, &combos, 0);
+        assert!(spawns.is_empty());
+        assert_eq!(games.game_count(), 0);
+        assert_eq!(hosting.pending_rehost_tournaments(), ["T"]);
+        let retry = hosting.pending_rehost_matches("T", &tournaments);
+        let replacements =
+            TournamentHostingManager::spawn_ready_matches("T", retry, &mut games, &db, &combos, 1);
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(replacements[0].pairing_id, pairing);
+        assert_eq!(games.game_count(), 1);
+
+        let new_code = &replacements[0].game_code;
+        hosting.bind("T", pairing, new_code.clone());
+        assert!(hosting.pending_rehost_tournaments().is_empty());
+        assert_eq!(
+            hosting.queue_rehost(new_code),
+            Some(("T".to_string(), pairing))
+        );
+        tournaments
+            .report_result_system(
+                "T",
+                pairing,
+                lobby_broker::tournament::PodOutcome::Draw,
+                &env,
+            )
+            .unwrap();
+        assert!(hosting.pending_rehost_matches("T", &tournaments).is_empty());
+        assert!(hosting.pending_rehost_tournaments().is_empty());
     }
 
     /// The `(tournament, pairing) <-> game_code` binding supports both lookups
