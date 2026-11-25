@@ -695,15 +695,29 @@ fn tapping_assembled_urzas_mine_under_contamination_adds_only_black() {
     let (mut scenario, mine) = tron_scenario(true);
     scenario.add_enchantment_from_oracle(P0, "Contamination", CONTAMINATION);
     let mut runner = scenario.build();
-    let Produced::Pool(produced) = tap_for_mana(&mut runner, mine) else {
-        panic!("the Mine produces mana without a type prompt");
-    };
+    let result = runner
+        .act(GameAction::ActivateAbility {
+            source_id: mine,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    // Amount: see the "instead of any other type and amount" gap (Contamination keeps the production's amount).
+    let produced = pool(&runner, P0);
     assert!(!produced.is_empty(), "the Mine produced mana");
     assert!(
         produced
             .iter()
             .all(|mana_type| *mana_type == ManaType::Black),
         "CR 106.12b: only black mana reaches the pool, got {produced:?}"
+    );
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::TappedForMana { .. }))
+            .count(),
+        1
     );
 }
 

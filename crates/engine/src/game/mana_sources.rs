@@ -13,15 +13,13 @@
 //! inline resolution — which is why any irreversible sub-effect (damage,
 //! life loss, sacrifice) disqualifies a source from UI-level undo.
 
-use std::borrow::Cow;
-
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{cost_has_component, ManaSpendRestriction};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    ControllerRef, CostPaidObjectSnapshot, Effect, ManaProduction, PlayerFilter, QuantityExpr,
-    ResolvedAbility, SacrificeCost, SacrificeRequirement, TargetFilter, TriggerDefinition,
-    TriggerDefinitionRef, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef,
+    CostPaidObjectSnapshot, Effect, ManaProduction, PlayerFilter, QuantityExpr, ResolvedAbility,
+    SacrificeCost, SacrificeRequirement, TargetFilter, TriggerDefinition, TriggerDefinitionRef,
+    TypedFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
@@ -981,7 +979,7 @@ fn live_base_mana_output(
         return Vec::new();
     };
     let production_override =
-        super::casting_costs::production_override_for_option(ability_def, option);
+        super::casting_costs::production_override_for_option(&ability.effect, option);
     live_mana_output_units(
         state,
         &ability,
@@ -1052,15 +1050,13 @@ fn resolved_mana_ability_for_live_output(
     player: PlayerId,
     ability_def: &AbilityDefinition,
 ) -> ResolvedAbility {
-    let ability = match &*ability_def.effect {
-        Effect::Mana { .. } => largest_sizing_resolution(state, ability_def, source_id, player)
-            .map(|(resolved, _)| resolved),
-        _ => None,
-    }
-    .unwrap_or_else(|| {
-        super::ability_utils::build_resolved_from_def(ability_def, source_id, player)
-    });
-    mana_abilities::apply_condition_instead_mana_swap(state, &ability)
+    largest_sizing_resolution(state, ability_def, source_id, player)
+        .map(|(resolved, _)| resolved)
+        .unwrap_or_else(|| {
+            let ability =
+                super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
+            mana_abilities::apply_condition_instead_mana_swap(state, &ability)
+        })
 }
 
 /// CR 608.2h + CR 118.3: The resolutions a mana ability is sized by before it
@@ -1093,46 +1089,8 @@ fn sizing_resolutions(
         .collect()
 }
 
-pub(super) fn is_fixed_colorless_payment_swap(
-    base: &Effect,
-    replacement: &Effect,
-    condition: Option<&AbilityCondition>,
-) -> bool {
-    let fixed_colorless = |effect: &Effect| {
-        matches!(
-            effect,
-            Effect::Mana {
-                produced: ManaProduction::Colorless {
-                    count: QuantityExpr::Fixed { .. },
-                },
-                restrictions,
-                target: None,
-                ..
-            } if restrictions.is_empty()
-        )
-    };
-    matches!(condition, Some(AbilityCondition::ConditionInstead { .. }))
-        && fixed_colorless(base)
-        && fixed_colorless(replacement)
-}
-
-/// CR 601.2g + CR 614.15: Size an unrestricted fixed colorless source using
-/// the whole production selected by its self-replacement. Both branches use
-/// the same mana type, so selecting the amount requires no payment choice.
-fn fixed_colorless_payment_effect<'a>(
-    state: &GameState,
-    ability: &'a ResolvedAbility,
-) -> Cow<'a, Effect> {
-    if ability.sub_ability.as_ref().is_some_and(|sub| {
-        is_fixed_colorless_payment_swap(&ability.effect, &sub.effect, sub.condition.as_ref())
-    }) {
-        return Cow::Owned(
-            mana_abilities::apply_condition_instead_mana_swap(state, ability).effect,
-        );
-    }
-    Cow::Borrowed(&ability.effect)
-}
-
+/// CR 601.2g + CR 614.15: Size the whole resolution selected by the
+/// mana ability's self-replacement.
 /// The sizing resolution that adds the most mana, with that amount. An
 /// any-one-color amount that reads the color chosen for it is sized by its
 /// best color (`planned_gross_mana`).
@@ -1145,13 +1103,11 @@ fn largest_sizing_resolution(
     sizing_resolutions(state, ability, object_id, controller)
         .into_iter()
         .filter_map(|resolved| {
-            let gross = {
-                let effect = fixed_colorless_payment_effect(state, &resolved);
-                let Effect::Mana { produced, .. } = effect.as_ref() else {
-                    return None;
-                };
-                planned_gross_mana(produced, state, &resolved)
+            let resolved = mana_abilities::apply_condition_instead_mana_swap(state, &resolved);
+            let Effect::Mana { produced, .. } = &resolved.effect else {
+                return None;
             };
+            let gross = planned_gross_mana(produced, state, &resolved);
             Some((resolved, gross))
         })
         .max_by_key(|(_, gross)| *gross)
@@ -1320,7 +1276,13 @@ pub(crate) fn activate_mana_source_option_with_output(
             })?;
         let production_override = match output {
             ManaSourceOutput::Concrete(_) => {
-                super::casting_costs::production_override_for_option(&ability, option)
+                let resolved = super::ability_utils::build_resolved_from_def(
+                    &ability,
+                    option.object_id,
+                    player,
+                );
+                let resolved = mana_abilities::apply_condition_instead_mana_swap(state, &resolved);
+                super::casting_costs::production_override_for_option(&resolved.effect, option)
             }
             ManaSourceOutput::DeferredColorChoice { .. } => None,
         };
@@ -3815,12 +3777,12 @@ fn activatable_mana_profiles_for_object(
         for kind in sizing_resolutions(state, ability, object_id, controller)
             .iter()
             .filter_map(|resolved| {
-                let effect = fixed_colorless_payment_effect(state, resolved);
-                let Effect::Mana { produced, .. } = effect.as_ref() else {
+                let resolved = mana_abilities::apply_condition_instead_mana_swap(state, resolved);
+                let Effect::Mana { produced, .. } = &resolved.effect else {
                     return None;
                 };
                 profile_kind_from_production(
-                    state, object_id, controller, ability, produced, resolved,
+                    state, object_id, controller, ability, produced, &resolved,
                 )
                 .and_then(|kind| profile_kind_allowed_for_context(kind, payment_context))
             })
@@ -4656,11 +4618,12 @@ fn emit_source_rows(
     ability: &AbilityDefinition,
     payability_mode: ManaPayabilityMode,
 ) -> Vec<SourceRow> {
+    let resolved = resolved_mana_ability_for_live_output(state, object_id, controller, ability);
     let Effect::Mana {
         produced,
         restrictions,
         ..
-    } = &*ability.effect
+    } = &resolved.effect
     else {
         return Vec::new();
     };
@@ -4687,12 +4650,6 @@ fn emit_source_rows(
         ManaProduction::Fixed { .. }
         | ManaProduction::Colorless { .. }
         | ManaProduction::Mixed { .. } => {
-            let resolved =
-                super::ability_utils::build_resolved_from_def(ability, object_id, controller);
-            let effect = fixed_colorless_payment_effect(state, &resolved);
-            let Effect::Mana { produced, .. } = effect.as_ref() else {
-                return Vec::new();
-            };
             let types =
                 super::effects::mana::resolve_mana_types_for_ability(produced, state, &resolved);
             if types.is_empty() {
@@ -4723,8 +4680,6 @@ fn emit_source_rows(
                     })
                     .collect();
             }
-            let resolved =
-                super::ability_utils::build_resolved_from_def(ability, object_id, controller);
             super::effects::mana::any_one_color_outputs(state, produced, &resolved)
                 .into_iter()
                 .map(|(mana_type, _)| SourceRow {
@@ -4740,17 +4695,7 @@ fn emit_source_rows(
         produced
             if single_color_production_count(produced).is_some_and(|count| !count.contains_x()) =>
         {
-            // Reuse the live label's sizing authority: a paid-object amount
-            // needs its candidate bound, and an "instead" condition can
-            // replace the base output before its amount is evaluated.
-            let resolved =
-                resolved_mana_ability_for_live_output(state, object_id, controller, ability);
-            let count = match &resolved.effect {
-                Effect::Mana { produced, .. } => {
-                    resolved_production_count(produced, state, &resolved) as usize
-                }
-                _ => 0,
-            };
+            let count = resolved_production_count(produced, state, &resolved) as usize;
             // CR 605.2: a legal explicit activation may add zero mana; it
             // still pays its costs, but cannot fund an automatic payment.
             if count == 0 && payability_mode == ManaPayabilityMode::Planning {

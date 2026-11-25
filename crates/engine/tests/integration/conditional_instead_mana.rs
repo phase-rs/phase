@@ -175,20 +175,17 @@ fn tower_worker_reads_its_companions_in_the_order_auto_payment_activates_sources
         .expect("Tower Worker supplies colorless");
 
     // CR 605.3b + CR 614.15: the replacement is chosen against the board at the actual tap.
-    let amount = if tower_tapped < sacrificed { 3 } else { 1 };
+    assert!(
+        sacrificed < tower_tapped,
+        "Mine Worker must leave before Tower Worker taps"
+    );
     assert_eq!(
         mana_tap_payloads(&result.events, tower),
-        [&[ManaType::Colorless; 3][..amount]],
-        "sacrificing Mine Worker before Tower Worker taps disables the replacement"
+        [&[ManaType::Colorless][..]]
     );
     // CR 601.2g + CR 601.2h: Explore spends the granted green and one colorless.
     assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
-    assert_eq!(
-        runner.state().players[0]
-            .mana_pool
-            .count_color(ManaType::Colorless),
-        amount - 1
-    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
     assert!(matches!(
         result.waiting_for,
         WaitingFor::Priority { player: P0 }
@@ -385,6 +382,38 @@ fn river_of_tears_and_reflecting_pool_see_the_same_land_play() {
         // CR 106.7: Reflecting Pool sees River's current output type.
         assert_production(&mut reading, pool, mana, 1);
         assert_production(&mut runner, river, mana, 1);
+    }
+}
+
+#[test]
+fn river_of_tears_auto_payment_uses_the_selected_color() {
+    for (land_played, spell_name, mana) in [
+        (false, "Consider", ManaType::Blue),
+        (true, "Dark Ritual", ManaType::Black),
+    ] {
+        let mut scenario = main_phase();
+        let river = add(&mut scenario, "River of Tears", Zone::Battlefield);
+        let land = add(&mut scenario, "Reflecting Pool", Zone::Hand);
+        let spell = add(&mut scenario, spell_name, Zone::Hand);
+        let mut runner = scenario.build();
+        if land_played {
+            play_land(&mut runner, land);
+            runner.state_mut().objects.get_mut(&land).unwrap().tapped = true;
+        }
+
+        let card_id = runner.state().objects[&spell].card_id;
+        let result = runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        assert_eq!(mana_tap_payloads(&result.events, river), [&[mana][..]]);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
     }
 }
 

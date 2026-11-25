@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4463
-- **Total card appearances across root causes:** 4496 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4459
+- **Total card appearances across root causes:** 4492 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > **Staleness warning.** This list is pruned one card at a time and has not been
 > regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
@@ -60,7 +60,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 2 | Dropped intervening-if / gating condition (condition: null) | 567 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 394 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 377 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
-| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 321 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
+| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 317 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 222 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 207 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
@@ -86,7 +86,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2375/4496 ≈ 52.8% of all misparse appearances; the top 10 cover 3349/4496 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
+> The top **5** root causes cover 2371/4492 ≈ 52.8% of all misparse appearances; the top 10 cover 3345/4492 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
 
 ## Full card lists per root cause
 
@@ -2183,7 +2183,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (321 cards)
+### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (317 cards)
 
 **Signature.** Effect quantity (count/amount/P-T) parses as Fixed(1)/constant instead of a dynamic QuantityExpr::Ref over a 'for each X' / 'that many' / 'equal to' clause; the multiplier is dropped.
 
@@ -2435,7 +2435,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Ryan Sinclair
 - Sage of Hours
 - Sage's Reverie
-- Sarevok's Tome
 - Sasaya's Essence
 - Say Its Name
 - Search for Glory
@@ -2482,9 +2481,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Undead Sprinter
 - Unlucky Cabbage Merchant
 - Ursine Monstrosity
-- Urza's Mine
-- Urza's Power Plant
-- Urza's Tower
 - Uyo, Silent Prophet
 - Valakut Awakening
 - Valiant Changeling
