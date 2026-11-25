@@ -5389,6 +5389,32 @@ fn draw_is_substituted_away(
     }
 }
 
+/// CR 614.6 + CR 615.5: does the proposed event have no slot that a link of
+/// `branch_ability` folds into, so the branch's WHOLE chain — links shaped like
+/// event modifiers (`ChangeZone`, self `PutCounter`) included — is
+/// post-replacement work?
+///
+/// - A damage event has no modifier slot: a prevention follow-up's self
+///   counter or zone move is the follow-up itself (CR 615.5).
+/// - A draw substituted away ([`draw_is_substituted_away`]) never happens
+///   (CR 614.6), so a `ChangeZone` head has no destination to redirect: Out of
+///   the Tombs' "instead return a creature card from your graveyard to the
+///   battlefield" IS the substitute, not a modification of the draw.
+///
+/// Every site that splits a branch into folded modifiers and residual work
+/// (mandatory stash, optional accept, auto-choice identity) asks this, so they
+/// cannot disagree about what runs after the event.
+fn branch_folds_no_link_into_event(
+    state: &GameState,
+    rid: ReplacementId,
+    repl_def: &ReplacementDefinition,
+    branch_ability: Option<&AbilityDefinition>,
+    proposed: &ProposedEvent,
+) -> bool {
+    matches!(proposed, ProposedEvent::Damage { .. })
+        || draw_is_substituted_away(state, rid, repl_def, branch_ability, proposed)
+}
+
 // --- 4b. Scry ---
 
 // CR 614.6: A replacement effect applies only once to a given event. The
@@ -13766,8 +13792,12 @@ fn apply_single_replacement(
                         // — the `has_only_event_modifier` heuristic that classifies
                         // self-targeted PutCounter as an ETB modifier does not
                         // apply to Damage events, where there is no `etb_counters`
-                        // slot to absorb the counters into.
-                        let is_damage = matches!(proposed, ProposedEvent::Damage { .. });
+                        // slot to absorb the counters into. CR 614.6: likewise a
+                        // draw substituted away has no destination for a
+                        // `ChangeZone` head to redirect (Out of the Tombs).
+                        let folds_no_link = branch_folds_no_link_into_event(
+                            state, rid, repl_def, ability, &proposed,
+                        );
                         if let Some(runtime) = state.replacement_rider(repl_def).cloned() {
                             Some(PostReplacementContinuation::Resolved(Box::new(runtime)))
                         } else {
@@ -13821,13 +13851,19 @@ fn apply_single_replacement(
                                 // modifier, which has no meaning) and stashes only the
                                 // Shuffle tail — leaving the creature on the battlefield.
                                 //
+                                // CR 614.6 + CR 614.11: the same holds for a draw
+                                // substituted away (Out of the Tombs: "instead return a
+                                // creature card from your graveyard to the battlefield.
+                                // If you can't, you lose the game") — stripping the
+                                // return leaves only the loss.
+                                //
                                 // CR 614.1c: for non-Damage events, walk past modifier-
                                 // only effects (Tap/Untap/PutCounter/ChangeZone) to find
                                 // the first non-modifier work. Covers the existing
                                 // ChangeZone → sub_ability pattern (Nexus of Fate shuffle-
                                 // back) and composed replacements like Tap → BecomeCopy
                                 // (Vesuva "enter tapped as a copy").
-                                if is_damage {
+                                if folds_no_link {
                                     Some(PostReplacementContinuation::Template(Box::new(
                                         def.clone(),
                                     )))
@@ -17104,10 +17140,17 @@ fn auto_choice_identities(
                 // ChangeZone prefixes that modify other event kinds instead.
                 (definition.execute.as_deref(), decline)
             } else {
-                // Match ordinary delivery: accept skips applied modifier prefixes,
-                // while mixed decline retains its full root; pure modifiers do not run.
+                // Match ordinary delivery: accept skips applied modifier prefixes
+                // unless nothing folds into the event (CR 614.6: a draw substituted
+                // away runs its whole chain), while mixed decline retains its full
+                // root; pure modifiers do not run.
+                let execute = definition.execute.as_deref();
                 (
-                    EventModifiers::first_non_modifier_ability(definition.execute.as_deref()),
+                    if branch_folds_no_link_into_event(state, *rid, definition, execute, proposed) {
+                        execute
+                    } else {
+                        EventModifiers::first_non_modifier_ability(execute)
+                    },
                     if EventModifiers::has_only_event_modifier(decline) {
                         None
                     } else {
@@ -19253,13 +19296,24 @@ fn continue_replacement_impl(
                 // grant rider after the zone move, so accepting an optional
                 // replacement must not also enqueue the generic child.
                 None
-            } else if matches!(proposed, ProposedEvent::Damage { .. }) {
+            } else if matches!(proposed, ProposedEvent::Damage { .. })
+                || replacement_definition_for_id(state, rid).is_some_and(|repl| {
+                    branch_folds_no_link_into_event(
+                        state,
+                        rid,
+                        repl,
+                        accept_effect.as_deref(),
+                        &proposed,
+                    )
+                })
+            {
                 // CR 614.6 + CR 615.5: a damage event has no event-modifier
                 // slot, so no link of the accepted branch was folded into it —
                 // a self-targeted `PutCounter` is the substitute's own work
                 // ("put that many +1/+1 counters on Szadek and that player
-                // mills that many cards"). Keep the whole chain, exactly as the
-                // mandatory stash does for damage events.
+                // mills that many cards"). A draw substituted away likewise
+                // folds nothing (CR 614.6). Keep the whole chain, exactly as
+                // the mandatory stash does for these events.
                 accept_effect
             } else {
                 let real_work = accept_effect.as_deref().and_then(|def| {

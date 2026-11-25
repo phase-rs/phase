@@ -303,6 +303,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
@@ -768,6 +769,8 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::Historic
         | FilterProp::NotHistoric
         | FilterProp::IsChosenCardType
+        // CR 205.2a: distinct core card-type count.
+        | FilterProp::CardTypeCount { .. }
         // CR 303.4 + CR 301.5: both read the attachment's subtype (Aura /
         // Equipment) to decide the relationship.
         | FilterProp::EnchantedBy
@@ -1154,6 +1157,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
@@ -3150,6 +3154,7 @@ fn filter_prop_contains_input(
             | FilterProp::HasColor { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -3936,6 +3941,7 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -4525,6 +4531,7 @@ fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -5270,6 +5277,19 @@ fn controller_ref_face_state(
     }
 }
 
+/// CR 205.2a: number of distinct card types in a `core_types` list — the single
+/// counting authority for `FilterProp::CardTypeCount` on every evaluation path
+/// (live object, spell record, zone-change record, face). Supertypes and
+/// subtypes live on other fields and never count; each `CoreType` value counts
+/// once no matter how many times it was granted.
+fn distinct_core_type_count(core_types: &[CoreType]) -> i32 {
+    let mut seen = HashSet::new();
+    for core_type in core_types {
+        seen.insert(*core_type);
+    }
+    i32::try_from(seen.len()).unwrap_or(i32::MAX)
+}
+
 /// CR 205 + CR 202: Evaluate one `FilterProp` against a bare `CardFace`.
 ///
 /// `Some(true)` / `Some(false)` = the property has a context-free reading and
@@ -5301,6 +5321,11 @@ pub fn context_free_prop_matches_face(face: &CardFace, prop: &FilterProp) -> Opt
         FilterProp::NotColor { color } => Some(!face_colors(face).contains(color)),
         FilterProp::ColorCount { comparator, count } => Some(comparator.evaluate(
             i32::try_from(face_colors(face).len()).unwrap_or(i32::MAX),
+            i32::from(*count),
+        )),
+        // CR 205.2a: printed card-type line.
+        FilterProp::CardTypeCount { comparator, count } => Some(comparator.evaluate(
+            distinct_core_type_count(&face.card_type.core_types),
             i32::from(*count),
         )),
         // CR 702: printed keyword line. The keyword authorities in
@@ -9722,6 +9747,7 @@ pub(super) fn filter_reads_pt(filter: &TargetFilter) -> bool {
             | FilterProp::HasColor { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -10112,6 +10138,13 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::NotHistoric => !spell_record_matches_property(record, &FilterProp::Historic),
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(record.colors.len() as i32, i32::from(*count))
+        }
+        // CR 205.2a: distinct card types on the cast-time record.
+        FilterProp::CardTypeCount { comparator, count } => {
+            comparator.evaluate(
+                distinct_core_type_count(&record.core_types),
+                i32::from(*count),
+            )
         }
         FilterProp::Cmc { comparator, value } => match value {
             QuantityExpr::Fixed { value: v } => comparator.evaluate(record.mana_value as i32, *v),
@@ -12017,6 +12050,11 @@ fn matches_filter_prop(
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(obj.effective_colors().len() as i32, i32::from(*count))
         }
+        // CR 205.2a: distinct card types of the candidate object.
+        FilterProp::CardTypeCount { comparator, count } => comparator.evaluate(
+            distinct_core_type_count(&obj.card_types.core_types),
+            i32::from(*count),
+        ),
         FilterProp::HasSupertype { value } => obj.card_types.supertypes.contains(value),
         // CR 202.2 + CR 709.4b: Object does NOT have this color (combined colors
         // off the stack for a split card).
@@ -12684,6 +12722,13 @@ fn zone_change_record_matches_property(
         FilterProp::NotColor { color } => !record.colors.contains(color),
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(record.colors.len() as i32, i32::from(*count))
+        }
+        // CR 205.2a: distinct card types on the zone-change snapshot.
+        FilterProp::CardTypeCount { comparator, count } => {
+            comparator.evaluate(
+                distinct_core_type_count(&record.core_types),
+                i32::from(*count),
+            )
         }
         // CR 208.1 / CR 107.2: `toughness > power` comparison on the snapshot.
         FilterProp::ToughnessGTPower => record.toughness.unwrap_or(0) > record.power.unwrap_or(0),
@@ -29062,6 +29107,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::PtComparison { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType

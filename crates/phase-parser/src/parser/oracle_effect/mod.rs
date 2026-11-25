@@ -2797,6 +2797,46 @@ fn target_span_dropped_this_way_anaphor(span: &str, target: &TargetFilter) -> bo
     scan_contains_phrase(&unbound, "this way")
 }
 
+/// CR 400.3 + CR 400.7j + CR 608.2d: A mandatory singular return from a
+/// preceding instruction's arrivals in the spell controller's graveyard.
+/// Clause IR assigns the preceding instruction; the return routes only
+/// recognize the complete descriptor and its ordinary battlefield delivery.
+pub(crate) fn graveyard_arrival_return_spec(
+    input: &str,
+) -> OracleResult<'_, crate::types::ability::ReturnResultReadSpec> {
+    let (rest, _) = all_consuming((
+        tag("return "),
+        verify(nom_primitives::parse_number, |count| *count == 1),
+        tag(" creature card "),
+        tag("put into "),
+        tag("your graveyard "),
+        tag("this way "),
+        tag("to the battlefield "),
+        verify(parse_control_clause, |possessor| {
+            *possessor == ControlClausePossessor::You
+        }),
+        opt(tag(".")),
+    ))
+    .parse(input.trim())?;
+    Ok((
+        rest,
+        crate::types::ability::ReturnResultReadSpec {
+            noun: TypedFilter::creature()
+                .properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                ])
+                .into(),
+            destination: Zone::Graveyard,
+            recipient: ControllerRef::You,
+        },
+    ))
+}
+
 /// CR 608.2d (override) + CR 701.9b (analogous): locate the "at random"
 /// selection qualifier at any WORD BOUNDARY and split the text around it,
 /// returning `(before, after)`.
@@ -24733,9 +24773,15 @@ fn try_parse_verb_and_target<'a>(
         // the bound-quantity-anaphor excision and the reveal-choice
         // exemption — so this arm routes through it rather than duplicating
         // the raw predicate.
-        if target_span_dropped_this_way_anaphor(target_text, &target) {
-            return None;
-        }
+        let (target, origin) = if let Ok((_, reader)) = graveyard_arrival_return_spec(lower) {
+            rem = dest_remainder;
+            (reader.noun, Some(reader.destination))
+        } else {
+            if target_span_dropped_this_way_anaphor(target_text, &target) {
+                return None;
+            }
+            (target, origin)
+        };
         // CR 115.1: A bounce resolves at-resolution iff the Oracle text omitted
         // the word "target" AND the filter has a controller scope to enumerate
         // against. Computed here so both Hand-destined and default-None
@@ -27279,7 +27325,7 @@ fn parse_bare_damage_continuation<'a>(
 /// Composed one `alt` per axis: the copy-object exiled-card anaphor, then the
 /// comma/bare `and` conjunction (CR 608.2c) that coordinates the cast tail. The
 /// returned remainder is the lowercase cast half.
-fn parse_copy_cast_head_connector(input: &str) -> OracleResult<'_, ()> {
+pub(super) fn parse_copy_cast_head_connector(input: &str) -> OracleResult<'_, ()> {
     let (input, _) = tag("copy ").parse(input)?;
     let (input, _) = alt((
         tag("those exiled cards"),

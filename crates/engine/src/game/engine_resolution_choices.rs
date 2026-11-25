@@ -12437,6 +12437,7 @@ pub(crate) fn run_batch_completion(
         BatchCompletion::DestroyPopulationSettled {
             ability,
             settled_destroyed,
+            ..
         } => {
             let destroyed =
                 settled_destroyed.expect("destroy population completion must be settled");

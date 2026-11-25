@@ -13768,6 +13768,7 @@ fn parsed_condition_reads_filter_population(
         | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { .. }
         | ParsedCondition::HasCityBlessing
         | ParsedCondition::HasEnduringStory
+        | ParsedCondition::IsMonarch
         | ParsedCondition::CompletedDungeon { .. }
         | ParsedCondition::HasMaxSpeed
         | ParsedCondition::IsYourTurn
@@ -66042,11 +66043,11 @@ mod tests {
         assert!(!filter_refs_parent_target(&TargetFilter::Any));
     }
 
-    /// CR 702.174b + CR 608.2c: Longstalk Brawl — the +1/+1 counter is gated on
+    /// CR 702.174k + CR 608.2c: Longstalk Brawl — the +1/+1 counter is gated on
     /// "if the gift was promised", parsed onto the `PutCounter` sub_ability as
-    /// `additional_cost_paid_any()`. Drives the REAL parsed condition through
-    /// `evaluate_condition`: it fires only when the spell's additional cost
-    /// (gift promise) was paid. Reverting the gate recognizer drops the
+    /// a Gift-origin payment check. Drives the parsed condition through
+    /// `evaluate_condition` with and without a recorded Gift payment.
+    /// Reverting the gate recognizer drops the
     /// condition (`None`) and `s07_find_gated_condition` returns `None`, failing
     /// the `.expect`.
     #[test]
@@ -66076,22 +66077,23 @@ mod tests {
             ObjectId(99),
             PlayerId(0),
         );
-        ability.context.additional_cost_paid = true;
-        assert!(
-            evaluate_condition(&cond, &state, &ability),
-            "gift promised → counter clause fires"
-        );
-        ability.context.additional_cost_paid = false;
         assert!(
             !evaluate_condition(&cond, &state, &ability),
             "gift not promised → counter clause does not fire"
         );
+        ability
+            .context
+            .record_additional_cost_payment(crate::types::ability::AdditionalCostOrigin::Gift, 1);
+        assert!(
+            evaluate_condition(&cond, &state, &ability),
+            "gift promised → counter clause fires"
+        );
     }
 
-    /// CR 702.174b + CR 205.4 + CR 608.2c: Coiling Rebirth — the copy token is
+    /// CR 702.174k + CR 205.4 + CR 608.2c: Coiling Rebirth — the copy token is
     /// gated on "if the gift was promised and that creature isn't legendary",
     /// parsed onto the `CopyTokenOf` sub_ability as
-    /// `And([AdditionalCostPaid, Not(TargetMatchesFilter{Legendary})])`. Drives
+    /// a Gift-origin payment check and a nonlegendary predicate. Drives
     /// the REAL parsed conjunction through `evaluate_condition` against a
     /// legendary vs. nonlegendary FIRST target. Reverting the conjunction
     /// fallback or the "that creature isn't legendary" recognizer drops the
@@ -66146,7 +66148,12 @@ mod tests {
                 ObjectId(99),
                 PlayerId(0),
             );
-            ability.context.additional_cost_paid = paid;
+            if paid {
+                ability.context.record_additional_cost_payment(
+                    crate::types::ability::AdditionalCostOrigin::Gift,
+                    1,
+                );
+            }
             ability
         };
 

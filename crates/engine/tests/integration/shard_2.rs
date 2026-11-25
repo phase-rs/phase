@@ -118,6 +118,7 @@ mod aura_token_attach_guard;
 mod aurification_gold_counter_defender_cant_attack;
 mod aurora_awakener_reveal_until_n_permanents;
 mod avalanche_of_sector_7_activation_trigger;
+mod aveline_that_many_counters_705;
 mod awaken_runtime;
 mod azog_morias_ruin_amass_lki;
 mod azors_gateway_transform_condition;
