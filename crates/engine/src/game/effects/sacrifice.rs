@@ -373,17 +373,6 @@ pub fn resolve(
                 .unwrap_or_default(),
             _ => Vec::new(),
         }
-    } else if matches!(filter, TargetFilter::LastCreated)
-        && ability.targets == ability.context.chain_root_targets
-        && !state
-            .resolving_trigger_firing
-            .is_some_and(|firing| firing.is_delayed())
-    {
-        // CR 608.2c: an immediate counted instruction names the created
-        // population even when an inherited target supplies its quantity.
-        // Legacy delayed LastCreated payloads carry their creation snapshot
-        // as explicit objects and use the existing explicit-object path.
-        Vec::new()
     } else if let Some(referent) = cost_paid_referent {
         // CR 608.2k: the resolved back-reference IS the whole subject set;
         // never widen it with inherited targets.

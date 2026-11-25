@@ -2,7 +2,6 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use engine::game::combat::AttackTarget;
-use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::static_abilities::object_has_static_other;
@@ -15,7 +14,7 @@ use engine::types::ability::{
 use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::game_state::WaitingFor;
-use engine::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
+use engine::types::identifiers::{ObjectId, TrackedSetId};
 use engine::types::phase::Phase;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
@@ -432,54 +431,60 @@ fn sacrifice_tracked_set_count_can_read_a_different_set() {
 }
 
 #[test]
-fn sacrifice_last_created_count_can_read_parent_target() {
+fn sacrifice_last_created_count_can_read_a_different_population() {
     let mut scenario = GameScenario::new();
-    let a = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
-    let b = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
-    let parent = scenario.add_creature(P0, "Balduvian Bears", 2, 2).id();
+    scenario.at_phase(Phase::PreCombatMain);
+    let producer = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Raise the Alarm",
+            true,
+            "Create two 1/1 white Soldier creature tokens.",
+        )
+        .id();
+    let quantity_object = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let mut runner = scenario.build();
-    let count = counted_by(TargetFilter::ParentTarget);
-    let mut effect = ResolvedAbility::new(
+    runner.cast(producer).resolve();
+    assert_priority(&runner);
+    let [a, b] = runner.state().last_created_token_ids[..] else {
+        panic!("expected two Soldiers");
+    };
+
+    // The legacy count path uses the LastCreated population as its choice
+    // pool when there are no explicit objects on the resolving ability.
+    let counted = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::LastCreated,
-            count: count.clone(),
+            count: counted_by(TargetFilter::SpecificObject {
+                id: quantity_object,
+            }),
             min_count: 0,
         },
-        vec![TargetRef::Object(parent)],
-        parent,
+        vec![],
+        quantity_object,
         P0,
     );
-    effect.set_chain_root_targets_recursive(vec![TargetRef::Object(parent)]);
-    effect.target_incarnations = vec![ObjectIncarnationRef::from_object(
-        &runner.state().objects[&parent],
-    )];
-    runner.state_mut().last_created_token_ids = vec![a, b];
-
-    // A synthetic resolver input models distinct bindings without relying
-    // on a printed card that encodes this particular mismatch.
-    assert_eq!(
-        engine::game::quantity::resolve_quantity_with_targets(
-            runner.state(),
-            count.count_expr().unwrap(),
-            &effect
-        ),
-        1
+    let mut whole_runner = GameRunner::from_state(runner.state().clone());
+    // A delayed LastCreated cleanup carries the installed cohort in targets.
+    let entire = ResolvedAbility::new(
+        Effect::Sacrifice {
+            target: TargetFilter::LastCreated,
+            count: SacrificeSelection::EntireReferent,
+            min_count: 0,
+        },
+        vec![TargetRef::Object(a), TargetRef::Object(b)],
+        quantity_object,
+        P0,
     );
-    engine::game::effects::sacrifice::resolve(runner.state_mut(), &effect, &mut Vec::new())
+    engine::game::effects::sacrifice::resolve(whole_runner.state_mut(), &entire, &mut Vec::new())
+        .expect("resolve whole sacrifice");
+    assert_priority(&whole_runner);
+    assert!(!on_battlefield(&whole_runner, a));
+    assert!(!on_battlefield(&whole_runner, b));
+    assert!(on_battlefield(&whole_runner, quantity_object));
+
+    engine::game::effects::sacrifice::resolve(runner.state_mut(), &counted, &mut Vec::new())
         .expect("resolve counted sacrifice");
-    let WaitingFor::EffectZoneChoice {
-        cards,
-        count: 1,
-        player: P0,
-        ..
-    } = &runner.state().waiting_for
-    else {
-        panic!(
-            "expected a one-object sacrifice, got {:?}",
-            runner.state().waiting_for
-        );
-    };
-    assert_eq!(cards.len(), 2);
-    assert!(cards.contains(&a) && cards.contains(&b));
-    assert!(on_battlefield(&runner, parent));
+    assert_choose_one(&mut runner, a, b);
+    assert!(on_battlefield(&runner, quantity_object));
 }

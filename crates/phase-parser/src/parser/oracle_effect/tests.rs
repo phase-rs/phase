@@ -108228,3 +108228,101 @@ fn assert_goaded_restriction_tail_declined(parsed: &ParsedAbilities) {
         Some(Effect::ChangeZone { .. })
     ));
 }
+
+fn parsed_sacrifice_selections(
+    oracle: &str,
+    name: &str,
+    card_type: &str,
+) -> Vec<(TargetFilter, crate::types::ability::SacrificeSelection)> {
+    use crate::types::ability_visit::visit_ability_def;
+    use std::ops::ControlFlow;
+
+    let parsed = parse_oracle_text(oracle, name, &[], &[card_type.into()], &[]);
+    let mut sacrifices = Vec::new();
+    for root in parsed.abilities.iter().chain(
+        parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref()),
+    ) {
+        let _ = visit_ability_def(root, &mut |effect| {
+            if let Effect::Sacrifice { target, count, .. } = effect {
+                sacrifices.push((target.clone(), count.clone()));
+            }
+            ControlFlow::Continue(())
+        });
+    }
+    sacrifices
+}
+
+#[test]
+fn plural_sacrifice_selects_entire_admitted_last_created_cohorts() {
+    use crate::types::ability::SacrificeSelection;
+
+    for (name, card_type, oracle) in [
+        ("City of the Daleks", "Plane", "Whenever you attack, target opponent loses X life, where X is the number of artifacts you control.\nWhenever chaos ensues, for each opponent, you create a 3/3 black Dalek artifact creature token with menace that attacks that opponent this turn if able. Those tokens gain haste. Sacrifice them at the beginning of the next end step."),
+        ("Dalkovan Encampment", "Land", "This land enters tapped unless you control a Swamp or a Mountain.\n{T}: Add {W}.\n{2}{W}, {T}: Whenever you attack this turn, create two 1/1 red Warrior creature tokens that are tapped and attacking. Sacrifice them at the beginning of the next end step."),
+        ("Devastating Onslaught", "Sorcery", "Create X tokens that are copies of target artifact or creature you control. Those tokens gain haste until end of turn. Sacrifice them at the beginning of the next end step."),
+        ("Gut, Zealous Fanatic", "Creature", "When this creature specializes, create two tokens that are copies of a creature card exiled with this creature, except they're 2/2 and have haste. Sacrifice them at the beginning of your next end step."),
+        ("Salt Road Skirmish", "Sorcery", "Destroy target creature. Create two 1/1 red Warrior creature tokens. They gain haste until end of turn. Sacrifice them at the beginning of the next end step."),
+        ("Venser, Fervent Forger", "Creature", "Flash\nWhen Venser enters, choose one —\n• Copy target instant or sorcery spell an opponent controls twice. You may choose new targets for the copies.\n• Create two tokens that are copies of target permanent an opponent controls. They gain haste. At the beginning of the next end step, sacrifice them."),
+    ] {
+        assert_eq!(
+            parsed_sacrifice_selections(oracle, name, card_type),
+            [(TargetFilter::LastCreated, SacrificeSelection::EntireReferent)],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn plural_sacrifice_keeps_deferred_routes_counted() {
+    use crate::types::ability::SacrificeSelection;
+
+    let tracked = TargetFilter::TrackedSet {
+        id: TrackedSetId(0),
+    };
+    for (name, card_type, target, oracle) in [
+        ("Depthshaker Titan", "Creature", Some(TargetFilter::ParentTarget), "When this creature enters, any number of target noncreature artifacts you control become 3/3 artifact creatures. Sacrifice them at the beginning of the next end step.\nEach artifact creature you control has melee, trample, and haste. (Whenever a creature with melee attacks, it gets +1/+1 until end of turn for each opponent you attacked this combat.)"),
+        ("Mardu Siegebreaker", "Creature", Some(tracked.clone()), "Deathtouch, haste\nWhen this creature enters, exile up to one other target creature you control until this creature leaves the battlefield.\nWhenever this creature attacks, for each opponent, create a tapped token that's a copy of the exiled card attacking that opponent. At the beginning of your next end step, sacrifice those tokens."),
+        ("Tears of Rage", "Instant", Some(tracked), "Cast this spell only during the declare attackers step.\nAttacking creatures you control get +X/+0 until end of turn, where X is the number of attacking creatures. Sacrifice those creatures at the beginning of the next end step."),
+        ("Malik, Grim Manipulator", "Creature", None, "When Malik, Grim Manipulator enters, you and target opponent each secretly choose a creature that player controls. Then those choices are revealed, and that player sacrifices those creatures.\nWhenever an opponent sacrifices a creature, you create a Treasure token."),
+    ] {
+        let sacrifices = parsed_sacrifice_selections(oracle, name, card_type);
+        let one = SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 });
+        if let Some(target) = target {
+            assert_eq!(sacrifices, [(target, one)], "{name}");
+        } else {
+            assert!(!sacrifices.is_empty(), "{name}");
+            assert!(sacrifices.iter().all(|(_, count)| *count == one), "{name}: {sacrifices:?}");
+        }
+    }
+}
+
+#[test]
+fn plural_token_sacrifice_stops_at_nearer_producers() {
+    use crate::types::ability::SacrificeSelection;
+    use crate::types::ability_visit::visit_ability_def;
+    use std::ops::ControlFlow;
+
+    for (oracle, entire) in [
+        ("Create two 1/1 white Soldier creature tokens. Draw a card. Sacrifice them at the beginning of the next end step.", true),
+        ("Create two 1/1 white Soldier creature tokens. Populate. Sacrifice them at the beginning of the next end step.", false),
+        ("Create two 1/1 white Soldier creature tokens. Exile all creatures. Sacrifice them at the beginning of the next end step.", false),
+    ] {
+        let parsed = parse_effect_chain(oracle, AbilityKind::Spell);
+        let mut counts = Vec::new();
+        let _ = visit_ability_def(&parsed, &mut |effect| {
+            if let Effect::Sacrifice { count, .. } = effect {
+                counts.push(count.clone());
+            }
+            ControlFlow::Continue(())
+        });
+        let expected = if entire {
+            SacrificeSelection::EntireReferent
+        } else {
+            SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 })
+        };
+        assert_eq!(counts, [expected], "{oracle}");
+    }
+}

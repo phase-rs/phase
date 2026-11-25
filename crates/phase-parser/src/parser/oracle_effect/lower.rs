@@ -4324,58 +4324,72 @@ pub(super) fn bind_plural_token_sacrifice(
     ) {
         return;
     }
-    let nearest_creator = prior_defs
-        .iter()
-        .rev()
-        .find(|previous| is_token_creating_effect(&previous.effect));
-    if matches!(target, TargetFilter::TrackedSet { .. }) {
-        let mut publishers = prior_defs
-            .iter()
-            .filter(|previous| super::publishes_aggregate_set_from_resolution(&previous.effect));
-        if *uses_tracked_set
-            && publishers
-                .next()
-                .is_some_and(|def| matches!(*def.effect, Effect::Token { .. }))
-            && publishers.next().is_none()
-        {
-            *count = crate::types::ability::SacrificeSelection::EntireReferent;
-        }
-        return;
-    }
-    if !matches!(
-        target,
-        TargetFilter::LastCreated
-            | TargetFilter::ParentTarget
-            | TargetFilter::TriggeringSource
-            | TargetFilter::SelfRef
-    ) {
-        return;
-    }
-    let nested_token_creator = prior_defs.last().is_some_and(|previous| {
-        matches!(
-            &*previous.effect,
+    // LastCreated and tracked-set anaphors can see different publications.
+    // Stop at the nearest potential antecedent before checking whether its
+    // producer is admitted for whole-cohort cleanup.
+    let nested_creator = prior_defs
+        .last()
+        .and_then(|previous| match &*previous.effect {
             Effect::CreateDelayedTrigger {
                 condition: DelayedTriggerCondition::WheneverEvent { .. },
                 effect: producer,
                 ..
-            } if is_token_creating_effect(&producer.effect)
-        )
+            } => Some(producer.effect.as_ref()),
+            _ => None,
+        });
+    let nearest_producer = nested_creator.or_else(|| {
+        prior_defs
+            .iter()
+            .rev()
+            .map(|def| def.effect.as_ref())
+            .find(|effect| {
+                publishes_chain_created_referent(effect)
+                    || super::publishes_aggregate_set_from_resolution(effect)
+                    || matches!(
+                        effect,
+                        Effect::PumpAll { .. }
+                            | Effect::TargetOnly { .. }
+                            | Effect::ChooseObjectsIntoTrackedSet { .. }
+                            | Effect::Unimplemented { .. }
+                    )
+            })
     });
-    if nearest_creator.is_some() || nested_token_creator {
-        // Use the same operand rewrite as the ordinary post-token pass and
-        // the nested per-attack cleanup fold.
-        rewrite_parent_target_to_last_created(&mut effect.effect, false);
-        if !nested_token_creator {
-            rewrite_delayed_cleanup_self_ref_to_last_created(&mut effect.effect);
-        }
-        if let Effect::Sacrifice {
-            target: TargetFilter::LastCreated,
-            count,
-            ..
-        } = effect.effect.as_mut()
+    let Some(producer) = nearest_producer else {
+        return;
+    };
+    // Populate is outside the admitted cleanup class. Copy batches routed
+    // through a tracked set are also deferred.
+    if matches!(target, TargetFilter::TrackedSet { .. }) {
+        if *uses_tracked_set
+            && matches!(producer, Effect::Token { .. })
+            && nested_creator.is_none()
+            && prior_defs
+                .iter()
+                .filter(|def| super::publishes_aggregate_set_from_resolution(&def.effect))
+                .count()
+                == 1
         {
             *count = crate::types::ability::SacrificeSelection::EntireReferent;
         }
+        return;
+    }
+    if !matches!(producer, Effect::Token { .. } | Effect::CopyTokenOf { .. }) {
+        return;
+    }
+
+    // Use the ordinary post-token operand rewrite, or the per-attack cleanup
+    // fold when assembly is about to move this cleanup under its producer.
+    rewrite_parent_target_to_last_created(&mut effect.effect, false);
+    if nested_creator.is_none() {
+        rewrite_delayed_cleanup_self_ref_to_last_created(&mut effect.effect);
+    }
+    if let Effect::Sacrifice {
+        target: TargetFilter::LastCreated,
+        count,
+        ..
+    } = effect.effect.as_mut()
+    {
+        *count = crate::types::ability::SacrificeSelection::EntireReferent;
     }
 }
 

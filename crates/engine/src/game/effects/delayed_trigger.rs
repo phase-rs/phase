@@ -164,23 +164,6 @@ pub fn resolve(
     let tracked_set_id = if uses_tracked_set {
         if matches!(
             &*effect_def.effect,
-            Effect::Sacrifice {
-                count: crate::types::ability::SacrificeSelection::EntireReferent,
-                ..
-            }
-        ) {
-            // CR 603.7c: freeze membership separately from the writable
-            // chain publication, even when the producer created no tokens.
-            let chain_id = state.chain_tracked_set_id;
-            let members = chain_id
-                .and_then(|id| state.tracked_object_sets.get(&id))
-                .cloned()
-                .unwrap_or_default();
-            let bound = super::publish_fresh_tracked_set(state, members);
-            state.chain_tracked_set_id = chain_id;
-            Some(bound)
-        } else if matches!(
-            &*effect_def.effect,
             Effect::ChangeZone {
                 target: TargetFilter::SelfRef,
                 ..
@@ -859,12 +842,14 @@ pub fn resolve(
     delayed_ability.context.outer_declared_players =
         crate::game::targeting::live_declared_players(state, ability);
     delayed_ability.context.creation_illegal_referents = illegal;
-    // CR 400.7 + CR 603.7c: pin tracked exile returns and sacrifices in
-    // their expected zones. If a member leaves that zone and returns, it is
-    // a new object outside the delayed ability's referent.
+    // CR 400.7 + CR 603.7c: a delayed move of a tracked set's exiled members
+    // ("When that token leaves the battlefield, put the exiled card into your
+    // hand") affects only the objects exiled by the creating effect. A member
+    // that left exile and came back is a new object and is not affected, so pin
+    // each member to the incarnation it has now.
     let target_pins = if target_pins.is_empty() {
         tracked_set_id
-            .map(|real_id| tracked_member_pins(state, &delayed_ability, real_id))
+            .map(|real_id| tracked_exile_member_pins(state, &delayed_ability, real_id))
             .unwrap_or_default()
     } else {
         target_pins
@@ -1003,9 +988,10 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 400.7 + CR 603.7c: Pin a bound tracked set's members for a delayed
-/// return from exile or for a delayed sacrifice of the entire named set.
-fn tracked_member_pins(
+/// CR 400.7 + CR 603.7c: Incarnation pins for the members of the bound tracked
+/// set that currently sit in exile, when the delayed payload moves exactly that
+/// set out of exile. Empty for every other payload shape.
+fn tracked_exile_member_pins(
     state: &GameState,
     delayed_ability: &ResolvedAbility,
     real_id: TrackedSetId,
@@ -1018,27 +1004,16 @@ fn tracked_member_pins(
             ..
         } if *id == real_id
     );
-    let zone = if moves_bound_set_from_exile {
-        Zone::Exile
-    } else if matches!(
-        &delayed_ability.effect,
-        Effect::Sacrifice {
-            target: TargetFilter::TrackedSet { id },
-            count: crate::types::ability::SacrificeSelection::EntireReferent,
-            ..
-        } if *id == real_id
-    ) {
-        Zone::Battlefield
-    } else {
+    if !moves_bound_set_from_exile {
         return Vec::new();
-    };
+    }
     state
         .tracked_object_sets
         .get(&real_id)
         .into_iter()
         .flatten()
         .filter_map(|id| state.objects.get(id))
-        .filter(|object| object.zone == zone)
+        .filter(|object| object.zone == Zone::Exile)
         .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
         .collect()
 }
