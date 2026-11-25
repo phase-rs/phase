@@ -2844,7 +2844,7 @@ pub fn candidate_actions_broad_with_probe(
                 .filter(|back_face| {
                     legal_faces.is_none_or(|faces| faces.face(*back_face).is_some())
                         && (!library_spell_choice
-                            || crate::game::casting::library_spell_face_is_granted(
+                            || crate::game::casting::library_spell_face_is_castable(
                                 state,
                                 *player,
                                 *object_id,

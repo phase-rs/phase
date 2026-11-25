@@ -13023,7 +13023,7 @@ fn apply_non_priority_pass_action(
             );
             if resolution_permission.is_none()
                 && casting::library_spell_face_choice(state, *object_id)
-                && !casting::library_spell_face_is_granted(
+                && !casting::library_spell_face_is_castable(
                     state,
                     *player,
                     *object_id,
@@ -13031,7 +13031,7 @@ fn apply_non_priority_pass_action(
                 )
             {
                 return Err(EngineError::InvalidAction(
-                    "The library permission does not allow casting that face".to_string(),
+                    "That face cannot be cast from the library now".to_string(),
                 ));
             }
             // Validate the exact indexed paid-cleanup root before changing the

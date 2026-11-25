@@ -1988,6 +1988,11 @@ fn has_aftermath_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Aftermath)
 }
 
+/// CR 702.127a: Check the effective keyword of the proposed spell face.
+fn aftermath_prohibits_cast_from_zone(state: &GameState, object_id: ObjectId, zone: Zone) -> bool {
+    zone != Zone::Graveyard && has_aftermath_keyword(state, object_id)
+}
+
 /// CR 702.133: Check if an object has the Jump-start keyword.
 fn has_jumpstart_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::JumpStart)
@@ -10363,6 +10368,12 @@ fn prepare_spell_cast_announced(
             _ => None,
         };
 
+    if aftermath_prohibits_cast_from_zone(state, object_id, obj.zone) {
+        return Err(EngineError::ActionNotAllowed(
+            "A spell face with aftermath can only be cast from a graveyard".to_string(),
+        ));
+    }
+
     // CR 601.3 + CR 101.2 + CR 109.5: "Can't" beats "can" — check CantCastFrom statics.
     // Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
     // Drannith Magistrate: "Your opponents can't cast spells from anywhere other
@@ -16749,13 +16760,7 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
         // aftermath half castable from Hand, Exile, or Library.  Ask after
         // projecting the prospective face so the effective keyword belongs to
         // that half (and so off-zone ability removal is still respected).
-        if zone != Zone::Graveyard
-            && super::keywords::object_has_effective_keyword_kind(
-                &projected,
-                object_id,
-                KeywordKind::Aftermath,
-            )
-        {
+        if aftermath_prohibits_cast_from_zone(&projected, object_id, zone) {
             continue;
         }
         let object = projected
@@ -17016,7 +17021,7 @@ fn cast_spell_face_choice_offered_from_zone(
 
 /// CR 712.11c + CR 709.3: A top-of-library cast grant must admit the
 /// characteristics of the chosen spell face.
-pub(crate) fn library_spell_face_is_granted(
+fn library_spell_face_is_granted(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
@@ -17036,6 +17041,16 @@ pub(crate) fn library_spell_face_is_granted(
                 .is_some()
         }
     }
+}
+
+pub(crate) fn library_spell_face_is_castable(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    face: ModalCardFace,
+) -> bool {
+    library_spell_face_is_granted(state, player, object_id, face)
+        && can_cast_modal_face_now(state, player, object_id, face == ModalCardFace::Back)
 }
 
 pub(crate) fn library_spell_face_choice(state: &GameState, object_id: ObjectId) -> bool {
@@ -20045,6 +20060,16 @@ pub fn handle_cast_spell_with_payment_mode(
     // The committed-face flag suppresses this prompt when the choice re-enters casting.
     if let Some(obj) = state.objects.get(&object_id) {
         if cast_spell_face_choice_offered_from_zone(state, player, obj) {
+            // CR 601.3: A library grant must leave at least one legal announcement.
+            if obj.zone == Zone::Library
+                && ![ModalCardFace::Front, ModalCardFace::Back]
+                    .into_iter()
+                    .any(|face| library_spell_face_is_castable(state, player, object_id, face))
+            {
+                return Err(EngineError::InvalidAction(format!(
+                    "Neither face of {object_id:?} can be cast from the library now",
+                )));
+            }
             return Ok(WaitingFor::ModalFaceChoice {
                 player,
                 object_id,
