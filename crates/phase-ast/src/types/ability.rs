@@ -42186,6 +42186,12 @@ pub enum DamageReceivedGrouping {
     PerPlayerRecipient,
 }
 
+impl DamageReceivedGrouping {
+    fn is_per_event(&self) -> bool {
+        *self == Self::PerEvent
+    }
+}
+
 /// Trigger definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(remote = "Self")]
@@ -42305,8 +42311,11 @@ pub struct TriggerDefinition {
     pub batched: bool,
     /// CR 603.2c: Occurrence grouping for `DamageReceived`. Omission defaults to
     /// `PerEvent`; deserialization first migrates any legacy `batched: true`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub damage_received_grouping: Option<DamageReceivedGrouping>,
+    #[serde(
+        skip_deserializing,
+        skip_serializing_if = "DamageReceivedGrouping::is_per_event"
+    )]
+    pub damage_received_grouping: DamageReceivedGrouping,
     /// CR 706.2: Optional sides filter for die-roll triggers such as
     /// "Whenever you roll a d20". `None` accepts any die.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43217,15 +43226,26 @@ impl Serialize for TriggerDefinition {
 
 impl<'de> Deserialize<'de> for TriggerDefinition {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let mut definition = Self::deserialize(deserializer)?;
-        // Only an omitted grouping falls back to the legacy flag. Clear the
-        // flag after migration so old data reserializes in the canonical shape.
-        if definition.mode == TriggerMode::DamageReceived
-            && std::mem::take(&mut definition.batched)
-            && definition.damage_received_grouping.is_none()
-        {
-            definition.damage_received_grouping = Some(DamageReceivedGrouping::WholeBatch);
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(default)]
+            damage_received_grouping: Option<DamageReceivedGrouping>,
+            #[serde(flatten, with = "TriggerDefinition")]
+            definition: TriggerDefinition,
         }
+
+        let Wire {
+            damage_received_grouping,
+            mut definition,
+        } = Wire::deserialize(deserializer)?;
+        let legacy_batched = definition.mode == TriggerMode::DamageReceived
+            && std::mem::take(&mut definition.batched);
+        definition.damage_received_grouping =
+            damage_received_grouping.unwrap_or(if legacy_batched {
+                DamageReceivedGrouping::WholeBatch
+            } else {
+                DamageReceivedGrouping::PerEvent
+            });
         Ok(definition)
     }
 }
@@ -43273,7 +43293,7 @@ impl TriggerDefinition {
             saga_chapter: None,
             unless_pay: None,
             batched: false,
-            damage_received_grouping: None,
+            damage_received_grouping: DamageReceivedGrouping::default(),
             die_sides: None,
             gotcha_condition: None,
             expend_threshold: None,
@@ -50258,7 +50278,7 @@ mod tests {
             saga_chapter: None,
             unless_pay: None,
             batched: false,
-            damage_received_grouping: None,
+            damage_received_grouping: DamageReceivedGrouping::default(),
             die_sides: None,
             gotcha_condition: None,
             expend_threshold: None,
@@ -52831,20 +52851,19 @@ mod modal_ability_tests {
     fn damage_received_grouping_migrates_legacy_batching() {
         use serde_json::json;
 
+        use DamageReceivedGrouping::{PerEvent, PerPlayerRecipient, WholeBatch};
+
+        let omitted: TriggerDefinition =
+            serde_json::from_value(json!({ "mode": "DamageReceived" })).unwrap();
+        let canonical_default = serde_json::to_value(&omitted).unwrap();
+
         for (legacy_batched, explicit_grouping, expected) in [
-            (Some(true), None, Some(DamageReceivedGrouping::WholeBatch)),
-            (Some(false), None, None),
-            (None, None, None),
-            (
-                Some(false),
-                Some(DamageReceivedGrouping::PerPlayerRecipient),
-                Some(DamageReceivedGrouping::PerPlayerRecipient),
-            ),
-            (
-                Some(true),
-                Some(DamageReceivedGrouping::PerEvent),
-                Some(DamageReceivedGrouping::PerEvent),
-            ),
+            (Some(true), None, WholeBatch),
+            (Some(false), None, PerEvent),
+            (None, None, PerEvent),
+            (None, Some(PerEvent), PerEvent),
+            (Some(true), Some(PerEvent), PerEvent),
+            (Some(true), Some(PerPlayerRecipient), PerPlayerRecipient),
         ] {
             let mut input = json!({ "mode": "DamageReceived" });
             if let Some(batched) = legacy_batched {
@@ -52859,10 +52878,13 @@ mod modal_ability_tests {
 
             let serialized = serde_json::to_value(&definition).unwrap();
             assert_eq!(serialized["batched"], false);
-            assert_eq!(
-                serialized.get("damage_received_grouping").cloned(),
-                expected.map(|grouping| json!(grouping))
-            );
+            if expected == PerEvent {
+                assert_eq!(definition, omitted);
+                assert_eq!(serialized, canonical_default);
+                assert!(serialized.get("damage_received_grouping").is_none());
+            } else {
+                assert_eq!(serialized["damage_received_grouping"], json!(expected));
+            }
             assert_eq!(
                 serde_json::from_value::<TriggerDefinition>(serialized).unwrap(),
                 definition
@@ -52872,7 +52894,7 @@ mod modal_ability_tests {
         let other: TriggerDefinition =
             serde_json::from_value(json!({ "mode": "ChangesZone", "batched": true })).unwrap();
         assert!(other.batched);
-        assert_eq!(other.damage_received_grouping, None);
+        assert_eq!(other.damage_received_grouping, PerEvent);
     }
 
     /// V13 / H8 — CR 603.2 + CR 120.4b: `damage_amount` gained a scope axis, so

@@ -18474,15 +18474,15 @@ fn try_parse_event(
                     let quantified_sources =
                         source.as_ref().is_some_and(|(_, quantified)| *quantified);
                     def.damage_received_grouping = if quantified_recipients {
-                        Some(DamageReceivedGrouping::WholeBatch)
+                        DamageReceivedGrouping::WholeBatch
                     } else if quantified_sources {
-                        Some(if subject_is_player(subject) {
+                        if subject_is_player(subject) {
                             DamageReceivedGrouping::PerPlayerRecipient
                         } else {
                             DamageReceivedGrouping::WholeBatch
-                        })
+                        }
                     } else {
-                        None
+                        DamageReceivedGrouping::PerEvent
                     };
                 }
                 def.valid_source = source.map(|(filter, _)| filter);

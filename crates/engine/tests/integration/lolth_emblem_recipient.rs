@@ -211,7 +211,7 @@ fn lolth_emblem_fires_once_for_each_damaged_opponent() {
     let definition = triggers.first().expect("emblem trigger").definition();
     assert_eq!(
         definition.damage_received_grouping,
-        Some(DamageReceivedGrouping::PerPlayerRecipient)
+        DamageReceivedGrouping::PerPlayerRecipient
     );
     assert!(!definition.batched);
 

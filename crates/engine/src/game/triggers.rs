@@ -1865,7 +1865,7 @@ fn counter_removal_threshold_fires_once_per_recipient(trig_def: &TriggerDefiniti
 /// CR 603.2c: Whether printed quantifiers group simultaneous event records.
 fn groups_simultaneous_occurrences(trig_def: &TriggerDefinition) -> bool {
     if trig_def.mode == TriggerMode::DamageReceived {
-        return match trig_def.damage_received_grouping.unwrap_or_default() {
+        return match trig_def.damage_received_grouping {
             DamageReceivedGrouping::PerEvent => false,
             DamageReceivedGrouping::WholeBatch | DamageReceivedGrouping::PerPlayerRecipient => true,
         };
@@ -1879,8 +1879,7 @@ fn groups_simultaneous_occurrences(trig_def: &TriggerDefinition) -> bool {
 /// The passive form takes its grouping from the printed quantifiers.
 fn damage_fires_per_player_recipient(trig_def: &TriggerDefinition) -> bool {
     if trig_def.mode == TriggerMode::DamageReceived {
-        return trig_def.damage_received_grouping
-            == Some(DamageReceivedGrouping::PerPlayerRecipient);
+        return trig_def.damage_received_grouping == DamageReceivedGrouping::PerPlayerRecipient;
     }
     trig_def.batched
         && matches!(
@@ -37662,7 +37661,7 @@ pub mod tests {
         trigger.valid_card = Some(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
         ));
-        trigger.damage_received_grouping = Some(DamageReceivedGrouping::WholeBatch);
+        trigger.damage_received_grouping = DamageReceivedGrouping::WholeBatch;
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },

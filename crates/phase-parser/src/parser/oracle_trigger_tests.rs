@@ -22944,7 +22944,7 @@ fn trigger_opponents_are_dealt_combat_damage_uses_valid_target() {
     assert!(!def.batched);
     assert_eq!(
         def.damage_received_grouping,
-        Some(DamageReceivedGrouping::WholeBatch)
+        DamageReceivedGrouping::WholeBatch
     );
     assert_eq!(def.valid_card, None);
     assert_eq!(
@@ -40559,7 +40559,10 @@ fn dealt_damage_axes_plural_noncombat() {
     assert_eq!(def.mode, TriggerMode::DamageReceived);
     assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
     assert!(!def.batched);
-    assert_eq!(def.damage_received_grouping, None);
+    assert_eq!(
+        def.damage_received_grouping,
+        DamageReceivedGrouping::PerEvent
+    );
 }
 
 #[test]
@@ -40574,7 +40577,7 @@ fn dealt_damage_axes_plural_one_or_more_noncombat() {
     assert!(!def.batched);
     assert_eq!(
         def.damage_received_grouping,
-        Some(DamageReceivedGrouping::WholeBatch)
+        DamageReceivedGrouping::WholeBatch
     );
 }
 
@@ -40779,7 +40782,7 @@ fn dealt_damage_lolth_emblem_quantified_source_parses() {
     assert!(!def.batched);
     assert_eq!(
         def.damage_received_grouping,
-        Some(DamageReceivedGrouping::PerPlayerRecipient)
+        DamageReceivedGrouping::PerPlayerRecipient
     );
     assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
     assert_eq!(
@@ -40804,7 +40807,7 @@ fn dealt_damage_collective_recipients_stay_grouped_with_a_qualified_source() {
         assert!(!def.batched);
         assert_eq!(
             def.damage_received_grouping,
-            Some(DamageReceivedGrouping::WholeBatch)
+            DamageReceivedGrouping::WholeBatch
         );
         assert_eq!(
             def.valid_source,
@@ -40930,7 +40933,10 @@ fn whole_event_trigger_is_not_subject_batched() {
         DamageAmountScope::WholeEvent
     );
     assert!(!def.batched);
-    assert_eq!(def.damage_received_grouping, None);
+    assert_eq!(
+        def.damage_received_grouping,
+        DamageReceivedGrouping::PerEvent
+    );
 
     let quantified = parse_trigger_line(
         "Whenever one or more creatures you control are dealt noncombat damage, draw a card.",
@@ -40938,7 +40944,7 @@ fn whole_event_trigger_is_not_subject_batched() {
     );
     assert_eq!(
         quantified.damage_received_grouping,
-        Some(DamageReceivedGrouping::WholeBatch)
+        DamageReceivedGrouping::WholeBatch
     );
 }
 
@@ -46989,7 +46995,7 @@ fn fblthp_full_oracle_keeps_the_damage_received_trigger() {
     assert!(!trigger.batched);
     assert_eq!(
         trigger.damage_received_grouping,
-        Some(DamageReceivedGrouping::WholeBatch),
+        DamageReceivedGrouping::WholeBatch,
         "CR 603.2c: one or more opponents is one batched trigger"
     );
     assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
@@ -47059,7 +47065,7 @@ fn fblthp_impossibly_lost_head_is_batched_opponent_combat_damage_with_turn_windo
     assert!(!def.batched);
     assert_eq!(
         def.damage_received_grouping,
-        Some(DamageReceivedGrouping::WholeBatch)
+        DamageReceivedGrouping::WholeBatch
     );
     assert_eq!(
         def.valid_card, None,
@@ -47172,7 +47178,7 @@ fn received_damage_siblings_without_windows_keep_no_condition() {
     assert!(!barbs.batched);
     assert_eq!(
         barbs.damage_received_grouping,
-        Some(DamageReceivedGrouping::WholeBatch)
+        DamageReceivedGrouping::WholeBatch
     );
     assert_eq!(barbs.condition, None);
 
