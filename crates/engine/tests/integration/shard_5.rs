@@ -375,6 +375,7 @@ mod twice_instead_repeat_for;
 mod twilight_prophet_upkeep_drain_1375;
 mod twinflame_paused_copy_referent;
 mod twinned_vision_cast_origin;
+mod two_headed_giant_teammate_priority;
 mod type_phrase_union_rows;
 mod typed_trigger_compound_counter_anaphor;
 mod typhoon_per_opponent_island_count;

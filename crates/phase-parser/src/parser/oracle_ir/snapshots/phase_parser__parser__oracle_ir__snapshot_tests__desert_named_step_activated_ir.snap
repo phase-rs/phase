@@ -97,7 +97,6 @@ expression: "&ir"
             },
             "description": "{T}: Add {C}.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
@@ -222,7 +221,6 @@ expression: "&ir"
             ],
             "description": "{T}: ~ deals 1 damage to target attacking creature. Activate only during the end of combat step.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

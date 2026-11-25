@@ -10037,11 +10037,10 @@ mod tests {
 
     /// CR 614.1a positive case: the `Add {C}{C}{C} instead` sub-ability is a
     /// replacement effect (the word "instead" per CR 614.1a). When its `And`
-    /// condition is satisfied (all three Urza lands controlled), the delta
-    /// replaces the base `Add {C}` production and the pool ends with three
-    /// colorless mana.
+    /// condition is satisfied (all three Urza lands controlled), it replaces the
+    /// base production with one production of three colorless mana.
     #[test]
-    fn resolve_mana_ability_conditional_urza_delta() {
+    fn resolve_mana_ability_conditional_urza_swap() {
         let mut state = GameState::new_two_player(42);
         let tower = create_object(
             &mut state,
@@ -10089,7 +10088,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Mana {
                     produced: ManaProduction::Colorless {
-                        count: QuantityExpr::Fixed { value: 2 },
+                        count: QuantityExpr::Fixed { value: 3 },
                     },
                     restrictions: vec![],
                     grants: vec![],
@@ -10097,23 +10096,25 @@ mod tests {
                     target: None,
                 },
             )
-            .condition(AbilityCondition::And {
-                conditions: vec![
-                    AbilityCondition::ControllerControlsMatching {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::land()
-                                .subtype("Mine".to_string())
-                                .controller(ControllerRef::You),
-                        ),
-                    },
-                    AbilityCondition::ControllerControlsMatching {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::land()
-                                .subtype("Power-Plant".to_string())
-                                .controller(ControllerRef::You),
-                        ),
-                    },
-                ],
+            .condition(AbilityCondition::ConditionInstead {
+                inner: Box::new(AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::ControllerControlsMatching {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::land()
+                                    .subtype("Mine".to_string())
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                        AbilityCondition::ControllerControlsMatching {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::land()
+                                    .subtype("Power-Plant".to_string())
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                    ],
+                }),
             }),
         );
 
@@ -10129,11 +10130,10 @@ mod tests {
     /// CR 614.1a negative case: when the sub-ability's "instead" replacement
     /// (CR 614.1a) cannot fire because its condition is false (here, Urza's
     /// Power-Plant is missing), only the base `Add {C}` resolves and the
-    /// `And { Mine, Power-Plant }` delta does not apply — the pool ends with
-    /// one colorless, not three. Mirrors
-    /// `resolve_mana_ability_conditional_urza_delta` but omits Power-Plant.
+    /// `And { Mine, Power-Plant }` condition leaves the pool with one colorless. Mirrors
+    /// `resolve_mana_ability_conditional_urza_swap` but omits Power-Plant.
     #[test]
-    fn resolve_mana_ability_urza_delta_skips_when_companion_land_missing() {
+    fn resolve_mana_ability_urza_swap_skips_when_companion_land_missing() {
         let mut state = GameState::new_two_player(42);
         let tower = create_object(
             &mut state,
@@ -10176,7 +10176,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Mana {
                     produced: ManaProduction::Colorless {
-                        count: QuantityExpr::Fixed { value: 2 },
+                        count: QuantityExpr::Fixed { value: 3 },
                     },
                     restrictions: vec![],
                     grants: vec![],
@@ -10184,23 +10184,25 @@ mod tests {
                     target: None,
                 },
             )
-            .condition(AbilityCondition::And {
-                conditions: vec![
-                    AbilityCondition::ControllerControlsMatching {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::land()
-                                .subtype("Mine".to_string())
-                                .controller(ControllerRef::You),
-                        ),
-                    },
-                    AbilityCondition::ControllerControlsMatching {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::land()
-                                .subtype("Power-Plant".to_string())
-                                .controller(ControllerRef::You),
-                        ),
-                    },
-                ],
+            .condition(AbilityCondition::ConditionInstead {
+                inner: Box::new(AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::ControllerControlsMatching {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::land()
+                                    .subtype("Mine".to_string())
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                        AbilityCondition::ControllerControlsMatching {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::land()
+                                    .subtype("Power-Plant".to_string())
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                    ],
+                }),
             }),
         );
 

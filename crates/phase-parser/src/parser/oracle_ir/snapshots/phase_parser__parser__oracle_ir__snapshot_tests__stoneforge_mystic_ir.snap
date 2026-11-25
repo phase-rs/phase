@@ -324,7 +324,6 @@ expression: "&ir"
             },
             "description": "{1}{W}, {T}: You may put an Equipment card from your hand onto the battlefield.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
