@@ -27,14 +27,15 @@ use crate::types::ability::{
 use crate::types::ability::{
     IllegalTargetsDisposition, NumberQuality, Parity, SpentColor, StaticCondition, StaticDefinition,
 };
-use crate::types::card_type::Supertype;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::player::PlayerCounterKind;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{CastFrequency, StaticMode};
+use crate::types::statics::{CastFrequency, CausingObject, StaticMode, TriggerCause};
+use crate::types::triggers::CausedAbilitySource;
 use crate::types::zones::Zone;
 
 /// CR 608.2c: Karona's scoped upkeep player is the grammatical subject of the
@@ -48172,4 +48173,218 @@ fn raggadragga_seven_mana_spell_trigger_shape() {
         execute.sub_ability.is_some(),
         "the +7/+7 trample continuation must be attached past the untap"
     );
+}
+
+/// CR 603.2 + CR 603.3b (#11338): Firebender Ascension's observer condition
+/// lowers to `AbilityTriggered { CreatureAttacking, CausingObject }` with the
+/// cause subject as `valid_card`. Full verbatim Oracle ability.
+#[test]
+fn trigger_firebender_ascension_attacking_observer() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control attacking causes a triggered ability of that creature to trigger, put a quest counter on this enchantment. Then if it has four or more quest counters on it, you may copy that ability. You may choose new targets for the copy.",
+        "Firebender Ascension",
+    );
+    assert_eq!(
+        def.mode,
+        TriggerMode::AbilityTriggered {
+            cause: TriggerCause::CreatureAttacking,
+            source: CausedAbilitySource::CausingObject,
+        }
+    );
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+    assert_eq!(def.destination, None);
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::PutCounter { .. }),
+        "head effect is the quest counter, got {:?}",
+        execute.effect
+    );
+    let copy = execute.sub_ability.as_deref().expect("copy sub-ability");
+    assert!(
+        matches!(
+            copy.effect.as_ref(),
+            Effect::CopySpell {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "conditional copy follows, got {:?}",
+        copy.effect
+    );
+    assert!(
+        copy.condition.is_some(),
+        "copy gated on four quest counters"
+    );
+    assert!(copy.optional, "copy is optional");
+    assert_no_unimplemented(execute);
+}
+
+/// CR 603.2 + CR 603.3b (#11338): Aboleth Spawn's observer condition lowers
+/// to `AbilityTriggered { EntersBattlefield { [Creature], Any },
+/// CausingObject }`, with the "under an opponent's control" rider scoping
+/// `valid_card`. The "Probing Telepathy — " ability-word prefix is stripped
+/// upstream at priority 14, so the trigger text below starts at "Whenever".
+#[test]
+fn trigger_aboleth_spawn_entering_observer() {
+    let def = parse_trigger_line(
+        "Whenever a creature entering under an opponent's control causes a triggered ability of that creature to trigger, you may copy that ability. You may choose new targets for the copy.",
+        "Aboleth Spawn",
+    );
+    assert_eq!(
+        def.mode,
+        TriggerMode::AbilityTriggered {
+            cause: TriggerCause::EntersBattlefield {
+                core_types: vec![CoreType::Creature],
+                entrant: CausingObject::Any,
+            },
+            source: CausedAbilitySource::CausingObject,
+        }
+    );
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent)
+        ))
+    );
+    assert_eq!(def.destination, None);
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::CopySpell {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "copy effect, got {:?}",
+        execute.effect
+    );
+    assert!(execute.optional, "copy is optional");
+    assert_no_unimplemented(execute);
+}
+
+/// CR 603.2 + CR 603.3b (#11338): Strict Proctor's observer condition lowers
+/// to `AbilityTriggered { EntersBattlefield { [], Any }, Any }` — "permanent"
+/// names no core type and the bare "a triggered ability" observes any
+/// ability with an admitted cause subject. Full verbatim Oracle ability.
+#[test]
+fn trigger_strict_proctor_entering_observer() {
+    let def = parse_trigger_line(
+        "Whenever a permanent entering causes a triggered ability to trigger, counter that ability unless its controller pays {2}.",
+        "Strict Proctor",
+    );
+    assert_eq!(
+        def.mode,
+        TriggerMode::AbilityTriggered {
+            cause: TriggerCause::EntersBattlefield {
+                core_types: vec![],
+                entrant: CausingObject::Any,
+            },
+            source: CausedAbilitySource::Any,
+        }
+    );
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(TypedFilter::permanent()))
+    );
+    assert_eq!(def.destination, None);
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::Counter {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "counter effect, got {:?}",
+        execute.effect
+    );
+    assert!(def.unless_pay.is_some(), "unless-pays-{{2}} preserved");
+    assert_no_unimplemented(execute);
+}
+
+/// The observer accept-set declines unlisted causes: a life-gain cause
+/// classifies (see the `classify_trigger_cause` unit tests) but stays a
+/// flagged gap on the trigger path.
+/// Synthetic probe — no printed card has this form; nearest is Dr. Beverly
+/// Crusher (life-gain cause, doubler frame).
+#[test]
+fn trigger_unlisted_observer_cause_declines_to_unknown() {
+    let def = parse_trigger_line(
+        "Whenever you gaining life causes a triggered ability to trigger, draw a card.",
+        "Test Observer",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "unlisted cause declines, got {:?}",
+        def.mode
+    );
+    // Reach guard: the effect half parsed typed, proving event dispatch was
+    // reached rather than an upstream bail.
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Draw { .. }),
+        "effect parsed, got {:?}",
+        execute.effect
+    );
+    assert_no_unimplemented(execute);
+}
+
+/// Trailing text after the anchor declines: only the bare "to trigger" and
+/// the `of that <type>` refinement are modeled, so an unmodeled rider stays
+/// a flagged gap rather than parsing with dropped text.
+/// Synthetic probe — no printed card has this form; nearest is Firebender
+/// Ascension (attacking-cause observer).
+#[test]
+fn trigger_observer_trailing_text_declines_to_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control attacking causes a triggered ability to trigger twice, draw a card.",
+        "Test Observer",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "trailing rider declines, got {:?}",
+        def.mode
+    );
+    // Reach guard: the effect half parsed typed, proving event dispatch was
+    // reached rather than an upstream bail.
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Draw { .. }),
+        "effect parsed, got {:?}",
+        execute.effect
+    );
+    assert_no_unimplemented(execute);
+}
+
+/// The observer source refinement declines non-"that" anaphors: "of a Ninja
+/// ..." names no accepted source, so the line stays a flagged gap.
+/// Synthetic probe — no printed card has this form; nearest is Firebender
+/// Ascension (attacking-cause observer).
+#[test]
+fn trigger_observer_foreign_source_refinement_declines_to_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control attacking causes a triggered ability of a ninja creature you control to trigger, draw a card.",
+        "Test Observer",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "foreign refinement declines, got {:?}",
+        def.mode
+    );
+    // Reach guard: the effect half parsed typed, proving event dispatch was
+    // reached rather than an upstream bail.
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Draw { .. }),
+        "effect parsed, got {:?}",
+        execute.effect
+    );
+    assert_no_unimplemented(execute);
 }

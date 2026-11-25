@@ -213,6 +213,15 @@
 //! The staged parent's inline size fits within the existing bucket's slack;
 //! keep the 16,384 ceiling.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-04-19`) at
+//! 16,416 B when the departed-trigger record (`departed_triggered_abilities`,
+//! an `im::HashMap`, 32 B inline with alignment) landed for #10027: the branch
+//! was green alone under 16,384 and the union crossed it by 32 B. The field is
+//! not a large rarely-populated one — an ordinary heap-shared map exactly like
+//! its `departed_stack_spells` / `departed_activated_abilities` siblings, which
+//! the same rule admitted — so the ceiling moves to
+//! 16,416.next_multiple_of(256) + 256 = 16,768.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!
@@ -222,7 +231,7 @@
 const _: () = {
     use core::mem::size_of;
     assert!(
-        size_of::<crate::types::game_state::GameState>() <= 16_384,
+        size_of::<crate::types::game_state::GameState>() <= 16_768,
         "GameState grew past its stack budget. It is moved by value through the \
          phase-server action + AI path, so an overrun is an uncatchable \
          guard-page abort, not a panic. Re-run the -Zprint-type-sizes command in \

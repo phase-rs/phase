@@ -70,6 +70,7 @@ use super::oracle_target::{
     attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase_folding,
     parse_type_phrase_folding_with_ctx, starts_with_type_list_continuation, starts_with_type_word,
 };
+use super::oracle_trigger_cause::classify_trigger_cause;
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
     normalize_card_name_refs, parse_number, parse_ordinal, parse_ordinal_list, parse_subtype,
@@ -106,8 +107,10 @@ use crate::types::event_kinds::{ClashResult, PlayerActionKind};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::{Phase, PhaseGroup};
+use crate::types::statics::TriggerCause;
 use crate::types::triggers::{
-    AbilityLifecyclePoint, AttackTargetFilter, ControlChangeSide, PlaneswalkRole, TriggerMode,
+    AbilityLifecyclePoint, AttackTargetFilter, CausedAbilitySource, ControlChangeSide,
+    PlaneswalkRole, TriggerMode,
 };
 use crate::types::zones::Zone;
 use std::num::NonZeroUsize;
@@ -16826,6 +16829,82 @@ fn try_parse_event(
     ctx: &mut ParseContext,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     let rest = rest.trim_start();
+
+    // CR 603.2 + CR 603.3b: ability-triggering observers — "Whenever [cause]
+    // causes a triggered ability [of that <type>] to trigger" (Firebender
+    // Ascension, Aboleth Spawn, Strict Proctor). First in dispatch: the
+    // `tag("enter")` arm below prefix-matches "entering" (the ChangesZone
+    // mistype) and the attacks arm's `ing`-guard rejects "attacking" (the
+    // Unknown miss). Gate-fail falls through to the compound arms; every
+    // post-gate decline is a hard `return None` so a recognized-but-
+    // untypable observer can never reach a later mistyping arm.
+    if scan_contains(rest, "causes a triggered ability") && scan_contains(rest, "to trigger") {
+        let cause = classify_trigger_cause(full_lower)?;
+        // Only attack- and enter-caused occurrences name subjects in the
+        // engine (`cause_subjects` fails closed otherwise), so any other
+        // classified cause stays a flagged gap rather than a supported-but-
+        // never-firing parse. Exhaustive with no wildcard: a future
+        // `TriggerCause` forces a decision here at compile time.
+        let observable = match cause {
+            TriggerCause::CreatureAttacking | TriggerCause::EntersBattlefield { .. } => true,
+            TriggerCause::Any
+            | TriggerCause::CreatureDying
+            | TriggerCause::ControlledCreature { .. }
+            | TriggerCause::ControllerCastOrCopiedSpell { .. }
+            | TriggerCause::RoomEntered
+            | TriggerCause::BattlefieldTransition { .. }
+            | TriggerCause::PlayerAction { .. }
+            | TriggerCause::TurnedFaceUp => false,
+        };
+        if !observable {
+            return None;
+        }
+        let (_, _, after) = scan_preceded(rest, |i| {
+            tag::<_, _, OracleError<'_>>("causes a triggered ability").parse(i)
+        })?;
+        // "of that <type>" (the causing object's own ability) vs bare "a
+        // triggered ability" (any ability with an admitted cause subject).
+        // `parse_core_type` matches a bare word, so the consuming
+        // `tag(" to trigger")` terminator bounds it (and leaves the tail
+        // check below meaningful). Any other refinement declines.
+        let source = alt((
+            value(
+                CausedAbilitySource::CausingObject,
+                preceded(
+                    tag(" of that "),
+                    terminated(nom_primitives::parse_core_type, tag(" to trigger")),
+                ),
+            ),
+            value(CausedAbilitySource::Any, tag(" to trigger")),
+        ))
+        .parse(after);
+        let Ok((tail, source)) = source else {
+            return None;
+        };
+        // Hard decline on trailing text: only the bare anchor and the `of
+        // that <type>` refinement are modeled. A future observer with
+        // trailing qualifiers declines to an honest gap rather than parsing
+        // with a dropped rider.
+        if !tail.trim_end().is_empty() {
+            return None;
+        }
+        // CR 603.6a: "entering under [whoever]'s control" (Aboleth Spawn)
+        // scopes the cause subject by controller, exactly as the ETB arm
+        // does via `parse_enters_control_rider`. `add_controller` only
+        // fills an absent controller, so subjects that already carry one
+        // ("a creature you control") are untouched.
+        let mut valid_card = subject.clone();
+        if matches!(cause, TriggerCause::EntersBattlefield { .. }) {
+            if let Some(controller) = parse_enters_control_rider(rest) {
+                valid_card = add_controller(valid_card, controller);
+            }
+        }
+        let mode = TriggerMode::AbilityTriggered { cause, source };
+        let mut def = make_base();
+        def.mode = mode.clone();
+        def.valid_card = Some(valid_card);
+        return Some((mode, def));
+    }
 
     // --- Compound triggers (nom alt for prefix matching) ---
     // "enters or attacks" / "enters the battlefield or attacks"
