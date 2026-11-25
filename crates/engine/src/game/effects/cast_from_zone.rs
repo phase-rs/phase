@@ -213,7 +213,7 @@ fn resolution_window_linked_batch_candidates(
     // its filtered intersection would silently narrow a source-anchored pool.
     // In that case, return `None` so the caller can use the durable linked
     // ledger instead.
-    if members.iter().any(|id| !linked_ids.contains(id)) {
+    if members.len() != linked_ids.len() || members.iter().any(|id| !linked_ids.contains(id)) {
         return None;
     }
     let mut seen = HashSet::new();

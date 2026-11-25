@@ -398,6 +398,15 @@ Whenever this creature deals combat damage to a player, if there are cards exile
                         .all(|candidate| hidden.contains(candidate)),
                     "the linked-exile window must not offer unrelated cards: {candidates:?}"
                 );
+                assert_eq!(
+                    candidates.len(),
+                    hidden.len(),
+                    "the linked-exile window must offer every linked Hideaway card"
+                );
+                assert!(
+                    hidden.iter().all(|id| candidates.contains(id)),
+                    "the linked-exile window must not omit a linked Hideaway card"
+                );
                 assert!(!candidates.contains(&decoy));
                 let choice = hidden
                     .iter()
