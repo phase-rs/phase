@@ -884,25 +884,79 @@ fn resolve_earthbend_target(
     }
 }
 
+fn parse_anchored_life_verb<'a>(
+    input: &'a str,
+    verb: &str,
+    third_person: &str,
+) -> OracleResult<'a, ()> {
+    value(
+        (),
+        alt((
+            terminated(preceded(tag("you "), tag(verb)), tag(" ")),
+            terminated(tag(verb), tag(" ")),
+            terminated(tag(third_person), tag(" ")),
+        )),
+    )
+    .parse(input)
+}
+
+pub(super) fn is_fixed_opponent_loss_and_controller_gain(loss: &str, gain: &str) -> bool {
+    let (scope, loss) = super::lower::strip_player_scope_subject(loss, false);
+    if scope != Some(PlayerFilter::Opponent) {
+        return false;
+    }
+    let loss_lower = loss.to_ascii_lowercase();
+    let gain_lower = gain.to_ascii_lowercase();
+    let Some(((), loss_tail)) = nom_on_lower(&loss, &loss_lower, |input| {
+        preceded(peek(tag("lose ")), |input| {
+            parse_anchored_life_verb(input, "lose", "loses")
+        })
+        .parse(input)
+    }) else {
+        return false;
+    };
+    let Some(((), gain_tail)) = nom_on_lower(gain, &gain_lower, |input| {
+        preceded(peek(tag("you ")), |input| {
+            parse_anchored_life_verb(input, "gain", "gains")
+        })
+        .parse(input)
+    }) else {
+        return false;
+    };
+
+    let complete = |tail: &str| {
+        super::parse_count_slot(tail, &mut ParseContext::default()).is_some_and(|slot| {
+            is_life_noun(slot.noun)
+                && std::ptr::eq(
+                    slot.noun.trim_end().as_bytes().as_ptr_range().end,
+                    tail.trim_end().as_bytes().as_ptr_range().end,
+                )
+        })
+    };
+    complete(loss_tail)
+        && complete(gain_tail)
+        && matches!(
+            parse_numeric_imperative_ast(&loss, &loss_lower),
+            Some(NumericImperativeAst::LoseLife {
+                amount: QuantityExpr::Fixed { .. },
+            })
+        )
+        && matches!(
+            parse_numeric_imperative_ast(gain, &gain_lower),
+            Some(NumericImperativeAst::GainLife {
+                amount: QuantityExpr::Fixed { .. },
+            })
+        )
+}
+
 fn parse_life_verb_remainder<'a>(
     text: &'a str,
     lower: &str,
     verb: &str,
     third_person: &str,
 ) -> Option<&'a str> {
-    let you_verb = format!("you {verb} ");
-    let bare_verb = format!("{verb} ");
-    let direct_third_person = format!("{third_person} ");
-    if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
-        value(
-            (),
-            alt((
-                tag(you_verb.as_str()),
-                tag(bare_verb.as_str()),
-                tag(direct_third_person.as_str()),
-            )),
-        )
-        .parse(input)
+    if let Some(((), rest)) = nom_on_lower(text, lower, |input| {
+        parse_anchored_life_verb(input, verb, third_person)
     }) {
         return Some(rest);
     }

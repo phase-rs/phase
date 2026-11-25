@@ -1549,6 +1549,32 @@ fn parse_exile_n_of_them_face_down(lower: &str) -> Option<(u32, Vec<(CounterType
     }
 }
 
+// CR 603.7b + CR 608.2c: keep both life instructions in the creature-entry
+// watcher. The recursive body split sees no event head and splits them normally.
+fn keeps_delayed_entry_life_body(before: TextPair<'_>, after: &str) -> bool {
+    if terminated(
+        tag::<_, _, OracleError<'_>>("whenever"),
+        nom::character::complete::space1,
+    )
+    .parse(before.lower)
+    .is_err()
+    {
+        return false;
+    }
+    let Some((head, loss)) = super::parse_delayed_this_turn_head(before) else {
+        return false;
+    };
+    if !super::super::oracle_trigger::is_singular_controlled_creature_entry_head(head) {
+        return false;
+    }
+    let gain = take_until::<_, _, OracleError<'_>>(". ")
+        .parse(after)
+        .map_or(after, |(_, sentence)| sentence);
+    // allow-noncombinator: remove sentence punctuation after isolating the clause.
+    let gain = gain.strip_suffix('.').unwrap_or(gain);
+    super::imperative::is_fixed_opponent_loss_and_controller_gain(loss.trim(), gain.trim())
+}
+
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -2026,6 +2052,10 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
+                        || keeps_delayed_entry_life_body(
+                            TextPair::new(before_and, &before_lower),
+                            remainder_trimmed,
+                        )
                         || targeted_compound_continuation
                         || prevent_then_put_continuation
                         || search_with_that_name
@@ -16535,6 +16565,30 @@ mod tests {
         assert_eq!(
             chunks,
             vec!["each opponent discards a card", "you gain 3 life"]
+        );
+    }
+
+    #[test]
+    fn delayed_entry_life_body_shape_preserves_only_a_singular_complete_watcher() {
+        let admitted = "Whenever a creature you control enters this turn, each opponent loses 1 life and you gain 1 life.";
+        assert_eq!(split_clause_sequence(admitted).len(), 1);
+        assert_eq!(
+            split_clause_sequence("each opponent loses 1 life and you gain 1 life.").len(),
+            2
+        );
+        for refused in [
+            "Whenever one or more creatures you control enter this turn, each opponent loses 1 life and you gain 1 life.",
+            "Whenever a creature you control enters from your hand this turn, each opponent loses 1 life and you gain 1 life.",
+            "Whenever a creature you control enters this turn, each opponent loses 1 life instead and you gain 1 life.",
+            "Whenever a creature you control enters this turn, each opponent loses 1 life and you gain 1 life instead.",
+            "Whenever a creature you control enters this turn, each opponent loses 1 life and you gain 1 life for each player.",
+            "Whenever a Berserker attacks this turn, you draw a card and you lose 1 life.",
+        ] {
+            assert_eq!(split_clause_sequence(refused).len(), 2, "{refused}");
+        }
+        assert_eq!(
+            split_clause_sequence("Whenever a creature you control enters this turn, put a +1/+1 counter on it and it gains haste until end of turn.").len(),
+            2
         );
     }
 

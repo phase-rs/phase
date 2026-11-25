@@ -10472,6 +10472,31 @@ fn parse_enters_verb_phrase(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+pub(super) fn is_singular_controlled_creature_entry_head(head: &str) -> bool {
+    // Preserve singular occurrence semantics before subject parsing consumes quantifiers.
+    if (
+        tag::<_, _, OracleError<'_>>("a"),
+        space1,
+        tag("creature"),
+        space1,
+    )
+        .parse(head)
+        .is_err()
+    {
+        return false;
+    }
+
+    let mut ctx = ParseContext::default();
+    ctx.enter_delayed_trigger_body();
+    let (subject, remainder) = parse_trigger_subject(head, &mut ctx);
+    subject == TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+        && ctx.pending_trigger_subject_clause.is_none()
+        && ctx.diagnostics.is_empty()
+        && all_consuming(parse_enters_verb_phrase)
+            .parse(remainder.trim())
+            .is_ok()
+}
+
 fn trigger_head_dies_zone_change(condition_lower: &str) -> Option<(Zone, Zone)> {
     let (_before, (), rest) = scan_preceded(condition_lower, parse_dies_verb_phrase)?;
     rest.trim()

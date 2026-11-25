@@ -15442,6 +15442,61 @@ fn damage_to_self_counter_instead_is_replacement_not_spell_ability() {
 }
 
 #[test]
+fn thunder_of_unity_chapters_keep_both_life_instructions_in_the_watcher_shape() {
+    use crate::types::ability::{DelayedTriggerCondition, WheneverEventExpiry};
+
+    let parsed = parse(
+        "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — You draw two cards and you lose 2 life.\nII, III — Whenever a creature you control enters this turn, each opponent loses 1 life and you gain 1 life.",
+        "Thunder of Unity",
+        &[],
+        &["Enchantment"],
+        &["Saga"],
+    );
+    assert_eq!(parsed.triggers.len(), 3);
+    for (index, chapter) in parsed.triggers.iter().enumerate() {
+        assert_eq!(
+            chapter.counter_filter.as_ref().unwrap().threshold,
+            Some(index as u32 + 1)
+        );
+        let root = chapter.execute.as_deref().expect("chapter effect");
+        if index == 0 {
+            assert!(matches!(root.effect.as_ref(), Effect::Draw { .. }));
+            assert!(matches!(
+                root.sub_ability.as_ref().unwrap().effect.as_ref(),
+                Effect::LoseLife { .. }
+            ));
+            continue;
+        }
+        let Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WheneverEvent { trigger, expiry },
+            effect,
+            ..
+        } = root.effect.as_ref()
+        else {
+            panic!("expected chapter watcher, got {:?}", root.effect);
+        };
+        assert_eq!(*expiry, WheneverEventExpiry::EndOfTurn);
+        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            trigger.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+        assert!(matches!(effect.effect.as_ref(), Effect::LoseLife { .. }));
+        assert!(matches!(
+            effect.sub_ability.as_ref().unwrap().effect.as_ref(),
+            Effect::GainLife { .. }
+        ));
+        assert!(
+            root.sub_ability.is_none(),
+            "gain belongs inside the watcher"
+        );
+    }
+}
+
+#[test]
 fn parse_saga_multi_chapter_line() {
     let oracle = "(Reminder text.)\nI, II — Draw a card.\nIII — Discard a card.";
     let result = parse_oracle_text(

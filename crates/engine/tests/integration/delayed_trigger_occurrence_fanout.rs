@@ -630,6 +630,136 @@ fn tasha_puts_a_counter_on_each_attacker() {
     }
 }
 
+const THUNDER_OF_UNITY: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — You draw two cards and you lose 2 life.\nII, III — Whenever a creature you control enters this turn, each opponent loses 1 life and you gain 1 life.";
+
+fn thunder_life(runner: &GameRunner) -> [i32; 3] {
+    [P0, P1, P2].map(|player| runner.life(player))
+}
+
+fn thunder_chapter(lore: u32) {
+    use engine::types::keywords::Keyword;
+
+    let mut scenario = three_player_board();
+    scenario.with_library_top(P1, &["Mountain"]);
+    let saga = scenario
+        .add_creature(P0, "Thunder of Unity", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Saga"])
+        .from_oracle_text(THUNDER_OF_UNITY)
+        .id();
+    scenario.with_counter(saga, CounterType::Lore, lore);
+    let first = scenario
+        .add_creature_to_hand(P0, "First recruit", 2, 2)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let second = scenario
+        .add_creature_to_hand(P0, "Second recruit", 2, 2)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let opponent = scenario
+        .add_creature_to_hand(P1, "Visiting recruit", 2, 2)
+        .with_keyword(Keyword::Flash)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let late = scenario
+        .add_creature_to_hand(P0, "Late recruit", 2, 2)
+        .with_keyword(Keyword::Flash)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let noncreature = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Plain artifact", "")
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    let initial = thunder_life(&runner);
+    advance_sagas(&mut runner);
+    assert_eq!(
+        thunder_life(&runner),
+        initial,
+        "chapter installation changes no life"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .delayed_triggers
+            .iter()
+            .filter(|watch| watch.source_id == saga && watch.controller == P0)
+            .count(),
+        1
+    );
+    assert_eq!(
+        zone(&runner, saga),
+        if lore == 2 {
+            Zone::Graveyard
+        } else {
+            Zone::Battlefield
+        }
+    );
+
+    let assert_entry = |runner: &mut GameRunner, card, player, expected: [i32; 3]| {
+        let before = thunder_life(runner);
+        runner.cast(card).commit();
+        resolve_top(runner);
+        assert_eq!(zone(runner, card), Zone::Battlefield);
+        assert_eq!(runner.state().objects[&card].controller, player);
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .filter(|entry| entry.source_id == saga && entry.controller == P0)
+                .count(),
+            usize::from(expected != [0; 3]),
+            "delayed firings for the entry of {card:?}"
+        );
+        settle(runner, &[]);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(
+            thunder_life(runner),
+            std::array::from_fn(|i| before[i] + expected[i])
+        );
+    };
+    assert_entry(&mut runner, first, P0, [1, -1, -1]);
+    assert_entry(&mut runner, second, P0, [1, -1, -1]);
+
+    if lore == 1 {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass to opponent");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ));
+        assert_entry(&mut runner, opponent, P1, [0; 3]);
+        assert_entry(&mut runner, noncreature, P0, [0; 3]);
+    } else {
+        drive_until(&mut runner, |r| {
+            r.state().active_player == P1
+                && matches!(r.state().waiting_for, WaitingFor::Priority { player: P0 })
+        });
+        assert!(!runner
+            .state()
+            .delayed_triggers
+            .iter()
+            .any(|watch| watch.source_id == saga));
+        assert_entry(&mut runner, late, P0, [0; 3]);
+    }
+}
+
+#[test]
+fn thunder_chapter_two_drains_on_each_controlled_creature_entry() {
+    thunder_chapter(1);
+}
+
+#[test]
+fn thunder_chapter_three_watches_after_sacrifice_until_cleanup() {
+    thunder_chapter(2);
+}
+
 /// First Day of Class: each creature that enters gets the counter and haste.
 #[test]
 fn first_day_of_class_marks_each_entering_creature() {
