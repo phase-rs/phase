@@ -24,7 +24,7 @@
 //!     Tutored MV 5 vs sacrificed MV 3 must not scry; reverted, a ScryChoice
 //!     prompt appears.
 //!   * `no_scry_when_mana_values_are_equal` — REVERT-FAILING boundary. "Less
-//!     than" is strict (CR 107.1b): equal MVs (3 vs 3) must not scry.
+//!     than" is strict: equal MVs (3 vs 3) must not scry.
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::actions::GameAction;

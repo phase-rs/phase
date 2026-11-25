@@ -168,7 +168,7 @@ fn fling_deals_sacrificed_power_to_player() {
     );
 }
 
-/// CR 120.3b + CR 704.5g: a sacrificed 3/3 flung at a 2/2 destroys it by lethal
+/// CR 120.3e + CR 704.5g: a sacrificed 3/3 flung at a 2/2 destroys it by lethal
 /// damage (0 power would leave it alive, so survival discriminates the amount).
 #[test]
 fn fling_deals_sacrificed_power_to_creature() {
