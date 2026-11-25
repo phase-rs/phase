@@ -6506,6 +6506,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes<'_> {
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType

@@ -7600,6 +7600,19 @@ pub enum FilterProp {
         comparator: Comparator,
         count: u8,
     },
+    /// CR 205.2a: Matches objects by distinct card-type count ("a card with two
+    /// or more card types" — Rendmaw, Creaking Nest; Visitor from Planet Q).
+    /// Counts distinct [`CoreType`] values of the object's `core_types`, the same
+    /// source type matching reads: supertypes (CR 205.4a) and subtypes (CR 205.3)
+    /// never count, and a Tribal single counts 1 under any wording. The
+    /// Tribal+Kindred pair vector is empty and Boss/Event never appear on a
+    /// playable card, so the stored-value count equals the CR 205.2a count on
+    /// every reachable object. Parameterized over [`Comparator`] like
+    /// `ColorCount`, so other thresholds need no new variant.
+    CardTypeCount {
+        comparator: Comparator,
+        count: u8,
+    },
     /// CR 107.4 + CR 202.1: Matches objects whose count of colored mana symbols
     /// in the printed mana cost satisfies `comparator` against `value`.
     /// `color: Some(c)` counts symbols contributing to color `c` (hybrid /
@@ -8112,6 +8125,7 @@ impl FilterProp {
             | FilterProp::HasColor { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -9359,6 +9373,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -9622,6 +9637,7 @@ pub fn filter_prop_contains(prop: &FilterProp, leaf: &dyn Fn(&TargetFilter) -> b
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -9921,6 +9937,7 @@ pub fn filter_prop_grammar_any(
             | FilterProp::HasColor { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -10586,6 +10603,7 @@ pub fn rewrite_filter_prop<C>(
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -13082,6 +13100,7 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -29797,6 +29816,7 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType

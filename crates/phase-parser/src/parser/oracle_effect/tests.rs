@@ -74115,6 +74115,7 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
