@@ -4521,9 +4521,9 @@ pub(crate) fn resolve_quantity_scoped_with_targets(
 }
 
 /// Resolve a per-player quantity for a resolving ability: its original
-/// controller ("you", CR 109.5), targets, chosen X and chain bindings, so an
-/// object an earlier instruction moved reads as its new object (CR 400.7j —
-/// Lady Loki, Agent of Chaos's exiled spell, CR 202.3e off-stack X).
+/// controller ("you", CR 109.5), targets, chosen X and chain bindings.
+/// CR 400.7j lets a later instruction find a moved card, while a read about
+/// the spell keeps its stack value or last known information (CR 202.3e + CR 608.2h).
 pub(crate) fn resolve_quantity_scoped_for_ability(
     state: &GameState,
     expr: &QuantityExpr,
@@ -9746,26 +9746,7 @@ fn resolve_object_mana_value(
             if let Some(mana_value) =
                 object_lookback_event(state, ability, ctx.stack_trigger_context)
                     .as_ref()
-                    .and_then(|event| {
-                        // CR 400.7j + CR 608.2h: If an earlier instruction of this
-                        // ability moved the triggering spell to a public zone, use
-                        // the exact successor it handed to this instruction.
-                        // CR 202.3e: the card off the stack treats X as zero.
-                        let moved_mana_value = || {
-                            let cast = crate::game::targeting::triggering_spell_identity_for_event(
-                                state, event,
-                            )?;
-                            let moved = ability?.effect_context_object.as_ref()?;
-                            let id = moved.live_object_id(state)?;
-                            let object = state.objects.get(&id)?;
-                            (id == cast.object_id
-                                && cast.incarnation.checked_add(1) == Some(moved.incarnation)
-                                && object.zone != Zone::Stack
-                                && object.zone.is_public())
-                            .then(|| u32_to_i32_saturating(object.effective_mana_value()))
-                        };
-                        moved_mana_value().or_else(|| spell_cast_mana_value_for_event(state, event))
-                    })
+                    .and_then(|event| spell_cast_mana_value_for_event(state, event))
             {
                 return mana_value;
             }
