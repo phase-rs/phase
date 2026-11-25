@@ -507,6 +507,7 @@ export function DeckBuilder({
                         onImport={handleImport}
                         onCardHover={onCardHover}
                         format={format}
+                        commanderInferenceFormat={isCommander ? format : undefined}
                         compatibility={compatibility}
                         cardDataCache={cardDataCache}
                         groupMode={groupMode}
