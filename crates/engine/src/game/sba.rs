@@ -105,12 +105,13 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
 /// CR 704.3 + CR 117.2e: [`check_state_based_actions`] for the player-loss
 /// safety net, which can run while a resolution is paused on a player's
 /// replacement choice. Reports a departure that canceled that pause, so the
-/// caller finishes the resolution before any player receives priority.
+/// caller finishes the resolution before any player receives priority. The
+/// count is the tail of deferred triggers collected by this call's departures.
 pub(crate) fn check_state_based_actions_reporting_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-) -> DepartureResume {
-    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller).0
+) -> (DepartureResume, usize) {
+    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller)
 }
 
 /// CR 704.3 + CR 117.5: [`check_state_based_actions`] inside a post-action pass, which places
@@ -766,13 +767,18 @@ fn cant_lose_active_for(state: &GameState, player_id: PlayerId) -> bool {
 }
 
 /// CR 704.5a/704.5b/704.5c/704.6c: Whether a player-loss SBA would currently
-/// eliminate at least one non-eliminated player, read from the same collectors
-/// the SBA check runs. This is intentionally narrower than running the full SBA
-/// loop: callers that are only trying to avoid waiting on a dead player during a
-/// non-priority continuation should not trigger unrelated SBA choice prompts such
-/// as commander-zone or legend-rule choices.
-pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
-    !player_losses(state).is_empty()
+/// eliminate a living player, or one of the named actors when an actor slice
+/// is present. The check shares the loss reasons and CR 810.8a departure
+/// membership with the SBA loop without applying unrelated SBAs.
+pub(crate) fn has_pending_player_loss_sba(state: &GameState, actors: Option<&[PlayerId]>) -> bool {
+    let losses = player_losses(state);
+    match actors {
+        None => !losses.is_empty(),
+        Some(actors) => losses
+            .into_keys()
+            .flat_map(|root| super::elimination::living_loss_departure_seats(state, root))
+            .any(|seat| actors.contains(&seat)),
+    }
 }
 
 /// Check if a static ability from `source_controller` with the given `affected` filter
@@ -3043,7 +3049,7 @@ mod tests {
         state.waiting_for = paused_prompt.clone();
 
         let mut events = Vec::new();
-        assert!(has_pending_player_loss_sba(&state));
+        assert!(has_pending_player_loss_sba(&state, None));
         check_state_based_actions(&mut state, &mut events);
 
         assert!(state.players[1].is_eliminated, "CR 704.5a still fires");
@@ -5249,7 +5255,7 @@ mod tests {
         ));
         state.players[0].life = 0;
         assert!(player_losses(&state).is_empty());
-        assert!(!has_pending_player_loss_sba(&state));
+        assert!(!has_pending_player_loss_sba(&state, None));
 
         state.players[0].life = 20;
         state.players[1].life = 0;
@@ -5261,7 +5267,7 @@ mod tests {
                 (PlayerId(2), BTreeSet::from([LossReason::LifeTotal])),
             ])
         );
-        assert!(has_pending_player_loss_sba(&state));
+        assert!(has_pending_player_loss_sba(&state, None));
     }
 
     #[test]

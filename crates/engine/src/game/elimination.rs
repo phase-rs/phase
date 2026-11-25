@@ -440,6 +440,25 @@ impl LookedBackDeparture {
     }
 }
 
+/// CR 810.8a: a living loss root departs first, followed by its living
+/// shared-life teammates. A seat already out of the game adds no departure.
+pub(crate) fn living_loss_departure_seats(
+    state: &GameState,
+    root: PlayerId,
+) -> impl Iterator<Item = PlayerId> + '_ {
+    players::is_alive(state, root)
+        .then_some(root)
+        .into_iter()
+        .flat_map(move |root| {
+            let teammates = super::topology::has_shared_life(state, root)
+                .then(|| players::teammates(state, root))
+                .into_iter()
+                .flatten()
+                .filter(move |&seat| players::is_alive(state, seat));
+            std::iter::once(root).chain(teammates)
+        })
+}
+
 pub(crate) fn eliminate_players(
     state: &mut GameState,
     losses: &BTreeMap<PlayerId, BTreeSet<LossReason>>,
@@ -479,19 +498,8 @@ pub(crate) fn eliminate_players(
     };
 
     for (&player, reasons) in losses {
-        if !players::is_alive(state, player) {
-            continue;
-        }
-        record(player, reasons);
-        // Team loss rides with shared life: CR 810.8a in 2HG (CR 810.8b for a
-        // concession), and CR 810.8a-via-904.13b for Archenemy Commander heroes
-        // (the archenemy has no teammates, so the fold is a no-op there).
-        if super::topology::has_shared_life(state, player) {
-            for teammate in players::teammates(state, player) {
-                if players::is_alive(state, teammate) {
-                    record(teammate, reasons);
-                }
-            }
+        for seat in living_loss_departure_seats(state, player) {
+            record(seat, reasons);
         }
     }
     let leaving_set: HashSet<PlayerId> = leaving.iter().map(|&(player, _)| player).collect();
