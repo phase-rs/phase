@@ -86,6 +86,7 @@ import {
   inspectActiveDraftGuest,
   loadDraftGuestSession,
   loadDraftSettlementOutbox,
+  saveActiveDraftGuest,
   saveActiveDraftPod,
   saveDraftIntergameCommands,
   saveDraftSettlementOutbox,
@@ -3918,6 +3919,12 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
 
 function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
   switch (event.type) {
+    case "recoveryCommitted":
+      // This event reaches only the installed owner, so a superseded or ended
+      // owner publishes nothing, and the write runs in the commit's own
+      // continuation.
+      saveActiveDraftGuest(event.pointer);
+      break;
     case "workspaceRestored":
       restoredWorkspace = {
         generation: lifecycleGeneration,

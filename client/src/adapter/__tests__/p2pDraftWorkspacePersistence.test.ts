@@ -5,7 +5,6 @@ const persistenceMocks = vi.hoisted(() => ({
   saveDraftHostSession: vi.fn(async () => {}),
   clearDraftHostSession: vi.fn(async () => {}),
   saveDraftGuestSession: vi.fn(async () => {}),
-  saveActiveDraftGuest: vi.fn(),
   loadDraftDeckSubmission: vi.fn(async () => null),
   saveDraftDeckSubmission: vi.fn(async () => {}),
   clearDraftDeckSubmission: vi.fn(async () => {}),
@@ -833,8 +832,8 @@ describe("P2P draft workspace persistence", () => {
     await Promise.all([received, initialized]);
 
     expect(events).toEqual(kind === "new"
-      ? ["workspaceRestored:true", "joined:", "viewUpdated:"]
-      : ["workspaceRestored:false", "reconnected:", "viewUpdated:"]);
+      ? ["recoveryCommitted:", "workspaceRestored:true", "joined:", "viewUpdated:"]
+      : ["recoveryCommitted:", "workspaceRestored:false", "reconnected:", "viewUpdated:"]);
     expect(eventsAtReplay).toEqual(events);
     guest.dispose();
   });

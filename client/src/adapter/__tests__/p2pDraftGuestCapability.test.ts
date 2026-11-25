@@ -232,6 +232,18 @@ describe("P2P draft guest capability", () => {
     await initialized;
     const admitted = await storedRecord();
     expect(admitted).toMatchObject({ draftToken: "token-A", capabilityId: expect.any(String) });
+    // The guest writes no pointer; it hands the committed one to its owner.
+    expect(storedPointer()).toBeNull();
+    const committed = events.find(
+      (event): event is Extract<DraftGuestEvent, { type: "recoveryCommitted" }> => event.type === "recoveryCommitted",
+    );
+    expect(committed).toEqual({
+      type: "recoveryCommitted",
+      pointer: { roomCode: "ABCDE", displayName: "Alice", hostPeerId: HOST_PEER_ID, capabilityId: admitted!.capabilityId },
+    });
+    // Owner double: the lifecycle store publishes exactly this pointer.
+    saveActiveDraftGuest(committed!.pointer);
+    expect(storedPointer()).toMatchObject({ capabilityId: admitted!.capabilityId });
     // The welcome replays the stored submission; let it reach the wire first.
     await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(2));
 
@@ -261,6 +273,7 @@ describe("P2P draft guest capability", () => {
 
   it("an unnamed capability gains one name at its first admission and keeps it", async () => {
     await setUnnamedPair("token-L");
+    const seededPointer = storedPointer();
 
     const first = reconnectGuest("token-L");
     const firstInitialized = first.guest.initialize(undefined, 1);
@@ -271,7 +284,10 @@ describe("P2P draft guest capability", () => {
     const capabilityId = named?.capabilityId;
     expect(capabilityId).toEqual(expect.any(String));
     expect((capabilityId as string).length).toBeGreaterThan(0);
-    expect(storedPointer()).toMatchObject({ capabilityId });
+    // The guest leaves the public pointer to its owner.
+    expect(storedPointer()).toEqual(seededPointer);
+    const committedPointer = { roomCode: "ABCDE", displayName: "Alice", hostPeerId: HOST_PEER_ID, capabilityId };
+    expect(first.events).toContainEqual({ type: "recoveryCommitted", pointer: committedPointer });
     expect(loadDraftGuestCapability).toHaveBeenCalledOnce();
     first.guest.dispose();
 
@@ -281,7 +297,7 @@ describe("P2P draft guest capability", () => {
     await secondInitialized;
 
     await expect(storedRecord()).resolves.toMatchObject({ draftToken: "token-L", capabilityId });
-    expect(storedPointer()).toMatchObject({ capabilityId });
+    expect(second.events).toContainEqual({ type: "recoveryCommitted", pointer: committedPointer });
     expect(loadDraftGuestCapability).toHaveBeenCalledTimes(2);
   });
 

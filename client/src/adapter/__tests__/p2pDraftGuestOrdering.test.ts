@@ -13,7 +13,6 @@ import type {
 
 const persistence = vi.hoisted(() => ({
   saveDraftGuestSession: vi.fn<typeof saveDraftGuestSession>(async () => {}),
-  saveActiveDraftGuest: vi.fn(),
   clearDraftGuestRecovery: vi.fn<typeof clearDraftGuestRecovery>(async () => {}),
   clearDraftDeckSubmission: vi.fn<typeof clearDraftDeckSubmission>(async () => {}),
   loadDraftDeckSubmission: vi.fn(async (): Promise<PersistedDraftDeckSubmission | null> => null),
@@ -1453,7 +1452,6 @@ describe("P2P draft guest receive ordering", () => {
     await rejected;
 
     expect(events).toEqual([{ type: "error", message: "Could not save draft recovery details" }]);
-    expect(persistence.saveActiveDraftGuest).not.toHaveBeenCalled();
   });
 
   it("reports a first-contact protocol mismatch as incompatible without a compatibility code", async () => {

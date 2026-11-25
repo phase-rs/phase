@@ -40,13 +40,16 @@ import type {
 import {
   saveDraftGuestSession,
   clearDraftGuestRecovery,
-  saveActiveDraftGuest,
   clearDraftDeckSubmission,
   loadDraftDeckSubmission,
   loadDraftGuestCapability,
   saveDraftDeckSubmission,
 } from "../services/draftPersistence";
-import type { DraftGuestCapability, DraftGuestCapabilityOwner } from "../services/draftPersistence";
+import type {
+  ActiveDraftGuestMeta,
+  DraftGuestCapability,
+  DraftGuestCapabilityOwner,
+} from "../services/draftPersistence";
 import type {
   DraftIntergameCommand,
   DraftIntergameCommandAck,
@@ -58,7 +61,16 @@ import {
 
 // ── Types ──────────────────────────────────────────────────────────────
 
+/**
+ * The public pointer to a committed private recovery record. Only the
+ * lifecycle owner publishes it; the guest hands it over and never writes it.
+ */
+export type DraftGuestRecoveryPointer = Readonly<Pick<ActiveDraftGuestMeta, "roomCode" | "displayName" | "hostPeerId">> & {
+  readonly capabilityId: string;
+};
+
 export type DraftGuestEvent =
+  | { type: "recoveryCommitted"; pointer: DraftGuestRecoveryPointer }
   | { type: "joined"; seatIndex: number; draftCode: string }
   | { type: "reconnected"; seatIndex: number }
   | { type: "workspaceRestored"; workspaceState: DraftWorkspaceState | null }
@@ -717,13 +729,16 @@ export class P2PDraftGuest {
         this.currentView = msg.view;
 
         try {
-          // The IDB capability must commit before its local-storage locator is
-          // published; otherwise a reload can observe a dead recovery route.
-          await this.persistRecoveryIdentity({
+          // The pointer to the committed record goes to the lifecycle owner
+          // inside the admission, so a refused publication fails it exactly
+          // like a refused private write.
+          const pointer = await this.persistRecoveryIdentity({
             draftToken: msg.draftToken,
             seatIndex: msg.seatIndex,
             draftCode: msg.draftCode,
           }, "welcome");
+          if (this.session !== session) return;
+          this.emit({ type: "recoveryCommitted", pointer });
         } catch (err) {
           this.rejectHandshake(session, asError(err), "retire");
           this.emit({ type: "error", message: "Could not save draft recovery details" });
@@ -748,11 +763,13 @@ export class P2PDraftGuest {
 
         if (this.draftToken) {
           try {
-            await this.persistRecoveryIdentity({
+            const pointer = await this.persistRecoveryIdentity({
               draftToken: this.draftToken,
               seatIndex: msg.seatIndex,
               draftCode: msg.draftCode,
             }, "reconnect");
+            if (this.session !== session) return;
+            this.emit({ type: "recoveryCommitted", pointer });
           } catch (err) {
             this.rejectHandshake(session, asError(err), "retire");
             this.emit({ type: "error", message: "Could not save draft recovery details" });
@@ -1194,10 +1211,11 @@ export class P2PDraftGuest {
     }
   }
 
+  /** Commits the private record and returns the pointer the owner publishes; writes no pointer. */
   private async persistRecoveryIdentity(
     data: { draftToken: string; seatIndex: number; draftCode: string },
     admission: RecoveryAdmission,
-  ): Promise<void> {
+  ): Promise<DraftGuestRecoveryPointer> {
     const owner: DraftGuestCapabilityOwner = {
       hostPeerId: this.hostPeerId,
       draftToken: data.draftToken,
@@ -1212,12 +1230,12 @@ export class P2PDraftGuest {
       capabilityId,
     });
     this.capability = { ...owner, capabilityId };
-    saveActiveDraftGuest({
+    return {
       roomCode: owner.roomCode,
       displayName: owner.displayName,
       hostPeerId: owner.hostPeerId,
       capabilityId,
-    });
+    };
   }
 
   private cancelRecoveryRoute(route: GuestRecoveryRoute, reason: Error): void {

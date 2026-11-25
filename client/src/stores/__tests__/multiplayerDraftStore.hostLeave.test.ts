@@ -138,7 +138,6 @@ vi.mock("../../adapter/p2p-draft-host", async (importOriginal) => {
 });
 
 vi.mock("../../adapter/p2p-draft-guest", async () => {
-  const persistence = await import("../../services/draftPersistence");
   return {
     P2PDraftGuest: vi.fn().mockImplementation(function (
       _peer: unknown,
@@ -146,14 +145,23 @@ vi.mock("../../adapter/p2p-draft-guest", async () => {
       _conn: unknown,
       connection: { roomCode?: string; displayName?: string },
     ) {
+      let listener: ((event: unknown) => void) | null = null;
       const instance = {
-        onEvent: () => () => {},
+        onEvent: (l: (event: unknown) => void) => {
+          listener = l;
+          return () => { listener = null; };
+        },
+        // Like the real guest, hand the committed pointer to the lifecycle
+        // owner, which publishes it.
         initialize: vi.fn(async () => {
-          persistence.saveActiveDraftGuest({
-            roomCode: connection?.roomCode ?? "GGGGG",
-            displayName: connection?.displayName ?? "G",
-            hostPeerId,
-            capabilityId: `capability-${hostPeerId}`,
+          listener?.({
+            type: "recoveryCommitted",
+            pointer: {
+              roomCode: connection?.roomCode ?? "GGGGG",
+              displayName: connection?.displayName ?? "G",
+              hostPeerId,
+              capabilityId: `capability-${hostPeerId}`,
+            },
           });
         }),
         leave: vi.fn(async () => {}),
