@@ -6922,9 +6922,9 @@ mod tests {
     }
 
     /// S-1 (CR 701.6a + CR 113.7a + CR 608.2h): a non-resolving removal of an
-    /// activated ability records its entry whole under the entry's id; a
-    /// non-resolving removal of a triggered ability records nothing, and neither
-    /// does the CR 405.5 resolution pop of an activated ability.
+    /// activated or triggered ability records its entry whole under the entry's
+    /// id, each in its own departed table; other stack objects record nothing,
+    /// and neither does the CR 405.5 resolution pop of an activated ability.
     #[test]
     fn a_nonresolving_removal_records_an_activated_ability_whole_and_its_trigger() {
         let mut state = setup();
