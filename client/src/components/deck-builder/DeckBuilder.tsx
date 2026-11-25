@@ -103,6 +103,7 @@ export function DeckBuilder({
     resolveSaveConflict,
     handleSetCommander,
     isCommanderEligible,
+    commanderCandidateNames,
     handleRemoveCommander,
     signatureSpellCandidates,
     companionCandidateNames,
@@ -506,6 +507,7 @@ export function DeckBuilder({
                         onImport={handleImport}
                         onCardHover={onCardHover}
                         format={format}
+                        commanderInferenceFormat={isCommander ? format : undefined}
                         compatibility={compatibility}
                         cardDataCache={cardDataCache}
                         groupMode={groupMode}
@@ -554,7 +556,7 @@ export function DeckBuilder({
                 deckComposition="commanders-outside"
                 cardDataCache={cardDataCache}
                 deckSizeRule={deckSizeRule}
-                isCommanderEligible={isCommanderEligible}
+                commanderCandidates={commanderCandidateNames}
                 onSetCommander={handleSetCommander}
                 onRemoveCommander={handleRemoveCommander}
                 signatureSpell={deck.signature_spell?.[0]}

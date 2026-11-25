@@ -53,7 +53,7 @@ vi.mock("../../../hooks/useDeckCardData.ts", () => ({
 vi.mock("../../../services/engineRuntime.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/engineRuntime.ts")>()),
   commanderPartnerCandidates: vi.fn(async () => []),
-  isCardCommanderEligibleForFormat: vi.fn(async () => false),
+  commanderCandidates: vi.fn(async () => []),
 }));
 
 vi.mock("../../../viewmodel/limitedPoolFilter.ts", async (importOriginal) => ({
