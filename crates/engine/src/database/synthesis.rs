@@ -14392,20 +14392,18 @@ mod annihilator_synthesis_tests {
         assert_eq!(triggers.len(), 2);
 
         // Both N=1 and N=3 must be present from the first pass.
-        let ns: Vec<i32> =
-            triggers
-                .iter()
-                .filter_map(|t| match t.execute.as_deref().map(|a| &*a.effect) {
-                    Some(Effect::Sacrifice {
-                        count:
-                            crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
-                                value,
-                            }),
-                        ..
-                    }) => Some(*value),
-                    _ => None,
-                })
-                .collect();
+        let ns: Vec<i32> = triggers
+            .iter()
+            .filter_map(|t| {
+                let Effect::Sacrifice { count, .. } = t.execute.as_deref()?.effect.as_ref() else {
+                    return None;
+                };
+                let QuantityExpr::Fixed { value } = count.count_expr()? else {
+                    return None;
+                };
+                Some(*value)
+            })
+            .collect();
         assert!(ns.contains(&1) && ns.contains(&3));
     }
 

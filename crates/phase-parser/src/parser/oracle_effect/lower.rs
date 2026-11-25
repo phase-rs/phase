@@ -4327,16 +4327,40 @@ pub(super) fn bind_plural_token_sacrifice(
     // LastCreated and tracked-set anaphors can see different publications.
     // Stop at the nearest potential antecedent before checking whether its
     // producer is admitted for whole-cohort cleanup.
-    let nested_creator = prior_defs
-        .last()
-        .and_then(|previous| match &*previous.effect {
-            Effect::CreateDelayedTrigger {
-                condition: DelayedTriggerCondition::WheneverEvent { .. },
-                effect: producer,
-                ..
-            } => Some(producer.effect.as_ref()),
-            _ => None,
-        });
+    let nested_creator = prior_defs.last().and_then(|previous| {
+        use crate::types::ability::NestedDefinitionEdge;
+
+        // The AST's exhaustive walk classifies every Effect's nested definitions.
+        let mut creator = None;
+        previous
+            .effect
+            .for_each_nested_definition(&mut |edge, producer| match edge {
+                NestedDefinitionEdge::CreateDelayedTriggerEffect => {
+                    if matches!(
+                        previous.effect.as_ref(),
+                        Effect::CreateDelayedTrigger {
+                            condition: DelayedTriggerCondition::WheneverEvent { .. },
+                            ..
+                        }
+                    ) {
+                        creator = Some(producer.effect.as_ref());
+                    }
+                }
+                NestedDefinitionEdge::VotePerChoice
+                | NestedDefinitionEdge::VoteObjectOutcome
+                | NestedDefinitionEdge::SeparateIntoPilesChosen
+                | NestedDefinitionEdge::SeparateIntoPilesUnchosen
+                | NestedDefinitionEdge::ExileTopCardContestWinner
+                | NestedDefinitionEdge::RevealFromHandOnDecline
+                | NestedDefinitionEdge::CreateDrawReplacementEffect
+                | NestedDefinitionEdge::CreateBoonTrigger
+                | NestedDefinitionEdge::RollDieResult
+                | NestedDefinitionEdge::FlipCoinsWin
+                | NestedDefinitionEdge::FlipCoinsLose
+                | NestedDefinitionEdge::ChooseOneOfBranch => {}
+            });
+        creator
+    });
     let nearest_producer = nested_creator.or_else(|| {
         prior_defs
             .iter()

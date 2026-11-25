@@ -15,6 +15,7 @@ use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::{ObjectId, TrackedSetId};
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
@@ -224,13 +225,18 @@ fn thatcher_revolt_skips_a_phased_out_token() {
     let revolt = scenario
         .add_spell_to_hand_from_oracle(P0, "Thatcher Revolt", false, THATCHER)
         .id();
-    let ripple = scenario
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])],
+    );
+    let slip = scenario
         .add_spell_to_hand_from_oracle(
             P0,
-            "Reality Ripple",
+            "Slip Out the Back",
             true,
-            "Target artifact, creature, or land phases out. (While it's phased out, it's treated as though it doesn't exist. It phases in before its controller untaps during their next untap step.)",
+            "Put a +1/+1 counter on target creature. It phases out. (Treat it and anything attached to it as though they don't exist until its controller's next turn.)",
         )
+        .with_mana_cost(parse_mtgjson_mana_cost("{U}"))
         .id();
     let mut runner = scenario.build();
     runner.cast(revolt).resolve();
@@ -238,7 +244,7 @@ fn thatcher_revolt_skips_a_phased_out_token() {
     let [phased_out, first, second] = runner.state().last_created_token_ids[..] else {
         panic!("expected three Humans");
     };
-    runner.cast(ripple).target_objects(&[phased_out]).resolve();
+    runner.cast(slip).target_objects(&[phased_out]).resolve();
     assert_priority(&runner);
     assert!(runner.state().objects[&phased_out].is_phased_out_permanent());
     assert!(runner.state().objects[&first].is_phased_in_permanent());
@@ -312,10 +318,15 @@ fn mobilize_sacrifices_original_warriors_after_another_spell_creates_tokens() {
     runner.combat_damage();
     runner.advance_to_end_step();
     assert_eq!(runner.state().phase, Phase::End);
+    assert_eq!(runner.state().last_created_token_ids, soldiers);
     runner.advance_until_stack_empty();
     assert_priority(&runner);
-    assert!(warriors.iter().all(|id| !on_battlefield(&runner, *id)));
-    assert!(soldiers.iter().all(|id| on_battlefield(&runner, *id)));
+    assert!(
+        warriors.iter().all(|id| !on_battlefield(&runner, *id))
+            && soldiers.iter().all(|id| on_battlefield(&runner, *id)),
+        "cleanup must remove the installed Warriors {warriors:?} and keep the live LastCreated Soldiers {soldiers:?}; battlefield: {:?}",
+        runner.state().battlefield
+    );
 }
 
 #[test]

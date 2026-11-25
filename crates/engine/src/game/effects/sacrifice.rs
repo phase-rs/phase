@@ -207,13 +207,15 @@ pub fn resolve(
     // `QuantityExpr` (Fixed/Ref/DivideRounded/...) means a mandatory count;
     // wrapped in `UpTo` means the player may select 0..=count.
     let default_count = QuantityExpr::Fixed { value: 1 };
-    let (raw_filter, selection, min_count) = match &ability.effect {
-        Effect::Sacrifice {
-            target,
-            count,
-            min_count,
-        } => (target, count.count_expr(), *min_count),
-        _ => (&TargetFilter::Any, Some(&default_count), 0),
+    let (raw_filter, selection, min_count) = if let Effect::Sacrifice {
+        target,
+        count,
+        min_count,
+    } = &ability.effect
+    {
+        (target, count.count_expr(), *min_count)
+    } else {
+        (&TargetFilter::Any, Some(&default_count), 0)
     };
     // CR 608.2c + CR 510.2: Bind the parser's `TrackedSetId(0)` "most recent set"
     // sentinel to a concrete filter before deriving the eligible pool. This is

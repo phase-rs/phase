@@ -108856,19 +108856,42 @@ fn plural_token_sacrifice_stops_at_nearer_producers() {
     use crate::types::ability_visit::visit_ability_def;
     use std::ops::ControlFlow;
 
-    for (oracle, entire) in [
-        ("Create two 1/1 white Soldier creature tokens. Draw a card. Sacrifice them at the beginning of the next end step.", true),
-        ("Create two 1/1 white Soldier creature tokens. Populate. Sacrifice them at the beginning of the next end step.", false),
-        ("Create two 1/1 white Soldier creature tokens. Exile all creatures. Sacrifice them at the beginning of the next end step.", false),
-    ] {
+    type InstructionCheck = fn(&Effect) -> bool;
+    let fixtures: [(&str, InstructionCheck, bool); 3] = [
+        // Salt Road Skirmish has the same plural cleanup with intervening haste.
+        // Insert a draw to isolate a plain instruction that publishes no referent.
+        ("Create two 1/1 white Soldier creature tokens. Draw a card. Sacrifice them at the beginning of the next end step.", |effect| matches!(effect, Effect::Draw { .. }), true),
+        // Coursers' Accord creates a token then populates. The synthetic cleanup
+        // probes which producer wins when a plural anaphor follows both.
+        ("Create two 1/1 white Soldier creature tokens. Populate. Sacrifice them at the beginning of the next end step.", |effect| matches!(effect, Effect::Populate), false),
+        // Thatcher Revolt supplies the cleanup; Final Judgment supplies the
+        // exile instruction. A combined fixture probes the competing referents.
+        ("Create two 1/1 white Soldier creature tokens. Exile all creatures. Sacrifice them at the beginning of the next end step.", |effect| matches!(effect, Effect::ChangeZoneAll { destination: Zone::Exile, .. }), false),
+    ];
+    for (oracle, intervening_instruction, entire) in fixtures {
         let parsed = parse_effect_chain(oracle, AbilityKind::Spell);
+        let mut has_token_producer = false;
+        let mut has_intervening_instruction = false;
+        let mut gaps = 0;
         let mut counts = Vec::new();
         let _ = visit_ability_def(&parsed, &mut |effect| {
+            has_token_producer |= matches!(effect, Effect::Token { .. });
+            has_intervening_instruction |= intervening_instruction(effect);
+            gaps += usize::from(matches!(effect, Effect::Unimplemented { .. }));
             if let Effect::Sacrifice { count, .. } = effect {
                 counts.push(count.clone());
             }
             ControlFlow::Continue(())
         });
+        assert!(
+            has_token_producer,
+            "missing original token producer: {oracle}"
+        );
+        assert!(
+            has_intervening_instruction,
+            "missing intervening instruction: {oracle}"
+        );
+        assert_eq!(gaps, 0, "{oracle}: {parsed:#?}");
         let expected = if entire {
             SacrificeSelection::EntireReferent
         } else {
