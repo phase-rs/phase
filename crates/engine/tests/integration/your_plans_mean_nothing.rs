@@ -72,9 +72,9 @@ fn drive_to_phase(runner: &mut GameRunner, target: Phase) {
                 runner.declare_blockers(&[]).expect("declare no blockers");
             }
             WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
-                runner.act(GameAction::PassPriority).expect("pass priority");
-                runner.act(GameAction::PassPriority).expect("pass priority");
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             WaitingFor::OrderTriggers { .. } => {
                 drain_order_triggers_with_identity(runner.state_mut());
@@ -165,7 +165,9 @@ fn resolve_with_targets(runner: &mut GameRunner, targets: Vec<TargetRef>) -> usi
                     .expect("any-number pick must be accepted");
             }
             WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             other => panic!("unexpected prompt resolving the scheme: {other:?}"),
         }
