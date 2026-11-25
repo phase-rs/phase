@@ -1789,6 +1789,87 @@ fn assert_xanathar_defers_a_new_foreign_top_during_manual_cast_payment(caster: P
 }
 
 #[test]
+fn xanathar_defers_foreign_top_through_same_source_mana_activation() {
+    let (mut scenario, _) = xanathar_scenario(2);
+    let monolith = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Grim Monolith",
+            "This artifact doesn't untap during your untap step.\n{T}: Add {C}{C}{C}.\n{4}: Untap this artifact.",
+        )
+        .id();
+    let grove = scenario
+        .add_land_from_oracle(
+            P0,
+            "Grove of the Burnwillows",
+            "{T}: Add {C}.\n{T}: Add {R} or {G}. Each opponent gains 1 life.",
+        )
+        .id();
+    scenario.add_enchantment_from_oracle(P1, "Nefarious Lich",
+        "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game."
+    );
+    let next = scenario.add_land_to_library_top(P1, "Forest").id();
+    let before = scenario.add_land_to_library_top(P1, "Island").id();
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+    resolve_xanathar_trigger(&mut runner);
+
+    let seen = |runner: &GameRunner, object| {
+        filter_state_for_viewer(runner.state(), P0).objects[&object].name != HIDDEN_CARD_NAME
+    };
+    assert!(seen(&runner, before));
+
+    let activate = |runner: &mut GameRunner, ability_index, payment_mode| {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: monolith,
+                ability_index,
+                payment_mode,
+            })
+            .expect("activate Grim Monolith")
+    };
+    let is_paying =
+        |waiting: &WaitingFor| matches!(waiting, WaitingFor::ManaPayment { player: P0, .. });
+    let outer = activate(&mut runner, 1, CastPaymentMode::Manual);
+    assert!(is_paying(&outer.waiting_for));
+    let inner = activate(&mut runner, 0, CastPaymentMode::Auto);
+    assert!(inner.events.iter().any(|event| {
+        matches!(event, GameEvent::AbilityActivated { source_id, stack_entry: None, .. } if *source_id == monolith)
+    }));
+    assert!(is_paying(&inner.waiting_for));
+
+    let grove = activate_grove(&mut runner, grove);
+    assert!(grove
+        .events
+        .iter()
+        .any(|event| { matches!(event, GameEvent::CardDrawn { player_id: P1, .. }) }));
+    assert!(is_paying(&grove.waiting_for));
+    assert_eq!(runner.state().library_of(P1).front(), Some(&next));
+    // CR 401.5: completing a mana activation within a cost leaves the
+    // enclosing activation's look boundary in force.
+    assert!(
+        !seen(&runner, next),
+        "outer activation still awaits payment"
+    );
+
+    let mut cancelled = GameRunner::from_state(runner.state().clone());
+    let cancellation = cancelled.act(GameAction::CancelCast).expect("cancel");
+    assert!(matches!(
+        cancellation.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(cancelled.state().stack.is_empty());
+    assert_eq!(cancelled.state().library_of(P1).front(), Some(&next));
+    assert!(seen(&cancelled, next));
+
+    let completion = runner.act(GameAction::PassPriority).expect("pay the cost");
+    assert!(completion.events.iter().any(|event| {
+        matches!(event, GameEvent::AbilityActivated { source_id, stack_entry: Some(_), .. } if *source_id == monolith)
+    }));
+    assert!(seen(&runner, next));
+}
+
+#[test]
 fn xanathar_foreign_land_requires_main_phase_and_uses_one_land_drop() {
     let (mut scenario, _) = xanathar_scenario(2);
     let second = scenario.add_land_to_library_top(P1, "Island").id();

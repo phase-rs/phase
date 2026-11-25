@@ -34263,6 +34263,11 @@ pub(crate) fn record_activated_ability_placed(
     }) {
         state.pending_activations.push(key);
     }
+    super::visibility::retire_foreign_library_look(
+        state,
+        player,
+        crate::types::game_state::ForeignLibraryLookAction::Activate(source_id),
+    );
     super::casting_targets::emit_ability_activated(
         state,
         player,
@@ -34529,11 +34534,7 @@ pub fn handle_cancel_cast(
         Some(_) => ForeignLibraryLookAction::Activate(pending.object_id),
         None => ForeignLibraryLookAction::Cast,
     };
-    super::visibility::retire_cancelled_foreign_library_look(
-        state,
-        pending.ability.controller,
-        action,
-    );
+    super::visibility::retire_foreign_library_look(state, pending.ability.controller, action);
     // The owning action restored paid resources before entering this cleanup.
     // Direct declaration-denial callers also retire the matching receipt.
     if state

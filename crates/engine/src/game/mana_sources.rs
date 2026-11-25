@@ -1306,6 +1306,7 @@ pub(crate) fn activate_mana_source_option_with_output(
         // CR 305.6 + CR 605.3: tapping a basic land for mana activates its
         // intrinsic mana ability; observe its triggers at that boundary. Its
         // activation cost is the intrinsic "{T}" (CR 305.6).
+        mana_abilities::retire_mana_activation_look(state, player, option.object_id, &resume);
         let activation_event = super::casting_targets::emit_ability_activated(
             state,
             player,

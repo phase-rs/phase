@@ -4373,6 +4373,12 @@ fn finish_mana_ability_cost_payment(
         // activation began, before any cost; never `mana_ability_definition`'s
         // post-payment live fallback (a pending without its snapshot is `Unknown`).
         let activation_cost = BoundActivationCost::of_definition(pending.ability_snapshot.as_ref());
+        // CR 401.5: synchronous auto-taps and cursor children are part of
+        // their caller's cost procedure. A manual child can also have a
+        // parked parent in its resume, even on the very same source.
+        if !resolves_automatically && is_ultimate_root {
+            retire_mana_activation_look(state, pending.player, pending.source_id, &pending.resume);
+        }
         let activation_event = super::casting_targets::emit_ability_activated(
             state,
             pending.player,
@@ -4884,8 +4890,18 @@ pub(super) fn cancel_mana_ability_activation(
     resume: ManaAbilityResume,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    retire_mana_activation_look(state, player, source_id, &resume);
+    resume_mana_ability_root(state, player, resume, events)
+}
+
+pub(super) fn retire_mana_activation_look(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    resume: &ManaAbilityResume,
+) {
     let same_source_is_enclosing = matches!(
-        &resume,
+        resume,
         ManaAbilityResume::ManaAbilityManaPayment { pending_mana_ability }
             if pending_mana_ability.suspended_chain().any(|outer| {
                 outer.player == player && outer.source_id == source_id
@@ -4897,13 +4913,12 @@ pub(super) fn cancel_mana_ability_activation(
                 && outer.object_id == source_id
         }));
     if !same_source_is_enclosing {
-        super::visibility::retire_cancelled_foreign_library_look(
+        super::visibility::retire_foreign_library_look(
             state,
             player,
             crate::types::game_state::ForeignLibraryLookAction::Activate(source_id),
         );
     }
-    resume_mana_ability_root(state, player, resume, events)
 }
 
 pub(crate) fn resume_mana_ability_root(
