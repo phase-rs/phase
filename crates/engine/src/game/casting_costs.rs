@@ -598,14 +598,17 @@ fn declaration_offerable_reserving(
         + split.residual.as_ref().map_or(0, |residual| {
             cost_life_payment(state, player, pending.object_id, residual)
         });
-    let payable = |objects: &[(ObjectId, super::casting::ReservedUse)]| {
-        let reserved = super::casting::PaymentReservation { life, objects };
-        let scratch = super::casting::reserved_payment_state(state, player, &reserved);
-        let state = scratch.as_ref().unwrap_or(state);
-        super::casting::can_feasibly_pay_mana_cost(state, player, Some(pending.object_id), &total)
+    // CR 119.4 + CR 601.2h: the mana is judged with that life spoken for.
+    let life_state = super::casting::reserved_payment_state(
+        state,
+        player,
+        &super::casting::PaymentReservation::life(life),
+    );
+    let payable = |probe: &GameState| {
+        super::casting::can_feasibly_pay_mana_cost(probe, player, Some(pending.object_id), &total)
             || split.payment_mode.is_some_and(|mode| {
                 super::casting::can_feasibly_pay_mana_cost_with_tap_payment_mode(
-                    state,
+                    probe,
                     player,
                     pending.object_id,
                     &total,
@@ -613,7 +616,7 @@ fn declaration_offerable_reserving(
                 )
             })
     };
-    if !payable(&[]) {
+    if !payable(life_state.as_ref().unwrap_or(state)) {
         return Ok(false);
     }
     // CR 601.2f-h + CR 118.3: the additional cost's hand and graveyard cards
@@ -629,6 +632,11 @@ fn declaration_offerable_reserving(
     else {
         return Ok(true);
     };
+    // One scratch for the whole search: an assignment is held on it and
+    // released, so no assignment copies the state.
+    let scratch = std::cell::RefCell::new(super::casting::CardHoldScratch::new(
+        life_state.unwrap_or_else(|| state.clone()),
+    ));
     let mut held = Vec::new();
     let mut explored = 0;
     // A search that runs out of budget stays offered, as the alternative-cost
@@ -638,7 +646,7 @@ fn declaration_offerable_reserving(
         &|id| !fodder.contains(&id),
         &mut held,
         &mut explored,
-        &payable,
+        &|objects| scratch.borrow_mut().probe_holding(objects, payable),
     ) != Some(false))
 }
 
@@ -11918,21 +11926,112 @@ pub(super) fn choice_branch_offerable_under_alternative(
     alternative: &AbilityCost,
     branches: &[AbilityCost],
 ) -> Result<bool, EngineError> {
-    let split =
-        split_declared_mana_addition_and_residual(Some(state), Some(pending), alternative.clone())?;
-    if split.residual.is_some() {
+    let Some(priced) = pending_priced_with_mana_alternative(state, pending, alternative)? else {
         return Ok(false);
-    }
-    let mut priced = pending.clone();
-    priced.cost = ManaCost::zero();
-    priced.base_cost = Some(ManaCost::zero());
-    priced.declared_mana_additions.extend(split.declared);
+    };
     for branch in branches {
         if required_declaration_offerable(state, player, &priced, branch, None)? {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// CR 118.9d: `pending` with `alternative`, a mana-only alternative cost, as
+/// the cast's base in place of its mana cost. `None` when the alternative has
+/// a non-mana leg.
+fn pending_priced_with_mana_alternative(
+    state: &GameState,
+    pending: &PendingCast,
+    alternative: &AbilityCost,
+) -> Result<Option<PendingCast>, EngineError> {
+    let split =
+        split_declared_mana_addition_and_residual(Some(state), Some(pending), alternative.clone())?;
+    if split.residual.is_some() {
+        return Ok(None);
+    }
+    let mut priced = pending.clone();
+    priced.cost = ManaCost::zero();
+    priced.base_cost = Some(ManaCost::zero());
+    priced.declared_mana_additions.extend(split.declared);
+    Ok(Some(priced))
+}
+
+/// CR 118.9d + CR 601.2f-h: whether `required`, a required additional cost a
+/// mana ability's cost contends with, can be declared when `alternative`, a
+/// granted alternative cost, is paid in place of the mana cost.
+///
+/// A mana-only alternative (As Foretold's {0}) is the cast's base, and the
+/// declaration authority judges the required cost beside it. CR 118.3 +
+/// CR 118.10: an alternative with a non-mana leg (Conspiracy Unraveler's
+/// collect evidence) is paid with objects too, and one card pays one cost, so
+/// the alternative must still be payable with some assignment of the required
+/// cost's hand and graveyard cards held. The required cost's own legs were
+/// judged by the caller; a leg whose count the joint model doesn't represent
+/// isn't held here.
+pub(super) fn required_declaration_offerable_under_alternative(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    alternative: &AbilityCost,
+    required: &AbilityCost,
+) -> Result<bool, EngineError> {
+    if let Some(priced) = pending_priced_with_mana_alternative(state, pending, alternative)? {
+        return required_declaration_offerable(state, player, &priced, required, None);
+    }
+    // The required cost's mana isn't priced beside an alternative's objects.
+    let split =
+        split_declared_mana_addition_and_residual(Some(state), Some(pending), required.clone())?;
+    if !split.declared.is_empty() || split.payment_mode.is_some() {
+        return Ok(false);
+    }
+    let Some(residual) = split.residual.as_ref() else {
+        return Ok(true);
+    };
+    // The cards either the alternative or a mana ability could also spend.
+    let mut contended = mana_sources::mana_ability_card_fodder(state, player);
+    contended.extend(super::cost_payability::object_cost_candidates(
+        state,
+        player,
+        pending.object_id,
+        alternative,
+    ));
+    let legs = match residual {
+        AbilityCost::Composite { costs } => costs.as_slice(),
+        leaf => std::slice::from_ref(leaf),
+    };
+    let legs = super::cost_payability::reservable_card_legs(
+        state,
+        player,
+        pending.object_id,
+        legs,
+        &contended,
+    );
+    // The same alternative, not another one the held cards leave payable.
+    let alternative_payable = |probe: &GameState| {
+        payable_spell_alternative_cost_details_at_index(
+            probe,
+            player,
+            pending.object_id,
+            pending.casting_permission_index,
+        )
+        .is_some_and(|payable| payable.cost == *alternative)
+    };
+    let scratch = std::cell::RefCell::new(super::casting::CardHoldScratch::new(state.clone()));
+    let mut held = Vec::new();
+    let mut explored = 0;
+    // A search that runs out of budget stays offered; the real payment decides.
+    Ok(assign_reserved_legs(
+        &legs,
+        &|id| !contended.contains(&id),
+        &mut held,
+        &mut explored,
+        &|objects| {
+            scratch
+                .borrow_mut()
+                .probe_holding(objects, alternative_payable)
+        },
+    ) != Some(false))
 }
 
 /// CR 601.2b + CR 601.2f: whether an object's own required additional cost can

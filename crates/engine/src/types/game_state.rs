@@ -29439,6 +29439,14 @@ declare_game_state! {
     /// inside that synchronous window; it is never serialized.
     #[serde(skip)]
     pub active_spend_only_on_x_count: Option<(ObjectId, u32)>,
+    /// CR 601.2g-h + CR 118.3: the hand cards a payment probe holds for another
+    /// leg of the cost it is judging (`casting::CardHoldScratch`). A held card
+    /// can't pay a mana ability's cost, but it is still in its owner's hand
+    /// while mana abilities are activated, so a reveal still reads it
+    /// (`mana_sources::reveal_eligible_hand_cards`). Set only on a probe's
+    /// scratch state; never serialized and never compared.
+    #[serde(skip)]
+    pub(crate) probe_held_hand_cards: Vec<ObjectId>,
     /// Open while an action-ingress player-resource change (life, player
     /// counter, energy) settles synchronously (a `try_*` entry's whole call, or
     /// the replacement-choice handler resuming a `Reject` record). Any such
@@ -41169,6 +41177,7 @@ impl GameState {
             active_graveyard_permission_latch: None,
             active_paid_resolution_offer_tail: None,
             active_spend_only_on_x_count: None,
+            probe_held_hand_cards: Vec::new(),
             ingress_life_window: None,
             released_entry_rows: Vec::new(),
             replacement_quantity_overflow: None,
@@ -45147,6 +45156,7 @@ impl GameState {
             active_graveyard_permission_latch: _,
             active_paid_resolution_offer_tail: _,
             active_spend_only_on_x_count: _,
+            probe_held_hand_cards: _,
             ingress_life_window: _,
             released_entry_rows: _,
             replacement_quantity_overflow: _,
@@ -46741,6 +46751,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_graveyard_permission_latch: _,
         active_paid_resolution_offer_tail: _,
         active_spend_only_on_x_count: _,
+        probe_held_hand_cards: _,
         ingress_life_window: _,
         released_entry_rows: _,
         replacement_quantity_overflow: _,

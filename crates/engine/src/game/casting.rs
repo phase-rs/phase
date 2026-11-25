@@ -13366,10 +13366,6 @@ impl PaymentReservation<'_> {
 /// being sacrificed as a cost (a Yasharn-class prohibition, read by every
 /// sacrifice gate) and, for a tap leg, tapped. `None` when nothing is reserved.
 /// The scratch never reaches a real payment.
-///
-/// CR 118.3 + CR 601.2h: a card committed to another part of the total cost
-/// isn't available to a mana ability's cost; CR 118.10: one payment pays one
-/// cost. A reserved hand or graveyard card is therefore taken out of its zone.
 pub(super) fn reserved_payment_state(
     state: &GameState,
     player: PlayerId,
@@ -13382,57 +13378,130 @@ pub(super) fn reserved_payment_state(
     if let Some(payer) = scratch.players.iter_mut().find(|p| p.id == player) {
         payer.life -= i32::try_from(reserved.life).unwrap_or(i32::MAX);
     }
-    let mut battlefield_held = false;
     for &(id, reserved_use) in reserved.objects {
-        let Some((zone, owner)) = scratch.objects.get(&id).map(|obj| (obj.zone, obj.owner)) else {
+        let Some(obj) = scratch.objects.get_mut(&id) else {
             continue;
         };
-        match zone {
-            Zone::Battlefield => {
-                battlefield_held = true;
-                if reserved_use == ReservedUse::Untapped {
-                    if let Some(obj) = scratch.objects.get_mut(&id) {
-                        obj.tapped = true;
-                    }
-                }
-                // CR 613.1f + CR 613.7: the bar is granted in layer 6 with the
-                // newest timestamp, so an earlier ability-removing effect
-                // (Humility) can't strip it while a later grant's
-                // self-sacrifice mana ability survives.
-                scratch.add_transient_continuous_effect(
-                    id,
-                    player,
-                    Duration::Permanent,
-                    TargetFilter::SpecificObject { id },
-                    vec![ContinuousModification::GrantStaticAbility {
-                        definition: Box::new(StaticDefinition::new(StaticMode::CantPayCost {
-                            who: crate::types::statics::ProhibitionScope::AllPlayers,
-                            cost: crate::types::statics::CostPaymentProhibition::Sacrifice {
-                                filter: TargetFilter::SelfRef,
-                            },
-                        })),
-                    }],
-                    None,
-                );
-            }
-            Zone::Hand | Zone::Graveyard => {
-                // allow-raw-zone: holds a card for another cost leg on the discarded payment-probe clone; no zone change occurs (CR 118.3)
-                super::zones::remove_from_zone(&mut scratch, id, zone, owner);
-                // allow-raw-zone: holds a card for another cost leg on the discarded payment-probe clone; no zone change occurs (CR 118.3)
-                super::zones::add_to_zone(&mut scratch, id, Zone::Exile, owner);
-                if let Some(obj) = scratch.objects.get_mut(&id) {
-                    // allow-raw-zone: holds a card for another cost leg on the discarded payment-probe clone; no zone change occurs (CR 118.3)
-                    obj.zone = Zone::Exile;
-                }
-            }
-            Zone::Library | Zone::Stack | Zone::Exile | Zone::Command => {}
+        if reserved_use == ReservedUse::Untapped {
+            obj.tapped = true;
         }
+        // CR 613.1f + CR 613.7: the bar is granted in layer 6 with the newest
+        // timestamp, so an earlier ability-removing effect (Humility) can't
+        // strip it while a later grant's self-sacrifice mana ability survives.
+        scratch.add_transient_continuous_effect(
+            id,
+            player,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id },
+            vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(StaticDefinition::new(StaticMode::CantPayCost {
+                    who: crate::types::statics::ProhibitionScope::AllPlayers,
+                    cost: crate::types::statics::CostPaymentProhibition::Sacrifice {
+                        filter: TargetFilter::SelfRef,
+                    },
+                })),
+            }],
+            None,
+        );
     }
-    if battlefield_held {
+    if !reserved.objects.is_empty() {
         scratch.layers_dirty.mark_full();
     }
     super::layers::flush_layers(&mut scratch);
     Some(scratch)
+}
+
+/// CR 118.3 + CR 601.2g-h: one scratch state for a whole search over the hand
+/// and graveyard cards a cost's other legs hold. Each assignment is held on it
+/// and released again, so the search copies the state once.
+///
+/// CR 118.3 + CR 118.10: a held card is committed to another part of the total
+/// cost, so no mana ability's cost can use it up: it is taken out of its zone
+/// for the probe. CR 601.2g: mana abilities are activated before costs are
+/// paid, so a held hand card is still in hand for an ability that only reads
+/// it (Metalworker's reveal); `GameState::probe_held_hand_cards` carries those.
+/// The scratch never reaches a real payment.
+pub(super) struct CardHoldScratch {
+    state: GameState,
+}
+
+impl CardHoldScratch {
+    pub(super) fn new(mut state: GameState) -> Self {
+        super::layers::flush_layers(&mut state);
+        Self { state }
+    }
+
+    /// `probe`'s answer with `held`'s hand and graveyard cards held. Objects in
+    /// other zones are left alone.
+    pub(super) fn probe_holding<T>(
+        &mut self,
+        held: &[(ObjectId, ReservedUse)],
+        probe: impl FnOnce(&GameState) -> T,
+    ) -> T {
+        let scratch = &mut self.state;
+        let cards: Vec<(ObjectId, Zone, PlayerId)> = held
+            .iter()
+            .filter_map(|&(id, _)| {
+                let obj = scratch.objects.get(&id)?;
+                matches!(obj.zone, Zone::Hand | Zone::Graveyard)
+                    .then_some((id, obj.zone, obj.owner))
+            })
+            .collect();
+        if cards.is_empty() {
+            return probe(scratch);
+        }
+        // The zones as they stand, restored below so every assignment is
+        // probed on the same state.
+        let zones: Vec<(PlayerId, Zone, im::Vector<ObjectId>)> = cards
+            .iter()
+            .map(|&(_, zone, owner)| (owner, zone, card_zone(scratch, zone, owner).clone()))
+            .collect();
+        let exile = scratch.exile.clone();
+        for &(id, zone, owner) in &cards {
+            // allow-raw-zone: holds a card for another cost leg on the discarded payment-probe scratch; no zone change occurs (CR 118.3)
+            super::zones::remove_from_zone(scratch, id, zone, owner);
+            // allow-raw-zone: holds a card for another cost leg on the discarded payment-probe scratch; no zone change occurs (CR 118.3)
+            super::zones::add_to_zone(scratch, id, Zone::Exile, owner);
+            if let Some(obj) = scratch.objects.get_mut(&id) {
+                // allow-raw-zone: holds a card for another cost leg on the discarded payment-probe scratch; no zone change occurs (CR 118.3)
+                obj.zone = Zone::Exile;
+            }
+            if zone == Zone::Hand {
+                scratch.probe_held_hand_cards.push(id);
+            }
+        }
+        let answer = probe(scratch);
+        scratch.probe_held_hand_cards.clear();
+        for &(id, zone, _) in &cards {
+            if let Some(obj) = scratch.objects.get_mut(&id) {
+                // allow-raw-zone: releases a held card on the discarded payment-probe scratch; no zone change occurs (CR 118.3)
+                obj.zone = zone;
+            }
+        }
+        for (owner, zone, cards) in zones {
+            // allow-raw-zone: releases held cards on the discarded payment-probe scratch; no zone change occurs (CR 118.3)
+            *card_zone(scratch, zone, owner) = cards;
+        }
+        // allow-raw-zone: releases held cards on the discarded payment-probe scratch; no zone change occurs (CR 118.3)
+        scratch.exile = exile;
+        answer
+    }
+}
+
+/// `owner`'s hand or graveyard, the zones [`CardHoldScratch`] holds cards in.
+fn card_zone(state: &mut GameState, zone: Zone, owner: PlayerId) -> &mut im::Vector<ObjectId> {
+    match zone {
+        Zone::Graveyard => state.graveyard_of_mut(owner),
+        _ => {
+            // allow-raw-zone: the probe scratch's own hand storage (CR 118.3)
+            &mut state
+                .players
+                .iter_mut()
+                .find(|p| p.id == owner)
+                .expect("owner exists")
+                .hand
+        }
+    }
 }
 
 /// CR 601.2g-h: whether the Auto payer can pay `cost` with `reserved` spoken for.
@@ -23426,20 +23495,27 @@ fn can_cast_prepared_now_with_probe(
         // discard beside Thrill of Possibility), the two are judged together
         // by the declaration-time authority. The contention gate keeps every
         // other spell, and every battlefield leg, on the checks above.
-        // CR 118.9: an alternative cost replaces the mana cost judged here, so
-        // a payable granted one keeps the cast on offer.
         if casting_costs::cost_contends_with_mana_abilities(state, player, prepared.object_id, cost)
-            && !granted_alternative_cost(state, player, prepared).is_some()
-            && !casting_costs::required_declaration_offerable(
-                state,
-                player,
-                &prepared_declaration_pending(prepared, player),
-                cost,
-                None,
-            )
-            .unwrap_or(false)
         {
-            return false;
+            let pending = prepared_declaration_pending(prepared, player);
+            // CR 118.9d: additional costs apply to an alternative cost, which
+            // replaces the mana cost judged first. A payable granted one keeps
+            // the cast on offer when the cost can be paid beside it.
+            if !casting_costs::required_declaration_offerable(state, player, &pending, cost, None)
+                .unwrap_or(false)
+                && !granted_alternative_cost(state, player, prepared).is_some_and(|alternative| {
+                    casting_costs::required_declaration_offerable_under_alternative(
+                        state,
+                        player,
+                        &pending,
+                        &alternative.cost,
+                        cost,
+                    )
+                    .unwrap_or(false)
+                })
+            {
+                return false;
+            }
         }
     }
 
@@ -41001,5 +41077,65 @@ mod alternative_keyword_cost_journal_tests {
             cost_observable_activation_journal(runner.state()).is_empty(),
             "with no first-activation modifier on the board the rows are stripped"
         );
+    }
+}
+
+#[cfg(test)]
+mod card_hold_scratch_tests {
+    use super::{CardHoldScratch, ReservedUse};
+    use crate::game::perf_counters::take_cost_snapshot;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::zones::Zone;
+
+    /// CR 118.3 + CR 601.2g-h: a search holds every assignment on one scratch.
+    /// Each hold takes its cards out of hand and graveyard, keeps the hand card
+    /// readable, and is released in full, and the state is copied once however
+    /// many assignments are held.
+    #[test]
+    fn holds_are_released_and_the_state_is_copied_once() {
+        let mut sc = GameScenario::new();
+        let hand: Vec<ObjectId> = (0..3)
+            .map(|i| sc.add_card_to_hand(P0, &format!("Hand Card {i}")))
+            .collect();
+        let graveyard: Vec<ObjectId> = (0..3)
+            .map(|i| {
+                sc.add_spell_to_graveyard(P0, &format!("Graveyard Card {i}"), true)
+                    .id()
+            })
+            .collect();
+        let runner = sc.build();
+        let state = runner.state();
+        let zones = |probe: &crate::types::game_state::GameState| {
+            (
+                probe.players[0].hand.clone(),
+                probe.graveyard_of(P0).clone(),
+                probe.exile.clone(),
+            )
+        };
+
+        let before = take_cost_snapshot();
+        let mut scratch = CardHoldScratch::new(state.clone());
+        for (&in_hand, &in_graveyard) in hand.iter().zip(&graveyard) {
+            let held = [
+                (in_hand, ReservedUse::Present),
+                (in_graveyard, ReservedUse::Present),
+            ];
+            scratch.probe_holding(&held, |probe| {
+                assert!(!probe.players[0].hand.contains(&in_hand));
+                assert!(!probe.graveyard_of(P0).contains(&in_graveyard));
+                assert_eq!(probe.objects[&in_hand].zone, Zone::Exile);
+                assert_eq!(probe.objects[&in_graveyard].zone, Zone::Exile);
+                assert!(probe.exile.contains(&in_hand) && probe.exile.contains(&in_graveyard));
+                assert_eq!(probe.probe_held_hand_cards, vec![in_hand]);
+            });
+            scratch.probe_holding(&[], |probe| {
+                assert_eq!(zones(probe), zones(state));
+                assert_eq!(probe.objects[&in_hand].zone, Zone::Hand);
+                assert_eq!(probe.objects[&in_graveyard].zone, Zone::Graveyard);
+                assert!(probe.probe_held_hand_cards.is_empty());
+            });
+        }
+        assert_eq!(take_cost_snapshot().since(before).state_copies, 1);
     }
 }

@@ -34,6 +34,9 @@ const AS_FORETOLD: &str = "At the beginning of your upkeep, put a time counter o
 const CONSPIRACY_UNRAVELER: &str = "Flying\nYou may collect evidence 10 rather than pay the mana cost for spells you cast. (To collect evidence 10, exile cards with total mana value 10 or greater from your graveyard.)";
 const STITCHED_DRAKE: &str =
     "As an additional cost to cast this spell, exile a creature card from your graveyard.\nFlying";
+const CORPSE_EXPLOSION: &str = "As an additional cost to cast this spell, exile a creature card from your graveyard.\nCorpse Explosion deals damage equal to the exiled card's power to each creature and each planeswalker.";
+const UNEXPECTED_WINDFALL: &str = "As an additional cost to cast this spell, discard a card.\nDraw two cards and create two Treasure tokens. (They're artifacts with \"{T}, Sacrifice this token: Add one mana of any color.\")";
+const METALWORKER: &str = "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.";
 
 fn cost(generic: u32, shards: &[ManaCostShard]) -> ManaCost {
     ManaCost::Cost {
@@ -112,6 +115,8 @@ struct Answers {
     optional: CostElection,
     /// Objects preferred when a cost asks for a selection.
     picks: Vec<ObjectId>,
+    /// The cards exiled when evidence is collected.
+    evidence: Vec<ObjectId>,
 }
 
 struct Trail {
@@ -170,6 +175,9 @@ fn drive(runner: &mut GameRunner, spell: ObjectId, answers: &Answers) -> Trail {
                 }
                 GameAction::SelectCards { cards }
             }
+            WaitingFor::CollectEvidenceChoice { .. } => GameAction::SelectCards {
+                cards: answers.evidence.clone(),
+            },
             WaitingFor::ManaSourceSelection { options, .. } => {
                 let Some(selection) = options.first().cloned() else {
                     panic!(
@@ -530,6 +538,7 @@ fn redemptor_dreadnought_exile_is_offered_only_with_a_card_to_spare() {
             optional: CostElection::Pay,
             // The mana ability's exile takes the noncreature card if asked first.
             picks: vec![other],
+            ..Answers::default()
         },
     );
     assert!(
@@ -768,4 +777,135 @@ fn an_alternative_cost_with_an_object_leg_does_not_open_a_contended_choice() {
 
     assert!(!castable(&runner, spell));
     assert!(!offered(&runner, spell));
+}
+
+/// P0: Corpse Explosion in hand, Conspiracy Unraveler and Rubble Rouser on the
+/// battlefield and no land; Desolation Twin in the graveyard and, with `spare`,
+/// a second creature card beside it.
+fn corpse_explosion_board(spare: bool) -> (Board, ObjectId, Option<ObjectId>) {
+    let mut sc = scenario();
+    let spell = sc
+        .add_spell_to_hand_from_oracle(P0, "Corpse Explosion", false, CORPSE_EXPLOSION)
+        .with_mana_cost(cost(1, &[ManaCostShard::Black, ManaCostShard::Red]))
+        .id();
+    sc.add_creature_from_oracle(P0, "Conspiracy Unraveler", 6, 6, CONSPIRACY_UNRAVELER)
+        .with_mana_cost(cost(5, &[ManaCostShard::Blue, ManaCostShard::Blue]));
+    add_rubble_rouser(&mut sc);
+    let twin = sc
+        .add_creature_to_graveyard(P0, "Desolation Twin", 10, 10)
+        .with_mana_cost(cost(10, &[]))
+        .id();
+    let other = spare.then(|| {
+        sc.add_creature_to_graveyard(P0, "Graveyard Creature", 1, 1)
+            .with_mana_cost(cost(1, &[ManaCostShard::Green]))
+            .id()
+    });
+    (
+        Board {
+            runner: sc.build(),
+            spell,
+        },
+        twin,
+        other,
+    )
+}
+
+/// T13. CR 118.9d + CR 118.10, the Required twin of T12: {1}{B}{R} can't be
+/// paid, and Conspiracy Unraveler's collect evidence 10 is paid with graveyard
+/// cards, as Corpse Explosion's own cost is. One card pays one cost, so the
+/// sole Desolation Twin can't be exiled for both and the cast isn't offered.
+/// With a second creature card the Twin is the evidence and the other card
+/// pays the additional cost.
+#[test]
+fn an_alternative_cost_and_a_required_cost_need_distinct_cards() {
+    let (sole, _, _) = corpse_explosion_board(false);
+    assert!(
+        !castable(&sole.runner, sole.spell),
+        "one card can't be exiled for both costs"
+    );
+    assert!(
+        !offered(&sole.runner, sole.spell),
+        "one card can't be exiled for both costs"
+    );
+
+    let (mut both, twin, other) = corpse_explosion_board(true);
+    let other = other.unwrap();
+    assert!(castable(&both.runner, both.spell));
+    assert!(offered(&both.runner, both.spell));
+    let trail = drive(
+        &mut both.runner,
+        both.spell,
+        &Answers {
+            picks: vec![other],
+            evidence: vec![twin],
+            ..Answers::default()
+        },
+    );
+    assert_cast_completes(&both.runner, both.spell, &trail, "a second creature card");
+    assert_eq!(zone(&both.runner, twin), Zone::Exile);
+    assert_eq!(zone(&both.runner, other), Zone::Exile);
+}
+
+/// P0: Unexpected Windfall and `other` in hand, Skirge Familiar, two Mountains
+/// and `source` on the battlefield.
+fn windfall_board(source: WindfallSource, artifact_in_hand: bool) -> Board {
+    let mut sc = scenario();
+    let spell = sc
+        .add_spell_to_hand_from_oracle(P0, "Unexpected Windfall", true, UNEXPECTED_WINDFALL)
+        .with_mana_cost(cost(2, &[ManaCostShard::Red, ManaCostShard::Red]))
+        .id();
+    sc.add_creature_from_oracle(P0, "Skirge Familiar", 3, 2, SKIRGE_FAMILIAR)
+        .with_mana_cost(cost(4, &[ManaCostShard::Black]));
+    sc.add_basic_land(P0, ManaColor::Red);
+    sc.add_basic_land(P0, ManaColor::Red);
+    match source {
+        WindfallSource::Metalworker => {
+            sc.add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER)
+                .as_artifact_creature()
+                .with_mana_cost(cost(3, &[]));
+        }
+        WindfallSource::Mountain => {
+            sc.add_basic_land(P0, ManaColor::Red);
+        }
+    }
+    if artifact_in_hand {
+        sc.add_creature_to_hand(P0, "Ornithopter", 0, 2)
+            .as_artifact_creature()
+            .with_mana_cost(cost(0, &[]));
+    } else {
+        sc.add_land_to_hand(P0, "Island");
+    }
+    Board {
+        runner: sc.build(),
+        spell,
+    }
+}
+
+/// What makes Unexpected Windfall's last two mana beside the two Mountains.
+enum WindfallSource {
+    Metalworker,
+    Mountain,
+}
+
+/// T14. CR 601.2g: mana abilities are activated before costs are paid, so the
+/// Ornithopter held for Unexpected Windfall's discard is still in hand when
+/// Metalworker reveals it for {C}{C}: reading a card doesn't use it up, and the
+/// cast is offered. Skirge Familiar's discard does use it up: with a third
+/// Mountain in Metalworker's place the fourth mana needs that discard, and with
+/// an Island in hand Metalworker has no artifact to reveal. Neither is offered.
+///
+/// Only the offer is asserted. The engine pays a chosen discard before its
+/// mana-ability window, so the offered cast can't be completed yet. The
+/// predicate is asserted only on the positive board, as in T5.
+#[test]
+fn a_held_card_is_still_revealed_for_mana() {
+    let revealed = windfall_board(WindfallSource::Metalworker, true);
+    assert!(castable(&revealed.runner, revealed.spell));
+    assert!(offered(&revealed.runner, revealed.spell));
+
+    let mut discarded = windfall_board(WindfallSource::Mountain, true);
+    assert_not_castable(&mut discarded.runner, discarded.spell, "Skirge Familiar");
+
+    let mut no_artifact = windfall_board(WindfallSource::Metalworker, false);
+    assert_not_castable(&mut no_artifact.runner, no_artifact.spell, "an Island");
 }
