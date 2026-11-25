@@ -613,6 +613,7 @@ impl Broker {
         &self,
         request_id: Option<TournamentRequestId>,
         outcome: Result<GatedEffect, String>,
+        tournament_to_host: Option<&mut Option<String>>,
     ) -> Vec<Outbound> {
         let GatedEffect {
             code,
@@ -623,6 +624,9 @@ impl Broker {
             Err(reason) => return vec![settle_rejection(request_id, &reason)],
         };
 
+        if let Some(tournament_to_host) = tournament_to_host {
+            *tournament_to_host = Some(code.clone());
+        }
         let mut out = Vec::new();
         if let Some(request_id) = request_id {
             out.push(Outbound::ToSelf(LobbyServerMessage::TournamentActionAck {
@@ -697,10 +701,9 @@ impl Broker {
     }
 
     /// [`Broker::handle`], plus whether durable state changed
-    /// ([`Handled::persisted`]), so a persisting shell writes its snapshot only
-    /// for a frame that needs one. The host-liveness refresh is not part of this
-    /// report: it is decided by [`Broker::host_liveness_refresh_due`] before the
-    /// frame runs, and a shell combines the two.
+    /// ([`Handled::persisted`]) and any committed tournament hosting work.
+    /// The host-liveness refresh is decided separately by
+    /// [`Broker::host_liveness_refresh_due`] before the frame runs.
     pub fn handle_reporting(
         &mut self,
         conn: &mut ConnState,
@@ -735,12 +738,12 @@ impl Broker {
         }
         match persisted_effect(&msg) {
             PersistedEffect::None => {
-                return Handled::unchanged(self.dispatch(conn, msg, request_id, env));
+                return Handled::unchanged(self.dispatch(conn, msg, request_id, env, &mut None));
             }
             // A removal only deletes, so it cannot outgrow the store and needs no
             // admission; it does change the persisted value.
             PersistedEffect::Removes => {
-                return Handled::changed(self.dispatch(conn, msg, request_id, env));
+                return Handled::changed(self.dispatch(conn, msg, request_id, env, &mut None));
             }
             PersistedEffect::MayGrow => {}
         }
@@ -750,7 +753,7 @@ impl Broker {
         // the whole-broker accounting below, whose cost is proportional to all
         // retained state, not to the size of the request.
         if self.addresses_missing_tournament(&msg) {
-            return Handled::unchanged(self.dispatch(conn, msg, request_id, env));
+            return Handled::unchanged(self.dispatch(conn, msg, request_id, env, &mut None));
         }
         // The persistence boundary. Every frame that can grow the persisted value
         // runs against a checkpoint and is admitted only if the result still fits
@@ -764,11 +767,13 @@ impl Broker {
             tournaments: self.tournaments.clone(),
             conn: conn.clone(),
         };
-        let outbounds = self.dispatch(conn, msg, request_id, env);
+        let mut tournament_to_host = None;
+        let outbounds = self.dispatch(conn, msg, request_id, env, &mut tournament_to_host);
         match self.admit_or_restore(checkpoint, conn) {
             Ok(persisted) => Handled {
                 outbounds,
                 persisted,
+                tournament_to_host,
             },
             Err(reason) => {
                 warn!(%reason, "write refused at the persistence boundary");
@@ -879,6 +884,7 @@ impl Broker {
         msg: LobbyClientMessage,
         request_id: Option<TournamentRequestId>,
         env: &impl BrokerEnv,
+        tournament_to_host: &mut Option<String>,
     ) -> Vec<Outbound> {
         match msg {
             LobbyClientMessage::ClientHello {
@@ -1082,7 +1088,7 @@ impl Broker {
                 request_id,
             } => {
                 let outcome = self.handle_start_tournament_round(code, organizer_token, env);
-                self.settle_gated(request_id, outcome)
+                self.settle_gated(request_id, outcome, Some(tournament_to_host))
             }
 
             LobbyClientMessage::ReportMatchResult {
@@ -1094,7 +1100,7 @@ impl Broker {
             } => {
                 let outcome =
                     self.handle_report_match_result(code, pairing_id, player_token, reported, env);
-                self.settle_gated(request_id, outcome)
+                self.settle_gated(request_id, outcome, None)
             }
 
             LobbyClientMessage::SubmitTournamentDeck {
@@ -1104,7 +1110,7 @@ impl Broker {
                 request_id,
             } => {
                 let outcome = self.handle_submit_tournament_deck(code, player_token, deck, env);
-                self.settle_gated(request_id, outcome)
+                self.settle_gated(request_id, outcome, Some(tournament_to_host))
             }
 
             LobbyClientMessage::DropFromTournament {
@@ -1113,7 +1119,7 @@ impl Broker {
                 request_id,
             } => {
                 let outcome = self.handle_drop_from_tournament(code, player_token, env);
-                self.settle_gated(request_id, outcome)
+                self.settle_gated(request_id, outcome, None)
             }
 
             LobbyClientMessage::EndTournament {
@@ -1122,7 +1128,7 @@ impl Broker {
                 request_id,
             } => {
                 let outcome = self.handle_end_tournament(code, organizer_token, env);
-                self.settle_gated(request_id, outcome)
+                self.settle_gated(request_id, outcome, None)
             }
         }
     }
@@ -2410,12 +2416,13 @@ pub enum PersistedChange {
     Changed,
 }
 
-/// The result of [`Broker::handle_reporting`]: the shell's side effects and
-/// whether durable state changed.
+/// The shell's ordered outbounds, durable change, and committed hosting work.
 #[derive(Debug)]
 pub struct Handled {
     pub outbounds: Vec<Outbound>,
     pub persisted: PersistedChange,
+    /// A committed round start or deck submission may make this tournament hostable.
+    pub tournament_to_host: Option<String>,
 }
 
 impl Handled {
@@ -2423,6 +2430,7 @@ impl Handled {
         Self {
             outbounds,
             persisted: PersistedChange::Unchanged,
+            tournament_to_host: None,
         }
     }
 
@@ -2430,6 +2438,7 @@ impl Handled {
         Self {
             outbounds,
             persisted: PersistedChange::Changed,
+            tournament_to_host: None,
         }
     }
 }
@@ -4489,6 +4498,42 @@ mod tests {
         );
         assert!(!is_error(&out), "round 1 must pair: {out:?}");
         (code, organizer_token, token_a, token_b)
+    }
+
+    #[test]
+    fn hosting_signal_requires_a_committed_round_or_deck_change() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code, organizer_token) =
+            make_tournament(&mut conn, &mut broker, &env, BracketShape::Swiss);
+        let player_token = join_tournament(&mut conn, &mut broker, &env, &code, "key-a", "Alice");
+        let _bob_token = join_tournament(&mut conn, &mut broker, &env, &code, "key-b", "Bob");
+
+        let start = |token: &str| LobbyClientMessage::StartTournamentRound {
+            code: code.clone(),
+            organizer_token: token.to_owned(),
+            request_id: None,
+        };
+        let refused = broker.handle_reporting(&mut conn, start("unknown"), &env);
+        assert!(is_error(&refused.outbounds));
+        assert_eq!(refused.tournament_to_host, None);
+        let committed = broker.handle_reporting(&mut conn, start(&organizer_token), &env);
+        assert!(!is_error(&committed.outbounds));
+        assert_eq!(committed.tournament_to_host.as_deref(), Some(code.as_str()));
+
+        let submit = |token: &str| LobbyClientMessage::SubmitTournamentDeck {
+            code: code.clone(),
+            player_token: token.to_owned(),
+            deck: test_deck(),
+            request_id: None,
+        };
+        let refused = broker.handle_reporting(&mut conn, submit("unknown"), &env);
+        assert!(is_error(&refused.outbounds));
+        assert_eq!(refused.tournament_to_host, None);
+        let committed = broker.handle_reporting(&mut conn, submit(&player_token), &env);
+        assert!(!is_error(&committed.outbounds));
+        assert_eq!(committed.tournament_to_host.as_deref(), Some(code.as_str()));
     }
 
     // -- Row 1: organizer token reaches only its creator --------------------
@@ -8725,17 +8770,30 @@ mod tests {
             let mut broker = land_past_ceiling(&broker, 1);
             let before = serialized(&broker);
             let before_conn = alice.clone();
-            let out = broker.handle(&mut alice, submit_frame(&victim, &token, 10_000, 41), &env);
+            let handled = broker.handle_reporting(
+                &mut alice,
+                submit_frame(&victim, &token, 10_000, 41),
+                &env,
+            );
+            assert_eq!(
+                handled.tournament_to_host, None,
+                "rolled back submissions cannot host"
+            );
             assert_eq!(serialized(&broker), before, "the prior snapshot is intact");
             assert_eq!(alice, before_conn);
-            let (id, reason) = rejection_of(&out);
+            let (id, reason) = rejection_of(&handled.outbounds);
             assert_eq!(id, TournamentRequestId(41), "refusal keeps its correlation");
             assert!(reason.contains("at capacity"), "{reason}");
 
             // Exactly at the ceiling: admitted, and the value fills it to the byte.
             let mut broker = land_past_ceiling(&broker, 0);
-            let out = broker.handle(&mut alice, submit_frame(&victim, &token, 10_000, 42), &env);
-            assert_eq!(ack_of(&out).0, TournamentRequestId(42));
+            let handled = broker.handle_reporting(
+                &mut alice,
+                submit_frame(&victim, &token, 10_000, 42),
+                &env,
+            );
+            assert_eq!(handled.tournament_to_host.as_deref(), Some(victim.as_str()));
+            assert_eq!(ack_of(&handled.outbounds).0, TournamentRequestId(42));
             assert_eq!(
                 broker.snapshot_encoded_bytes(),
                 PHYSICAL_SNAPSHOT_LIMIT_BYTES

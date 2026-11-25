@@ -5977,13 +5977,13 @@ async fn dispatch_broker(
     player_count: &SharedPlayerCount,
     tx: &crate::socket_mailbox::Sender,
     identity: &mut SocketIdentity,
-) {
+) -> Option<String> {
     if let Err(reason) = guard_broker_projection_inbound(msg) {
         let _ = tx.send(ServerMessage::error(reason));
-        return;
+        return None;
     }
     let Some(lobby_msg) = to_lobby_client_message(msg) else {
-        return;
+        return None;
     };
     dispatch_broker_msg(
         lobby_msg,
@@ -5993,7 +5993,7 @@ async fn dispatch_broker(
         tx,
         identity,
     )
-    .await;
+    .await
 }
 
 /// Lower-level broker dispatch taking an already-projected
@@ -6007,27 +6007,28 @@ async fn dispatch_broker_msg(
     player_count: &SharedPlayerCount,
     tx: &crate::socket_mailbox::Sender,
     identity: &mut SocketIdentity,
-) {
+) -> Option<String> {
     let mut conn = identity.to_conn_state();
     // Production socket Pings are intercepted by the reader/decoder, with
     // hosted presence refreshed independently. Broker-facing callers of this
     // dispatcher still share its stateless policy without taking the lobby lock.
     if let Some(reply) = Broker::stateless_reply(&conn, &lobby_msg) {
         let _ = tx.send(to_server_message(reply));
-        return;
+        return None;
     }
     let mut broker = lobby.lock().await;
-    let outbounds = broker.handle(&mut conn, lobby_msg, &SysEnv);
+    let handled = broker.handle_reporting(&mut conn, lobby_msg, &SysEnv);
     identity.absorb_conn_state(conn);
     apply_outbounds(
         &broker,
-        outbounds,
+        handled.outbounds,
         tx,
         lobby_subscribers,
         player_count,
         identity.hello_build_commit(),
     )
     .await;
+    handled.tournament_to_host
 }
 
 /// Interpret an ordered `Vec<Outbound>` from the broker over the shell's
@@ -7850,7 +7851,11 @@ async fn maybe_spawn_tournament_matches(
         .tournaments()
         .hostable_pairings(&code_owned)
         .iter()
-        .any(|hostable| hosting_guard.game_code_for(&code_owned, hostable.pairing_id).is_none());
+        .any(|hostable| {
+            hosting_guard
+                .game_code_for(&code_owned, hostable.pairing_id)
+                .is_none()
+        });
     if !has_spawnable {
         return;
     }
@@ -7889,10 +7894,11 @@ async fn maybe_spawn_tournament_matches(
                 //    failure (a state the readiness gate already excludes)
                 //    rolls the game back rather than leaving it masquerading as
                 //    the hosted table.
-                match lobby_guard
-                    .tournaments_mut()
-                    .begin_hosting(&spawn.code, spawn.pairing_id, &SysEnv)
-                {
+                match lobby_guard.tournaments_mut().begin_hosting(
+                    &spawn.code,
+                    spawn.pairing_id,
+                    &SysEnv,
+                ) {
                     Ok(_generation) => {
                         hosting_guard.bind(&spawn.code, spawn.pairing_id, spawn.game_code.clone());
                         count += 1;
@@ -13860,7 +13866,7 @@ async fn handle_client_message(
         | ClientMessage::DropFromTournament { .. }
         | ClientMessage::EndTournament { .. }
         | ClientMessage::RenewTournamentCredential { .. } => {
-            dispatch_broker(
+            let tournament_to_host = dispatch_broker(
                 &client_msg,
                 lobby,
                 lobby_subscribers,
@@ -13869,39 +13875,21 @@ async fn handle_client_message(
                 identity,
             )
             .await;
-            // A newly paired round or a newly-complete deck set can make a
-            // pairing hostable; spawn any ready hosted games.
-            //
-            // Hosting runs real game engines, so it belongs only to a Full-mode
-            // server — a LobbyOnly node rejects reconnect, actions and
-            // concessions, which would strand any pairing it marked Hosted (the
-            // broker dispatch above stays mode-agnostic, so the tournament stays
-            // manually reportable there). Calling this after every tournament
-            // frame — authorized or rejected — is safe and cheap: a rejected
-            // frame mutates no tournament state, so `maybe_spawn`'s readiness
-            // pre-check finds no newly-hostable pairing and returns before any
-            // CPU admission or game creation. The authoritative trust boundary
-            // is the core's `hostable_pairings` plus `begin_hosting`
-            // re-validation, not this call site.
-            if matches!(mode, ServerMode::Full) {
-                match &client_msg {
-                    ClientMessage::StartTournamentRound { code, .. }
-                    | ClientMessage::SubmitTournamentDeck { code, .. } => {
-                        maybe_spawn_tournament_matches(
-                            code,
-                            lobby,
-                            state,
-                            db,
-                            combos,
-                            tournament_hosting,
-                            &context.game_executor,
-                            game_db,
-                            context.limits.max_games,
-                        )
-                        .await;
-                    }
-                    _ => {}
-                }
+            // Hosting follows a broker-authorized, committed change on a node
+            // that can run the resulting game and accept its actions.
+            if let (ServerMode::Full, Some(code)) = (mode, tournament_to_host) {
+                maybe_spawn_tournament_matches(
+                    &code,
+                    lobby,
+                    state,
+                    db,
+                    combos,
+                    tournament_hosting,
+                    &context.game_executor,
+                    game_db,
+                    context.limits.max_games,
+                )
+                .await;
             }
         }
     }
@@ -20625,7 +20613,7 @@ mod game_submission_tests {
     use engine::types::zones::Zone;
     use futures_util::SinkExt;
     use server_core::game_action_payload_guard::MAX_ACTION_LIST_LEN;
-    use server_core::protocol::{AiSeatRequest, DeckData};
+    use server_core::protocol::{AiSeatRequest, DeckData, TournamentRequestId, TournamentView};
     use tokio_tungstenite::tungstenite::Message as WsMessage;
     use tokio_tungstenite::MaybeTlsStream;
     use tokio_tungstenite::WebSocketStream;
@@ -21159,28 +21147,32 @@ mod game_submission_tests {
         assert!(result.is_ok(), "the finished game was never delisted");
     }
 
-    /// End-to-end hosted-tournament lifecycle through the production code paths:
-    /// a ready Swiss + head-to-head + Bo3 pairing is spawned by the production
-    /// trigger, the spawned game carries a persisted Full runtime identity, the
-    /// spawn is idempotent, and driving the match terminal through the
-    /// production contest handler reports the result back to the tournament core
-    /// and releases the hosting binding.
-    ///
-    /// Discriminating: it fails if the runtime-init (F1), the spawn, or the
-    /// game-over handoff wiring is reverted — reverting runtime init strands the
-    /// snapshot assertion (and the terminal cannot report), and removing the
-    /// handoff leaves the pairing result-less and the binding live.
-    #[tokio::test]
-    async fn a_hosted_tournament_match_spawns_runs_and_reports_through_production() {
-        use engine::types::contest::{ContestConfig, ContestKind, ContestState};
-        use lobby_broker::tournament::{
-            BracketShape, CreateTournamentRequest, MatchArity, ScoringPolicy,
-        };
+    type TournamentTestSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-        // A one-card DB whose only entry is a basic land: a 60-Forest deck is a
-        // legal Standard list (basics are exempt from the 4-copy limit), so it
-        // passes the hosted-spawn deck-legality gate and the engine can start
-        // the game.
+    async fn get_tournament_view(socket: &mut TournamentTestSocket, code: &str) -> TournamentView {
+        send_test_message(
+            socket,
+            &ClientMessage::GetTournament {
+                code: code.to_string(),
+            },
+            false,
+        )
+        .await;
+        match recv_server_message(socket).await {
+            ServerMessage::TournamentUpdate {
+                code: reply_code,
+                view,
+            } => {
+                assert_eq!(reply_code, code);
+                view
+            }
+            other => panic!("expected tournament view, got {other:?}"),
+        }
+    }
+
+    fn hosted_tournament_deck_fixture() -> (CardDatabase, DeckData) {
+        // Forest is exempt from the four-copy limit. Use a legal 60-card
+        // Standard deck with a sideboard for the engine's Bo3 admission gate.
         let db = CardDatabase::from_json_str(
             &serde_json::json!({
                 "forest": {
@@ -21195,118 +21187,224 @@ mod game_submission_tests {
             .to_string(),
         )
         .expect("forest db");
-        let (_url, server, _temp_dir, app) = spawn_full_mode_server_with_db(db).await;
-        let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-            let tcode = "TOURNEY";
-            // Supply a sideboard to satisfy the engine's current Bo3 admission policy.
-            // Basics are exempt from the copy limit.
-            let forest = DeckData {
-                main_deck: vec!["Forest".to_string(); 60],
-                sideboard: vec!["Forest".to_string(); 15],
-                ..Default::default()
-            };
-            // Drive the tournament to a ready, hostable pairing through the core
-            // the dispatch path mutates.
-            let pairing_id = {
-                let mut broker = app.lobby.lock().await;
-                let t = broker.tournaments_mut();
-                let arity = MatchArity::new(2).expect("arity");
-                t.create_tournament(
-                    tcode,
-                    CreateTournamentRequest {
-                        name: "E2E".to_string(),
-                        arity,
-                        scoring: ScoringPolicy::default_for_arity(arity),
-                        bracket: BracketShape::Swiss,
-                        total_rounds: None,
-                        plus_rounds: None,
-                        format: None,
-                        match_type: None,
-                    },
-                    &SysEnv,
-                )
-                .expect("create tournament");
-                t.join_tournament(tcode, "p0", "P0", &SysEnv).expect("join 0");
-                t.join_tournament(tcode, "p1", "P1", &SysEnv).expect("join 1");
-                t.generate_pairings(tcode, &SysEnv).expect("pair round 1");
-                t.submit_deck(tcode, "p0", forest.clone(), &SysEnv)
-                    .expect("deck 0");
-                t.submit_deck(tcode, "p1", forest.clone(), &SysEnv)
-                    .expect("deck 1");
-                assert!(
-                    !t.hostable_pairings(tcode).is_empty(),
-                    "reach guard: the pairing is ready to host"
-                );
-                t.get(tcode).expect("tournament").pairings[0].id
-            };
+        let deck = DeckData {
+            main_deck: vec!["Forest".to_string(); 60],
+            sideboard: vec!["Forest".to_string(); 15],
+            ..Default::default()
+        };
+        (db, deck)
+    }
 
-            // Production spawn trigger.
-            maybe_spawn_tournament_matches(
-                tcode,
-                &app.lobby,
-                &app.sessions,
-                &app.db,
-                &app.combos,
-                &app.tournament_hosting,
-                &app.context.game_executor,
-                &app.game_db,
-                app.context.limits.max_games,
+    /// Exercise Full WebSocket dispatch from registration through a persisted
+    /// hosted game and its server-reported result.
+    #[tokio::test]
+    async fn a_hosted_tournament_match_spawns_runs_and_reports_through_production() {
+        use engine::types::contest::{ContestConfig, ContestKind, ContestState};
+        use engine::types::match_config::MatchType;
+        use lobby_broker::tournament::{
+            BracketShape, MatchArity, PairingOutcome, PodOutcome, ReportGate,
+        };
+
+        async fn apply_action(
+            socket: &mut TournamentTestSocket,
+            code: &str,
+            action: ClientMessage,
+        ) -> TournamentView {
+            let expected_id = match &action {
+                ClientMessage::StartTournamentRound { request_id, .. }
+                | ClientMessage::SubmitTournamentDeck { request_id, .. } => {
+                    request_id.expect("correlated action")
+                }
+                _ => unreachable!("expected a round start or deck submission"),
+            };
+            send_test_message(socket, &action, false).await;
+            match recv_server_message(socket).await {
+                ServerMessage::TournamentActionAck {
+                    request_id,
+                    code: ack_code,
+                    view,
+                } => {
+                    assert_eq!(request_id, expected_id);
+                    assert_eq!(ack_code, code);
+                    view
+                }
+                other => panic!("expected tournament action acknowledgement, got {other:?}"),
+            }
+        }
+
+        let (db, forest) = hosted_tournament_deck_fixture();
+        let (url, server, _temp_dir, app) = spawn_full_mode_server_with_db(db).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let mut socket = connect_and_hello(url).await;
+            send_test_message(
+                &mut socket,
+                &ClientMessage::CreateTournament {
+                    name: "E2E".to_string(),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: None,
+                    bracket: BracketShape::Swiss,
+                    total_rounds: Some(1),
+                    plus_rounds: None,
+                    format: None,
+                    match_type: Some(MatchType::Bo3),
+                },
+                false,
             )
             .await;
+            let (tcode, organizer_token) = match recv_server_message(&mut socket).await {
+                ServerMessage::TournamentCreated {
+                    code,
+                    organizer_token,
+                    ..
+                } => (code, organizer_token),
+                other => panic!("expected tournament creation, got {other:?}"),
+            };
 
-            // Successful creation, durable hosted marker, and binding.
-            let game_code = app
-                .tournament_hosting
-                .lock()
-                .await
-                .game_code_for(tcode, pairing_id)
-                .map(str::to_string)
-                .expect("a hosted game was spawned and bound to the pairing");
-            assert!(
-                app.lobby
-                    .lock()
-                    .await
-                    .tournaments()
-                    .hosting_generation(tcode, pairing_id)
-                    .is_some(),
-                "the pairing is marked hosted in the core"
-            );
-            // Runtime identity: the spawned session has a persisted Full runtime
-            // (reverting F1 removes this — the snapshot would be unavailable, or
-            // the game would have been rolled back and never bound above).
-            {
-                let handle = app.sessions.lock().await.session(&game_code).expect("session");
-                let mut session = handle.lock().await;
-                session
-                    .full_persist_snapshot()
-                    .expect("a runtime-bound hosted session has a snapshot");
+            let mut player_tokens = HashMap::new();
+            for key in ["alice", "bob", "carol"] {
+                send_test_message(
+                    &mut socket,
+                    &ClientMessage::JoinTournament {
+                        code: tcode.clone(),
+                        player_key: key.to_string(),
+                        display_name: key.to_string(),
+                    },
+                    false,
+                )
+                .await;
+                let player_token = match recv_server_message(&mut socket).await {
+                    ServerMessage::TournamentJoined {
+                        code, player_token, ..
+                    } => {
+                        assert_eq!(code, tcode);
+                        player_token
+                    }
+                    other => panic!("expected tournament entry for {key}, got {other:?}"),
+                };
+                player_tokens.insert(key, player_token);
             }
 
-            // Idempotency: a second trigger spawns nothing new.
-            let before = app.sessions.lock().await.game_count();
-            maybe_spawn_tournament_matches(
-                tcode,
-                &app.lobby,
-                &app.sessions,
-                &app.db,
-                &app.combos,
-                &app.tournament_hosting,
-                &app.context.game_executor,
-                &app.game_db,
-                app.context.limits.max_games,
+            let round = apply_action(
+                &mut socket,
+                &tcode,
+                ClientMessage::StartTournamentRound {
+                    code: tcode.clone(),
+                    organizer_token,
+                    request_id: Some(TournamentRequestId(1)),
+                },
             )
             .await;
+            assert_eq!(round.pairings.len(), 2);
+            assert!(round.pairings.iter().all(|pairing| pairing.round == 1));
+            let pairing = round
+                .pairings
+                .iter()
+                .find(|pairing| pairing.players.len() == 2)
+                .expect("round one head-to-head pairing");
+            let bye = round
+                .pairings
+                .iter()
+                .find(|pairing| pairing.players.len() == 1)
+                .expect("round one bye");
+            assert_eq!(pairing.outcome, None);
+            assert_eq!(bye.outcome, Some(PairingOutcome::Bye));
+            let pairing_id = pairing.id;
+            let winner = &pairing.players[0].player_key;
+            let loser = &pairing.players[1].player_key;
+            let bye_player = &bye.players[0].player_key;
+            let mut paired_players = [winner.as_str(), loser.as_str(), bye_player.as_str()];
+            paired_players.sort_unstable();
+            assert_eq!(paired_players, ["alice", "bob", "carol"]);
+
+            let submit_deck = |key: &str, request_id| ClientMessage::SubmitTournamentDeck {
+                code: tcode.clone(),
+                player_token: player_tokens[key].clone(),
+                deck: forest.clone(),
+                request_id: Some(TournamentRequestId(request_id)),
+            };
+            apply_action(&mut socket, &tcode, submit_deck(winner, 2)).await;
+            // The acknowledgement may precede hosting. A read on the same
+            // connection waits for the prior frame's dispatch to finish.
+            get_tournament_view(&mut socket, &tcode).await;
+            assert_eq!(app.sessions.lock().await.game_count(), 0);
+
+            apply_action(&mut socket, &tcode, submit_deck(loser, 3)).await;
+            let hosted = get_tournament_view(&mut socket, &tcode).await;
+            let hosted_pairing = hosted
+                .pairings
+                .iter()
+                .find(|p| p.id == pairing_id)
+                .expect("pairing");
+            assert_eq!(hosted_pairing.report_gate, ReportGate::Hosted);
+            assert_eq!(app.sessions.lock().await.game_count(), 1);
+
+            let game_code = {
+                let hosting = app.tournament_hosting.lock().await;
+                let code = hosting
+                    .game_code_for(&tcode, pairing_id)
+                    .expect("a hosted game was bound to the pairing");
+                assert_eq!(
+                    hosting.tournament_for_game_code(code),
+                    Some((tcode.clone(), pairing_id))
+                );
+                code.to_string()
+            };
+            let runtime_key = {
+                let handle = app
+                    .sessions
+                    .lock()
+                    .await
+                    .session(&game_code)
+                    .expect("session");
+                let mut session = handle.lock().await;
+                let seats = session.player_slot_info();
+                assert_eq!(seats.len(), 2);
+                assert_eq!(&seats[0].name, winner);
+                assert_eq!(&seats[1].name, loser);
+                session
+                    .full_persist_snapshot()
+                    .expect("a runtime-bound hosted session has a snapshot")
+                    .key
+            };
+            assert_eq!(runtime_key.game_code, game_code);
+            let snapshots = app
+                .game_db
+                .load_active_full_sessions()
+                .expect("load persisted Full runtime");
+            assert_eq!(snapshots.len(), 1);
+            assert_eq!(snapshots[0].key, runtime_key);
+
+            // The entrant with a bye may still submit a deck. This accepted
+            // action runs the hosting trigger again with the same pairing live.
+            let updated = apply_action(&mut socket, &tcode, submit_deck(bye_player, 4)).await;
+            assert!(updated
+                .players
+                .iter()
+                .any(|p| &p.player_key == bye_player && p.deck_submitted));
+            get_tournament_view(&mut socket, &tcode).await;
             assert_eq!(
                 app.sessions.lock().await.game_count(),
-                before,
-                "spawning the same ready pairing twice creates no second game"
+                1,
+                "a later accepted submission creates no second game"
+            );
+            assert_eq!(
+                app.tournament_hosting
+                    .lock()
+                    .await
+                    .game_code_for(&tcode, pairing_id),
+                Some(game_code.as_str())
             );
 
             // Park the Bo3 at match point (P0 up 1-0) on a contest P0 wins, so
             // this game's end completes the match and drives the production
             // terminal (same injection the contest tests use).
             {
-                let handle = app.sessions.lock().await.session(&game_code).expect("session");
+                let handle = app
+                    .sessions
+                    .lock()
+                    .await
+                    .session(&game_code)
+                    .expect("session");
                 let mut session = handle.lock().await;
                 session.state.match_score.p0_wins = 1;
                 let config = ContestConfig {
@@ -21344,28 +21442,50 @@ mod game_submission_tests {
             )
             .await;
 
-            // The production game-over handoff reports the result to the core
-            // (the pairing gains an outcome) and releases the binding.
-            loop {
-                let reported = app
-                    .lobby
-                    .lock()
-                    .await
-                    .tournaments()
-                    .get(tcode)
-                    .and_then(|t| t.pairings.iter().find(|p| p.id == pairing_id))
-                    .map(|p| p.outcome.is_some())
-                    .unwrap_or(false);
-                let forgotten = app
-                    .tournament_hosting
-                    .lock()
-                    .await
-                    .game_code_for(tcode, pairing_id)
-                    .is_none();
-                if reported && forgotten {
-                    break;
-                }
+            while app
+                .tournament_hosting
+                .lock()
+                .await
+                .game_code_for(&tcode, pairing_id)
+                .is_some()
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert_eq!(
+                app.tournament_hosting
+                    .lock()
+                    .await
+                    .tournament_for_game_code(&game_code),
+                None
+            );
+
+            let finished = get_tournament_view(&mut socket, &tcode).await;
+            let reported = finished
+                .pairings
+                .iter()
+                .find(|p| p.id == pairing_id)
+                .expect("reported pairing");
+            assert_eq!(
+                reported.outcome,
+                Some(PairingOutcome::Reported(PodOutcome::Decisive {
+                    winner: winner.clone(),
+                    game_wins: HashMap::from([(winner.clone(), 2), (loser.clone(), 0)]),
+                }))
+            );
+            assert_eq!(finished.standings.len(), 3);
+            for (key, points, matches, byes) in
+                [(winner, 3, 1, 0), (loser, 0, 1, 0), (bye_player, 3, 0, 1)]
+            {
+                let row = finished
+                    .standings
+                    .iter()
+                    .find(|row| &row.player_key == key)
+                    .expect("entrant's standing");
+                assert_eq!(
+                    (row.match_points, row.matches_played, row.byes),
+                    (points, matches, byes),
+                    "standing for {key}"
+                );
             }
         })
         .await;
@@ -21374,6 +21494,115 @@ mod game_submission_tests {
             result.is_ok(),
             "the hosted tournament match did not spawn, run, and report through production"
         );
+    }
+
+    #[tokio::test]
+    async fn a_hosted_tournament_match_requires_an_accepted_action() {
+        use lobby_broker::tournament::{
+            BracketShape, CreateTournamentRequest, MatchArity, ReportGate, ScoringPolicy,
+        };
+
+        let (db, deck) = hosted_tournament_deck_fixture();
+        let (url, server, _temp_dir, app) = spawn_full_mode_server_with_db(db).await;
+        let code = "TOURNEY";
+        // Build the ready state through trusted fixture setup so there is no
+        // accepted wire action to start hosting before these checks.
+        let (pairing_id, organizer, entrant) = {
+            let mut broker = app.lobby.lock().await;
+            let tournaments = broker.tournaments_mut();
+            let arity = MatchArity::HEAD_TO_HEAD;
+            let organizer = tournaments
+                .create_tournament(
+                    code,
+                    CreateTournamentRequest {
+                        name: "Authorization test".to_string(),
+                        arity,
+                        scoring: ScoringPolicy::default_for_arity(arity),
+                        bracket: BracketShape::Swiss,
+                        total_rounds: None,
+                        plus_rounds: None,
+                        format: None,
+                        match_type: None,
+                    },
+                    &SysEnv,
+                )
+                .expect("tournament setup");
+            let entrant = tournaments
+                .join_tournament(code, "alice", "Alice", &SysEnv)
+                .expect("first entrant setup");
+            tournaments
+                .join_tournament(code, "bob", "Bob", &SysEnv)
+                .expect("second entrant setup");
+            let pairings = tournaments
+                .generate_pairings(code, &SysEnv)
+                .expect("pairing setup");
+            for key in ["alice", "bob"] {
+                tournaments
+                    .submit_deck(code, key, deck.clone(), &SysEnv)
+                    .expect("deck setup");
+            }
+            let ready = tournaments.hostable_pairings(code);
+            assert_eq!(pairings.len(), 1);
+            assert_eq!(ready.len(), 1);
+            assert_eq!(ready[0].pairing_id, pairings[0]);
+            (pairings[0], organizer.secret, entrant.secret)
+        };
+
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut socket = connect_and_hello(url).await;
+            // Hosting takes this lock before checking readiness or admitting
+            // a game job. An ordered read must still finish after each refusal.
+            let hosting = app.tournament_hosting.lock().await;
+            let start_id = TournamentRequestId(1);
+            let submit_id = TournamentRequestId(2);
+            let actions = [
+                (
+                    start_id,
+                    "organizer",
+                    ClientMessage::StartTournamentRound {
+                        code: code.to_string(),
+                        organizer_token: entrant,
+                        request_id: Some(start_id),
+                    },
+                ),
+                (
+                    submit_id,
+                    "player",
+                    ClientMessage::SubmitTournamentDeck {
+                        code: code.to_string(),
+                        player_token: organizer,
+                        deck,
+                        request_id: Some(submit_id),
+                    },
+                ),
+            ];
+            for (expected_id, role, action) in actions {
+                send_test_message(&mut socket, &action, false).await;
+                match recv_server_message(&mut socket).await {
+                    ServerMessage::TournamentActionRejected {
+                        request_id,
+                        message,
+                    } => {
+                        assert_eq!(request_id, expected_id);
+                        assert_eq!(
+                            message,
+                            format!("Invalid {role} token for tournament {code}")
+                        );
+                    }
+                    other => panic!("expected {role} credential refusal, got {other:?}"),
+                }
+                let view = get_tournament_view(&mut socket, code).await;
+                assert_eq!(view.pairings.len(), 1);
+                assert_eq!(view.pairings[0].id, pairing_id);
+                assert_eq!(view.pairings[0].report_gate, ReportGate::Open);
+            }
+            assert_eq!(hosting.game_code_for(code, pairing_id), None);
+            drop(hosting);
+            assert_eq!(app.sessions.lock().await.game_count(), 0);
+        })
+        .await;
+        server.abort();
+        result.expect("refused tournament actions must finish while hosting is locked");
     }
 
     /// Park a started AI game (human P0, AI P1 at 0 life) on a contest the AI wins, so

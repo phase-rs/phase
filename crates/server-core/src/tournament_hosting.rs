@@ -343,16 +343,9 @@ mod tests {
         }
     }
 
-    fn deck_of(name: &str) -> DeckData {
-        DeckData {
-            main_deck: vec![name.to_string(); 40],
-            ..Default::default()
-        }
-    }
-
-    /// A 2-player Swiss+Bo3 tournament with round 1 paired and both decks in — a
-    /// single hostable pairing.
-    fn ready_tournament(env: &FakeEnv) -> TournamentManager {
+    /// A Swiss Bo3 tournament with round one paired and a legal Standard deck
+    /// submitted by every player.
+    fn ready_tournament(env: &FakeEnv, players: usize) -> TournamentManager {
         let arity = MatchArity::new(2).expect("valid arity");
         let mut mgr = TournamentManager::new();
         mgr.create_tournament(
@@ -370,15 +363,19 @@ mod tests {
             env,
         )
         .expect("create_tournament");
-        mgr.join_tournament("T", "p00", "Player 0", env)
-            .expect("join 0");
-        mgr.join_tournament("T", "p01", "Player 1", env)
-            .expect("join 1");
+        let keys: Vec<_> = (0..players).map(|index| format!("p{index:02}")).collect();
+        for key in &keys {
+            mgr.join_tournament("T", key, key, env).expect("join");
+        }
         mgr.generate_pairings("T", env).expect("round 1");
-        mgr.submit_deck("T", "p00", deck_of("Island"), env)
-            .expect("deck 0");
-        mgr.submit_deck("T", "p01", deck_of("Forest"), env)
-            .expect("deck 1");
+        let deck = DeckData {
+            main_deck: vec!["Forest".to_string(); 60],
+            sideboard: vec!["Forest".to_string(); 15],
+            ..Default::default()
+        };
+        for key in keys {
+            mgr.submit_deck("T", &key, deck.clone(), env).expect("deck");
+        }
         mgr
     }
 
@@ -390,7 +387,7 @@ mod tests {
     #[test]
     fn spawn_skips_when_decks_fail_validation_or_resolution() {
         let env = FakeEnv::new();
-        let tournaments = ready_tournament(&env);
+        let tournaments = ready_tournament(&env, 2);
         let pairing_id = tournaments.get("T").expect("t").pairings[0].id;
         assert!(
             !tournaments.hostable_pairings("T").is_empty(),
@@ -401,7 +398,8 @@ mod tests {
         let mut game_mgr = SessionManager::new();
         let db = Arc::new(CardDatabase::default());
         let combos = ComboTable::default();
-        let spawns = hosting.spawn_ready_matches("T", &tournaments, &mut game_mgr, &db, &combos, 100);
+        let spawns =
+            hosting.spawn_ready_matches("T", &tournaments, &mut game_mgr, &db, &combos, 100);
 
         assert!(spawns.is_empty(), "unresolvable decks spawn no game");
         assert_eq!(game_mgr.game_count(), 0);
@@ -417,14 +415,40 @@ mod tests {
     #[test]
     fn spawn_respects_game_capacity() {
         let env = FakeEnv::new();
-        let tournaments = ready_tournament(&env);
+        let tournaments = ready_tournament(&env, 4);
+        assert_eq!(tournaments.hostable_pairings("T").len(), 2);
         let hosting = TournamentHostingManager::new();
-        let mut game_mgr = SessionManager::new();
-        let db = Arc::new(CardDatabase::default());
+        let db = Arc::new(
+            CardDatabase::from_json_str(
+                &serde_json::json!({
+                    "forest": {
+                        "name": "Forest",
+                        "scryfall_oracle_id": "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6",
+                        "mana_cost": {"type": "NoCost"},
+                        "card_type": {
+                            "supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Forest"]
+                        },
+                        "legalities": {"standard": "legal"},
+                        "keywords": [], "abilities": [], "triggers": [],
+                        "static_abilities": [], "replacements": []
+                    }
+                })
+                .to_string(),
+            )
+            .expect("the same legal deck can be resolved below capacity"),
+        );
         let combos = ComboTable::default();
-        let spawns = hosting.spawn_ready_matches("T", &tournaments, &mut game_mgr, &db, &combos, 0);
-        assert!(spawns.is_empty(), "at capacity, no tournament game spawns");
-        assert_eq!(game_mgr.game_count(), 0);
+        for (limit, expected_count) in [(0, 0), (1, 1), (3, 2)] {
+            let mut game_mgr = SessionManager::new();
+            let spawns =
+                hosting.spawn_ready_matches("T", &tournaments, &mut game_mgr, &db, &combos, limit);
+            assert_eq!(spawns.len(), expected_count, "spawn count at limit {limit}");
+            assert_eq!(
+                game_mgr.game_count(),
+                expected_count,
+                "live games at limit {limit}"
+            );
+        }
     }
 
     /// The `(tournament, pairing) <-> game_code` binding supports both lookups
