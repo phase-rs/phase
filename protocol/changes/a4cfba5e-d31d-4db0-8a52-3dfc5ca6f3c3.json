@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "SpellContext gains direct_damage_result, a typed DamageInstructionResult carrying what the immediately preceding damage instruction did (CR 608.2c + CR 614.9): Dealt { recipient }, the object its damage was actually dealt to, read by a slotless 'if a [type] is dealt damage this way' rider (Marauding Raptor); AwaitingDelivery { amount, excess, recipient, fight_fought_creature }, accumulating the instruction's result across pauses (CR 616.1, resolution divisions, lifelink/post-loss choices) until the rider resolves; or ContinuationPortion marking a remaining-recipient continuation node. It is serialized inside ResolvedAbility, omitted when absent and defaulted when missing, so an older peer reading a resolution paused between the damage and its rider drops the result and suppresses the rider."
+  "reason": "SpellContext carries the preceding damage instruction's typed direct result (CR 608.2c and CR 614.9) and a defaulted node-local damage delivery owner. Defaulted owner fields on suspended delivery carriers and a state-local monotone counter link resumed producers to the exact waiting result. A legacy record without identity preserves already accumulated values and cannot receive new contributions by position. Older peers discard these links and cannot guarantee correct damage attribution after a pause."
 }

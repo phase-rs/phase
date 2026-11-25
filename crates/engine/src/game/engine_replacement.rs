@@ -1487,10 +1487,13 @@ fn finish_replacement_execute_epilogue(
             .is_some_and(|stashed| !stashed.is_combat)
         && state.active_batch_delivery().is_none()
     {
-        let damage_start = events.len();
-        let outcome =
-            crate::game::effects::deal_damage::drain_pending_damage_post_counter(state, events);
-        super::effects::fold_awaited_damage_events(state, &events[damage_start..]);
+        let owner = state
+            .pending_damage_post_counter
+            .as_ref()
+            .and_then(|stash| stash.damage_delivery_owner);
+        let outcome = effects::resume_damage_delivery(state, owner, |state| {
+            effects::deal_damage::drain_pending_damage_post_counter(state, events)
+        });
         if matches!(
             outcome,
             crate::game::effects::deal_damage::DamagePostCounterDrainOutcome::PausedForReplacement
@@ -2081,16 +2084,19 @@ fn handle_replacement_choice_inner(
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::RollDice { .. }))
         .then(|| super::pre_entry_view::PreEntryRulesView::of_pending_roll(state))
         .flatten();
-    let is_combat_replacement = state.pending_replacement.as_ref().is_some_and(|pending| {
-        matches!(
-            pending.proposed,
-            ProposedEvent::Damage {
-                is_combat: true,
-                ..
-            }
-        )
-    });
-    let continue_start = events.len();
+    let parked_damage_owner = state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| {
+            matches!(
+                pending.proposed,
+                ProposedEvent::Damage {
+                    is_combat: false,
+                    ..
+                }
+            )
+        })
+        .and_then(|pending| pending.damage_delivery_owner);
     // CR 616.1 + CR 615.5: an answer a parked damage batch awaits is one of its original
     // choices, so the chosen replacement's action or rider waits with the batch's held work.
     let (result, viewed_choice) = if impossible_parked_draw {
@@ -2114,16 +2120,15 @@ fn handle_replacement_choice_inner(
             // A parked damage batch's answer is never a roll, so only the live
             // board's re-scan can hold riders.
             None => (
-                super::effects::deal_damage::hold_riders_for_awaited_portion(state, |state| {
-                    operation(state, events)
+                effects::resume_damage_delivery(state, parked_damage_owner, |state| {
+                    effects::deal_damage::hold_riders_for_awaited_portion(state, |state| {
+                        operation(state, events)
+                    })
                 }),
                 None,
             ),
         }
     };
-    if !is_combat_replacement {
-        super::effects::fold_awaited_damage_events(state, &events[continue_start..]);
-    }
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
     // multiple eligible lands) re-parked the pending replacement with
@@ -2455,17 +2460,17 @@ fn handle_replacement_choice_inner(
                     // CR 120.4b + CR 120.4c: a portion of a parked two-phase batch rejoins the
                     // batch, which finishes its other portions' replacement before delivering.
                     if !super::effects::deal_damage::return_answered_portion_to_batch(
-                        state, &ctx, &damage,
+                        state,
+                        &ctx,
+                        &damage,
+                        parked_damage_owner,
                     ) {
-                        let damage_start = events.len();
                         let result =
-                            apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
-                        if !is_combat {
-                            super::effects::fold_awaited_damage_events(
-                                state,
-                                &events[damage_start..],
-                            );
-                        }
+                            effects::resume_damage_delivery(state, parked_damage_owner, |state| {
+                                apply_damage_after_replacement(
+                                    state, &ctx, damage, is_combat, events,
+                                )
+                            });
                         if matches!(result, DamageResult::NeedsChoice) {
                             // CR 616.1 + CR 616.1f: the resumed hit raised its own
                             // result prompt (poison counters, life loss, the
@@ -3826,9 +3831,13 @@ fn drain_settled_non_combat_damage_stash(
     {
         return None;
     }
-    let damage_start = events.len();
-    let outcome = effects::deal_damage::drain_pending_damage_post_loss(state, events);
-    super::effects::fold_awaited_damage_events(state, &events[damage_start..]);
+    let owner = state
+        .pending_damage_post_loss
+        .as_ref()
+        .and_then(|stash| stash.damage_delivery_owner);
+    let outcome = effects::resume_damage_delivery(state, owner, |state| {
+        effects::deal_damage::drain_pending_damage_post_loss(state, events)
+    });
     match outcome {
         effects::deal_damage::DamagePostLossDrainOutcome::PausedForReplacement => {
             super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
@@ -8206,7 +8215,10 @@ pub(crate) fn dispatch_pending_post_replacement_effect(
     // scope on its `PendingContinuation` and re-enters it when it resumes
     // (`effects::drain_pending_continuation`).
     let owned_amount = captured_amount.map(crate::game::arithmetic::u32_to_i32_saturating);
-    let waiting_for =
+    let waiting_for = {
+        // CR 615.5: an independent replacement action can deal its own damage,
+        // even with the same source as the delivery it modified.
+        let _damage_scope = effects::DamageDeliveryScope::enter(None);
         crate::game::quantity::with_replacement_action_scope(owned_amount, || match continuation {
             PostReplacementContinuation::Resolved(resolved) => {
                 apply_post_replacement_resolved_effect(
@@ -8228,7 +8240,8 @@ pub(crate) fn dispatch_pending_post_replacement_effect(
                 replacement_applied,
                 events,
             ),
-        });
+        })
+    };
     // CR 614.12a + CR 616.1g: classify by what OWNS the outstanding prompt, never
     // by whether the two-deep positional accessor can currently see this frame.
     // The predecessor asked `active_post_replacement_drains()`, which returns None
@@ -9053,6 +9066,7 @@ mod tests {
                 Zone::Battlefield,
             );
             state.pending_damage_post_loss = Some(Box::new(PendingDamagePostLoss {
+                damage_delivery_owner: None,
                 source_id: source,
                 source_incarnation: None,
                 controller: PlayerId(1),
@@ -9164,6 +9178,7 @@ mod tests {
                 "reach-guard: the observer parsed"
             );
             state.pending_damage_post_loss = Some(Box::new(PendingDamagePostLoss {
+                damage_delivery_owner: None,
                 source_id: specter,
                 source_incarnation: Some(state.objects[&specter].incarnation),
                 controller: P0,
@@ -9545,6 +9560,7 @@ mod tests {
         // the terminal Connive survivor through `handle_replacement_choice`.
         let candidate = install_optional_replacement(&mut state, ReplacementEvent::Connive);
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Connive {
                 object_id: conniver,
@@ -10231,6 +10247,7 @@ mod tests {
             .description("Regenerate".to_string())]
         .into();
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Destroy {
                 object_id: bear,

@@ -1,9 +1,9 @@
-//! Marauding Raptor — "Whenever another creature you control enters, this
+//! Marauding Raptor â€” "Whenever another creature you control enters, this
 //! creature deals 2 damage to it. If a Dinosaur is dealt damage this way, this
 //! creature gets +2/+0 until end of turn."
 //!
 //! CR 603.2 + CR 608.2c: the "If a Dinosaur is dealt damage this way" clause is
-//! a conditional rider on the same triggered ability — the sub-ability is
+//! a conditional rider on the same triggered ability â€” the sub-ability is
 //! checked on resolution against the damage the first instruction dealt, and
 //! the pump must land whenever a Dinosaur received that damage, even when the
 //! Dinosaur survives it (Colossal Dreadmaw, 6/6).
@@ -12,6 +12,7 @@
 //! Dinosaurs but the +2/+0 never applied.
 
 use engine::database::CardDatabase;
+use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
@@ -21,15 +22,16 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
 
-/// Colossal Dreadmaw: a 6/6 Dinosaur, so the 2 damage does not kill it — the
+/// Colossal Dreadmaw: a 6/6 Dinosaur, so the 2 damage does not kill it â€” the
 /// damage-dealt rider is tested independently of lethality.
 const ENTERING_DINOSAUR: &str = "Colossal Dreadmaw";
 /// A Dragon, satisfying the trigger's "another creature you control enters"
-/// while missing the "Dinosaur" rider filter — the non-matching control.
+/// while missing the "Dinosaur" rider filter â€” the non-matching control.
 const ENTERING_NON_DINOSAUR: &str = "Shivan Dragon";
 
 /// A pool of `colored` mana of one color plus enough colorless to cover a
@@ -110,7 +112,7 @@ fn raptor_does_not_pump_for_a_non_dinosaur() {
     runner.cast(dragon).resolve();
     runner.advance_until_stack_empty();
 
-    // Reach guard: the trigger really fired — the Dragon took the 2 damage too.
+    // Reach guard: the trigger really fired â€” the Dragon took the 2 damage too.
     assert_eq!(
         runner.state().objects[&dragon].damage_marked,
         2,
@@ -287,7 +289,7 @@ fn cast_under_harms_way(
 
 /// CR 614.6 + CR 614.9: when Harm's Way redirects all of the Raptor's damage
 /// to a player, the entering Dinosaur is dealt no damage, so no Dinosaur was
-/// "dealt damage this way" and the Raptor is not pumped — even though the
+/// "dealt damage this way" and the Raptor is not pumped â€” even though the
 /// instruction dealt 2 damage and its intended recipient was a Dinosaur.
 #[test]
 fn raptor_does_not_pump_when_the_damage_is_redirected_to_a_player() {
@@ -323,7 +325,7 @@ fn raptor_does_not_pump_when_the_damage_is_redirected_to_a_player() {
 }
 
 /// CR 614.9: redirected onto an opponent's non-Dinosaur creature, the damage
-/// was dealt to that creature, not to the entering Dinosaur — no pump.
+/// was dealt to that creature, not to the entering Dinosaur â€” no pump.
 #[test]
 fn raptor_does_not_pump_when_the_damage_is_redirected_to_a_non_dinosaur() {
     let Some(db) = load_db() else {
@@ -350,7 +352,7 @@ fn raptor_does_not_pump_when_the_damage_is_redirected_to_a_non_dinosaur() {
 
 /// CR 614.6 + CR 608.2c: the modified event is what the instruction did. A
 /// non-Dinosaur enters and Harm's Way redirects the Raptor's damage onto an
-/// opponent's Dinosaur — a Dinosaur WAS dealt damage this way, so the Raptor
+/// opponent's Dinosaur â€” a Dinosaur WAS dealt damage this way, so the Raptor
 /// is pumped although the triggering creature is not a Dinosaur.
 #[test]
 fn raptor_pumps_when_the_damage_is_redirected_onto_a_dinosaur() {
@@ -377,6 +379,115 @@ fn raptor_pumps_when_the_damage_is_redirected_onto_a_dinosaur() {
         runner.state().objects[&raptor].power,
         Some(4),
         "a Dinosaur was dealt damage this way, so Marauding Raptor must be +2/+0"
+    );
+}
+
+/// CR 614.9 + CR 615.5 + CR 608.2c: Harm's Way redirects the Raptor's hit,
+/// New Way Forward prevents it, then Pariah redirects the separate reflection.
+#[test]
+fn raptor_does_not_count_a_prevention_riders_reflected_damage() {
+    let db = load_db().expect("the printed card fixture must be available");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let raptor = scenario.add_real_card(P0, "Marauding Raptor", Zone::Battlefield, db);
+    let dinosaur = scenario.add_real_card(P0, ENTERING_DINOSAUR, Zone::Battlefield, db);
+    let pariah = scenario.add_real_card(P0, "Pariah", Zone::Hand, db);
+    let harms_way = scenario.add_real_card(P0, "Harm's Way", Zone::Hand, db);
+    let entrant = scenario.add_real_card(P0, ENTERING_NON_DINOSAUR, Zone::Hand, db);
+    let way_forward = scenario.add_real_card(P1, "New Way Forward", Zone::Hand, db);
+    let island = scenario.add_real_card(P1, "Island", Zone::Library, db);
+    let mountain = scenario.add_real_card(P1, "Mountain", Zone::Library, db);
+    let mut pool = cast_pool(ManaType::Red, 2, 7);
+    pool.extend((0..2).map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    scenario.with_mana_pool(
+        P1,
+        [
+            ManaType::Blue,
+            ManaType::Red,
+            ManaType::White,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+
+    runner.cast(pariah).target_object(dinosaur).resolve();
+    assert_eq!(runner.state().objects[&pariah].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&pariah].attached_to,
+        Some(AttachTarget::Object(dinosaur))
+    );
+
+    let cast = runner.cast(harms_way).target_player(P1).resolve();
+    assert!(matches!(
+        cast.final_waiting_for(),
+        WaitingFor::DamageSourceChoice { player: P0, options, .. } if options.contains(&raptor)
+    ));
+    runner
+        .act(GameAction::ChooseDamageSource { source: raptor })
+        .expect("P0 names the Raptor for Harm's Way");
+    assert_eq!(runner.state().objects[&harms_way].zone, Zone::Graveyard);
+
+    assert_eq!(runner.state().priority_player, P0);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes to P1");
+    assert_eq!(runner.state().priority_player, P1);
+    let cast = runner.cast(way_forward).resolve();
+    assert!(matches!(
+        cast.final_waiting_for(),
+        WaitingFor::DamageSourceChoice { player: P1, options, .. } if options.contains(&raptor)
+    ));
+    runner
+        .act(GameAction::ChooseDamageSource { source: raptor })
+        .expect("P1 names the Raptor for New Way Forward");
+    assert_eq!(runner.state().objects[&way_forward].zone, Zone::Graveyard);
+    if runner.state().priority_player == P1 {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P1 passes to P0");
+    }
+    assert_eq!(runner.state().priority_player, P0);
+
+    let mut events = runner.cast(entrant).resolve().events().to_vec();
+    drain_stack_collecting_events(&mut runner, &mut events);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        GameEvent::DamagePrevented { source_id, target: TargetRef::Player(P1), amount: 2 }
+            if *source_id == raptor
+    )));
+    let dealt: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                source_id,
+                target,
+                amount,
+                ..
+            } => Some((*source_id, target.clone(), *amount)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dealt, [(way_forward, TargetRef::Object(dinosaur), 2)]);
+    let hand = &runner.state().players[P1.0 as usize].hand;
+    assert_eq!(hand.len(), 2);
+    assert!(hand.contains(&island) && hand.contains(&mountain));
+    assert_eq!(runner.state().objects[&dinosaur].damage_marked, 2);
+    assert_eq!(runner.state().objects[&entrant].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&entrant].damage_marked, 0);
+    assert_eq!(
+        runner.state().objects[&raptor].power,
+        Some(2),
+        "damage dealt by New Way Forward must not pump Marauding Raptor"
     );
 }
 
@@ -466,7 +577,7 @@ fn cast_dinosaur_through_ordering_choice(
 /// CR 616.1 + CR 608.2c: a replacement ordering prompt pauses the Raptor's
 /// damage before it is dealt; the "dealt damage this way" rider is answered by
 /// the damage the resumed instruction actually dealt. Furnace of Rath first
-/// doubles 2 to 4, then Temple Altisaur prevents all but 1 — the Dinosaur is
+/// doubles 2 to 4, then Temple Altisaur prevents all but 1 â€” the Dinosaur is
 /// dealt 1 damage, so the Raptor gets +2/+0.
 #[test]
 fn raptor_pumps_after_a_replacement_ordering_choice_furnace_first() {
@@ -513,9 +624,9 @@ fn raptor_pumps_after_a_replacement_ordering_choice_shield_first() {
 }
 
 /// CR 616.1 + CR 615.1a: the same pause-and-resume path where the answered
-/// order still leaves the Dinosaur undamaged — Inner Sanctum ("Prevent all
+/// order still leaves the Dinosaur undamaged â€” Inner Sanctum ("Prevent all
 /// damage that would be dealt to creatures you control.") prevents the
-/// doubled damage — so no Dinosaur was dealt damage this way and the resumed
+/// doubled damage â€” so no Dinosaur was dealt damage this way and the resumed
 /// rider must not pump.
 #[test]
 fn raptor_does_not_pump_after_a_replacement_ordering_choice_prevents_all() {
@@ -882,4 +993,417 @@ fn fight_replacement_ordering_adds_mana_for_fought_creature_excess() {
         10,
         "fought creature (2/2) took 12 damage = 10 excess, so The Last Agni Kai must add 10 red mana"
     );
+}
+
+/// Chooses a printed shield's source while the chosen spell is still on the stack.
+fn choose_reflection_shield_source(
+    runner: &mut GameRunner,
+    controller: PlayerId,
+    source: ObjectId,
+) {
+    assert!(matches!(
+        &runner.state().waiting_for,
+        WaitingFor::DamageSourceChoice { player, options, .. }
+            if *player == controller && options.contains(&source)
+    ));
+    runner
+        .act(GameAction::ChooseDamageSource { source })
+        .expect("name the damage spell on the stack");
+}
+
+fn resolve_reflection_spell(
+    reflect: bool,
+    incinerate: bool,
+) -> (GameRunner, Vec<GameEvent>, [ObjectId; 6]) {
+    let db = load_db().expect("the printed card fixture must be available");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Drudge Skeletons",
+            1,
+            1,
+            "{B}: Regenerate this creature.",
+        )
+        .id();
+    let harmless_target = scenario.add_real_card(P0, ENTERING_DINOSAUR, Zone::Battlefield, db);
+    let target = if reflect { harmless_target } else { victim };
+    let pariah = scenario.add_real_card(P0, "Pariah", Zone::Hand, db);
+    let harms_way = scenario.add_real_card(P0, "Harm's Way", Zone::Hand, db);
+    let way_forward = scenario.add_real_card(P1, "New Way Forward", Zone::Hand, db);
+    let spell = scenario.add_real_card(
+        P0,
+        if incinerate {
+            "Incinerate"
+        } else {
+            "Hell to Pay"
+        },
+        Zone::Hand,
+        db,
+    );
+    let island = scenario.add_real_card(P1, "Island", Zone::Library, db);
+    let mountain = scenario.add_real_card(P1, "Mountain", Zone::Library, db);
+    let mut pool = cast_pool(ManaType::Red, 2, 7);
+    pool.extend((0..2).map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])));
+    pool.push(ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]));
+    scenario.with_mana_pool(P0, pool);
+    scenario.with_mana_pool(
+        P1,
+        [
+            ManaType::Blue,
+            ManaType::Red,
+            ManaType::White,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    if incinerate {
+        runner.activate(victim, 0).resolve();
+        assert!(runner.state().stack.is_empty(), "regeneration resolved");
+    }
+    let mut events = Vec::new();
+    if reflect {
+        // Attach Pariah first, retaining the damage spell below both responses.
+        runner.cast(pariah).target_object(victim).resolve();
+        assert_eq!(
+            runner.state().objects[&pariah].attached_to,
+            Some(AttachTarget::Object(victim))
+        );
+        let cast = runner.cast(spell).target_object(target);
+        if incinerate {
+            cast.commit();
+        } else {
+            cast.x(2).commit();
+        }
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+        runner.cast(harms_way).target_player(P1).resolve();
+        choose_reflection_shield_source(&mut runner, P0, spell);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+        assert_eq!(runner.state().priority_player, P0);
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P0 passes to P1");
+        runner.cast(way_forward).resolve();
+        choose_reflection_shield_source(&mut runner, P1, spell);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+        drain_stack_collecting_events(&mut runner, &mut events);
+    } else {
+        let cast = runner.cast(spell).target_object(target);
+        let outcome = if incinerate {
+            cast.resolve()
+        } else {
+            cast.x(2).resolve()
+        };
+        events.extend_from_slice(outcome.events());
+        drain_stack_collecting_events(&mut runner, &mut events);
+    }
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    (
+        runner,
+        events,
+        [
+            spell,
+            victim,
+            harmless_target,
+            way_forward,
+            island,
+            mountain,
+        ],
+    )
+}
+
+fn damage_receipts(events: &[GameEvent]) -> Vec<(ObjectId, TargetRef, u32, u32)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                source_id,
+                target,
+                amount,
+                excess,
+                ..
+            } => Some((*source_id, target.clone(), *amount, *excess)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 701.19a, 701.19c and 615.5: the regeneration restriction follows the
+/// creatures Incinerate damaged. The independent reflection is outside that set.
+#[test]
+fn raptor_damage_ownership_incinerate_regeneration_controls() {
+    let (runner, events, [spell, skeletons, original, way, island, mountain]) =
+        resolve_reflection_spell(true, true);
+    let mut damage = damage_receipts(&events);
+    damage.sort_by_key(|(source, _, _, _)| *source);
+    let mut expected = [
+        (spell, TargetRef::Object(original), 1, 0),
+        (way, TargetRef::Object(skeletons), 2, 1),
+    ];
+    expected.sort_by_key(|(source, _, _, _)| *source);
+    assert_eq!(damage, expected);
+    assert_eq!(runner.state().objects[&island].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&mountain].zone, Zone::Hand);
+    let skeletons = &runner.state().objects[&skeletons];
+    assert_eq!(skeletons.zone, Zone::Battlefield);
+    assert!(skeletons.tapped);
+    assert_eq!(skeletons.damage_marked, 0);
+
+    let (runner, events, [spell, skeletons, ..]) = resolve_reflection_spell(false, true);
+    assert_eq!(
+        damage_receipts(&events),
+        [(spell, TargetRef::Object(skeletons), 3, 2)]
+    );
+    assert_eq!(runner.state().objects[&skeletons].zone, Zone::Graveyard);
+}
+
+/// CR 120.10 and 615.5: the independent reflection's excess damage belongs to
+/// New Way Forward even when it was originally prevented from Hell to Pay.
+#[test]
+fn raptor_damage_ownership_hell_to_pay_excess_controls() {
+    let (runner, events, [_, victim, original, way, island, mountain]) =
+        resolve_reflection_spell(true, false);
+    assert_eq!(
+        damage_receipts(&events),
+        [(way, TargetRef::Object(victim), 2, 1)]
+    );
+    assert_eq!(runner.state().objects[&original].damage_marked, 0);
+    assert_eq!(runner.state().objects[&island].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&mountain].zone, Zone::Hand);
+    assert!(!runner
+        .state()
+        .objects
+        .values()
+        .any(|object| { object.zone == Zone::Battlefield && object.name == "Treasure" }));
+
+    let (runner, events, [spell, victim, ..]) = resolve_reflection_spell(false, false);
+    assert_eq!(
+        damage_receipts(&events),
+        [(spell, TargetRef::Object(victim), 2, 1)]
+    );
+    let treasures: Vec<_> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.zone == Zone::Battlefield && object.name == "Treasure")
+        .collect();
+    assert_eq!(treasures.len(), 1);
+    assert!(treasures[0].tapped);
+}
+
+/// CR 616.1e and 615.5: the original replacement preserves its owner through
+/// the recipient change. The reflection's independently parked choice survives
+/// save and restore with its own owner.
+#[test]
+fn raptor_damage_ownership_furnace_reflection_survives_save_resume() {
+    use engine::types::game_state::{CastPaymentMode, PersistedGameState};
+
+    let db = load_db().expect("the printed card fixture must be available");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let raptor = scenario.add_real_card(P0, "Marauding Raptor", Zone::Battlefield, db);
+    let dinosaur = scenario.add_real_card(P0, ENTERING_DINOSAUR, Zone::Battlefield, db);
+    let furnace = scenario.add_real_card(P0, "Furnace of Rath", Zone::Battlefield, db);
+    let pariah = scenario.add_real_card(P0, "Pariah", Zone::Hand, db);
+    let jade = scenario.add_real_card(P1, "Jade Monolith", Zone::Battlefield, db);
+    let entrant = scenario.add_real_card(P0, ENTERING_NON_DINOSAUR, Zone::Hand, db);
+    let way_forward = scenario.add_real_card(P1, "New Way Forward", Zone::Hand, db);
+    let island = scenario.add_real_card(P1, "Island", Zone::Library, db);
+    let mountain = scenario.add_real_card(P1, "Mountain", Zone::Library, db);
+    let mut pool = cast_pool(ManaType::Red, 2, 7);
+    pool.extend((0..2).map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    scenario.with_mana_pool(
+        P1,
+        [
+            ManaType::Blue,
+            ManaType::Red,
+            ManaType::White,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(pariah).target_object(dinosaur).resolve();
+    assert_eq!(
+        runner.state().objects[&pariah].attached_to,
+        Some(AttachTarget::Object(dinosaur))
+    );
+    assert_eq!(runner.state().priority_player, P0);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes to P1");
+    runner.cast(way_forward).resolve();
+    choose_reflection_shield_source(&mut runner, P1, raptor);
+    assert_eq!(runner.state().priority_player, P0);
+
+    // The entrant has to be a creature on the battlefield before Monolith can
+    // target it. Install that redirect in response to the already-stacked trigger.
+    let mut events = runner.cast(entrant).commit().events().to_vec();
+    for _ in 0..6 {
+        if runner.state().objects[&entrant].zone == Zone::Battlefield {
+            break;
+        }
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    assert_eq!(runner.state().objects[&entrant].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Raptor trigger remains on the stack"
+    );
+    if runner.state().priority_player == P0 {
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    assert_eq!(runner.state().priority_player, P1);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: jade,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P1 activates Jade Monolith");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(entrant)),
+        })
+        .expect("Monolith protects the entrant");
+    for _ in 0..6 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    choose_reflection_shield_source(&mut runner, P1, raptor);
+    assert_eq!(runner.state().stack.len(), 1);
+    for _ in 0..20 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            || runner.state().stack.is_empty()
+        {
+            break;
+        }
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+
+    let choice = |runner: &GameRunner, expected_player: PlayerId, expected_source: ObjectId| {
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected Furnace ordering choice for {expected_player:?} with {expected_source:?}, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, expected_player);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.source_id == furnace));
+        candidates
+            .iter()
+            .position(|candidate| candidate.source_id == expected_source)
+            .unwrap_or_else(|| panic!("expected {expected_source:?} among {candidates:?}"))
+    };
+    // The floating redirect is indexed by the creature it protects.
+    let jade_idx = choice(&runner, P0, entrant);
+    let original_owner = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .unwrap()
+        .damage_delivery_owner
+        .expect("the original Raptor damage owns its replacement");
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index: jade_idx })
+            .unwrap()
+            .events,
+    );
+
+    let way_idx = choice(&runner, P1, ObjectId(0));
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .damage_delivery_owner,
+        Some(original_owner)
+    );
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index: way_idx })
+            .unwrap()
+            .events,
+    );
+
+    let pariah_idx = choice(&runner, P0, pariah);
+    let reflection_owner = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .unwrap()
+        .damage_delivery_owner
+        .expect("New Way Forward owns its reflection");
+    assert_ne!(reflection_owner, original_owner);
+    assert!(damage_receipts(&events).is_empty());
+    let saved =
+        serde_json::to_string(&PersistedGameState::capture(runner.state().clone())).unwrap();
+    let restored: PersistedGameState = serde_json::from_str(&saved).unwrap();
+    let mut runner = GameRunner::from_state(restored.into_game_state().unwrap());
+    assert_eq!(choice(&runner, P0, pariah), pariah_idx);
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .damage_delivery_owner,
+        Some(reflection_owner)
+    );
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index: pariah_idx })
+            .unwrap()
+            .events,
+    );
+    drain_stack_collecting_events(&mut runner, &mut events);
+
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        damage_receipts(&events),
+        [(way_forward, TargetRef::Object(dinosaur), 4, 0)]
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        GameEvent::DamagePrevented { source_id, target: TargetRef::Player(P1), amount: 2 }
+            if *source_id == raptor
+    )));
+    assert_eq!(runner.state().objects[&dinosaur].damage_marked, 4);
+    assert_eq!(runner.state().objects[&entrant].damage_marked, 0);
+    assert_eq!(runner.state().objects[&raptor].power, Some(2));
+    assert_eq!(runner.state().objects[&island].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&mountain].zone, Zone::Hand);
 }

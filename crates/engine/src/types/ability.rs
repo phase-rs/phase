@@ -14,7 +14,7 @@ use super::game_state::{
 };
 use super::game_state_kinds::{DistributionUnit, TargetSelectionConstraint};
 use super::identifiers::{
-    CardId, EpicEffectId, ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION,
+    CardId, DamageDeliveryOwnerId, EpicEffectId, ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION,
 };
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost, ManaType};
@@ -2193,6 +2193,9 @@ pub struct SpellContext {
     /// incidental object (a land tapped for a mana payment) never reaches it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_damage_result: Option<DamageInstructionResult>,
+    /// The damage instruction that owns this suspended result or delivery node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_delivery_owner: Option<DamageDeliveryOwnerId>,
     /// CR 701.20e + CR 608.2c: Exact parent-produced cards forwarded to one
     /// immediate "for each" child. The child uses this snapshot as its
     /// iteration universe instead of an unqualified battlefield census.
@@ -6573,7 +6576,11 @@ impl ResolvedAbility {
     /// CR 608.2c + CR 614.9: Stamp a damage instruction's result onto this node,
     /// its next instruction, and onto the base clause of an unswapped "instead"
     /// override, which is that same next instruction.
-    pub fn set_direct_damage_result(&mut self, result: Option<DamageInstructionResult>) {
+    pub(crate) fn set_direct_damage_result(
+        &mut self,
+        result: Option<DamageInstructionResult>,
+        owner: Option<DamageDeliveryOwnerId>,
+    ) {
         if self
             .condition
             .as_ref()
@@ -6581,9 +6588,11 @@ impl ResolvedAbility {
         {
             if let Some(base) = self.else_ability.as_deref_mut() {
                 base.context.direct_damage_result = result;
+                base.context.damage_delivery_owner = owner;
             }
         }
         self.context.direct_damage_result = result;
+        self.context.damage_delivery_owner = owner;
     }
 
     /// CR 608.2c: Stamp one completed effect result onto exactly the deferred

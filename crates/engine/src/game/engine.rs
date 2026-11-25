@@ -1442,6 +1442,7 @@ fn apply_action_boundary_core(
     stack_resolution_limit: Option<u32>,
     authorize_actor: bool,
 ) -> Result<RawActionApplication, EngineError> {
+    let _damage_scope = effects::DamageDeliveryScope::enter(None);
     let lifecycle = super::lifecycle::enter_action_frame();
     if let Err(error) = mana_sources::preflight_tap_land_action(state, authenticated_actor, &action)
     {
@@ -17208,15 +17209,19 @@ fn apply_non_priority_pass_action(
                     state.priority_player = active;
                     match unit {
                         DistributionUnit::Damage => {
-                            let damage_start = events.len();
-                            effects::deal_damage::resume_resolution_division(
+                            effects::resume_damage_delivery(
                                 state,
-                                &pending_effect,
-                                &distribution,
-                                &mut events,
+                                pending_effect.context.damage_delivery_owner,
+                                |state| {
+                                    effects::deal_damage::resume_resolution_division(
+                                        state,
+                                        &pending_effect,
+                                        &distribution,
+                                        &mut events,
+                                    )
+                                },
                             )
                             .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
-                            effects::fold_awaited_damage_events(state, &events[damage_start..]);
                         }
                         DistributionUnit::EvenSplitDamage
                         | DistributionUnit::Counters(_)

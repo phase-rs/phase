@@ -16155,6 +16155,7 @@ fn park_entry_controller_choice(
     candidates: Vec<PlayerId>,
 ) -> ReplacementResult {
     state.pending_replacement = Some(PendingReplacement {
+        damage_delivery_owner: None,
         settled_damage_guards: Vec::new(),
         proposed,
         sacrifice_provenance: None,
@@ -16334,6 +16335,7 @@ fn park_as_enters_named_choice(
 ) -> ReplacementResult {
     let object_id = rid.source;
     state.pending_replacement = Some(PendingReplacement {
+        damage_delivery_owner: None,
         settled_damage_guards: Vec::new(),
         proposed,
         sacrifice_provenance: None,
@@ -16667,6 +16669,7 @@ fn park_as_enters_pay_choice(
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     state.pending_replacement = Some(PendingReplacement {
+        damage_delivery_owner: None,
         settled_damage_guards: Vec::new(),
         proposed,
         sacrifice_provenance: None,
@@ -17558,6 +17561,15 @@ fn pipeline_loop(
                 let search_found_candidates =
                     snapshot_search_found_candidates(state, &proposed, &candidates);
                 state.pending_replacement = Some(PendingReplacement {
+                    damage_delivery_owner: matches!(
+                        proposed,
+                        ProposedEvent::Damage {
+                            is_combat: false,
+                            ..
+                        }
+                    )
+                    .then(super::effects::current_damage_delivery_owner)
+                    .flatten(),
                     settled_damage_guards: settled_damage_guards(state),
                     proposed,
                     sacrifice_provenance: None,
@@ -17651,6 +17663,15 @@ fn pipeline_loop(
                 snapshot_search_found_candidates(state, &proposed, &candidates);
             let recorded_chooser = proposed.has_appended_token_batches().then_some(actor);
             state.pending_replacement = Some(PendingReplacement {
+                damage_delivery_owner: matches!(
+                    proposed,
+                    ProposedEvent::Damage {
+                        is_combat: false,
+                        ..
+                    }
+                )
+                .then(super::effects::current_damage_delivery_owner)
+                .flatten(),
                 settled_damage_guards: settled_damage_guards(state),
                 proposed,
                 sacrifice_provenance: None,
@@ -19121,6 +19142,7 @@ fn continue_replacement_impl(
                 // `may_cost_remaining`. The carried `Execute` payload is inert — the
                 // flag short-circuits the caller before it is read.
                 let outer_replacement = crate::types::game_state::PendingReplacement {
+                    damage_delivery_owner: None,
                     settled_damage_guards: Vec::new(),
                     proposed: proposed.clone(),
                     sacrifice_provenance: reparked_sacrifice_provenance,
@@ -19895,6 +19917,7 @@ mod tests {
     fn an_optional_replacement_candidate_is_resolved_through_the_authority() {
         let state = GameState::new_two_player(7);
         let mut pending = PendingReplacement {
+            damage_delivery_owner: None,
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
@@ -23188,6 +23211,7 @@ mod tests {
         // single optional replacement produces): candidate 0 is the real Riot
         // replacement, decline is synthetic. This isolates the label builder.
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
             sacrifice_provenance: None,
@@ -23254,6 +23278,7 @@ mod tests {
         ] {
             let mut state = test_state_with_object(commander, Zone::Battlefield, vec![]);
             state.pending_replacement = Some(PendingReplacement {
+                damage_delivery_owner: None,
                 settled_damage_guards: Vec::new(),
                 proposed: ProposedEvent::zone_change(
                     commander,
@@ -23339,6 +23364,7 @@ mod tests {
                 description: "Retain green mana".to_string(),
             }];
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::EmptyManaPool {
                 player_id: PlayerId(0),
@@ -26674,6 +26700,7 @@ mod tests {
             MatchedProtectionQuality::Color(ManaColor::Red),
         ];
         let pending = PendingReplacement {
+            damage_delivery_owner: None,
             proposed: ProposedEvent::Damage {
                 source_id: ObjectId(9),
                 target: TargetRef::Player(PlayerId(0)),
@@ -30618,6 +30645,7 @@ mod tests {
         // ReplacementChoice — covering the non-None branch of the guard.
         let mut state = GameState::new_two_player(42);
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
             sacrifice_provenance: None,

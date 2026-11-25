@@ -1223,6 +1223,7 @@ fn client_state_wire_value(state: &GameState) -> serde_json::Result<serde_json::
     root.remove("next_delayed_trigger_token");
     root.remove("next_delayed_trigger_instance");
     root.remove("next_resolution_cast_offer_id");
+    root.remove("next_damage_delivery_owner_id");
     root.remove("pending_trigger_firing");
     root.remove("stack_trigger_firings");
     root.remove("resolving_trigger_firing");
@@ -1251,6 +1252,7 @@ fn redact_private_trigger_firing(value: &mut serde_json::Value) {
                 "provenance",
                 "firing",
                 "firing_classification",
+                "damage_delivery_owner",
                 "trigger_firing",
                 "stack_trigger_firings",
                 "resolving_trigger_firing",
@@ -9748,14 +9750,24 @@ mod tests {
     /// serializer's own `redact_waiting_for_iteration_members` call is removed.
     #[test]
     fn client_wire_redacts_resolution_division_provenance_without_viewer_filter() {
+        use crate::types::ability::{QuantityExpr, TargetFilter};
+        use crate::types::identifiers::DamageDeliveryOwnerId;
+
         let mut state = GameState::new_two_player(42);
         let mut pending = ResolvedAbility::new(
-            Effect::unimplemented("private loop probe", "private loop probe"),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
             vec![],
             ObjectId(10),
             PlayerId(0),
         );
         pending.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(2)]);
+        pending.context.damage_delivery_owner = Some(DamageDeliveryOwnerId(12));
+        state.next_damage_delivery_owner_id = 13;
         state.waiting_for = WaitingFor::DistributeAmong {
             player: PlayerId(0),
             total: 3,
@@ -9778,6 +9790,27 @@ mod tests {
                 .is_none(),
             "wire payload leaked iteration members: {pending_effect}"
         );
+        assert!(pending_effect["context"]
+            .get("damage_delivery_owner")
+            .is_none());
+        assert!(wire.get("next_damage_delivery_owner_id").is_none());
+
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(filtered.next_damage_delivery_owner_id, 0);
+        let filtered_json = serde_json::to_value(&filtered).expect("filtered view serializes");
+        let filtered_pending =
+            &filtered_json["waiting_for"]["data"]["scope"]["data"]["pending_effect"];
+        assert!(filtered_pending.is_object());
+        assert!(filtered_pending["context"]
+            .get("damage_delivery_owner")
+            .is_none());
+        let decoded: GameState =
+            serde_json::from_value(filtered_json).expect("viewer state decodes");
+        assert!(matches!(
+            decoded.waiting_for,
+            WaitingFor::DistributeAmong { .. }
+        ));
+
         // Reach guard: the trusted serialization of the same state carries the
         // provenance, so its absence above is the projection's own redaction.
         let trusted = serde_json::to_value(&state).expect("trusted state serializes");
@@ -9786,6 +9819,12 @@ mod tests {
                 .get("parent_target_iteration_members")
                 .is_some()
         );
+        assert_eq!(
+            trusted["waiting_for"]["data"]["scope"]["data"]["pending_effect"]["context"]
+                ["damage_delivery_owner"],
+            12
+        );
+        assert_eq!(trusted["next_damage_delivery_owner_id"], 13);
     }
 
     /// CR 605.4a + CR 117.3c: `client_state_wire_value` is a defence-in-depth

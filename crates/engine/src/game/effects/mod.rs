@@ -57,7 +57,9 @@ use crate::types::game_state::{
     ResolutionPaymentOrigin, ReturnResultOccurrenceId, SeatCreatedTokens, TrackedMemberOrigin,
     WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
 };
-use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef, TrackedSetId};
+use crate::types::identifiers::{
+    DamageDeliveryOwnerId, DiscardFrameId, ObjectId, ObjectIncarnationRef, TrackedSetId,
+};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerId};
@@ -4156,6 +4158,15 @@ pub(crate) fn parent_referent_context_from_events(
     events: &[GameEvent],
     allow_taps: bool,
 ) -> Option<CostPaidObjectSnapshot> {
+    parent_referent_context(state, events, allow_taps, None)
+}
+
+fn parent_referent_context(
+    state: &GameState,
+    events: &[GameEvent],
+    allow_taps: bool,
+    damage: Option<&[RecordedDamageDealt]>,
+) -> Option<CostPaidObjectSnapshot> {
     // CR 608.2c + CR 400.7j: Later instructions in one resolving effect may
     // refer to a single object the earlier instruction sacrificed, moved to a
     // public zone, or revealed, even after that object changed zones.
@@ -4202,7 +4213,19 @@ pub(crate) fn parent_referent_context_from_events(
     // to its power to ~"). A damaged permanent stays on the battlefield, so its
     // claim is the weakest; sacrifice/move/reveal/tap referents from the same
     // resolution still win.
-    damaged_object_context_from_events(state, events)
+    match damage {
+        Some(records) => {
+            let pin = single_damage_recipient(records)?;
+            state
+                .objects
+                .get(&pin.object_id)
+                .filter(|object| object.incarnation == pin.incarnation)
+                .map(|object| {
+                    CostPaidObjectSnapshot::capture(object, object.snapshot_for_mana_spent())
+                })
+        }
+        None => damaged_object_context_from_events(state, events),
+    }
 }
 
 fn amassed_army_context_from_events(
@@ -4288,52 +4311,108 @@ fn referentless_chain_damage_result(
     Some(recipient.filter(|recipient| recipient.is_current(state)))
 }
 
-/// Captured snapshot of a single `GameEvent::DamageDealt` event, decoupling event
-/// reading (`&GameState`) from mutating parked continuations (`&mut GameState`).
+/// A positive delivery recorded at the same boundary as damage history.
+#[derive(Clone)]
 pub(crate) struct RecordedDamageDealt {
-    target: TargetRef,
-    amount: u32,
-    excess: u32,
-    object_pin: Option<ObjectIncarnationRef>,
+    pub(super) target: TargetRef,
+    pub(super) amount: u32,
+    pub(super) excess: u32,
+    pub(super) object_pin: Option<ObjectIncarnationRef>,
 }
 
-/// Snapshot all `DamageDealt` events in `events` along with live object incarnations.
-pub(crate) fn snapshot_damage_dealt_events(
-    state: &GameState,
-    events: &[GameEvent],
-) -> Vec<RecordedDamageDealt> {
-    if !events
-        .iter()
-        .any(|event| matches!(event, GameEvent::DamageDealt { .. }))
-    {
-        return Vec::new();
+struct DamageDeliveryCapture {
+    owner: DamageDeliveryOwnerId,
+    records: Vec<RecordedDamageDealt>,
+}
+
+thread_local! {
+    static DAMAGE_DELIVERY_CAPTURE: std::cell::RefCell<Option<DamageDeliveryCapture>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The current instruction's live recording scope. A scope with no owner
+/// suspends its caller during independent work or a legacy ownerless resume.
+pub(super) struct DamageDeliveryScope(Option<DamageDeliveryCapture>);
+
+impl DamageDeliveryScope {
+    pub(super) fn enter(owner: Option<DamageDeliveryOwnerId>) -> Self {
+        Self::with_records(owner, Vec::new())
     }
-    events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::DamageDealt {
-                target,
-                amount,
-                excess,
-                ..
-            } => {
-                let object_pin = match target {
-                    TargetRef::Object(id) => state
-                        .objects
-                        .get(id)
-                        .map(|obj| ObjectIncarnationRef::of(*id, obj.incarnation)),
-                    TargetRef::Player(_) => None,
-                };
-                Some(RecordedDamageDealt {
-                    target: target.clone(),
-                    amount: *amount,
-                    excess: *excess,
-                    object_pin,
-                })
-            }
-            _ => None,
+
+    fn with_records(
+        owner: Option<DamageDeliveryOwnerId>,
+        records: Vec<RecordedDamageDealt>,
+    ) -> Self {
+        Self(
+            DAMAGE_DELIVERY_CAPTURE.with(|live| {
+                live.replace(owner.map(|owner| DamageDeliveryCapture { owner, records }))
+            }),
+        )
+    }
+
+    fn take_records(&self) -> Vec<RecordedDamageDealt> {
+        DAMAGE_DELIVERY_CAPTURE.with(|live| {
+            live.borrow_mut()
+                .as_mut()
+                .map(|capture| std::mem::take(&mut capture.records))
+                .unwrap_or_default()
         })
-        .collect()
+    }
+}
+
+impl Drop for DamageDeliveryScope {
+    fn drop(&mut self) {
+        DAMAGE_DELIVERY_CAPTURE.with(|live| live.replace(self.0.take()));
+    }
+}
+
+pub(super) fn current_damage_delivery_owner() -> Option<DamageDeliveryOwnerId> {
+    DAMAGE_DELIVERY_CAPTURE.with(|live| live.borrow().as_ref().map(|capture| capture.owner))
+}
+
+pub(super) fn record_damage_delivery(record: RecordedDamageDealt) {
+    DAMAGE_DELIVERY_CAPTURE.with(|live| {
+        if let Some(capture) = live.borrow_mut().as_mut() {
+            capture.records.push(record);
+        }
+    });
+}
+
+pub(super) fn damage_delivery_mark() -> usize {
+    DAMAGE_DELIVERY_CAPTURE.with(|live| {
+        live.borrow()
+            .as_ref()
+            .map_or(0, |capture| capture.records.len())
+    })
+}
+
+pub(super) fn damage_deliveries_since(mark: usize) -> Vec<RecordedDamageDealt> {
+    DAMAGE_DELIVERY_CAPTURE.with(|live| {
+        live.borrow()
+            .as_ref()
+            .map_or_else(Vec::new, |capture| capture.records[mark..].to_vec())
+    })
+}
+
+pub(super) fn resume_damage_delivery<T>(
+    state: &mut GameState,
+    owner: Option<DamageDeliveryOwnerId>,
+    resume: impl FnOnce(&mut GameState) -> T,
+) -> T {
+    let scope = DamageDeliveryScope::enter(owner);
+    let result = resume(state);
+    if let Some(owner) = owner {
+        fold_snapshots_into_stack_awaiting_delivery(state, owner, &scope.take_records());
+    }
+    result
+}
+
+fn single_damage_recipient(records: &[RecordedDamageDealt]) -> Option<ObjectIncarnationRef> {
+    let mut recipient = AwaitedDamageRecipient::None;
+    for pin in records.iter().filter_map(|record| record.object_pin) {
+        recipient.record_object(pin);
+    }
+    recipient.single()
 }
 
 pub(crate) fn new_awaiting_damage_result_from_snapshots(
@@ -4359,40 +4438,31 @@ pub(crate) fn new_awaiting_damage_result_from_snapshots(
     result
 }
 
-/// CR 608.2c + CR 616.1: Build an initial `AwaitingDelivery` result for `ability`
-/// seeded with any `DamageDealt` events emitted before it paused.
-pub(crate) fn new_awaiting_damage_result(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    dealt_before_pause: &[GameEvent],
-) -> DamageInstructionResult {
-    let snapshots = snapshot_damage_dealt_events(state, dealt_before_pause);
-    new_awaiting_damage_result_from_snapshots(state, ability, &snapshots)
-}
-
 /// CR 608.2c: Does `ability` represent a continuation portion of an already-started
 /// damage instruction (`ResumeDamageBatch` or `remaining_damage_chain` node)?
 pub(crate) fn is_damage_continuation_node(ability: &ResolvedAbility) -> bool {
-    matches!(ability.effect, Effect::ResumeDamageBatch { .. })
-        || matches!(
-            ability.context.direct_damage_result,
-            Some(DamageInstructionResult::ContinuationPortion)
-        )
+    matches!(
+        ability.effect,
+        Effect::ResumeDamageBatch { .. } | Effect::ApplyPostReplacementDamage { .. }
+    ) || matches!(
+        ability.context.direct_damage_result,
+        Some(DamageInstructionResult::ContinuationPortion)
+    )
 }
 
-/// CR 608.2c: Does `chain` or any reachable child await a paused damage instruction?
-pub(crate) fn chain_awaits_damage_delivery(chain: &ResolvedAbility) -> bool {
-    matches!(
-        chain.context.direct_damage_result,
-        Some(DamageInstructionResult::AwaitingDelivery { .. })
-    ) || chain
-        .sub_ability
-        .as_deref()
-        .is_some_and(chain_awaits_damage_delivery)
+/// CR 608.2c: whether this chain awaits the specified instruction's delivery.
+pub(crate) fn chain_awaits_damage_delivery(
+    chain: &ResolvedAbility,
+    owner: Option<DamageDeliveryOwnerId>,
+) -> bool {
+    (chain.context.damage_delivery_owner == owner
+        && matches!(
+            chain.context.direct_damage_result,
+            Some(DamageInstructionResult::AwaitingDelivery { .. })
+        ))
         || chain
-            .else_ability
-            .as_deref()
-            .is_some_and(chain_awaits_damage_delivery)
+            .child_links()
+            .any(|(_, child)| chain_awaits_damage_delivery(child, owner))
 }
 
 /// Fold `snapshots` into an `AwaitingDelivery` result.
@@ -4430,60 +4500,40 @@ pub(crate) fn fold_snapshots_into_damage_result(
     }
 }
 
-/// Fold `snapshots` into the first `AwaitingDelivery` node found inside `chain`.
+/// CR 608.2c + CR 616.1: only this delivery owner's waiting result can
+/// receive its receipts. A newer independent pause may have no rider at all.
 pub(crate) fn fold_snapshots_into_chain_awaiting_delivery(
     chain: &mut ResolvedAbility,
+    owner: DamageDeliveryOwnerId,
     snapshots: &[RecordedDamageDealt],
 ) -> bool {
-    if let Some(result @ DamageInstructionResult::AwaitingDelivery { .. }) =
-        chain.context.direct_damage_result.as_mut()
-    {
-        fold_snapshots_into_damage_result(result, snapshots);
-        if chain
-            .condition
-            .as_ref()
-            .is_some_and(|condition| condition.is_instead_override())
+    if chain.context.damage_delivery_owner == Some(owner) {
+        if let Some(result @ DamageInstructionResult::AwaitingDelivery { .. }) =
+            chain.context.direct_damage_result.as_mut()
         {
-            let synced = chain.context.direct_damage_result;
-            if let Some(base) = chain.else_ability.as_deref_mut() {
-                base.context.direct_damage_result = synced;
-            }
+            fold_snapshots_into_damage_result(result, snapshots);
+            chain.set_direct_damage_result(chain.context.direct_damage_result, Some(owner));
+            return true;
         }
-        return true;
-    }
-    if chain
-        .sub_ability
-        .as_deref_mut()
-        .is_some_and(|sub| fold_snapshots_into_chain_awaiting_delivery(sub, snapshots))
-    {
-        return true;
     }
     chain
-        .else_ability
-        .as_deref_mut()
-        .is_some_and(|else_ab| fold_snapshots_into_chain_awaiting_delivery(else_ab, snapshots))
+        .child_links_mut()
+        .any(|(_, child)| fold_snapshots_into_chain_awaiting_delivery(child, owner, snapshots))
 }
 
-fn fold_snapshots_into_stack_awaiting_delivery(
+pub(super) fn fold_snapshots_into_stack_awaiting_delivery(
     state: &mut GameState,
+    owner: DamageDeliveryOwnerId,
     snapshots: &[RecordedDamageDealt],
 ) {
     if snapshots.is_empty() {
         return;
     }
     for pending in state.resolution_stack.ability_continuations_from_top_mut() {
-        if fold_snapshots_into_chain_awaiting_delivery(pending.chain.as_mut(), snapshots) {
+        if fold_snapshots_into_chain_awaiting_delivery(pending.chain.as_mut(), owner, snapshots) {
             break;
         }
     }
-}
-
-/// CR 608.2c + CR 616.1: Fold `DamageDealt` events emitted by a resuming damage
-/// instruction (replacement resume, post-loss/post-counter drain, or resolution-time
-/// division) into the topmost parked rider awaiting that instruction's delivery.
-pub(crate) fn fold_awaited_damage_events(state: &mut GameState, events: &[GameEvent]) {
-    let snapshots = snapshot_damage_dealt_events(state, events);
-    fold_snapshots_into_stack_awaiting_delivery(state, &snapshots);
 }
 
 /// Convert `ability`'s `AwaitingDelivery` into `Dealt { recipient }`, publish
@@ -4519,7 +4569,7 @@ fn finalize_awaiting_damage_result(
     let dealt = DamageInstructionResult::Dealt {
         recipient: recipient.single(),
     };
-    ability.set_direct_damage_result(Some(dealt));
+    ability.set_direct_damage_result(Some(dealt), None);
     Some(dealt)
 }
 
@@ -5964,6 +6014,7 @@ pub(crate) fn apply_parent_chain_context(
     let child_parked_batch = std::mem::take(&mut child.context.parked_damage_batch);
     // CR 616.1 + CR 608.2c: and a node's wait for its paused damage instruction's
     // delivery (`DamageInstructionResult::AwaitingDelivery` / `ContinuationPortion`).
+    let child_damage_delivery_owner = child.context.damage_delivery_owner;
     let child_awaited_damage = child.context.direct_damage_result.take().filter(|result| {
         matches!(
             result,
@@ -6065,6 +6116,7 @@ pub(crate) fn apply_parent_chain_context(
     // node parked awaiting its paused instruction's delivery keeps awaiting it:
     // a remaining portion of that instruction handing off to it dealt only part
     // of that damage.
+    child.context.damage_delivery_owner = child_damage_delivery_owner;
     if child_awaited_damage.is_some() {
         child.context.direct_damage_result = child_awaited_damage;
     } else if !deal_damage::is_multi_event_damage_instruction(&parent.effect)
@@ -17749,8 +17801,16 @@ fn affected_objects_with_causes(
     ability: &ResolvedAbility,
     effect: &Effect,
     events: &[GameEvent],
+    owned_damage: Option<&[RecordedDamageDealt]>,
 ) -> Vec<(ObjectId, Option<ThisWayCause>)> {
-    let ids = affected_objects_from_events(state, ability, effect, events);
+    let ids = match (effect, owned_damage) {
+        (Effect::DealDamage { .. } | Effect::DamageAll { .. }, Some(records)) => records
+            .iter()
+            .filter_map(|record| record.object_pin.filter(|pin| pin.is_current(state)))
+            .map(|pin| pin.object_id)
+            .collect(),
+        _ => affected_objects_from_events(state, ability, effect, events),
+    };
     // CR 608.2c: the cause is a property of the EFFECT being resolved, not of any
     // individual member's event — so every member of this publish shares one
     // cause, except under `Effect::Counter`, whose CR 614.1a rider applies to a
@@ -19642,6 +19702,15 @@ pub(crate) fn publish_tracked_set_for_resolution(
     producer: &ResolvedAbility,
     input: TrackedSetPublicationInput<'_>,
 ) {
+    publish_tracked_set_with_damage_delivery(state, producer, input, None);
+}
+
+fn publish_tracked_set_with_damage_delivery(
+    state: &mut GameState,
+    producer: &ResolvedAbility,
+    input: TrackedSetPublicationInput<'_>,
+    owned_damage: Option<&[RecordedDamageDealt]>,
+) {
     match (tracked_set_publication_mode(producer), input) {
         (
             TrackedSetPublicationMode::Prospective { cause },
@@ -19659,7 +19728,7 @@ pub(crate) fn publish_tracked_set_for_resolution(
             },
         ) if resolution_next_needs_tracked_set(state, producer) => {
             let mut affected =
-                affected_objects_with_causes(state, ability, &ability.effect, events);
+                affected_objects_with_causes(state, ability, &ability.effect, events, owned_damage);
             // CR 608.2c + CR 701.26a: "tap all creatures that blocked this
             // creature this turn. They don't untap ..." (Joven's Ferrets) names
             // an already-tapped blocker too. Such a member emits no event, so it
@@ -23220,6 +23289,34 @@ fn amount_channel(effect: &Effect) -> Option<AmountChannel> {
     Some(AmountChannel { events, zero })
 }
 
+fn owned_damage_amounts(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    records: &[RecordedDamageDealt],
+) -> (Option<i32>, Option<i32>) {
+    let Some(channel) = amount_channel(&ability.effect) else {
+        return (None, None);
+    };
+    let DamageInstructionResult::AwaitingDelivery {
+        amount,
+        excess,
+        fight_fought_creature,
+        ..
+    } = new_awaiting_damage_result_from_snapshots(state, ability, records)
+    else {
+        unreachable!("fresh damage accumulator must await delivery");
+    };
+    if matches!(channel.events, AmountEvents::FightExcessOnFoughtCreature)
+        && fight_fought_creature.is_none()
+    {
+        return (None, None);
+    }
+    (
+        (amount > 0 || channel.zero == ZeroSemantics::MeasuredResult).then_some(amount),
+        excess,
+    )
+}
+
 fn previous_effect_amount_from_events(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -23659,6 +23756,7 @@ pub(crate) fn publish_player_scope_clause_results(
                 scoped_template,
                 &scoped_template.effect,
                 scoped_events,
+                None,
             )
         } else {
             Vec::new()
@@ -25137,7 +25235,8 @@ fn publish_completed_sacrifice_clause_set(
     if !tail_needs_set {
         return;
     }
-    let affected = affected_objects_with_causes(state, template, &template.effect, scoped_events);
+    let affected =
+        affected_objects_with_causes(state, template, &template.effect, scoped_events, None);
     publish_tracked_set_with_causes(state, affected);
 }
 
@@ -29530,6 +29629,8 @@ fn resolve_chain_body(
         begin_seat_created_tokens(created, seat);
     }
     let mut immediate_effect_result = None;
+    let mut damage_delivery_owner = None;
+    let mut damage_records = None;
     // CR 610.3a / CR 610.3b + CR 118.12: per-call verdicts for this node's bounded zone
     // move. Each `resolve_effect` call (one per repeat iteration) is judged on
     // its OWN event window by the resolver's own predicate; the node counts as
@@ -29998,13 +30099,38 @@ fn resolve_chain_body(
                         &mut state.current_step_targets_hydrated_from_event_context,
                         hydrated_only_for_step,
                     );
-                    let resolved = if ability.repeat_for.is_some() {
-                        with_iteration_return_result_occurrence(state, iter_effective, |state| {
+                    let mut resolve_step = |state: &mut GameState| {
+                        if ability.repeat_for.is_some() {
+                            with_iteration_return_result_occurrence(
+                                state,
+                                iter_effective,
+                                |state| resolve_effect_step(state, iter_effective, events),
+                            )
+                        } else {
                             resolve_effect_step(state, iter_effective, events)
-                        })
-                    } else {
-                        resolve_effect_step(state, iter_effective, events)
+                        }
                     };
+                    let resolved =
+                        if deal_damage::is_multi_event_damage_instruction(&iter_effective.effect) {
+                            let owner =
+                                if is_damage_continuation_node(iter_effective) {
+                                    iter_effective.context.damage_delivery_owner
+                                } else {
+                                    Some(*damage_delivery_owner.get_or_insert_with(|| {
+                                        state.allocate_damage_delivery_owner()
+                                    }))
+                                };
+                            damage_delivery_owner = owner;
+                            let scope = DamageDeliveryScope::with_records(
+                                owner,
+                                damage_records.take().unwrap_or_default(),
+                            );
+                            let result = resolve_step(state);
+                            damage_records = Some(scope.take_records());
+                            result
+                        } else {
+                            resolve_step(state)
+                        };
                     state.current_step_targets_hydrated_from_event_context = prev_hydrated;
                     match resolved {
                         Ok(step) => {
@@ -30219,7 +30345,14 @@ fn resolve_chain_body(
             // completed damage instruction's amount instead.
             state.last_effect_count = None;
         }
-        if let Some(amount) = previous_effect_amount_from_events(state, ability, parent_events) {
+        let (amount, excess) = match damage_records.as_deref() {
+            Some(records) => owned_damage_amounts(state, ability, records),
+            None => (
+                previous_effect_amount_from_events(state, ability, parent_events),
+                previous_effect_excess_amount_from_events(state, ability, parent_events),
+            ),
+        };
+        if let Some(amount) = amount {
             state.last_effect_amount = Some(amount);
             // CR 120.10: stamp the resolution-local excess channel alongside the
             // running total so a follow-up "if excess damage was dealt this way"
@@ -30227,7 +30360,6 @@ fn resolve_chain_body(
             // total and is struck: it governs damage MARKED on a creature until
             // the cleanup step, not the amount one clause leaves for a later
             // clause in the same resolution — that carry-forward is CR 608.2c.
-            let excess = previous_effect_excess_amount_from_events(state, ability, parent_events);
             state.last_effect_excess_amount = excess;
         }
     }
@@ -30420,7 +30552,7 @@ fn resolve_chain_body(
     //     creatures" after a mass counter instruction means the permanents that
     //     actually received counters.
     if resolution_next_needs_tracked_set(state, ability) {
-        publish_tracked_set_for_resolution(
+        publish_tracked_set_with_damage_delivery(
             state,
             ability,
             TrackedSetPublicationInput::ResolvedEvents {
@@ -30428,6 +30560,7 @@ fn resolve_chain_body(
                 events: &events[events_before..],
                 selection: &selection_before,
             },
+            damage_records.as_deref(),
         );
         // CR 608.2c + CR 603.7a: a CopyToken owner parked at this producer's boundary completes
         // the instruction later; bind it to the set just published so its remaining tokens join
@@ -30551,20 +30684,18 @@ fn resolve_chain_body(
     // instruction is a PayCost effect.
     let allow_taps = !matches!(ability.effect, Effect::PayCost { .. });
     let event_context_object =
-        parent_referent_context_from_events(state, effect_events, allow_taps);
-    // CR 608.2c + CR 614.9: a damage instruction's own result, the object its damage
-    // was actually dealt to (after any redirection), for its direct child's "dealt
-    // damage this way" rider. Taken from this instruction's `DamageDealt` events
-    // alone, never from another published referent.
-    let damage_result = (deal_damage::is_multi_event_damage_instruction(&ability.effect)
-        && !is_damage_continuation_node(ability))
-    .then(|| DamageInstructionResult::Dealt {
-        recipient: damaged_object_context_from_events(state, effect_events)
-            .map(|snapshot| ObjectIncarnationRef::of(snapshot.object_id, snapshot.incarnation)),
-    });
-    let paused_damage_snapshots = (deal_damage::is_multi_event_damage_instruction(&ability.effect)
-        && (is_damage_continuation_node(ability) || progress.is_pending()))
-    .then(|| snapshot_damage_dealt_events(state, effect_events));
+        parent_referent_context(state, effect_events, allow_taps, damage_records.as_deref());
+    // CR 608.2c + CR 614.9: the direct child reads this instruction's actual
+    // delivery. Other referents and independent replacement actions stay separate.
+    let damage_result = damage_records
+        .as_deref()
+        .filter(|_| !is_damage_continuation_node(ability))
+        .map(|records| DamageInstructionResult::Dealt {
+            recipient: single_damage_recipient(records),
+        });
+    let paused_damage_snapshots = damage_records
+        .as_deref()
+        .filter(|_| is_damage_continuation_node(ability) || progress.is_pending());
     // CR 608.2c + CR 609.3: an instruction that left no referent event still names
     // the object its root instruction announced (`announced_object_context`), for
     // the next instruction only. A later "that card" names what some other
@@ -30613,6 +30744,15 @@ fn resolve_chain_body(
     // written, so no later resolution can observe it.
     let bounded_move_refused =
         bounded_move_calls > 0 && bounded_move_refusals == bounded_move_calls;
+    let damage_performed = damage_records
+        .as_deref()
+        .filter(|_| {
+            matches!(
+                ability.effect,
+                Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::Fight { .. }
+            )
+        })
+        .map(|records| !records.is_empty());
     let bounded_refusal_owned = (bounded_move_refused && ability.context.optional_effect_performed)
         .then(|| {
             rebound_ability(ability, |owned| {
@@ -30652,7 +30792,9 @@ fn resolve_chain_body(
         && !compound_run_unperformed(ability)
         && !state.cost_payment_failed_flag
         && !bounded_move_refused
-        && mandatory_parent_effect_performed(&ability.effect, &events[events_before..])
+        && damage_performed.unwrap_or_else(|| {
+            mandatory_parent_effect_performed(&ability.effect, &events[events_before..])
+        })
         && !effect_manages_own_outcome_flag(&ability.effect)
         && ability.sub_ability.as_ref().is_some_and(|sub| {
             sub.sub_link == SubAbilityLink::SequentialSibling
@@ -30669,7 +30811,9 @@ fn resolve_chain_body(
         && !ability.context.optional_effect_performed
         && !waits_for_resolution_choice(&state.waiting_for)
         && !effect_manages_own_outcome_flag(&ability.effect)
-        && !mandatory_parent_effect_performed(&ability.effect, &events[events_before..])
+        && !damage_performed.unwrap_or_else(|| {
+            mandatory_parent_effect_performed(&ability.effect, &events[events_before..])
+        })
         && ability.sub_ability.as_ref().is_some_and(|sub| {
             sub.sub_link == SubAbilityLink::ContinuationStep && sub.condition.is_none()
         })
@@ -30820,28 +30964,33 @@ fn resolve_chain_body(
     // instruction (`ResumeDamageBatch` or `ContinuationPortion`) folds its own
     // `DamageDealt` events into the awaiting rider, and finalizes it when that
     // rider is the immediate child and the instruction has now finished.
-    let continuation_damage_owned = if is_damage_continuation_node(ability) {
-        let snapshots = paused_damage_snapshots.as_deref().unwrap_or(&[]);
+    let continuation_damage_owned = if let Some(owner) =
+        damage_delivery_owner.filter(|_| is_damage_continuation_node(ability))
+    {
+        let snapshots = paused_damage_snapshots.unwrap_or_default();
         if ability
             .sub_ability
             .as_deref()
-            .is_some_and(chain_awaits_damage_delivery)
+            .is_some_and(|sub| chain_awaits_damage_delivery(sub, Some(owner)))
         {
             let mut owned = rebound_ability(ability, |owned| {
                 if let Some(sub) = owned.sub_ability.as_deref_mut() {
-                    fold_snapshots_into_chain_awaiting_delivery(sub, snapshots);
+                    fold_snapshots_into_chain_awaiting_delivery(sub, owner, snapshots);
                 }
             });
             if !progress.is_pending() {
                 if let Some(sub) = owned.sub_ability.as_deref_mut() {
-                    if let Some(dealt) = finalize_awaiting_damage_result(state, sub) {
-                        owned.context.direct_damage_result = Some(dealt);
+                    if sub.context.damage_delivery_owner == Some(owner) {
+                        if let Some(dealt) = finalize_awaiting_damage_result(state, sub) {
+                            owned.context.direct_damage_result = Some(dealt);
+                            owned.context.damage_delivery_owner = None;
+                        }
                     }
                 }
             }
             Some(owned)
         } else {
-            fold_snapshots_into_stack_awaiting_delivery(state, snapshots);
+            fold_snapshots_into_stack_awaiting_delivery(state, owner, snapshots);
             None
         }
     } else {
@@ -31361,13 +31510,13 @@ fn resolve_chain_body(
                     // an enclosing caller's prompt does not suspend this instruction.
                     if progress.is_pending() {
                         if let Some(snapshots) = paused_damage_snapshots
-                            .as_deref()
                             .filter(|_| !is_damage_continuation_node(ability))
                         {
                             let awaiting = new_awaiting_damage_result_from_snapshots(
                                 state, ability, snapshots,
                             );
-                            resolved.set_direct_damage_result(Some(awaiting));
+                            resolved
+                                .set_direct_damage_result(Some(awaiting), damage_delivery_owner);
                         }
                         // The shared continuation authority places it relative to
                         // whatever paused (a draw pair, a direct choice).
@@ -31442,13 +31591,13 @@ fn resolve_chain_body(
                     }
                     if progress.is_pending() {
                         if let Some(snapshots) = paused_damage_snapshots
-                            .as_deref()
                             .filter(|_| !is_damage_continuation_node(ability))
                         {
                             let awaiting = new_awaiting_damage_result_from_snapshots(
                                 state, ability, snapshots,
                             );
-                            resolved.set_direct_damage_result(Some(awaiting));
+                            resolved
+                                .set_direct_damage_result(Some(awaiting), damage_delivery_owner);
                         }
                         // CR 608.2c: the tail is a later instruction of the
                         // parent; the shared continuation authority keeps it
@@ -31608,12 +31757,11 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            if let Some(snapshots) = paused_damage_snapshots
-                .as_deref()
-                .filter(|_| !is_damage_continuation_node(ability))
+            if let Some(snapshots) =
+                paused_damage_snapshots.filter(|_| !is_damage_continuation_node(ability))
             {
                 let awaiting = new_awaiting_damage_result_from_snapshots(state, ability, snapshots);
-                sub_clone.set_direct_damage_result(Some(awaiting));
+                sub_clone.set_direct_damage_result(Some(awaiting), damage_delivery_owner);
             }
             if forwards_battlefield_move(ability) {
                 bind_forwarded_generic_self_ref(&mut sub_clone);
@@ -74324,7 +74472,8 @@ mod tests {
             let tapped_event = events.iter().any(|event| {
                 matches!(event, GameEvent::PermanentTapped { object_id, .. } if *object_id == creature)
             });
-            let affected = affected_objects_with_causes(&state, &ability, &ability.effect, &events);
+            let affected =
+                affected_objects_with_causes(&state, &ability, &ability.effect, &events, None);
             (creature, tapped_event, affected)
         };
 

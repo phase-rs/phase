@@ -55,9 +55,10 @@ pub use super::game_state_kinds::{
     TargetSelectionConstraint,
 };
 use super::identifiers::{
-    CardId, DelayedInstallIdentity, DelayedTriggerOrigin, EpicEffectId, ExtraPhaseId, ExtraTurnId,
-    LogicalZoneChangeGroupId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef,
-    ReplacementContinuationId, ResolutionCastOfferId, TrackedSetId, TriggerFiring,
+    CardId, DamageDeliveryOwnerId, DelayedInstallIdentity, DelayedTriggerOrigin, EpicEffectId,
+    ExtraPhaseId, ExtraTurnId, LogicalZoneChangeGroupId, ObjectId, ObjectIdentityBinding,
+    ObjectIncarnationRef, ReplacementContinuationId, ResolutionCastOfferId, TrackedSetId,
+    TriggerFiring,
 };
 use super::interaction::{ActiveInteractionSlot, InteractionSessionId};
 use super::keywords::{Keyword, KeywordKind};
@@ -3634,6 +3635,9 @@ pub struct ExploitRecord {
 /// it (mirroring `PendingCombatLifelink`'s deliberately-absent paused source).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDamagePostLoss {
+    /// The instruction whose damage is still being delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_delivery_owner: Option<DamageDeliveryOwnerId>,
     pub source_id: ObjectId,
     /// CR 400.7: the source incarnation captured with the damage context —
     /// authoritative if the source changes zones across the pause.
@@ -3690,6 +3694,9 @@ pub enum DamagePostLossStage {
 /// keywords, and `lifelink_bonus`; the `excess` below rides alongside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDamagePostCounter {
+    /// The instruction whose damage is still being delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_delivery_owner: Option<DamageDeliveryOwnerId>,
     /// CR 400.7: the damage context at pause time (source identity/incarnation,
     /// controller, keywords, `excess_recipient`, `lifelink_bonus`).
     pub ctx: DamageContextSnapshot,
@@ -14006,6 +14013,15 @@ impl GameState {
         ResolutionCastOfferId(id)
     }
 
+    /// Mint the nonzero identity of one damage instruction.
+    pub(crate) fn allocate_damage_delivery_owner(&mut self) -> DamageDeliveryOwnerId {
+        let id = self.next_damage_delivery_owner_id.max(1);
+        self.next_damage_delivery_owner_id = id
+            .checked_add(1)
+            .expect("damage-delivery owner allocator exhausted");
+        DamageDeliveryOwnerId(id)
+    }
+
     /// CR 500.7: mint the nonzero identity of one granted extra turn. The
     /// allocator is persisted, so an id minted after a reload never repeats one
     /// already on a queued turn or bound trigger.
@@ -18904,6 +18920,163 @@ pub(crate) fn live_return_result_occurrences(
         live.extend(frame.return_result_occurrence);
     }
     live
+}
+
+/// Re-establish the allocator bound using the live suspended instruction
+/// carriers. An absent stamp is a legacy ownerless record.
+pub(crate) fn normalize_damage_delivery_owners(state: &mut GameState) -> Result<(), String> {
+    use crate::types::{ability::DamageInstructionResult, Effect};
+    if state.viewer_projection.is_some() {
+        return Ok(());
+    }
+
+    #[derive(Default)]
+    struct Owners {
+        max: u64,
+        readers: HashSet<DamageDeliveryOwnerId>,
+        batches: HashSet<DamageDeliveryOwnerId>,
+        active: HashSet<DamageDeliveryOwnerId>,
+    }
+
+    impl Owners {
+        fn reserve(&mut self, owner: DamageDeliveryOwnerId) -> Result<(), String> {
+            if owner.0 == 0 {
+                return Err("damage-delivery owner is zero".into());
+            }
+            self.max = self.max.max(owner.0);
+            Ok(())
+        }
+
+        fn active(&mut self, owner: DamageDeliveryOwnerId) -> Result<(), String> {
+            self.reserve(owner)?;
+            if !self.active.insert(owner) {
+                return Err("unrelated active damage deliveries share an owner".into());
+            }
+            Ok(())
+        }
+
+        fn parked_chain(&mut self, node: &ResolvedAbility, mirrored: bool) -> Result<(), String> {
+            if let Some(owner) = node.context.damage_delivery_owner {
+                self.reserve(owner)?;
+                match (&node.effect, node.context.direct_damage_result) {
+                    (Effect::ResumeDamageBatch { .. }, _) => {
+                        if !self.batches.insert(owner) {
+                            return Err("unrelated parked damage batches share an owner".into());
+                        }
+                    }
+                    (Effect::ApplyPostReplacementDamage { .. }, _)
+                    | (
+                        Effect::DealDamage { .. },
+                        Some(DamageInstructionResult::ContinuationPortion),
+                    ) => {}
+                    (_, Some(DamageInstructionResult::AwaitingDelivery { .. })) => {
+                        if !mirrored && !self.readers.insert(owner) {
+                            return Err("unrelated waiting damage results share an owner".into());
+                        }
+                    }
+                    _ => {
+                        return Err("damage-delivery owner lives on an unrelated instruction".into())
+                    }
+                }
+            }
+            for (edge, child) in node.child_links() {
+                // The base of an unswapped "instead" override is another
+                // representation of this same next instruction.
+                let mirrored = node.context.damage_delivery_owner.is_some()
+                    && matches!(edge, ChainStep::ElseAbility)
+                    && node
+                        .condition
+                        .as_ref()
+                        .is_some_and(|condition| condition.is_instead_override())
+                    && matches!(
+                        node.context.direct_damage_result,
+                        Some(DamageInstructionResult::AwaitingDelivery { .. })
+                    );
+                if mirrored
+                    && (child.context.damage_delivery_owner != node.context.damage_delivery_owner
+                        || child.context.direct_damage_result != node.context.direct_damage_result)
+                {
+                    return Err("mirrored damage results disagree on the delivery owner".into());
+                }
+                self.parked_chain(child, mirrored)?;
+            }
+            Ok(())
+        }
+    }
+    fn has_owner(node: &ResolvedAbility) -> bool {
+        node.context.damage_delivery_owner.is_some()
+            || node.child_links().any(|(_, child)| has_owner(child))
+    }
+
+    let mut owners = Owners::default();
+    for pending in state.resolution_stack.ability_continuations() {
+        owners.parked_chain(&pending.chain, false)?;
+    }
+    for source in state
+        .stack
+        .iter()
+        .chain(state.resolving_stack_entry.iter())
+        .filter_map(StackEntry::ability)
+    {
+        if has_owner(source) {
+            return Err("unstarted stack instruction carries a damage-delivery owner".into());
+        }
+    }
+    if let Some(pending) = &state.pending_replacement {
+        if let Some(owner) = pending.damage_delivery_owner {
+            if !matches!(
+                pending.proposed,
+                ProposedEvent::Damage {
+                    is_combat: false,
+                    ..
+                }
+            ) {
+                return Err("unrelated replacement carries a damage-delivery owner".into());
+            }
+            owners.active(owner)?;
+        }
+    }
+    if let WaitingFor::DistributeAmong {
+        unit,
+        scope: DistributionScope::ResolutionCandidates { pending_effect },
+        ..
+    } = &state.waiting_for
+    {
+        if let Some(owner) = pending_effect.context.damage_delivery_owner {
+            if *unit != DistributionUnit::Damage
+                || !matches!(pending_effect.effect, Effect::DealDamage { .. })
+            {
+                return Err("unrelated distribution carries a damage-delivery owner".into());
+            }
+            owners.active(owner)?;
+        }
+    }
+    for (owner, combat) in state
+        .pending_damage_post_loss
+        .iter()
+        .map(|post| (post.damage_delivery_owner, post.is_combat))
+        .chain(
+            state
+                .pending_damage_post_counter
+                .iter()
+                .map(|post| (post.damage_delivery_owner, post.is_combat)),
+        )
+    {
+        if let Some(owner) = owner {
+            if combat {
+                return Err("combat residue carries a noncombat damage-delivery owner".into());
+            }
+            owners.active(owner)?;
+        }
+    }
+    let next = owners
+        .max
+        .checked_add(1)
+        .map(|bound| state.next_damage_delivery_owner_id.max(bound))
+        .filter(|next| *next != u64::MAX)
+        .ok_or_else(|| "damage-delivery owner allocator exhausted".to_string())?;
+    state.next_damage_delivery_owner_id = next;
+    Ok(())
 }
 
 pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> Result<(), String> {
@@ -29362,6 +29535,9 @@ declare_game_state! {
     /// Persisted producer allocator for paid resolution-cast cleanup authority.
     #[serde(default)]
     pub(crate) next_resolution_cast_offer_id: u64,
+    /// Persisted allocator for damage instructions that can resume after a pause.
+    #[serde(default)]
+    pub(crate) next_damage_delivery_owner_id: u64,
     /// Monotonic allocator for [`LogicalZoneChangeGroupId`]. It is pure
     /// identity, so equality intentionally compares the active owner rather
     /// than this historical counter.
@@ -34732,6 +34908,7 @@ impl GameStateDecode {
         withhold_unestablished_entry_completion(&mut state);
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
+        normalize_damage_delivery_owners(&mut state)?;
         // The PERSISTED half of the projection gate; `decode` below carries the other.
         // See the pairing comment there for why one site is not enough.
         reject_viewer_projection_as_authority(&state)?;
@@ -34776,6 +34953,7 @@ impl GameStateDecode {
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
+        normalize_damage_delivery_owners(&mut state)?;
         // NO viewer-projection guard here, deliberately. This is the TRANSPORT decode
         // path as much as a restore path: `ServerMessage::GameStarted { state, .. }`
         // (`server-core/src/protocol.rs`) carries a `filter_state_for_viewer` projection
@@ -36198,6 +36376,9 @@ pub struct PendingSimultaneousTokenClause {
 /// into `proposed` before typed decoding, and this struct ignores the key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
+    /// The instruction whose damage is still being delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_delivery_owner: Option<DamageDeliveryOwnerId>,
     pub proposed: ProposedEvent,
     /// CR 608.2f + CR 700.1: the guards of the simultaneous damage batch this portion
     /// belongs to, read again when the answer re-scans this portion.
@@ -41166,6 +41347,7 @@ impl GameState {
             next_delayed_trigger_token: 1,
             next_delayed_trigger_instance: initial_delayed_trigger_instance_id(),
             next_resolution_cast_offer_id: 1,
+            next_damage_delivery_owner_id: 1,
             next_logical_zone_change_group_id: initial_logical_zone_change_group_id(),
             // CR 118.3a: start at 1 so minted pip ids never collide with the
             // `ManaPipId(0)` unstamped sentinel.
@@ -42761,6 +42943,7 @@ impl GameState {
         clone.next_delayed_trigger_token = 0;
         clone.next_delayed_trigger_instance = 0;
         clone.next_resolution_cast_offer_id = 0;
+        clone.next_damage_delivery_owner_id = 0;
         // CR 608.2e + CR 104.4b: fan-out control-change captures are
         // resolution-scoped working memory keyed by a monotone id, not game
         // position.
@@ -45146,6 +45329,7 @@ impl GameState {
             next_delayed_trigger_token: _,
             next_delayed_trigger_instance: _,
             next_resolution_cast_offer_id: _,
+            next_damage_delivery_owner_id: _,
             next_logical_zone_change_group_id: _,
             next_pip_id: _,
             next_spell_announcement: _,
@@ -46742,6 +46926,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_delayed_trigger_token: _,
         next_delayed_trigger_instance: _,
         next_resolution_cast_offer_id: _,
+        next_damage_delivery_owner_id: _,
         next_logical_zone_change_group_id: _,
         next_pip_id: _,
         next_spell_announcement: _,
@@ -47528,6 +47713,7 @@ impl PartialEq for GameState {
             && self.next_delayed_trigger_token == other.next_delayed_trigger_token
             && self.next_delayed_trigger_instance == other.next_delayed_trigger_instance
             && self.next_resolution_cast_offer_id == other.next_resolution_cast_offer_id
+            && self.next_damage_delivery_owner_id == other.next_damage_delivery_owner_id
             && self.next_pip_id == other.next_pip_id
             && self.next_spell_announcement == other.next_spell_announcement
             && self.resolved_rules_journal == other.resolved_rules_journal
@@ -50322,6 +50508,90 @@ mod tests {
             },
         };
         (state, source, hit_card, constraint, receipt)
+    }
+
+    #[test]
+    fn damage_ownership_restore_reserves_live_ids_and_rejects_invalid_authority() {
+        use crate::types::ability::{QuantityExpr, TargetFilter};
+        use crate::types::Effect;
+
+        let make_state = |owner| {
+            let mut state = GameState::new_two_player(42);
+            let mut effect = ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+                vec![],
+                ObjectId(10),
+                PlayerId(0),
+            );
+            effect.context.damage_delivery_owner = owner;
+            state.waiting_for = WaitingFor::DistributeAmong {
+                player: PlayerId(0),
+                total: 3,
+                targets: vec![TargetRef::Player(PlayerId(1))],
+                unit: DistributionUnit::Damage,
+                scope: DistributionScope::ResolutionCandidates {
+                    pending_effect: Box::new(effect),
+                },
+            };
+            state
+        };
+
+        let trusted = make_state(Some(DamageDeliveryOwnerId(12)));
+        let mut raw = serde_json::to_value(&trusted).unwrap();
+        raw.as_object_mut()
+            .unwrap()
+            .remove("next_damage_delivery_owner_id");
+        let mut decoded: GameState =
+            serde_json::from_value(raw).expect("missing counter is reserved");
+        assert_eq!(
+            decoded.allocate_damage_delivery_owner(),
+            DamageDeliveryOwnerId(13)
+        );
+
+        for (owner, message) in [
+            (DamageDeliveryOwnerId(0), "owner is zero"),
+            (DamageDeliveryOwnerId(u64::MAX), "allocator exhausted"),
+        ] {
+            let raw = serde_json::to_value(make_state(Some(owner))).unwrap();
+            let error = serde_json::from_value::<GameState>(raw)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{error}");
+        }
+
+        let mut legacy = make_state(None);
+        legacy.next_damage_delivery_owner_id = 0;
+        let raw = serde_json::to_value(legacy).unwrap();
+        let mut decoded: GameState =
+            serde_json::from_value(raw).expect("legacy ownerless damage decodes");
+        assert_eq!(
+            decoded.allocate_damage_delivery_owner(),
+            DamageDeliveryOwnerId(1)
+        );
+        assert!(matches!(
+            decoded.waiting_for,
+            WaitingFor::DistributeAmong { scope: DistributionScope::ResolutionCandidates { pending_effect }, .. }
+                if pending_effect.context.damage_delivery_owner.is_none()
+        ));
+
+        let mut unrelated = trusted;
+        let WaitingFor::DistributeAmong { unit, .. } = &mut unrelated.waiting_for else {
+            unreachable!("fixture is a distribution prompt");
+        };
+        *unit = DistributionUnit::Life;
+        let raw = serde_json::to_value(unrelated).unwrap();
+        let error = serde_json::from_value::<GameState>(raw)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unrelated distribution carries a damage-delivery owner"),
+            "{error}"
+        );
     }
 
     fn downgrade_paid_offer_cleanup_to_legacy(state: &mut serde_json::Value) {
@@ -72743,6 +73013,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
 
     fn pending_life_gain_replacement(policy: UnrepresentablePolicy) -> PendingReplacement {
         PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::LifeGain {
                 player_id: PlayerId(0),
