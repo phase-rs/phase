@@ -27,7 +27,7 @@ use crate::types::counter::{parse_counter_type, CounterMatch};
 use crate::types::zones::Zone;
 
 pub use crate::types::text_grammar::{
-    parse_color_property, parse_property_filter, parse_zone_filter,
+    parse_card_type_count_property, parse_color_property, parse_property_filter, parse_zone_filter,
 };
 
 /// CR 201.2 + CR 201.2a: "not named <name>" — a NAME predicate, lowered to
@@ -297,6 +297,34 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
         FilterProp::AnyOf { props }
     };
     Ok((rest, prop))
+}
+
+/// CR 208.1: Parse the source-relative lesser-power/toughness suffix shape
+/// without choosing its referent. The enclosing target parser owns that
+/// context-sensitive binding; keeping the grammar separate prevents a bare
+/// suffix from silently becoming a trigger-source or prior-target reference.
+pub fn parse_relative_pt_comparison(input: &str) -> OracleResult<'_, (PtStat, Comparator)> {
+    let (input, _) = tag("with").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, inclusive) = opt(terminated(tag("equal or"), space1)).parse(input)?;
+    let (input, _) = tag("lesser").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, stat) = alt((
+        value(PtStat::Power, tag("power")),
+        value(PtStat::Toughness, tag("toughness")),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        (
+            stat,
+            if inclusive.is_some() {
+                Comparator::LE
+            } else {
+                Comparator::LT
+            },
+        ),
+    ))
 }
 
 /// CR 202.3: Parse the numeric mana-value comparison tail after the shared
@@ -761,6 +789,18 @@ pub fn parse_controlled_permanents_conjunct(
 mod tests {
     use super::*;
     use crate::types::mana::ManaColor;
+
+    #[test]
+    fn parse_relative_pt_comparison_lesser_and_equal() {
+        assert_eq!(
+            parse_relative_pt_comparison("with lesser power, return it"),
+            Ok((", return it", (PtStat::Power, Comparator::LT),))
+        );
+        assert_eq!(
+            parse_relative_pt_comparison("with equal or lesser toughness."),
+            Ok((".", (PtStat::Toughness, Comparator::LE)))
+        );
+    }
 
     /// CR 614.1a + CR 109.1: the single authority must cover every plural noun
     /// BOTH former copies knew, and must carry the "other" article rather than
@@ -1443,6 +1483,43 @@ mod tests {
             }
         );
         assert_eq!(rest3, "");
+    }
+
+    #[test]
+    fn test_parse_card_type_count_property() {
+        // Positive (reach-guard for the rejections below): the printed form.
+        let (rest, p) = parse_card_type_count_property("with two or more card types").unwrap();
+        assert_eq!(
+            p,
+            FilterProp::CardTypeCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }
+        );
+        assert_eq!(rest, "");
+
+        // The digit form parses identically (same `parse_number` axis).
+        let (rest, p) = parse_card_type_count_property("with 2 or more card types").unwrap();
+        assert_eq!(
+            p,
+            FilterProp::CardTypeCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }
+        );
+        assert_eq!(rest, "");
+
+        // Trailing text is left unconsumed for the caller (the play-subject
+        // arm's effect-comma check relies on this).
+        let (rest, _) =
+            parse_card_type_count_property("with two or more card types, draw a card").unwrap();
+        assert_eq!(rest, ", draw a card");
+
+        // Unprinted forms are rejected (fail closed, never partial).
+        assert!(parse_card_type_count_property("with two card types").is_err());
+        assert!(parse_card_type_count_property("with exactly two card types").is_err());
+        assert!(parse_card_type_count_property("with two or fewer card types").is_err());
+        assert!(parse_card_type_count_property("with two or more card type").is_err());
     }
 
     /// V-FORMS (SHAPE) — CR 105.4. The printed chosen-colour qualifier must

@@ -7835,13 +7835,22 @@ pub(super) fn apply_post_replacement_effect(
     //
     // Gated on `event == ReplacementEvent::Moved` so the suppression scopes to
     // ETB-style replacements (the Devour shape). Damage riders with the same shape
-    // take `damage_rider_population` below.
+    // take `rider_population` below.
     let sacrifice_typed_scope = is_as_enters_sacrifice_scope_replacement(event, &real_work.effect);
     // CR 614.6 + CR 615.5 + CR 608.2d: a damage rider that picks from a population ("sacrifice that
     // many permanents", "exile that many cards from your graveyard", "sacrifice an
     // Equipment attached to Outfitted Jouster") names no pre-selected object; the injected
     // host would be acted on instead. `event_source` is populated only for damage riders.
-    let damage_rider_population = state.post_replacement_event_source().is_some()
+    // CR 614.6 + CR 608.2d: the same holds for a substitute of an event that affected a
+    // player rather than an object (a replaced draw — Out of the Tombs' "instead return a
+    // creature card from your graveyard to the battlefield"): with no affected object, the
+    // drain's subject is the replacing permanent itself, which the pick must not be bound to.
+    let replaced_player_event = matches!(
+        state.post_replacement_event_target(),
+        Some(TargetRef::Player(_))
+    );
+    let rider_population = (state.post_replacement_event_source().is_some()
+        || replaced_player_event)
         && matches!(
             &*effect_def.effect,
             Effect::Sacrifice {
@@ -7852,7 +7861,7 @@ pub(super) fn apply_post_replacement_effect(
                 ..
             }
         );
-    let targets = if sacrifice_typed_scope || damage_rider_population {
+    let targets = if sacrifice_typed_scope || rider_population {
         Vec::new()
     } else {
         object_id

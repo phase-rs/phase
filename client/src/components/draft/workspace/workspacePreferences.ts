@@ -1,12 +1,11 @@
 import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../../constants/storage";
 import type { CardPreviewMode } from "../../../stores/preferencesStore";
-import { DRAFT_WORKSPACE_COLUMN_MAX } from "./types";
+import { DRAFT_WORKSPACE_COLUMN_MAX, DRAFT_WORKSPACE_COLUMN_MIN } from "./types";
 
-export { DRAFT_WORKSPACE_COLUMN_MAX };
+export { DRAFT_WORKSPACE_COLUMN_MAX, DRAFT_WORKSPACE_COLUMN_MIN };
 
 export const DRAFT_WORKSPACE_PREFERENCES_SCHEMA_VERSION = 3 as const;
 export const DRAFT_WORKSPACE_BOARD_BREAKPOINT_PX = 1024;
-export const DRAFT_WORKSPACE_COLUMN_MIN = 2;
 export const DRAFT_WORKSPACE_PACK_SCALE_DEFAULT = 1.65;
 export const DRAFT_WORKSPACE_PACK_SCALE_MIN = 0.4;
 export const DRAFT_WORKSPACE_PACK_SCALE_MAX = 2.9;

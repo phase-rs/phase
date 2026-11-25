@@ -678,16 +678,20 @@ impl GameScenario {
         builder
     }
 
-    /// Add a nonbasic land to the battlefield with abilities parsed from Oracle
-    /// text. Mirrors `add_creature_from_oracle`; no existing helper places a
-    /// land on the battlefield with parsed Oracle text (`add_basic_land` wires a
-    /// hard-coded mana ability; `add_land_to_hand` places in `Zone::Hand`).
+    /// Add a nonbasic land to the battlefield with abilities parsed from Oracle text.
     pub fn add_land_from_oracle(
         &mut self,
         player: PlayerId,
         name: &str,
         oracle_text: &str,
     ) -> CardBuilder<'_> {
+        let mut builder = self.add_land(player, name);
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
+    /// Add a nonbasic land to the battlefield so its type line can be set before parsing.
+    pub fn add_land(&mut self, player: PlayerId, name: &str) -> CardBuilder<'_> {
         let card_id = CardId(self.state.next_object_id);
         let id = create_object(
             &mut self.state,
@@ -706,12 +710,10 @@ impl GameScenario {
         // matching `add_creature`'s override.
         obj.summoning_sick = false;
 
-        let mut builder = CardBuilder {
+        CardBuilder {
             state: &mut self.state,
             id,
-        };
-        builder.from_oracle_text(oracle_text);
-        builder
+        }
     }
 
     /// Add a nonland, noncreature permanent (e.g. an enchantment) to the

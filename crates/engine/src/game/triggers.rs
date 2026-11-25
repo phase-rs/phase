@@ -13529,35 +13529,7 @@ pub(crate) fn seed_event_context_parent_targets(
 /// Never consult live state here: trigger placement can be deferred until after
 /// the same storage id has already left and returned as a different object.
 pub(crate) fn zone_change_parent_target_pin(event: &GameEvent) -> Option<ObjectIncarnationRef> {
-    let GameEvent::ZoneChanged {
-        object_id,
-        from,
-        to,
-        record,
-    } = event
-    else {
-        return None;
-    };
-    if record.object_id != *object_id || record.from_zone != *from || record.to_zone != *to {
-        return None;
-    }
-
-    let incarnation = if *to == Zone::Battlefield {
-        record.entered_incarnation?
-    } else {
-        let source = record.trigger_source_context()?;
-        if source.identity.reference.object_id != *object_id
-            || from.is_some_and(|zone| source.identity.expected_zone != zone)
-        {
-            return None;
-        }
-        if from.is_some_and(|zone| zone != *to) {
-            source.identity.reference.incarnation.checked_add(1)?
-        } else {
-            source.identity.reference.incarnation
-        }
-    };
-    Some(ObjectIncarnationRef::of(*object_id, incarnation))
+    crate::game::targeting::zone_change_parent_target_pin(event)
 }
 
 fn effect_uses_parent_target(effect: &Effect) -> bool {
@@ -16958,6 +16930,7 @@ fn latched_property_kind(
         | FilterProp::HasColor { .. }
         | FilterProp::NotColor { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::WithKeyword { .. }
         | FilterProp::WithoutKeyword { .. }
@@ -19639,6 +19612,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp, reader: BindingReader) -> boo
         | FilterProp::HasSupertype { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::ManaCostIn { .. }
         | FilterProp::HasXInManaCost

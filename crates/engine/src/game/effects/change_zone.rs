@@ -453,7 +453,10 @@ fn resolution_choice_cardinality(
     up_to: bool,
 ) -> (usize, usize, bool) {
     let Some(spec) = ability.multi_target.as_ref() else {
-        return (1, 0, up_to);
+        // CR 608.2d: the singular return from a settled instruction result
+        // requires choosing one card when a legal card is available.
+        let min_count = usize::from(ability.reads_return_result.is_some() && !up_to);
+        return (1, min_count, up_to);
     };
 
     match crate::game::ability_utils::resolve_multi_target_bounds(
@@ -508,6 +511,19 @@ fn resolution_zone_candidates(
             ..
         }
     );
+    let recorded_arrivals = ability
+        .reads_return_result
+        .as_ref()
+        .map(|(result_id, spec)| {
+            if spec.destination != Zone::Graveyard || spec.recipient != ControllerRef::You {
+                return &[][..];
+            }
+            state
+                .active_return_result_occurrence
+                .and_then(|id| state.return_result_frames.get(&id))
+                .and_then(|frame| frame.get(result_id))
+                .map_or(&[][..], Vec::as_slice)
+        });
     state
         .objects
         .iter()
@@ -523,6 +539,25 @@ fn resolution_zone_candidates(
                 // chosen merged permanent this branch delivers whole; every
                 // other scan keeps the merge-base population (#10759).
                 && !(terminal_shuffle_move && state.is_absorbed_merge_component(**id))
+                // CR 108.2 + CR 400.3 + CR 400.7j + CR 608.2d: a return
+                // referring to this instruction's arrivals chooses a real card
+                // still in the controller's graveyard at its recorded identity.
+                && recorded_arrivals.is_none_or(|records| {
+                    object.is_represented_by_a_card()
+                        && state.object_in_players_zone(object, Zone::Graveyard, ability.controller)
+                        && records.iter().any(|record| {
+                            record.object_id == **id
+                                && (record.from_zone == Some(Zone::Battlefield)
+                                    // CR 730.3c: an absorbed component arrives
+                                    // without a separate battlefield departure.
+                                    || (record.from_zone.is_none()
+                                        && object.split_from_merge_survivor.is_some()))
+                                && record.to_zone == Zone::Graveyard
+                                && record.arrival.owner == ability.controller
+                                && record.recorded_zone_change_successor()
+                                    == Some(ObjectIncarnationRef::from_object(object))
+                        })
+                })
                 && crate::game::filter::matches_target_filter_for_zone(
                     state,
                     **id,
@@ -10554,6 +10589,62 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.cost_payment_failed_flag);
+    }
+
+    #[test]
+    fn graveyard_arrival_result_rejects_a_later_incarnation_in_the_same_zone() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::{ReturnResultId, ReturnResultReadSpec};
+
+        let mut scenario = GameScenario::new();
+        let original = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let fresh = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let mut events = Vec::new();
+        for id in [original, fresh] {
+            zones::move_to_zone(state, id, Zone::Graveyard, &mut events);
+        }
+        let records = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => Some((**record).clone()),
+                _ => None,
+            })
+            .collect();
+        let occurrence = crate::types::game_state::ReturnResultOccurrenceId(0);
+        let result = ReturnResultId(1);
+        state
+            .return_result_frames
+            .insert(occurrence, Default::default());
+        state.active_return_result_occurrence = Some(occurrence);
+        crate::game::effects::publish_return_result(state, occurrence, result, records).unwrap();
+        let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(100), P0);
+        ability.reads_return_result = Some((
+            result,
+            ReturnResultReadSpec {
+                noun: TargetFilter::Any,
+                destination: Zone::Graveyard,
+                recipient: ControllerRef::You,
+            },
+        ));
+        // CR 117.2e: Starfall offers the return during uninterrupted
+        // resolution, so model the stale-result edge at the candidate reader.
+        zones::move_to_zone(state, original, Zone::Exile, &mut events);
+        zones::move_to_zone(state, original, Zone::Graveyard, &mut events);
+        assert_eq!(state.objects[&original].zone, Zone::Graveyard);
+        // CR 400.7j: the later arrival is a different object even at the same id.
+        assert_eq!(
+            resolution_zone_candidates(
+                state,
+                &ability,
+                &TargetFilter::Any,
+                P0,
+                &[Zone::Graveyard],
+                Zone::Battlefield,
+            ),
+            vec![fresh]
+        );
     }
 
     #[test]

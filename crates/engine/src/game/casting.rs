@@ -1416,6 +1416,7 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         triggering_object: None,
                         declared_slot_view: None,
                         granting_object: None,
+                        stack_trigger_context: None,
                         pre_entry_battlefield: None,
                     };
                     // CR 712.12 + CR 101.2: a spell//land modal card is played
@@ -15277,6 +15278,7 @@ impl<'a> SpellCostView<'a> {
                 | FilterProp::HasColor { .. }
                 | FilterProp::PowerGTSource
                 | FilterProp::ColorCount { .. }
+                | FilterProp::CardTypeCount { .. }
                 | FilterProp::ManaSymbolCount { .. }
                 | FilterProp::HasSupertype { .. }
                 | FilterProp::IsChosenCreatureType
@@ -27705,6 +27707,7 @@ fn apply_mana_spell_grants(
                 triggering_object: None,
                 declared_slot_view: None,
                 granting_object: None,
+                stack_trigger_context: None,
                 pre_entry_battlefield: None,
             };
             if !crate::game::filter::matches_target_filter(
@@ -34931,6 +34934,7 @@ fn parsed_condition_reads_targets(condition: &ParsedCondition, read: TargetRead)
         | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { .. }
         | ParsedCondition::HasCityBlessing
         | ParsedCondition::HasEnduringStory
+        | ParsedCondition::IsMonarch
         | ParsedCondition::CompletedDungeon { .. }
         | ParsedCondition::HasMaxSpeed
         | ParsedCondition::IsYourTurn
@@ -35431,6 +35435,7 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
