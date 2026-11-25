@@ -208,10 +208,11 @@ copied from the adjacent arm.
 ### Nom Compliance (mandatory — parser files change)
 
 - New combinator (bare predicate, mirroring `parse_no_abilities`):
-  `value(FilterProp::HasManaAbility, tag("a mana ability")).parse(input)`.
-  Singular only: the qualifier position is singular in every attested Oracle
-  printing (`with a mana ability`); plural `mana abilities` appears only in
-  rulings prose. No `contains`/`starts_with` dispatch anywhere.
+  `alt((value(HasManaAbility, tag("a mana ability")), value(HasManaAbility,
+  tag("mana abilities"))))`. Both number forms are printed Oracle text
+  (supersedes the pre-F1 "singular only" sentence: see CORRECTION in Step
+  0.5 — Power Sink attests the plural). No `contains`/`starts_with`
+  dispatch anywhere.
 - Type-phrase arm: extend the :4488 block's inner parse to
   `alt((nom_filter::parse_mana_ability, nom_filter::parse_no_abilities))`
   on `with_rest`, keeping the existing `pos` advance.
