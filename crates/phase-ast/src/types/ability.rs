@@ -12046,7 +12046,10 @@ pub fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
 ///    `attach_to.is_context_ref()` — exactly when `target_filter()` returns
 ///    `owner` rather than `attach_to` — so the filter is never double-counted.
 ///    Asinine Antics' "for each opponent creature, create a Cursed Role attached
-///    to that creature" rebinds through this hidden `ParentTarget` slot.
+///    to that creature" rebinds through this hidden `ParentTarget` slot. The
+///    arm also surfaces a *context-ref* `enters_blocking` (Nature Shields Its
+///    Own's "blocking that creature" rider). `target_filter()` never surfaces
+///    `enters_blocking` at all, so that slot can never double-count.
 ///  * `Effect::Attach` surfaces `target` but hides `attachment`; the arm fires
 ///    only when `attachment.is_context_ref()`, mirroring the guards above (a
 ///    non-context-ref `attachment` can never be a parent-ref, so excluding it
@@ -12107,8 +12110,28 @@ fn effect_target_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
             ..
         } if target.is_context_ref() => slots.push(target),
         Effect::Token {
-            attach_to: Some(f), ..
-        } if f.is_context_ref() => slots.push(f),
+            attach_to,
+            enters_blocking,
+            ..
+        } => {
+            // CR 400.7 + CR 608.2k: Token carries TWO hidden slots, each
+            // surfaced iff it is a context ref. The `attach_to` push keeps the
+            // single-slot arm's guard byte-for-byte (it fires exactly when
+            // `target_filter()` hides the filter); `enters_blocking` is hidden
+            // unconditionally, so its push can never double-count. One
+            // combined arm is load-bearing: two sequential match arms would
+            // drop the second slot, since a match executes the first only.
+            if let Some(f) = attach_to {
+                if f.is_context_ref() {
+                    slots.push(f);
+                }
+            }
+            if let Some(f) = enters_blocking {
+                if f.is_context_ref() {
+                    slots.push(f);
+                }
+            }
+        }
         Effect::Attach { attachment, .. } if attachment.is_context_ref() => slots.push(attachment),
         Effect::UnattachAll { attachment, .. } if attachment.is_context_ref() => {
             slots.push(attachment)
@@ -46117,6 +46140,76 @@ mod tests {
             extra_keywords: vec![],
             additional_modifications: vec![],
         }
+    }
+
+    /// CR 400.7 + CR 608.2k: the Token arm of `effect_parent_ref_slots`
+    /// surfaces BOTH hidden slots — `attach_to` and `enters_blocking` — each
+    /// iff it is a context ref. A single combined arm (two independent
+    /// pushes) is load-bearing: two sequential match arms would drop the
+    /// second slot, since a match executes the first arm only.
+    #[test]
+    fn token_arm_surfaces_attach_to_and_enters_blocking_each_iff_context_ref() {
+        let token_with = |attach_to: Option<TargetFilter>,
+                          enters_blocking: Option<TargetFilter>| {
+            let mut effect = goblin_token(TokenAttackDestination::ControllerChooses);
+            let Effect::Token {
+                attach_to: attach_slot,
+                enters_blocking: blocking_slot,
+                ..
+            } = &mut effect
+            else {
+                unreachable!()
+            };
+            *attach_slot = attach_to;
+            *blocking_slot = enters_blocking;
+            effect
+        };
+        let controller = TargetFilter::Controller;
+        let parent = TargetFilter::ParentTarget;
+        let triggering = TargetFilter::TriggeringSource;
+        let event = TargetFilter::EventTarget;
+        let targeted = TargetFilter::Typed(TypedFilter::creature());
+
+        // Neither slot: only the owner seed.
+        let neither = token_with(None, None);
+        assert_eq!(effect_parent_ref_slots(&neither), vec![&controller]);
+
+        // attach_to-only: the pre-existing arm, unchanged.
+        let attach_only = token_with(Some(parent.clone()), None);
+        assert_eq!(
+            effect_parent_ref_slots(&attach_only),
+            vec![&controller, &parent]
+        );
+
+        // enters_blocking-only: the F4 slot (hidden pre-fix).
+        let blocking_only = token_with(None, Some(triggering.clone()));
+        assert_eq!(
+            effect_parent_ref_slots(&blocking_only),
+            vec![&controller, &triggering]
+        );
+        let blocking_event = token_with(None, Some(event.clone()));
+        assert_eq!(
+            effect_parent_ref_slots(&blocking_event),
+            vec![&controller, &event]
+        );
+
+        // Both present: BOTH surface (the no-sequential-arms regression).
+        let both = token_with(Some(parent.clone()), Some(triggering.clone()));
+        assert_eq!(
+            effect_parent_ref_slots(&both),
+            vec![&controller, &parent, &triggering]
+        );
+
+        // Non-context-ref variants surface exactly once via the seed (guard):
+        // a targetable attach_to IS the seed, a non-context enters_blocking
+        // is excluded and the owner seed stands alone.
+        let targeted_attach = token_with(Some(targeted.clone()), None);
+        assert_eq!(effect_parent_ref_slots(&targeted_attach), vec![&targeted]);
+        let targeted_blocking = token_with(None, Some(targeted.clone()));
+        assert_eq!(
+            effect_parent_ref_slots(&targeted_blocking),
+            vec![&controller]
+        );
     }
 
     /// A token effect that names no defender is byte-identical on the wire to

@@ -30,6 +30,7 @@ use engine::types::card_type::{CoreType, Supertype};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -324,5 +325,441 @@ fn nature_shields_blocks_for_defender_and_abandons_on_four() {
         runner.state().scheme_deck.back(),
         Some(&scheme),
         "abandoned scheme must be on the bottom of the scheme deck"
+    );
+}
+
+// F4 rows (CR 400.7): the blocking rider's "that creature" is an event
+// anaphor resolved against incarnation-pinned referents, so a returned or
+// blinked attacker is not blocked as its earlier incarnation. The
+// behavioral legs pass pre-fix too (CR 506.4: a zone-changed attacker
+// leaves `combat.attackers`, so `place_blocking` no-matches either way):
+// discrimination rests on the folded F4-pins assertions (`[]`
+// pre-fix, `[(attacker, incarnation)]` post-fix) plus the F4-unit slot
+// matrix in `phase-ast`.
+
+const MISTBLADE_SHINOBI: &str = "Ninjutsu {U} ({U}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever this creature deals combat damage to a player, you may return target creature that player controls to its owner's hand.";
+const NINJA_OF_THE_DEEP_HOURS: &str = "Ninjutsu {1}{U} ({1}{U}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever this creature deals combat damage to a player, you may draw a card.";
+const CLOUDSHIFT: &str = "Exile target creature you control, then return that card to the battlefield under your control.";
+const MURDER: &str = "Destroy target creature.";
+
+fn archenemy_scenario(raider_count: usize) -> (GameScenario, Vec<ObjectId>) {
+    let mut format = FormatConfig::archenemy();
+    format.archenemy_player = Some(P0);
+    let mut scenario = GameScenario::new_with_format(format, 2, 42);
+    scenario.at_phase(Phase::Draw);
+    for i in 0..7 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Library {i}"));
+        scenario.add_card_to_library_top(P1, &format!("P1 Library {i}"));
+    }
+    let mut raiders = Vec::new();
+    for i in 0..raider_count {
+        raiders.push(
+            scenario
+                .add_creature(P1, &format!("Grizzly Bears {i}"), 2, 2)
+                .id(),
+        );
+    }
+    (scenario, raiders)
+}
+
+fn build_with_scheme(scenario: GameScenario) -> GameRunner {
+    let mut runner = scenario.build();
+    let face = scheme_face("Nature Shields Its Own", NATURE_SHIELDS_ITS_OWN);
+    create_scheme_deck_card(runner.state_mut(), &face, P0);
+    runner.state_mut().archenemy = Some(P0);
+    runner.state_mut().active_player = P0;
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(
+        runner
+            .state()
+            .command_zone
+            .iter()
+            .any(|id| runner.state().objects[id].name == "Nature Shields Its Own"),
+        "scheme must be face up in the command zone"
+    );
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).expect("declare no attackers");
+    runner
+}
+
+fn drive_to_p1_combat(runner: &mut GameRunner) {
+    for _ in 0..8 {
+        runner.advance_to_phase(Phase::DeclareAttackers);
+        if runner.state().active_player == P1
+            && matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareAttackers { .. }
+            )
+        {
+            return;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareAttackers { .. } => {
+                runner.declare_attackers(&[]).expect("declare no attackers");
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt driving to P1 combat: {other:?}"),
+        }
+    }
+    panic!("never reached P1 combat");
+}
+
+/// Every (object, incarnation) pin on every stacked ability, sorted.
+fn stack_pins(runner: &GameRunner) -> Vec<(ObjectId, u64)> {
+    let mut pins = Vec::new();
+    for entry in runner.state().stack.iter() {
+        if let Some(ability) = entry.ability() {
+            for pin in &ability.target_incarnations {
+                pins.push((pin.object_id, pin.incarnation));
+            }
+        }
+    }
+    pins.sort_by_key(|(id, incarnation)| (id.0, *incarnation));
+    pins
+}
+
+fn sorted_pins(mut pins: Vec<(ObjectId, u64)>) -> Vec<(ObjectId, u64)> {
+    pins.sort_by_key(|(id, incarnation)| (id.0, *incarnation));
+    pins
+}
+
+/// Resolve to an empty stack at priority, explicitly declining every
+/// optional ("you may") offer. Returns the decline count.
+fn settle_declining_optionals(runner: &mut GameRunner) -> usize {
+    let mut declined = 0;
+    for _ in 0..64 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                declined += 1;
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: false })
+                    .expect("decline the optional");
+            }
+            other => panic!("unexpected prompt while settling: {other:?}"),
+        }
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "all triggers must have resolved"
+    );
+    declined
+}
+
+/// Collect the pending unblocked-attacker triggers onto the stack: after
+/// `attack_unblocked` the game sits at priority with the triggers pending,
+/// and passing surfaces the ordering prompt.
+fn stack_unblocked_triggers(runner: &mut GameRunner, expected: usize) {
+    for _ in 0..8 {
+        if runner.state().stack.len() == expected {
+            return;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt collecting triggers: {other:?}"),
+        }
+    }
+    panic!(
+        "expected {expected} triggers on the stack, got {}",
+        runner.state().stack.len()
+    );
+}
+
+/// F4-ninja: the frozen two-ninja sequence (Mistblade Shinobi returns A, then
+/// Ninja of the Deep Hours returns Mistblade) with the Nature Shields
+/// triggers on the stack. The returned A is not blocked as its earlier
+/// incarnation (CR 400.7); the hostile second attacker B is still blocked.
+#[test]
+fn ninjutsu_returned_attacker_not_blocked_as_earlier_incarnation() {
+    let (mut scenario, raiders) = archenemy_scenario(2);
+    let mistblade = scenario
+        .add_creature_to_hand_from_oracle(P1, "Mistblade Shinobi", 1, 1, MISTBLADE_SHINOBI)
+        .with_subtypes(vec!["Human", "Ninja"])
+        .id();
+    let ninja = scenario
+        .add_creature_to_hand_from_oracle(
+            P1,
+            "Ninja of the Deep Hours",
+            2,
+            2,
+            NINJA_OF_THE_DEEP_HOURS,
+        )
+        .with_subtypes(vec!["Human", "Ninja"])
+        .id();
+    let mut runner = build_with_scheme(scenario);
+    drive_to_p1_combat(&mut runner);
+    let (a, b) = (raiders[0], raiders[1]);
+    let p0_life = life_of(&runner, P0);
+
+    attack_unblocked(
+        &mut runner,
+        &[(a, AttackTarget::Player(P0)), (b, AttackTarget::Player(P0))],
+    );
+    stack_unblocked_triggers(&mut runner, 2);
+
+    // F4-pins: each firing pins its own attacker at the pre-return incarnation.
+    let incarn_a = runner.state().objects[&a].incarnation;
+    let incarn_b = runner.state().objects[&b].incarnation;
+    assert_eq!(
+        stack_pins(&runner),
+        sorted_pins(vec![(a, incarn_a), (b, incarn_b)]),
+        "each stacked trigger pins its attacker"
+    );
+
+    // Mana for Mistblade {U} + Ninja {1}{U}.
+    for (mana, source) in [
+        (ManaType::Blue, mistblade),
+        (ManaType::Blue, ninja),
+        (ManaType::Colorless, ninja),
+    ] {
+        runner
+            .state_mut()
+            .add_mana_to_pool(P1, ManaUnit::new(mana, source, false, vec![]));
+    }
+
+    // The frozen two-ninja sequence through the public action.
+    runner
+        .act(GameAction::ActivateNinjutsu {
+            ninjutsu_object_id: mistblade,
+            creature_to_return: a,
+        })
+        .expect("Mistblade ninjutsu returns A");
+    assert_eq!(runner.state().objects[&a].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&mistblade].zone, Zone::Battlefield);
+    runner
+        .act(GameAction::ActivateNinjutsu {
+            ninjutsu_object_id: ninja,
+            creature_to_return: mistblade,
+        })
+        .expect("Ninja ninjutsu returns Mistblade");
+    assert_eq!(runner.state().objects[&mistblade].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&ninja].zone, Zone::Battlefield);
+
+    // F4-pins no-overwrite: the returns do not restamp the pins, while A
+    // itself is a new object in hand (CR 400.7).
+    assert_eq!(
+        stack_pins(&runner),
+        sorted_pins(vec![(a, incarn_a), (b, incarn_b)]),
+        "pins survive the returns unstamped"
+    );
+    assert_eq!(
+        runner.state().objects[&a].incarnation,
+        incarn_a + 1,
+        "reach guard: A left and is a new object"
+    );
+
+    // Both triggers resolve: A's Plant cannot block the departed A, while
+    // B's Plant blocks B.
+    drain_triggers(&mut runner);
+    assert_eq!(
+        plants_on_battlefield(&runner),
+        2,
+        "each trigger still grows its Plant"
+    );
+    let combat = runner.state().combat.as_ref().expect("combat is live");
+    assert!(
+        combat.blocker_assignments.get(&a).is_none_or(Vec::is_empty),
+        "no Plant blocks the returned A"
+    );
+    let b_blockers = combat
+        .blocker_assignments
+        .get(&b)
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(b_blockers.len(), 1, "the unreturned B is still blocked");
+    assert!(
+        runner.state().objects[&b_blockers[0]]
+            .name
+            .contains("Plant"),
+        "B's blocker is the Plant"
+    );
+
+    // Only the Ninja's 2 damage gets through.
+    runner.combat_damage();
+    assert_eq!(
+        life_of(&runner, P0),
+        p0_life - 2,
+        "the Ninja deals 2 through the unblocked line"
+    );
+
+    // The Ninja's may-draw prompt is explicitly declined to a clean Priority.
+    let declined = settle_declining_optionals(&mut runner);
+    assert_eq!(
+        declined, 1,
+        "exactly the Ninja may-draw is offered and declined"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "settled at priority"
+    );
+}
+
+/// F4-cloud (additional row): a Cloudshift blink in response to the trigger.
+/// The blinked attacker is not blocked as its earlier incarnation; the
+/// intervening-if still holds, so the Plant is still created.
+#[test]
+fn blinked_attacker_not_blocked_as_earlier_incarnation() {
+    let (mut scenario, raiders) = archenemy_scenario(1);
+    let cloudshift = scenario
+        .add_spell_to_hand_from_oracle(P1, "Cloudshift", true, CLOUDSHIFT)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = build_with_scheme(scenario);
+    drive_to_p1_combat(&mut runner);
+    let a = raiders[0];
+    let p0_life = life_of(&runner, P0);
+
+    attack_unblocked(&mut runner, &[(a, AttackTarget::Player(P0))]);
+    stack_unblocked_triggers(&mut runner, 1);
+
+    let incarn = runner.state().objects[&a].incarnation;
+    assert_eq!(
+        stack_pins(&runner),
+        vec![(a, incarn)],
+        "the stacked trigger pins its attacker"
+    );
+
+    // Cloudshift in response: exile + return.
+    runner.cast(cloudshift).target_object(a).commit();
+    assert_eq!(runner.state().stack.len(), 2);
+    runner.act(GameAction::PassPriority).expect("pass");
+    runner.act(GameAction::PassPriority).expect("pass");
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Cloudshift resolved; the trigger remains"
+    );
+    assert_eq!(runner.state().objects[&a].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&a].incarnation,
+        incarn + 2,
+        "exile + return is a new object (CR 400.7)"
+    );
+    assert_eq!(
+        stack_pins(&runner),
+        vec![(a, incarn)],
+        "the pin is not restamped"
+    );
+
+    drain_triggers(&mut runner);
+    assert_eq!(
+        plants_on_battlefield(&runner),
+        1,
+        "the intervening-if still holds, so the Plant is created"
+    );
+    let combat = runner.state().combat.as_ref().expect("combat is live");
+    assert!(
+        combat.blocker_assignments.get(&a).is_none_or(Vec::is_empty),
+        "no Plant blocks the blinked A"
+    );
+
+    // Vacuous by construction: nothing attacks, so no damage is possible.
+    runner.combat_damage();
+    assert_eq!(life_of(&runner, P0), p0_life);
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "settled at priority"
+    );
+}
+
+/// F4-ctrl (paired positive): the unblinked attacker is still blocked, and
+/// the destroyed-in-response hostile grows its Plant without blocking.
+#[test]
+fn unblinked_attacker_still_blocked() {
+    let (mut scenario, raiders) = archenemy_scenario(2);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = build_with_scheme(scenario);
+    drive_to_p1_combat(&mut runner);
+    let (doomed, steady) = (raiders[0], raiders[1]);
+    let p0_life = life_of(&runner, P0);
+
+    attack_unblocked(
+        &mut runner,
+        &[
+            (doomed, AttackTarget::Player(P0)),
+            (steady, AttackTarget::Player(P0)),
+        ],
+    );
+    stack_unblocked_triggers(&mut runner, 2);
+
+    // Hostile: the doomed attacker is destroyed with its trigger on the stack.
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+    runner.cast(murder).target_object(doomed).commit();
+    runner.act(GameAction::PassPriority).expect("pass");
+    runner.act(GameAction::PassPriority).expect("pass");
+    assert_eq!(
+        runner.state().objects[&doomed].zone,
+        Zone::Graveyard,
+        "reach guard: Murder resolved"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "Murder resolved; both triggers remain"
+    );
+
+    drain_triggers(&mut runner);
+    assert_eq!(
+        plants_on_battlefield(&runner),
+        2,
+        "both triggers still grow their Plants"
+    );
+    let combat = runner.state().combat.as_ref().expect("combat is live");
+    assert!(
+        combat
+            .blocker_assignments
+            .get(&doomed)
+            .is_none_or(Vec::is_empty),
+        "no Plant blocks the destroyed attacker"
+    );
+    let steady_blockers = combat
+        .blocker_assignments
+        .get(&steady)
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        steady_blockers.len(),
+        1,
+        "the unblinked attacker is still blocked"
+    );
+    assert!(
+        runner.state().objects[&steady_blockers[0]]
+            .name
+            .contains("Plant"),
+        "the blocker's Plant"
+    );
+
+    runner.combat_damage();
+    assert_eq!(
+        life_of(&runner, P0),
+        p0_life,
+        "the Plants block all incoming damage"
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "settled at priority"
     );
 }
