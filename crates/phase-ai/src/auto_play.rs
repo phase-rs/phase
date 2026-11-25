@@ -132,38 +132,37 @@ pub struct AiActionsRun {
 /// CR 805.5a: under shared team turns every living teammate may act when the
 /// team has priority, so an AI teammate is eligible even while the window is
 /// parked on the human representative.
+///
+/// The pending bindings come from the engine authority
+/// (`turn_control::pending_decision_bindings`); the all-owners fallback below
+/// stays this driver's own documented policy and is never folded into the
+/// published authority, so the browser view cannot schedule an AI teammate to
+/// pass again where the human holder decides today.
 pub fn eligible_ai_decision(
     state: &GameState,
     ai_players: &HashSet<PlayerId>,
 ) -> Option<(PlayerId, PlayerId)> {
-    // CR 805.5a: team priority windows list every living member as a decision
-    // owner; other windows list the engine's acting players unchanged.
     // CR 805.5b: a member who already passed this window has no new decision
-    // until someone acts (which clears passes) — skip them so the driver hands
-    // the window to an unpassed teammate instead of re-prompting the passer
-    // until the safety cap.
-    let owners = turn_control::decision_owners(state);
-    // Only a Priority window records passes; every other window resolves to
-    // the engine's acting players unchanged.
-    let unpassed: Vec<PlayerId> = if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        owners
-            .iter()
-            .copied()
-            .filter(|owner| !state.priority_passes.contains(owner))
+    // until someone acts (which clears passes) — the authority lists strict
+    // pending bindings only, so the driver hands the window to an unpassed
+    // teammate instead of re-prompting the passer until the safety cap.
+    let bindings = turn_control::pending_decision_bindings(state);
+    // Headless fallback policy: when nothing is strictly pending (every
+    // member passed, or a window with no owners at all), the headless driver
+    // still scans every owner through the same binding constructor — the
+    // published authority never carries this fallback.
+    let bindings = if bindings.is_empty() {
+        turn_control::decision_owners(state)
+            .into_iter()
+            .map(|owner| turn_control::DecisionBinding::for_owner(state, owner))
             .collect()
     } else {
-        owners.clone()
+        bindings
     };
-    let owners = if unpassed.is_empty() {
-        owners
-    } else {
-        unpassed
-    };
-    owners.into_iter().find_map(|semantic_owner| {
-        let actor = turn_control::authorized_submitter_for_player(state, semantic_owner);
+    bindings.into_iter().find_map(|binding| {
         ai_players
-            .contains(&actor)
-            .then_some((semantic_owner, actor))
+            .contains(&binding.authorized_actor)
+            .then_some((binding.semantic_owner, binding.authorized_actor))
     })
 }
 
@@ -1430,5 +1429,166 @@ mod tests {
                 "{label} must resolve to the engine's acting players unchanged"
             );
         }
+    }
+
+    /// VM-H1 (PARITY PIN — revert-green expected on every leg): the delegated
+    /// driver schedules an AI controller of humans, leaves a human controller
+    /// of AI manual, and preserves the all-owners fallback. Priority has no
+    /// frozen arm, so each leg computes identically at base and new.
+    #[test]
+    fn controlled_team_schedules_controller_not_owners() {
+        use engine::game::turn_control;
+
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let p2 = PlayerId(2);
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = p0;
+        state.priority_player = p0;
+        state.waiting_for = WaitingFor::Priority { player: p0 };
+        state.turn_decision_controller = Some(p2);
+
+        // Pre: the authority is live.
+        assert_eq!(
+            turn_control::pending_decision_bindings(&state),
+            vec![
+                turn_control::DecisionBinding {
+                    semantic_owner: p0,
+                    authorized_actor: p2,
+                },
+                turn_control::DecisionBinding {
+                    semantic_owner: p1,
+                    authorized_actor: p2,
+                },
+            ]
+        );
+
+        // AI controller of humans is scheduled.
+        assert_eq!(
+            eligible_ai_decision(&state, &HashSet::from([p2])),
+            Some((p0, p2))
+        );
+        // Human controller of AI stays manual.
+        assert_eq!(eligible_ai_decision(&state, &HashSet::from([p0])), None);
+        assert_eq!(eligible_ai_decision(&state, &HashSet::from([p0, p1])), None);
+        // Driver handoff, not stall, on the None legs.
+        for ai in [HashSet::from([p0]), HashSet::from([p0, p1])] {
+            let mut rng = rand::rng();
+            let session = AiSession::arc_from_game(&state);
+            let run =
+                run_ai_actions_bounded(&mut state, &ai, &HashMap::new(), &mut rng, &session, 1);
+            assert!(run.is_empty());
+            assert!(
+                matches!(run.stop, AiActionsStop::NoEligibleAiActor),
+                "clean handoff once no AI seat can act, got {:?}",
+                run.stop
+            );
+        }
+
+        // Uncontrolled fallback: every member passed, so the all-owners
+        // fallback scans owners and the AI passer is eligible again.
+        state.turn_decision_controller = None;
+        state.priority_passes.insert(p0);
+        state.priority_passes.insert(p1);
+        assert_eq!(
+            eligible_ai_decision(&state, &HashSet::from([p1])),
+            Some((p1, p1))
+        );
+
+        // Sibling: the actor mapping applies outside Priority too.
+        state.turn_decision_controller = Some(p2);
+        state.priority_passes.clear();
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: p0,
+            valid_attacker_ids: Vec::new(),
+            valid_attack_targets: Vec::new(),
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        assert_eq!(
+            eligible_ai_decision(&state, &HashSet::from([p2])),
+            Some((p0, p2))
+        );
+    }
+
+    /// VM-H2: Consent-parity (the delegation preserves the frozen path) +
+    /// Ready-emptiness (Ready schedules nothing — it has no acting players).
+    /// The Consent leg and the eligible-`None` half are parity pins with
+    /// revert-green expected; the authority-`[]` half is new surface
+    /// (compile-red on revert).
+    #[test]
+    fn eligible_decision_preserves_frozen_consent_actor_and_schedules_nothing_on_ready() {
+        use engine::game::turn_control;
+        use engine::types::actions::ResolveAllScope;
+        use engine::types::game_state::{
+            ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot,
+            StackResolutionBudget,
+        };
+        use std::collections::BTreeSet;
+
+        let rep = PlayerId(0);
+        let frozen = PlayerId(2);
+
+        // Consent with a granted run whose frozen submitter diverges from live.
+        let mut consent = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        consent.waiting_for = WaitingFor::ResolveAllConsent {
+            epoch: 0,
+            representative: rep,
+        };
+        consent.resolve_all_consent_run = Some(ResolveAllConsentRun {
+            epoch: 0,
+            max_resolutions: StackResolutionBudget::Unlimited,
+            priority_snapshot: ResolveAllPrioritySnapshot {
+                waiting_player: rep,
+                priority_player: rep,
+                priority_pass_count: 0,
+                priority_passes: BTreeSet::new(),
+            },
+            scope: ResolveAllScope::Shared,
+            participants: vec![ResolveAllConsentParticipant {
+                representative: rep,
+                authorized_submitter: frozen,
+                granted: true,
+            }],
+            auto_pass_baseline: None,
+        });
+        // Run live, and the frozen-vs-live divergence is REAL (no latch, so
+        // the live submitter is the representative itself).
+        assert_eq!(
+            turn_control::resolve_all_granted_submitter(&consent, 0, rep),
+            Some(frozen)
+        );
+        assert!(consent.turn_decision_controller.is_none());
+        assert_ne!(frozen, rep);
+        // Contract cross-check on the Consent leg.
+        assert_eq!(
+            AiDecisionContract::issue(&consent, rep).authorized_actor,
+            frozen
+        );
+        // Consent leg: PARITY — base `authorized_submitter`'s Consent arm
+        // returns the same run submitter.
+        assert_eq!(
+            eligible_ai_decision(&consent, &HashSet::from([frozen])),
+            Some((rep, frozen))
+        );
+
+        // Ready: the authority is empty and nothing is scheduled.
+        let mut ready = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        ready.waiting_for = WaitingFor::ResolveAllReady { epoch: 0 };
+        assert!(
+            turn_control::decision_owners(&ready).is_empty(),
+            "reach: Ready has no acting players, so vacuity is documented, not assumed"
+        );
+        assert!(turn_control::pending_decision_bindings(&ready).is_empty());
+        assert_eq!(eligible_ai_decision(&ready, &HashSet::from([frozen])), None);
+
+        // Hostile: Ready WITH a live granted run — still None (no owners to
+        // map, so the frozen composition is never enumerated).
+        ready.resolve_all_consent_run = consent.resolve_all_consent_run.clone();
+        assert!(turn_control::decision_owners(&ready).is_empty());
+        assert!(turn_control::pending_decision_bindings(&ready).is_empty());
+        assert_eq!(eligible_ai_decision(&ready, &HashSet::from([frozen])), None);
+        assert_eq!(eligible_ai_decision(&ready, &HashSet::from([rep])), None);
     }
 }

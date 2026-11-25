@@ -1114,25 +1114,30 @@ fn ai_session_for(state: &GameState) -> Arc<AiSession> {
     })
 }
 
-/// Resolve the seat whose live prompt owns an AI decision. The requested seat
-/// is retained for simultaneous prompts where it is still entitled to act.
+/// Resolve the seat whose live prompt owns the requested AI seat's decision.
+/// The requested seat keeps its own decision first, then a controlled owner
+/// it submits for — else nothing: a seat with no decision must get no
+/// proposal, not another seat's (CR 723.5).
 ///
 /// CR 805.5a: on a shared-team priority window every living teammate is
 /// entitled — the window parks on the representative, but any member may
-/// act — so entitlement is the engine's decision owners, not the narrow
-/// acting players (which name only the parked holder). Retaining a
+/// act — so entitlement is the engine's pending decision bindings, not the
+/// narrow acting players (which name only the parked holder). Retaining a
 /// non-representative teammate here is what lets an explicitly requested P1
 /// keep its own proposal instead of being rebound to P0.
-fn ai_semantic_owner(state: &GameState, requested_ai: PlayerId) -> PlayerId {
-    if engine::game::turn_control::decision_owners(state).contains(&requested_ai) {
-        requested_ai
-    } else {
-        state
-            .waiting_for
-            .acting_player()
-            .or_else(|| state.waiting_for.acting_players().first().copied())
-            .unwrap_or(requested_ai)
+fn ai_semantic_owner(state: &GameState, requested_ai: PlayerId) -> Option<PlayerId> {
+    let bindings = engine::game::turn_control::pending_decision_bindings(state);
+    // The seat's own decision: it both owns and may submit it.
+    if bindings.iter().any(|binding| {
+        binding.semantic_owner == requested_ai && binding.authorized_actor == requested_ai
+    }) {
+        return Some(requested_ai);
     }
+    // A controlled owner the requested seat submits for.
+    bindings
+        .iter()
+        .find(|binding| binding.authorized_actor == requested_ai)
+        .map(|binding| binding.semantic_owner)
 }
 
 /// Mint an opaque proposal only after the engine's current decision contract
@@ -8741,7 +8746,9 @@ pub fn get_ai_action_proposal(difficulty: &str, player_id: u8) -> Result<JsValue
         // decision slot. The live prompt is the sole authority for semantic
         // ownership; this matters when control effects make its authorized
         // submitter a different player.
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let Some(semantic_owner) = ai_semantic_owner(state, PlayerId(player_id)) else {
+            return Ok(JsValue::NULL);
+        };
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
@@ -8773,7 +8780,9 @@ pub fn get_ai_tactical_action_proposal(
     let ai_difficulty = AiDifficulty::from_label(difficulty);
     with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let Some(semantic_owner) = ai_semantic_owner(state, PlayerId(player_id)) else {
+            return Ok(JsValue::NULL);
+        };
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let mut config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
@@ -8807,7 +8816,9 @@ pub fn get_ai_action_proposal_with_diagnostics(
     let ai_difficulty = AiDifficulty::from_label(difficulty);
     with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let Some(semantic_owner) = ai_semantic_owner(state, PlayerId(player_id)) else {
+            return Ok(JsValue::NULL);
+        };
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
@@ -8845,7 +8856,9 @@ pub fn get_ai_tactical_action_proposal_with_diagnostics(
     let ai_difficulty = AiDifficulty::from_label(difficulty);
     with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let Some(semantic_owner) = ai_semantic_owner(state, PlayerId(player_id)) else {
+            return Ok(JsValue::NULL);
+        };
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let mut config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
@@ -8945,7 +8958,9 @@ pub fn get_ai_action_proposal_from_scores(
     with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
         let requested_ai = PlayerId(player_id);
-        let semantic_owner = ai_semantic_owner(state, requested_ai);
+        let Some(semantic_owner) = ai_semantic_owner(state, requested_ai) else {
+            return Ok(JsValue::NULL);
+        };
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let admissible_scores: Vec<(GameAction, f64)> = scored
             .into_iter()
@@ -8989,7 +9004,9 @@ pub fn get_ai_action_proposal_from_scores_with_diagnostics(
     with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
         let requested_ai = PlayerId(player_id);
-        let semantic_owner = ai_semantic_owner(state, requested_ai);
+        let Some(semantic_owner) = ai_semantic_owner(state, requested_ai) else {
+            return Ok(JsValue::NULL);
+        };
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let admissible_scores: Vec<(GameAction, f64)> = scored
             .into_iter()
@@ -9157,15 +9174,16 @@ fn build_llm_decision_request_inner(
 
     with_installed_state_mut(|state| {
         engine::game::layers::flush_layers(state);
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let Some(semantic_owner) = ai_semantic_owner(state, PlayerId(player_id)) else {
+            return serde_json::Value::Null;
+        };
         let contract = AiDecisionContract::issue(state, semantic_owner);
         // Only the seat the engine authorizes to submit this decision is asked
-        // it: its owner, or the owner's controller (CR 723.5). For any other
-        // seat, `ai_semantic_owner` names whoever is acting, so without this a
-        // seat with no decision to make would get the acting player's
-        // decision, rendered from that player's view, hand included. Refused
-        // before the standing pass and the thread memory are consulted, so a
-        // refused build changes nothing.
+        // it: its owner, or the owner's controller (CR 723.5). The `None`
+        // short-circuit above already refuses every seat with no binding, so
+        // the actor half of this guard is now defense-in-depth; the empty
+        // domain half still fires. Refused before the standing pass and the
+        // thread memory are consulted, so a refused build changes nothing.
         if contract.authorized_actor != PlayerId(player_id) || contract.candidates.is_empty() {
             return serde_json::Value::Null;
         }
@@ -9304,7 +9322,11 @@ fn get_ai_action_proposal_from_llm_response_inner(
     let usage = phase_llm::token_usage(reply.provider, response_body);
     with_installed_state_mut(|state| {
         engine::game::layers::flush_layers(state);
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let Some(semantic_owner) = ai_semantic_owner(state, PlayerId(player_id)) else {
+            // No decision for this seat: refuse without touching the thread
+            // memory, so no reply is recorded against another seat's decision.
+            return llm_failure(&phase_llm::LlmError::StaleDecision, usage);
+        };
         let admitted = admit_llm_reply(state, semantic_owner, fingerprint, reply);
         // The engine's verdict decides where the seat's message thread goes
         // next: on from this reply, dropped after a thread error or a stored
@@ -14794,26 +14816,87 @@ mod teammate_browser_ai_tests {
 
     const P2: PlayerId = PlayerId(2);
 
-    /// An explicitly requested P1 is retained on a P0-parked team window
-    /// (the reported failure rebound it to P0); an opponent still falls
-    /// back to the parked holder.
+    /// VM-W1: an explicitly requested P1 is retained on a P0-parked team
+    /// window (the reported failure rebound it to P0); a seat with no
+    /// decision — an opponent, a controlled subject, a passed member —
+    /// resolves to nothing instead of another seat's proposal (CR 723.5).
     #[test]
     fn ai_semantic_owner_retains_a_teammate_on_a_parked_team_window() {
+        use engine::game::turn_control::DecisionBinding;
+
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         state.active_player = P0;
         state.priority_player = P0;
         state.waiting_for = WaitingFor::Priority { player: P0 };
-        assert_eq!(ai_semantic_owner(&state, P1), P1);
-        assert_eq!(ai_semantic_owner(&state, P0), P0);
-        assert_eq!(ai_semantic_owner(&state, P2), P0);
+        assert_eq!(ai_semantic_owner(&state, P1), Some(P1));
+        assert_eq!(ai_semantic_owner(&state, P0), Some(P0));
+        // INTENDED DELTA (the bug F2 fixes): base minted P0's proposal for P2.
+        assert_eq!(ai_semantic_owner(&state, P2), None);
+
+        // Controlled: P2 submits for the team, so P2 resolves to the first
+        // controlled owner while the subjects resolve to nothing.
+        state.turn_decision_controller = Some(P2);
+        assert_eq!(
+            engine::game::turn_control::pending_decision_bindings(&state),
+            vec![
+                DecisionBinding {
+                    semantic_owner: P0,
+                    authorized_actor: P2,
+                },
+                DecisionBinding {
+                    semantic_owner: P1,
+                    authorized_actor: P2,
+                },
+            ],
+            "reach: the authority pairs each owner with the controller"
+        );
+        assert_eq!(ai_semantic_owner(&state, P2), Some(P0));
+        assert_eq!(ai_semantic_owner(&state, P0), None);
+        assert_eq!(ai_semantic_owner(&state, P1), None);
+
+        // Strict-pending consequence: a passed member owes no decision
+        // (base resolved the passer to itself; an unfiltered-owners
+        // implementation reds here).
+        state.turn_decision_controller = None;
+        state.priority_passes.insert(P1);
+        assert_eq!(ai_semantic_owner(&state, P1), None);
+        assert_eq!(ai_semantic_owner(&state, P0), Some(P0));
+
+        // Sibling: a non-Priority prompt resolves its acting seat the same way.
+        state.priority_passes.clear();
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: P0,
+            pending_cast: Box::new(engine::types::game_state::PendingCast::new(
+                ObjectId(1),
+                engine::types::identifiers::CardId(1),
+                engine::types::ability::ResolvedAbility::new(
+                    engine::types::ability::Effect::NoOp,
+                    Vec::new(),
+                    ObjectId(1),
+                    P0,
+                ),
+                engine::types::mana::ManaCost::NoCost,
+            )),
+            target_slots: vec![engine::types::game_state::TargetSelectionSlot {
+                legal_targets: Vec::new(),
+                optional: false,
+                chooser: None,
+                effect_kind: engine::types::ability::EffectKind::NoOp,
+                effect_detail: engine::types::game_state::TargetEffectDetail::None,
+            }],
+            mode_labels: Vec::new(),
+            selection: engine::types::game_state::TargetSelectionProgress::default(),
+        };
+        assert_eq!(ai_semantic_owner(&state, P0), Some(P0));
+        assert_eq!(ai_semantic_owner(&state, P2), None);
     }
 
     fn installed() -> GameState {
         with_installed_state(GameState::clone).expect("a game is installed")
     }
 
-    fn owners_of(state: &GameState) -> Vec<PlayerId> {
-        engine::game::derived_views::derive_views(state, None).priority_decision_owners
+    fn owners_of(state: &GameState) -> Vec<engine::game::turn_control::DecisionBinding> {
+        engine::game::derived_views::derive_views(state, None).priority_decision_bindings
     }
 
     /// Mint a token for `owner`'s `action` through the production registry
@@ -14847,8 +14930,20 @@ mod teammate_browser_ai_tests {
         runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
         GAME_STATE.with(|cell| cell.set(Some(runner.state().clone())));
 
-        assert_eq!(owners_of(&installed()), vec![P0, P1]);
-        assert_eq!(ai_semantic_owner(&installed(), P1), P1);
+        assert_eq!(
+            owners_of(&installed()),
+            vec![
+                engine::game::turn_control::DecisionBinding {
+                    semantic_owner: P0,
+                    authorized_actor: P0,
+                },
+                engine::game::turn_control::DecisionBinding {
+                    semantic_owner: P1,
+                    authorized_actor: P1,
+                },
+            ]
+        );
+        assert_eq!(ai_semantic_owner(&installed(), P1), Some(P1));
 
         // P1's own land play.
         let card_id = installed().objects[&forest].card_id;
@@ -14941,5 +15036,167 @@ mod teammate_browser_ai_tests {
             installed().waiting_for
         );
         assert!(owners_of(&installed()).is_empty());
+    }
+
+    const W2_ENDPOINT: &str = r#"{"provider":"Anthropic","apiKey":"key","model":"claude-test","decisionContext":"messageThread"}"#;
+
+    fn w2_clock(ms: u64) -> phase_llm::ClockReading {
+        phase_llm::ClockReading {
+            wall_ms: ms,
+            monotonic_ms: ms,
+        }
+    }
+
+    fn w2_thread_snapshot() -> phase_llm::LlmThreadMemory {
+        LLM_THREAD_MEMORY.with(|cell| cell.borrow().clone())
+    }
+
+    /// Install a 2HG game parked on P0 with P0 and P1 each holding a land, so
+    /// both teammates' decisions offer more than the forced pass.
+    fn install_w2_parked_window() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        let mut sc = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+        sc.at_phase(Phase::PreCombatMain);
+        sc.add_land_to_hand(P0, "Forest");
+        sc.add_land_to_hand(P1, "Forest");
+        let mut runner = sc.build();
+        runner.state_mut().active_player = P0;
+        runner.state_mut().priority_player = P0;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+        install_game_state(Some(runner.state().clone()));
+    }
+
+    fn w2_minted_token_count() -> usize {
+        AI_PROPOSALS.with(|registry| registry.borrow().proposals.len())
+    }
+
+    /// VM-W2: every proposal/LLM endpoint short-circuits a seat with no
+    /// decision to its no-proposal value — a NULL proposal, a null LLM
+    /// build, and a stale-decision LLM refusal that records nothing.
+    ///
+    /// Native observability: a returned `JsValue` cannot be inspected
+    /// natively (`is_null`/`==` are wasm imports — every `JsValue`-asserting
+    /// test in this file is `wasm32`-gated), so the NULL legs assert the
+    /// native-observable equivalent: the endpoint returns `Ok` while minting
+    /// no proposal token (the NULL arm returns before the registry). At base
+    /// this same call mints P0's token and then panics in `to_js` — red
+    /// either way.
+    #[test]
+    fn proposal_endpoints_return_null_for_seat_with_no_decision() {
+        install_w2_parked_window();
+
+        // P2 has no decision on P0's parked window.
+        assert_eq!(ai_semantic_owner(&installed(), P2), None);
+
+        // Proposal endpoint: Ok with no token minted, not P0's proposal.
+        let tokens_before = w2_minted_token_count();
+        get_ai_action_proposal("Medium", 2).expect("a proposal result");
+        assert_eq!(
+            w2_minted_token_count(),
+            tokens_before,
+            "a seat with no decision must mint no proposal token"
+        );
+        // Positive control: the registry observation is live — a direct mint
+        // for P1's own decision registers exactly one token.
+        let p1_contract = AiDecisionContract::issue(&installed(), P1);
+        assert!(
+            issue_ai_proposal_token(p1_contract).is_some(),
+            "reach: the registry mints outside the refused path"
+        );
+        assert_eq!(w2_minted_token_count(), tokens_before + 1);
+
+        // Positive legs (same state): the None is seat-specific, not a dead
+        // engine — P1 resolves to its own decision and builds a real request.
+        assert_eq!(ai_semantic_owner(&installed(), P1), Some(P1));
+        let teammate_build =
+            build_llm_decision_request_inner("Medium", 1, W2_ENDPOINT, "[]", 0, w2_clock(0))
+                .expect("the teammate decision builds");
+        assert!(
+            teammate_build["request"].is_object(),
+            "P1 must build a real request on the same state: {teammate_build}"
+        );
+
+        // LLM build for the seat with no decision: null, before the thread
+        // memory is touched.
+        let refused_build =
+            build_llm_decision_request_inner("Medium", 2, W2_ENDPOINT, "[]", 0, w2_clock(0))
+                .expect("a refused build is still Ok");
+        assert!(
+            refused_build.is_null(),
+            "a seat with no decision must build null: {refused_build}"
+        );
+
+        // LLM reply for the seat with no decision: refused as stale even when
+        // the reply names P0's own live decision — and the thread memory is
+        // untouched, so nothing is recorded against P0.
+        let p0_build =
+            build_llm_decision_request_inner("Medium", 0, W2_ENDPOINT, "[]", 0, w2_clock(0))
+                .expect("P0's decision builds");
+        assert!(
+            p0_build["request"].is_object(),
+            "P0 must build a real request: {p0_build}"
+        );
+        let thread_turn = p0_build["threadTurn"]
+            .as_u64()
+            .map(|turn| u32::try_from(turn).expect("a thread turn id"));
+        let threads_before = w2_thread_snapshot();
+        let resolved = get_ai_action_proposal_from_llm_response_inner(
+            2,
+            p0_build["fingerprint"].as_str().expect("a fingerprint"),
+            thread_turn,
+            "Anthropic",
+            200,
+            &serde_json::json!({
+                "id": "msg_w2",
+                "type": "message",
+                "stop_reason": "end_turn",
+                "content": [{ "type": "text", "text": "{\"choice\": 0}" }],
+                "usage": { "input_tokens": 900, "output_tokens": 20 },
+            })
+            .to_string(),
+            w2_clock(0),
+        )
+        .expect("a refused reply is still Ok");
+        assert!(
+            resolved["proposal"].is_null(),
+            "no proposal may be minted for a seat with no decision: {resolved}"
+        );
+        assert_eq!(
+            resolved["errorKind"]["kind"],
+            serde_json::json!("staleDecision"),
+            "the refusal must be a stale decision: {resolved}"
+        );
+        assert_eq!(
+            w2_thread_snapshot(),
+            threads_before,
+            "the refused reply must record nothing in the thread memory"
+        );
+
+        // Hostile: with a takeback vote open, a seat with no decision still
+        // resolves to NULL (the token gate composes — no hang).
+        set_multiplayer_mode(true);
+        install_game_state(Some(installed()));
+        let submitted = submit_action_inner(P0, GameAction::PassPriority).expect("installed");
+        assert!(
+            matches!(submitted, SubmittedAction::Applied { .. }),
+            "reach: a pass must apply so the ledger has a last action"
+        );
+        let reply = request_takeback_inner(P0, vec![]).expect("installed");
+        assert!(
+            matches!(reply, TakebackReply::Requested(_)),
+            "reach: the vote must be open, got {reply:?}"
+        );
+        let tokens_before_vote = w2_minted_token_count();
+        get_ai_action_proposal("Medium", 2).expect("a proposal result");
+        assert_eq!(
+            w2_minted_token_count(),
+            tokens_before_vote,
+            "takeback-open + no decision still mints nothing (no hang)"
+        );
+
+        cancel_takeback_inner(P0).expect("installed");
+        set_multiplayer_mode(false);
+        clear_game_state();
     }
 }

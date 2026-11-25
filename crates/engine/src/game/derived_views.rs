@@ -30,6 +30,7 @@ use crate::game::stack::{
     stack_revealed_card_names, StackDisplayGroup,
 };
 use crate::game::topology::Side;
+use crate::game::turn_control::DecisionBinding;
 use crate::types::ability::{
     AbilityCost, ContinuousModification, Duration, Effect, GameRestriction, KeywordAction,
     ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
@@ -719,18 +720,19 @@ pub struct DerivedViews {
     /// when there is no actor or multiple distinct authorized submitters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_authorized_submitter: Option<PlayerId>,
-    /// CR 805.5a: the living seats entitled to answer the live priority
-    /// window that have not passed it yet — the parked representative plus
-    /// every unpassed teammate on a shared-team window. Omitted on any
-    /// non-priority window and whenever it would name only the holder
-    /// (always so for individual seats), where consumers fall back to
-    /// `WaitingFor::Priority`'s player. The browser AI scheduler
-    /// drives the AI seats in this list so a teammate stays eligible while
-    /// the window sits on its representative; it mirrors the headless
-    /// driver's owner filter minus the AI membership check, which only the
-    /// client knows.
+    /// CR 805.5a + CR 723.5: each living seat entitled to answer the live
+    /// priority window that has not passed it yet — the parked representative
+    /// plus every unpassed teammate on a shared-team window — paired with its
+    /// authorized actor. Omitted on any non-priority window and whenever the
+    /// owners would name only the holder (always so for individual seats),
+    /// where consumers fall back to `WaitingFor::Priority`'s player. The
+    /// browser AI scheduler drives the AI actors in this list so a teammate
+    /// stays eligible while the window sits on its representative, and so an
+    /// AI controller of humans is scheduled while a human controller of AI
+    /// stays manual; it mirrors the headless driver's owner filter minus the
+    /// AI membership check, which only the client knows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub priority_decision_owners: Vec<PlayerId>,
+    pub priority_decision_bindings: Vec<DecisionBinding>,
     /// The authorized viewer's Scry identity, retained when the bounded
     /// interaction projection omits its opportunities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1813,7 +1815,7 @@ fn temporary_cant_be_blocked_source(
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews {
         unique_authorized_submitter: unique_authorized_submitter(state),
-        priority_decision_owners: priority_decision_owners(state),
+        priority_decision_bindings: priority_decision_bindings(state),
         scry_prompt_id: viewer
             .and_then(|viewer| crate::game::interaction::scry_prompt_id_for_viewer(state, viewer)),
         blocker_assignment_pairs: blocker_assignment_pairs(state),
@@ -2455,7 +2457,7 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
-    views.priority_decision_owners = priority_decision_owners(authoritative_state);
+    views.priority_decision_bindings = priority_decision_bindings(authoritative_state);
     // CR 702.24a: whether the prompt continues a payment already begun is read
     // from the payment's parked owner, which the viewer projection drops.
     if let Some(draw) = views.unless_draw_cost.as_mut() {
@@ -2729,28 +2731,33 @@ fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
     (submitters.len() == 1).then(|| submitters[0])
 }
 
-/// CR 805.5a: the living seats entitled to answer the live priority window
-/// that have not passed it yet. A member who already passed has no new
-/// decision until someone acts (which clears passes), so passed owners are
-/// excluded — the same filter the headless AI driver applies before
-/// choosing a seat.
+/// CR 805.5a + CR 723.5: the living seats entitled to answer the live
+/// priority window that have not passed it yet, each paired with its
+/// authorized actor. A member who already passed has no new decision until
+/// someone acts (which clears passes), so passed owners are excluded — the
+/// same strict-pending authority the headless AI driver reads.
 ///
-/// A list naming only the holder adds nothing to `WaitingFor::Priority`, and
-/// every consumer already falls back to the holder, so it is left empty
-/// (and omitted from the wire). The list is published only when a teammate
-/// can act on the window, which keeps individual-seat updates unchanged.
-fn priority_decision_owners(state: &GameState) -> Vec<PlayerId> {
+/// A list whose owners name only the holder adds nothing to
+/// `WaitingFor::Priority`, and every consumer already falls back to the
+/// holder, so it is left empty (and omitted from the wire). The collapse keys
+/// on the OWNER projection, not the actors: a controlled holder-only window
+/// still collapses, and consumers fall back to `priority_player`, which the
+/// engine re-derives to the controller. The list is published only when a
+/// teammate can act on the window, which keeps individual-seat updates
+/// unchanged.
+fn priority_decision_bindings(state: &GameState) -> Vec<DecisionBinding> {
     let WaitingFor::Priority { player: holder } = state.waiting_for else {
         return Vec::new();
     };
-    let owners: Vec<PlayerId> = crate::game::turn_control::decision_owners(state)
-        .into_iter()
-        .filter(|owner| !state.priority_passes.contains(owner))
+    let bindings = crate::game::turn_control::pending_decision_bindings(state);
+    let owners: Vec<PlayerId> = bindings
+        .iter()
+        .map(|binding| binding.semantic_owner)
         .collect();
     if owners == [holder] {
         return Vec::new();
     }
-    owners
+    bindings
 }
 
 /// CR 103.1: the starting player of the game this state describes, once it has
@@ -10934,7 +10941,11 @@ mod tests {
     /// teammate on a parked shared-team window, minus seats that already
     /// passed — and collapses to the single holder in individual formats.
     #[test]
-    fn priority_decision_owners_lists_unpassed_teammates_on_a_parked_window() {
+    fn priority_decision_bindings_list_unpassed_teammates_on_a_parked_window() {
+        let binding = |semantic_owner: PlayerId, authorized_actor: PlayerId| DecisionBinding {
+            semantic_owner,
+            authorized_actor,
+        };
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
@@ -10942,15 +10953,18 @@ mod tests {
             player: PlayerId(0),
         };
         assert_eq!(
-            derive_views(&state, None).priority_decision_owners,
-            vec![PlayerId(0), PlayerId(1)]
+            derive_views(&state, None).priority_decision_bindings,
+            vec![
+                binding(PlayerId(0), PlayerId(0)),
+                binding(PlayerId(1), PlayerId(1))
+            ]
         );
 
         // A passed member has no new decision until someone acts.
         state.priority_passes.insert(PlayerId(0));
         assert_eq!(
-            derive_views(&state, None).priority_decision_owners,
-            vec![PlayerId(1)]
+            derive_views(&state, None).priority_decision_bindings,
+            vec![binding(PlayerId(1), PlayerId(1))]
         );
 
         // Only the holder left unpassed: the list would repeat the window's
@@ -10958,13 +10972,13 @@ mod tests {
         state.priority_passes.clear();
         state.priority_passes.insert(PlayerId(1));
         assert!(derive_views(&state, None)
-            .priority_decision_owners
+            .priority_decision_bindings
             .is_empty());
 
-        // Non-priority windows carry no owner list.
+        // Non-priority windows carry no binding list.
         state.waiting_for = WaitingFor::GameOver { winner: None };
         assert!(derive_views(&state, None)
-            .priority_decision_owners
+            .priority_decision_bindings
             .is_empty());
 
         // Individual formats never publish a list: the holder is the only
@@ -10974,7 +10988,84 @@ mod tests {
             player: PlayerId(1),
         };
         assert!(derive_views(&solo, None)
-            .priority_decision_owners
+            .priority_decision_bindings
             .is_empty());
+
+        // A live non-Priority prompt with a non-empty authority still
+        // publishes nothing: this pins the Priority gate, not vacuity.
+        state.priority_passes.clear();
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: PlayerId(0),
+            pending_cast: Box::new(PendingCast::new(
+                ObjectId(1),
+                CardId(1),
+                ResolvedAbility::new(
+                    Effect::unimplemented("damage", "inert fixture effect"),
+                    vec![],
+                    ObjectId(1),
+                    PlayerId(0),
+                ),
+                ManaCost::NoCost,
+            )),
+            target_slots: vec![target_slot(vec![])],
+            mode_labels: Vec::new(),
+            selection: TargetSelectionProgress::default(),
+        };
+        assert!(
+            !crate::game::turn_control::pending_decision_bindings(&state).is_empty(),
+            "reach: the authority is non-empty on this prompt, so [] proves the gate"
+        );
+        assert!(derive_views(&state, None)
+            .priority_decision_bindings
+            .is_empty());
+    }
+
+    /// VM-D2: a controlled holder-only window publishes an empty view while
+    /// the authority stays non-empty — the collapse keys on the OWNER
+    /// projection, not the actors. Labeled predicate pin: per-seat pass
+    /// states under control are unreachable through the production pass
+    /// boundary (a controller-submitted pass records the whole team).
+    #[test]
+    fn controlled_holder_only_window_collapses_to_submitter_fallback() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = PlayerId(0);
+        // The engine re-derives `priority_player` to the controller on a
+        // controlled window; the imperative fixture carries that value so the
+        // fallback target the collapse relies on exists.
+        state.priority_player = PlayerId(2);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.turn_decision_controller = Some(PlayerId(2));
+        state.priority_passes.insert(PlayerId(1));
+
+        assert_eq!(
+            state.priority_player,
+            PlayerId(2),
+            "reach: the re-derived submitter — the fallback target — exists"
+        );
+        assert_eq!(
+            crate::game::turn_control::pending_decision_bindings(&state),
+            vec![DecisionBinding {
+                semantic_owner: PlayerId(0),
+                authorized_actor: PlayerId(2),
+            }],
+            "the authority is non-empty: only the view collapses"
+        );
+        assert!(
+            derive_views(&state, None)
+                .priority_decision_bindings
+                .is_empty(),
+            "the holder-only view collapses even though the actor differs"
+        );
+        // The filtered-views site re-reads the same authoritative projection.
+        for viewer in [None, Some(PlayerId(0)), Some(PlayerId(2))] {
+            assert!(
+                derive_filtered_views(&state, &state, viewer)
+                    .priority_decision_bindings
+                    .is_empty(),
+                "filtered views collapse for viewer {viewer:?}"
+            );
+        }
     }
 }

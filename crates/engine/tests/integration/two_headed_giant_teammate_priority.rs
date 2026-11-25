@@ -6,10 +6,13 @@
 use engine::ai_support;
 use engine::game::casting::can_foretell_card;
 use engine::game::combat::{AttackerInfo, CombatState};
+use engine::game::derived_views::derive_views;
 use engine::game::engine as game_engine;
 use engine::game::game_object::RoomDoor;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::turn_control::{pending_decision_bindings, DecisionBinding};
+use engine::game::turns::start_next_turn;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
@@ -2067,5 +2070,154 @@ fn declare_prompts_store_under_prompt_seat() {
     assert!(
         format!("{err:?}").contains("ActionNotAllowed"),
         "unexpected refusal (want ActionNotAllowed): {err:?}"
+    );
+}
+
+/// VM-M1: printed Mindslaver → controlled team turn → the authority pairs
+/// each owner with the controller, and the derived view publishes the same
+/// pairs on the wire shape (CR 723.1/723.5/805.8/117.4).
+#[test]
+fn mindslaver_controlled_team_pairs_each_owner_with_controller() {
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let mut sc = team_turn_board();
+    let mindslaver = sc.add_real_card(P2, "Mindslaver", Zone::Battlefield, db);
+    sc.with_mana_pool(
+        P2,
+        vec![
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = sc.build();
+    park_p0(&mut runner);
+    runner
+        .pass_holding_team()
+        .expect("active team passes to P2");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P2
+        ),
+        "P2 must hold priority to activate, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Activate Mindslaver targeting P1 through the production pipeline. The
+    // sacrifice is declared via `pay_with` (E0a): the self-sacrifice cost
+    // surfaces as a `PayCost` window the driver answers from it.
+    runner
+        .activate(mindslaver, 0)
+        .target_player(P1)
+        .pay_with(&[mindslaver])
+        .resolve();
+
+    // The activation resolved: P1's team is scheduled under P2, anchored to
+    // the team's representative (CR 805.8).
+    assert_eq!(
+        runner.state().scheduled_turn_controls.len(),
+        1,
+        "reach: the activation resolved and scheduled control"
+    );
+    assert_eq!(
+        runner.state().scheduled_turn_controls[0].target_player,
+        P0,
+        "CR 805.8: controlling P1 anchors to the P0/P1 team representative"
+    );
+    assert_eq!(
+        runner.state().scheduled_turn_controls[0].controller,
+        P2,
+        "reach: P2 is the scheduled controller"
+    );
+
+    // Advance two turns: the P0-team turn ends, the P2-team turn passes, and
+    // the P0-team turn begins under P2's control (CR 723.1).
+    let mut events = Vec::new();
+    start_next_turn(runner.state_mut(), &mut events);
+    assert_eq!(
+        runner.state().active_player,
+        P2,
+        "reach: the first advance reaches the P2-team turn"
+    );
+    start_next_turn(runner.state_mut(), &mut events);
+    assert_eq!(
+        runner.state().active_player,
+        P0,
+        "reach: the second advance returns to the P0-team turn"
+    );
+    assert_eq!(
+        runner.state().turn_decision_controller,
+        Some(P2),
+        "CR 723.1: the scheduled control is active on the controlled turn"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "the controlled turn parks priority on P0, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach: the stack is empty on the controlled window"
+    );
+
+    // The authority pairs each owner with the controller.
+    let expected = vec![
+        DecisionBinding {
+            semantic_owner: P0,
+            authorized_actor: P2,
+        },
+        DecisionBinding {
+            semantic_owner: P1,
+            authorized_actor: P2,
+        },
+    ];
+    assert_eq!(pending_decision_bindings(runner.state()), expected);
+    // The derived view publishes the same pairs.
+    assert_eq!(
+        derive_views(runner.state(), None).priority_decision_bindings,
+        expected
+    );
+    // Serde keys pin the TS contract.
+    assert_eq!(
+        serde_json::to_value(pending_decision_bindings(runner.state())[0])
+            .expect("a binding serializes"),
+        serde_json::json!({"semantic_owner": 0, "authorized_actor": 2})
+    );
+
+    // Completion tail: P2's pass is the team's pass (CR 805.8) — the whole
+    // team records, the window advances to P2, and the opposing window is
+    // uncontrolled.
+    game_engine::apply(runner.state_mut(), P2, GameAction::PassPriority)
+        .expect("the controller's pass must apply");
+    assert_eq!(
+        passes_set(&runner),
+        BTreeSet::from([P0, P1]),
+        "CR 805.8: the controller's pass records the whole team"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P2
+        ),
+        "the window must advance to P2, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        pending_decision_bindings(runner.state()),
+        vec![
+            DecisionBinding {
+                semantic_owner: P2,
+                authorized_actor: P2,
+            },
+            DecisionBinding {
+                semantic_owner: P3,
+                authorized_actor: P3,
+            },
+        ],
+        "control is released for the opposing window"
     );
 }

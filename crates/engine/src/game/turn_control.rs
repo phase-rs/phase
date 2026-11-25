@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::ability::ControlWindow;
 use crate::types::actions::ResolveAllScope;
 use crate::types::game_state::{
@@ -630,11 +632,97 @@ pub fn decision_owners(state: &GameState) -> Vec<PlayerId> {
     state.waiting_for.acting_players()
 }
 
+/// CR 723.5 + CR 805.8: one pending decision's semantic owner paired with the
+/// seat authorized to submit it. The owner is who the rules say decides; the
+/// actor is who actually submits — the owner's controller under a
+/// turn-control effect, otherwise the owner itself.
+///
+/// This is NOT `ai_support::payment_surplus::DecisionBinding`: that
+/// module-private type is a payment-preparation certificate (revision +
+/// interaction + pools) with disjoint semantics. This type is always
+/// referenced by full path (`turn_control::DecisionBinding`), matching the
+/// existing `turn_control::decision_owners` call-site convention, so no `use`
+/// collision is possible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionBinding {
+    pub semantic_owner: PlayerId,
+    pub authorized_actor: PlayerId,
+}
+
+impl DecisionBinding {
+    /// Map `semantic_owner` to its actor through the same frozen-or-live
+    /// composition `AiDecisionContract::issue` binds — shared, not duplicated.
+    pub fn for_owner(state: &GameState, semantic_owner: PlayerId) -> Self {
+        Self {
+            semantic_owner,
+            authorized_actor: contract_actor_for_owner(state, semantic_owner),
+        }
+    }
+}
+
+/// The owner→actor composition `AiDecisionContract::issue` binds: a frozen
+/// Resolve All submitter where one exists, else the live authorized
+/// submitter. Moved here from `ai_support::context` so the one constructor
+/// every scheduler shares sits beside its game-side callees.
+pub(crate) fn contract_actor_for_owner(state: &GameState, semantic_owner: PlayerId) -> PlayerId {
+    resolve_all_frozen_actor(state, semantic_owner)
+        .unwrap_or_else(|| authorized_submitter_for_player(state, semantic_owner))
+}
+
+fn resolve_all_frozen_actor(state: &GameState, semantic_owner: PlayerId) -> Option<PlayerId> {
+    let epoch = match &state.waiting_for {
+        WaitingFor::ResolveAllConsent { epoch, .. } | WaitingFor::ResolveAllReady { epoch } => {
+            *epoch
+        }
+        _ => return None,
+    };
+    resolve_all_granted_submitter(state, epoch, semantic_owner).or_else(|| {
+        state
+            .resolve_all_consent_run
+            .as_ref()
+            .filter(|run| run.epoch == epoch)
+            .and_then(|run| run.authorized_submitter_for(semantic_owner))
+    })
+}
+
+/// CR 805.5a + CR 805.5b + CR 723.5: the strict pending bindings — every
+/// decision owner that still owes a decision, each paired with its authorized
+/// actor. On a Priority window a member who already passed owes nothing until
+/// someone acts (which clears passes); every other window maps the engine's
+/// acting players unchanged. Strict pending only: no all-owners fallback here
+/// (that stays the headless driver's documented policy) and no
+/// holder-collapse (that stays the derived view's).
+pub fn pending_decision_bindings(state: &GameState) -> Vec<DecisionBinding> {
+    let owners = decision_owners(state);
+    // Only a Priority window records passes; every other window resolves to
+    // the engine's acting players unchanged.
+    let unpassed: Vec<PlayerId> = if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        owners
+            .into_iter()
+            .filter(|owner| !state.priority_passes.contains(owner))
+            .collect()
+    } else {
+        owners
+    };
+    unpassed
+        .into_iter()
+        .map(|owner| DecisionBinding::for_owner(state, owner))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::SearchSelectionConstraint;
-    use crate::types::game_state::ActiveSearchDecisionControl;
+    use crate::ai_support::AiDecisionContract;
+    use crate::types::ability::{Effect, EffectKind, ResolvedAbility, SearchSelectionConstraint};
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::{
+        ActiveSearchDecisionControl, PendingCast, ResolveAllConsentParticipant,
+        ResolveAllPrioritySnapshot, StackResolutionBudget, TargetEffectDetail,
+        TargetSelectionProgress, TargetSelectionSlot,
+    };
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::ManaCost;
 
     #[test]
     fn search_prompt_uses_latched_controller_without_rebinding_to_live_control() {
@@ -673,5 +761,228 @@ mod tests {
             .unwrap()
             .authority = ActiveSearchDecisionAuthority::SearcherFallback;
         assert_eq!(authorized_submitter(&state), Some(PlayerId(0)));
+    }
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+    const P2: PlayerId = PlayerId(2);
+
+    fn two_hg_priority_state() -> GameState {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        state
+    }
+
+    fn consent_run(
+        epoch: u64,
+        participants: Vec<(PlayerId, PlayerId, bool)>,
+    ) -> ResolveAllConsentRun {
+        ResolveAllConsentRun {
+            epoch,
+            max_resolutions: StackResolutionBudget::Unlimited,
+            priority_snapshot: ResolveAllPrioritySnapshot {
+                waiting_player: P0,
+                priority_player: P0,
+                priority_pass_count: 0,
+                priority_passes: BTreeSet::new(),
+            },
+            scope: ResolveAllScope::Shared,
+            participants: participants
+                .into_iter()
+                .map(|(representative, authorized_submitter, granted)| {
+                    ResolveAllConsentParticipant {
+                        representative,
+                        authorized_submitter,
+                        granted,
+                    }
+                })
+                .collect(),
+            auto_pass_baseline: None,
+        }
+    }
+
+    fn targeting_window(player: PlayerId) -> WaitingFor {
+        WaitingFor::TargetSelection {
+            player,
+            pending_cast: Box::new(PendingCast::new(
+                ObjectId(1),
+                CardId(1),
+                ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(1), player),
+                ManaCost::NoCost,
+            )),
+            target_slots: vec![TargetSelectionSlot {
+                legal_targets: Vec::new(),
+                optional: false,
+                chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
+            }],
+            mode_labels: Vec::new(),
+            selection: TargetSelectionProgress::default(),
+        }
+    }
+
+    /// VM-A1: the authority lists strict pending bindings with controller
+    /// actors. Pure-fn pin: mixed pass states under control are unreachable
+    /// through the production pass boundary (a controller-submitted pass
+    /// records the whole team), so this is imperative by necessity.
+    #[test]
+    fn pending_bindings_pair_unpassed_owners_with_actors() {
+        let mut state = two_hg_priority_state();
+
+        // Sibling (uncontrolled): actor == owner identity.
+        assert_eq!(
+            pending_decision_bindings(&state),
+            vec![
+                DecisionBinding {
+                    semantic_owner: P0,
+                    authorized_actor: P0,
+                },
+                DecisionBinding {
+                    semantic_owner: P1,
+                    authorized_actor: P1,
+                },
+            ]
+        );
+
+        // Latch P2 as the active team's controller (CR 723.5 + CR 805.8).
+        state.turn_decision_controller = Some(P2);
+        // Reach guards: the latch is live and the owner list is the full team.
+        assert_eq!(authorized_submitter_for_player(&state, P0), P2);
+        assert_eq!(decision_owners(&state), vec![P0, P1]);
+
+        state.priority_passes.insert(P1);
+        assert_eq!(
+            pending_decision_bindings(&state),
+            vec![DecisionBinding {
+                semantic_owner: P0,
+                authorized_actor: P2,
+            }]
+        );
+
+        state.priority_passes.insert(P0);
+        assert!(
+            pending_decision_bindings(&state).is_empty(),
+            "every member passed, so no binding is pending"
+        );
+
+        // Non-Priority windows map the acting players unchanged (no pass
+        // filter); the controlled actor still applies.
+        state.priority_passes.clear();
+        state.priority_passes.insert(P1);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: P0,
+            valid_attacker_ids: Vec::new(),
+            valid_attack_targets: Vec::new(),
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        assert_eq!(
+            pending_decision_bindings(&state),
+            vec![DecisionBinding {
+                semantic_owner: P0,
+                authorized_actor: P2,
+            }]
+        );
+    }
+
+    /// VM-A2: the constructor's actor equals `issue`'s actor on every window
+    /// family — the shared-fn contract. Consent/Ready/granted legs assert the
+    /// frozen-vs-live divergence is REAL; Priority/TargetSelection legs assert
+    /// frozen-`None` agreement (both sides equal the live submitter).
+    #[test]
+    fn binding_actor_matches_issued_contract_actor() {
+        // Shared Priority, uncontrolled: frozen arm is None, both sides equal
+        // the live submitter.
+        let state = two_hg_priority_state();
+        for owner in decision_owners(&state) {
+            let live = live_authorized_submitter_for_player(&state, owner);
+            assert_eq!(
+                DecisionBinding::for_owner(&state, owner).authorized_actor,
+                live,
+                "constructor must equal the live submitter on Priority (no frozen arm)"
+            );
+            assert_eq!(
+                AiDecisionContract::issue(&state, owner).authorized_actor,
+                live,
+                "issued contract must equal the live submitter on Priority (no frozen arm)"
+            );
+        }
+
+        // Individual Priority: degenerate single binding, same agreement.
+        let mut solo = GameState::new(FormatConfig::standard(), 2, 42);
+        solo.waiting_for = WaitingFor::Priority { player: P1 };
+        for owner in decision_owners(&solo) {
+            let live = live_authorized_submitter_for_player(&solo, owner);
+            assert_eq!(
+                DecisionBinding::for_owner(&solo, owner).authorized_actor,
+                AiDecisionContract::issue(&solo, owner).authorized_actor,
+            );
+            assert_eq!(
+                DecisionBinding::for_owner(&solo, owner).authorized_actor,
+                live,
+            );
+        }
+
+        // TargetSelection: same frozen-None agreement outside Priority.
+        let mut targeted = two_hg_priority_state();
+        targeted.waiting_for = targeting_window(P0);
+        for owner in decision_owners(&targeted) {
+            let live = live_authorized_submitter_for_player(&targeted, owner);
+            assert_eq!(
+                DecisionBinding::for_owner(&targeted, owner).authorized_actor,
+                AiDecisionContract::issue(&targeted, owner).authorized_actor,
+            );
+            assert_eq!(
+                DecisionBinding::for_owner(&targeted, owner).authorized_actor,
+                live,
+            );
+        }
+
+        // Consent with a granted run: frozen P2 diverges from the live P0.
+        let mut consent = two_hg_priority_state();
+        consent.waiting_for = WaitingFor::ResolveAllConsent {
+            epoch: 0,
+            representative: P0,
+        };
+        consent.resolve_all_consent_run = Some(consent_run(0, vec![(P0, P2, true)]));
+        assert_eq!(resolve_all_granted_submitter(&consent, 0, P0), Some(P2));
+        assert_eq!(
+            live_authorized_submitter_for_player(&consent, P0),
+            P0,
+            "reach: the frozen-vs-live divergence is REAL (no latch, so live is P0)"
+        );
+        assert!(consent.turn_decision_controller.is_none());
+        assert_eq!(
+            DecisionBinding::for_owner(&consent, P0).authorized_actor,
+            P2,
+        );
+        assert_eq!(
+            DecisionBinding::for_owner(&consent, P0).authorized_actor,
+            AiDecisionContract::issue(&consent, P0).authorized_actor,
+        );
+
+        // Hostile: granted-revoke window — the frozen granted submitter still
+        // binds after the run is Ready (direct call, never enumerated: Ready
+        // has no acting players).
+        let mut ready = two_hg_priority_state();
+        ready.waiting_for = WaitingFor::ResolveAllReady { epoch: 0 };
+        ready.resolve_all_consent_run = Some(consent_run(0, vec![(P0, P2, true)]));
+        assert!(
+            decision_owners(&ready).is_empty(),
+            "reach: Ready enumerates no owners"
+        );
+        assert_eq!(
+            live_authorized_submitter_for_player(&ready, P0),
+            P0,
+            "reach: the frozen-vs-live divergence is REAL on Ready too"
+        );
+        assert_eq!(DecisionBinding::for_owner(&ready, P0).authorized_actor, P2);
+        assert_eq!(
+            DecisionBinding::for_owner(&ready, P0).authorized_actor,
+            AiDecisionContract::issue(&ready, P0).authorized_actor,
+        );
     }
 }
