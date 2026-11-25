@@ -658,6 +658,10 @@ pub enum ResolvedCombatMembershipReplayInvariantError {
         expected: Vec<ObjectId>,
         found: Vec<ObjectId>,
     },
+    /// CR 508.7 + CR 400.7: a Reselect command's relation does not hold: the
+    /// creature's live prior relation differs from the recorded one, or the
+    /// recorded resulting relation is incoherent (a player destination carrying
+    /// a permanent pin). `expected` / `found` name the relation compared.
     #[error(
         "combat-membership reselection precondition mismatch for {object:?}: expected {expected:?}, found {found:?}"
     )]

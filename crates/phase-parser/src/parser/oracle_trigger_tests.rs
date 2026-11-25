@@ -46082,6 +46082,8 @@ fn reaches_reselect_attack_target(def: &AbilityDefinition) -> bool {
 /// Misleading Signpost's full Oracle text parses to the reselection.
 #[test]
 fn reselect_production_keeps_out_of_claim_subjects_unimplemented() {
+    // Each parsed ability or trigger body, paired with the printed description
+    // of the ability that carries it.
     let defs = |text: &str, name: &str, keywords: &[&str], types: &[&str], subtypes: &[&str]| {
         let parsed = parse_oracle_text(
             text,
@@ -46093,19 +46095,29 @@ fn reselect_production_keeps_out_of_claim_subjects_unimplemented() {
         parsed
             .abilities
             .into_iter()
+            .map(|def| (def.description.clone(), def))
             .chain(
                 parsed
                     .triggers
                     .into_iter()
-                    .filter_map(|t| t.execute.map(|b| *b)),
+                    .filter_map(|t| t.execute.map(|body| (t.description, *body))),
             )
-            .collect::<Vec<AbilityDefinition>>()
+            .collect::<Vec<(Option<String>, AbilityDefinition)>>()
+    };
+    // The gap text of every `Effect::Unimplemented` reachable from `def`.
+    let unimplemented_gaps = |def: &AbilityDefinition| {
+        let mut gaps = Vec::new();
+        let _ = crate::types::ability_visit::visit_ability_def(def, &mut |effect| {
+            if let Effect::Unimplemented { description, .. } = effect {
+                gaps.push(description.clone().unwrap_or_default());
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+        gaps
     };
 
     let signpost = defs(
-        "Flash
-When this artifact enters during the declare attackers step, you may reselect which player or permanent target attacking creature is attacking. (It can't attack its controller or their permanents.)
-{T}: Add {U}.",
+        "Flash\nWhen this artifact enters during the declare attackers step, you may reselect which player or permanent target attacking creature is attacking. (It can't attack its controller or their permanents.)\n{T}: Add {U}.",
         "Misleading Signpost",
         &["Flash"],
         &["Artifact"],
@@ -46114,45 +46126,57 @@ When this artifact enters during the declare attackers step, you may reselect wh
     assert!(
         signpost
             .iter()
-            .any(|def| matches!(&*def.effect, Effect::ReselectAttackTarget { .. })),
+            .any(|(_, def)| matches!(&*def.effect, Effect::ReselectAttackTarget { .. })),
         "{signpost:?}"
     );
     assert!(
-        signpost.iter().all(|def| !has_unimplemented(def)),
+        signpost.iter().all(|(_, def)| !has_unimplemented(def)),
         "{signpost:?}"
     );
 
     for (text, name, keywords, subtypes) in [
         (
-            "Flash
-Flying
-When this creature enters during the declare attackers step, for each attacking creature, you may reselect which player or permanent that creature is attacking. (It can't attack its controller or their permanents.)",
+            "Flash\nFlying\nWhen this creature enters during the declare attackers step, for each attacking creature, you may reselect which player or permanent that creature is attacking. (It can't attack its controller or their permanents.)",
             "Windshaper Planetar",
             &["Flash", "Flying"][..],
             &["Angel"][..],
         ),
         (
-            "Flash
-When Tuvok enters during the declare attackers step, choose up to two target attacking creatures. For each of them, you may reselect which player or permanent that creature is attacking. (A creature can't attack its controller.)",
+            "Flash\nWhen Tuvok enters during the declare attackers step, choose up to two target attacking creatures. For each of them, you may reselect which player or permanent that creature is attacking. (A creature can't attack its controller.)",
             "Tuvok, Chief Tactical Officer",
             &["Flash"][..],
             &["Vulcan", "Officer"][..],
         ),
         (
-            "This creature enters with X +1/+1 counters on it.
-{2}: Put a +1/+1 counter on this creature, then you may reselect which player this creature is attacking. Only the player this creature is attacking may activate this ability and only during the declare attackers step. (It can't attack its controller.)",
+            "This creature enters with X +1/+1 counters on it.\n{2}: Put a +1/+1 counter on this creature, then you may reselect which player this creature is attacking. Only the player this creature is attacking may activate this ability and only during the declare attackers step. (It can't attack its controller.)",
             "Capricopian",
             &[][..],
             &["Goat", "Hydra"][..],
         ),
     ] {
         let parsed = defs(text, name, keywords, &["Creature"], subtypes);
+        // The one ability or trigger whose printed text carries the clause.
+        let carriers: Vec<&AbilityDefinition> = parsed
+            .iter()
+            .filter(|(description, _)| {
+                description
+                    .as_deref()
+                    .is_some_and(|d| d.contains("reselect which player"))
+            })
+            .map(|(_, def)| def)
+            .collect();
+        assert_eq!(carriers.len(), 1, "{name}: {parsed:?}");
+        let carrier = carriers[0];
+        assert!(has_unimplemented(carrier), "{name}: {carrier:?}");
+        // The gap is the reselection clause itself, not another clause of the
+        // same ability (Tuvok's "choose up to two target attacking creatures").
+        let gaps = unimplemented_gaps(carrier);
         assert!(
-            parsed.iter().any(has_unimplemented),
-            "{name}: the reselection clause stays unimplemented: {parsed:?}"
+            gaps.iter().any(|gap| gap.starts_with("reselect which player")),
+            "{name}: the reselection clause stays unimplemented: {gaps:?}"
         );
         assert!(
-            parsed.iter().all(|def| !reaches_reselect_attack_target(def)),
+            parsed.iter().all(|(_, def)| !reaches_reselect_attack_target(def)),
             "{name}: {parsed:?}"
         );
     }

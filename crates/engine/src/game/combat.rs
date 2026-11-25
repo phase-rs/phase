@@ -2070,9 +2070,21 @@ pub fn apply_resolved_combat_membership(
             }
             // CR 400.7: a reselected permanent must still be the exact recorded
             // incarnation; a reselected player carries no pin.
-            match resulting_attack_target {
-                AttackTarget::Player(_) if resulting_attack_target_identity.is_none() => {}
-                AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => {
+            match (resulting_attack_target, resulting_attack_target_identity) {
+                (AttackTarget::Player(_), None) => {}
+                (AttackTarget::Player(_), Some(_)) => {
+                    return Err(
+                        ResolvedCombatMembershipReplayInvariantError::ReselectPreconditionMismatch {
+                            object: object_id,
+                            expected: Box::new((*resulting_attack_target, None)),
+                            found: Box::new((
+                                *resulting_attack_target,
+                                *resulting_attack_target_identity,
+                            )),
+                        },
+                    );
+                }
+                (AttackTarget::Planeswalker(id) | AttackTarget::Battle(id), _) => {
                     let legacy = || {
                         ObjectIncarnationRef::of(*id, crate::types::identifiers::LEGACY_INCARNATION)
                     };
@@ -2083,13 +2095,6 @@ pub fn apply_resolved_combat_membership(
                             found: bound.unwrap_or_else(legacy),
                         });
                     }
-                }
-                AttackTarget::Player(_) => {
-                    return Err(ResolvedCombatMembershipReplayInvariantError::StaleObject {
-                        expected: resulting_attack_target_identity
-                            .expect("guarded player identity"),
-                        found: command.object,
-                    });
                 }
             }
             let combat = state
@@ -10910,6 +10915,74 @@ mod tests {
         assert_eq!(serde_json::to_value(&state.combat).unwrap(), combat_before);
         assert_eq!(state.resolved_rules_journal.entries().len(), journal_before);
         assert_eq!(defender_of(&state), Some(PlayerId(1)));
+    }
+
+    /// CR 400.7 + CR 508.7: an unvalidated Reselect command naming a player
+    /// destination with a permanent pin is refused by the applier with a typed
+    /// error that names the resulting target, and edits nothing.
+    #[test]
+    fn reselect_applier_refuses_a_pinned_player_destination() {
+        use crate::types::resolved_commands::{
+            ResolvedCombatMembershipEdit, ResolvedCombatMembershipReplayInvariantError,
+            ResolvedRulesCommand,
+        };
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        declare_targets(&mut state, &[(source, AttackTarget::Player(PlayerId(1)))]);
+        let before = state.clone();
+        assert!(reselect_attack_target(
+            &mut state,
+            source,
+            AttackTarget::Player(PlayerId(2))
+        ));
+        let mut command = state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry.command.as_ref() {
+                Some(ResolvedRulesCommand::CombatMembership(command)) => Some(command.clone()),
+                _ => None,
+            })
+            .expect("the reselection is journaled");
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        let ResolvedCombatMembershipEdit::Reselect {
+            resulting_attack_target_identity,
+            ..
+        } = &mut command.edit
+        else {
+            panic!("expected a Reselect edit: {:?}", command.edit);
+        };
+        *resulting_attack_target_identity = Some(pin);
+
+        // Reach guard: the unmutated command replays.
+        let mut replay = before.clone();
+        let mut valid = command.clone();
+        if let ResolvedCombatMembershipEdit::Reselect {
+            resulting_attack_target_identity,
+            ..
+        } = &mut valid.edit
+        {
+            *resulting_attack_target_identity = None;
+        }
+        assert_eq!(
+            apply_resolved_combat_membership(&mut replay, &valid),
+            Ok(())
+        );
+
+        let mut replay = before.clone();
+        let untouched = serde_json::to_value(&replay.combat).unwrap();
+        assert_eq!(
+            apply_resolved_combat_membership(&mut replay, &command),
+            Err(
+                ResolvedCombatMembershipReplayInvariantError::ReselectPreconditionMismatch {
+                    object: source,
+                    expected: Box::new((AttackTarget::Player(PlayerId(2)), None)),
+                    found: Box::new((AttackTarget::Player(PlayerId(2)), Some(pin))),
+                }
+            )
+        );
+        assert_eq!(serde_json::to_value(&replay.combat).unwrap(), untouched);
     }
 
     /// CR 506.4 + CR 733: a live type-loss retirement journals `RetireAttacked`, which
