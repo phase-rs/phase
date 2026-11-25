@@ -162,8 +162,9 @@ fn living_library_shuffles_only_the_selected_permanents_owners_library() {
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.stack.is_empty());
         assert!(state.resolution_stack.is_empty());
-        // CR 400.3 + CR 701.24a: the chosen permanent enters its owner's
-        // library and that owner shuffles once.
+        // CR 608.2c + CR 400.3 + CR 701.24a + CR 701.24c: Living Library
+        // instructs the target's owner to move it into their library and
+        // shuffle that library once.
         assert_eq!(state.objects[&target].zone, Zone::Library);
         assert!(state.players[P2.0 as usize].library.contains(&target));
         assert_eq!(library_shufflers(&events), [P2]);
@@ -288,10 +289,13 @@ fn disjunctive_owner_shuffle_moves_only_the_announced_object() {
     for (name, is_token) in [("Deglamer", false), ("Unravel the Aether", true)] {
         let mut scenario = GameScenario::new_n_player(3, 42);
         scenario.at_phase(Phase::PreCombatMain);
-        let target = scenario
-            .add_artifact_from_oracle(P2, "Stolen artifact", "")
-            .controlled_by(P1)
-            .id();
+        let target = if is_token {
+            scenario.add_artifact_from_oracle(P2, "Stolen artifact token", "")
+        } else {
+            scenario.add_enchantment_from_oracle(P2, "Stolen enchantment", "")
+        }
+        .controlled_by(P1)
+        .id();
         let decoy = scenario
             .add_artifact_from_oracle(P1, "Other legal artifact", "")
             .id();
@@ -328,6 +332,8 @@ fn disjunctive_owner_shuffle_moves_only_the_announced_object() {
         assert_eq!(selected.targets, [TargetRef::Object(target)]);
         let outcome = committed.resolve();
         let state = outcome.state();
+        // CR 608.2c + CR 701.24a + CR 701.24c: Each spell instructs the
+        // target's owner to move it into their library and shuffle once.
         assert!(outcome.events().iter().any(|event| matches!(event,
             GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Library, .. } if *object_id == target
         )));
@@ -336,7 +342,7 @@ fn disjunctive_owner_shuffle_moves_only_the_announced_object() {
         let owner_library = &state.players[P2.0 as usize].library;
         if is_token {
             // CR 111.2 + CR 704.5d: the creator owns the token. It ceases
-            // to exist after the move, and the owner still shuffles.
+            // to exist after moving to the library.
             assert!(!state.objects.contains_key(&target));
             assert!(!owner_library.contains(&target));
         } else {
