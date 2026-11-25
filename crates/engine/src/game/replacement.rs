@@ -6657,6 +6657,17 @@ fn create_token_applier(
                 // its own attack destination and disposal; its probe spec only
                 // seeds `enters_attacking`.
                 substitute_spec.enters_attacking |= spec.enters_attacking;
+                // CR 614.6 + the Divine Visitation ruling ("Anything else
+                // specified in the effect creating the token ... still
+                // applies"): the creating instruction's blocking rider (CR
+                // 509.4) applies to the substitute. The id resolved once at
+                // propose time against the pinned incarnation (CR 400.7 +
+                // CR 608.2k) travels verbatim — no re-resolution. Mirrors
+                // the `sacrifice_at` rider rule in
+                // `keep_creating_instruction_entry`.
+                if spec.blocking_attacker.is_some() {
+                    substitute_spec.blocking_attacker = spec.blocking_attacker;
+                }
                 match copy.as_deref() {
                     Some(batch_copy) => {
                         substitute_spec.attack_request = batch_copy.attack_request.clone();
@@ -6706,6 +6717,15 @@ fn create_token_applier(
             // rulings) — and a later ETB-tap replacement that matches it still
             // applies to it as part of the event.
             extra.tapped |= spec.tapped;
+            // CR 614.6 + the Chatterfang ruling ("... applies to both
+            // the original tokens and the Squirrels"): the appended
+            // batch is part of the one modified event, so it inherits
+            // the creating instruction's blocking rider (CR 509.4)
+            // alongside tapped. Pinned-incarnation id travels verbatim
+            // (CR 400.7 + CR 608.2k) — no re-resolution.
+            if spec.blocking_attacker.is_some() {
+                extra.blocking_attacker = spec.blocking_attacker;
+            }
             push_appended_token_batch(
                 &mut appended,
                 &applied,
