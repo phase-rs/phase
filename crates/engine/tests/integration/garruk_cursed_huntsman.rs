@@ -17,11 +17,16 @@
 //!   graveyard before the triggers resolve, so "each Garruk you control" is
 //!   evaluated at resolution (CR 608.2h) and excludes it.
 
+use std::ops::ControlFlow;
+
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, ContinuousModification, ControllerRef, Effect, QuantityExpr,
-    TargetFilter, TypeFilter,
+    AbilityCost, ContinuousModification, ControllerRef, Effect, QuantityExpr, TargetFilter,
+    TypeFilter,
+};
+use engine::types::ability_visit::{
+    visit_ability_def, visit_replacement, visit_static, visit_trigger,
 };
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
@@ -89,17 +94,6 @@ fn loyalty_index(runner: &GameRunner, source: ObjectId, amount: i32) -> usize {
         })
 }
 
-/// Every effect in an ability's `sub_ability` chain, head first.
-fn chain_effects(ability: &AbilityDefinition) -> Vec<&Effect> {
-    let mut effects = vec![&*ability.effect];
-    let mut node = ability.sub_ability.as_deref();
-    while let Some(def) = node {
-        effects.push(&def.effect);
-        node = def.sub_ability.as_deref();
-    }
-    effects
-}
-
 /// The Wolf tokens `player` controls on the battlefield.
 fn wolves(runner: &GameRunner, player: PlayerId) -> Vec<ObjectId> {
     let mut ids: Vec<ObjectId> = runner
@@ -148,14 +142,32 @@ fn full_oracle_parses_with_no_unimplemented() {
         "all three loyalty abilities must parse; got {:?}",
         parsed.abilities
     );
-    for ability in &parsed.abilities {
-        for effect in chain_effects(ability) {
-            assert!(
-                !matches!(effect, Effect::Unimplemented { .. }),
-                "no honest gap allowed in Garruk's Oracle; got {effect:?}"
-            );
+    // The shared walk descends every nested carrier — sub-abilities, the
+    // Wolf token's statics and their granted trigger's execute, and the
+    // emblem's registered payload — so a gap anywhere in the tree fails here.
+    let mut gaps = Vec::new();
+    let mut record_gap = |effect: &Effect| {
+        if matches!(effect, Effect::Unimplemented { .. }) {
+            gaps.push(format!("{effect:?}"));
         }
+        ControlFlow::Continue(())
+    };
+    for ability in &parsed.abilities {
+        let _ = visit_ability_def(ability, &mut record_gap);
     }
+    for trigger in &parsed.triggers {
+        let _ = visit_trigger(trigger, &mut record_gap);
+    }
+    for static_def in &parsed.statics {
+        let _ = visit_static(static_def, &mut record_gap);
+    }
+    for replacement in &parsed.replacements {
+        let _ = visit_replacement(replacement, &mut record_gap);
+    }
+    assert!(
+        gaps.is_empty(),
+        "no honest gap allowed anywhere in Garruk's Oracle; got {gaps:?}"
+    );
 
     // Reach guard: the [0] is a Token whose statics carry the granted trigger.
     let Effect::Token {
