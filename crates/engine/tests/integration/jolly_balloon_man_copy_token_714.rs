@@ -34,13 +34,16 @@ struct Fixture {
     balloon_man: ObjectId,
     bears: ObjectId,
     second_bears: ObjectId,
-    opposing_bears: ObjectId,
     opt: ObjectId,
     island: ObjectId,
 }
 
 impl Fixture {
     fn new(phase: Phase) -> Self {
+        Self::with_cards(phase, |_| ()).0
+    }
+
+    fn with_cards<T>(phase: Phase, add_cards: impl FnOnce(&mut GameScenario) -> T) -> (Self, T) {
         let db = shared_card_db().expect("integration card database");
         let mut scenario = GameScenario::new();
         scenario.at_phase(phase);
@@ -54,21 +57,24 @@ impl Fixture {
             .id();
         let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
         let second_bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
-        let opposing_bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+        scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
         let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
         let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
         let opt = scenario.add_real_card(P0, "Opt", Zone::Hand, db);
+        let cards = add_cards(&mut scenario);
         let mut runner = scenario.build();
         tap_land(&mut runner, forest);
-        Self {
-            runner,
-            balloon_man,
-            bears,
-            second_bears,
-            opposing_bears,
-            opt,
-            island,
-        }
+        (
+            Self {
+                runner,
+                balloon_man,
+                bears,
+                second_bears,
+                opt,
+                island,
+            },
+            cards,
+        )
     }
 
     fn activation(&self) -> GameAction {
@@ -79,11 +85,11 @@ impl Fixture {
         }
     }
 
-    fn copy_bears(&mut self) -> ObjectId {
+    fn copy_creature(&mut self, target: ObjectId) -> ObjectId {
         let outcome = self
             .runner
             .activate(self.balloon_man, 0)
-            .target_object(self.bears)
+            .target_object(target)
             .resolve();
         assert!(matches!(
             outcome.final_waiting_for(),
@@ -104,6 +110,20 @@ impl Fixture {
             panic!("expected one token on P0's battlefield, got {tokens:?}");
         };
         *token
+    }
+
+    fn assert_activation_rejected(&mut self, window: &str) {
+        assert!(!self.activation_is_offered(), "activation offered {window}");
+        let before = serde_json::to_value(self.runner.state()).expect("serialize game state");
+        let activation = self.activation();
+        self.runner.act(activation).expect_err(window);
+        let state = self.runner.state();
+        assert!(!state.objects[&self.balloon_man].tapped);
+        assert!(!state.objects.values().any(|obj| obj.is_token));
+        assert_eq!(
+            serde_json::to_value(state).expect("serialize game state"),
+            before
+        );
     }
 
     fn activation_is_offered(&self) -> bool {
@@ -143,7 +163,7 @@ fn tap_land(runner: &mut GameRunner, land: ObjectId) {
 #[test]
 fn copy_keeps_the_creature_but_is_a_1_1_red_balloon_with_flying_and_haste() {
     let mut fixture = Fixture::new(Phase::PreCombatMain);
-    let token = fixture.copy_bears();
+    let token = fixture.copy_creature(fixture.bears);
     let state = fixture.runner.state();
     let copy = &state.objects[&token];
     let bears = &state.objects[&fixture.bears];
@@ -190,9 +210,58 @@ fn copy_keeps_the_creature_but_is_a_1_1_red_balloon_with_flying_and_haste() {
 }
 
 #[test]
+fn the_balloon_man_copies_an_animated_artifact_as_an_artifact_land_creature() {
+    let db = shared_card_db().expect("integration card database");
+    let (mut fixture, (citadel, ensoul, plains)) =
+        Fixture::with_cards(Phase::PreCombatMain, |scenario| {
+            (
+                scenario.add_real_card(P0, "Darksteel Citadel", Zone::Battlefield, db),
+                scenario.add_real_card(P0, "Ensoul Artifact", Zone::Hand, db),
+                scenario.add_real_card(P0, "Plains", Zone::Battlefield, db),
+            )
+        });
+
+    assert!(!fixture.runner.state().objects[&citadel]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    tap_land(&mut fixture.runner, fixture.island);
+    let animation = fixture.runner.cast(ensoul).target_object(citadel).resolve();
+    assert!(matches!(
+        animation.final_waiting_for(),
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(animation.state().stack.is_empty());
+    assert!(animation.state().objects[&citadel]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    animation.assert_power_toughness(citadel, 5, 5);
+    tap_land(&mut fixture.runner, plains);
+
+    let token = fixture.copy_creature(citadel);
+    let copy = &fixture.runner.state().objects[&token];
+
+    // CR 707.2 and CR 707.9b: Ensoul's animation stays on the original.
+    // The copy exception supplies the token's creature type and base P/T.
+    assert_eq!(copy.name, "Darksteel Citadel");
+    assert_eq!((copy.power, copy.toughness), (Some(1), Some(1)));
+    assert_eq!(copy.color, [ManaColor::Red]);
+    for core_type in [CoreType::Artifact, CoreType::Land, CoreType::Creature] {
+        assert!(
+            copy.card_types.core_types.contains(&core_type),
+            "copy lacks {core_type:?}"
+        );
+    }
+    assert_eq!(copy.card_types.subtypes, ["Balloon"]);
+    assert!(copy.keywords.contains(&Keyword::Flying));
+    assert!(copy.keywords.contains(&Keyword::Haste));
+}
+
+#[test]
 fn the_copy_is_sacrificed_at_the_next_end_step() {
     let mut fixture = Fixture::new(Phase::PostCombatMain);
-    let token = fixture.copy_bears();
+    let token = fixture.copy_creature(fixture.bears);
     let runner = &mut fixture.runner;
     assert_eq!(runner.state().phase, Phase::PostCombatMain);
     assert_eq!(runner.state().objects[&token].zone, Zone::Battlefield);
@@ -252,25 +321,14 @@ fn the_balloon_man_cannot_copy_itself_or_an_opponents_creature() {
     let [slot] = target_slots.as_slice() else {
         panic!("expected one copy target slot, got {target_slots:?}");
     };
-    assert!(slot
-        .legal_targets
-        .contains(&TargetRef::Object(fixture.bears)));
-    // A second legal target keeps the engine from automatically selecting the only option.
-    assert!(slot
-        .legal_targets
-        .contains(&TargetRef::Object(fixture.second_bears)));
-    assert!(
-        !slot
-            .legal_targets
-            .contains(&TargetRef::Object(fixture.balloon_man)),
-        "another creature excludes the Balloon Man"
-    );
-    assert!(
-        !slot
-            .legal_targets
-            .contains(&TargetRef::Object(fixture.opposing_bears)),
-        "you control excludes the opponent's Bears"
-    );
+    let mut actual = slot.legal_targets.clone();
+    actual.sort_unstable();
+    let mut expected = [
+        TargetRef::Object(fixture.bears),
+        TargetRef::Object(fixture.second_bears),
+    ];
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
 
     fixture
         .runner
@@ -299,24 +357,15 @@ fn the_balloon_man_can_only_activate_as_a_sorcery() {
     let committed = main.runner.cast(main.opt).commit();
     assert_eq!(committed.state().stack.len(), 1);
     assert_eq!(main.runner.state().priority_player, P0);
-    assert!(
-        !main.activation_is_offered(),
-        "activation is illegal with Opt on the stack"
-    );
+    main.assert_activation_rejected("with Opt on the stack");
 
-    let combat = Fixture::new(Phase::BeginCombat);
+    let mut combat = Fixture::new(Phase::BeginCombat);
     assert!(combat.runner.state().stack.is_empty());
-    assert!(
-        !combat.activation_is_offered(),
-        "activation is illegal in beginning of combat"
-    );
+    combat.assert_activation_rejected("at the beginning of combat");
 
     let mut opponent_turn = Fixture::new(Phase::PreCombatMain);
     opponent_turn.runner.state_mut().active_player = P1;
     assert!(opponent_turn.runner.state().stack.is_empty());
     assert_eq!(opponent_turn.runner.state().priority_player, P0);
-    assert!(
-        !opponent_turn.activation_is_offered(),
-        "activation is illegal on the opponent's turn"
-    );
+    opponent_turn.assert_activation_rejected("during the opponent's main phase");
 }
