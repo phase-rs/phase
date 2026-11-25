@@ -319,7 +319,7 @@ pub(crate) fn finish_meld_delivery(
                 entry.replacement_applied.clone(),
             )),
             LiminalEntryKind::Token => None,
-            LiminalEntryKind::TransformedEntry => None,
+            LiminalEntryKind::TransformedEntry | LiminalEntryKind::OutsideGameCard { .. } => None,
         })
         .unwrap_or((context, attack_target, Default::default()));
     state.liminal_entries.remove(&context.source_id);

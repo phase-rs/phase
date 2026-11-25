@@ -178,7 +178,11 @@ const DRIVE_CAP: usize = 200;
 /// A Historic (Arena) game at `phase` of P0's turn with both libraries padded
 /// with real basic lands.
 fn scenario(phase: Phase, db: &CardDatabase) -> GameScenario {
-    let mut scenario = GameScenario::new_with_format(FormatConfig::historic(), 2, SEED);
+    scenario_with_seed(phase, db, SEED)
+}
+
+fn scenario_with_seed(phase: Phase, db: &CardDatabase, seed: u64) -> GameScenario {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::historic(), 2, seed);
     scenario.at_phase(phase);
     for player in [P0, P1] {
         for _ in 0..LIBRARY_PAD {
@@ -186,6 +190,524 @@ fn scenario(phase: Phase, db: &CardDatabase) -> GameScenario {
         }
     }
     scenario
+}
+
+/// MTGJSON AtomicCards (5.3.0+20261124) omits these digital faces from the
+/// committed integration subset. Parse their printed records at test time.
+fn battlefield_spellbook_database() -> &'static CardDatabase {
+    use engine::database::{mtgjson::AtomicCard, synthesis::build_oracle_face};
+    use std::sync::OnceLock;
+
+    static DATABASE: OnceLock<CardDatabase> = OnceLock::new();
+    DATABASE.get_or_init(|| {
+        let names = [
+            "Forest",
+            "Island",
+            "Swamp",
+            "Spelunking",
+            "Lotus Cobra",
+            "Containment Priest",
+            "Evendo, Waking Haven",
+            "Uthros, Titanic Godcore",
+            "Barkhide Troll",
+            "Adaptive Automaton",
+            "Llanowar Elves",
+            "Mystic Reflection",
+            "Hardened Scales",
+            "Doubling Season",
+            "Murder",
+            "Cling to Dust",
+            "Rhythm of the Wild",
+            "Stonebound Mentor",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+        let json = shared_card_db()
+            .expect("the committed card fixture")
+            .export_subset_json(&names);
+        let mut records: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&json).expect("the fixture exports named faces");
+        let atomic_cards: Vec<AtomicCard> =
+            serde_json::from_str(BATTLEFIELD_SPELLBOOK_ATOMIC).expect("pinned MTGJSON records");
+        for card in &atomic_cards {
+            let mut face = build_oracle_face(card, card.identifiers.scryfall_oracle_id.clone());
+            face.metadata.spellbook = card.related_cards.spellbook.clone();
+            records.insert(
+                card.name.to_lowercase(),
+                serde_json::to_value(face).unwrap(),
+            );
+        }
+        CardDatabase::from_json_str(&serde_json::Value::Object(records).to_string()).unwrap()
+    })
+}
+
+const PLANETS: [&str; 5] = [
+    "Adagia, Windswept Bastion",
+    "Evendo, Waking Haven",
+    "Kavaron, Memorial World",
+    "Susur Secundi, Void Altar",
+    "Uthros, Titanic Godcore",
+];
+const SUSUR: &str = "Susur Secundi, Void Altar";
+
+fn brood_draft(
+    spelunking_owner: Option<PlayerId>,
+    cobra: bool,
+) -> (GameRunner, ObjectId, Option<ObjectId>) {
+    let db = battlefield_spellbook_database();
+    for seed in 0..32 {
+        let mut game = scenario_with_seed(Phase::PreCombatMain, db, seed);
+        let brood = game.add_real_card(P0, "Brood Astronomer", Zone::Hand, db);
+        let sacrifice = game.add_real_card(P0, "Island", Zone::Battlefield, db);
+        for _ in 0..3 {
+            game.add_real_card(P0, "Forest", Zone::Battlefield, db);
+        }
+        let spelunking = spelunking_owner
+            .map(|owner| game.add_real_card(owner, "Spelunking", Zone::Battlefield, db));
+        if cobra {
+            game.add_real_card(P0, "Lotus Cobra", Zone::Battlefield, db);
+        }
+        let mut runner = build(game, db);
+        assert_real_spellbook(&runner, brood, &PLANETS);
+        let outcome = runner.cast(brood).commit().stop_at_optional().resolve();
+        assert!(
+            matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "expected Brood Astronomer's optional ETB, got {:?}",
+            outcome.final_waiting_for(),
+        );
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        let WaitingFor::EffectZoneChoice {
+            cards,
+            effect_kind: EffectKind::Sacrifice,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected Brood Astronomer's sacrifice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert!(cards.contains(&sacrifice));
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![sacrifice],
+            })
+            .unwrap();
+        assert_eq!(runner.state().objects[&sacrifice].zone, Zone::Graveyard);
+        let (player, source, offered) = pending_draft(runner.state());
+        assert_eq!((player, source), (P0, brood));
+        assert_three_card_offer(&offered, &PLANETS);
+        if offered.iter().any(|card| card == SUSUR) {
+            return (runner, brood, spelunking);
+        }
+    }
+    panic!("the real draft never offered Susur");
+}
+
+fn outside_game_entry_receipts(events: &[GameEvent], id: ObjectId, destination: Zone) {
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event, GameEvent::ObjectConjured { object_id, .. } if *object_id == id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(events.iter().filter(|event| matches!(
+        event, GameEvent::ZoneChanged { object_id, from: None, to, record }
+            if *object_id == id && *to == destination && record.entered_incarnation.is_some()
+    )).count(), 1);
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, GameEvent::TokenCreated { .. })));
+}
+
+fn saved_game_runner(runner: &GameRunner) -> GameRunner {
+    let json = serde_json::to_string(runner.state()).expect("entry state serializes");
+    GameRunner::from_state(serde_json::from_str(&json).expect("entry state restores"))
+}
+
+#[test]
+fn brood_astronomer_orders_printed_tap_and_untap_replacements() {
+    for spelunking_first in [false, true] {
+        let (mut runner, brood, spelunking) = brood_draft(Some(P0), false);
+        let spelunking = spelunking.unwrap();
+        assert!(runner
+            .act(GameAction::SubmitSpellbookDraft {
+                card: "Forest".into()
+            })
+            .is_err());
+        assert!(at_draft(runner.state()));
+        let events = submit(&mut runner, SUSUR);
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, GameEvent::ObjectConjured { .. })));
+        let state = runner.state();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ));
+        let pending = state.pending_replacement.as_ref().unwrap();
+        let entry_ref = pending.proposed.affected_object_id().unwrap();
+        assert!(state.liminal_entries.contains_key(&entry_ref));
+        assert!(!state.objects.contains_key(&entry_ref));
+        assert!(!state.battlefield.contains(&entry_ref));
+        assert_eq!(
+            pending
+                .candidates
+                .iter()
+                .map(|candidate| candidate.source)
+                .collect::<HashSet<_>>(),
+            HashSet::from([entry_ref, spelunking]),
+        );
+        let first = if spelunking_first {
+            spelunking
+        } else {
+            entry_ref
+        };
+        let index = pending
+            .candidates
+            .iter()
+            .position(|candidate| candidate.source == first)
+            .unwrap();
+        let result = runner.act(GameAction::ChooseReplacement { index }).unwrap();
+        outside_game_entry_receipts(&result.events, entry_ref, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&entry_ref].tapped, spelunking_first);
+        assert!(!runner.state().objects[&brood].tapped);
+        assert_eq!(runner.state().last_created_token_ids, vec![entry_ref]);
+        assert!(settled(runner.state()), "{:?}", runner.state().waiting_for);
+    }
+}
+
+#[test]
+fn brood_astronomer_without_a_friendly_spelunking_enters_the_planet_tapped() {
+    for spelunking_owner in [None, Some(P1)] {
+        let (mut runner, brood, _) = brood_draft(spelunking_owner, false);
+        let events = submit(&mut runner, SUSUR);
+        let entry_ref = object_named(runner.state(), SUSUR);
+        outside_game_entry_receipts(&events, entry_ref, Zone::Battlefield);
+        assert!(runner.state().objects[&entry_ref].tapped);
+        assert!(!runner.state().objects[&brood].tapped);
+    }
+}
+
+#[test]
+fn brood_astronomer_restores_ordering_and_notifies_landfall_once() {
+    let (mut runner, _, _) = brood_draft(Some(P0), true);
+    submit(&mut runner, SUSUR);
+    let opponent = filter_state_for_viewer(runner.state(), P1);
+    assert!(opponent.liminal_entries.is_empty());
+    assert!(opponent.pending_replacement.is_none());
+    assert!(matches!(
+        &opponent.waiting_for,
+        WaitingFor::ReplacementChoice { candidates, .. } if candidates.iter().all(|option| option.source_name != SUSUR)
+    ));
+    let mut runner = saved_game_runner(&runner);
+    let pending = runner.state().pending_replacement.as_ref().unwrap();
+    let entry_ref = pending.proposed.affected_object_id().unwrap();
+    let index = pending
+        .candidates
+        .iter()
+        .position(|candidate| candidate.source == entry_ref)
+        .unwrap();
+    let result = runner.act(GameAction::ChooseReplacement { index }).unwrap();
+    outside_game_entry_receipts(&result.events, entry_ref, Zone::Battlefield);
+    let cobra = object_named(runner.state(), "Lotus Cobra");
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == cobra)
+            .count(),
+        1
+    );
+    assert!(!runner.state().objects[&entry_ref].tapped);
+}
+
+const GARRUK: &str = "Garruk, Wrath of the Wilds";
+const TROLL: &str = "Barkhide Troll";
+
+fn garruk_draft(extra: &[&str], copy: bool) -> (GameRunner, ObjectId, Option<ObjectId>) {
+    let db = battlefield_spellbook_database();
+    for seed in 0..64 {
+        let mut game = scenario_with_seed(Phase::PreCombatMain, db, seed);
+        let garruk = game.add_real_card(P0, GARRUK, Zone::Battlefield, db);
+        for name in extra {
+            game.add_real_card(P0, name, Zone::Battlefield, db);
+        }
+        let spells = copy.then(|| {
+            let automaton = game.add_real_card(P0, "Adaptive Automaton", Zone::Hand, db);
+            let reflection = game.add_real_card(P0, "Mystic Reflection", Zone::Hand, db);
+            game.add_real_card(P0, "Murder", Zone::Hand, db);
+            for _ in 0..6 {
+                game.add_real_card(P0, "Island", Zone::Battlefield, db);
+            }
+            for _ in 0..3 {
+                game.add_real_card(P0, "Swamp", Zone::Battlefield, db);
+            }
+            (automaton, reflection)
+        });
+        let mut runner = build(game, db);
+        if let Some((automaton, reflection)) = spells {
+            runner.state_mut().all_creature_types = db.creature_type_vocabulary().to_vec();
+            runner.cast(automaton).resolve();
+            let WaitingFor::NamedChoice { player: P0, .. } = runner.state().waiting_for else {
+                panic!(
+                    "expected the original Automaton's named choice, got {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            runner
+                .act(GameAction::ChooseOption {
+                    choice: "Construct".into(),
+                })
+                .unwrap();
+            assert!(settled(runner.state()));
+            runner.cast(reflection).target_object(automaton).resolve();
+            assert!(settled(runner.state()), "{:?}", runner.state().waiting_for);
+        }
+        runner.activate(garruk, 1).resolve();
+        let (player, source, offered) = pending_draft(runner.state());
+        assert_eq!((player, source), (P0, garruk));
+        if offered.iter().any(|name| name == TROLL) {
+            return (runner, garruk, spells.map(|(id, _)| id));
+        }
+    }
+    panic!("the real Garruk draft never offered Barkhide Troll");
+}
+
+#[test]
+fn spellbook_creature_is_redirected_to_exile_by_containment_priest() {
+    let (mut runner, _, _) = garruk_draft(&["Containment Priest"], false);
+    let priest = object_named(runner.state(), "Containment Priest");
+    let mut events = submit(&mut runner, TROLL);
+    if let Some(pending) = &runner.state().pending_replacement {
+        // The Priest's redirect competes with Barkhide Troll's own counter.
+        let index = pending
+            .candidates
+            .iter()
+            .position(|candidate| candidate.source == priest)
+            .unwrap();
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index })
+                .unwrap()
+                .events,
+        );
+    }
+    let id = object_named(runner.state(), TROLL);
+    assert_eq!(runner.state().objects[&id].zone, Zone::Exile);
+    assert!(!runner.state().objects[&id].is_token);
+    outside_game_entry_receipts(&events, id, Zone::Exile);
+    assert!(!runner.state().battlefield.contains(&id));
+    assert!(settled(runner.state()));
+}
+
+#[test]
+fn spellbook_entry_copy_restores_its_own_name_choice_and_keeps_the_drafted_base() {
+    let (mut runner, _, original) = garruk_draft(&[], true);
+    let original = original.unwrap();
+    let events = submit(&mut runner, TROLL);
+    let WaitingFor::NamedChoice {
+        source: Some(source),
+        player: P0,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected Adaptive Automaton's entry choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let id = source.prompt.identity.reference.object_id;
+    assert_ne!(original, id);
+    assert!(runner.state().liminal_entries.contains_key(&id));
+    assert!(!runner.state().objects.contains_key(&id));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, GameEvent::ObjectConjured { .. })));
+    let mut runner = saved_game_runner(&runner);
+    let result = runner
+        .act(GameAction::ChooseOption {
+            choice: "Elf".into(),
+        })
+        .unwrap();
+    outside_game_entry_receipts(&result.events, id, Zone::Battlefield);
+    let state = runner.state();
+    let copy = &state.objects[&id];
+    assert_eq!(copy.name, "Adaptive Automaton");
+    assert!(!copy.is_token);
+    assert_ne!(
+        copy.chosen_attributes,
+        state.objects[&original].chosen_attributes
+    );
+    assert!(format!("{:?}", copy.chosen_attributes).contains("Elf"));
+    assert!(format!("{:?}", state.objects[&original].chosen_attributes).contains("Construct"));
+    assert!(state.pending_liminal_entry_resume.is_none());
+    assert!(state.liminal_entries.is_empty());
+    assert!(settled(state));
+
+    // CR 400.7 + CR 707.2: a real move ends the current copy modification.
+    let murder = object_named(runner.state(), "Murder");
+    runner.cast(murder).target_object(id).resolve();
+    let moved = &runner.state().objects[&id];
+    assert_eq!(moved.zone, Zone::Graveyard);
+    assert_eq!(moved.name, TROLL);
+}
+
+#[test]
+fn spellbook_counter_ordering_finishes_after_restore_before_the_entry_receipt() {
+    for double_first in [false, true] {
+        let (mut runner, _, _) = garruk_draft(&["Hardened Scales", "Doubling Season"], false);
+        let events = submit(&mut runner, TROLL);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ObjectConjured { .. })));
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ));
+        let mut runner = saved_game_runner(&runner);
+        let id = object_named(runner.state(), TROLL);
+        let first = object_named(
+            runner.state(),
+            if double_first {
+                "Doubling Season"
+            } else {
+                "Hardened Scales"
+            },
+        );
+        let pending = runner.state().pending_replacement.as_ref().unwrap();
+        assert_eq!(pending.proposed.affected_object_id(), Some(id));
+        let index = pending
+            .candidates
+            .iter()
+            .position(|candidate| candidate.source == first)
+            .unwrap();
+        let result = runner.act(GameAction::ChooseReplacement { index }).unwrap();
+        outside_game_entry_receipts(&result.events, id, Zone::Battlefield);
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, from: None, record, .. }
+                if *object_id == id && record.power == Some(if double_first { 5 } else { 6 })
+        )));
+        assert_eq!(
+            runner.state().objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            if double_first { 3 } else { 4 },
+        );
+        assert!(settled(runner.state()));
+    }
+}
+
+#[test]
+fn blood_age_muster_random_entry_keeps_the_written_tail_behind_riot() {
+    for (rhythm_owner, counter) in [
+        (None, false),
+        (Some(P1), false),
+        (Some(P0), true),
+        (Some(P0), false),
+    ] {
+        let db = battlefield_spellbook_database();
+        let mut game = scenario(Phase::PreCombatMain, db);
+        let muster = game.add_real_card(P0, "Blood Age Muster", Zone::Battlefield, db);
+        let exiled = game.add_real_card(P0, "Island", Zone::Graveyard, db);
+        let cling = game.add_real_card(P0, "Cling to Dust", Zone::Hand, db);
+        game.add_real_card(P0, "Swamp", Zone::Battlefield, db);
+        if let Some(owner) = rhythm_owner {
+            game.add_real_card(owner, "Rhythm of the Wild", Zone::Battlefield, db);
+        }
+        let mut runner = build(game, db);
+        let mut observed = runner
+            .cast(cling)
+            .target_object(exiled)
+            .resolve()
+            .events()
+            .to_vec();
+        observed.extend(
+            drive_until(&mut runner, |state| {
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) || settled(state)
+            })
+            .events,
+        );
+        assert_eq!(runner.state().objects[&exiled].zone, Zone::Exile);
+        let events = if rhythm_owner == Some(P0) {
+            let WaitingFor::ReplacementChoice {
+                player: P0,
+                candidates,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "expected the drafted creature's riot prompt, got {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(candidates.len(), 2);
+            assert!(runner.state().pending_replacement.is_some());
+            assert!(runner.state().active_ability_continuation().is_some());
+            assert!(!observed.iter().any(|event| matches!(
+                event, GameEvent::EffectResolved { source_id, kind: EffectKind::ApplyPerpetual, .. } if *source_id == muster
+            )));
+            let index = candidates
+                .iter()
+                .position(|candidate| {
+                    if counter {
+                        candidate.description.contains("+1/+1")
+                    } else {
+                        candidate.description == "It gains haste"
+                    }
+                })
+                .unwrap();
+            runner
+                .act(GameAction::ChooseReplacement { index })
+                .unwrap()
+                .events
+        } else {
+            observed
+        };
+        let id = *runner
+            .state()
+            .last_created_token_ids
+            .first()
+            .expect("the draft completed");
+        outside_game_entry_receipts(&events, id, Zone::Battlefield);
+        if rhythm_owner == Some(P0) {
+            assert_eq!(
+                runner.state().objects[&id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0),
+                u32::from(counter),
+            );
+        }
+        let card = &runner.state().objects[&id];
+        let printed_haste = db
+            .get_face_by_name(&card.name)
+            .unwrap()
+            .keywords
+            .contains(&engine::types::keywords::Keyword::Haste);
+        assert_eq!(
+            card.has_keyword(&engine::types::keywords::Keyword::Haste),
+            printed_haste || (rhythm_owner == Some(P0) && !counter),
+        );
+        assert!(runner.state().pending_liminal_entry_resume.is_none());
+        assert!(runner.state().liminal_entries.is_empty());
+        assert!(runner.state().active_ability_continuation().is_none());
+        assert!(settled(runner.state()));
+    }
 }
 
 /// Builds the scenario and rehydrates it from the card database, which seeds
@@ -873,3 +1395,21 @@ fn an_empty_draft_exiles_and_grants_nothing() {
         }
     }
 }
+
+const BATTLEFIELD_SPELLBOOK_ATOMIC: &str = r#"[
+{"name":"Brood Astronomer","type":"Creature — Insect Scientist","types":["Creature"],"subtypes":["Insect","Scientist"],"supertypes":[],"layout":"normal","text":"When this creature enters, you may sacrifice a land. If you do, draft a card from the Planets Spellbook and put it onto the battlefield tapped.\n{T}: Add one mana of any color. If you control a Planet with twelve or more charge counters on it, add three mana of any one color instead.","manaCost":"{1}{G}","manaValue":2.0,"power":"2","toughness":"2","colors":["G"],"colorIdentity":["G"],"keywords":["Draft from a spellbook"],"relatedCards":{"spellbook":["Adagia, Windswept Bastion","Evendo, Waking Haven","Kavaron, Memorial World","Susur Secundi, Void Altar","Uthros, Titanic Godcore"]},"identifiers":{"scryfallOracleId":"7a56bdd4-f70e-4abf-9cb7-1624be3288ce"},"legalities":{"historic":"Legal"}},
+{"name":"Garruk, Wrath of the Wilds","type":"Legendary Planeswalker — Garruk","types":["Planeswalker"],"subtypes":["Garruk"],"supertypes":["Legendary"],"layout":"normal","text":"[+1]: Choose a creature card in your hand. It perpetually gets +1/+1 and perpetually gains \"This spell costs {1} less to cast.\"\n[−1]: Draft a card from Garruk, Wrath of the Wilds's spellbook and put it onto the battlefield.\n[−6]: Until end of turn, creatures you control get +3/+3 and gain trample.","manaCost":"{2}{G}{G}","manaValue":4.0,"loyalty":"4","colors":["G"],"colorIdentity":["G"],"keywords":["Draft from a spellbook"],"relatedCards":{"spellbook":["Barkhide Troll","Dawntreader Elk","Dire Wolf Prowler","Ferocious Pup","Mosscoat Goriak","Murasa Rootgrazer","Nessian Hornbeetle","Pestilent Wolf","Scurrid Colony","Sylvan Brushstrider","Territorial Scythecat","Trufflesnout","Underdark Basilisk","Wary Okapi"]},"identifiers":{"scryfallOracleId":"5967ced4-fd2b-4434-8747-7335c2bec201"},"legalities":{"historic":"Legal"}},
+{"name":"Blood Age Muster","type":"Enchantment","types":["Enchantment"],"subtypes":[],"supertypes":[],"layout":"normal","text":"Whenever one or more cards leave your graveyard, conjure a random card from Blood Age Muster's spellbook onto the battlefield. Its base power and toughness perpetually become 2/2. This ability triggers only once each turn.","manaCost":"{R}{W}","manaValue":2.0,"colors":["R","W"],"colorIdentity":["R","W"],"keywords":["Conjure"],"relatedCards":{"spellbook":["Blood Age General","Charging Strifeknight","Fuming Effigy","Pillardrop Warden","Spirit Mascot","Stonebinder's Familiar","Stonebound Mentor","Stone Docent","Stonerise Spirit","Summoned Dromedary"]},"identifiers":{"scryfallOracleId":"1d7c3f12-3c8f-4e54-beb2-481247a6a750"},"legalities":{"historic":"Legal"}},
+{"name":"Adagia, Windswept Bastion","type":"Land — Planet","types":["Land"],"subtypes":["Planet"],"supertypes":[],"layout":"normal","text":"This land enters tapped.\n{T}: Add {W}.\nStation (Tap another creature you control: Put charge counters equal to its power on this Planet. Station only as a sorcery.)\n12+ | {3}{W}, {T}: Create a token that's a copy of target artifact or enchantment you control, except it's legendary. Activate only as a sorcery.","manaValue":0.0,"colors":[],"colorIdentity":["W"],"keywords":["Station"],"relatedCards":{"tokens":["3ae3c4af-2b85-5943-bab1-760e1b7da047"]},"identifiers":{"scryfallOracleId":"70d35dbd-1d91-4a2a-a643-6870d168f4f5"},"legalities":{"historic":"Legal"}},
+{"name":"Kavaron, Memorial World","type":"Land — Planet","types":["Land"],"subtypes":["Planet"],"supertypes":[],"layout":"normal","text":"This land enters tapped.\n{T}: Add {R}.\nStation (Tap another creature you control: Put charge counters equal to its power on this Planet. Station only as a sorcery.)\n12+ | {1}{R}, {T}, Sacrifice a land: Create a 2/2 colorless Robot artifact creature token, then creatures you control get +1/+0 and gain haste until end of turn.","manaValue":0.0,"colors":[],"colorIdentity":["R"],"keywords":["Station"],"relatedCards":{"tokens":["100c8870-61aa-5c98-af92-dd7fbc63ce35"]},"identifiers":{"scryfallOracleId":"4fa826ca-d361-4391-ad0d-989ebcfa4a91"},"legalities":{"historic":"Legal"}},
+{"name":"Susur Secundi, Void Altar","type":"Land — Planet","types":["Land"],"subtypes":["Planet"],"supertypes":[],"layout":"normal","text":"This land enters tapped.\n{T}: Add {B}.\nStation (Tap another creature you control: Put charge counters equal to its power on this Planet. Station only as a sorcery.)\n12+ | {1}{B}, {T}, Pay 2 life, Sacrifice a creature: Draw cards equal to the sacrificed creature's power. Activate only as a sorcery.","manaValue":0.0,"colors":[],"colorIdentity":["B"],"keywords":["Station"],"identifiers":{"scryfallOracleId":"50d6cadc-07e4-479e-90f4-e3a20f769bab"},"legalities":{"historic":"Legal"}},
+{"name":"Blood Age General","type":"Creature — Spirit Warrior","types":["Creature"],"subtypes":["Spirit","Warrior"],"supertypes":[],"layout":"normal","text":"{T}: Attacking Spirits get +1/+0 until end of turn.","manaCost":"{1}{R}","manaValue":2.0,"power":"2","toughness":"2","colors":["R"],"colorIdentity":["R"],"identifiers":{"scryfallOracleId":"10ea73c8-7cf8-4a48-a0cc-072bb541880f"},"legalities":{"historic":"Legal"}},
+{"name":"Charging Strifeknight","type":"Creature — Spirit Knight","types":["Creature"],"subtypes":["Spirit","Knight"],"supertypes":[],"layout":"normal","text":"Haste\n{T}, Discard a card: Draw a card.","manaCost":"{2}{R}","manaValue":3.0,"power":"3","toughness":"3","colors":["R"],"colorIdentity":["R"],"keywords":["Haste"],"identifiers":{"scryfallOracleId":"b0b9a7c1-f515-4627-a050-b595d6641611"},"legalities":{"historic":"Legal"}},
+{"name":"Fuming Effigy","type":"Creature — Spirit","types":["Creature"],"subtypes":["Spirit"],"supertypes":[],"layout":"normal","text":"Whenever one or more cards leave your graveyard, this creature deals 1 damage to each opponent.","manaCost":"{3}{R}","manaValue":4.0,"power":"4","toughness":"3","colors":["R"],"colorIdentity":["R"],"identifiers":{"scryfallOracleId":"37d48f9b-0286-4c5b-b549-baccb473aea3"},"legalities":{"historic":"Legal"}},
+{"name":"Pillardrop Warden","type":"Creature — Spirit Dwarf","types":["Creature"],"subtypes":["Spirit","Dwarf"],"supertypes":[],"layout":"normal","text":"Reach\n{2}, {T}, Sacrifice this creature: Return target instant or sorcery card from your graveyard to your hand. Activate only as a sorcery.","manaCost":"{3}{R}","manaValue":4.0,"power":"1","toughness":"5","colors":["R"],"colorIdentity":["R"],"keywords":["Reach"],"identifiers":{"scryfallOracleId":"6ee2a7ba-a676-4d05-b214-7db52e41afe7"},"legalities":{"historic":"Legal"}},
+{"name":"Spirit Mascot","type":"Creature — Spirit Ox","types":["Creature"],"subtypes":["Spirit","Ox"],"supertypes":[],"layout":"normal","text":"Whenever one or more cards leave your graveyard, put a +1/+1 counter on this creature.","manaCost":"{R}{W}","manaValue":2.0,"power":"2","toughness":"2","colors":["R","W"],"colorIdentity":["R","W"],"identifiers":{"scryfallOracleId":"34c572b2-dccf-43d9-a9c4-846653ad22da"},"legalities":{"historic":"Legal"}},
+{"name":"Stonebinder's Familiar","type":"Creature — Spirit Dog","types":["Creature"],"subtypes":["Spirit","Dog"],"supertypes":[],"layout":"normal","text":"Whenever one or more cards are put into exile during your turn, put a +1/+1 counter on this creature. This ability triggers only once each turn.","manaCost":"{W}","manaValue":1.0,"power":"1","toughness":"1","colors":["W"],"colorIdentity":["W"],"identifiers":{"scryfallOracleId":"87266dec-ac03-4f21-b235-67c14c3024db"},"legalities":{"historic":"Legal"}},
+{"name":"Stone Docent","type":"Creature — Spirit Chimera","types":["Creature"],"subtypes":["Spirit","Chimera"],"supertypes":[],"layout":"normal","text":"{W}, Exile this card from your graveyard: You gain 2 life. Surveil 1. Activate only as a sorcery. (Look at the top card of your library. You may put it into your graveyard.)","manaCost":"{1}{W}","manaValue":2.0,"power":"3","toughness":"1","colors":["W"],"colorIdentity":["W"],"keywords":["Surveil"],"identifiers":{"scryfallOracleId":"dbb1690a-f6f5-459c-9d7f-cb6541fb6688"},"legalities":{"historic":"Legal"}},
+{"name":"Stonerise Spirit","type":"Creature — Spirit Bird","types":["Creature"],"subtypes":["Spirit","Bird"],"supertypes":[],"layout":"normal","text":"Flying\n{4}, Exile a card from your graveyard: Target creature gains flying until end of turn.","manaCost":"{1}{W}","manaValue":2.0,"power":"1","toughness":"2","colors":["W"],"colorIdentity":["W"],"keywords":["Flying"],"identifiers":{"scryfallOracleId":"9fbab5bc-c651-46dc-89b6-0bcfeadb3891"},"legalities":{"historic":"Legal"}},
+{"name":"Summoned Dromedary","type":"Creature — Spirit Camel","types":["Creature"],"subtypes":["Spirit","Camel"],"supertypes":[],"layout":"normal","text":"Vigilance\n{1}{W}: Return this card from your graveyard to your hand. Activate only as a sorcery.","manaCost":"{3}{W}","manaValue":4.0,"power":"4","toughness":"3","colors":["W"],"colorIdentity":["W"],"keywords":["Vigilance"],"identifiers":{"scryfallOracleId":"697b14c6-fe6a-4880-9cf2-b6602a52ca0b"},"legalities":{"historic":"Legal"}}
+]"#;

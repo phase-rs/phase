@@ -1800,6 +1800,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // it so no viewer snapshot carries either the seed or its stream position.
     filtered.rng_word_pos = 0;
     filtered.rng = crate::types::game_state::GameRng::seed_from_u64(0);
+    // Reserved outside-game card identities are private continuation state,
+    // like the existing token and meld projections. The chooser's authorized
+    // replacement summaries below carry the displayed candidate information.
     filtered.liminal_entries.clear();
     filtered.pending_liminal_entry_resume = None;
 

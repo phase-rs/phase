@@ -166,9 +166,7 @@ fn parser_maps_draft_clauses_to_the_right_destination() {
             selection: SpellbookSelection::Draft,
         }
     ));
-    // Deferral pin (F1): the battlefield rider still creates the card directly
-    // on the battlefield; the literal draft-into-hand-then-put reading is not
-    // modeled yet.
+    // An explicit battlefield destination has no intervening hand placement.
     assert!(matches!(
         parse_effect(
             "draft a card from Adaptive Armorer's spellbook and put it onto the battlefield."
@@ -218,6 +216,41 @@ fn parser_maps_draft_clauses_to_the_right_destination() {
             exile.effect
         );
     }
+}
+
+#[test]
+fn chosen_battlefield_draft_publishes_one_admitted_card_with_no_origin_zone() {
+    use crate::types::events::GameEvent;
+
+    let mut state = GameState::new_two_player(42);
+    let source = source_with_spellbook(&mut state, &["Forest"]);
+    let mut events = Vec::new();
+    complete_draft(
+        &mut state,
+        PlayerId(0),
+        source,
+        &["Forest".to_owned()],
+        "Forest",
+        Zone::Battlefield,
+        true,
+        &mut events,
+    )
+    .unwrap();
+
+    let [created] = state.last_created_token_ids.as_slice() else {
+        panic!("the chosen card should be the effect's only creation result");
+    };
+    assert!(state.liminal_entries.is_empty());
+    assert!(!state.objects[created].is_token);
+    assert!(state.objects[created].tapped);
+    assert!(matches!(
+        events.as_slice(),
+        [
+            GameEvent::ZoneChanged { object_id: entered, from: None, to: Zone::Battlefield, .. },
+            GameEvent::ObjectConjured { object_id: conjured, .. },
+            GameEvent::EffectResolved { .. }
+        ] if entered == created && conjured == created
+    ));
 }
 
 #[test]
