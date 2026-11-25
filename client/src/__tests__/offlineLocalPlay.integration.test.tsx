@@ -581,7 +581,8 @@ describe("offline local play integration", () => {
       const user = userEvent.setup();
       await user.click(await screen.findByRole("tab", { name: "Info" }));
       const candidate = await screen.findByRole("button", { name });
-      expect(vi.mocked(inferCommander).mock.calls).toEqual([[[{ name, count: 2 }]]]);
+      // Load opens the deck as stored; only Save and import infer a commander.
+      expect(inferCommander).not.toHaveBeenCalled();
       await user.click(candidate);
       await waitFor(() => expect(commanderCandidates).toHaveBeenLastCalledWith({
         main_deck: [name], commander: [name], selected_format: "Commander",
