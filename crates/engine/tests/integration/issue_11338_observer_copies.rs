@@ -956,3 +956,138 @@ fn proctor_silent_for_tapped_entry_but_counters_real_trigger() {
         runner.state().waiting_for
     );
 }
+
+/// Order P0's two observer triggers with Proctor's on top (resolves first).
+/// Output position 0 is the bottom of the controller's stack slot
+/// (`handle_order_triggers`), so Spawn goes first, Proctor last.
+fn order_proctor_over_spawn(runner: &mut GameRunner, proctor: ObjectId, spawn: ObjectId) {
+    for _ in 0..8 {
+        let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for else {
+            return;
+        };
+        assert_eq!(triggers.len(), 2, "exactly the two observer triggers");
+        let pos = |id: ObjectId| {
+            triggers
+                .iter()
+                .position(|t| t.source_id == id)
+                .expect("observer listed")
+        };
+        runner
+            .act(GameAction::OrderTriggers {
+                order: vec![pos(spawn), pos(proctor)],
+            })
+            .expect("trigger ordering is accepted");
+    }
+    panic!("OrderTriggers never cleared");
+}
+
+/// V-LKI-COPY (F1 close): the observed trigger is countered before the
+/// observer resolves, and the copy is still created from last-known
+/// information (CR 113.1c + CR 608.2h + CR 707.10). P0 controls Aboleth Spawn
+/// and Strict Proctor; P1 casts Elvish Visionary; Proctor's trigger resolves
+/// first and P1 declines to pay; accepting Spawn's copy creates a copy of the
+/// countered draw trigger, so P0 draws.
+#[test]
+fn aboleth_copies_countered_trigger_from_lki() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spawn = scenario
+        .add_creature_from_oracle(P0, "Aboleth Spawn", 2, 3, ABOLETH_SPAWN)
+        .id();
+    let proctor = scenario
+        .add_creature_from_oracle(P0, "Strict Proctor", 1, 3, STRICT_PROCTOR)
+        .id();
+    let visionary = scenario
+        .add_creature_to_hand_from_oracle(P1, "Elvish Visionary", 1, 1, ELVISH_VISIONARY)
+        .id();
+    // Both libraries staged: P0 draws from the copy, and a failed counter
+    // would grow P1's hand instead of decking P1 (anti-vacuity).
+    for _ in 0..5 {
+        scenario.add_card_to_library_top(P0, "Island");
+        scenario.add_card_to_library_top(P1, "Island");
+    }
+    let mut runner = scenario.build();
+    give_turn(&mut runner, P1);
+    let p0_hand_before = runner.state().players[0].hand.len();
+    let p1_hand_before = runner.state().players[1].hand.len();
+
+    cast_and_resolve(&mut runner, visionary);
+    order_proctor_over_spawn(&mut runner, proctor, spawn);
+
+    // Proctor resolves first: P1 (the observed ability's controller) declines.
+    for _ in 0..40 {
+        if matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }) {
+            break;
+        }
+        if drained_or_over(&runner) {
+            break;
+        }
+        runner.pass_both_players();
+        order_identity(&mut runner);
+    }
+    match runner.state().waiting_for.clone() {
+        WaitingFor::UnlessPayment { player, .. } => {
+            assert_eq!(player, P1, "the observed ability's controller pays");
+        }
+        other => panic!("expected the unless prompt, got {other:?}"),
+    }
+    // Reach guard: the Visionary ETB is still on the stack pre-decision.
+    assert!(
+        triggered_entries_of(runner.state(), visionary) > 0,
+        "visionary ETB must be on the stack pre-decision"
+    );
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("decline is accepted");
+    // Counter confirmation: the observed trigger left the stack.
+    assert_eq!(
+        triggered_entries_of(runner.state(), visionary),
+        0,
+        "declined: visionary ETB countered off the stack"
+    );
+
+    // Spawn resolves next: accept the copy of the departed trigger.
+    drive_to_copy_prompt(&mut runner);
+    match runner.state().waiting_for.clone() {
+        WaitingFor::OptionalEffectChoice {
+            player, source_id, ..
+        } => {
+            assert_eq!(player, P0, "P0 decides the copy");
+            assert_eq!(source_id, spawn, "the copy offer is Spawn's");
+        }
+        other => panic!("expected the copy prompt, got {other:?}"),
+    }
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accept is accepted");
+
+    for _ in 0..40 {
+        if drained_or_over(&runner) {
+            break;
+        }
+        runner.pass_both_players();
+        order_identity(&mut runner);
+    }
+    // The copy of the countered draw trigger resolved: P0 drew.
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        p0_hand_before + 1,
+        "LKI copy resolved: P0 drew from the copied trigger"
+    );
+    // And the original never resolved: P1 cast (-1) with no draw.
+    assert_eq!(
+        runner.state().players[1].hand.len(),
+        p1_hand_before - 1,
+        "countered: original drew nothing"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack must drain, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must end at Priority, got {:?}",
+        runner.state().waiting_for
+    );
+}

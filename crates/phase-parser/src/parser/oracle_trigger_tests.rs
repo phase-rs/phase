@@ -48276,6 +48276,8 @@ fn trigger_strict_proctor_entering_observer() {
 /// The observer accept-set declines unlisted causes: a life-gain cause
 /// classifies (see the `classify_trigger_cause` unit tests) but stays a
 /// flagged gap on the trigger path.
+/// Synthetic probe — no printed card has this form; nearest is Dr. Beverly
+/// Crusher (life-gain cause, doubler frame).
 #[test]
 fn trigger_unlisted_observer_cause_declines_to_unknown() {
     let def = parse_trigger_line(
@@ -48301,6 +48303,8 @@ fn trigger_unlisted_observer_cause_declines_to_unknown() {
 /// Trailing text after the anchor declines: only the bare "to trigger" and
 /// the `of that <type>` refinement are modeled, so an unmodeled rider stays
 /// a flagged gap rather than parsing with dropped text.
+/// Synthetic probe — no printed card has this form; nearest is Firebender
+/// Ascension (attacking-cause observer).
 #[test]
 fn trigger_observer_trailing_text_declines_to_unknown() {
     let def = parse_trigger_line(
@@ -48325,6 +48329,8 @@ fn trigger_observer_trailing_text_declines_to_unknown() {
 
 /// The observer source refinement declines non-"that" anaphors: "of a Ninja
 /// ..." names no accepted source, so the line stays a flagged gap.
+/// Synthetic probe — no printed card has this form; nearest is Firebender
+/// Ascension (attacking-cause observer).
 #[test]
 fn trigger_observer_foreign_source_refinement_declines_to_unknown() {
     let def = parse_trigger_line(

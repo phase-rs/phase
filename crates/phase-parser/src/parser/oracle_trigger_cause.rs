@@ -283,6 +283,8 @@ mod tests {
     fn unlisted_causes_stay_classified_for_their_own_callers() {
         // The life-gain clause classifies (the OBSERVER accept-set declines
         // it later — this pins the classifier half of that decline).
+        // Synthetic probe — no printed card has this form; nearest is
+        // Dr. Beverly Crusher (life-gain cause, doubler frame).
         assert_eq!(
             classify_trigger_cause(
                 "whenever you gaining life causes a triggered ability to trigger"
@@ -293,6 +295,8 @@ mod tests {
             })
         );
         // The Ninja refinement does not affect cause classification.
+        // Synthetic probe — no printed card has this form; nearest is
+        // Firebender Ascension (attacking-cause observer).
         assert_eq!(
             classify_trigger_cause(
                 "whenever a creature you control attacking causes a triggered ability of a ninja creature you control to trigger"
@@ -305,6 +309,8 @@ mod tests {
     fn untyped_cause_clause_declines() {
         // "dealing combat damage to a planeswalker" matches no arm (the Felix
         // arm requires "to a player"), so the decline arm fires.
+        // Synthetic probe — no printed card has this form; nearest is
+        // Felix Five-Boots (combat-damage-to-a-player cause).
         assert_eq!(
             classify_trigger_cause(
                 "if a creature you control dealing combat damage to a planeswalker causes a triggered ability to trigger, that ability triggers an additional time"
