@@ -3153,6 +3153,14 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             {
                 return event_referent_controller(state, event).map(TargetRef::Player);
             }
+            // CR 603.3a: on an ability-triggered event, "that ability's
+            // controller" is the event's carried controller — the player who
+            // controlled the source when it triggered. Ability stack entries
+            // carry no GameObject, so this cannot go through
+            // `extract_source_from_event` + a live-object read.
+            if let GameEvent::AbilityTriggered { controller, .. } = event {
+                return Some(TargetRef::Player(*controller));
+            }
             let source_obj_id = extract_source_from_event(event)?;
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))

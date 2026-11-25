@@ -786,6 +786,27 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> CopySource
         }
         return CopySourceLookup::Absent;
     }
+    // CR 608.2k + CR 707.10: an ability-triggering observer ("that ability"
+    // — Firebender Ascension, Aboleth Spawn) copies the observed stack entry
+    // by its entry id. Never `source_id`: sibling firings share it (see the
+    // CR 608.2h comment above for the same trap). `None` (the observed
+    // occurrence was removed during placement, CR 603.3d) and an entry that
+    // left since both resolve to `Gone`, the clean no-op.
+    if let Some(GameEvent::AbilityTriggered { stack_entry, .. }) =
+        state.current_trigger_event.as_ref()
+    {
+        return match stack_entry {
+            Some(id) => state
+                .stack
+                .iter()
+                .rev()
+                .find(|entry| entry.id == *id)
+                .cloned()
+                .map(|entry| Box::new(CopySource::on_stack(entry)))
+                .map_or(CopySourceLookup::Gone, CopySourceLookup::Source),
+            None => CopySourceLookup::Gone,
+        };
+    }
     // CR 608.2h: final untargeted fallback. With a spell-cast event in scope,
     // use its on-stack/departed/gone answer — never `triggering_spell_stack_entry`'s
     // `source_id` fallback or `state.stack.last()`, either of which can name a

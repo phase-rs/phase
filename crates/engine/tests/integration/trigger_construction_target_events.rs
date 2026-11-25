@@ -154,8 +154,10 @@ fn add_observer(scenario: &mut GameScenario, player: PlayerId, observer: Observe
     }
 }
 
-/// Replace the observer line the parser cannot yet produce with its typed shape,
+/// Replace the observer line's trigger condition with its typed D1 shape,
 /// keeping the parsed effect half (as in `ability_triggered_observer.rs`).
+/// (The parser produces the real shapes since #11338; the replacement pins
+/// the engine-level shape.)
 fn install_observer(state: &mut GameState, id: ObjectId, observer: Observer) {
     let obj = state.objects.get_mut(&id).expect("observer exists");
     let defs = std::sync::Arc::make_mut(&mut obj.base_trigger_definitions);
