@@ -246,10 +246,10 @@ fn chosen_battlefield_draft_publishes_one_admitted_card_with_no_origin_zone() {
     assert!(matches!(
         events.as_slice(),
         [
-            GameEvent::ZoneChanged { object_id: entered, from: None, to: Zone::Battlefield, .. },
+            GameEvent::ZoneChanged { object_id: entered, from, to, .. },
             GameEvent::ObjectConjured { object_id: conjured, .. },
             GameEvent::EffectResolved { .. }
-        ] if entered == created && conjured == created
+        ] if from.is_none() && *to == Zone::Battlefield && entered == created && conjured == created
     ));
 }
 
