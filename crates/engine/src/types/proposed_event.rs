@@ -7,14 +7,15 @@ use crate::game::game_object::{
 };
 
 use super::counter::CounterType;
+use super::definitions::ReplacementIdentity;
 
 use super::ability::{
     ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
     LibraryPosition, TargetRef,
 };
 use super::events::EventObjectSnapshot;
-use super::identifiers::{ObjectId, ObjectIncarnationRef};
-use super::keywords::Keyword;
+use super::identifiers::{ObjectId, ObjectIncarnationRef, ProtectionReplacementSourceExt};
+use super::keywords::{Keyword, MatchedProtectionQuality};
 use super::mana::{ManaType, UnitDecision};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
@@ -25,10 +26,37 @@ pub use super::token_spec::{
 };
 pub use super::zones::{ChainReferentIntent, EtbTapState};
 
+/// CR 602.2b + CR 606.4: marks only the initiating loyalty-cost removal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoyaltyCostRoot {
+    InitiatingRemoval,
+}
+
+/// CR 616.1: identity of one replacement candidate: the source object plus a
+/// per-source ordinal — or, for virtual protection candidates, the quality's
+/// full 64-bit minor word. `u64`, never `usize`: the index rides in
+/// serialized pause records on every target including wasm32, where `usize`
+/// is 32 bits wide and would truncate fingerprint qualities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReplacementId {
     pub source: ObjectId,
-    pub index: usize,
+    pub index: u64,
+}
+
+impl ReplacementId {
+    /// Contained `u64`→`usize` conversion for registry indexing. Real
+    /// definition ordinals always fit; anything wider (a virtual-candidate
+    /// payload, or foreign) resolves to `None` — the same answer a direct
+    /// `.get()` gives an out-of-range index on 64-bit.
+    pub(crate) fn index_as_usize(self) -> Option<usize> {
+        usize::try_from(self.index).ok()
+    }
+}
+
+impl ReplacementIdentity for ReplacementId {
+    fn registry_index(self) -> Option<usize> {
+        self.index_as_usize()
+    }
 }
 
 /// CR 701.23a + CR 614.6: Final disposition of one found card after the
@@ -116,21 +144,33 @@ pub struct BoundSearchFoundCandidate {
 pub enum AppliedReplacementKey {
     Object {
         source: ObjectId,
-        index: usize,
+        index: u64,
     },
     Floating {
-        index: usize,
+        index: u64,
     },
     StepEndMana {
-        index: usize,
+        index: u64,
     },
     /// CR 614.12a: The selected controller for an as-enters replacement.
     /// This rides the event's existing replacement provenance so the selected
     /// answer remains distinguishable from an originating controller override.
     EntryControllerChoice {
         source: ObjectId,
-        index: usize,
+        index: u64,
         controller: PlayerId,
+    },
+    /// CR 702.16e + CR 615.13 (Matt F4, keyed by ability in R8-F1):
+    /// prevention by player/object protection inside a simultaneous batch.
+    /// Protection has no registry shield (and no rider), so it aggregates
+    /// under its own key — one application per (quality, recipient) per
+    /// batch — instead of fragmenting one event per damage event. The key
+    /// carries the matched protection quality (CR 702.16g: "protection from
+    /// [A] and from [B]" behaves as two separate abilities), never granter
+    /// identity: the gate claims each event for its first matching ability,
+    /// and qualities survive save/load while grantor tables do not.
+    Protection {
+        quality: MatchedProtectionQuality,
     },
 }
 
@@ -139,18 +179,21 @@ pub enum AppliedReplacementKey {
 enum TaggedAppliedReplacementKey {
     Object {
         source: ObjectId,
-        index: usize,
+        index: u64,
     },
     Floating {
-        index: usize,
+        index: u64,
     },
     StepEndMana {
-        index: usize,
+        index: u64,
     },
     EntryControllerChoice {
         source: ObjectId,
-        index: usize,
+        index: u64,
         controller: PlayerId,
+    },
+    Protection {
+        quality: MatchedProtectionQuality,
     },
 }
 
@@ -191,6 +234,9 @@ impl AppliedReplacementKeyCompat {
                 index,
                 controller,
             },
+            AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::Protection {
+                quality,
+            }) => AppliedReplacementKey::Protection { quality },
             AppliedReplacementKeyCompat::Legacy(ReplacementId {
                 source: ObjectId(0),
                 index,
@@ -216,15 +262,15 @@ impl<'de> Deserialize<'de> for AppliedReplacementKey {
 }
 
 impl AppliedReplacementKey {
-    pub fn object(source: ObjectId, index: usize) -> Self {
+    pub fn object(source: ObjectId, index: u64) -> Self {
         Self::Object { source, index }
     }
 
-    pub fn floating(index: usize) -> Self {
+    pub fn floating(index: u64) -> Self {
         Self::Floating { index }
     }
 
-    pub fn step_end_mana(index: usize) -> Self {
+    pub fn step_end_mana(index: u64) -> Self {
         Self::StepEndMana { index }
     }
 
@@ -232,18 +278,22 @@ impl AppliedReplacementKey {
         match self {
             AppliedReplacementKey::Object { source, .. }
             | AppliedReplacementKey::EntryControllerChoice { source, .. } => source,
-            AppliedReplacementKey::Floating { .. } | AppliedReplacementKey::StepEndMana { .. } => {
-                ObjectId(0)
-            }
+            AppliedReplacementKey::Floating { .. }
+            | AppliedReplacementKey::StepEndMana { .. }
+            | AppliedReplacementKey::Protection { .. } => ObjectId(0),
         }
     }
 
-    pub fn index(self) -> usize {
+    pub fn index(self) -> u64 {
         match self {
             AppliedReplacementKey::Object { index, .. }
             | AppliedReplacementKey::Floating { index }
             | AppliedReplacementKey::StepEndMana { index }
             | AppliedReplacementKey::EntryControllerChoice { index, .. } => index,
+            // Protection never reaches `as_replacement_id`: the aggregate
+            // drain matches it before the registry lookup. The 0 is a
+            // type-system placeholder, never a registry address.
+            AppliedReplacementKey::Protection { .. } => 0,
         }
     }
 
@@ -255,6 +305,19 @@ impl AppliedReplacementKey {
     }
 
     pub fn for_event(event: &ProposedEvent, id: ReplacementId) -> Self {
+        // CR 616.1 (Matt R10-F1): protection virtual candidates key by
+        // their quality (pure unpack — no state needed, so the applied-set
+        // path stays total). The rid index carries the minor word whole on
+        // every target (`u64`, never `usize`), so our own writes always
+        // decode; foreign rids in the source range fall through to the
+        // opaque object key, contained.
+        if let Some(discriminant) = id.source.protection_source_discriminant() {
+            if let Some(quality) =
+                MatchedProtectionQuality::from_replacement_parts(discriminant, id.index)
+            {
+                return Self::Protection { quality };
+            }
+        }
         if id.source != ObjectId(0) {
             return Self::object(id.source, id.index);
         }
@@ -495,7 +558,9 @@ pub enum CopiedFaceUp {
 /// event's own batch, or one a replacement added ("those tokens plus …",
 /// "instead create one of each"). An added batch is part of the same modified
 /// event, so every replacement applied afterwards applies to it too (to each
-/// batch it matches) under the affected player's single CR 616.1 ordering.
+/// batch it matches). Each batch owner orders the replacements reaching their
+/// own batches (CR 616.1 + CR 101.4); on a single-owner event that is one
+/// ordering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenBatch {
     pub owner: PlayerId,
@@ -505,17 +570,36 @@ pub struct TokenBatch {
     #[serde(default)]
     pub enter_tapped: EtbTapState,
     pub count: u32,
+    /// CR 614.6: where an applied replacement sent this batch's entrants
+    /// instead of the battlefield (see [`ProposedEvent::CreateToken`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirected_to: Option<Zone>,
+    /// CR 616.1 + CR 614.5: the replacements that have already had their
+    /// opportunity on this batch. Each batch owner chooses for their own part
+    /// of a simultaneous event, so a multi-owner compound tracks every batch
+    /// separately; a batch keeps its set if a redirect changes its owner
+    /// (CR 614.5; Crafty Cutpurse ruling: "Each effect can be applied to the
+    /// token only once this way").
+    #[serde(
+        default,
+        skip_serializing_if = "HashSet::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
+    pub applied: HashSet<AppliedReplacementKey>,
 }
 
 impl TokenBatch {
-    /// This batch as a single-batch `CreateToken` event carrying `applied`.
-    pub fn into_event(self, applied: HashSet<AppliedReplacementKey>) -> ProposedEvent {
+    /// This batch as a single-batch `CreateToken` event carrying its own
+    /// `applied` set.
+    pub fn into_event(self) -> ProposedEvent {
         let TokenBatch {
             owner,
             spec,
             copy,
             enter_tapped,
             count,
+            redirected_to,
+            applied,
         } = self;
         ProposedEvent::CreateToken {
             owner,
@@ -524,6 +608,7 @@ impl TokenBatch {
             enter_tapped,
             count,
             appended: Vec::new(),
+            redirected_to,
             applied,
         }
     }
@@ -728,6 +813,10 @@ pub enum ProposedEvent {
             skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
         )]
         library_shuffle: crate::types::ability::LibraryShuffleMode,
+        /// CR 730.3 + CR 903.9c: a physical move approved separately from
+        /// this permanent's logical departure, which has not yet happened.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merged_departure: Option<ObjectIncarnationRef>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -736,6 +825,26 @@ pub enum ProposedEvent {
         target: TargetRef,
         amount: u32,
         is_combat: bool,
+        /// CR 608.2h + CR 702.16e: the source's name as observed when the
+        /// damage event was created — the live name for live sources, the
+        /// last-known-information projection for departed sources (a Clone
+        /// copying Volatile Rig now in the graveyard reads "Volatile Rig",
+        /// not "Clone"). Protection matching reads this override before the
+        /// live object so chosen-name protection (Runed Halo) survives its
+        /// source across pauses, resumes, and save/load. `None` (including
+        /// payloads written before the field existed) falls back to the live
+        /// object, exactly the pre-override behavior.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_name: Option<String>,
+        /// CR 400.7 + CR 608.2h: the source incarnation observed when the
+        /// damage event was created. Protection matching reads the live object
+        /// only while it is still this incarnation; a later object under the
+        /// id (a Clone back in the graveyard) is a different object and the
+        /// match falls to this incarnation's exit last-known information
+        /// instead. `None` (including payloads written before the field
+        /// existed) keeps the legacy live-first read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_incarnation: Option<u64>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -880,6 +989,10 @@ pub enum ProposedEvent {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        /// CR 602.2b + CR 606.4: identifies this exact root proposal. Child
+        /// removals and legacy proposals omit the marker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loyalty_cost_root: Option<LoyaltyCostRoot>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -931,16 +1044,27 @@ pub enum ProposedEvent {
         /// replacements added ("those tokens plus that many 1/1 green Squirrel
         /// creature tokens", "instead create one of each"), in event order.
         /// "Instead" yields one modified event, so they are not separate events:
-        /// they share this event's `applied` set, every replacement the affected
-        /// player applies afterwards applies to each batch it matches, and the
+        /// each carries its own applied set (`TokenBatch::applied`); on a
+        /// single-owner event every set equals the event's. Every replacement
+        /// applied afterwards applies to each batch it matches, and the
         /// whole event is delivered (and its created referent published) as one.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         appended: Vec<TokenBatch>,
+        /// CR 614.6 + CR 111.1: where an applied replacement sent the batch's
+        /// entrants instead of the battlefield (Hallowed Moonlight: "exile it
+        /// instead"). The creation itself still happens (CR 111.1, CR 701.7a);
+        /// only the entry is replaced. `None` is the ordinary battlefield entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redirected_to: Option<Zone>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     TokenEntry {
         entry_ref: ObjectId,
+        /// CR 614.6: the zone an applied replacement sent this entrant to
+        /// instead of the battlefield; `None` is the ordinary battlefield entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redirected_to: Option<Zone>,
         #[serde(default)]
         enter_tapped: EtbTapState,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -952,6 +1076,24 @@ pub enum ProposedEvent {
         /// continuation through this field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enter_with_choices: Option<Box<EntryChoices>>,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+        applied: HashSet<AppliedReplacementKey>,
+    },
+    /// CR 400.11b + CR 614.12: admit a non-token card from outside the game.
+    /// The liminal reference reserves its first in-game identity.
+    OutsideGameCardEntry {
+        entry_ref: ObjectId,
+        destination: Zone,
+        #[serde(default)]
+        enter_tapped: EtbTapState,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, u32)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enter_with_choices: Option<Box<EntryChoices>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller_override: Option<PlayerId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enter_as_copy: Option<Box<CopyTokenSpec>>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -1321,6 +1463,7 @@ impl ProposedEvent {
             co_entrants: None,
             ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
+            merged_departure: None,
             applied: HashSet::new(),
         }
     }
@@ -1401,7 +1544,8 @@ impl ProposedEvent {
         match self {
             ProposedEvent::ZoneChange { enter_tapped, .. }
             | ProposedEvent::CreateToken { enter_tapped, .. }
-            | ProposedEvent::TokenEntry { enter_tapped, .. } => Some(*enter_tapped),
+            | ProposedEvent::TokenEntry { enter_tapped, .. }
+            | ProposedEvent::OutsideGameCardEntry { enter_tapped, .. } => Some(*enter_tapped),
             _ => None,
         }
     }
@@ -1430,6 +1574,7 @@ impl ProposedEvent {
             | ProposedEvent::MoveCounter { .. }
             | ProposedEvent::CreateToken { .. }
             | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::OutsideGameCardEntry { .. }
             | ProposedEvent::Discard { .. }
             | ProposedEvent::Tap { .. }
             | ProposedEvent::Untap { .. }
@@ -1472,6 +1617,7 @@ impl ProposedEvent {
             | ProposedEvent::MoveCounter { .. }
             | ProposedEvent::CreateToken { .. }
             | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::OutsideGameCardEntry { .. }
             | ProposedEvent::Discard { .. }
             | ProposedEvent::Tap { .. }
             | ProposedEvent::Untap { .. }
@@ -1491,7 +1637,8 @@ impl ProposedEvent {
         match self {
             ProposedEvent::ZoneChange { enter_tapped, .. }
             | ProposedEvent::CreateToken { enter_tapped, .. }
-            | ProposedEvent::TokenEntry { enter_tapped, .. } => Some(enter_tapped),
+            | ProposedEvent::TokenEntry { enter_tapped, .. }
+            | ProposedEvent::OutsideGameCardEntry { enter_tapped, .. } => Some(enter_tapped),
             _ => None,
         }
     }
@@ -1516,6 +1663,7 @@ impl ProposedEvent {
             | ProposedEvent::MoveCounter { applied, .. }
             | ProposedEvent::CreateToken { applied, .. }
             | ProposedEvent::TokenEntry { applied, .. }
+            | ProposedEvent::OutsideGameCardEntry { applied, .. }
             | ProposedEvent::Discard { applied, .. }
             | ProposedEvent::Tap { applied, .. }
             | ProposedEvent::Untap { applied, .. }
@@ -1551,6 +1699,7 @@ impl ProposedEvent {
             | ProposedEvent::MoveCounter { applied, .. }
             | ProposedEvent::CreateToken { applied, .. }
             | ProposedEvent::TokenEntry { applied, .. }
+            | ProposedEvent::OutsideGameCardEntry { applied, .. }
             | ProposedEvent::Discard { applied, .. }
             | ProposedEvent::Tap { applied, .. }
             | ProposedEvent::Untap { applied, .. }
@@ -1566,14 +1715,75 @@ impl ProposedEvent {
         }
     }
 
+    /// Whether `id` has already affected this event. On a compound token event
+    /// this reads the event's own batch only (each appended batch carries its
+    /// own set).
     pub fn already_applied(&self, id: &ReplacementId) -> bool {
         self.applied_set()
             .contains(&AppliedReplacementKey::for_event(self, *id))
     }
 
+    /// Records that `id` has had its opportunity on this whole event. On a
+    /// compound token event that is every batch.
     pub fn mark_applied(&mut self, id: ReplacementId) {
         let key = AppliedReplacementKey::for_event(self, id);
+        if let ProposedEvent::CreateToken { appended, .. } = self {
+            for batch in appended.iter_mut() {
+                batch.applied.insert(key);
+            }
+        }
         self.applied_set_mut().insert(key);
+    }
+
+    /// CR 616.1 + CR 614.5: records that `id` has had its opportunity on
+    /// `owner`'s part of a CreateToken event: the event's own batch when
+    /// `owner` owns it, and every appended batch of `owner`. Any other event
+    /// is marked whole.
+    pub fn mark_applied_for_owner(&mut self, id: ReplacementId, owner: PlayerId) {
+        let key = AppliedReplacementKey::for_event(self, id);
+        let ProposedEvent::CreateToken {
+            owner: own_owner,
+            appended,
+            applied,
+            ..
+        } = self
+        else {
+            self.mark_applied(id);
+            return;
+        };
+        if *own_owner == owner {
+            applied.insert(key);
+        }
+        for batch in appended.iter_mut().filter(|batch| batch.owner == owner) {
+            batch.applied.insert(key);
+        }
+    }
+
+    /// CR 616.1 + CR 614.5: the replacements that have had their opportunity on
+    /// any of `owner`'s batches of a CreateToken event (the union of those
+    /// batches' sets). Any other event yields its own set.
+    pub fn applied_of_owner(&self, owner: PlayerId) -> HashSet<AppliedReplacementKey> {
+        let ProposedEvent::CreateToken {
+            owner: own_owner,
+            appended,
+            applied,
+            ..
+        } = self
+        else {
+            return self.applied_set().clone();
+        };
+        (*own_owner == owner)
+            .then_some(applied)
+            .into_iter()
+            .chain(
+                appended
+                    .iter()
+                    .filter(|batch| batch.owner == owner)
+                    .map(|batch| &batch.applied),
+            )
+            .flatten()
+            .copied()
+            .collect()
     }
 
     /// CR 614.1a: whether this is a CreateToken event a replacement has
@@ -1604,6 +1814,7 @@ impl ProposedEvent {
             | ProposedEvent::RemoveCounter { .. }
             | ProposedEvent::MoveCounter { .. }
             | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::OutsideGameCardEntry { .. }
             | ProposedEvent::Discard { .. }
             | ProposedEvent::Tap { .. }
             | ProposedEvent::Untap { .. }
@@ -1621,9 +1832,9 @@ impl ProposedEvent {
 
     /// CR 616.1f + CR 616.2: one single-batch `CreateToken` view per batch of a
     /// compound token event — the event's own batch first, then each appended
-    /// batch in event order — each carrying the event's `applied` set (CR 614.5:
-    /// the batches are one event). `None` for anything that is not a compound
-    /// token event.
+    /// batch in event order — each carrying its own batch's `applied` set
+    /// (CR 616.1 + CR 614.5: each batch owner's part has its own opportunities).
+    /// `None` for anything that is not a compound token event.
     pub fn token_batch_views(&self) -> Option<Vec<ProposedEvent>> {
         if !self.has_appended_token_batches() {
             return None;
@@ -1631,8 +1842,9 @@ impl ProposedEvent {
         Some(self.clone().into_token_batch_views())
     }
 
-    /// The consuming form of [`Self::token_batch_views`]. Any other event —
-    /// including a CreateToken with no appended batch — is its own only view.
+    /// The consuming form of [`Self::token_batch_views`]; each view carries its
+    /// own batch's `applied` set. Any other event — including a CreateToken
+    /// with no appended batch — is its own only view.
     pub fn into_token_batch_views(self) -> Vec<ProposedEvent> {
         match self {
             ProposedEvent::CreateToken {
@@ -1642,6 +1854,7 @@ impl ProposedEvent {
                 enter_tapped,
                 count,
                 appended,
+                redirected_to,
                 applied,
             } => {
                 let mut views = Vec::with_capacity(appended.len() + 1);
@@ -1652,13 +1865,10 @@ impl ProposedEvent {
                     enter_tapped,
                     count,
                     appended: Vec::new(),
-                    applied: applied.clone(),
+                    redirected_to,
+                    applied,
                 });
-                views.extend(
-                    appended
-                        .into_iter()
-                        .map(|batch| batch.into_event(applied.clone())),
-                );
+                views.extend(appended.into_iter().map(TokenBatch::into_event));
                 views
             }
             event @ (ProposedEvent::ZoneChange { .. }
@@ -1678,6 +1888,7 @@ impl ProposedEvent {
             | ProposedEvent::RemoveCounter { .. }
             | ProposedEvent::MoveCounter { .. }
             | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::OutsideGameCardEntry { .. }
             | ProposedEvent::Discard { .. }
             | ProposedEvent::Tap { .. }
             | ProposedEvent::Untap { .. }
@@ -1696,8 +1907,9 @@ impl ProposedEvent {
     /// CR 614.1a + CR 614.5: reassemble one compound token event from its batch
     /// views. The first view is the event's own batch; the rest become its
     /// appended batches in order, each immediately followed by any batches its
-    /// own replacement application appended. The `applied` set is the union of
-    /// the views' sets. `None` for an empty list or a non-CreateToken view.
+    /// own replacement application appended. Each view keeps its own `applied`
+    /// set (CR 616.1: the first view's is the event's, each later view's lands
+    /// on its batch). `None` for an empty list or a non-CreateToken view.
     pub fn from_token_batch_views(views: Vec<ProposedEvent>) -> Option<ProposedEvent> {
         let mut views = views.into_iter();
         let ProposedEvent::CreateToken {
@@ -1707,7 +1919,8 @@ impl ProposedEvent {
             enter_tapped,
             count,
             mut appended,
-            mut applied,
+            redirected_to,
+            applied,
         } = views.next()?
         else {
             return None;
@@ -1720,6 +1933,7 @@ impl ProposedEvent {
                 enter_tapped,
                 count,
                 appended: view_appended,
+                redirected_to: view_redirected_to,
                 applied: view_applied,
             } = view
             else {
@@ -1731,9 +1945,10 @@ impl ProposedEvent {
                 copy,
                 enter_tapped,
                 count,
+                redirected_to: view_redirected_to,
+                applied: view_applied,
             });
             appended.extend(view_appended);
-            applied.extend(view_applied);
         }
         Some(ProposedEvent::CreateToken {
             owner,
@@ -1742,13 +1957,15 @@ impl ProposedEvent {
             enter_tapped,
             count,
             appended,
+            redirected_to,
             applied,
         })
     }
 
     /// CR 614.1a + CR 111.1: every batch of a CreateToken event in event order
     /// (position 0 is the event's own batch, then its appended batches). `None`
-    /// for any other event.
+    /// for any other event. Every yielded batch has an empty `applied` set:
+    /// delivery reads none, because the event's replacements are settled.
     pub fn into_token_batches(self) -> Option<Vec<TokenBatch>> {
         let ProposedEvent::CreateToken {
             owner,
@@ -1757,6 +1974,7 @@ impl ProposedEvent {
             enter_tapped,
             count,
             appended,
+            redirected_to,
             ..
         } = self
         else {
@@ -1769,8 +1987,13 @@ impl ProposedEvent {
             copy,
             enter_tapped,
             count,
+            redirected_to,
+            applied: HashSet::new(),
         });
-        batches.extend(appended);
+        batches.extend(appended.into_iter().map(|batch| TokenBatch {
+            applied: HashSet::new(),
+            ..batch
+        }));
         Some(batches)
     }
 
@@ -1867,6 +2090,18 @@ impl ProposedEvent {
                 .get(entry_ref)
                 .map(|entry| entry.object.projected().controller)
                 .unwrap_or(PlayerId(0)),
+            ProposedEvent::OutsideGameCardEntry {
+                entry_ref,
+                controller_override,
+                ..
+            } => controller_override
+                .or_else(|| {
+                    state
+                        .liminal_entries
+                        .get(entry_ref)
+                        .map(|entry| entry.controller)
+                })
+                .unwrap_or(PlayerId(0)),
             // CR 701.3a: The attaching Aura/Equipment's controller is the
             // affected player — they are the one who would choose a
             // replacement order (CR 616.1) and bind any "as it becomes
@@ -1895,7 +2130,8 @@ impl ProposedEvent {
             // CR 614.1a: the conniving permanent is the affected object the
             // `valid_card` filter ("a creature you control") is matched against.
             | ProposedEvent::Connive { object_id, .. } => Some(*object_id),
-            ProposedEvent::TokenEntry { entry_ref, .. } => Some(*entry_ref),
+            ProposedEvent::TokenEntry { entry_ref, .. }
+            | ProposedEvent::OutsideGameCardEntry { entry_ref, .. } => Some(*entry_ref),
             ProposedEvent::AddCounter { placement, .. } => placement.object_id(),
             ProposedEvent::MoveCounter {
                 source_id,
@@ -1943,6 +2179,52 @@ mod tests {
     use crate::types::attack_target::AttackTarget;
     use crate::types::card_type::CoreType;
     use crate::types::mana::ManaColor;
+
+    #[test]
+    fn loyalty_cost_root_marker_round_trips_and_defaults_for_legacy_removals() {
+        let root = ProposedEvent::RemoveCounter {
+            object_id: ObjectId(7),
+            counter_type: CounterType::Loyalty,
+            count: 3,
+            loyalty_cost_root: Some(LoyaltyCostRoot::InitiatingRemoval),
+            applied: HashSet::new(),
+        };
+        let wire = serde_json::to_value(&root).unwrap();
+        assert_eq!(
+            wire["RemoveCounter"]["loyalty_cost_root"],
+            "InitiatingRemoval"
+        );
+
+        let mut legacy = wire.clone();
+        legacy["RemoveCounter"]
+            .as_object_mut()
+            .unwrap()
+            .remove("loyalty_cost_root");
+        assert_eq!(
+            serde_json::from_value::<ProposedEvent>(legacy).unwrap(),
+            ProposedEvent::RemoveCounter {
+                object_id: ObjectId(7),
+                counter_type: CounterType::Loyalty,
+                count: 3,
+                loyalty_cost_root: None,
+                applied: HashSet::new(),
+            }
+        );
+
+        let unmarked = ProposedEvent::RemoveCounter {
+            object_id: ObjectId(8),
+            counter_type: CounterType::Loyalty,
+            count: 1,
+            loyalty_cost_root: None,
+            applied: HashSet::new(),
+        };
+        assert!(
+            serde_json::to_value(unmarked).unwrap()["RemoveCounter"]
+                .get("loyalty_cost_root")
+                .is_none(),
+            "unmarked proposals omit the provenance marker"
+        );
+    }
 
     #[test]
     fn zone_change_library_placement_wire_preserves_presence_and_values() {
@@ -2002,6 +2284,28 @@ mod tests {
         set.insert(id1);
         assert!(set.contains(&id2));
         assert!(!set.contains(&id3));
+    }
+
+    /// CR 702.16e + CR 615.13 (Matt F4, keyed by ability in R8-F1): the
+    /// protection tally key round-trips through the tagged mirror with its
+    /// matched quality, so paused-batch frames carrying protection
+    /// prevention survive save/load. The pre-quality shape (PR heads only,
+    /// never main) fails closed instead of loading as a quality-less key.
+    #[test]
+    fn protection_key_serde_round_trip() {
+        let key = AppliedReplacementKey::Protection {
+            quality: MatchedProtectionQuality::CardType(CoreType::Artifact),
+        };
+        let json = serde_json::to_string(&key).expect("the key serializes");
+        assert_eq!(
+            json,
+            r#"{"type":"Protection","quality":{"CardType":"Artifact"}}"#
+        );
+        let back: AppliedReplacementKey =
+            serde_json::from_str(&json).expect("the key deserializes");
+        assert_eq!(back, key);
+        assert_eq!(back.source(), ObjectId(0));
+        assert!(serde_json::from_str::<AppliedReplacementKey>(r#"{"type":"Protection"}"#).is_err());
     }
 
     #[test]
@@ -2297,20 +2601,31 @@ mod tests {
 
     fn batch(name: &str, count: u32) -> TokenBatch {
         TokenBatch {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: batch_spec(name),
             copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count,
+            applied: HashSet::new(),
+        }
+    }
+
+    fn owned_batch(name: &str, owner: u8, applied: HashSet<AppliedReplacementKey>) -> TokenBatch {
+        TokenBatch {
+            owner: PlayerId(owner),
+            applied,
+            ..batch(name, 1)
         }
     }
 
     fn applied_with(index: usize) -> HashSet<AppliedReplacementKey> {
-        HashSet::from([AppliedReplacementKey::object(ObjectId(9), index)])
+        HashSet::from([AppliedReplacementKey::object(ObjectId(9), index as u64)])
     }
 
     fn compound(primary: &str, appended: Vec<TokenBatch>) -> ProposedEvent {
         ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: batch_spec(primary),
             copy: None,
@@ -2356,18 +2671,31 @@ mod tests {
         assert!(back.token_batch_views().is_none());
     }
 
-    /// CR 614.1a + CR 614.5: splitting a compound event into batch views and
-    /// joining them back is the identity; every view carries the event's
-    /// applied set and no view is itself compound.
+    /// CR 614.1a + CR 616.1 + CR 614.5: splitting a compound event into batch
+    /// views and joining them back is the identity; every view carries its own
+    /// batch's applied set and no view is itself compound.
     #[test]
     fn token_batch_views_split_then_join_is_identity() {
-        let event = compound("Plant", vec![batch("Squirrel", 2), batch("Food", 1)]);
+        let event = compound(
+            "Plant",
+            vec![
+                owned_batch("Squirrel", 1, applied_with(1)),
+                owned_batch("Food", 2, applied_with(2)),
+            ],
+        );
         let views = event.token_batch_views().expect("compound event has views");
         assert_eq!(views.len(), 3);
         for view in &views {
             assert!(!view.has_appended_token_batches());
-            assert_eq!(view.applied_set(), event.applied_set());
         }
+        let view_sets: Vec<_> = views
+            .iter()
+            .map(|view| view.applied_set().clone())
+            .collect();
+        assert_eq!(
+            view_sets,
+            [applied_with(0), applied_with(1), applied_with(2)]
+        );
         assert_eq!(
             ProposedEvent::from_token_batch_views(views),
             Some(event.clone())
@@ -2376,12 +2704,16 @@ mod tests {
         assert_eq!(ProposedEvent::from_token_batch_views(Vec::new()), None);
     }
 
-    /// CR 614.1a: a batch a view's own application appended is placed right
-    /// after that view, and the applied sets are unioned.
+    /// CR 614.1a + CR 616.1: a batch a view's own application appended is
+    /// placed right after that view, and each view keeps its own applied set.
     #[test]
     fn from_token_batch_views_flattens_view_appended_after_its_view() {
         let primary = compound("Treasure", vec![batch("Clue", 1)]);
-        let mut second = batch("Squirrel", 1).into_event(applied_with(1));
+        let mut second = TokenBatch {
+            applied: applied_with(1),
+            ..batch("Squirrel", 1)
+        }
+        .into_event();
         if let ProposedEvent::CreateToken { appended, .. } = &mut second {
             appended.push(batch("Food", 1));
         }
@@ -2398,23 +2730,118 @@ mod tests {
             .map(|b| b.spec.characteristics.display_name.as_str())
             .collect();
         assert_eq!(names, ["Clue", "Squirrel", "Food"]);
-        assert_eq!(applied.len(), 2);
+        assert_eq!(applied, &applied_with(0));
+        assert_eq!(appended[1].applied, applied_with(1));
+        assert!(appended[0].applied.is_empty());
     }
 
     /// CR 614.1a + CR 111.1: the event's batches come out primary first, then
-    /// the appended batches in event order.
+    /// the appended batches in event order, with no applied set (delivery
+    /// reads none).
     #[test]
     fn into_token_batches_is_event_ordered() {
-        let event = compound("Plant", vec![batch("Squirrel", 3), batch("Food", 1)]);
+        let event = compound(
+            "Plant",
+            vec![
+                TokenBatch {
+                    applied: applied_with(3),
+                    ..batch("Squirrel", 3)
+                },
+                batch("Food", 1),
+            ],
+        );
         let batches = event.into_token_batches().expect("CreateToken has batches");
         let shape: Vec<_> = batches
             .iter()
             .map(|b| (b.spec.characteristics.display_name.as_str(), b.count))
             .collect();
         assert_eq!(shape, [("Plant", 2), ("Squirrel", 3), ("Food", 1)]);
+        assert!(batches.iter().all(|b| b.applied.is_empty()));
         assert!(ProposedEvent::begin_turn(PlayerId(0), false)
             .into_token_batches()
             .is_none());
+    }
+
+    /// SHAPE (serialized compatibility): a batch's applied set round-trips, an
+    /// empty set omits the key, and a batch persisted before the key existed
+    /// decodes with an empty set.
+    #[test]
+    fn token_batch_applied_round_trips_and_defaults() {
+        let event = compound("Plant", vec![owned_batch("Squirrel", 1, applied_with(4))]);
+        let json = serde_json::to_value(&event).unwrap();
+        assert!(json["CreateToken"]["appended"][0].get("applied").is_some());
+        let back: ProposedEvent = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(event, back);
+
+        let mut legacy = json;
+        legacy["CreateToken"]["appended"][0]
+            .as_object_mut()
+            .expect("TokenBatch payload object")
+            .remove("applied");
+        let back: ProposedEvent = serde_json::from_value(legacy).unwrap();
+        let ProposedEvent::CreateToken { appended, .. } = &back else {
+            panic!("expected CreateToken");
+        };
+        assert!(appended[0].applied.is_empty());
+
+        let empty = compound("Plant", vec![owned_batch("Squirrel", 1, HashSet::new())]);
+        let json = serde_json::to_value(&empty).unwrap();
+        assert!(json["CreateToken"]["appended"][0].get("applied").is_none());
+    }
+
+    /// CR 616.1 + CR 614.5: a whole-event mark reaches every batch; an owner
+    /// mark reaches only that owner's batches; an owner's applied set is the
+    /// union of that owner's batch sets.
+    #[test]
+    fn owner_marks_touch_only_that_owners_batches() {
+        let rid = ReplacementId {
+            source: ObjectId(9),
+            index: 7,
+        };
+        let key = AppliedReplacementKey::object(ObjectId(9), 7);
+        let fresh = || {
+            compound(
+                "Plant",
+                vec![
+                    owned_batch("Squirrel", 1, applied_with(1)),
+                    owned_batch("Food", 0, HashSet::new()),
+                    owned_batch("Clue", 1, applied_with(2)),
+                ],
+            )
+        };
+
+        let mut owner_marked = fresh();
+        owner_marked.mark_applied_for_owner(rid, PlayerId(1));
+        let ProposedEvent::CreateToken {
+            appended, applied, ..
+        } = &owner_marked
+        else {
+            panic!("expected CreateToken");
+        };
+        assert!(appended[0].applied.contains(&key));
+        assert!(appended[2].applied.contains(&key));
+        assert!(!appended[1].applied.contains(&key));
+        assert!(!applied.contains(&key));
+        assert_eq!(
+            owner_marked.applied_of_owner(PlayerId(1)),
+            HashSet::from([
+                key,
+                AppliedReplacementKey::object(ObjectId(9), 1),
+                AppliedReplacementKey::object(ObjectId(9), 2),
+            ])
+        );
+        assert_eq!(owner_marked.applied_of_owner(PlayerId(0)), applied_with(0));
+
+        let mut whole_marked = fresh();
+        whole_marked.mark_applied(rid);
+        let ProposedEvent::CreateToken {
+            appended, applied, ..
+        } = &whole_marked
+        else {
+            panic!("expected CreateToken");
+        };
+        assert!(applied.contains(&key));
+        assert!(appended.iter().all(|batch| batch.applied.contains(&key)));
     }
 
     #[test]

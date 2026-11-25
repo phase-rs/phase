@@ -193,6 +193,7 @@ mod tests {
     fn grant_effect(affected: Option<TargetFilter>, keyword: Keyword) -> Effect {
         Effect::GenericEffect {
             static_abilities: vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::Continuous,
                 affected,
                 modifications: vec![ContinuousModification::AddKeyword { keyword }],
@@ -210,6 +211,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }],
             target: None,
             duration: None,

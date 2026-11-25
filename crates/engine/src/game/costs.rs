@@ -77,7 +77,7 @@ use crate::types::ability::ResolvedAbility;
 
 /// Helper to find eligible cards for exile cost payment at resolution.
 /// Returns cards in the specified zone matching the filter, excluding the source.
-fn find_eligible_exile_targets(
+pub(super) fn find_eligible_exile_targets(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
@@ -1035,6 +1035,74 @@ pub(crate) fn record_delivered_cost_exile(
     }
 }
 
+/// CR 800.4f: an outstanding MayCost belongs to its latched payer, including
+/// when a different player owns the current inner replacement choice. An
+/// abandoned cost component is unpaid, not replacement-prevented-and-paid.
+pub(crate) fn settle_replacement_may_cost_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let Some(PendingCostMoveResume::ReplacementMayCost {
+        current,
+        remaining,
+        outer_replacement: Some(outer),
+        ..
+    }) = state.pending_cost_move_resume.as_ref()
+    else {
+        return Ok(None);
+    };
+    let payer_left = outer
+        .choice_player
+        .is_some_and(|payer| !super::players::is_alive(state, payer));
+    let component_left = std::iter::once(current).chain(remaining.iter()).any(|id| {
+        state
+            .objects
+            .get(id)
+            .is_none_or(|object| !super::players::is_alive(state, object.owner))
+    });
+    let interrupted_component = state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| pending.proposed.affected_object_id() == Some(*current));
+    let component_impossible = interrupted_component.is_some_and(|pending| {
+        !super::replacement::replacement_event_survives(state, &pending.proposed)
+            || match pending.delivery_boundary_event() {
+                crate::types::proposed_event::ProposedEvent::ZoneChange { from, .. } => {
+                    remaining.iter().any(|id| {
+                        state
+                            .objects
+                            .get(id)
+                            .is_none_or(|object| object.zone != *from)
+                    })
+                }
+                _ => false,
+            }
+    });
+    if !payer_left
+        && !component_left
+        && !component_impossible
+        && super::replacement::replacement_event_survives(state, &outer.proposed)
+    {
+        return Ok(None);
+    }
+    let Some(PendingCostMoveResume::ReplacementMayCost {
+        current,
+        outer_replacement: Some(outer),
+        ..
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("the exact MayCost continuation was inspected above")
+    };
+    if state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| pending.proposed.affected_object_id() == Some(current))
+    {
+        state.pending_replacement = None;
+    }
+    super::engine_replacement::settle_unpaid_replacement_may_cost(state, *outer, events).map(Some)
+}
+
 /// CR 614.12a + CR 616.1: Continue a forced MayCost exile after the inner
 /// replacement choice delivered or prevented its current object. The outer
 /// optional replacement resumes only after the whole cost has finished.
@@ -1042,6 +1110,9 @@ pub(crate) fn resume_replacement_may_cost_move(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if let Some(waiting) = settle_replacement_may_cost_after_departure(state, events)? {
+        return Ok(waiting);
+    }
     let Some(PendingCostMoveResume::ReplacementMayCost {
         source_id,
         current,
@@ -1128,10 +1199,37 @@ pub fn pay_ability_cost_for_activation(
         cost,
         ability_index,
         cost_removed_counters,
+        None,
         events,
     )
 }
 
+/// CR 606.4: activation payment entry that separately tracks loyalty counters
+/// while preserving the existing all-counter aggregate ledger.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pay_ability_cost_for_activation_with_loyalty_tally(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability_index: Option<usize>,
+    cost_removed_counters: &mut Option<u32>,
+    loyalty_counters_removed: &mut Option<u32>,
+    events: &mut Vec<GameEvent>,
+) -> Result<PaymentOutcome, EngineError> {
+    pay_ability_cost_for_activation_with_cost_move_replacement(
+        state,
+        player,
+        source_id,
+        cost,
+        ability_index,
+        cost_removed_counters,
+        Some(loyalty_counters_removed),
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn pay_ability_cost_for_activation_with_cost_move_replacement(
     state: &mut GameState,
     player: PlayerId,
@@ -1139,6 +1237,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
     cost: &AbilityCost,
     ability_index: Option<usize>,
     cost_removed_counters: &mut Option<u32>,
+    loyalty_counters_removed: Option<&mut Option<u32>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
@@ -1153,6 +1252,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
             ability_index,
         },
         Some(cost_removed_counters),
+        loyalty_counters_removed,
         None,
         false,
     )?;
@@ -1293,6 +1393,7 @@ pub(crate) fn pay_ability_cost_for_turn_face_up(
             cost_source,
         },
         None,
+        None,
         Some(cost),
         false,
     )?;
@@ -1349,6 +1450,7 @@ fn pay_ability_cost_for_resolution_with_cost_move_root(
         },
         // CR 118.12: a resolution-time PayCost has no activation to own a count.
         None,
+        None,
         Some(cost),
         false,
     )
@@ -1372,22 +1474,19 @@ pub(crate) fn credit_cost_removed_counters(ledger: &mut Option<u32>, removed: u3
     *total = total.saturating_add(removed);
 }
 
-/// CR 118.3 + CR 122.1 + CR 601.2h + CR 616.1: the applier of planned
-/// counter-removal costs (the Loyalty arm and the resolution-time unless
-/// payments remove their counters directly). Makes each planned removal in order through the
-/// replacement pipeline and credits each completed removal's actual count to
-/// the paying activation's ledger (`None` for a spell's cost, a resolution-time
-/// payment and the `can_pay` dry run). A removal that waits on a replacement
-/// choice stops the payment: nothing is credited for it until its owner
-/// settles it, and the later removals wait for it (CR 601.2h: partial payments
-/// are not allowed, so the owner finishes them before the payment proceeds).
-/// Only a completed removal materializes the ledger, so a completed cost that
-/// removed none reads `Some(0)`, and a cost paused on its first removal still
-/// reads `None`.
+/// CR 118.3 + CR 122.1 + CR 601.2h + CR 616.1: applies planned counter removals
+/// in payment order through the replacement pipeline. A pending replacement
+/// choice holds the remaining removals until its owner resumes payment.
+/// The ordinary activation aggregate stays `None` until the first removal
+/// settles. A completed zero-removal cost records `Some(0)`.
+/// Fixed negative loyalty costs use this applier with aggregate credit disabled.
+/// A tracked loyalty activation starts at `Some(0)` and credits the actual
+/// loyalty counters removed by its own root proposal when that result is delivered.
 pub(crate) fn pay_counter_cost_removals(
     state: &mut GameState,
     removals: Vec<PendingCounterRemoval>,
     mut cost_removed_counters: Option<&mut Option<u32>>,
+    mut loyalty_counters_removed: Option<&mut Option<u32>>,
     events: &mut Vec<GameEvent>,
 ) -> CounterCostRemovalProgress {
     // CR 616.1 + CR 608.2c: everything a removal's replacement installs sits
@@ -1396,16 +1495,36 @@ pub(crate) fn pay_counter_cost_removals(
     let mut removals = removals.into_iter();
     while let Some(removal) = removals.next() {
         let in_flight = super::effects::counters::begin_in_flight_counter_removal(state, removal);
-        match super::effects::counters::remove_counter_with_replacement(
-            state,
-            in_flight.removal.object_id,
-            in_flight.removal.counter_type.clone(),
-            in_flight.removal.count,
-            events,
-        ) {
+        let is_loyalty =
+            in_flight.removal.counter_type == crate::types::counter::CounterType::Loyalty;
+        let tracks_known_loyalty_tally = loyalty_counters_removed
+            .as_deref()
+            .is_some_and(Option::is_some);
+        let outcome = if is_loyalty && tracks_known_loyalty_tally {
+            super::effects::counters::remove_loyalty_cost_counter_with_replacement(
+                state,
+                in_flight.removal.object_id,
+                in_flight.removal.count,
+                events,
+            )
+        } else {
+            super::effects::counters::remove_counter_with_replacement(
+                state,
+                in_flight.removal.object_id,
+                in_flight.removal.counter_type.clone(),
+                in_flight.removal.count,
+                events,
+            )
+        };
+        match outcome {
             super::effects::counters::CounterRemovalOutcome::Removed(removed) => {
                 if let Some(ledger) = cost_removed_counters.as_deref_mut() {
                     credit_cost_removed_counters(ledger, removed);
+                }
+                if is_loyalty && tracks_known_loyalty_tally {
+                    if let Some(ledger) = loyalty_counters_removed.as_deref_mut() {
+                        credit_cost_removed_counters(ledger, removed);
+                    }
                 }
             }
             super::effects::counters::CounterRemovalOutcome::AwaitingReplacementChoice => {
@@ -1413,6 +1532,11 @@ pub(crate) fn pay_counter_cost_removals(
                     PausedCounterCostRemoval {
                         in_flight,
                         remaining: removals.collect(),
+                        aggregate_credit: if cost_removed_counters.is_some() {
+                            crate::types::game_state::CounterRemovalAggregateCredit::Credit
+                        } else {
+                            crate::types::game_state::CounterRemovalAggregateCredit::Skip
+                        },
                         replacement_subtree,
                     },
                 );
@@ -1441,6 +1565,7 @@ fn pay_ability_cost_inner(
     events: &mut Vec<GameEvent>,
     scope: &PaymentScope,
     mut cost_removed_counters: Option<&mut Option<u32>>,
+    mut loyalty_counters_removed: Option<&mut Option<u32>>,
     resume_cost: Option<&AbilityCost>,
     dry_run: bool,
 ) -> Result<PaymentOutcome, EngineError> {
@@ -1762,6 +1887,7 @@ fn pay_ability_cost_inner(
                     events,
                     scope,
                     cost_removed_counters.as_deref_mut(),
+                    loyalty_counters_removed.as_deref_mut(),
                     matches!(scope, PaymentScope::Resolution { .. }).then_some(&sub_resume_cost),
                     false,
                 )?;
@@ -1929,12 +2055,22 @@ fn pay_ability_cost_inner(
                 });
             }
             if matches!(cost.target, TargetFilter::SelfRef) {
+                // Player-level bans plus object-level bars (Call for Aid binds
+                // its caster) share one authority; either fails payment.
                 if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id)
+                    || super::static_abilities::object_cant_be_sacrificed_by(
+                        state, player, source_id,
+                    )
                 {
                     return Ok(payment_failed("Cannot sacrifice this permanent as a cost"));
                 }
                 match super::sacrifice::sacrifice_permanent(state, source_id, player, events)? {
                     super::sacrifice::SacrificeOutcome::Complete => {}
+                    // CR 118.3: a mid-payment bar fails the cost, mirroring the
+                    // pre-check above.
+                    super::sacrifice::SacrificeOutcome::Prohibited => {
+                        return Ok(payment_failed("Cannot sacrifice this permanent as a cost"));
+                    }
                     super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                         pause_cost_payment_for_replacement_choice(state, choice_player);
                         return Ok(PaymentOutcome::Paused {
@@ -2715,13 +2851,35 @@ fn pay_ability_cost_inner(
                     }
                 }
                 std::cmp::Ordering::Less => {
-                    super::effects::counters::remove_counter_with_replacement(
+                    let removal = PendingCounterRemoval {
+                        object_id: source_id,
+                        counter_type: crate::types::counter::CounterType::Loyalty,
+                        count: amount.unsigned_abs(),
+                    };
+                    match pay_counter_cost_removals(
                         state,
-                        source_id,
-                        crate::types::counter::CounterType::Loyalty,
-                        (-amount) as u32,
+                        vec![removal],
+                        None,
+                        loyalty_counters_removed.as_deref_mut(),
                         events,
-                    );
+                    ) {
+                        CounterCostRemovalProgress::Complete => {}
+                        CounterCostRemovalProgress::AwaitingReplacementChoice(removal) => {
+                            if matches!(scope, PaymentScope::Activation { .. }) {
+                                state.pending_cost_move_resume =
+                                    Some(PendingCostMoveResume::CounterCostRemovalPayment {
+                                        player,
+                                        pending: None,
+                                        removal: Box::new(removal),
+                                        cost_paid_object: None,
+                                        completion: PendingCostMoveCompletion::FinishPending,
+                                    });
+                            }
+                            return Ok(PaymentOutcome::Paused {
+                                remaining_cost: None,
+                            });
+                        }
+                    }
                 }
                 std::cmp::Ordering::Equal => {}
             }
@@ -2825,6 +2983,7 @@ fn pay_ability_cost_inner(
                 state,
                 removals,
                 cost_removed_counters,
+                loyalty_counters_removed,
                 events,
             ) {
                 CounterCostRemovalProgress::Complete => {}
@@ -3139,8 +3298,28 @@ fn pay_ability_cost_inner(
         // interactive `WaitingFor::PayCost { kind: UnattachFrom }` detour before
         // this resume runs, so this arm is an idempotent no-op (mirrors the
         // non-self Exile/Sacrifice interactive-cost arms).
-        | AbilityCost::UnattachFrom { .. }
-        | AbilityCost::Behold { .. } => {}
+        | AbilityCost::UnattachFrom { .. } => {}
+        // CR 614.12a + CR 118.3 + CR 701.4a: resolution-time single-object
+        // Behold costs either auto-pay their sole candidate or pause for a
+        // selection; the replacement resume continues after that choice.
+        AbilityCost::Behold {
+            count: 1,
+            filter,
+            action: crate::types::ability::BeholdCostAction::ChooseOrReveal,
+            type_choice: None,
+        } if matches!(scope, PaymentScope::Resolution { .. }) => {
+            use super::effects::behold::{begin_behold, BeholdStart};
+            return Ok(
+                match begin_behold(state, player, source_id, filter, events) {
+                    BeholdStart::Unavailable => payment_failed("no eligible object to behold"),
+                    BeholdStart::Selected => PaymentOutcome::Paid,
+                    BeholdStart::Parked => PaymentOutcome::Paused {
+                        remaining_cost: None,
+                    },
+                },
+            );
+        }
+        AbilityCost::Behold { .. } => {}
         AbilityCost::Discard { .. } | AbilityCost::NinjutsuFamily { .. } => {
             // At Activation these shapes are intercepted by the interactive
             // WaitingFor detours before payment is invoked, so passing through
@@ -3314,6 +3493,7 @@ pub(crate) fn can_pay(
                     cost,
                     &mut Vec::new(),
                     scope,
+                    None,
                     None,
                     None,
                     true,
@@ -3790,15 +3970,134 @@ pub(crate) fn cost_includes_draw(cost: &AbilityCost) -> bool {
     }
 }
 
-/// CR 121.1 + CR 605.3a: whether `cost` asks for draws and nothing else (nested
-/// `Composite`s flattened): a payment that asks for no mana.
-pub(crate) fn cost_is_only_draws(cost: &AbilityCost) -> bool {
+/// CR 605.3a + CR 117.1d: whether paying `cost` asks for a mana payment
+/// (nested costs flattened). The cost predicate behind the unless-payment
+/// mana window (`engine_payment_choices::unless_prompt_asks_for_no_mana`).
+pub(crate) fn cost_asks_for_mana(cost: &AbilityCost) -> bool {
     match cost {
-        AbilityCost::Composite { costs } => {
-            !costs.is_empty() && costs.iter().all(cost_is_only_draws)
+        AbilityCost::Mana { .. } | AbilityCost::ManaDynamic { .. } => true,
+        // CR 701.67a: pays a mana cost, generic legs optionally by tapping.
+        AbilityCost::Waterbend { .. } => true,
+        // CR 702.49a: ninjutsu's [cost] is paid to activate it; this variant's
+        // `mana_cost` is that payment.
+        AbilityCost::NinjutsuFamily { .. } => true,
+        // CR 118.9: a keyword's mana cost paid instead.
+        AbilityCost::KeywordCostOfCastSpell { .. } => true,
+        // An unparsed cost keeps the window it had.
+        AbilityCost::Unimplemented { .. } => true,
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            costs.iter().any(cost_asks_for_mana)
         }
-        AbilityCost::EffectCost { effect } => matches!(effect.as_ref(), Effect::Draw { .. }),
-        _ => false,
+        // CR 702.24a: [cost] for each counter.
+        AbilityCost::PerCounter { base, .. } => cost_asks_for_mana(base),
+        // Only `PayCost` carries a payment; every other effect performed as a
+        // cost (draws, added mana, counters) asks for none.
+        AbilityCost::EffectCost { effect } => {
+            matches!(effect.as_ref(), Effect::PayCost { cost, .. } if cost_asks_for_mana(cost))
+        }
+        AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::SayPhrase { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::GetPlayerCounters { .. } => false,
+    }
+}
+
+/// CR 118.12a: an unless cost paid by choosing exactly one object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SingleChoicePayment<'a> {
+    /// CR 701.21a: sacrifice one permanent matching `target`.
+    SacrificeOne { target: &'a TargetFilter },
+    /// CR 701.9a: discard one chosen card from hand, unfiltered.
+    DiscardOneChosen,
+}
+
+/// The closed classifier of single-choice unless costs. Every other cost kind
+/// is listed explicitly, so a new one fails closed at compile time.
+pub(crate) fn single_choice_payment(cost: &AbilityCost) -> Option<SingleChoicePayment<'_>> {
+    use crate::types::ability::{
+        CardSelectionMode, DiscardSelfScope, SacrificeCost, SacrificeRequirement,
+    };
+    match cost {
+        AbilityCost::Sacrifice(SacrificeCost {
+            target,
+            requirement: SacrificeRequirement::Count { count: 1 },
+        }) => Some(SingleChoicePayment::SacrificeOne { target }),
+        AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        } => Some(SingleChoicePayment::DiscardOneChosen),
+        AbilityCost::Sacrifice(_)
+        | AbilityCost::Discard { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Mana { .. }
+        | AbilityCost::Composite { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::SayPhrase { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => None,
+    }
+}
+
+/// CR 118.12a: every branch of an unless cost with its classification, or
+/// `None` when any branch is not a single-choice payment. A disjunctive cost
+/// ("sacrifices a nonland permanent of their choice or discards a card") is
+/// single-choice only when each of its branches is.
+pub(crate) fn single_choice_payment_branches(
+    cost: &AbilityCost,
+) -> Option<Vec<(&AbilityCost, SingleChoicePayment<'_>)>> {
+    match cost {
+        AbilityCost::OneOf { costs } if !costs.is_empty() => costs
+            .iter()
+            .map(|branch| single_choice_payment(branch).map(|kind| (branch, kind)))
+            .collect(),
+        single => single_choice_payment(single).map(|kind| vec![(single, kind)]),
     }
 }
 
@@ -4089,6 +4388,20 @@ fn can_pay_resolution(
             );
             eligible.len() >= count
         }
+        // CR 614.12a + CR 118.3 + CR 701.4a: a single-object Behold
+        // replacement cost is payable only when a matching object exists.
+        AbilityCost::Behold {
+            count: 1,
+            filter,
+            action: crate::types::ability::BeholdCostAction::ChooseOrReveal,
+            type_choice: None,
+        } => !super::casting_costs::eligible_behold_choices(
+            state,
+            payer,
+            ability.source_id,
+            filter,
+        )
+        .is_empty(),
         // CR 118.12 + CR 701.26a: Resolution-time optional tap-creatures costs
         // are payable when enough currently untapped matching creatures can be
         // selected. The concrete selection is surfaced through WaitingFor::PayCost.
@@ -4571,6 +4884,191 @@ mod tests {
         assert!(!supported_at_resolution(&cost));
     }
 
+    fn mana_cost_of(generic: u32) -> AbilityCost {
+        AbilityCost::Mana {
+            cost: ManaCost::generic(generic),
+        }
+    }
+
+    fn sacrifice_one() -> AbilityCost {
+        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1))
+    }
+
+    fn discard_one() -> AbilityCost {
+        AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        }
+    }
+
+    fn pay_life(amount: i32) -> AbilityCost {
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: amount },
+        }
+    }
+
+    /// CR 118.12a: the single-choice classifier admits exactly the one-object
+    /// sacrifice and the one unfiltered chosen discard.
+    #[test]
+    fn single_choice_payment_classifies_one_object_costs() {
+        assert_eq!(
+            single_choice_payment(&sacrifice_one()),
+            Some(SingleChoicePayment::SacrificeOne {
+                target: &TargetFilter::Any
+            })
+        );
+        assert_eq!(
+            single_choice_payment(&discard_one()),
+            Some(SingleChoicePayment::DiscardOneChosen)
+        );
+        let sacrifice_two = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 2));
+        assert_eq!(single_choice_payment(&sacrifice_two), None);
+        let filtered_discard = AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: Some(TargetFilter::Any),
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        };
+        assert_eq!(single_choice_payment(&filtered_discard), None);
+        assert_eq!(single_choice_payment(&pay_life(2)), None);
+        let one_of = AbilityCost::OneOf {
+            costs: vec![sacrifice_one(), discard_one()],
+        };
+        assert_eq!(
+            single_choice_payment_branches(&one_of).map(|branches| branches.len()),
+            Some(2)
+        );
+        let mixed = AbilityCost::OneOf {
+            costs: vec![sacrifice_one(), pay_life(2)],
+        };
+        assert!(single_choice_payment_branches(&mixed).is_none());
+    }
+
+    fn pay_cost_effect(cost: AbilityCost) -> AbilityCost {
+        AbilityCost::EffectCost {
+            effect: Box::new(Effect::PayCost {
+                cost,
+                scale: None,
+                payer: TargetFilter::Controller,
+            }),
+        }
+    }
+
+    /// Braid of Fire's "Cumulative upkeep—Add {R}.": a cost that adds mana.
+    fn add_red_mana() -> AbilityCost {
+        AbilityCost::EffectCost {
+            effect: Box::new(Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Red],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            }),
+        }
+    }
+
+    fn per_age_counter(base: AbilityCost) -> AbilityCost {
+        AbilityCost::PerCounter {
+            counter: CounterType::Age,
+            target: TargetFilter::SelfRef,
+            base: Box::new(base),
+        }
+    }
+
+    /// CR 605.3a + CR 117.1d: every cost that includes a mana payment asks for
+    /// mana, nested or not. A {0} mana payment is still a mana payment, and an
+    /// unparsed cost keeps the window it had.
+    #[test]
+    fn cost_asks_for_mana_is_true_for_every_mana_payment() {
+        assert!(
+            !cost_asks_for_mana(&sacrifice_one()),
+            "sanity: a sacrifice asks for no mana"
+        );
+        let mana_payments = [
+            mana_cost_of(1),
+            AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Fixed { value: 2 },
+            },
+            // CR 701.67a: waterbend pays a mana cost.
+            AbilityCost::Waterbend {
+                cost: ManaCost::generic(2),
+            },
+            // CR 702.49a: ninjutsu's [cost] is a mana payment.
+            AbilityCost::NinjutsuFamily {
+                variant: NinjutsuVariant::Ninjutsu,
+                mana_cost: ManaCost::generic(1),
+            },
+            // CR 118.9: a keyword's mana cost paid instead.
+            AbilityCost::KeywordCostOfCastSpell {
+                keyword: crate::types::keywords::KeywordKind::Suspend,
+            },
+            AbilityCost::Unimplemented {
+                description: "unparsed".to_string(),
+            },
+            pay_cost_effect(mana_cost_of(1)),
+            AbilityCost::Composite {
+                costs: vec![draw_effect_cost(1), mana_cost_of(1)],
+            },
+            AbilityCost::OneOf {
+                costs: vec![sacrifice_one(), mana_cost_of(1)],
+            },
+            // CR 702.24a: Mystic Remora's "Cumulative upkeep {1}".
+            per_age_counter(mana_cost_of(1)),
+        ];
+        for cost in &mana_payments {
+            assert!(cost_asks_for_mana(cost), "{cost:?} asks for mana");
+        }
+    }
+
+    /// CR 605.3a + CR 117.1d: a cost with no mana payment anywhere in it asks
+    /// for no mana: sacrifices, discards, life, taps, phrases, counters, draws,
+    /// and a cost that adds mana rather than paying it (Braid of Fire).
+    #[test]
+    fn cost_asks_for_mana_is_false_for_every_manaless_cost() {
+        assert!(
+            cost_asks_for_mana(&mana_cost_of(1)),
+            "sanity: a {{1}} payment asks for mana"
+        );
+        let manaless = [
+            sacrifice_one(),
+            discard_one(),
+            pay_life(2),
+            AbilityCost::Tap,
+            AbilityCost::SayPhrase {
+                phrase: "Gotcha!".to_string(),
+            },
+            AbilityCost::GetPlayerCounters {
+                counter_kind: PlayerCounterKind::Poison,
+                count: 5,
+            },
+            draw_effect_cost(1),
+            add_red_mana(),
+            per_age_counter(add_red_mana()),
+            pay_cost_effect(pay_life(2)),
+            AbilityCost::Composite {
+                costs: vec![draw_effect_cost(1), draw_effect_cost(1)],
+            },
+            AbilityCost::Composite { costs: vec![] },
+            // Rottenmouth Viper's "sacrifices a nonland permanent of their
+            // choice or discards a card".
+            AbilityCost::OneOf {
+                costs: vec![sacrifice_one(), discard_one()],
+            },
+            per_age_counter(sacrifice_one()),
+        ];
+        for cost in &manaless {
+            assert!(!cost_asks_for_mana(cost), "{cost:?} asks for no mana");
+        }
+    }
+
     /// Build one representative value for EVERY `AbilityCost` variant via an
     /// exhaustive `match` over a tag enum. The `match` has no wildcard, so a new
     /// `AbilityCost` variant forces a compile error here — the lockstep gate
@@ -4956,6 +5454,7 @@ mod tests {
                 &scope,
                 None,
                 None,
+                None,
                 true,
             )
             .unwrap();
@@ -4988,6 +5487,7 @@ mod tests {
             &scope,
             None,
             None,
+            None,
             false,
         )
         .unwrap();
@@ -5006,6 +5506,7 @@ mod tests {
             &cost,
             &mut events,
             &scope,
+            None,
             None,
             None,
             false,
@@ -5867,6 +6368,7 @@ mod tests {
             &scope,
             None,
             None,
+            None,
             false,
         )
         .unwrap();
@@ -5884,6 +6386,7 @@ mod tests {
             &AbilityCost::Tap,
             &mut Vec::new(),
             &scope,
+            None,
             None,
             None,
             false,
@@ -6715,6 +7218,7 @@ mod tests {
             },
             None,
             None,
+            None,
             false,
         )
         .expect("resolution-time tap-creatures payment must not error")
@@ -7265,5 +7769,46 @@ mod dandan_read_sweep_tests {
         );
 
         assert_eq!(eligible, vec![creature]);
+    }
+}
+
+#[cfg(test)]
+mod loyalty_cost_magnitude_tests {
+    use super::{pay_ability_cost_for_activation_with_loyalty_tally, AbilityCost, PaymentOutcome};
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::counter::CounterType;
+
+    // Synthetic arithmetic probe: no printed planeswalker has a [−2147483648]
+    // loyalty ability. It pins the tally's magnitude conversion at the i32
+    // boundary; the nearest printed shape is the Jace token Way of the Mind
+    // Sculptor empowers ("[−3]: Draw a card.").
+    #[test]
+    fn negative_loyalty_payment_magnitude_handles_i32_min() {
+        let magnitude = 1_u32 << 31;
+        let mut scenario = GameScenario::new();
+        let walker = scenario
+            .add_planeswalker_from_oracle(P0, "Jace", "Jace", magnitude + 1, "[−3]: Draw a card.")
+            .id();
+        let mut aggregate = None;
+        let mut loyalty_tally = Some(0);
+        let paid = pay_ability_cost_for_activation_with_loyalty_tally(
+            &mut scenario.state,
+            P0,
+            walker,
+            &AbilityCost::Loyalty { amount: i32::MIN },
+            Some(0),
+            &mut aggregate,
+            &mut loyalty_tally,
+            &mut Vec::new(),
+        )
+        .expect("the walker has enough loyalty to pay the full fixed cost");
+        assert_eq!(paid, PaymentOutcome::Paid);
+        assert_eq!(
+            scenario.state.objects[&walker].counters[&CounterType::Loyalty],
+            1
+        );
+        assert_eq!(scenario.state.objects[&walker].loyalty, Some(1));
+        assert_eq!(loyalty_tally, Some(magnitude));
+        assert_eq!(aggregate, None);
     }
 }

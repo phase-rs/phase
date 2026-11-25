@@ -838,7 +838,14 @@
     "lethalBadge": "Tödlich",
     "planeswalkerLoyalty": "Planeswalker (Loyalität: {{loyalty}})",
     "defendingPlayerTrample": "Verteidigender Spieler (Trampelschaden)",
+    "attackTargetTrample": "{{name}} (Trampelschaden)",
     "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)",
+    "lethalButton": "Tödlich",
+    "clearButton": "Zurücksetzen",
+    "assignLethalTo": "{{target}} tödlichen Schaden zuweisen",
+    "clearDamageFor": "Schadenszuweisung für {{target}} zurücksetzen",
+    "lethalFirstButton": "Tödlicher Schaden zuerst",
+    "lethalFirstTitle": "Weise der Reihe nach jedem Blocker tödlichen Schaden zu, dann den restlichen Schaden",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Die verbleibenden {{count}} Schaden {{target}} zuteilen",
     "assignRemainingTo_many": "Die verbleibenden {{count}} Schaden {{target}} zuteilen",
@@ -1351,7 +1358,8 @@
       "title": "{{effect}}, sofern du nicht bezahlst",
       "titleChooseOne": "{{effect}}, sofern du nicht eines bezahlst",
       "dontPay": "Nicht bezahlen",
-      "takeEffect": "Den Effekt hinnehmen"
+      "takeEffect": "Den Effekt hinnehmen",
+      "priorChoice": "Spieler {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "An Arkan koppeln?",
@@ -2158,6 +2166,13 @@
     "title": "Kontrolleur beim Eintreten wählen",
     "subtitle": "Wähle, welcher Gegner diese bleibende Karte beim Eintreten kontrolliert."
   },
+  "replacementDecisionOrder": {
+    "title": "Wähle die erste Entscheidung",
+    "subtitle": "Diese Ersetzungsentscheidungen fallen gleichzeitig an. Wähle, welche du zuerst triffst.",
+    "unknownObject": "Unbekanntes Objekt",
+    "attachedTo": "An {{host}}",
+    "attachments": "Mit {{names}}"
+  },
   "optionalCost": {
     "gift": {
       "title": "Ein Geschenk versprechen?",
@@ -2324,6 +2339,13 @@
     "creatureFallback": "Kreatur {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Die verbleibenden {{count}} Punkte {{target}} zuweisen",
+    "assignRemainingTo_many": "Die verbleibenden {{count}} Punkte {{target}} zuweisen",
+    "assignRemainingTo_one": "Den verbleibenden {{count}} Punkt {{target}} zuweisen",
+    "assignRemainingTo_other": "Die verbleibenden {{count}} Punkte {{target}} zuweisen",
+    "clearButton": "Zurücksetzen",
+    "clearTarget": "Zuweisung für {{target}} zurücksetzen",
     "unitCounter": "{{counter}}-Marke",
     "unitDamage": "Schaden",
     "unitLife": "Leben",

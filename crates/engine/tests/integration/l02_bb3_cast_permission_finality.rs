@@ -160,8 +160,10 @@ fn intrepid_parse_exile_permission_owner_and_finality() {
         parsed.replacements
     );
     let def = permission_static(&parsed).expect("Intrepid must emit an ExileCastPermission");
+    // CR 406.2: the pool is Clone-only (`CounterLinked` carries a
+    // `CounterMatch`), so bind by ref — it cannot move out of the borrow.
     let StaticMode::ExileCastPermission {
-        pool,
+        ref pool,
         play_mode,
         ref enters_with_counter,
         ..
@@ -169,7 +171,7 @@ fn intrepid_parse_exile_permission_owner_and_finality() {
     else {
         panic!("expected ExileCastPermission, got {:?}", def.mode);
     };
-    assert_eq!(pool, ExileCardPool::Persistent);
+    assert_eq!(pool, &ExileCardPool::Persistent);
     assert_eq!(play_mode, CardPlayMode::Cast);
     assert_eq!(
         enters_with_counter,

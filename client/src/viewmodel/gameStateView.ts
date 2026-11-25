@@ -591,7 +591,11 @@ export function getBoardChoiceView(
         player: waitingFor.data.player,
         objectIds: waitingFor.data.eligible,
         intent: "keep",
-        selection: { type: "exactCount", count: waitingFor.data.required_count },
+        // Exact or up-to keeper cardinality; the engine supplies both bounds.
+        selection: confirmedCountSelection(
+          waitingFor.data.required_count,
+          waitingFor.data.minimum_count ?? waitingFor.data.required_count,
+        ),
         response: { type: "ChooseKeptPermanents" },
         sourceId: waitingFor.data.source_id,
       };

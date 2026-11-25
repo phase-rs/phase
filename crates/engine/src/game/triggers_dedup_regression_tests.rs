@@ -245,6 +245,8 @@ fn spell_cast_observer_fires_once_per_event() {
         controller: PlayerId(0),
         object_id: spell,
         cast_mana_value: None,
+        cast_mana_spent: None,
+        cast_incarnation: None,
     };
 
     process_triggers(&mut state, &[event]);
@@ -1011,6 +1013,7 @@ fn panharmonicon_still_doubles_after_dedup() {
             crate::types::ability::StaticDefinition::new(StaticMode::DoubleTriggers {
                 cause: TriggerCause::EntersBattlefield {
                     core_types: vec![CoreType::Artifact, CoreType::Creature],
+                    entrant: crate::types::statics::CausingObject::Any,
                 },
             })
             .affected(TargetFilter::Typed(
@@ -1369,6 +1372,7 @@ fn panharmonicon_does_not_double_attack_triggers() {
         &mut state,
         TriggerCause::EntersBattlefield {
             core_types: vec![CoreType::Artifact, CoreType::Creature],
+            entrant: crate::types::statics::CausingObject::Any,
         },
     );
 
@@ -1432,6 +1436,8 @@ fn veyran_doubles_trigger_caused_by_controller_casting_instant() {
         controller: PlayerId(0),
         object_id: spell,
         cast_mana_value: None,
+        cast_mana_spent: None,
+        cast_incarnation: None,
     };
 
     process_triggers(&mut state, &[event]);
@@ -1530,6 +1536,8 @@ fn veyran_does_not_double_opponent_cast_trigger() {
         controller: PlayerId(1),
         object_id: spell,
         cast_mana_value: None,
+        cast_mana_spent: None,
+        cast_incarnation: None,
     };
 
     process_triggers(&mut state, &[event]);
@@ -1906,6 +1914,7 @@ fn isshin_and_panharmonicon_only_isshin_matches_attack_event() {
         &mut state,
         TriggerCause::EntersBattlefield {
             core_types: vec![CoreType::Artifact, CoreType::Creature],
+            entrant: crate::types::statics::CausingObject::Any,
         },
     );
 
@@ -1989,14 +1998,19 @@ fn drivnod_doubles_dies_triggers() {
     );
 }
 
-/// CR 603.2d: Wayta (ControlledCreatureDealtDamage cause) doubles only
+/// CR 603.2d: Wayta (ControlledCreature { DealtDamage } cause) doubles only
 /// triggers caused by a creature you control being dealt damage.
 #[test]
 fn wayta_doubles_damage_caused_triggers() {
     use crate::types::statics::TriggerCause;
 
     let (mut state, observer) = setup_with_observer(TriggerMode::DamageDone);
-    let _wayta = install_doubler(&mut state, TriggerCause::ControlledCreatureDealtDamage);
+    let _wayta = install_doubler(
+        &mut state,
+        TriggerCause::ControlledCreature {
+            event: crate::types::statics::ControlledCreatureEvent::DealtDamage,
+        },
+    );
     let damaged = create_object(
         &mut state,
         CardId(21),
@@ -2054,7 +2068,12 @@ fn wayta_does_not_double_unrelated_triggers() {
         .trigger_definitions[0]
         .definition
         .destination = Some(Zone::Battlefield);
-    let _wayta = install_doubler(&mut state, TriggerCause::ControlledCreatureDealtDamage);
+    let _wayta = install_doubler(
+        &mut state,
+        TriggerCause::ControlledCreature {
+            event: crate::types::statics::ControlledCreatureEvent::DealtDamage,
+        },
+    );
 
     let new_etb = create_object(
         &mut state,
@@ -2186,10 +2205,10 @@ fn cloud_doubles_attached_equipment_trigger_when_equipped() {
 }
 
 /// CR 603.2d: Self-inclusion — Cloud's OWN triggered ability is doubled while
-/// equipped, because its `affected` filter references the source (`~`), so the
-/// self-exclusion carve-out fires. Discriminating: reverting the runtime
-/// `affected_references_self` gate (or the SelfRef affected arm) re-applies the
-/// unconditional self-exclusion and this drops to 1.
+/// equipped, because its `affected` filter references the source (`~`) and the
+/// filter alone decides self-inclusion. Discriminating: reintroducing a
+/// self-exclusion in `doubler_applies` (or dropping the SelfRef affected arm)
+/// drops this to 1.
 #[test]
 fn cloud_doubles_its_own_trigger_when_equipped_self_inclusion() {
     let mut state = setup();

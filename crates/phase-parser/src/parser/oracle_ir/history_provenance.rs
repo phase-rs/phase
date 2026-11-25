@@ -1057,7 +1057,7 @@ mod tests {
         let mut doc = crate::parser::oracle::parse_oracle_ir(
             text,
             "History witness",
-            &[],
+            &["station".to_string()],
             &["Artifact".to_string()],
             &["Spacecraft".to_string()],
         );

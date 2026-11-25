@@ -478,13 +478,25 @@ impl FromStr for ExileCastCost {
 ///   ("...from among cards exiled with ~." — The Matrix of Time, the
 ///   Prosper/Tibalt impulse-commander class). Every card still linked to the
 ///   source remains eligible across turns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+/// - `CounterLinked` — CR 406.2 + CR 611.3a + CR 122.1: the counter-keyed,
+///   source-agnostic pool — every card in exile carrying a counter the matcher
+///   counts (Tinybones, Bauble Burglar: "...cards you don't own with stash
+///   counters on them from exile"). Unlike the source-keyed pools above, no
+///   exile-link record is consulted: which permanent put the counter there is
+///   irrelevant (CR 400.1: exile is one shared zone), and the pool is a live
+///   read recomputed at every gate (CR 611.3a), so a removed counter exits the
+///   pool immediately. Clone-only: the `CounterMatch` payload cannot be `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ExileCardPool {
     /// Per-turn rolling pool (`cards_exiled_with_source_this_turn`).
     #[default]
     ThisTurn,
     /// Lifetime per-source `exile_links` pool (`linked_exile_cards_for_source`).
     Persistent,
+    /// Counter-keyed, source-agnostic pool (live `state.exile` scan).
+    CounterLinked {
+        matcher: super::counter::CounterMatch,
+    },
 }
 
 impl fmt::Display for ExileCardPool {
@@ -492,6 +504,15 @@ impl fmt::Display for ExileCardPool {
         match self {
             ExileCardPool::ThisTurn => write!(f, "this_turn"),
             ExileCardPool::Persistent => write!(f, "persistent"),
+            ExileCardPool::CounterLinked { matcher } => match matcher {
+                // CR 122.1: the colon form carries the counter type word;
+                // `counter_any` stays colon-less so a future `Generic("any")`
+                // counter can never collide with the `Any` encoding.
+                super::counter::CounterMatch::OfType(counter_type) => {
+                    write!(f, "counter:{}", counter_type.as_str())
+                }
+                super::counter::CounterMatch::Any => write!(f, "counter_any"),
+            },
         }
     }
 }
@@ -503,7 +524,20 @@ impl FromStr for ExileCardPool {
         match s {
             "this_turn" => Ok(ExileCardPool::ThisTurn),
             "persistent" => Ok(ExileCardPool::Persistent),
-            other => Err(format!("unknown ExileCardPool: {other}")),
+            "counter_any" => Ok(ExileCardPool::CounterLinked {
+                matcher: super::counter::CounterMatch::Any,
+            }),
+            other => match other.strip_prefix("counter:") {
+                // CR 122.1: `parse_counter_type` is total — an unknown name
+                // falls back to `Generic`, so the matcher stays able to match
+                // the counters the exile pipeline actually writes.
+                Some(name) => Ok(ExileCardPool::CounterLinked {
+                    matcher: super::counter::CounterMatch::OfType(
+                        super::counter::parse_counter_type(name),
+                    ),
+                }),
+                None => Err(format!("unknown ExileCardPool: {other}")),
+            },
         }
     }
 }
@@ -683,7 +717,51 @@ pub enum ZoneChangeQualifier {
     Supertype(super::card_type::Supertype),
 }
 
+/// CR 603.2d: the event of a creature you control that causes a trigger, for
+/// `TriggerCause::ControlledCreature`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ControlledCreatureEvent {
+    /// CR 120.3: the creature is dealt damage (Wayta, Trainer Prodigy).
+    DealtDamage,
+    /// CR 115.1: the creature becomes the target of a spell or ability
+    /// (Valiant Emberkin).
+    BecameTarget,
+    /// CR 510.2 + CR 120.1: the creature deals combat damage to a player
+    /// (Felix Five-Boots).
+    DealsCombatDamageToPlayer,
+}
+
+/// CR 603.2d: which object a trigger doubler's cause event may be about,
+/// relative to the doubler. "If another permanent entering the battlefield
+/// causes ..." (The Fish Brewer) excludes the doubler's own entering; the
+/// unqualified form ("a permanent entering") includes it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CausingObject {
+    #[default]
+    Any,
+    /// The causing object is not the doubler ("another").
+    OtherThanDoubler,
+}
+
+impl CausingObject {
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub fn is_any(value: &Self) -> bool {
+        matches!(value, CausingObject::Any)
+    }
+}
+
+/// CR 603.2d: the player action that causes a trigger, for
+/// `TriggerCause::PlayerAction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlayerCauseAction {
+    /// CR 119.3: the player gains life.
+    GainedLife,
+    /// CR 121.1: the player draws a card.
+    DrewCard,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "TriggerCauseWire")]
 pub enum TriggerCause {
     /// Unrestricted doubler — matches any trigger cause.
     Any,
@@ -691,10 +769,13 @@ pub enum TriggerCause {
     /// (Panharmonicon-class). The `core_types` list narrows the entering
     /// permanent's type — for Panharmonicon this is
     /// `[Artifact, Creature]`; for a hypothetical creature-only Panharmonicon
-    /// it would be `[Creature]`.
+    /// it would be `[Creature]`. `entrant` excludes the doubler's own entering
+    /// for "another permanent entering" (The Fish Brewer).
     EntersBattlefield {
         #[serde(default)]
         core_types: Vec<super::card_type::CoreType>,
+        #[serde(default, skip_serializing_if = "CausingObject::is_any")]
+        entrant: CausingObject,
     },
     /// CR 508.1 + CR 308.1: Trigger was caused by a creature attacking
     /// (Isshin-class). Matches `GameEvent::AttackersDeclared` regardless of
@@ -706,11 +787,11 @@ pub enum TriggerCause {
     /// to `Graveyard` for an object whose snapshot included `Creature` in
     /// its core types.
     CreatureDying,
-    /// CR 603.2d + CR 120.3: Trigger was caused by a creature you control
-    /// being dealt damage (Wayta, Trainer Prodigy-class). Matches
-    /// `GameEvent::DamageDealt` whose target is a creature controlled by the
-    /// doubler's controller.
-    ControlledCreatureDealtDamage,
+    /// CR 603.2d: Trigger was caused by an event of a creature the doubler's
+    /// controller controls ("a creature you control being dealt damage",
+    /// "... becoming the target of a spell or ability", "... dealing combat
+    /// damage to a player").
+    ControlledCreature { event: ControlledCreatureEvent },
     /// CR 601.2 + CR 707.10: Trigger was caused by the doubler's controller
     /// casting or copying a spell (Veyran, Voice of Duality-class: "If you
     /// casting or copying an instant or sorcery spell causes ..."). Matches
@@ -725,6 +806,17 @@ pub enum TriggerCause {
     /// CR 309.4c: Trigger was caused by entering a dungeon room
     /// (Hama Pashar-class). Matches `GameEvent::RoomEntered` events.
     RoomEntered,
+    /// CR 603.2d: Trigger was caused by a player's action ("If you gaining
+    /// life causes ..." — Dr. Beverly Crusher; "If a player drawing a card
+    /// causes ..." — Krang, the All-Powerful). `player` is relative to the
+    /// doubler's controller (CR 109.5).
+    PlayerAction {
+        player: super::ability::PlayerRelation,
+        action: PlayerCauseAction,
+    },
+    /// CR 116.2b + CR 708.8: Trigger was caused by turning a face-down
+    /// permanent face up (Panoptic Projektor).
+    TurnedFaceUp,
     /// CR 603.6a + CR 603.6c: Trigger was caused by a permanent entering
     /// and/or leaving the battlefield (Gandalf the White-class). `enter` /
     /// `leave` select which directions qualify; when both are true, either
@@ -745,24 +837,145 @@ fn default_true() -> bool {
     true
 }
 
+/// Deserialize-only mirror of [`TriggerCause`] that also accepts the legacy
+/// unit `"ControlledCreatureDealtDamage"` written before the "creature you
+/// control" causes were parameterized into `ControlledCreature { event }`
+/// (persisted games and card exports). Tripwired by
+/// `_LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4`; see
+/// docs/LEGACY-COMPAT.md.
+#[derive(Deserialize)]
+#[serde(rename = "TriggerCause")]
+enum TriggerCauseWire {
+    Any,
+    EntersBattlefield {
+        #[serde(default)]
+        core_types: Vec<super::card_type::CoreType>,
+        #[serde(default)]
+        entrant: CausingObject,
+    },
+    CreatureAttacking,
+    CreatureDying,
+    ControlledCreature {
+        event: ControlledCreatureEvent,
+    },
+    ControllerCastOrCopiedSpell {
+        #[serde(default)]
+        core_types: Vec<super::card_type::CoreType>,
+    },
+    RoomEntered,
+    BattlefieldTransition {
+        #[serde(default = "default_true")]
+        enter: bool,
+        #[serde(default)]
+        leave: bool,
+        #[serde(default)]
+        qualifiers: Vec<ZoneChangeQualifier>,
+    },
+    PlayerAction {
+        player: super::ability::PlayerRelation,
+        action: PlayerCauseAction,
+    },
+    TurnedFaceUp,
+    /// LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: the pre-2026-Q4
+    /// shape of `ControlledCreature { event: DealtDamage }`.
+    ControlledCreatureDealtDamage,
+}
+
+impl From<TriggerCauseWire> for TriggerCause {
+    fn from(wire: TriggerCauseWire) -> Self {
+        match wire {
+            TriggerCauseWire::Any => TriggerCause::Any,
+            TriggerCauseWire::EntersBattlefield {
+                core_types,
+                entrant,
+            } => TriggerCause::EntersBattlefield {
+                core_types,
+                entrant,
+            },
+            TriggerCauseWire::CreatureAttacking => TriggerCause::CreatureAttacking,
+            TriggerCauseWire::CreatureDying => TriggerCause::CreatureDying,
+            TriggerCauseWire::ControlledCreature { event } => {
+                TriggerCause::ControlledCreature { event }
+            }
+            TriggerCauseWire::ControlledCreatureDealtDamage => TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealtDamage,
+            },
+            TriggerCauseWire::ControllerCastOrCopiedSpell { core_types } => {
+                TriggerCause::ControllerCastOrCopiedSpell { core_types }
+            }
+            TriggerCauseWire::RoomEntered => TriggerCause::RoomEntered,
+            TriggerCauseWire::PlayerAction { player, action } => {
+                TriggerCause::PlayerAction { player, action }
+            }
+            TriggerCauseWire::TurnedFaceUp => TriggerCause::TurnedFaceUp,
+            TriggerCauseWire::BattlefieldTransition {
+                enter,
+                leave,
+                qualifiers,
+            } => TriggerCause::BattlefieldTransition {
+                enter,
+                leave,
+                qualifiers,
+            },
+        }
+    }
+}
+
+const fn parse_legacy_version_component(text: &str) -> u32 {
+    let bytes = text.as_bytes();
+    let mut value = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        value = value * 10 + (bytes[index] - b'0') as u32;
+        index += 1;
+    }
+    value
+}
+
+/// Tripwire: fails to compile once the workspace ships past 0.140.x, the
+/// removal point for the legacy `ControlledCreatureDealtDamage` shape.
+/// Clippy sees the version comparisons as constant; that is the point of a
+/// compile-time tripwire.
+#[allow(dead_code, clippy::absurd_extreme_comparisons)]
+const _LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: () = {
+    const MAJOR: u32 = parse_legacy_version_component(env!("CARGO_PKG_VERSION_MAJOR"));
+    const MINOR: u32 = parse_legacy_version_component(env!("CARGO_PKG_VERSION_MINOR"));
+    assert!(
+        !(MAJOR > 0 || MINOR > 140),
+        "LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: remove the legacy arm of TriggerCauseWire and this tripwire; see docs/LEGACY-COMPAT.md."
+    );
+};
+
 impl fmt::Display for TriggerCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TriggerCause::Any => write!(f, "Any"),
-            TriggerCause::EntersBattlefield { core_types } => {
+            TriggerCause::EntersBattlefield {
+                core_types,
+                entrant,
+            } => {
                 let names: Vec<String> = core_types.iter().map(|ct| format!("{ct:?}")).collect();
-                write!(f, "EntersBattlefield([{}])", names.join(","))
+                match entrant {
+                    CausingObject::Any => write!(f, "EntersBattlefield([{}])", names.join(",")),
+                    CausingObject::OtherThanDoubler => {
+                        write!(f, "EntersBattlefield(another,[{}])", names.join(","))
+                    }
+                }
             }
             TriggerCause::CreatureAttacking => write!(f, "CreatureAttacking"),
             TriggerCause::CreatureDying => write!(f, "CreatureDying"),
-            TriggerCause::ControlledCreatureDealtDamage => {
-                write!(f, "ControlledCreatureDealtDamage")
+            TriggerCause::ControlledCreature { event } => {
+                write!(f, "ControlledCreature({event:?})")
             }
             TriggerCause::ControllerCastOrCopiedSpell { core_types } => {
                 let names: Vec<String> = core_types.iter().map(|ct| format!("{ct:?}")).collect();
                 write!(f, "ControllerCastOrCopiedSpell([{}])", names.join(","))
             }
             TriggerCause::RoomEntered => write!(f, "RoomEntered"),
+            TriggerCause::PlayerAction { player, action } => {
+                write!(f, "PlayerAction({player:?},{action:?})")
+            }
+            TriggerCause::TurnedFaceUp => write!(f, "TurnedFaceUp"),
             TriggerCause::BattlefieldTransition {
                 enter,
                 leave,
@@ -1085,6 +1298,12 @@ pub enum StaticMode {
     /// Adamantoise, Patient Zero, Uthgardt Fury, …), so their marked damage
     /// persists across turns.
     DamageNotRemovedDuringCleanup,
+    /// CR 120.6 + CR 704.5g + CR 613.11: "Lethal damage dealt to [filter] is determined by
+    /// their power rather than their toughness" (Zilortha, Strength Incarnate). A rule
+    /// modification read at query time: for creatures matched by the definition's `affected`
+    /// filter, marked damage is checked against power instead of toughness wherever the game
+    /// checks for lethal damage. Reader: `game::lethal_damage::lethal_damage_basis`.
+    LethalDamageDeterminedByPower,
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
@@ -1311,7 +1530,10 @@ pub enum StaticMode {
     ///
     /// `frequency`: None = all activations; Some(OncePerTurn) = first per turn.
     ///
-    /// Parser-complete structured gap; runtime hook deferred. CR 702.29a, CR 702.122a,
+    /// Runtime: `casting::activation_cost_with_alternative_keyword_costs` folds
+    /// active grants into an `AbilityCost::OneOf` for Equip and Cycling
+    /// activations, substituting only the keyword cost and keeping the
+    /// discard-self leg; Crew remains a coverage gap. CR 702.29a, CR 702.122a,
     /// CR 118.9.
     AlternativeKeywordCost {
         keyword: KeywordKind,
@@ -2524,6 +2746,7 @@ pub enum StaticMode {
 pub enum StaticModeKind {
     Continuous,
     DamageNotRemovedDuringCleanup,
+    LethalDamageDeterminedByPower,
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
@@ -2680,6 +2903,9 @@ impl StaticMode {
             StaticMode::Continuous => StaticModeKind::Continuous,
             StaticMode::DamageNotRemovedDuringCleanup => {
                 StaticModeKind::DamageNotRemovedDuringCleanup
+            }
+            StaticMode::LethalDamageDeterminedByPower => {
+                StaticModeKind::LethalDamageDeterminedByPower
             }
             StaticMode::CantAttack => StaticModeKind::CantAttack,
             StaticMode::CantBlock => StaticModeKind::CantBlock,
@@ -2969,6 +3195,7 @@ impl StaticMode {
             | StaticMode::CountsAsNamed { .. }
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::DamageNotRemovedDuringCleanup
+            | StaticMode::LethalDamageDeterminedByPower
             | StaticMode::Other(_) => None,
         }
     }
@@ -3354,6 +3581,7 @@ impl StaticMode {
             | StaticMode::CountsAsNamed { .. }
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::DamageNotRemovedDuringCleanup
+            | StaticMode::LethalDamageDeterminedByPower
             | StaticMode::Other(_) => None,
         }
     }
@@ -3365,6 +3593,9 @@ impl fmt::Display for StaticMode {
             StaticMode::Continuous => write!(f, "Continuous"),
             StaticMode::DamageNotRemovedDuringCleanup => {
                 write!(f, "DamageNotRemovedDuringCleanup")
+            }
+            StaticMode::LethalDamageDeterminedByPower => {
+                write!(f, "LethalDamageDeterminedByPower")
             }
             StaticMode::CantAttack => write!(f, "CantAttack"),
             StaticMode::CantBlock => write!(f, "CantBlock"),
@@ -3601,7 +3832,10 @@ impl fmt::Display for StaticMode {
                 if matches!(cost, ExileCastCost::WithoutPayingManaCost) {
                     write!(f, ",free")?;
                 }
-                if matches!(pool, ExileCardPool::Persistent) {
+                // CR 406.2: every non-default pool scope (`Persistent`,
+                // `CounterLinked`) is emitted; the `ThisTurn` default stays
+                // elided so the historical 2-/3-segment forms round-trip.
+                if !matches!(pool, ExileCardPool::ThisTurn) {
                     write!(f, ",pool={pool}")?;
                 }
                 if matches!(timing, ExileCastTiming::YourTurnOnly) {
@@ -3841,6 +4075,7 @@ impl FromStr for StaticMode {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mode = match s {
             "Continuous" => StaticMode::Continuous,
+            "LethalDamageDeterminedByPower" => StaticMode::LethalDamageDeterminedByPower,
             "CantAttack" => StaticMode::CantAttack,
             "CantBlock" => StaticMode::CantBlock,
             "CantAttackOrBlock" => StaticMode::CantAttackOrBlock,
@@ -4032,6 +4267,7 @@ impl FromStr for StaticMode {
                         super::card_type::CoreType::Artifact,
                         super::card_type::CoreType::Creature,
                     ],
+                    entrant: CausingObject::Any,
                 },
             },
             "IgnoreHexproof" => StaticMode::IgnoreHexproof,
@@ -4771,6 +5007,69 @@ mod tests {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
+    /// LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: a persisted
+    /// pre-parameterization Wayta cause still decodes, and every current shape
+    /// round-trips through the deserialize mirror.
+    #[test]
+    fn trigger_cause_decodes_the_legacy_controlled_creature_shape() {
+        let legacy: TriggerCause =
+            serde_json::from_str("\"ControlledCreatureDealtDamage\"").expect("legacy decodes");
+        assert_eq!(
+            legacy,
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealtDamage
+            }
+        );
+        for cause in [
+            TriggerCause::Any,
+            TriggerCause::EntersBattlefield {
+                core_types: vec![super::super::card_type::CoreType::Land],
+                entrant: CausingObject::OtherThanDoubler,
+            },
+            TriggerCause::CreatureAttacking,
+            TriggerCause::CreatureDying,
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealsCombatDamageToPlayer,
+            },
+            TriggerCause::ControllerCastOrCopiedSpell {
+                core_types: vec![super::super::card_type::CoreType::Instant],
+            },
+            TriggerCause::RoomEntered,
+            TriggerCause::PlayerAction {
+                player: crate::types::ability::PlayerRelation::Controller,
+                action: PlayerCauseAction::GainedLife,
+            },
+            TriggerCause::PlayerAction {
+                player: crate::types::ability::PlayerRelation::All,
+                action: PlayerCauseAction::DrewCard,
+            },
+            TriggerCause::TurnedFaceUp,
+            TriggerCause::BattlefieldTransition {
+                enter: true,
+                leave: false,
+                qualifiers: vec![ZoneChangeQualifier::Supertype(
+                    super::super::card_type::Supertype::Legendary,
+                )],
+            },
+        ] {
+            let json = serde_json::to_string(&cause).unwrap();
+            assert_eq!(
+                serde_json::from_str::<TriggerCause>(&json).unwrap(),
+                cause,
+                "{json}"
+            );
+        }
+        // An unqualified entering cause keeps its pre-entrant wire shape.
+        assert_eq!(
+            serde_json::to_string(&TriggerCause::EntersBattlefield {
+                core_types: vec![],
+                entrant: CausingObject::Any,
+            })
+            .unwrap(),
+            r#"{"EntersBattlefield":{"core_types":[]}}"#
+        );
+    }
+
     // ===== ROW C — the polarity-typed deferral rule, STRUCTURAL half =====
 
     fn static_mode_hash(mode: &StaticMode) -> u64 {
@@ -4904,6 +5203,7 @@ mod tests {
             StaticMode::DoubleTriggers {
                 cause: TriggerCause::EntersBattlefield {
                     core_types: vec![CoreType::Artifact, CoreType::Creature],
+                    entrant: CausingObject::Any,
                 },
             }
         );
@@ -5220,6 +5520,74 @@ mod tests {
             let s = mode.to_string();
             assert_eq!(StaticMode::from_str(&s).unwrap(), mode);
         }
+    }
+
+    /// CR 406.2 + CR 122.1 (V-pool-type): the counter-keyed pool scope
+    /// round-trips through Display/FromStr, the `Any` matcher keeps its
+    /// colon-less encoding, unknown `counter:` names fall back to `Generic`
+    /// (still matchable), and the historical 2-segment Maralen form keeps
+    /// parsing with the `ThisTurn` default elided.
+    #[test]
+    fn exile_card_pool_counter_linked_round_trips() {
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let stash = ExileCardPool::CounterLinked {
+            matcher: CounterMatch::OfType(CounterType::Generic("stash".to_string())),
+        };
+        assert_eq!(stash.to_string(), "counter:stash");
+        assert_eq!(ExileCardPool::from_str(&stash.to_string()).unwrap(), stash);
+
+        let any = ExileCardPool::CounterLinked {
+            matcher: CounterMatch::Any,
+        };
+        assert_eq!(any.to_string(), "counter_any");
+        assert_eq!(ExileCardPool::from_str("counter_any").unwrap(), any);
+
+        // Unknown counter names stay matchable via the `Generic` fallback.
+        assert_eq!(
+            ExileCardPool::from_str("counter:bauble").unwrap(),
+            ExileCardPool::CounterLinked {
+                matcher: CounterMatch::OfType(CounterType::Generic("bauble".to_string())),
+            }
+        );
+
+        // Reach-guard: the historical 2-segment Maralen form still parses with
+        // the default pool elided.
+        assert_eq!(
+            StaticMode::from_str("ExileCastPermission(Cast,unlimited)").unwrap(),
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                cost: ExileCastCost::PayNormalCost,
+                pool: ExileCardPool::ThisTurn,
+                timing: ExileCastTiming::AnyTime,
+                mana_spend_permission: None,
+                grants_flash: false,
+                extra_cost: None,
+                enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
+            }
+        );
+
+        // The counter-linked scope rides the `pool=` segment of the mode form.
+        let mode = StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: stash,
+            timing: ExileCastTiming::YourTurnOnly,
+            mana_spend_permission: None,
+            grants_flash: false,
+            extra_cost: None,
+            enters_with_counter: None,
+            grantee: ExileCastGrantee::SourceController,
+        };
+        let rendered = mode.to_string();
+        assert!(
+            rendered.contains("pool=counter:stash"),
+            "the non-default pool must be emitted, got {rendered}"
+        );
+        assert_eq!(StaticMode::from_str(&rendered).unwrap(), mode);
     }
 
     #[test]

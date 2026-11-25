@@ -1,11 +1,12 @@
 use nom::Parser;
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, ops::Range};
 
 use super::oracle_ir::context::{ParseContext, PlayerAntecedents};
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::error::{oracle_err, OracleError};
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{parse_cda_quantity, parse_cda_quantity_with_context};
 use crate::types::ability::{
     Comparator, ObjectScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter,
@@ -16,7 +17,7 @@ use crate::types::card_type::{
 use crate::types::mana::{ManaColor, ManaCost};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
-use nom::character::complete::{alpha1, anychar, space1};
+use nom::character::complete::{alpha1, anychar, char, line_ending, space1};
 use nom::combinator::{all_consuming, eof, map_res, opt, peek, recognize, value, verify};
 use nom::multi::many_till;
 use nom::sequence::{preceded, terminated};
@@ -967,10 +968,7 @@ fn parse_count_binder(input: &str) -> OracleResult<'_, CountBinder> {
         // ("draw a card for every five creature types among …" — Sarek). The
         // quantity after either marker goes to the same for-each authority,
         // which owns the grouped "N <things>" floor division.
-        value(
-            CountBinder::ForEach,
-            preceded(tag("for "), alt((tag("each "), tag("every ")))),
-        ),
+        value(CountBinder::ForEach, nom_quantity::parse_for_each_marker),
     ))
     .parse(input)
 }
@@ -1192,7 +1190,7 @@ fn apply_rounding_postmodifier(count: QuantityExpr, noun: &str) -> (QuantityExpr
 /// context ("that much", "the damage prevented this way"), the cda grammar, the
 /// chunk's bare-card aggregate ("those cards"), the where-X core (without the
 /// printed-name possessive arm), then the "the difference" placeholder that
-/// only the token carrier rebinds. A `Sum` whose operands read different object
+/// the enclosing comparison rebinds. A `Sum` whose operands read different object
 /// pronouns is a miss (the operand-anaphor guard).
 pub(crate) fn parse_equal_to_count(quantity: &str, ctx: &mut ParseContext) -> Option<QuantityExpr> {
     let lower = quantity
@@ -1299,6 +1297,22 @@ pub fn parse_ordinal(text: &str) -> Option<(u32, &str)> {
         }
     }
     None
+}
+
+/// Parse an ordinal list at the start of text: `<ordinal>` followed by any
+/// number of `or <ordinal>` items ("first or second", "first or second or third").
+/// Returns the ordinals in written order and the remaining text, or `None` when
+/// the text does not start with an ordinal or an `or` is not followed by one.
+/// A single ordinal yields a one-element list.
+pub fn parse_ordinal_list(text: &str) -> Option<(Vec<u32>, &str)> {
+    let (first, mut rest) = parse_ordinal(text)?;
+    let mut ordinals = vec![first];
+    while let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>("or ").parse(rest) {
+        let (next, remainder) = parse_ordinal(after_or)?;
+        ordinals.push(next);
+        rest = remainder;
+    }
+    Some((ordinals, rest))
 }
 
 /// Parse mana symbols like `{2}{W}{U}` at the start of text.
@@ -2002,6 +2016,20 @@ fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
     }
     result.push_str(&haystack[last_end..]);
     result
+}
+
+/// CR 201.5c + CR 205.3j / CR 205.3m: a single-word printed (short) name
+/// refers to the card only where it is used as a name. When that word is also
+/// a subtype, type-reference occurrences ("each Garruk you control",
+/// "non-Gideon creatures", "a Lukka planeswalker") stay literal via the
+/// preserving replacer's guards; a non-subtype word ("target Charix") is the
+/// card's name wherever it appears in its printed case.
+fn replace_single_word_self_name(haystack: &str, name: &str) -> String {
+    if is_subtype_word(&name.to_lowercase()) {
+        replace_all_words_case_sensitive_preserving_subtype_status_refs(haystack, name, "~")
+    } else {
+        replace_all_words_case_sensitive(haystack, name, "~")
+    }
 }
 
 /// Replace all occurrences of `needle` in `haystack` with `replacement`,
@@ -2859,6 +2887,60 @@ fn mask_name_occurrences_in_segment(
     (out, refused)
 }
 
+fn counter_recipient_end(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), char('.')),
+        value((), line_ending),
+        value((), eof),
+        value((), (char(','), space1, tag_no_case("then"), space1)),
+    ))
+    .parse(input)
+}
+
+// CR 201.5 + CR 201.5c: In a bare counter-recipient phrase, the shortened
+// printed name refers to this object.
+fn bare_counter_recipient_ranges(text: &str, short_name: &str) -> Vec<Range<usize>> {
+    let masked = nom_primitives::mask_double_quoted_spans_preserving_len(text);
+    let mut ranges = Vec::new();
+    let mut line_start = 0;
+    // The mask also blanks line endings inside quotes. Use the original text
+    // to locate each line before scanning the corresponding masked bytes.
+    for line in text.split_inclusive('\n') {
+        let line_end = line_start + line.len();
+        let mut from = line_start;
+        while let Some((before, name, tail)) =
+            nom_primitives::scan_preceded(&masked[from..line_end], |input| {
+                terminated(
+                    preceded(
+                        (
+                            alt((tag_no_case("counters"), tag_no_case("counter"))),
+                            space1,
+                            tag_no_case("on"),
+                            space1,
+                        ),
+                        tag(short_name),
+                    ),
+                    peek(counter_recipient_end),
+                )
+                .parse(input)
+            })
+        {
+            let phrase_start = from + before.len();
+            let name_end = line_end - tail.len();
+            // A masked quote must not create whitespace in the phrase or in
+            // the continuation that delimits the recipient.
+            if text.get(phrase_start..name_end) == masked.get(phrase_start..name_end)
+                && counter_recipient_end(&text[name_end..line_end]).is_ok()
+            {
+                ranges.push(name_end - name.len()..name_end);
+            }
+            from = name_end;
+        }
+        line_start = line_end;
+    }
+    ranges
+}
+
 pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs_reporting(text, card_name).0
 }
@@ -2913,14 +2995,8 @@ pub fn normalize_card_name_refs_reporting(
     // matching generic English words in Oracle text (e.g., "this scheme in motion").
     result = if effective_name.contains(' ') {
         replace_all_words(&result, effective_name, "~")
-    } else if is_subtype_word(&effective_name.to_lowercase()) {
-        replace_all_words_case_sensitive_preserving_subtype_status_refs(
-            &result,
-            effective_name,
-            "~",
-        )
     } else {
-        replace_all_words_case_sensitive(&result, effective_name, "~")
+        replace_single_word_self_name(&result, effective_name)
     };
 
     // CR 201.5c: some multi-word names use a first-and-last-word printed short
@@ -2955,11 +3031,16 @@ pub fn normalize_card_name_refs_reporting(
     // additional untap step" on Untap, Upkeep, Draw) or a keyword ("has storm"
     // on Storm, Force of Nature; CR 702.40a). A multi-word short name stays
     // case-insensitive, like a multi-word full name.
-    if let Some(short_name) = comma_short_self_name(card_name) {
+    //
+    // CR 201.5c + CR 205.3j / CR 205.3m: a subtype-word short name keeps its
+    // type-reference occurrences literal ("each Garruk you control"), exactly
+    // like a single-word subtype full name.
+    let comma_short_name = comma_short_self_name(card_name);
+    if let Some(short_name) = comma_short_name {
         result = if short_name.contains(' ') {
             replace_all_words(&result, short_name, "~")
         } else {
-            replace_all_words_case_sensitive(&result, short_name, "~")
+            replace_single_word_self_name(&result, short_name)
         };
     }
 
@@ -3067,6 +3148,23 @@ pub fn normalize_card_name_refs_reporting(
     // get the `~` guard set, preventing false-positive first-word matches on "Copy".
     for phrase in SELF_REF_TYPE_PHRASES {
         result = replace_all_words(&result, phrase, "~");
+    }
+
+    // The general first-word fallback rejects subtype vocabulary. A bare
+    // counter recipient distinguishes an abbreviated printed name in that set.
+    if comma_short_name.is_none() {
+        let mut name_words = effective_name.split_whitespace();
+        if let Some(short_name) = name_words.next().filter(|first| {
+            name_words.next().is_some()
+                && noncreature_subtype_set(first) == Some(SubtypeSet::Planeswalker)
+        }) {
+            for range in bare_counter_recipient_ranges(&result, short_name)
+                .into_iter()
+                .rev()
+            {
+                result.replace_range(range, "~");
+            }
+        }
     }
 
     // Short-name fallback via starts_with: if no prior strategy produced a ~,
@@ -3246,6 +3344,25 @@ mod tests {
     use super::*;
     use crate::types::mana::ManaCostShard;
     use nom::Parser;
+
+    #[test]
+    fn parse_ordinal_list_handles_single_and_or_lists() {
+        assert_eq!(
+            parse_ordinal_list("second card each turn"),
+            Some((vec![2], "card each turn"))
+        );
+        assert_eq!(
+            parse_ordinal_list("first or second card"),
+            Some((vec![1, 2], "card"))
+        );
+        assert_eq!(
+            parse_ordinal_list("first or second or third card"),
+            Some((vec![1, 2, 3], "card"))
+        );
+        assert_eq!(parse_ordinal_list("card each turn"), None);
+        // A dangling "or" that is not followed by an ordinal is not a list.
+        assert_eq!(parse_ordinal_list("first or card"), None);
+    }
 
     fn tp(text: &str) -> (String, String) {
         (text.to_string(), text.to_lowercase())
@@ -3479,6 +3596,67 @@ mod tests {
             ),
             "Manifest dread. A manifested permanent you control gets +1/+1."
         );
+    }
+
+    #[test]
+    fn shortened_counter_names_bind_only_bare_recipients() {
+        let ajani = "Whenever you gain life, put a loyalty counter on Ajani.\n[0]: You gain 1 life.\n[−4]: Create a 2/2 white Cat Soldier creature token named Ajani's Pridemate with \"Whenever you gain life, put a +1/+1 counter on this token.\"\n[−10]: You get an emblem with \"Creatures you control get +2/+2.\"";
+        assert_eq!(
+            normalize_card_name_refs(ajani, "Ajani Resolute"),
+            ajani
+                .replace("on Ajani.", "on ~.")
+                .replace("this token", "~")
+        );
+        let liliana = "Whenever another creature or planeswalker you control enters, mill two cards.\nExhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery. (Activate each exhaust ability only once.)";
+        assert_eq!(
+            normalize_card_name_refs(liliana, "Liliana the Repentant"),
+            liliana.replace("on Liliana.", "on ~.")
+        );
+
+        let decoy = "[+1]: You gain life equal to the number of creatures you control plus the number of planeswalkers you control.\n[−2]: Create a 2/2 white Cat Soldier creature token named Ajani's Pridemate with \"Whenever you gain life, put a +1/+1 counter on this token.\"\n[0]: If you have at least 15 life more than your starting life total, exile Ajani and each artifact and creature your opponents control.";
+        assert_eq!(
+            normalize_card_name_refs(decoy, "Ajani, Strength of the Pride"),
+            decoy
+                .replace("exile Ajani and", "exile ~ and")
+                .replace("this token", "~")
+        );
+
+        // The plural placement on Jhoira ends before the printed continuation.
+        let jhoira = "{T}: Put two ingenuity counters on Jhoira, then you may put an artifact card with mana value X or less from your hand onto the battlefield, where X is the number of ingenuity counters on Jhoira.";
+        assert_eq!(
+            bare_counter_recipient_ranges(jhoira, "Jhoira")
+                .first()
+                .map(|range| &jhoira[range.start..]),
+            Some("Jhoira, then you may put an artifact card with mana value X or less from your hand onto the battlefield, where X is the number of ingenuity counters on Jhoira.")
+        );
+
+        // Grammar controls for CR 201.5c + CR 205.3j: exact bare names bind,
+        // while full names, subtype phrases and quoted text retain their meaning.
+        for literal in [
+            "counter on Gideon, Ally of Zendikar.",
+            "counter on a Gideon planeswalker.",
+            "counter on Gideon planeswalker.",
+            "counter on Gideon's.",
+            "counter on gideon.",
+            "\"put a loyalty counter on Gideon.\"",
+            "\"granted ability\ncounters on Gideon.\"",
+            "counter on \"quoted text\" Gideon.",
+            "counter on Gideon, \"quoted text\" then put a counter on it.",
+        ] {
+            let text =
+                format!("{literal}\ncounter on Gideon.\ncounter on Gideon\r\ncounter on Gideon");
+            let mut normalized = text.clone();
+            for range in bare_counter_recipient_ranges(&text, "Gideon")
+                .into_iter()
+                .rev()
+            {
+                normalized.replace_range(range, "~");
+            }
+            assert_eq!(
+                normalized,
+                format!("{literal}\ncounter on ~.\ncounter on ~\r\ncounter on ~")
+            );
+        }
     }
 
     #[test]
@@ -3929,6 +4107,60 @@ mod tests {
                 "Haliya, Guided by Light"
             ),
             "Whenever ~ or another creature enters"
+        );
+    }
+
+    /// CR 201.5c + CR 205.3j / CR 205.3m: a comma short name that is also a
+    /// planeswalker subtype refers to the card only where it is used as a name.
+    /// Type-reference occurrences ("each Garruk you control", "non-Gideon
+    /// creatures", "a Lukka planeswalker", "non-Quintorius planeswalker card")
+    /// stay literal, while subject occurrences in the same text still fold to
+    /// `~`. Full Oracle text, asserted against the full normalized string.
+    #[test]
+    fn normalize_comma_short_subtype_name_keeps_type_references_literal() {
+        let garruk = "[0]: Create two 2/2 black and green Wolf creature tokens with \"When this token dies, put a loyalty counter on each Garruk you control.\"\n[\u{2212}3]: Destroy target creature. Draw a card.\n[\u{2212}6]: You get an emblem with \"Creatures you control get +3/+3 and have trample.\"";
+        assert_eq!(
+            normalize_card_name_refs(garruk, "Garruk, Cursed Huntsman"),
+            "[0]: Create two 2/2 black and green Wolf creature tokens with \"When ~ dies, put a loyalty counter on each Garruk you control.\"\n[\u{2212}3]: Destroy target creature. Draw a card.\n[\u{2212}6]: You get an emblem with \"Creatures you control get +3/+3 and have trample.\""
+        );
+
+        let gideon = "Whenever you attack with two or more non-Gideon creatures, put a +1/+1 counter on each of those creatures.\n[+2]: Until end of turn, Gideon becomes a 5/5 white Soldier creature that's still a planeswalker. Prevent all damage that would be dealt to him this turn. (He can't attack if he was cast this turn.)\n[\u{2212}9]: Exile Gideon and each creature your opponents control.";
+        assert_eq!(
+            normalize_card_name_refs(gideon, "Gideon, the Oathsworn"),
+            "Whenever you attack with two or more non-Gideon creatures, put a +1/+1 counter on each of those creatures.\n[+2]: Until end of turn, ~ becomes a 5/5 white Soldier creature that's still a planeswalker. Prevent all damage that would be dealt to him this turn. (He can't attack if he was cast this turn.)\n[\u{2212}9]: Exile ~ and each creature your opponents control."
+        );
+
+        let lukka = "[+1]: Exile the top three cards of your library. Creature cards exiled this way gain \"You may cast this card from exile as long as you control a Lukka planeswalker.\"";
+        assert_eq!(
+            normalize_card_name_refs(lukka, "Lukka, Coppercoat Outcast"),
+            lukka
+        );
+
+        let quintorius = "As long as Quintorius entered this turn, you may activate the loyalty abilities of planeswalkers you control twice this turn rather than only once.\n[0]: Proliferate. You gain 3 life.\n[\u{2212}1]: Seek a non-Quintorius planeswalker card.\n[\u{2212}3]: Create a 2/2 colorless Wizard Soldier creature token named Cadet. Then put a +1/+1 counter on each creature you control.";
+        assert_eq!(
+            normalize_card_name_refs(quintorius, "Quintorius, Fate Splitter"),
+            "As long as ~ entered this turn, you may activate the loyalty abilities of planeswalkers you control twice this turn rather than only once.\n[0]: Proliferate. You gain 3 life.\n[\u{2212}1]: Seek a non-Quintorius planeswalker card.\n[\u{2212}3]: Create a 2/2 colorless Wizard Soldier creature token named Cadet. Then put a +1/+1 counter on each creature you control."
+        );
+    }
+
+    /// CR 201.5c: a comma short name that is not a subtype word is the card's
+    /// name in every case-matching position, including after a determiner
+    /// ("that target Charix") — the subtype gate's else arm.
+    #[test]
+    fn normalize_comma_short_non_subtype_name_still_folds_after_determiner() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Spells your opponents cast that target Charix cost {2} more to cast.\n{3}: Charix gets +X/-X until end of turn, where X is the number of Islands you control.",
+                "Charix, the Raging Isle"
+            ),
+            "Spells your opponents cast that target ~ cost {2} more to cast.\n{3}: ~ gets +X/-X until end of turn, where X is the number of Islands you control."
+        );
+        assert_eq!(
+            normalize_card_name_refs(
+                "Equip abilities you activate that target Cloud cost {2} less to activate.",
+                "Cloud, Planet's Champion"
+            ),
+            "Equip abilities you activate that target ~ cost {2} less to activate."
         );
     }
 

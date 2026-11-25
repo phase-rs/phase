@@ -9301,6 +9301,7 @@ source_card_names = [
     "Officer",
     "Photosynthetic Physician",
     "Shuttlecraft Galileo",
+    "Subspace Anomaly",
     "U.S.S. Cerritos, Following Up",
     "U.S.S. Enterprise-A, Free Spirit",
     "Worf, Son of Mogh",
@@ -13533,6 +13534,7 @@ source_card_names = [
     "Officer",
     "Photosynthetic Physician",
     "Shuttlecraft Galileo",
+    "Subspace Anomaly",
     "U.S.S. Cerritos, Following Up",
     "U.S.S. Enterprise-A, Free Spirit",
     "Worf, Son of Mogh",
@@ -13888,6 +13890,7 @@ source_card_names = [
     "Officer",
     "Photosynthetic Physician",
     "Shuttlecraft Galileo",
+    "Subspace Anomaly",
     "U.S.S. Cerritos, Following Up",
     "U.S.S. Enterprise-A, Free Spirit",
     "Worf, Son of Mogh",
@@ -64028,6 +64031,7 @@ source_card_names = [
     "Officer",
     "Photosynthetic Physician",
     "Shuttlecraft Galileo",
+    "Subspace Anomaly",
     "U.S.S. Cerritos, Following Up",
     "U.S.S. Enterprise-A, Free Spirit",
     "Worf, Son of Mogh",
@@ -64760,6 +64764,7 @@ source_card_names = [
     "Officer",
     "Photosynthetic Physician",
     "Shuttlecraft Galileo",
+    "Subspace Anomaly",
     "U.S.S. Cerritos, Following Up",
     "U.S.S. Enterprise-A, Free Spirit",
     "Worf, Son of Mogh",
@@ -120369,6 +120374,7 @@ source_card_names = [
     "Make It So",
     "Photosynthetic Physician",
     "Shuttlecraft Galileo",
+    "Subspace Anomaly",
     "U.S.S. Cerritos, Following Up",
     "U.S.S. Enterprise-A, Free Spirit",
     "Worf, Son of Mogh",
@@ -120518,6 +120524,11 @@ scryfall_id = "6c5a87cf-7790-4335-8497-ff793bbdcb05"
 card_name = "Captain Benjamin Sisko"
 scryfall_oracle_id = "f997ad8a-6903-47b1-83af-837b3b55a3d4"
 scryfall_id = "51338fb2-13a3-41b8-981f-05fa35e87e2e"
+
+[[token.source_card_refs]]
+card_name = "Subspace Anomaly"
+scryfall_oracle_id = "1a28a83a-de27-4aaa-b35f-1e7075fc1e43"
+scryfall_id = "ed62600f-84ae-421e-970a-fd0682c8f280"
 
 [[token.source_card_refs]]
 card_name = "Excalbian Gamemaster"
@@ -156383,6 +156394,7 @@ source_card_names = [
     "Officer",
     "Photosynthetic Physician",
     "Shuttlecraft Galileo",
+    "Subspace Anomaly",
     "U.S.S. Cerritos, Following Up",
     "U.S.S. Enterprise-A, Free Spirit",
     "Worf, Son of Mogh",
@@ -178841,6 +178853,7 @@ source_card_names = [
     "Officer",
     "Photosynthetic Physician",
     "Shuttlecraft Galileo",
+    "Subspace Anomaly",
     "U.S.S. Cerritos, Following Up",
     "U.S.S. Enterprise-A, Free Spirit",
     "Worf, Son of Mogh",
@@ -209045,6 +209058,7 @@ source_card_names = [
     "Officer",
     "Photosynthetic Physician",
     "Shuttlecraft Galileo",
+    "Subspace Anomaly",
     "U.S.S. Cerritos, Following Up",
     "U.S.S. Enterprise-A, Free Spirit",
     "Worf, Son of Mogh",
@@ -228803,6 +228817,7 @@ source_card_names = [
     "Officer",
     "Photosynthetic Physician",
     "Shuttlecraft Galileo",
+    "Subspace Anomaly",
     "U.S.S. Cerritos, Following Up",
     "U.S.S. Enterprise-A, Free Spirit",
     "Worf, Son of Mogh",

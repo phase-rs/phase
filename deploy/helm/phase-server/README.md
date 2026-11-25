@@ -610,9 +610,11 @@ bundle. `phase-web:sha-<12>` and `phase-server:sha-<12>` are built from the same
 commit, but separate jobs publish them and either can fail alone, so check that
 both tags exist before using the pair. For anything else, point the value at
 your own build — `web.enabled` is false by default, so nothing resolves the
-image until you opt in. It is a static bundle over `nginx-unprivileged`,
-carrying no nginx.conf of its own because the chart mounts one, so building it
-is a client build plus a copy:
+image until you opt in. It is a static bundle over `nginx-unprivileged` plus a
+default nginx.conf and `/config.js` renderer (see
+[Running the web image without the chart](#running-the-web-image-without-the-chart)),
+which the chart mounts its own over, so building it is a client build plus a
+copy:
 
 ```bash
 docker buildx create --use --driver docker-container --bootstrap   # once
@@ -631,6 +633,36 @@ reads the shared copy, which tracks upstream's releases rather than your checkou
 — and because that copy is not content-addressed, the service worker may serve a
 cached one for up to 30 days after upstream updates it. Generate your own if that
 matters to you.
+
+### Running the web image without the chart
+
+The image serves the site on its own, configured through the environment, so a
+plain container runtime needs no mounted files:
+
+```bash
+docker run -p 8080:8080 \
+  -e PHASE_MULTIPLAYER_SERVER_URL=wss://phase.example.com/ws \
+  ghcr.io/phase-rs/phase-web:<the server's tag>
+```
+
+| variable | `/config.js` key | chart value |
+| --- | --- | --- |
+| `PHASE_MULTIPLAYER_SERVER_URL` | `multiplayerServerUrl` | `web.defaultMultiplayerServerUrl` |
+| `PHASE_PREVIEW_SITE_URL` | `previewSiteUrl` | `web.previewSiteUrl` |
+
+Each is optional and means what its chart value means. At start,
+`/docker-entrypoint.d/40-phase-web-config.sh` renders them into
+`/tmp/phase-web/config.js`, which the image's default nginx.conf serves as
+`/config.js`. That nginx.conf is the chart's own, rendered for port 8080;
+[`tests/assert-web-image-defaults.sh`](tests/assert-web-image-defaults.sh) fails
+if the two drift apart, and checks that the same addresses give the client the
+same configuration through either path. Unlike the chart, nothing refuses an
+address the client would ignore: a malformed one simply leaves the build-time
+default in place. `/tmp` must be writable, as nginx already requires for its pid
+and temp files.
+
+The [version rule](#serving-the-web-client) applies here too: run the web image
+of the same release as the server it points at.
 
 ## Values
 

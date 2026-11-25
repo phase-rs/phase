@@ -791,6 +791,7 @@ export type DeckSection =
 export interface CardPrinting {
   set_code: string;
   collector_number: string;
+  automatic_art_catalog_version?: number;
 }
 
 /** Mirrors the engine's `DeckPrinting`: an owner's explicit printing for `count` copies. */
@@ -798,7 +799,7 @@ export interface DeckPrinting {
   section: DeckSection;
   name: string;
   count: number;
-  printing: CardPrinting;
+  printing: Pick<CardPrinting, "set_code" | "collector_number">;
 }
 
 /** Name-only per-player deck list, mirroring the engine's `PlayerDeckList`. */
@@ -3136,6 +3137,7 @@ export type WaitingFor =
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[]; kind?: ReplacementChoiceKind; last_applied_decides?: boolean; remember_identity?: ReplacementAutoChoiceRecord["key"] } }
   | { type: "EntryControllerChoice"; data: { player: PlayerId; candidates: PlayerId[] } }
+  | { type: "ReplacementDecisionOrder"; data: { player: PlayerId; objects: ObjectId[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
   | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" | "CopyTokenSource" } } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
@@ -3260,7 +3262,7 @@ export type WaitingFor =
   // "unless they X or Y" punisher class.
   | { type: "UnlessPaymentChooseCost"; data: { player: PlayerId; costs: UnlessCost[]; pending_effect: unknown; trigger_event?: unknown; effect_description?: string; affected_object?: ObjectId } }
   | { type: "WardDiscardChoice"; data: { player: PlayerId; cards: ObjectId[]; pending_effect: unknown; remaining: number; filter?: unknown } }
-  | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number; min_total_power?: number | null } }
+  | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number; min_total_power?: number | null; trigger_event?: unknown } }
   | { type: "UnlessBounceChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
   | { type: "RevealUntilKeptChoice"; data: { player: PlayerId; hit_card: ObjectId; source_id: ObjectId; accept_zone: string; decline_zone: string; enter_tapped: boolean; enters_attacking: boolean; revealed_misses: ObjectId[]; rest_destination: string } }
@@ -3432,6 +3434,8 @@ export type WaitingFor =
       target_player: PlayerId;
       eligible: ObjectId[];
       required_count: number;
+      // Fewest to keep; absent means exactly required_count (an "up to" keeper sends 0).
+      minimum_count?: number | null;
       // CR 608.2c + CR 122.1: the printed keeper mark, already resolved (CR 608.2h).
       keeper_counter?: [CounterType, number] | null;
       choose_filter?: TargetFilter;
@@ -4011,13 +4015,13 @@ export type GameEvent =
   | { type: "PhaseChanged"; data: { phase: Phase } }
   | { type: "PhaseChangedFor"; data: { phase: Phase; player: PlayerId } }
   | { type: "PriorityPassed"; data: { player_id: PlayerId } }
-  | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId; cast_mana_value?: number } }
+  | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId; cast_mana_value?: number; cast_mana_spent?: number; cast_incarnation?: number } }
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
   // `kind` is the engine's activated-ability kind (CR 605.1a / 606.1); it is
   // omitted by legacy payloads, which mean "Normal". `departed_source_lki`,
   // `trigger_state`, `stack_entry` and `activation_cost` are engine-internal
   // trigger authority the UI never renders.
-  | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; kind?: ActivatedAbilityKind } }
+  | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; kind?: ActivatedAbilityKind; loyalty_counters_removed?: number } }
   | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
   // `from` is null for an object that enters from no zone (a created token).
   | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone | null; to: Zone } }
@@ -4952,6 +4956,19 @@ export interface DerivedViews {
    * or battle. Mirrors `engine::game::derived_views::DerivedViews::attack_targets`.
    */
   attack_targets?: Record<string, AttackTarget>;
+  /**
+   * The engine's lethal-first default for the open AssignCombatDamage prompt,
+   * derived from live combat state. Advisory only and absent outside that prompt.
+   * Mirrors `engine::game::derived_views::DerivedViews::combat_damage_suggestion`.
+   */
+  combat_damage_suggestion?: CombatDamageSplit;
+}
+
+/** Mirrors `engine::types::game_state::CombatDamageSplit`. */
+export interface CombatDamageSplit {
+  assignments: [ObjectId, number][];
+  trample_damage: number;
+  controller_damage: number;
 }
 
 /** Mirrors `engine::game::derived_views::UnblockedAttackPreview`. */
@@ -5181,6 +5198,19 @@ export interface GameState {
   /** CR 732.2a: opt-in gate for the live combo-detector (default Off). Set from the
    *  match's immutable `MatchConfig` at game creation; not mutable mid-game. */
   loop_detection?: LoopDetectionMode;
+  /** CR 101.4 + CR 101.4b: engine-projected APNAP scoped-unless poll state.
+   *  Public sacrifice selections keep their chosen object ids; discard card
+   *  identities are redacted by the engine for non-owning viewers. */
+  pending_player_scope_unless_punishment?: PendingPlayerScopeUnlessPunishmentView | null;
+}
+
+export interface PendingPlayerScopeUnlessPunishmentView {
+  declining_players: PlayerId[];
+  payments: Array<{
+    player: PlayerId;
+    action: "Sacrifice" | "Discard";
+    objects: Array<{ object_id: ObjectId; incarnation: number }>;
+  }>;
 }
 
 /**

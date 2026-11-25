@@ -245,6 +245,7 @@ pub(crate) fn finish_meld_entry(
     state.liminal_entries.insert(
         context.source_id,
         LiminalEntry {
+            copy_settlement: None,
             // CR 701.42a: the meld result is card-backed — its two component
             // cards are real objects in exile — so it is not a CR 111.1 token
             // projection and never enters through `ProposedEvent::TokenEntry`.
@@ -318,7 +319,7 @@ pub(crate) fn finish_meld_delivery(
                 entry.replacement_applied.clone(),
             )),
             LiminalEntryKind::Token => None,
-            LiminalEntryKind::TransformedEntry => None,
+            LiminalEntryKind::TransformedEntry | LiminalEntryKind::OutsideGameCard { .. } => None,
         })
         .unwrap_or((context, attack_target, Default::default()));
     state.liminal_entries.remove(&context.source_id);

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "FilterProp gains CardTypeCount { comparator, count } (CR 205.2a), serialized in GameState trigger definitions; an older peer cannot decode the new filter variant"
+}

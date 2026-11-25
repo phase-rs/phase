@@ -14,7 +14,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_while_m_n};
 use nom::character::complete::{digit1, space1};
-use nom::combinator::{map, map_opt, not, opt, peek, recognize, value};
+use nom::combinator::{map, map_opt, map_res, not, opt, peek, recognize, value};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::{IResult, Parser};
@@ -680,6 +680,28 @@ pub fn parse_color_property(input: &str) -> OracleResult<'_, FilterProp> {
     .parse(input)
 }
 
+/// CR 205.2a: "with <n> or more card types" object qualifier ("a card with two
+/// or more card types" — Rendmaw, Creaking Nest; "another spell with two or more
+/// card types" — Visitor from Planet Q). Lowers to `FilterProp::CardTypeCount`
+/// with `Comparator::GE`; the count reads distinct core card types at runtime.
+/// Only the printed plural threshold form is recognized: the threshold-shaped
+/// singular, "exactly N", and "or fewer" have zero printed occurrences.
+pub fn parse_card_type_count_property(input: &str) -> OracleResult<'_, FilterProp> {
+    preceded(
+        (tag("with"), space1),
+        map_res(
+            terminated(parse_number, tag(" or more card types")),
+            |n: u32| {
+                u8::try_from(n).map(|count| FilterProp::CardTypeCount {
+                    comparator: Comparator::GE,
+                    count,
+                })
+            },
+        ),
+    )
+    .parse(input)
+}
+
 // --- from parser/oracle_target.rs ---
 
 /// Guard: does text start with something `parse_type_phrase_folding` would recognize?
@@ -967,23 +989,13 @@ pub fn parse_exile_visibility_prefix(input: &str) -> OracleResult<'_, FilterProp
     .parse(input)
 }
 
-/// A keyword-list separator followed by something other than a keyword, where
-/// that something opens another leg of the enclosing list — a type word ("creature
-/// with disturb, or enchantment") or a determiner-led leg ("each creature without
-/// flying and each planeswalker", "target creature with flying and all Equipment
-/// attached to that creature") — belongs to the enclosing list and stays
-/// unconsumed.
-pub fn separator_continues_enclosing_list(after_separator: &str) -> bool {
+/// A keyword-list separator can continue the suffix only when another keyword
+/// follows it. Otherwise the separator belongs to the enclosing type list —
+/// "creature with disturb, or enchantment" — or opens the following clause —
+/// "creature with decayed, create a token" — and must stay unconsumed for the
+/// caller.
+pub fn separator_stops_keyword_list(after_separator: &str) -> bool {
     parse_leading_keyword_match(after_separator).is_none()
-        && (starts_with_type_word(after_separator)
-            || alt((
-                tag::<_, _, OracleError<'_>>("each "),
-                tag("all "),
-                tag("target "),
-                tag("up to "),
-            ))
-            .parse(after_separator)
-            .is_ok())
 }
 
 /// Parse "without [keyword]" suffix — negated keyword filter.
@@ -1015,7 +1027,7 @@ pub fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usiz
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
-                if separator_continues_enclosing_list(rest) {
+                if separator_stops_keyword_list(rest) {
                     break;
                 }
                 consumed += sep.len();

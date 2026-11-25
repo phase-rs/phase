@@ -74,6 +74,10 @@ export function PlayerHud({ ref }: PlayerHudProps) {
   }, [isValidTarget, dispatch, playerId]);
 
   const hudTone = isValidTarget ? "cyan" : isMyTurn ? "emerald" : "neutral";
+  // The plate becomes a button that targets this player while it is a valid
+  // target, and a tap on a badge inside it is then a tap on that button.
+  // Otherwise the badges only explain, so a tap shows their explanation.
+  const badgeTouch = isValidTarget ? "ignore" : "toggle";
   const seatColor = useSeatColor(playerId);
   const avatarIdentity = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
 
@@ -103,10 +107,10 @@ export function PlayerHud({ ref }: PlayerHudProps) {
             <EnchantmentsBadge playerId={playerId} />
             <StormCounter count={stormCount} />
             {showMatchScore && matchScore ? <ScoreBadge score={matchScore} player={0} /> : null}
-            {designations.isMonarch ? <MonarchBadge /> : null}
-            {designations.hasInitiative ? <InitiativeBadge /> : null}
-            {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
-            {designations.hasEnduringStory ? <EnduringStoryBadge /> : null}
+            {designations.isMonarch ? <MonarchBadge touch={badgeTouch} /> : null}
+            {designations.hasInitiative ? <InitiativeBadge touch={badgeTouch} /> : null}
+            {designations.hasCityBlessing ? <CityBlessingBadge touch={badgeTouch} /> : null}
+            {designations.hasEnduringStory ? <EnduringStoryBadge touch={badgeTouch} /> : null}
             {designations.dungeonRoom ? (
               <DungeonBadge room={designations.dungeonRoom} />
             ) : null}
@@ -117,27 +121,35 @@ export function PlayerHud({ ref }: PlayerHudProps) {
                 ringBearerName={designations.ringBearerName}
               />
             ) : null}
-            {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
-            {poisonCounters > 0 ? <PoisonCounterBadge playerId={playerId} value={poisonCounters} /> : null}
-            {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
-            {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
-            {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
+            {designations.energy > 0 ? (
+              <CounterBadge kind="energy" value={designations.energy} touch={badgeTouch} />
+            ) : null}
+            {poisonCounters > 0 ? (
+              <PoisonCounterBadge playerId={playerId} value={poisonCounters} touch={badgeTouch} />
+            ) : null}
+            {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} touch={badgeTouch} /> : null}
+            {experienceCounters > 0 ? (
+              <CounterBadge kind="experience" value={experienceCounters} touch={badgeTouch} />
+            ) : null}
+            {speed > 0 ? <CounterBadge kind="speed" value={speed} touch={badgeTouch} /> : null}
             {designations.pendingSpellModifiers.length > 0
             || designations.pendingSpellReductions.length > 0 ? (
               <PendingSpellBadge
                 modifiers={designations.pendingSpellModifiers}
                 reductions={designations.pendingSpellReductions}
+                touch={badgeTouch}
               />
             ) : null}
             {designations.statusConditions.map((condition, i) => (
               <ConditionBadge
                 key={`${condition.kind.type}-${condition.source ?? "x"}-${i}`}
                 condition={condition}
+                touch={badgeTouch}
               />
             ))}
             {designations.unboundedFamilies.map(
               (u) => (
-                <UnboundedBadge key={u.family} family={u.family} state={u.state} />
+                <UnboundedBadge key={u.family} family={u.family} state={u.state} touch={badgeTouch} />
               ),
             )}
           </>

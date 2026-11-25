@@ -13,7 +13,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, LossReason, PlayerActionKind};
 use engine::types::game_state::WaitingFor;
 use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
@@ -875,8 +875,8 @@ fn two_copies_each_choose_their_own_host() {
 
 /// CR 704.4: state-based actions pay no attention to what happens during the
 /// resolution of a spell or ability. An open CR 303.4f host prompt is
-/// mid-resolution, so the token must not be swept while it is open — and an
-/// unrelated pending SBA (a player at 0 life) must still process once it closes.
+/// mid-resolution, so the token must survive it. An unrelated pending loss
+/// waits until Yenna's following scry finishes the ability.
 #[test]
 fn an_open_host_prompt_does_not_expose_the_token_to_sbas() {
     let (mut scenario, yenna) = yenna_scenario();
@@ -928,7 +928,7 @@ fn an_open_host_prompt_does_not_expose_the_token_to_sbas() {
     // Set here rather than at scenario build time: a player at 0 life on the
     // first priority check ends the game before the ability ever resolves.
     runner.state_mut().players[1].life = 0;
-    runner
+    let host_answer = runner
         .act(GameAction::ChooseTarget {
             target: Some(TargetRef::Object(host_a)),
         })
@@ -938,10 +938,49 @@ fn an_open_host_prompt_does_not_expose_the_token_to_sbas() {
         Some(AttachTarget::Object(host_a)),
         "the token was still on the battlefield to be attached when the prompt closed"
     );
+    let WaitingFor::ScryChoice { player: P0, cards } = &runner.state().waiting_for else {
+        panic!(
+            "expected P0's scry after the host answer, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(cards.len(), 2);
+    assert_eq!(runner.state().players[1].life, 0);
+    assert!(!runner.state().players[1].is_eliminated);
+    assert!(!host_answer
+        .events
+        .iter()
+        .any(|event| matches!(event, GameEvent::PlayerLost { .. })));
+
+    let scry_answer = runner
+        .act(GameAction::SelectCards {
+            cards: cards.clone(),
+        })
+        .expect("finish Yenna's scry and keep both cards");
+    let scry = scry_answer.events.iter().position(|event| {
+        matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id: P0,
+                action: PlayerActionKind::Scry,
+                look_count: Some(2),
+                ..
+            }
+        )
+    });
+    let loss = scry_answer.events.iter().position(|event| {
+        matches!(event, GameEvent::PlayerLost { player_id: P1, reasons } if reasons.contains(&LossReason::LifeTotal))
+    });
+    assert!(matches!((scry, loss), (Some(scry), Some(loss)) if scry < loss));
     assert!(
         runner.state().players[1].is_eliminated,
         "CR 704.5a: the 0-life loss still processes once resolution finishes"
     );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    assert!(runner.state().resolving_stack_entry.is_none());
 }
 
 // ── The NON-LIMINAL copy path ────────────────────────────────────────────────

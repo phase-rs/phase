@@ -777,10 +777,39 @@ impl UnitEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ActivationRestriction, Duration, Effect, PlayerScope,
-        QuantityExpr, QuantityRef, TargetFilter,
+        AbilityDefinition, AbilityKind, ActivationRestriction, CyclingHistoryWindow, Duration,
+        Effect, PlayerScope, QuantityExpr, QuantityRef, TargetFilter,
     };
+    use crate::types::oracle_diagnostic::OracleDiagnostic;
+
+    #[test]
+    fn cycling_history_discharges_this_turn_warning() {
+        let parsed = parse_oracle_text(
+            "At the beginning of each end step, if you cycled two or more cards this turn, return this card from your graveyard to your hand.",
+            "Spellpyre Phoenix",
+            &[],
+            &["Creature".into()],
+            &["Phoenix".into()],
+        );
+        let evidence = UnitEvidence::of(&parsed);
+        assert!(evidence.any_quantity_ref(|quantity| matches!(
+            quantity,
+            QuantityRef::CardsCycled {
+                window: CyclingHistoryWindow::ThisTurn,
+                ..
+            }
+        )));
+        assert!(
+            !parsed.parse_warnings.iter().any(|warning| matches!(
+                warning,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Duration_ThisTurn"
+            )),
+            "{:?}",
+            parsed.parse_warnings
+        );
+    }
 
     fn parsed_with(def: AbilityDefinition) -> ParsedAbilities {
         ParsedAbilities {

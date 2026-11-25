@@ -80,7 +80,7 @@ describe("deck-size floor wording — neither component receives a format", () =
       deck: [{ name: "Filler", count: 10 }],
       deckComposition: "commanders-outside" as const,
       cardDataCache: new Map([[name, makeLegendaryCreature(name)]]),
-      isCommanderEligible: () => true,
+      commanderCandidates: [],
       onSetCommander: vi.fn(),
       onRemoveCommander: vi.fn(),
     };
@@ -121,7 +121,7 @@ describe("deck-size floor wording — neither component receives a format", () =
         deck={[]}
         deckComposition="commanders-outside"
         cardDataCache={new Map([[name, makeLegendaryCreature(name)]])}
-        isCommanderEligible={() => true}
+        commanderCandidates={[]}
         onSetCommander={vi.fn()}
         onRemoveCommander={vi.fn()}
         deckSizeRule={formatMetadata("FreeformCommander")!.default_config.deck_size}

@@ -1,8 +1,9 @@
 //! Issue #629 — Fractured Sanity cycling must mill each opponent four cards.
 //!
 //! CR 702.29a: Cycling is an activated ability from hand (discard, draw).
-//! CR 702.29c: "When you cycle this card" triggers fire from the graveyard.
-//! CR 701.13: Mill moves cards from library to graveyard.
+//! CR 702.29c: "When you cycle this card" triggers from whatever zone the card winds up in;
+//! here, the graveyard.
+//! CR 701.17a: To mill, a player puts cards from the top of their library into their graveyard.
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::AbilityTag;
@@ -44,10 +45,10 @@ fn fractured_sanity_parses_cycle_trigger_with_mill() {
         cycle_trigger.definition.valid_card,
         Some(engine::types::ability::TargetFilter::SelfRef)
     );
-    assert!(cycle_trigger
-        .definition
-        .trigger_zones
-        .contains(&Zone::Graveyard));
+    assert_eq!(
+        cycle_trigger.definition.trigger_zones,
+        vec![Zone::Graveyard, Zone::Exile]
+    );
     assert!(
         cycle_trigger.definition.execute.is_some(),
         "cycle trigger must carry the mill effect"

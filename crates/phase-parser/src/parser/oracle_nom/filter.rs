@@ -8,7 +8,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{alphanumeric1, space0, space1};
 use nom::combinator::{map, not, opt, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::OracleResult;
@@ -27,7 +27,7 @@ use crate::types::counter::{parse_counter_type, CounterMatch};
 use crate::types::zones::Zone;
 
 pub use crate::types::text_grammar::{
-    parse_color_property, parse_property_filter, parse_zone_filter,
+    parse_card_type_count_property, parse_color_property, parse_property_filter, parse_zone_filter,
 };
 
 /// CR 201.2 + CR 201.2a: "not named <name>" — a NAME predicate, lowered to
@@ -185,6 +185,25 @@ pub fn parse_no_abilities(input: &str) -> OracleResult<'_, FilterProp> {
     value(FilterProp::HasNoAbilities, tag("no abilities")).parse(input)
 }
 
+/// CR 605.1: an object with a mana ability — an activated or triggered ability
+/// meeting the mana-ability criteria. Narrow primitive shared by the
+/// target-suffix scanner (oracle_target.rs) and the search-library filter
+/// scanner (oracle_effect/search.rs); each call site supplies its own
+/// surrounding "with " grammar, so this matches the bare predicate only.
+/// Both number forms are printed Oracle text: singular "a mana ability"
+/// (Raggadragga clause 2) and plural "mana abilities" (Power Sink: "tap all
+/// lands with mana abilities they control"). The predicate is "has ≥1 mana
+/// ability" regardless of subject number, so both lower to HasManaAbility.
+/// The two heads ("a ..." vs "mana ...") are disjoint, so alt order is
+/// immaterial.
+pub fn parse_mana_ability(input: &str) -> OracleResult<'_, FilterProp> {
+    alt((
+        value(FilterProp::HasManaAbility, tag("a mana ability")),
+        value(FilterProp::HasManaAbility, tag("mana abilities")),
+    ))
+    .parse(input)
+}
+
 /// Parse the inner content of a "with" clause.
 fn parse_with_inner(input: &str) -> OracleResult<'_, FilterProp> {
     alt((
@@ -299,6 +318,67 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
     Ok((rest, prop))
 }
 
+/// CR 208.1: Parse the source-relative lesser-power/toughness suffix shape
+/// without choosing its referent. The enclosing target parser owns that
+/// context-sensitive binding; keeping the grammar separate prevents a bare
+/// suffix from silently becoming a trigger-source or prior-target reference.
+pub fn parse_relative_pt_comparison(input: &str) -> OracleResult<'_, (PtStat, Comparator)> {
+    let (input, _) = tag("with").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, inclusive) = opt(terminated(tag("equal or"), space1)).parse(input)?;
+    let (input, _) = tag("lesser").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, stat) = alt((
+        value(PtStat::Power, tag("power")),
+        value(PtStat::Toughness, tag("toughness")),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        (
+            stat,
+            if inclusive.is_some() {
+                Comparator::LE
+            } else {
+                Comparator::LT
+            },
+        ),
+    ))
+}
+
+/// CR 202.3: Parse the numeric mana-value comparison tail after the shared
+/// `mana value ` / `converted mana cost ` head. This is deliberately limited to
+/// literal/X numeric grammar; contextual and superlative mana-value phrases
+/// remain owned by `oracle_target`.
+pub(crate) fn parse_mana_value_comparison_tail(input: &str) -> OracleResult<'_, FilterProp> {
+    if let Ok((after, values)) = parse_number_disjunction(input) {
+        let props = values
+            .into_iter()
+            .map(|value| FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value,
+            })
+            .collect();
+        return Ok((after, FilterProp::AnyOf { props }));
+    }
+
+    let (after_num_raw, value) = parse_quantity_expr_number(input)?;
+    let after_num = after_num_raw.trim_start();
+    let (after, (comparator, value)) = alt((
+        map(terminated(tag("or greater"), not(alphanumeric1)), {
+            let value = value.clone();
+            move |_| (Comparator::GE, value.clone())
+        }),
+        map(terminated(tag("or less"), not(alphanumeric1)), {
+            let value = value.clone();
+            move |_| (Comparator::LE, value.clone())
+        }),
+        map(not(tag("or")), move |_| (Comparator::EQ, value.clone())),
+    ))
+    .parse(after_num)?;
+    Ok((after, FilterProp::Cmc { comparator, value }))
+}
+
 /// CR 208.1 (power and toughness) + CR 202.3 (mana value): the HEAD of a
 /// postnominal superlative property qualifier — "with the `<superlative>`
 /// `<property>`".
@@ -329,8 +409,37 @@ pub(crate) fn parse_superlative_property_head(
 /// CR 208.1: Possessive phrase introducing a creature's *own* stat in a
 /// self-referential P/T comparison — "its", "their", or "that creature's".
 /// All refer to the candidate object itself, not the ability source.
-fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
+pub(crate) fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
     alt((tag("its "), tag("their "), tag("that creature's "))).parse(input)
+}
+
+/// Peel a trailing spell P/T qualifier from a cost-modifier subject.
+/// A recognized stat with an invalid comparison is an error.
+pub fn split_spell_pt_qualifier(
+    subject: &str,
+) -> Result<(&str, Option<FilterProp>), nom::Err<super::error::OracleError<'_>>> {
+    use super::primitives::split_once_on;
+    use nom::combinator::{all_consuming, eof, peek};
+
+    let Ok((_, (prefix, tail))) = split_once_on(subject, " with ") else {
+        return Ok((subject, None));
+    };
+    if peek((
+        opt(tag::<_, _, super::error::OracleError<'_>>("base ")),
+        alt((
+            tag("power"),
+            tag("toughness"),
+            tag("total power and toughness"),
+        )),
+        alt((space1, eof)),
+    ))
+    .parse(tail)
+    .is_err()
+    {
+        return Ok((subject, None));
+    }
+    let (_, prop) = all_consuming(parse_pt_comparison).parse(tail)?;
+    Ok((prefix, Some(prop)))
 }
 
 /// CR 208.1: "toughness greater than <poss> power" → [`FilterProp::ToughnessGTPower`]
@@ -700,6 +809,18 @@ mod tests {
     use super::*;
     use crate::types::mana::ManaColor;
 
+    #[test]
+    fn parse_relative_pt_comparison_lesser_and_equal() {
+        assert_eq!(
+            parse_relative_pt_comparison("with lesser power, return it"),
+            Ok((", return it", (PtStat::Power, Comparator::LT),))
+        );
+        assert_eq!(
+            parse_relative_pt_comparison("with equal or lesser toughness."),
+            Ok((".", (PtStat::Toughness, Comparator::LE)))
+        );
+    }
+
     /// CR 614.1a + CR 109.1: the single authority must cover every plural noun
     /// BOTH former copies knew, and must carry the "other" article rather than
     /// discarding it.
@@ -908,6 +1029,42 @@ mod tests {
     #[test]
     fn test_parse_no_abilities_failure() {
         assert!(parse_no_abilities("flying").is_err());
+    }
+
+    #[test]
+    fn test_parse_mana_ability() {
+        // CR 605.1: bare "a mana ability" predicate → HasManaAbility,
+        // fully consumed.
+        let (rest, prop) = parse_mana_ability("a mana ability").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_mana_ability_residual() {
+        // Only the bare predicate is consumed; trailing grammar is left for the
+        // call site's scanner.
+        let (rest, prop) = parse_mana_ability("a mana ability and more").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, " and more");
+    }
+
+    #[test]
+    fn test_parse_mana_ability_failure() {
+        assert!(parse_mana_ability("flying").is_err());
+    }
+
+    #[test]
+    fn test_parse_mana_ability_plural() {
+        // CR 605.1: plural "mana abilities" (Power Sink: "tap all lands with
+        // mana abilities they control") lowers to the same HasManaAbility
+        // predicate; trailing grammar is left for the call site's scanner.
+        let (rest, prop) = parse_mana_ability("mana abilities").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, "");
+        let (rest, prop) = parse_mana_ability("mana abilities they control").unwrap();
+        assert_eq!(prop, FilterProp::HasManaAbility);
+        assert_eq!(rest, " they control");
     }
 
     #[test]
@@ -1383,6 +1540,43 @@ mod tests {
         assert_eq!(rest3, "");
     }
 
+    #[test]
+    fn test_parse_card_type_count_property() {
+        // Positive (reach-guard for the rejections below): the printed form.
+        let (rest, p) = parse_card_type_count_property("with two or more card types").unwrap();
+        assert_eq!(
+            p,
+            FilterProp::CardTypeCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }
+        );
+        assert_eq!(rest, "");
+
+        // The digit form parses identically (same `parse_number` axis).
+        let (rest, p) = parse_card_type_count_property("with 2 or more card types").unwrap();
+        assert_eq!(
+            p,
+            FilterProp::CardTypeCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }
+        );
+        assert_eq!(rest, "");
+
+        // Trailing text is left unconsumed for the caller (the play-subject
+        // arm's effect-comma check relies on this).
+        let (rest, _) =
+            parse_card_type_count_property("with two or more card types, draw a card").unwrap();
+        assert_eq!(rest, ", draw a card");
+
+        // Unprinted forms are rejected (fail closed, never partial).
+        assert!(parse_card_type_count_property("with two card types").is_err());
+        assert!(parse_card_type_count_property("with exactly two card types").is_err());
+        assert!(parse_card_type_count_property("with two or fewer card types").is_err());
+        assert!(parse_card_type_count_property("with two or more card type").is_err());
+    }
+
     /// V-FORMS (SHAPE) — CR 105.4. The printed chosen-colour qualifier must
     /// CHOMP (not peek) its text and must reject every adjacent form.
     ///
@@ -1485,5 +1679,58 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    /// CR 202.3: the shared numeric mana-value tail covers threshold,
+    /// exact-value-list, and malformed-tail behavior without accepting a
+    /// partially parsed comparator.
+    #[test]
+    fn mana_value_comparison_tail_is_shared_and_fails_closed() {
+        let fixed = |value| QuantityExpr::Fixed { value };
+        assert_eq!(
+            parse_mana_value_comparison_tail("4 or greater, rest"),
+            Ok((
+                ", rest",
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: fixed(4),
+                },
+            ))
+        );
+        assert_eq!(
+            parse_mana_value_comparison_tail("5 or less"),
+            Ok((
+                "",
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: fixed(5),
+                },
+            ))
+        );
+        assert_eq!(
+            parse_mana_value_comparison_tail("4, 5, or 6, rest"),
+            Ok((
+                ", rest",
+                FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: fixed(4),
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: fixed(5),
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: fixed(6),
+                        },
+                    ],
+                },
+            ))
+        );
+        assert!(parse_mana_value_comparison_tail("4 or blue").is_err());
+        assert!(parse_mana_value_comparison_tail("4 or").is_err());
+        assert!(parse_mana_value_comparison_tail("4 or greaterish").is_err());
     }
 }

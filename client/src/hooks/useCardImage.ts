@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { CardPrinting, PrintedRef } from "../adapter/types.ts";
 import { matchSourcePrinting } from "../services/artSelection.ts";
+import { automaticArtCatalogVersion } from "../services/cardImageLookup.ts";
 import { createOwnerArtCatalogReader, deriveImageUrl, imageUrlSize } from "../services/scryfall.ts";
 import type { ImageSize, OwnerArtCatalogReader, OwnerArtAuthority } from "../services/scryfall.ts";
 import { cardCandidateGroups } from "../services/visualPacks/candidateKeys.ts";
@@ -57,6 +58,8 @@ interface OwnerPresentation {
   isFlip: boolean;
 }
 
+type OwnerOverlay = { image: ImageResult; failedSources: ReadonlySet<string> };
+
 // These instances never alias the normal hook's caches or repository.
 const ownerPresentations = new BoundedCache<string, OwnerPresentation>(256);
 let ownerRepository: VisualPackRepository | undefined;
@@ -107,7 +110,7 @@ function presentationResult(
 /**
  * Revalidate generation/admission immediately before each overlay-initiated repository API call. A repository call initiated while admitted may finish its internal initialization, subscription, resolution and revision retry after admission is lost; those operations are not cancellable through the existing API. The overlay must start no further calls and must discard stale results before presentation, caching or publication.
  */
-function useOwnerCardImageOverlay(input: OwnerInput | null, reload: (() => void) | undefined): ImageResult | null {
+function useOwnerCardImageOverlay(input: OwnerInput | null, reload: (() => void) | undefined): OwnerOverlay | null {
   const readerRef = useRef<OwnerArtCatalogReader | null>(null);
   const latest = useRef(input);
   latest.current = input;
@@ -269,21 +272,23 @@ function useOwnerCardImageOverlay(input: OwnerInput | null, reload: (() => void)
   // source makes owner art failed art, online or offline.
   const recordedFailure = selected.failed.size > 0;
   const showsFailedArt = recordedFailure && selected.remoteDone && !selected.sources[selected.index]?.src;
-  return presentationResult(
-    selected,
-    (src) => advanceRef.current(selected.key, src),
-    recordedFailure ? reload : undefined,
-    showsFailedArt ? input.oracleId : undefined,
-  );
+  return {
+    image: presentationResult(
+      selected,
+      (src) => advanceRef.current(selected.key, src),
+      recordedFailure ? reload : undefined,
+      showsFailedArt ? input.oracleId : undefined,
+    ),
+    failedSources: selected.failed,
+  };
 }
 
 /**
  * Normal rendering runs unchanged, including while owner art is pending or displayed.
- * An admitted exact owner printing replaces it when ready. Missing admitted art is
- * terminal null/nonloading, never a substitution from another printing. Toggle off
- * immediately reveals the still-live normal result; pending/rejected owners do not
- * blank it or add a loading flag. Owner admission requires identity delivered with
- * its carrier (`ownerPrintedRef`, or the caller's `oracleId`); never a name lookup.
+ * A usable exact image takes precedence. When automatic exact art is pending or
+ * exhausted, the normal result stays visible. Admitted owner art retains its exact
+ * overlay through exhaustion. Admission uses the carrier's identity
+ * (`ownerPrintedRef`, or the caller's `oracleId`).
  */
 export function useCardImage(cardName: string, options?: UseCardImageOptions): CardImageResult {
   let legacyOptions: Parameters<typeof useLegacyCardImage>[1] = options;
@@ -293,6 +298,7 @@ export function useCardImage(cardName: string, options?: UseCardImageOptions): C
   }
   const normal = useLegacyCardImage(cardName, legacyOptions);
   const owner = options?.ownerPrinting;
+  const catalogVersion = automaticArtCatalogVersion(owner);
   const eligible = typeof owner?.set_code === "string" && owner.set_code.length > 0
     && typeof owner.collector_number === "string" && owner.collector_number.length > 0;
   const enabled = usePreferencesStore((state) =>
@@ -319,6 +325,7 @@ export function useCardImage(cardName: string, options?: UseCardImageOptions): C
         faceIndex,
         setCode,
         collectorNumber,
+        catalogVersion,
         size,
         language,
         offline,
@@ -329,13 +336,25 @@ export function useCardImage(cardName: string, options?: UseCardImageOptions): C
     };
   }
   const overlay = useOwnerCardImageOverlay(input, ownerArt.reload);
+  const failedOrdinarySrc = catalogVersion !== null && overlay
+    && !overlay.image.src && !overlay.image.isLoading
+    && normal.src && overlay.failedSources.has(normal.src)
+    ? normal.src
+    : null;
+  const advanceOrdinarySource = normal.advanceFailedSource;
+  useEffect(() => {
+    // A shared URL can stay on the same <img> across the handoff. The ordinary
+    // ladder records the failure even when the browser emits no further error.
+    if (failedOrdinarySrc) advanceOrdinarySource?.(failedOrdinarySrc);
+  }, [failedOrdinarySrc, advanceOrdinarySource]);
+
   // Whether some surface of the card failed is the card's, read under the owner
   // art's own oracle id, and another surface's failure is worth a reload too.
-  const result = overlay
+  const result = overlay && (catalogVersion === null || overlay.image.src)
     ? {
-        ...overlay,
+        ...overlay.image,
         cardArtFailed: ownerArt.failed,
-        reload: overlay.reload ?? (ownerArt.failed ? ownerArt.reload : undefined),
+        reload: overlay.image.reload ?? (ownerArt.failed ? ownerArt.reload : undefined),
       }
     : normal;
   // A surface counts toward `cardArtFailed` by what it shows: owner art that

@@ -378,6 +378,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::SeparatePilesChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::CopyRetarget { .. }
         | WaitingFor::CombatTaxPayment { .. } => {
@@ -636,6 +637,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::SeparatePilesChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::AssistChoosePlayer { .. }
@@ -4714,14 +4716,20 @@ fn selection_projection(
             action: SelectionAction::KeepWithinPower,
             source_id: Some(*source_id),
         }),
+        // CR 101.4 + CR 701.21a: exact (`minimum_count == None`) or up-to
+        // keeper; the engine publishes both bounds.
         WaitingFor::KeepExactPermanentsChoice {
             eligible,
             required_count,
+            minimum_count,
             source_id,
             ..
         } => Some(SelectionProjection {
             object_ids: eligible.clone(),
-            constraint: count_constraint(*required_count, *required_count),
+            constraint: count_constraint(
+                minimum_count.unwrap_or(*required_count),
+                *required_count,
+            ),
             confirm: ConfirmSemantics::Explicit,
             intent: InteractionIntentCode::Keep,
             action: SelectionAction::KeepExact,
@@ -5315,6 +5323,7 @@ fn selection_projection(
         | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::ProliferateChoice { .. }
@@ -12430,6 +12439,7 @@ mod tests {
             keep_is_distinct: Vec::new(),
             player: PlayerId(0),
             stack_entry_index: 0,
+            stack_entry_id: None,
             scope: crate::types::game_state::RetargetScope::Single,
             current_targets: vec![object_a.clone()],
             slots: vec![crate::types::game_state::RetargetSlotAddress {
@@ -12461,6 +12471,7 @@ mod tests {
             keep_is_distinct: Vec::new(),
             player: PlayerId(0),
             stack_entry_index: 0,
+            stack_entry_id: None,
             scope: crate::types::game_state::RetargetScope::Single,
             current_targets: vec![object_a.clone()],
             slots: vec![],

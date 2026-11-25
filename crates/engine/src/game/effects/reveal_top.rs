@@ -4,6 +4,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
 /// Whose library a `RevealTop` reveals from, bound once for both [`resolve`]
@@ -80,6 +81,79 @@ pub(crate) fn optional_reveal_is_infeasible(state: &GameState, ability: &Resolve
     }
 }
 
+/// The top cards a `RevealTop` reveals, in reveal order.
+pub(crate) enum RevealTopSelection {
+    /// CR 701.20a + CR 601.2c: two or more target players each reveal their
+    /// own top cards, in target order. A player whose library is empty reveals
+    /// nothing and has no entry.
+    EachTargeted(Vec<(PlayerId, Vec<ObjectId>)>),
+    /// CR 701.20a: one player's top cards — empty when that library is.
+    One {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+    },
+    /// CR 608.2b: the player reference names no one, so nothing is revealed.
+    Nobody,
+}
+
+impl RevealTopSelection {
+    /// Every revealed card in reveal order: the set the handler publishes to
+    /// `last_revealed_ids`.
+    pub(crate) fn into_cards(self) -> Vec<ObjectId> {
+        match self {
+            RevealTopSelection::EachTargeted(reveals) => {
+                reveals.into_iter().flat_map(|(_, cards)| cards).collect()
+            }
+            RevealTopSelection::One { cards, .. } => cards,
+            RevealTopSelection::Nobody => Vec::new(),
+        }
+    }
+}
+
+/// CR 701.20a + CR 401.5: the cards resolving `ability`'s `RevealTop` would
+/// reveal right now, or `None` when its effect is not a `RevealTop`. The
+/// single selection authority: [`resolve`] reveals exactly these.
+pub(crate) fn revealed_cards(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<RevealTopSelection> {
+    let Effect::RevealTop { count, player } = &ability.effect else {
+        return None;
+    };
+    let count = *count as usize;
+    let selection = match reveal_subjects(state, ability, player) {
+        RevealSubjects::EachTargeted(targeted_players) => {
+            let reveals = targeted_players
+                .into_iter()
+                .filter_map(|pid| {
+                    let player = state.players.get(pid.0 as usize)?;
+                    // WATCH-POINT N2: skip an empty library INDIVIDUALLY — never
+                    // early-return, or a first empty library would suppress every
+                    // later player's reveal (CR 608.2b fail-closed per player).
+                    let library = state.library_of(player.id);
+                    if library.is_empty() {
+                        return None;
+                    }
+                    Some((pid, library.iter().take(count).copied().collect()))
+                })
+                .collect();
+            RevealTopSelection::EachTargeted(reveals)
+        }
+        RevealSubjects::One(None) => RevealTopSelection::Nobody,
+        // Take the top `count` cards (library[0] = top, per zones.rs convention).
+        RevealSubjects::One(Some(target_player)) => RevealTopSelection::One {
+            player: target_player,
+            cards: state
+                .library_of(target_player)
+                .iter()
+                .take(count)
+                .copied()
+                .collect(),
+        },
+    };
+    Some(selection)
+}
+
 /// CR 701.20a: Reveal the top card(s) of a player's library.
 ///
 /// Resolves the `player` target filter (typically `DefendingPlayer` or `Controller`)
@@ -90,29 +164,16 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (count, player_filter) = match &ability.effect {
-        Effect::RevealTop { count, player } => (*count as usize, player.clone()),
-        _ => return Err(EffectError::MissingParam("RevealTop count".to_string())),
+    let Some(selection) = revealed_cards(state, ability) else {
+        return Err(EffectError::MissingParam("RevealTop count".to_string()));
     };
 
     state.last_parent_target_missing_reason = None;
 
-    let target_player = match reveal_subjects(state, ability, &player_filter) {
-        RevealSubjects::EachTargeted(targeted_players) => {
-            let mut accumulated: Vec<crate::types::identifiers::ObjectId> = Vec::new();
-            for pid in targeted_players {
-                let Some(player) = state.players.get(pid.0 as usize) else {
-                    continue;
-                };
-                // WATCH-POINT N2: skip an empty library INDIVIDUALLY — never
-                // early-return, or a first empty library would suppress every later
-                // player's reveal (CR 608.2b fail-closed per player).
-                let library = state.library_of(player.id);
-                if library.is_empty() {
-                    continue;
-                }
-                let count_n = count.min(library.len());
-                let revealed_ids: Vec<_> = library.iter().take(count_n).copied().collect();
+    let (target_player, revealed_ids) = match selection {
+        RevealTopSelection::EachTargeted(reveals) => {
+            let mut accumulated: Vec<ObjectId> = Vec::new();
+            for (pid, revealed_ids) in reveals {
                 // CR 701.20b: Revealing a card doesn't cause it to leave its zone.
                 for &card_id in &revealed_ids {
                     state.revealed_cards.insert(card_id);
@@ -139,16 +200,15 @@ pub fn resolve(
             });
             return Ok(());
         }
-        RevealSubjects::One(None) => {
+        RevealTopSelection::Nobody => {
             super::publish_reveal_result(state, Vec::new());
             state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
             return Ok(());
         }
-        RevealSubjects::One(Some(target_player)) => target_player,
+        RevealTopSelection::One { player, cards } => (player, cards),
     };
 
-    let library = state.library_of(target_player);
-    if library.is_empty() {
+    if state.library_of(target_player).is_empty() {
         super::publish_reveal_result(state, Vec::new());
         state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
         events.push(GameEvent::EffectResolved {
@@ -158,10 +218,6 @@ pub fn resolve(
         });
         return Ok(());
     }
-
-    // Take the top `count` cards (library[0] = top, per zones.rs convention)
-    let count = count.min(library.len());
-    let revealed_ids: Vec<_> = library.iter().take(count).copied().collect();
 
     // CR 701.20b: Revealing a card doesn't cause it to leave the zone it's in.
     for &card_id in &revealed_ids {

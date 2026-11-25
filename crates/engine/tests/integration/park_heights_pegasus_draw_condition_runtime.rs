@@ -59,6 +59,7 @@ fn record_creature_entry(state: &mut GameState, object_id: u64, controller: Play
     state
         .battlefield_entries_this_turn
         .push_back(BattlefieldEntryRecord {
+            token_status: Some(engine::types::game_state::EntryTokenStatus::Nontoken),
             object_id: ObjectId(object_id),
             name: format!("Entered Creature {object_id}"),
             core_types: vec![CoreType::Creature],

@@ -20,8 +20,8 @@
 //!     no basic lands."
 //!
 //! Runtime tests drive the production pipeline (cast, combat, castability); the
-//! two lines that fail closed are pinned at `parse_oracle_text`, where the gap is
-//! recorded.
+//! line that fails closed (Woolly Razorback) is pinned at `parse_oracle_text`,
+//! where the gap is recorded.
 
 use engine::game::casting::can_cast_object_now;
 use engine::game::combat::AttackTarget;
@@ -95,16 +95,18 @@ fn parsed_gaps_and_damage_shield(
     (gaps, shield)
 }
 
-/// CR 615.1a: Bronze Horse's shield is scoped to "spells that target it", a
-/// source subject no filter expresses ("that target" is not in the target
-/// grammar). Its gate parses, so the line fails closed on the source scope: no
-/// shield (which would prevent combat damage and every untargeted source while
-/// the gate holds), one line-owned gap.
+/// CR 615.1a + CR 609.7c: Bronze Horse's shield is scoped to "spells that target it"
+/// (a spell source whose targets include the host). The gate and the source scope
+/// both parse, so the line yields the gated, source-scoped shield and no gap. The
+/// runtime behaviour is witnessed in `bronze_horse_targeting_spell_prevention`.
 #[test]
-fn bronze_horse_source_scope_fails_closed() {
+fn bronze_horse_source_scope_parses_to_a_scoped_shield() {
     let (gaps, shield) = parsed_gaps_and_damage_shield(BRONZE_HORSE, "Bronze Horse", &["Trample"]);
-    assert_eq!(gaps, vec!["prevention_source_scope".to_string()]);
-    assert!(!shield, "no unscoped damage-prevention shield may be built");
+    assert!(gaps.is_empty(), "no line-owned gap, got {gaps:?}");
+    assert!(
+        shield,
+        "the source-scoped damage-prevention shield is built"
+    );
 }
 
 /// CR 615.1a + CR 702.3a: Woolly Razorback's gated line also grants defender

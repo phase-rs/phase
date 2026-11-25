@@ -176,11 +176,17 @@ fn real_cast_journals_an_exact_stack_entry_finalize() {
         "the recorded result is the entry that is actually live"
     );
     assert_eq!(
-        command.resulting_paid_facts.actual_mana_spent, 2,
+        command
+            .resulting_paid_facts
+            .as_deref()
+            .unwrap()
+            .actual_mana_spent,
+        2,
         "the recorded snapshot is the one the engine reads for paid facts"
     );
     assert_eq!(
-        state.stack_paid_facts[&entry.id], *command.resulting_paid_facts,
+        state.stack_paid_facts[&entry.id],
+        *command.resulting_paid_facts.as_deref().unwrap(),
         "the recorded snapshot is the snapshot that was installed"
     );
 
@@ -266,7 +272,7 @@ fn a_divergent_paid_facts_predecessor_installs_neither_half() {
     let stub_kind = predecessor.stack[command.entry_position].kind.clone();
     // Diverge ONLY the snapshot side, leaving the entry precondition satisfied,
     // so the rejection can only come from the paid-facts check.
-    let mut foreign = command.resulting_paid_facts.as_ref().clone();
+    let mut foreign = command.resulting_paid_facts.as_deref().unwrap().clone();
     foreign.actual_mana_spent += 7;
     predecessor
         .stack_paid_facts
@@ -441,7 +447,7 @@ fn a_recorded_prior_snapshot_is_required_to_match_before_install() {
     );
 
     // A command that claims a prior snapshot was present.
-    let mut prior = command.resulting_paid_facts.as_ref().clone();
+    let mut prior = command.resulting_paid_facts.as_deref().unwrap().clone();
     prior.actual_mana_spent = 1;
     let mut with_prior = command.clone();
     with_prior.expected_old_paid_facts = Some(Box::new(prior.clone()));
@@ -454,7 +460,8 @@ fn a_recorded_prior_snapshot_is_required_to_match_before_install() {
     apply_resolved_stack_entry_finalize(&mut matching, &with_prior)
         .expect("a recorded prior snapshot that matches the predecessor must install");
     assert_eq!(
-        matching.stack_paid_facts[&command.object], *command.resulting_paid_facts,
+        matching.stack_paid_facts[&command.object],
+        *command.resulting_paid_facts.as_deref().unwrap(),
         "the recorded result overwrites the recorded prior snapshot"
     );
     assert_eq!(
@@ -478,4 +485,76 @@ fn a_recorded_prior_snapshot_is_required_to_match_before_install() {
         absent.stack[command.entry_position].kind, stub_kind,
         "and the rejected replay installs neither half"
     );
+}
+
+#[test]
+fn phase2_v9_spell_finalize_requires_the_paid_result_on_decode_and_apply() {
+    use crate::support::shared_card_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::resolved_commands::ResolvedRulesJournal;
+    use engine::types::zones::Zone;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario.add_real_card(
+        P0,
+        "Faithless Looting",
+        Zone::Hand,
+        shared_card_db().unwrap(),
+    );
+    scenario.with_mana_pool(P0, vec![ManaUnit::new(ManaType::Red, spell, false, vec![])]);
+    let mut runner = scenario.build();
+    runner.cast(spell).commit();
+    let state = runner.state();
+    let entry = state.stack.back().expect("Looting is on the stack");
+    assert_eq!(entry.source_id, spell);
+    let mut wire = serde_json::to_value(&state.resolved_rules_journal).unwrap();
+    let decoded: ResolvedRulesJournal = serde_json::from_value(wire.clone()).unwrap();
+    let (position, genuine) = decoded
+        .entries()
+        .iter()
+        .enumerate()
+        .find_map(|(position, row)| match row.command.as_ref()? {
+            ResolvedRulesCommand::StackEntryFinalize(command) if command.object == entry.id => {
+                Some((position, command.as_ref()))
+            }
+            _ => None,
+        })
+        .expect("real spell finalizer");
+    assert_eq!(
+        genuine.resulting_paid_facts.as_deref(),
+        state.stack_paid_facts.get(&entry.id)
+    );
+    assert!(genuine.resulting_paid_facts.is_some());
+
+    let mut predecessor = pre_finalize_state(state, genuine);
+    let mut positive = predecessor.clone();
+    apply_resolved_stack_entry_finalize(&mut positive, genuine).unwrap();
+    assert_eq!(positive.stack, state.stack);
+    assert_eq!(positive.stack_paid_facts, state.stack_paid_facts);
+
+    let payload = &mut wire["entries"][position]["command"]["StackEntryFinalize"];
+    payload
+        .as_object_mut()
+        .unwrap()
+        .remove("resulting_paid_facts")
+        .unwrap();
+    let error = serde_json::from_value::<ResolvedRulesJournal>(wire)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("requires a resulting paid-facts snapshot"),
+        "{error}"
+    );
+
+    let mut malformed = genuine.clone();
+    malformed.resulting_paid_facts = None;
+    let before = predecessor.clone();
+    assert_eq!(
+        apply_resolved_stack_entry_finalize(&mut predecessor, &malformed),
+        Err(ResolvedStackEntryFinalizeReplayInvariantError::MissingResultPaidFacts(entry.id))
+    );
+    assert_eq!(predecessor.stack, before.stack);
+    assert_eq!(predecessor.stack_paid_facts, before.stack_paid_facts);
+    assert_eq!(predecessor.objects[&spell], before.objects[&spell]);
 }

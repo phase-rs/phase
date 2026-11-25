@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   parseDeckFile,
   exportDeckFile,
@@ -6,18 +6,38 @@ import {
   exportMtgaDeck,
   detectAndParseDeck,
   deriveImportedDeckName,
+  deckEntryKey,
+  deduplicateEntries,
+  type DeckEntry,
+  looksCommanderSingleton,
   repairParsedDeck,
+  removeOneCopy,
   assignOathbreakerSlots,
   expandParsedDeck,
   parsedDeckHasCards,
 } from '../deckParser';
 import { resolveCommander } from '../commanderResolution';
+import { inferCommander } from '../engineRuntime';
 
 vi.mock('../engineRuntime', () => ({
-  isCardCommanderEligible: vi.fn(),
+  inferCommander: vi.fn(),
 }));
 
 describe('deckParser', () => {
+  it('removes one copy by name from the first positive matching row', () => {
+    const zero = { count: 0, name: 'Forest', sourcePrinting: { setCode: 'one', collectorNumber: '276' } };
+    const positive = { count: 2, name: 'Forest', sourcePrinting: { setCode: 'dmu', collectorNumber: '277' } };
+
+    expect(removeOneCopy([zero, positive], 'forest')).toEqual([zero, { ...positive, count: 1 }]);
+  });
+
+  it('removes one copy by exact key from the first positive matching row', () => {
+    const zero = { count: 0, name: 'Forest', sourcePrinting: { setCode: 'one', collectorNumber: '276' } };
+    const positive = { ...zero, count: 1 };
+
+    expect(removeOneCopy([zero, positive], positive)).toEqual([zero]);
+  });
+
   it('moves the selected Oathbreaker and signature spell into their special slots', () => {
     const result = assignOathbreakerSlots(
       {
@@ -785,20 +805,76 @@ describe('sourcePrinting capture', () => {
     expect(result.main[0].sourcePrinting).toBeUndefined();
   });
 
-  it('preserves sourcePrinting through deduplicateEntries', () => {
-    const content = '2 Lightning Bolt (FDN) 123\n2 Lightning Bolt (FDN) 123';
-    const result = parseMtgaDeck(content);
-    expect(result.main).toHaveLength(1);
-    expect(result.main[0].count).toBe(4);
-    expect(result.main[0].sourcePrinting).toEqual({ setCode: 'fdn', collectorNumber: '123' });
+  it.each([
+    ['a missing set code', { collectorNumber: '276' }],
+    ['an empty set code', { setCode: '', collectorNumber: '276' }],
+    ['an empty collector number', { setCode: 'one', collectorNumber: '' }],
+    ['a blank collector number', { setCode: 'one', collectorNumber: ' ' }],
+  ])('keys a stored printing with %s like an entry without printing data', (_case, sourcePrinting) => {
+    const entry = { count: 1, name: 'Forest' };
+    const malformed = { ...entry, sourcePrinting } as DeckEntry;
+    expect(deckEntryKey(malformed)).toBe(deckEntryKey(entry));
+    expect(repairParsedDeck({ main: [entry, malformed], sideboard: [] }).main).toEqual([{ count: 2, name: 'Forest' }]);
   });
 
-  it('keeps first sourcePrinting when deduplicating entries from different sets', () => {
-    const content = '2 Lightning Bolt (FDN) 123\n1 Lightning Bolt (A25) 141';
-    const result = parseMtgaDeck(content);
-    expect(result.main).toHaveLength(1);
-    expect(result.main[0].count).toBe(3);
-    expect(result.main[0].sourcePrinting).toEqual({ setCode: 'fdn', collectorNumber: '123' });
+  it('merges matching printings case-insensitively by set and keeps collector numbers exact', () => {
+    const entry = { count: 2, name: 'Forest', sourcePrinting: { setCode: 'one', collectorNumber: '276a' } };
+    expect(deduplicateEntries([
+      entry,
+      { ...entry, sourcePrinting: { setCode: 'ONE', collectorNumber: '276a' } },
+      { ...entry, sourcePrinting: { setCode: 'one', collectorNumber: '276A' } },
+      { count: 3, name: 'Forest' },
+      { count: 5, name: 'Forest' },
+    ])).toEqual([
+      { ...entry, count: 4 },
+      { ...entry, sourcePrinting: { setCode: 'one', collectorNumber: '276A' } },
+      { count: 8, name: 'Forest' },
+    ]);
+  });
+
+  it.each([
+    ['MTGA', 'Deck\n4 Forest (ONE) 276\n3 Forest (DMU) 277\n5 Forest (NEO) 292'],
+    ['Forge', '[Main]\n4 Forest|ONE|[276]\n3 Forest|DMU|[277]\n5 Forest|NEO|[292]'],
+  ])('keeps three Forest printings in %s imports', (_format, text) => {
+    expect(detectAndParseDeck(text).main).toEqual([
+      { count: 4, name: 'Forest', sourcePrinting: { setCode: 'one', collectorNumber: '276' } },
+      { count: 3, name: 'Forest', sourcePrinting: { setCode: 'dmu', collectorNumber: '277' } },
+      { count: 5, name: 'Forest', sourcePrinting: { setCode: 'neo', collectorNumber: '292' } },
+    ]);
+  });
+
+  it('counts all printings of a non-basic together for singleton detection', () => {
+    const deck = detectAndParseDeck('1 Lightning Bolt (FDN) 123\n1 Lightning Bolt (A25) 141');
+    expect(deck.main).toHaveLength(2);
+    expect(looksCommanderSingleton(deck.main)).toBe(false);
+  });
+
+  it.each([
+    ['MTGA', exportMtgaDeck, '276 A'],
+    ['MTGA', exportMtgaDeck, 'F'],
+    ['Forge', exportDeckFile, '276]'],
+    ['Forge', exportDeckFile, '276\nA'],
+  ] as const)('exports a plain %s line for an unrepresentable collector number', (_format, exporter, collectorNumber) => {
+    const entry = { count: 4, name: 'Forest' };
+    const exported = exporter({
+      main: [{ ...entry, sourcePrinting: { setCode: 'one', collectorNumber } }],
+      sideboard: [],
+    });
+    expect(exported.split('\n')).toContain('4 Forest');
+    expect(detectAndParseDeck(exported).main).toEqual([entry]);
+  });
+
+  it.each([
+    [exportMtgaDeck, '4 Forest (ONE) 276a', '1 Negate (NEO) A-12'],
+    [exportDeckFile, '4 Forest|ONE|[276a]', '1 Negate|NEO|[A-12]'],
+  ])('round-trips main and sideboard printings with %s', (exporter, mainLine, sideboardLine) => {
+    const parsed = detectAndParseDeck(
+      'Deck\n4 Forest (ONE) 276a\n3 Forest (DMU) 276\n5 Forest (NEO) 12★\n2 Forest\n\nSideboard\n1 Negate (NEO) A-12',
+    );
+    const exported = exporter(parsed);
+    expect(exported).toContain(mainLine);
+    expect(exported).toContain(sideboardLine);
+    expect(detectAndParseDeck(exported)).toEqual(parsed);
   });
 
   it.each([
@@ -867,11 +943,12 @@ Commander
 });
 
 describe('resolveCommander waterfall', () => {
+  beforeEach(() => {
+    vi.mocked(inferCommander).mockReset().mockResolvedValue(null);
+  });
+
   it('promotes the first eligible card when the deck is 100 singletons', async () => {
-    const { isCardCommanderEligible } = await import('../engineRuntime');
-    vi.mocked(isCardCommanderEligible).mockImplementation((name) =>
-      Promise.resolve(name === 'Zimone, Infinite Analyst')
-    );
+    vi.mocked(inferCommander).mockResolvedValue('Zimone, Infinite Analyst');
 
     const main = [
       { count: 1, name: 'Sol Ring' },
@@ -886,14 +963,26 @@ describe('resolveCommander waterfall', () => {
     expect(resolved.main[0].name).toBe('Sol Ring');
     expect(resolved.main).not.toContainEqual({ count: 1, name: 'Zimone, Infinite Analyst' });
     expect(resolved.main).toHaveLength(87 + 2);
-    expect(isCardCommanderEligible).toHaveBeenCalledWith('Sol Ring');
-    expect(isCardCommanderEligible).toHaveBeenCalledWith('Zimone, Infinite Analyst');
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[main]]);
   });
 
-  it('does not promote when the first card is not commander-eligible', async () => {
-    const { isCardCommanderEligible } = await import('../engineRuntime');
-    vi.mocked(isCardCommanderEligible).mockResolvedValue(false);
+  it('promotes the positive commander copy and preserves zero-count rows', async () => {
+    const name = 'Isamaru, Hound of Konda';
+    vi.mocked(inferCommander).mockResolvedValue(name);
+    const deck = detectAndParseDeck(`0 ${name} (CHK) 19\n1 ${name} (JMP) 116\n99 Plains\n0 Sol Ring`);
 
+    const resolved = await resolveCommander(deck);
+
+    expect(resolved.commander).toEqual([name]);
+    expect(resolved.main.reduce((sum, entry) => sum + entry.count, 0)).toBe(99);
+    expect(resolved.main).toEqual([
+      { count: 0, name, sourcePrinting: { setCode: 'chk', collectorNumber: '19' } },
+      { count: 99, name: 'Plains' },
+      { count: 0, name: 'Sol Ring' },
+    ]);
+  });
+
+  it('does not promote a deck when the engine returns null', async () => {
     const main = [
       { count: 1, name: 'Sol Ring' },
       ...Array.from({ length: 86 }, (_, i) => ({ count: 1, name: `Card ${i}` })),
@@ -906,25 +995,26 @@ describe('resolveCommander waterfall', () => {
     expect(resolved.main).toEqual(main);
   });
 
-  it('skips lookup when the deck already has a commander', async () => {
-    const { isCardCommanderEligible } = await import('../engineRuntime');
-    vi.mocked(isCardCommanderEligible).mockReset();
+  it.each([
+    ['an existing commander', { commander: ['Zimone, Infinite Analyst'], sideboard: [] }],
+    ['a retained sideboard', { sideboard: [{ name: 'Opt', count: 2 }] }],
+  ] as const)('skips inference for %s and promotes once it is cleared', async (_label, zones) => {
+    const main = [{ name: 'Zimone, Infinite Analyst', count: 1 }, { name: 'Forest', count: 99 }];
+    const deck = { ...zones, main, sideboard: [...zones.sideboard], commander: 'commander' in zones ? [...zones.commander] : undefined };
+    vi.mocked(inferCommander).mockResolvedValue(main[0].name);
 
-    const resolved = await resolveCommander({
-      main: [{ count: 1, name: 'Sol Ring' }],
-      sideboard: [],
-      commander: ['Zimone, Infinite Analyst'],
+    expect(await resolveCommander(deck)).toEqual(repairParsedDeck(deck));
+    expect(inferCommander).not.toHaveBeenCalled();
+    expect(await resolveCommander({ main, sideboard: [] })).toMatchObject({
+      commander: [main[0].name], main: [main[1]],
     });
-
-    expect(resolved.commander).toEqual(['Zimone, Infinite Analyst']);
-    expect(isCardCommanderEligible).not.toHaveBeenCalled();
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[main]]);
   });
 
   it('end-to-end: handles an unmarked Archidekt-style 100-card paste with empty set codes', async () => {
-    const { isCardCommanderEligible } = await import('../engineRuntime');
-    vi.mocked(isCardCommanderEligible).mockResolvedValue(true);
+    vi.mocked(inferCommander).mockResolvedValue('Zimone, Infinite Analyst');
 
-    // 87 singletons + 7 Island + 6 Forest = 100 cards, no commander/sideboard headers.
+    // 87 singletons + 7 Snow-Covered Wastes + 6 Forest = 100 cards, no commander/sideboard headers.
     // Includes "Three Visits () 315" with an empty set code (Archidekt edge case).
     const singletons = Array.from({ length: 86 }, (_, i) =>
       i === 30 ? '1 Three Visits () 315' : `1 Generic Card ${i} (SOC) ${i + 1}`
@@ -932,8 +1022,9 @@ describe('resolveCommander waterfall', () => {
     const content = [
       '1 Zimone, Infinite Analyst (SOC) 10',
       ...singletons,
-      '7 Island (SOS) 274',
-      '6 Forest (SOS) 280',
+      '7 Snow-Covered Wastes (MH3) 229',
+      '4 Forest (SOS) 280',
+      '2 Forest (ONE) 276',
     ].join('\n');
 
     const parsed = detectAndParseDeck(content);
@@ -942,22 +1033,53 @@ describe('resolveCommander waterfall', () => {
     expect(parsed.main[0]).toMatchObject({ count: 1, name: 'Zimone, Infinite Analyst' });
 
     const resolved = await resolveCommander(parsed);
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[
+      [
+        { name: 'Zimone, Infinite Analyst', count: 1 },
+        ...Array.from({ length: 86 }, (_, i) => ({ name: i === 30 ? 'Three Visits' : `Generic Card ${i}`, count: 1 })),
+        { name: 'Snow-Covered Wastes', count: 7 },
+        { name: 'Forest', count: 4 },
+        { name: 'Forest', count: 2 },
+      ],
+    ]]);
+    expect(resolved.main).toEqual(parsed.main.slice(1));
     expect(resolved.commander).toEqual(['Zimone, Infinite Analyst']);
     expect(resolved.main).not.toContainEqual({ count: 1, name: 'Zimone, Infinite Analyst' });
+    expect(resolved.main.filter(({ name }) => name === 'Forest')).toEqual([
+      { count: 4, name: 'Forest', sourcePrinting: { setCode: 'sos', collectorNumber: '280' } },
+      { count: 2, name: 'Forest', sourcePrinting: { setCode: 'one', collectorNumber: '276' } },
+    ]);
     expect(resolved.main.reduce((s, e) => s + e.count, 0)).toBe(99);
   });
 
-  it('skips lookup when the deck is not 100 cards', async () => {
-    const { isCardCommanderEligible } = await import('../engineRuntime');
-    vi.mocked(isCardCommanderEligible).mockReset();
+  it.each([
+    [99, 0, 'Isamaru, Hound of Konda'],
+    [97, 2, null],
+  ] as const)('sends parsed counts with %i Plains and %i Sol Ring', async (plains, ring, answer) => {
+    const name = 'Isamaru, Hound of Konda';
+    const deck = detectAndParseDeck(`1 ${name}\n${plains} Plains\n${ring} Sol Ring`);
+    const rows = [{ name, count: 1 }, { name: 'Plains', count: plains }, { name: 'Sol Ring', count: ring }];
+    vi.mocked(inferCommander).mockResolvedValue(answer);
+    const resolved = await resolveCommander(deck);
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[rows]]);
+    expect(resolved.commander).toEqual(answer === null ? undefined : [answer]);
+    expect(resolved.main).toEqual(answer === null ? rows : rows.slice(1));
+  });
 
-    const resolved = await resolveCommander({
-      main: [{ count: 60, name: 'Mountain' }],
-      sideboard: [],
-    });
+  it('keeps a wrong-size deck unmarked after either null or a query rejection', async () => {
+    const deck = { main: [{ count: 60, name: 'Mountain' }], sideboard: [] };
+    expect(await resolveCommander(deck)).toEqual(repairParsedDeck(deck));
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[deck.main]]);
 
-    expect(resolved.commander).toBeUndefined();
-    expect(isCardCommanderEligible).not.toHaveBeenCalled();
+    vi.mocked(inferCommander).mockRejectedValueOnce(new Error('engine unavailable'));
+    expect(await resolveCommander(deck)).toEqual(repairParsedDeck(deck));
+    expect(vi.mocked(inferCommander).mock.calls).toEqual([[deck.main], [deck.main]]);
+  });
+
+  it('bypasses inference for an empty main deck', async () => {
+    const deck = { main: [], sideboard: [] };
+    expect(await resolveCommander(deck)).toEqual(repairParsedDeck(deck));
+    expect(inferCommander).not.toHaveBeenCalled();
   });
 });
 
