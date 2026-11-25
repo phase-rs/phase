@@ -21003,7 +21003,7 @@ fn parse_keeper_dispose_rest_ir(
                         .player_scope(Some(player_scope))
                         .push();
                 }
-                // CR 608.2c: "that player" names no player this context can bind
+                // "that player" names no player this context can bind
                 // (a spell, or a trigger whose antecedent is not the event's player).
                 // Claim the whole printed instruction as one honest gap rather than
                 // letting the line fall to the general chain parser's targeted shape.
