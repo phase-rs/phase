@@ -10154,29 +10154,39 @@ mod tests {
 
         const SPELL: &str =
             "Choose target artifact or enchantment. Its owner shuffles it into their library.";
-        for (face, expected_kind, types, controller) in [
+        let living_library_types = ["Artifact".to_string(), "Creature".to_string()];
+        let living_library_subtypes = ["Book".to_string(), "Illusion".to_string()];
+        let instant_types = ["Instant".to_string()];
+        for (name, oracle, card_types, subtypes, expected_kind, types, controller) in [
             (
-                card(
-                    "{6}, Sacrifice this creature: Choose target creature or planeswalker an opponent controls. Its owner shuffles it into their library.",
-                    "Living Library", &[], &["Artifact", "Creature"], &["Book", "Illusion"],
-                ),
+                "Living Library",
+                "{6}, Sacrifice this creature: Choose target creature or planeswalker an opponent controls. Its owner shuffles it into their library.",
+                living_library_types.as_slice(),
+                living_library_subtypes.as_slice(),
                 AbilityKind::Activated,
                 [TypeFilter::Creature, TypeFilter::Planeswalker],
                 Some(ControllerRef::Opponent),
             ),
             (
-                card(SPELL, "Deglamer", &[], &["Instant"], &[]),
+                "Deglamer",
+                SPELL,
+                instant_types.as_slice(),
+                &[],
                 AbilityKind::Spell,
                 [TypeFilter::Artifact, TypeFilter::Enchantment],
                 None,
             ),
             (
-                card(SPELL, "Unravel the Aether", &[], &["Instant"], &[]),
+                "Unravel the Aether",
+                SPELL,
+                instant_types.as_slice(),
+                &[],
                 AbilityKind::Spell,
                 [TypeFilter::Artifact, TypeFilter::Enchantment],
                 None,
             ),
         ] {
+            let face = crate::parser::oracle::parse_oracle_text(oracle, name, &[], card_types, subtypes);
             let [def] = face.abilities.as_slice() else {
                 panic!("expected one ability: {:?}", face.abilities);
             };
