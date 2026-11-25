@@ -266,6 +266,7 @@ mod game_state_boxed_ability_serde;
 mod game_state_stack_budget;
 mod game_state_stack_high_water;
 mod gandalf_flash_artifact_spells;
+mod garruk_cursed_huntsman;
 mod gather_the_townsfolk_fateful_hour;
 mod gatta_and_luzzu_regression;
 mod gemstone_caverns_begin_game;
