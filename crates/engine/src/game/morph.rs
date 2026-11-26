@@ -720,6 +720,13 @@ pub(crate) fn handle_turn_face_up(
                     "Unsupported non-mana turn-face-up cost".to_string(),
                 ));
             }
+            super::visibility::snapshot_foreign_library_tops(
+                state,
+                player,
+                crate::types::game_state::ForeignLibraryLookAction::Special(
+                    crate::types::mana::SpecialAction::TurnFaceUp,
+                ),
+            );
             super::costs::pay_ability_cost_for_turn_face_up(
                 state,
                 player,

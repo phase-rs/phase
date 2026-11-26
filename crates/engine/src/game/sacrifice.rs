@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::restrictions;
+use crate::game::targeting::is_phased_in_battlefield_permanent;
 use crate::game::zone_pipeline::{
     self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult,
 };
@@ -296,11 +297,8 @@ fn consult_sacrifice_move(
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> SacrificeConsult {
-    let on_battlefield = state
-        .objects
-        .get(&object_id)
-        .is_some_and(|obj| obj.zone == Zone::Battlefield);
-    if !on_battlefield {
+    // CR 702.26b: phased-out permanents cannot be sacrificed.
+    if !is_phased_in_battlefield_permanent(state, object_id) {
         return SacrificeConsult::NoMove;
     }
     // CR 109.5 + CR 701.21: "Can't be sacrificed" prevents this action for the
@@ -404,6 +402,7 @@ pub(crate) fn deliver_consulted_sacrifice(
     events: &mut Vec<GameEvent>,
 ) -> SacrificeDelivery {
     let PendingSacrificeDelivery { sacrifice, rider } = delivery;
+    // CR 702.26b: a permanent can phase out before its queued delivery resumes.
     let still_present = match &sacrifice {
         PendingSacrificeMove::Sacrifice {
             object_id,
@@ -412,12 +411,14 @@ pub(crate) fn deliver_consulted_sacrifice(
         } => state
             .objects
             .get(object_id)
-            .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.controller == *player_id),
-        PendingSacrificeMove::InnerPrevented { .. } => true,
+            .is_some_and(|obj| obj.is_phased_in_permanent() && obj.controller == *player_id),
+        PendingSacrificeMove::InnerPrevented { object_id, .. } => state
+            .objects
+            .get(object_id)
+            .is_none_or(|obj| !obj.is_phased_out_permanent()),
         PendingSacrificeMove::DirectMove { zone_event } => zone_event
             .affected_object_id()
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.zone == Zone::Battlefield),
+            .is_some_and(|id| is_phased_in_battlefield_permanent(state, id)),
     };
     // CR 400.7: the permanent left the battlefield (or its sacrificer's
     // control) after the consult; nothing moves, and the replacement's own

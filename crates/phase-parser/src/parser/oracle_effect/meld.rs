@@ -381,7 +381,10 @@ fn parse_live_pair_condition_prefix(text: &str) -> Option<(&str, LivePairConditi
         filters: vec![
             source_filter,
             TargetFilter::Typed(TypedFilter::default().properties(vec![
-                FilterProp::Attacking { defender: None },
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None,
+                },
                 FilterProp::Owned {
                     controller: ControllerRef::You,
                 },
@@ -391,18 +394,21 @@ fn parse_live_pair_condition_prefix(text: &str) -> Option<(&str, LivePairConditi
     let partner_filter = with_owned_you(partner_base);
     let partner_filter = match partner_filter {
         TargetFilter::Typed(mut typed) => {
-            typed
-                .properties
-                .push(FilterProp::Attacking { defender: None });
+            typed.properties.push(FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            });
             TargetFilter::Typed(typed)
         }
         other => TargetFilter::And {
             filters: vec![
                 other,
-                TargetFilter::Typed(
-                    TypedFilter::default()
-                        .properties(vec![FilterProp::Attacking { defender: None }]),
-                ),
+                TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None,
+                    },
+                ])),
             ],
         },
     };

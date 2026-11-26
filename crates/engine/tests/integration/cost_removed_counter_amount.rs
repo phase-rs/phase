@@ -2886,6 +2886,7 @@ fn fast_loyalty_owner_resumes_after_replacement_child_trigger_retires() {
             count: QuantityExpr::Fixed { value: 1 },
             owner: TargetFilter::Controller,
             attach_to: None,
+            enters_blocking: None,
             enters_attacking: false,
             attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
@@ -4532,7 +4533,7 @@ fn a_dies_trigger_from_a_sacrifice_child_goes_on_the_stack_once_above_the_activa
                     target: TargetFilter::Typed(
                         TypedFilter::creature().controller(ControllerRef::You),
                     ),
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 1,
                 },
             )),

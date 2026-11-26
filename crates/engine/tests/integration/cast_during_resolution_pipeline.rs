@@ -14,7 +14,7 @@
 //! exercised. They never call `resolve()` directly — that bypass is the exact
 //! reason this class of bug shipped.
 
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, CastingPermission, Effect, ReplacementDefinition, TargetFilter,
@@ -1704,21 +1704,41 @@ fn nested_ripple_bottom_order_cards_are_visible_to_controller() {
     panic!("never reached a nested RippleBottomOrder");
 }
 
-/// CR 702.60a + CR 701.20a: a Ripple free cast that pauses for target
-/// selection must not hide the still-revealed pile once the bottom-order
-/// prompt opens.
-#[test]
-fn ripple_cast_with_target_pause_keeps_bottom_pile_revealed() {
+fn ripple_shock_at_offered_target_selection() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     const SHOCK: &str = "Shock deals 2 damage to any target.";
     let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    red_pool(&mut scenario, 2);
-    scenario.add_creature_from_oracle(P0, "Thrumming Stone", 1, 1, THRUMMING_STONE_ORACLE);
+    scenario.at_phase(Phase::Untap);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Xanathar, Guild Kingpin",
+        5,
+        6,
+        "At the beginning of your upkeep, choose target opponent. Until end of turn, that player can't cast spells, you may look at the top card of their library any time, you may play the top card of their library, and you may spend mana as though it were mana of any color to cast spells this way.",
+    );
+    let bell = scenario
+        .add_artifact_from_oracle(P0, "Temple Bell", "{T}: Each player draws a card.")
+        .id();
+    let next_top = scenario.add_land_to_library_top(P1, "Forest").id();
+    scenario.add_land_to_library_top(P1, "Island");
+    for _ in 0..2 {
+        scenario.add_land_from_oracle(P0, "Mountain", "{T}: Add {R}.");
+    }
+    scenario.add_artifact_from_oracle(P0, "Thrumming Stone", THRUMMING_STONE_ORACLE);
+    let red_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic: 0,
+    };
     let shock_a = scenario
         .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+        .with_mana_cost(red_cost.clone())
         .id();
     let shock_b = scenario
         .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+        .with_mana_cost(red_cost.clone())
+        .id();
+    let later_shock = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+        .with_mana_cost(red_cost)
         .id();
     let misses: Vec<ObjectId> = ["Miss One", "Miss Two", "Miss Three"]
         .iter()
@@ -1729,6 +1749,19 @@ fn ripple_cast_with_target_pause_keeps_bottom_pile_revealed() {
         })
         .collect();
     let mut runner = scenario.build();
+    for _ in 0..2 {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("advance to upkeep");
+    }
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    assert_eq!(runner.state().stack.len(), 1, "Xanathar's upkeep trigger");
+    for _ in 0..2 {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve Xanathar's trigger");
+    }
+    assert!(runner.state().stack.is_empty());
     {
         let state = runner.state_mut();
         for id in std::iter::once(shock_b).chain(misses.iter().copied()) {
@@ -1776,6 +1809,14 @@ fn ripple_cast_with_target_pause_keeps_bottom_pile_revealed() {
         "free Ripple cast must pause for its target, got {:?}",
         runner.state().waiting_for
     );
+    (runner, later_shock, bell, next_top)
+}
+
+/// CR 702.60a + CR 701.20a: a Ripple free cast that pauses for target
+/// selection must keep the pile revealed when the bottom-order prompt opens.
+#[test]
+fn ripple_cast_with_target_pause_keeps_bottom_pile_revealed() {
+    let (mut runner, ..) = ripple_shock_at_offered_target_selection();
     runner
         .act(GameAction::SelectTargets {
             targets: vec![TargetRef::Player(P1)],
@@ -1794,6 +1835,80 @@ fn ripple_cast_with_target_pause_keeps_bottom_pile_revealed() {
             "revealed Ripple card {id:?} must stay face-up after the cast's target pause"
         );
     }
+}
+
+/// CR 401.5 + CR 733.1: cancelling an offered cast releases the library look
+/// boundary even while its parent Ripple trigger still waits for an answer.
+#[test]
+fn cancelled_ripple_cast_retires_foreign_library_look_before_bottom_order() {
+    let (mut runner, later_shock, bell, next_top) = ripple_shock_at_offered_target_selection();
+    let snapshot = |state: &GameState| {
+        serde_json::to_value(state).expect("serialize authoritative state")
+            ["foreign_library_look_snapshot"]
+            .clone()
+    };
+    let assert_visible = |state: &GameState, id| {
+        let view = engine::game::visibility::filter_state_for_viewer(state, P0);
+        assert_eq!(view.objects[&id].name, state.objects[&id].name);
+    };
+    let original_top = *runner.state().library_of(P1).front().unwrap();
+    assert_visible(runner.state(), original_top);
+    assert!(snapshot(runner.state())["tops"]
+        .as_array()
+        .is_some_and(|tops| tops.contains(&serde_json::json!([P1, original_top]))));
+
+    runner
+        .act(GameAction::CancelCast)
+        .expect("cancel the offered Shock");
+    let WaitingFor::RippleBottomOrder {
+        player: P0, cards, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected P0's RippleBottomOrder, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        snapshot(runner.state()).is_null(),
+        "the cancelled cast's snapshot survived into RippleBottomOrder"
+    );
+    runner
+        .act(GameAction::SelectCards { cards })
+        .expect("order the Ripple cards");
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: bell,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Temple Bell");
+    for _ in 0..2 {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve Temple Bell");
+    }
+    assert_eq!(runner.state().library_of(P1).front(), Some(&next_top));
+    assert_visible(runner.state(), next_top);
+
+    let card_id = runner.state().objects[&later_shock].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: later_shock,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("announce a later Shock");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { player: P0, .. }
+    ));
+    assert_visible(runner.state(), next_top);
+    assert!(snapshot(runner.state())["tops"]
+        .as_array()
+        .is_some_and(|tops| tops.contains(&serde_json::json!([P1, next_top]))));
 }
 
 /// CR 701.20a: an effect's reveal lasts only as long as needed. Once Ripple has

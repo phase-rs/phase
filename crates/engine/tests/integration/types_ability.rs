@@ -233,6 +233,7 @@ fn target_filter_mut_is_target_filters_twin() {
         additional_modifications: Vec::new(),
     };
     let token = |attach_to: Option<TargetFilter>| Effect::Token {
+        enters_blocking: None,
         name: "Spirit".to_string(),
         power: PtValue::Fixed(1),
         toughness: PtValue::Fixed(1),

@@ -498,6 +498,7 @@ fn war_games_two_pauses_goad_every_seat() {
 /// A tapped 1/1 white creature token effect named `name` (and of that subtype).
 fn vanilla_token(name: &str, count: i32) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         name: name.to_string(),
         power: PtValue::Fixed(1),
@@ -709,7 +710,7 @@ fn paused_fan_out_delayed_trigger_snapshots_every_seats_tokens() {
             AbilityKind::Spell,
             Effect::Sacrifice {
                 target: TargetFilter::LastCreated,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         )),
@@ -985,6 +986,7 @@ fn sync_fan_out_emblem_static_reads_every_seats_tokens() {
 /// An untapped 1/1 green creature token effect named `name` (and of that subtype).
 fn untapped_token(name: &str) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         name: name.to_string(),
         power: PtValue::Fixed(1),

@@ -11553,6 +11553,9 @@ pub struct PendingTokenBattlefieldEntry {
     /// The `TokenCreated` display name (the token's OWN name, not the copied source's).
     pub name: String,
     pub source_id: ObjectId,
+    /// CR 509.4: the bound attacker to block at completed battlefield entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_attacker: Option<ObjectIncarnationRef>,
 }
 
 /// Synchronous access to the exact batch owner parked by a paused move.
@@ -11852,6 +11855,8 @@ pub enum PendingCounterPostAction {
             skip_serializing_if = "EntryAttackDestination::is_any_defender"
         )]
         attack_destination: EntryAttackDestination,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_attacker: Option<ObjectIncarnationRef>,
         source_id: ObjectId,
         controller: PlayerId,
     },
@@ -11872,6 +11877,8 @@ pub enum PendingCounterPostAction {
             skip_serializing_if = "EntryAttackDestination::is_any_defender"
         )]
         attack_destination: EntryAttackDestination,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_attacker: Option<ObjectIncarnationRef>,
         source_id: ObjectId,
         controller: PlayerId,
         remaining_modifications: Vec<ContinuousModification>,
@@ -11920,6 +11927,9 @@ pub enum PendingCounterPostAction {
             skip_serializing_if = "EntryAttackDestination::is_any_defender"
         )]
         attack_destination: EntryAttackDestination,
+        /// CR 509.4: the bound attacker to block at completed battlefield entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_attacker: Option<ObjectIncarnationRef>,
         attach_to: Option<AttachTarget>,
         sacrifice_at: Option<Duration>,
         created_ids: Vec<ObjectId>,
@@ -16717,6 +16727,10 @@ pub enum EmergeSacrificeQuality {
     Land,
     Permanent,
     Planeswalker,
+    // CR 314.1: mirrors `TypeFilter::Scheme` (no printed emerge card names
+    // it — schemes can't be sacrificed — but the constructor match is
+    // exhaustive over `TypeFilter`).
+    Scheme,
     Sorcery,
     Subtype(String),
 }
@@ -16866,6 +16880,36 @@ pub struct AnnouncedGraveyardPermission {
     pub grant_digest: GrantDigest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_type: Option<super::card_type::CoreType>,
+}
+
+/// An action that can hold a foreign-library look at its CR 401.5 boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ForeignLibraryLookAction {
+    Cast,
+    Activate(ObjectId),
+    PlayLand,
+    /// CR 401.5 + CR 116.2: A special action with a resumable cost.
+    Special(crate::types::mana::SpecialAction),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ForeignLibraryLookSnapshot {
+    pub player: PlayerId,
+    pub action: ForeignLibraryLookAction,
+    pub tops: Vec<(PlayerId, ObjectId)>,
+}
+
+/// CR 601.2a + CR 609.4b: Terms of the library permission elected before
+/// costs are paid, retained even if payment changes the top or grant source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopOfLibraryCastLatch {
+    pub spell_id: ObjectId,
+    pub source: ObjectId,
+    pub frequency: crate::types::statics::CastFrequency,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_cost: Option<AbilityCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
 }
 
 /// CR 601.2f + CR 601.2h + CR 614.1c: a graveyard permission's terms as they
@@ -21936,18 +21980,30 @@ impl GameState {
         Ok(())
     }
 
-    /// Combat damage on the stack is serde-decodable but not resolvable in this
-    /// build; a persisted state carrying it is refused.
+    /// Validate entries that can still resolve. Historical stack entries in the
+    /// rules journal can be decoded without either Equip incarnation.
     fn refuse_unresolvable_persisted_stack(&self) -> Result<(), PersistedRestoreError> {
-        if self
-            .stack
-            .iter()
-            .chain(self.resolving_stack_entry.iter())
-            .any(|entry| matches!(entry.kind, StackEntryKind::CombatDamage { .. }))
-        {
-            return Err(PersistedRestoreError::UnsupportedStackObject(
-                "combat damage on the stack is not resolvable in this build",
-            ));
+        use super::identifiers::LEGACY_INCARNATION;
+
+        for entry in self.stack.iter().chain(&self.resolving_stack_entry) {
+            let reason = match &entry.kind {
+                StackEntryKind::CombatDamage { .. } => {
+                    "combat damage on the stack is not resolvable in this build"
+                }
+                StackEntryKind::KeywordAction {
+                    action:
+                        KeywordAction::Equip {
+                            equipment,
+                            target_creature,
+                        },
+                } if equipment.incarnation == LEGACY_INCARNATION
+                    || target_creature.incarnation == LEGACY_INCARNATION =>
+                {
+                    "pending Equip is missing the Equipment or target creature incarnation"
+                }
+                _ => continue,
+            };
+            return Err(PersistedRestoreError::UnsupportedStackObject(reason));
         }
         Ok(())
     }
@@ -22523,17 +22579,8 @@ impl PersistedGameState {
             .format_config
             .reject_unimplemented_range_of_influence()
             .map_err(PersistedRestoreError::UnsupportedFormat)?;
+        // Check pending work before terminal-rest recovery can consume it.
         state.refuse_unresolvable_persisted_stack()?;
-        // Decoding a type and admitting it as a PLAYABLE persisted game are
-        // separate contracts. `StackEntryKind::CombatDamage` is serde-decodable
-        // so later phases can round-trip it, but no phase before the pushing
-        // one can resolve its assignments — so a restored state carrying one
-        // has pending damage this build cannot deal. Admitting it would either
-        // crash resolution or silently drop that damage; both are worse than
-        // refusing the load. Rejected here, at the single chokepoint every
-        // production restore funnels through (WASM `prepare_restored_game_state`,
-        // `server-core`'s `from_persisted`, and offline tooling), rather than at
-        // each caller.
         if let Some(member) = state.resolution_stack.unresumable_shared_batch_pause() {
             return Err(PersistedRestoreError::UnresumableSharedBatchPause { member });
         }
@@ -28974,6 +29021,9 @@ pub struct LiminalEntry {
         skip_serializing_if = "EntryAttackDestination::is_any_defender"
     )]
     pub attack_destination: EntryAttackDestination,
+    /// CR 509.4: the bound attacker to block at completed battlefield entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_attacker: Option<ObjectIncarnationRef>,
     pub attach_to: Option<AttachTarget>,
     pub sacrifice_at: Option<Duration>,
     pub remaining_count: u32,
@@ -29961,6 +30011,8 @@ declare_game_state! {
     /// (`game_state_size`).
     #[serde(skip)]
     pub active_graveyard_permission_latch: Option<Box<GraveyardPermissionLatch>>,
+    #[serde(skip)]
+    pub(crate) active_top_of_library_cast_latch: Option<Box<TopOfLibraryCastLatch>>,
     /// The single synchronous handoff from a paid offer's immediate direct
     /// `CreateDelayedTrigger` tail to the installer. It is never persisted.
     #[serde(skip)]
@@ -30111,6 +30163,8 @@ declare_game_state! {
     /// frontend doesn't need to maintain a parallel list of casting states.
     #[serde(skip_deserializing, default)]
     pub has_pending_cast: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) foreign_library_look_snapshot: Option<Box<ForeignLibraryLookSnapshot>>,
     /// CR 601.2i: display-only authority for whether the current pending cast
     /// may be withdrawn. Separate from `has_pending_cast` so choice prompts
     /// can expose an in-flight cast without encouraging an illegal cancel.
@@ -30211,7 +30265,7 @@ declare_game_state! {
     /// of client round-trips; realized by the single authority
     /// `crate::game::effects::token::flush_pending_token_battlefield_entry`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_token_battlefield_entry: Option<PendingTokenBattlefieldEntry>,
+    pub pending_token_battlefield_entry: Option<Box<PendingTokenBattlefieldEntry>>,
 
     // Layer system
     // CONSERVATIVE: deserialized snapshots (e.g. the WASM-export repro) rebuild
@@ -31901,8 +31955,9 @@ declare_game_state! {
     /// Typed cleanup waiting for an ordinary search's leading ChangeZone to
     /// settle. The chain walker consumes it synchronously; the paused
     /// ChangeZone drain consumes the same value after its final member lands.
+    /// Boxed because it is populated only while a search delivery settles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_library_search_delivery: Option<LibrarySearchDeliveryResume>,
+    pub pending_library_search_delivery: Option<Box<LibrarySearchDeliveryResume>>,
     /// Exact-incarnation audience provenance from a search delivery that
     /// settled in the current action. It is cleared at the next outer action
     /// boundary and never appears in a viewer projection.
@@ -41761,6 +41816,7 @@ impl GameState {
             active_copy_token_resolution_tokens: None,
             active_casting_permission_index: None,
             active_graveyard_permission_latch: None,
+            active_top_of_library_cast_latch: None,
             active_paid_resolution_offer_tail: None,
             active_spend_only_on_x_count: None,
             ingress_life_window: None,
@@ -41789,6 +41845,7 @@ impl GameState {
             next_interaction_serial: default_interaction_serial(),
             active_interaction_slots: Vec::new(),
             has_pending_cast: false,
+            foreign_library_look_snapshot: None,
             allows_cancel_cast: false,
             lands_played_this_turn: 0,
             max_lands_per_turn: 1,
@@ -43740,6 +43797,37 @@ impl GameState {
         }
     }
 
+    /// Equip checks both announced incarnations. Only the source can supply
+    /// last-known characteristics when rechecking protection on the target.
+    fn visit_loop_equip_pins_mut(
+        &mut self,
+        mut source_lki: impl FnMut(ObjectIncarnationRef),
+        mut visit_pin: impl FnMut(&mut ObjectIncarnationRef),
+    ) {
+        for entry in self
+            .stack
+            .iter_mut()
+            .chain(self.resolving_stack_entry.iter_mut())
+        {
+            if let StackEntryKind::KeywordAction {
+                action:
+                    KeywordAction::Equip {
+                        equipment,
+                        target_creature,
+                    },
+            } = &mut entry.kind
+            {
+                if equipment.incarnation != crate::types::identifiers::LEGACY_INCARNATION {
+                    source_lki(*equipment);
+                    visit_pin(equipment);
+                }
+                if target_creature.incarnation != crate::types::identifiers::LEGACY_INCARNATION {
+                    visit_pin(target_creature);
+                }
+            }
+        }
+    }
+
     pub(crate) fn retain_carrier_referenced_lki(&mut self) {
         // CR 104.4b + CR 732.2a: incarnation-versioned LKI is historical support
         // state, not independently loop-material state. Retain only snapshots
@@ -43805,6 +43893,12 @@ impl GameState {
                 referenced_lki.insert(ObjectIncarnationRef::of(object_id, *incarnation));
             });
         });
+        self.visit_loop_equip_pins_mut(
+            |source| {
+                referenced_lki.insert(source);
+            },
+            |_| {},
+        );
 
         // CR 508.1 + CR 608.2h: an attack trigger's intervening-if rechecks a departed
         // attacker against the snapshot of the incarnation that attacked
@@ -45179,6 +45273,17 @@ impl GameState {
                 });
             });
         });
+        self.visit_loop_equip_pins_mut(
+            |source| {
+                carrier_read.insert(source);
+            },
+            |pin| {
+                present
+                    .entry(pin.object_id)
+                    .or_default()
+                    .push(pin.incarnation)
+            },
+        );
         // CR 122.6 + CR 400.7: a counter record's recipient stamp is ranked with the live
         // incarnation it is compared against, so a stale stamp stays distinct from the current one.
         for record in self.counter_added_this_turn.iter() {
@@ -45569,6 +45674,7 @@ impl GameState {
         let rank_incarnation = |reference: &mut ObjectIncarnationRef| {
             reference.incarnation = canonical(reference.object_id, reference.incarnation);
         };
+        self.visit_loop_equip_pins_mut(|_| {}, rank_incarnation);
         if let Some(combat) = self.combat.as_mut() {
             combat.attacking_incarnations_this_combat = rank_hash_set(
                 std::mem::take(&mut combat.attacking_incarnations_this_combat),
@@ -45754,7 +45860,8 @@ impl GameState {
             // RANKED THROUGH A CARRIER — these hold the events, abilities and records
             // whose own pins sections 1 and 3 classify. The abilities are the ones
             // `for_each_loop_ability_carrier_mut` walks: their captured pins, snapshots
-            // and creation lookback events all rank. A parked `resolution_stack` frame
+            // and creation lookback events all rank. Equip's keyword entries also rank
+            // their own source and target pins. A parked `resolution_stack` frame
             // holds abilities nothing walks, so `is_loop_comparable` refuses a state that
             // holds one.
             stack: _,
@@ -45849,6 +45956,7 @@ impl GameState {
             active_copy_token_resolution_tokens: _,
             active_casting_permission_index: _,
             active_graveyard_permission_latch: _,
+            active_top_of_library_cast_latch: _,
             active_paid_resolution_offer_tail: _,
             active_spend_only_on_x_count: _,
             ingress_life_window: _,
@@ -45872,6 +45980,7 @@ impl GameState {
             next_interaction_serial: _,
             active_interaction_slots: _,
             has_pending_cast: _,
+            foreign_library_look_snapshot: _,
             allows_cancel_cast: _,
             lands_played_this_turn: _,
             max_lands_per_turn: _,
@@ -47448,6 +47557,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_copy_token_resolution_tokens: _,
         active_casting_permission_index: _,
         active_graveyard_permission_latch: _,
+        active_top_of_library_cast_latch: _,
         active_paid_resolution_offer_tail: _,
         active_spend_only_on_x_count: _,
         ingress_life_window: _,
@@ -47486,6 +47596,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_interaction_serial: _,
         active_interaction_slots: _,
         has_pending_cast: _,
+        foreign_library_look_snapshot: _,
         allows_cancel_cast: _,
         lands_played_this_turn: _,
         max_lands_per_turn: _,
@@ -50138,6 +50249,7 @@ mod tests {
         let projection = TokenProjection::materialize(state.objects[&object_id].clone());
         check(
             |attack_destination| LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: LiminalEntrant::Token(projection.clone()),
                 name: "Goblin".to_string(),
@@ -50159,6 +50271,7 @@ mod tests {
             |entry| entry.attack_destination.clone(),
         );
         let copy = Box::new(crate::types::proposed_event::CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
                 &state.objects[&object_id],
             )),
@@ -50191,6 +50304,7 @@ mod tests {
         );
         check(
             |attack_destination| PendingCounterPostAction::FinalizeCopyTokenEntry {
+                blocking_attacker: None,
                 object_id,
                 name: "Goblin".to_string(),
                 enters_attacking: true,
@@ -50212,6 +50326,8 @@ mod tests {
     #[test]
     fn continue_token_event_delivery_serde_roundtrip() {
         let spec = TokenSpec {
+            blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: crate::types::proposed_event::TokenCharacteristics {
                 display_name: "Squirrel".to_string(),
                 power: Some(1),
@@ -50481,6 +50597,7 @@ mod tests {
                     owner: PlayerId(0),
                     count: 1,
                     copy: Box::new(CopyTokenSpec {
+                        blocking_attacker: None,
                         values: Box::new(intrinsic_copiable_values(&source)),
                         display: Default::default(),
                         extra_keywords: vec![Keyword::Haste],
@@ -60769,6 +60886,116 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop())
     }
 
+    #[test]
+    fn loop_equip_keeps_source_and_target_incarnation_relations() {
+        fn position(resolving: bool, epoch: u64) -> (GameState, ObjectId, ObjectId) {
+            let mut state = GameState::new_two_player(7);
+            let mut permanent = |card, name: &str| {
+                let id = create_object(
+                    &mut state,
+                    CardId(card),
+                    PlayerId(0),
+                    name.into(),
+                    Zone::Battlefield,
+                );
+                state.objects.get_mut(&id).unwrap().incarnation = epoch;
+                id
+            };
+            let source = permanent(1, "Bonesplitter");
+            let creature = permanent(2, "Grizzly Bears");
+            let entry = StackEntry {
+                id: ObjectId(30),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::KeywordAction {
+                    action: KeywordAction::equip(
+                        &state.objects[&source],
+                        &state.objects[&creature],
+                    ),
+                },
+            };
+            if resolving {
+                state.resolving_stack_entry = Some(entry);
+            } else {
+                state.stack.push_back(entry);
+            }
+            (state, source, creature)
+        }
+
+        fn pins(state: &GameState) -> [ObjectIncarnationRef; 2] {
+            let entry = state
+                .resolving_stack_entry
+                .as_ref()
+                .or_else(|| state.stack.front())
+                .unwrap();
+            let StackEntryKind::KeywordAction {
+                action:
+                    KeywordAction::Equip {
+                        equipment,
+                        target_creature,
+                    },
+            } = &entry.kind
+            else {
+                panic!("the equip must survive loop normalization");
+            };
+            [*equipment, *target_creature]
+        }
+
+        for resolving in [false, true] {
+            let (live, equipment, creature) = position(resolving, 3);
+            let (renumbered, _, _) = position(resolving, 71);
+            assert!(
+                normalized_equal(&live, &renumbered),
+                "consistently shifted equip pins"
+            );
+            assert_eq!(
+                pins(&live.normalize_for_loop()),
+                pins(&renumbered.normalize_for_loop())
+            );
+            for id in [equipment, creature] {
+                let mut returned = live.clone();
+                returned.objects.get_mut(&id).unwrap().incarnation += 2;
+                // The resolving entry itself is transient and omitted from
+                // GameState equality. Check the normalized pins there directly.
+                let ranked = returned.normalize_for_loop();
+                for pin in pins(&ranked) {
+                    assert_eq!(pin.is_current(&ranked), pin.object_id != id);
+                }
+                if !resolving {
+                    assert!(
+                        !normalized_equal(&live, &returned),
+                        "stale equip pin on {id:?}"
+                    );
+                }
+            }
+
+            let mut departed = live.clone();
+            departed.objects.get_mut(&equipment).unwrap().incarnation += 2;
+            let mut selected = live.objects[&equipment].snapshot_public_characteristics();
+            let mut other_color = departed.clone();
+            other_color
+                .lki_by_incarnation
+                .entry(equipment)
+                .or_default()
+                .insert(3, selected.clone());
+            selected.colors = vec![ManaColor::Red];
+            departed
+                .lki_by_incarnation
+                .entry(equipment)
+                .or_default()
+                .insert(3, selected.clone());
+            assert!(
+                !normalized_equal(&departed, &other_color),
+                "the departed source's color can change target legality"
+            );
+            let normalized = departed.normalize_for_loop();
+            assert_eq!(
+                normalized.lki_by_incarnation[&equipment].get(&pins(&normalized)[0].incarnation),
+                Some(&selected)
+            );
+        }
+    }
+
     // Controlled identity fixtures, not independently played damage histories.
     fn relational_damage_frame(selected: u64, shift: u64) -> GameState {
         let (mut state, dealer) = records_naming(7 + shift, &[]);
@@ -61827,6 +62054,54 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         let twice = once.normalize_for_loop();
         assert!(loop_states_equal(&once, &twice));
         assert_eq!(twice.players[0].library, im::vector![b, a]);
+    }
+
+    #[test]
+    fn normalize_for_loop_ranks_an_installed_death_watch_against_its_creature() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let source = scenario.add_enchantment_from_oracle(
+            P0,
+            "Printed return watcher",
+            "When this enchantment enters, support 2. (Put a +1/+1 counter on each of up to two target creatures.)\n{1}: Choose target creature with a counter on it. When that creature dies this turn, return that card to its owner's hand.",
+        ).id();
+        let watched = scenario.add_creature(P1, "Watched creature", 2, 2).id();
+        scenario.with_counter(watched, crate::types::counter::CounterType::Plus1Plus1, 1);
+        let mut runner = scenario.build();
+        runner.activate(source, 0).target_object(watched).resolve();
+        let current = runner.state();
+        let mut shifted = current.clone();
+        shifted.objects.get_mut(&watched).unwrap().incarnation += 100;
+        shifted.delayed_triggers[0]
+            .ability
+            .context
+            .delayed_watch_incarnation
+            .as_mut()
+            .expect("production activation installed a watch pin")
+            .incarnation += 100;
+        assert_ne!(current, &shifted);
+        assert!(normalized_equal(current, &shifted));
+
+        shifted.delayed_triggers[0]
+            .ability
+            .context
+            .delayed_watch_incarnation
+            .as_mut()
+            .unwrap()
+            .incarnation -= 1;
+        assert!(!normalized_equal(current, &shifted));
     }
 
     /// CR 400.7 + CR 104.4b: every incarnation a zone-change record names is ranked,
@@ -70503,7 +70778,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             ability: Box::new(ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 1,
                 },
                 Vec::new(),
@@ -75717,13 +75992,13 @@ mod restored_exact_attack_authority_tests {
                 // A scoped search delivery's "after the search" tail.
                 16 => {
                     state.pending_library_search_delivery =
-                        Some(LibrarySearchDeliveryResume::Scoped {
+                        Some(Box::new(LibrarySearchDeliveryResume::Scoped {
                             player: P0,
                             source_id: attacker,
                             search_keys: vec![],
                             grants: vec![],
                             after_scope: Some(node.clone()),
-                        });
+                        }));
                     state.waiting_for.clone()
                 }
                 // A player-scope sacrifice choice's ability.

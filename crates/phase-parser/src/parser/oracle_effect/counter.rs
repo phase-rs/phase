@@ -4439,7 +4439,7 @@ mod tests {
         assert!(
             tf.properties
                 .iter()
-                .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
             "target should be Attacking, got {:?}",
             tf.properties
         );

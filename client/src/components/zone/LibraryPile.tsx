@@ -80,7 +80,6 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   const { t } = useTranslation("game");
   const myId = usePlayerId();
   const pileSeat = useGameStore((s) => resolvePileSeat(s.gameState, "library", playerId));
-  const myPileSeat = useGameStore((s) => resolvePileSeat(s.gameState, "library", myId));
   const count = useGameStore(
     (s) => s.gameState?.players[pileSeat]?.library?.length ?? 0,
   );
@@ -122,7 +121,6 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   const hoverProps = useInspectHoverProps();
   const dispatchAction = useGameDispatch();
 
-  const isMyLibrary = pileSeat === myPileSeat;
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
 
   // CR 401.5 + CR 118.9 + CR 305.9 + CR 702.170f: top-card action surfacing
@@ -134,9 +132,9 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   // `CastSpell` family; Fblthp, Lost on the Range surfaces the plot
   // `ActivateAbility`.
   const playActions = useMemo(() => {
-    if (!isMyLibrary || !hasPriority || topObjectId == null) return [];
+    if (!hasPriority || topObjectId == null) return [];
     return zoneSurfaceActionsForObject(legalActionsByObject, topObject, topObjectId);
-  }, [isMyLibrary, hasPriority, topObject, topObjectId, legalActionsByObject]);
+  }, [hasPriority, topObject, topObjectId, legalActionsByObject]);
 
   const canPlay = playActions.length > 0;
 

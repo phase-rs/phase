@@ -1754,6 +1754,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: "T".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),

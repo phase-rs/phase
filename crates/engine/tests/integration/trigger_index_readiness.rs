@@ -19,6 +19,7 @@ const LAUNCH_THE_FLEET: &str = "Strive \u{2014} This spell costs {1} more to cas
 
 fn token_batch_effect(name: &str, types: &[&str], keywords: Vec<Keyword>, count: i32) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: name.to_string(),
         power: PtValue::Fixed(1),
         toughness: PtValue::Fixed(1),

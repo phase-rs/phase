@@ -391,8 +391,9 @@ fn strip_cost_mod_cast_scope_suffix(input: &str) -> &str {
 /// rather than re-deriving it: `oracle_classifier::is_static_pattern` (routing —
 /// does this line reach the static parser at all) and
 /// `oracle_static::dispatch::parse_static_line_inner` (composition — attach the
-/// matching `StaticCondition` to any enforceable continuous static the
-/// dispatcher would otherwise refuse). CR 604.1 + CR 611.3a + CR 102.1.
+/// matching `StaticCondition` to any static accepted by
+/// `can_compose_leading_turn_scope` that the dispatcher would otherwise
+/// refuse). CR 604.1 + CR 611.3a + CR 102.1.
 pub(crate) fn parse_leading_turn_scope(text: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         value(
@@ -1869,6 +1870,12 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         }
         // CR 122.1f + CR 109.5: same scoped-subject rebind as the monarch arm.
         StaticCondition::PlayerIsPoisoned { player } => {
+            if matches!(player, PlayerScope::ScopedPlayer) {
+                *player = antecedent.clone();
+            }
+        }
+        // CR 508.5: same scoped-subject rebind as the monarch arm above.
+        StaticCondition::IsDefendingPlayer { player } => {
             if matches!(player, PlayerScope::ScopedPlayer) {
                 *player = antecedent.clone();
             }

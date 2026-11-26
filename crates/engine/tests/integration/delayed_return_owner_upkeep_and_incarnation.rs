@@ -46,6 +46,7 @@
 //!   * CR 730.3 / CR 730.3c: a merged permanent that leaves becomes several
 //!     objects; an effect that finds the new object finds all of them.
 
+use engine::database::card_db::CardDatabase;
 use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -219,9 +220,10 @@ fn board<T>(
 /// permanent is a 7/2 with both cards' abilities. `extra` adds the row's
 /// other permanents. Returns `(runner, phytotitan, gemrazer, spells)`.
 fn merged_board(extra: impl FnOnce(&mut GameScenario)) -> (GameRunner, ObjectId, ObjectId, Spells) {
-    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
     let (mut runner, phytotitan, spells, gemrazer) = board(Phase::PreCombatMain, |scenario| {
-        let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, db);
+        let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
         // Gemrazer's mutate cost is {1}{G}{G}.
         scenario.with_mana_pool(
             P0,
@@ -232,19 +234,25 @@ fn merged_board(extra: impl FnOnce(&mut GameScenario)) -> (GameRunner, ObjectId,
         extra(scenario);
         gemrazer
     });
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
     assert!(
         !runner.state().objects[&phytotitan]
             .trigger_definitions
             .is_empty(),
         "reach-guard: the Oracle-built Phytotitan keeps its dies trigger through the rehydrate"
     );
+    mutate_gemrazer_under(&mut runner, gemrazer, phytotitan);
+    assert_eq!(runner.state().objects[&phytotitan].power, Some(7));
+    assert_eq!(runner.state().objects[&phytotitan].toughness, Some(2));
+    (runner, phytotitan, gemrazer, spells)
+}
 
+fn mutate_gemrazer_under(runner: &mut GameRunner, gemrazer: ObjectId, host: ObjectId) {
     runner
         .cast(gemrazer)
         .casting_variant(CastingVariant::Mutate)
         .alternative_cast(AlternativeCastDecision::Alternative)
-        .target_object(phytotitan)
+        .target_object(host)
         .commit();
     runner.advance_until_stack_empty();
     assert!(
@@ -259,18 +267,13 @@ fn merged_board(extra: impl FnOnce(&mut GameScenario)) -> (GameRunner, ObjectId,
         .act(GameAction::ChooseMutateMergeSide {
             side: engine::game::merge::MergeSide::Bottom,
         })
-        .expect("Gemrazer goes under Phytotitan");
+        .expect("Gemrazer goes under the host");
     // Gemrazer's mutate trigger has no legal target (P1 controls no artifact or
     // enchantment), so nothing waits on the stack.
     runner.advance_until_stack_empty();
-    let merged = runner.state().objects[&phytotitan]
-        .merged_components
-        .clone();
+    let merged = &runner.state().objects[&host].merged_components;
     assert_eq!(merged.len(), 2, "reach-guard: one merged permanent");
     assert!(merged.contains(&gemrazer), "Gemrazer is a component");
-    assert_eq!(runner.state().objects[&phytotitan].power, Some(7));
-    assert_eq!(runner.state().objects[&phytotitan].toughness, Some(2));
-    (runner, phytotitan, gemrazer, spells)
 }
 
 // ------------------------------------------------------------------ drivers
@@ -881,6 +884,584 @@ fn merged_phytotitan_survivor_put_back_before_its_trigger_still_returns_its_comp
     assert_returned_tapped_under(&runner, gemrazer, P0);
     assert_eq!(zone(&runner, phytotitan), Zone::Graveyard);
     assert!(runner.state().delayed_triggers.is_empty());
+}
+
+#[test]
+fn together_forever_returns_a_merged_component_after_cremate_exiles_the_survivor() {
+    together_forever_merged_death(false);
+}
+
+#[test]
+fn together_forever_does_not_open_a_merged_death_to_scarblades_malice() {
+    together_forever_merged_death(true);
+}
+
+#[test]
+fn broodmoth_keeps_merged_component_in_graveyard_after_cremate_exiles_the_survivor() {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let broodmoth = scenario.add_real_card(P0, "Luminous Broodmoth", Zone::Battlefield, &db);
+    let host = scenario
+        .add_creature(P0, "Mutate host", 2, 2)
+        .with_subtypes(vec!["Beast"])
+        .id();
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let murder = add_free_spell(&mut scenario, P0, "Murder", "Destroy target creature.");
+    let cremate = add_free_spell(&mut scenario, P0, "Cremate", CREMATE);
+    scenario.add_card_to_library_top(P0, "Cremate draw");
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+
+    cast_and_resolve_only(&mut runner, murder, TargetRef::Object(host));
+    assert_eq!(zone(&runner, host), Zone::Graveyard);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, broodmoth);
+
+    cast_and_resolve_only(&mut runner, cremate, TargetRef::Object(host));
+    assert_eq!(zone(&runner, host), Zone::Exile);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, broodmoth);
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(zone(&runner, host), Zone::Exile);
+
+    // CR 400.7e + CR 730.3c: Broodmoth should return Gemrazer. The ordinary
+    // trigger gap is tracked as a Phase 1 follow-up. This control preserves base behavior.
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+}
+
+#[test]
+fn departing_merged_hushbringer_suppresses_a_good_day_to_die() {
+    good_day_to_die_on_merged_host("Hushbringer", "Murder", 0);
+}
+
+#[test]
+fn a_good_day_to_die_draws_once_for_an_unsuppressed_merged_death() {
+    good_day_to_die_on_merged_host("Grizzly Bears", "Murder", 1);
+}
+
+#[test]
+fn simultaneous_lethal_damage_to_merged_hushbringer_suppresses_a_good_day_to_die() {
+    good_day_to_die_on_merged_host("Hushbringer", "Pyroclasm", 0);
+}
+
+#[test]
+fn a_good_day_to_die_draws_once_after_unsuppressed_simultaneous_lethal_damage() {
+    good_day_to_die_on_merged_host("Grizzly Bears", "Pyroclasm", 1);
+}
+
+fn good_day_to_die_on_merged_host(host_name: &str, removal_name: &str, expected_draws: usize) {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Green; 3]
+            .into_iter()
+            .chain([ManaType::Black; 4])
+            .chain([ManaType::Red])
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let host = scenario.add_real_card(P0, host_name, Zone::Battlefield, &db);
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let watcher = scenario.add_real_card(P0, "A Good Day to Die", Zone::Hand, &db);
+    let removal = scenario.add_real_card(P0, removal_name, Zone::Hand, &db);
+    let co_departure = (removal_name == "Pyroclasm")
+        .then(|| scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, &db));
+    scenario.add_card_to_library_top(P0, "Extra card");
+    let draw = scenario.add_card_to_library_top(P0, "Delayed draw");
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+
+    runner.cast(watcher).target_object(host).resolve();
+    assert_eq!(
+        only_delayed(&runner)
+            .ability
+            .context
+            .delayed_watch_incarnation,
+        Some(incarnation(&runner, host))
+    );
+    if let Some(co_departure) = co_departure {
+        runner.cast(removal).commit();
+        runner.act(GameAction::PassPriority).unwrap();
+        let death = runner.act(GameAction::PassPriority).unwrap();
+        // CR 704.5g + CR 704.3: Pyroclasm's lethal damage destroys both creatures
+        // in one state-based action check.
+        assert_eq!(zone(&runner, co_departure), Zone::Graveyard);
+        assert!(death.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, record, .. }
+                if *object_id == host && record.co_departed.contains(&co_departure)
+        )));
+    } else {
+        cast_and_resolve_only(&mut runner, removal, TargetRef::Object(host));
+    }
+    assert_eq!(zone(&runner, host), Zone::Graveyard);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    // CR 603.10a: the departing merged permanent's static still applies to its death.
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == watcher)
+            .count(),
+        expected_draws,
+        "A Good Day to Die triggers queued after {removal_name}"
+    );
+    let hand_at_death = runner.state().players[0].hand.len();
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_at_death + expected_draws
+    );
+    let expected_zone = if expected_draws == 0 {
+        Zone::Library
+    } else {
+        Zone::Hand
+    };
+    assert_eq!(zone(&runner, draw), expected_zone);
+}
+
+#[test]
+fn legend_rule_answer_does_not_replay_a_suppressed_merged_death() {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Green; 3]
+            .into_iter()
+            .chain([ManaType::Blue; 3])
+            .chain([ManaType::Black; 4])
+            .chain([ManaType::White])
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let host = scenario.add_real_card(P0, "Hushbringer", Zone::Battlefield, &db);
+    let survivor = scenario.add_real_card(P0, "Hushbringer", Zone::Battlefield, &db);
+    let gallery = scenario.add_real_card(P0, "Mirror Gallery", Zone::Battlefield, &db);
+    scenario.add_real_card(P0, "Leyline of Singularity", Zone::Battlefield, &db);
+    let crawler = scenario.add_real_card(P0, "Psychosis Crawler", Zone::Battlefield, &db);
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let watcher = scenario.add_real_card(P0, "A Good Day to Die", Zone::Hand, &db);
+    let command = scenario.add_real_card(P0, "Cryptic Command", Zone::Hand, &db);
+    scenario.add_real_card(P0, "Plains", Zone::Hand, &db);
+    let humble = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Humble",
+            true,
+            "Until end of turn, target creature loses all abilities and has base power and toughness 0/1.",
+        )
+        .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::White], generic: 1 })
+        .id();
+    let delayed_draw = scenario.add_card_to_library_top(P0, "Delayed draw");
+    let command_draw = scenario.add_card_to_library_top(P0, "Command draw");
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+    runner.cast(watcher).target_object(host).resolve();
+    assert_eq!(
+        only_delayed(&runner)
+            .ability
+            .context
+            .delayed_watch_incarnation,
+        Some(incarnation(&runner, host))
+    );
+    runner.cast(humble).target_object(survivor).resolve();
+
+    // CR 704.5j: removing Gallery makes the two Hushbringers subject to the
+    // legend rule. Crawler's draw observer is waiting when the choice opens.
+    runner
+        .cast(command)
+        .modes(&[1, 3])
+        .target_object(gallery)
+        .commit();
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+    assert_eq!(zone(&runner, gallery), Zone::Hand);
+    assert_eq!(zone(&runner, command_draw), Zone::Hand);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseLegend { .. }
+    ));
+    assert!(runner
+        .state()
+        .deferred_triggers
+        .iter()
+        .any(|trigger| trigger.pending.source_id == crawler));
+
+    runner
+        .act(GameAction::ChooseLegend { keep: survivor })
+        .unwrap();
+    assert_eq!(zone(&runner, host), Zone::Graveyard);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    assert_eq!(zone(&runner, survivor), Zone::Battlefield);
+    // CR 603.10a: the departing Hushbringer alone suppresses its death.
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, crawler);
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().players[1].life, 19);
+    assert_eq!(zone(&runner, delayed_draw), Zone::Library);
+}
+
+#[test]
+fn automatic_mana_payment_preserves_suppression_of_a_merged_death() {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Green; 3]
+            .into_iter()
+            .chain([ManaType::Black])
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let host = scenario.add_real_card(P0, "Hushbringer", Zone::Battlefield, &db);
+    let cauldron = scenario.add_real_card(P0, "Agatha's Soul Cauldron", Zone::Battlefield, &db);
+    let pet = scenario.add_real_card(P0, "Blood Pet", Zone::Graveyard, &db);
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let watcher = scenario.add_real_card(P0, "A Good Day to Die", Zone::Hand, &db);
+    let ritual = scenario.add_real_card(P0, "Dark Ritual", Zone::Hand, &db);
+    let draw = scenario.add_card_to_library_top(P0, "Delayed draw");
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+
+    let grant = runner
+        .activate(cauldron, 0)
+        .target_objects(&[pet, host])
+        .resolve();
+    grant.assert_zone(&[pet], Zone::Exile);
+    grant.assert_counters(host, engine::types::counter::CounterType::Plus1Plus1, 1);
+    runner.cast(watcher).target_object(host).resolve();
+    assert_eq!(
+        only_delayed(&runner)
+            .ability
+            .context
+            .delayed_watch_incarnation,
+        Some(incarnation(&runner, host))
+    );
+
+    let outcome = runner.cast(ritual).resolve();
+    outcome.assert_zone(&[host, gemrazer, ritual], Zone::Graveyard);
+    // CR 603.10a: the payment's later scan must preserve the death's suppression.
+    outcome.assert_hand_drawn(P0, 0);
+    outcome.assert_zone(&[draw], Zone::Library);
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn automatic_mana_payment_fires_death_frenzy_once_for_a_merged_death() {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Green; 7]
+            .into_iter()
+            .chain([ManaType::Black])
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let host = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, &db);
+    let cauldron = scenario.add_real_card(P0, "Agatha's Soul Cauldron", Zone::Battlefield, &db);
+    let pet = scenario.add_real_card(P0, "Blood Pet", Zone::Graveyard, &db);
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let frenzy = scenario.add_real_card(P0, "Death Frenzy", Zone::Hand, &db);
+    let ritual = scenario.add_real_card(P0, "Dark Ritual", Zone::Hand, &db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+
+    let grant = runner
+        .activate(cauldron, 0)
+        .target_objects(&[pet, host])
+        .resolve();
+    grant.assert_zone(&[pet], Zone::Exile);
+    grant.assert_counters(host, engine::types::counter::CounterType::Plus1Plus1, 1);
+    let setup = runner.cast(frenzy).resolve();
+    setup.assert_zone(&[host], Zone::Battlefield);
+    setup.assert_zone(&[frenzy], Zone::Graveyard);
+    setup.assert_life_delta(P0, 0);
+    assert_eq!(
+        only_delayed(&runner)
+            .ability
+            .context
+            .delayed_watch_incarnation,
+        None
+    );
+
+    let cast = runner.cast(ritual).commit();
+    assert_eq!(cast.state().objects[&host].zone, Zone::Graveyard);
+    assert_eq!(cast.state().objects[&gemrazer].zone, Zone::Graveyard);
+    // CR 603.2c + CR 730.3: the sacrifice is one death across both components.
+    assert_eq!(
+        cast.state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == frenzy)
+            .count(),
+        1,
+        "Death Frenzy triggers once during automatic payment",
+    );
+    let outcome = cast.resolve();
+    outcome.assert_life_delta(P0, 1);
+    outcome.assert_zone(&[ritual], Zone::Graveyard);
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn rootless_mana_payment_preserves_suppression_of_a_merged_death() {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Green; 3]
+            .into_iter()
+            .chain([ManaType::Black; 6])
+            .chain([ManaType::Blue, ManaType::White])
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let host = scenario.add_real_card(P0, "Hushbringer", Zone::Battlefield, &db);
+    let cauldron = scenario.add_real_card(P0, "Agatha's Soul Cauldron", Zone::Battlefield, &db);
+    let cantor = scenario.add_real_card(P0, "Wild Cantor", Zone::Graveyard, &db);
+    let tyrant = scenario.add_real_card(P0, "Leyline Tyrant", Zone::Battlefield, &db);
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let watcher = scenario.add_real_card(P0, "A Good Day to Die", Zone::Hand, &db);
+    let aura = scenario.add_real_card(P0, "Witness Protection", Zone::Hand, &db);
+    let disenchant = scenario.add_real_card(P0, "Disenchant", Zone::Hand, &db);
+    let murder = scenario.add_real_card(P0, "Murder", Zone::Hand, &db);
+    let draw = scenario.add_card_to_library_top(P0, "Delayed draw");
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+    let grant = runner
+        .activate(cauldron, 0)
+        .target_objects(&[cantor, host])
+        .resolve();
+    grant.assert_zone(&[cantor], Zone::Exile);
+    grant.assert_counters(host, engine::types::counter::CounterType::Plus1Plus1, 1);
+    runner.cast(watcher).target_object(host).resolve();
+    assert_eq!(
+        only_delayed(&runner)
+            .ability
+            .context
+            .delayed_watch_incarnation,
+        Some(incarnation(&runner, host))
+    );
+
+    // Let Tyrant trigger with Hushbringer's abilities removed, then restore
+    // both its suppressor and the granted mana ability before answering Tyrant.
+    runner
+        .cast(aura)
+        .target_object(host)
+        .resolve()
+        .assert_zone(&[aura], Zone::Battlefield);
+    cast_and_resolve_only(&mut runner, murder, TargetRef::Object(tyrant));
+    assert_eq!(zone(&runner, tyrant), Zone::Graveyard);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, tyrant);
+    cast_and_resolve_only(&mut runner, disenchant, TargetRef::Object(aura));
+    assert_eq!(zone(&runner, aura), Zone::Graveyard);
+    runner.advance_until_stack_empty();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayAmountChoice {
+            player: P0,
+            max: 1,
+            ..
+        }
+    ));
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 1 })
+        .unwrap();
+    assert_eq!(zone(&runner, host), Zone::Graveyard);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().players[1].life, 19);
+    // CR 603.10a: Hushbringer suppressed the watched death during the payment.
+    assert_eq!(zone(&runner, draw), Zone::Library);
+}
+
+fn together_forever_merged_death(with_scarblades_malice: bool) {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let watcher = scenario
+        .add_enchantment_from_oracle(P0, "Together Forever", "When this enchantment enters, support 2. (Put a +1/+1 counter on each of up to two target creatures.)\n{1}: Choose target creature with a counter on it. When that creature dies this turn, return that card to its owner's hand.")
+        .id();
+    let host = scenario
+        .add_creature(P0, "Mutate host", 2, 2)
+        .with_subtypes(vec!["Beast"])
+        .id();
+    scenario.with_counter(host, engine::types::counter::CounterType::Plus1Plus1, 1);
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let murder = add_free_spell(&mut scenario, P0, "Murder", "Destroy target creature.");
+    let scarblades_malice = with_scarblades_malice.then(|| {
+        add_free_spell(
+            &mut scenario,
+            P0,
+            "Scarblade's Malice",
+            "Target creature you control gains deathtouch and lifelink until end of turn. When that creature dies this turn, create a 2/2 black and green Elf creature token.",
+        )
+    });
+    let cremate = add_free_spell(&mut scenario, P0, "Cremate", CREMATE);
+    scenario.add_card_to_library_top(P0, "Cremate draw");
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+
+    runner.activate(watcher, 0).target_object(host).resolve();
+    let watched = only_delayed(&runner)
+        .ability
+        .context
+        .delayed_watch_incarnation
+        .expect("installed incarnation pin");
+    assert_eq!(watched, incarnation(&runner, host));
+    if let Some(spell) = scarblades_malice {
+        runner.cast(spell).target_object(host).resolve();
+        assert!(runner.state().delayed_triggers.iter().any(|delayed| {
+            delayed.source_id == spell
+                && delayed.ability.context.delayed_watch_incarnation.is_none()
+                && matches!(delayed.condition, DelayedTriggerCondition::WhenDies { .. })
+        }));
+    }
+    runner.cast(murder).target_object(host).commit();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pass to Murder");
+    let death = runner
+        .act(GameAction::PassPriority)
+        .expect("resolve Murder");
+    assert_eq!(zone(&runner, host), Zone::Graveyard);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    let departure = death.events.iter().find_map(|event| match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record,
+        } if *object_id == host => record.trigger_source_context(),
+        _ => None,
+    });
+    assert_eq!(
+        departure.map(|context| context.identity.reference),
+        Some(watched),
+        "the firing must see the watched departure"
+    );
+    if let Some(spell) = scarblades_malice {
+        assert!(
+            runner
+                .state()
+                .delayed_triggers
+                .iter()
+                .any(|delayed| delayed.source_id == spell),
+            "the legacy watcher must remain installed, as it did before the merged-death handoff"
+        );
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "death leaves the return on the stack; waiting for {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().stack[0].source_id, watcher);
+
+    cast_and_resolve_only(&mut runner, cremate, TargetRef::Object(host));
+    assert_eq!(zone(&runner, host), Zone::Exile);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    runner.advance_until_stack_empty();
+
+    // CR 400.7e + CR 730.3c + CR 609.3: each still-findable arrival returns.
+    assert_eq!(zone(&runner, host), Zone::Exile);
+    assert!(runner.state().players[0].hand.contains(&gemrazer));
+    assert!(!runner.state().battlefield.iter().any(|id| {
+        let object = &runner.state().objects[id];
+        object.is_token
+            && object
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Elf")
+    }));
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 /// CR 616.1e: answer a two-way entry tap-state ordering offered to P0.

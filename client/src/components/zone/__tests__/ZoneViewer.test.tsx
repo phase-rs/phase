@@ -340,7 +340,7 @@ describe("ZoneViewer", () => {
     expect(screen.queryByLabelText("Mox Sapphire")).not.toBeInTheDocument();
   });
 
-  it("dispatches the engine-surfaced play-from-top action for a revealed library top", () => {
+  it.each([0, 1])("dispatches the engine-surfaced play-from-top action for seat %i", (libraryOwner) => {
     // CR 401.5 + CR 118.9: with a TopOfLibraryCastPermission active (Future
     // Sight, Bolas's Citadel, Mystic Forge, …) the engine surfaces a play/cast
     // action on the revealed top. The viewer dispatches it just like a
@@ -348,6 +348,8 @@ describe("ZoneViewer", () => {
     const revealed = makeObject({
       id: 30,
       zone: "Library",
+      owner: libraryOwner,
+      controller: libraryOwner,
       name: "Mystic Sanctuary",
       display_visible_to_viewer: true,
       keywords: [],
@@ -359,10 +361,11 @@ describe("ZoneViewer", () => {
     const gameState = {
       ...base,
       objects: buildObjectMap(revealed, unrevealed),
-      players: [
-        { ...base.players[0], graveyard: [], library: [revealed.id, unrevealed.id] },
-        base.players[1],
-      ],
+      players: base.players.map((player) =>
+        player.id === libraryOwner
+          ? { ...player, graveyard: [], library: [revealed.id, unrevealed.id] }
+          : player,
+      ),
     };
 
     useGameStore.setState({
@@ -375,7 +378,7 @@ describe("ZoneViewer", () => {
       gameMode: "ai",
     });
 
-    render(<ZoneViewer zone="library" playerId={0} onClose={vi.fn()} />);
+    render(<ZoneViewer zone="library" playerId={libraryOwner} onClose={vi.fn()} />);
     fireEvent.click(screen.getByLabelText("Mystic Sanctuary"));
 
     expect(dispatch).toHaveBeenCalledTimes(1);

@@ -821,6 +821,7 @@ mod constructed {
 
     fn fractal_token() -> Effect {
         Effect::Token {
+            enters_blocking: None,
             attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Fractal".to_string(),
             power: PtValue::Fixed(1),

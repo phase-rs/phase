@@ -24654,6 +24654,7 @@ mod tests {
             def.affected,
             Some(TargetFilter::Typed(TypedFilter::creature().properties(
                 vec![FilterProp::Attacking {
+                    scope: Default::default(),
                     defender: Some(ControllerRef::Opponent),
                 }]
             ))),

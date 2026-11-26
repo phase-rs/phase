@@ -637,6 +637,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Token {
+                enters_blocking: None,
                 name: "Saproling".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -662,6 +663,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Token {
+                enters_blocking: None,
                 name: "Treasure".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),

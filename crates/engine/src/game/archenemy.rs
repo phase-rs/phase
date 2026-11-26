@@ -48,11 +48,16 @@
 //! The two-scheme-deck Supervillain Rumble option (CR 904.12) is deferred: this
 //! module models the single-archenemy game (CR 904.2a).
 
+use crate::game::static_abilities::{
+    check_static_ability, transient_grants_static_mode_to_object, StaticCheckContext,
+};
 use crate::types::ability::ChosenAttribute;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
+use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 
 /// CR 314: True when the object is a scheme card.
@@ -84,6 +89,25 @@ pub fn active_schemes(state: &GameState) -> Vec<ObjectId> {
         .collect()
 }
 
+/// CR 101.2 + CR 701.32a: True when an active `CantSetSchemeInMotion`
+/// prohibition (All in Good Time) covers `scheme_id`. Consults both
+/// permanent-sourced statics and spell-applied transient grants, mirroring
+/// the life-lock helpers.
+pub(crate) fn scheme_setting_in_motion_prohibited(state: &GameState, scheme_id: ObjectId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::CantSetSchemeInMotion,
+        &StaticCheckContext {
+            target_id: Some(scheme_id),
+            ..Default::default()
+        },
+    ) || transient_grants_static_mode_to_object(
+        state,
+        scheme_id,
+        &StaticMode::CantSetSchemeInMotion,
+    )
+}
+
 /// CR 904.9 / CR 701.32b: Set the top scheme of the archenemy's scheme deck in
 /// motion — move it off the top of the scheme deck and turn it face up in the
 /// command zone.
@@ -107,6 +131,14 @@ pub fn set_in_motion(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let Some(archenemy) = crate::game::topology::archenemy(state).or(state.archenemy) else {
         return;
     };
+    // CR 101.2 + CR 701.32a + CR 904.9: a "can't be set in motion"
+    // prohibition skips the turn-based action entirely — the scheme stays on
+    // top of the scheme deck and no event fires.
+    if let Some(&scheme_id) = state.scheme_deck.front() {
+        if scheme_setting_in_motion_prohibited(state, scheme_id) {
+            return;
+        }
+    }
     // CR 701.32b: move the scheme off the top of the scheme deck.
     let Some(scheme_id) = state.scheme_deck.pop_front() else {
         return;
@@ -131,6 +163,41 @@ pub fn set_in_motion(state: &mut GameState, events: &mut Vec<GameEvent>) {
         scheme_id,
     };
     events.push(event);
+}
+
+/// CR 701.32b / CR 904.9: re-fire a face-up scheme's "when you set this scheme
+/// in motion" abilities (My Laughter Echoes: "set that scheme in motion
+/// again"). The scheme is already face up in the command zone — the
+/// turn-based action's zone move already happened — so this only emits a fresh
+/// `SchemeSetInMotion` event, which the post-action scan collects exactly like
+/// the original (including "as" choices via
+/// `resolve_pending_as_set_in_motion_choices`). No-op unless the scheme is
+/// face up in the command zone: the only reachable state, since the CR 904.10
+/// SBA waits while scheme triggers are on the stack and this effect only
+/// resolves inside one.
+pub fn set_in_motion_again(
+    state: &mut GameState,
+    scheme_id: ObjectId,
+    player_id: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    let face_up_in_command = state.command_zone.contains(&scheme_id)
+        && state
+            .objects
+            .get(&scheme_id)
+            .is_some_and(|obj| !obj.face_down);
+    if !face_up_in_command {
+        return;
+    }
+    // CR 101.2 + CR 701.32a: re-setting a scheme in motion is still setting
+    // it in motion — the prohibition suppresses the re-fire too.
+    if scheme_setting_in_motion_prohibited(state, scheme_id) {
+        return;
+    }
+    events.push(GameEvent::SchemeSetInMotion {
+        player_id,
+        scheme_id,
+    });
 }
 
 /// CR 904.9 + CR 603.1: resolve "as you set this scheme in motion" choices

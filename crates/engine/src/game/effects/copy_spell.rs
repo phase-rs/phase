@@ -1936,7 +1936,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Sacrifice {
                     target: TargetFilter::SelfRef,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
             ));
@@ -2671,6 +2671,7 @@ mod tests {
         // Push an intermediate triggered ability (e.g. Monastery Mentor token trigger)
         let mentor_ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Monk".to_string(),
                 power: crate::types::ability::PtValue::Fixed(1),
                 toughness: crate::types::ability::PtValue::Fixed(1),

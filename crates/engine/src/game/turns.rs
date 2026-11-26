@@ -4,8 +4,8 @@ use crate::analysis::resource::ResourceAxis;
 use crate::game::filter::{matches_target_filter_including_phased_out, FilterContext};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    ControlWindow, DelayedTriggerCondition, EffectKind, GameRestriction, ReplacementDefinition,
-    RestrictionExpiry, TargetFilter, TurnGate, WheneverEventExpiry,
+    ControlWindow, DelayedTriggerCondition, Duration, EffectKind, GameRestriction,
+    ReplacementDefinition, RestrictionExpiry, TargetFilter, TurnGate, WheneverEventExpiry,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -1695,6 +1695,30 @@ fn retire_granted_turn_triggers(state: &mut GameState, turn: ExtraTurnId) {
     }
 }
 
+/// CR 614.10a + CR 611.2a: drop every transient continuous effect bound to the
+/// granted extra turn `turn` (`UntilEndOfGrantedTurn`). Called at the same 3
+/// sites as `retire_granted_turn_triggers`: when that turn ends or is
+/// skipped (a skipped turn never activates its bound window — Final Fortune
+/// ruling #8). A default id names no minted turn and retires nothing. Marks
+/// `layers_dirty` when anything dropped (TCE removal is layer-visible —
+/// unlike trigger retirement). The variant is never armed/pruned by
+/// untap/cleanup passes.
+fn retire_granted_turn_transients(state: &mut GameState, turn: ExtraTurnId) {
+    if turn == ExtraTurnId::default() {
+        return;
+    }
+    let before = state.transient_continuous_effects.len();
+    state.transient_continuous_effects.retain(|tce| {
+        !matches!(
+            tce.duration,
+            Duration::UntilEndOfGrantedTurn { turn: Some(bound) } if bound == turn
+        )
+    });
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty.mark_full();
+    }
+}
+
 /// CR 500.7: Select the next active player after `completed_player`'s turn ends.
 ///
 /// Returns `(next_active, extra_turn)`, where `extra_turn` names the popped
@@ -1949,6 +1973,7 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // fire. Retired before the skip recursion below re-enters this function.
     if let Some(ended) = state.current_extra_turn.take() {
         retire_granted_turn_triggers(state, ended);
+        retire_granted_turn_transients(state, ended);
     }
 
     state.turn_number += 1;
@@ -1975,6 +2000,7 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         // trigger bound to it can never fire.
         if let Some(skipped) = extra_turn {
             retire_granted_turn_triggers(state, skipped);
+            retire_granted_turn_transients(state, skipped);
         }
         // Recursively start the next turn (skipping this one entirely).
         return begin_next_turn(state, events);
@@ -1992,6 +2018,7 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // bound to the skipped granted turn can never fire.
             if let Some(skipped) = extra_turn {
                 retire_granted_turn_triggers(state, skipped);
+                retire_granted_turn_transients(state, skipped);
             }
             return begin_next_turn(state, events);
         }

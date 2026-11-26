@@ -474,6 +474,10 @@ fn type_filter_excludes_creature(tf: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 314.1: Scheme is a positive type — same conservative `false` as
+        // Battle (a scheme filter is not a creature exclusion, and `Non`'s
+        // duality reads the sibling predicate below).
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -501,6 +505,8 @@ fn type_filter_matches_all_creatures(tf: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 314.1: not every creature is a scheme (none is).
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Subtype(_) => false,
@@ -929,7 +935,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         // CR 701.21a: sacrificing produces sac + LTB (+ dies for creature filters,
         // §3.5) — same polarity as the 4a `AbilityCost::Sacrifice` cost arm.
         Effect::Sacrifice { target, count, .. } => {
-            let (a, mag) = count_seed(count);
+            let (a, mag) = count.count_expr().map_or((1, AxisMagnitude::Unbounded), count_seed);
             b.add_sac(a, mag);
             b.add_ltb(a, mag);
             if sac_produces_death(target) {
@@ -1120,6 +1126,10 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        // CR 701.32b: re-firing projects no axis (no modeled zone change,
+        // mana, or counters) — the re-fired triggers project as their own
+        // resolutions, not this node's.
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -3237,6 +3247,7 @@ mod tests {
     }
     fn token(count: QuantityExpr) -> Effect {
         Effect::Token {
+            enters_blocking: None,
             name: "Servo".into(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -3258,7 +3269,7 @@ mod tests {
     fn sacrifice(target: TargetFilter) -> Effect {
         Effect::Sacrifice {
             target,
-            count: fixed(1),
+            count: fixed(1).into(),
             min_count: 0,
         }
     }

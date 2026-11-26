@@ -873,6 +873,42 @@ describe("multiplayerStore", () => {
     expect(normalized?.formatConfig.poison_counter_threshold).toBeNull();
   });
 
+  it("keeps a remembered archenemy seat for the Archenemy family", () => {
+    const normalized = normalizeRememberedHostConfig({
+      format: "Archenemy",
+      formatConfig: { format: "Archenemy", archenemy_player: 2 },
+      playerCount: 4,
+    });
+
+    expect(normalized?.formatConfig.archenemy_player).toBe(2);
+    // Reach guard: the rest of the config still comes from the defaults.
+    expect(normalized?.formatConfig.starting_life).toBe(FORMAT_DEFAULTS.Archenemy.starting_life);
+  });
+
+  it("clamps a stranded remembered archenemy seat to the resolved table", () => {
+    const normalized = normalizeRememberedHostConfig({
+      format: "Archenemy",
+      formatConfig: { format: "Archenemy", archenemy_player: 5 },
+      playerCount: 3,
+    });
+
+    expect(normalized?.playerCount).toBe(3);
+    expect(normalized?.formatConfig.archenemy_player).toBe(2);
+  });
+
+  it("ignores a remembered archenemy seat outside the Archenemy family", () => {
+    const normalized = normalizeRememberedHostConfig({
+      format: "Commander",
+      formatConfig: { format: "Commander", archenemy_player: 1 },
+      playerCount: 2,
+    });
+
+    expect(normalized?.format).toBe("Commander");
+    expect(normalized?.formatConfig.archenemy_player).toBe(
+      FORMAT_DEFAULTS.Commander.archenemy_player,
+    );
+  });
+
   it("drops unknown persisted format names instead of indexing inherited object keys", () => {
     expect(normalizeRememberedHostConfig({ format: "toString" })).toBeNull();
   });

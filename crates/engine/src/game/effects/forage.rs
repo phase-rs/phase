@@ -126,7 +126,7 @@ fn sacrifice_food_branch() -> AbilityDefinition {
                     .controller(ControllerRef::You)
                     .subtype("Food".to_string()),
             ),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 1,
         },
     )

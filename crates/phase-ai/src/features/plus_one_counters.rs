@@ -590,6 +590,7 @@ mod tests {
         face.abilities.push(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Token {
+                enters_blocking: None,
                 name: "Construct".to_string(),
                 power: engine::types::ability::PtValue::Fixed(0),
                 toughness: engine::types::ability::PtValue::Fixed(0),

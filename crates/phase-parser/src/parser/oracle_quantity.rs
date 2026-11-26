@@ -5712,6 +5712,7 @@ mod tests {
             QuantityRef::ObjectCount {
                 filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
                     FilterProp::Attacking {
+                        scope: Default::default(),
                         defender: Some(ControllerRef::You)
                     }
                 ])),
@@ -7650,6 +7651,7 @@ mod tests {
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::CommanderManaValue {
                     owner: ControllerRef::You,
+                    zones: vec![Zone::Battlefield, Zone::Command],
                 },
             })
         );

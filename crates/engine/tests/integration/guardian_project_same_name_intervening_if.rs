@@ -186,6 +186,8 @@ fn enter_creature_and_count_draws(
 
 fn creature_token_spec(controller: PlayerId) -> TokenSpec {
     TokenSpec {
+        blocking_attacker: None,
+        blocking_attacker_incarnation: None,
         characteristics: TokenCharacteristics {
             display_name: "Zombie".to_string(),
             power: Some(2),

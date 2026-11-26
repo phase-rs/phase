@@ -99,7 +99,8 @@ impl SacrificeValuePolicy {
 
         let Effect::Sacrifice {
             target,
-            count: QuantityExpr::Fixed { value: 1 },
+            count:
+                engine::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 }),
             ..
         } = &ability.effect
         else {
@@ -705,7 +706,7 @@ mod tests {
         let mut sacrifice = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Typed(TypedFilter::creature()),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             Vec::new(),

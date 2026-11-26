@@ -12748,9 +12748,12 @@ fn static_as_long_as_equipped_creature_is_attacking_grants_first_strike_to_host(
     );
 
     let attacking_gate = StaticCondition::RecipientMatchesFilter {
-        filter: TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
-        ),
+        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+        ])),
     };
 
     // Supported static: first strike on the host, gated on the host attacking.
@@ -12805,9 +12808,12 @@ fn static_as_long_as_enchanted_creature_is_attacking_gate_binds_to_host() {
     assert_eq!(
         defs[0].condition,
         Some(StaticCondition::RecipientMatchesFilter {
-            filter: TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
-            ),
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }
+            ])),
         }),
     );
 }
@@ -12986,9 +12992,12 @@ fn static_as_long_as_attacking_bare_must_be_blocked_models_requirement() {
     assert_eq!(
         defs[1].condition,
         Some(StaticCondition::RecipientMatchesFilter {
-            filter: TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
-            ),
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }
+            ])),
         }),
     );
     // No Unimplemented residual for a fully-modeled requirement.
@@ -13011,9 +13020,12 @@ fn static_as_long_as_attacking_pure_must_be_blocked_models_requirement() {
     assert_eq!(
         defs[0].condition,
         Some(StaticCondition::RecipientMatchesFilter {
-            filter: TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
-            ),
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }
+            ])),
         }),
     );
 }
@@ -13576,7 +13588,12 @@ fn static_max_untap_static_orb_conditional() {
 #[test]
 fn static_you_may_look_at_top_card_of_library() {
     let def = parse_static_line("You may look at the top card of your library any time.").unwrap();
-    assert_eq!(def.mode, StaticMode::MayLookAtTopOfLibrary);
+    assert_eq!(
+        def.mode,
+        StaticMode::MayLookAtTopOfLibrary {
+            library: crate::types::ability::ControllerRef::You
+        }
+    );
     assert_eq!(
         def.affected,
         Some(TargetFilter::Typed(
@@ -14722,7 +14739,10 @@ fn static_attacking_creatures_you_control_have_double_strike() {
         Some(TargetFilter::Typed(
             TypedFilter::creature()
                 .controller(ControllerRef::You)
-                .properties(vec![FilterProp::Attacking { defender: None }]),
+                .properties(vec![FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }]),
         ))
     );
     assert!(def
@@ -14740,6 +14760,7 @@ fn static_creatures_attacking_your_opponents_have_double_strike() {
         def.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::Opponent)
             }]
         ),))
@@ -14764,6 +14785,7 @@ fn static_creatures_attacking_enchanted_player_have_trample() {
         def.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::EnchantedPlayer)
             }]
         ),))
@@ -14786,6 +14808,7 @@ fn static_creatures_attacking_opponents_and_planeswalkers_get_pump() {
         def.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::Opponent)
             }]
         ),))
@@ -14803,6 +14826,7 @@ fn static_creatures_attacking_you_get_pump() {
         def.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You)
             }]
         ),))
@@ -14826,6 +14850,7 @@ fn static_creatures_attacking_last_chosen_player_scope() {
         menace.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::SourceChosenPlayer)
             }]
         ),))
@@ -14841,6 +14866,7 @@ fn static_creatures_attacking_last_chosen_player_scope() {
         pump.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::SourceChosenPlayer)
             }]
         ),))
@@ -14855,6 +14881,7 @@ fn static_creatures_attacking_last_chosen_player_scope() {
         short.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::SourceChosenPlayer)
             }]
         ),))
@@ -14884,6 +14911,7 @@ fn triarch_stalker_choose_opponent_persists_for_last_chosen_player_static() {
         parsed.statics.iter().any(|s| matches!(
             &s.affected,
             Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::SourceChosenPlayer),
             })
         )),
@@ -15071,6 +15099,7 @@ fn granted_static_reader_persists_last_chosen_player() {
         parsed.statics.iter().any(|s| matches!(
             &s.affected,
             Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::SourceChosenPlayer),
             })
         )),
@@ -20242,9 +20271,10 @@ fn static_unblocked_attacking_ninjas_you_control_have_lifelink() {
         assert!(tf.properties.contains(&FilterProp::BlockStatus {
             status: AttackerBlockStatus::Unblocked
         }));
-        assert!(tf
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(tf.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
     } else {
         panic!(
             "Expected Typed filter with Ninja subtype, got {:?}",
@@ -20265,9 +20295,10 @@ fn static_attacking_ninjas_you_control_have_deathtouch() {
     if let Some(TargetFilter::Typed(tf)) = &def.affected {
         assert_eq!(tf.get_subtype(), Some("Ninja"));
         assert_eq!(tf.controller, Some(ControllerRef::You));
-        assert!(tf
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(tf.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(!tf.properties.contains(&FilterProp::BlockStatus {
             status: AttackerBlockStatus::Unblocked
         }));
@@ -33209,6 +33240,7 @@ fn top_of_library_cast_permission_realmwalker() {
             play_mode,
             frequency,
             ref alt_cost,
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Cast);
             assert_eq!(frequency, CastFrequency::Unlimited);
@@ -33247,6 +33279,7 @@ fn top_of_library_cast_permission_future_sight_compound() {
             play_mode,
             frequency,
             ref alt_cost,
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
             assert_eq!(frequency, CastFrequency::Unlimited);
@@ -33274,6 +33307,7 @@ fn top_of_library_object_form_unconditional() {
             play_mode,
             frequency,
             ref alt_cost,
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
             assert_eq!(frequency, CastFrequency::Unlimited);
@@ -33410,7 +33444,12 @@ fn top_of_library_object_form_does_not_shadow_neighbours() {
     let look = parse_static_line("You may look at the top card of your library any time.")
         .expect("look-at line must still parse");
     assert!(
-        matches!(look.mode, StaticMode::MayLookAtTopOfLibrary),
+        matches!(
+            look.mode,
+            StaticMode::MayLookAtTopOfLibrary {
+                library: crate::types::ability::ControllerRef::You
+            }
+        ),
         "expected MayLookAtTopOfLibrary, got {look:?}"
     );
 
@@ -33537,6 +33576,7 @@ fn top_of_library_cast_permission_crystal_skull_historic_disjunctive() {
             play_mode,
             frequency,
             ref alt_cost,
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
             assert_eq!(frequency, CastFrequency::Unlimited);
@@ -33586,6 +33626,7 @@ fn top_of_library_cast_permission_locked_hothouse_mixed_disjunctive() {
             play_mode,
             frequency,
             ref alt_cost,
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
             assert_eq!(frequency, CastFrequency::Unlimited);
@@ -33677,6 +33718,7 @@ fn top_of_library_cast_permission_bolas_alt_cost() {
             play_mode,
             frequency: CastFrequency::Unlimited,
             alt_cost: Some(crate::types::ability::AbilityCost::PayLife { amount }),
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
             assert_eq!(
@@ -33758,6 +33800,7 @@ fn top_of_library_cast_permission_once_per_turn_disjunctive() {
             play_mode,
             frequency,
             ref alt_cost,
+            ..
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
             assert_eq!(frequency, CastFrequency::OncePerTurn);
@@ -33812,7 +33855,7 @@ fn the_fourth_doctor_full_card_parse() {
         parsed
             .statics
             .iter()
-            .any(|s| matches!(s.mode, StaticMode::MayLookAtTopOfLibrary)),
+            .any(|s| matches!(s.mode, StaticMode::MayLookAtTopOfLibrary { .. })),
         "expected MayLookAtTopOfLibrary static, got {:?}",
         parsed.statics
     );
@@ -33828,6 +33871,7 @@ fn the_fourth_doctor_full_card_parse() {
             play_mode,
             frequency,
             alt_cost,
+            ..
         } => {
             assert_eq!(*play_mode, CardPlayMode::Play);
             assert_eq!(*frequency, CastFrequency::OncePerTurn);
@@ -37027,6 +37071,7 @@ fn assemble_the_players_once_per_turn_top_of_library() {
             play_mode,
             frequency,
             alt_cost,
+            ..
         } => {
             assert_eq!(*play_mode, CardPlayMode::Cast);
             assert_eq!(*frequency, CastFrequency::OncePerTurn);
@@ -37116,11 +37161,15 @@ fn johann_apprentice_sorcerer_once_per_turn_top_of_library() {
 fn top_of_library_frequency_display_roundtrip() {
     use std::str::FromStr;
     let unlimited = StaticMode::TopOfLibraryCastPermission {
+        library: crate::types::ability::ControllerRef::You,
+        mana_spend_permission: None,
         play_mode: CardPlayMode::Cast,
         frequency: CastFrequency::Unlimited,
         alt_cost: None,
     };
     let once = StaticMode::TopOfLibraryCastPermission {
+        library: crate::types::ability::ControllerRef::You,
+        mana_spend_permission: None,
         play_mode: CardPlayMode::Cast,
         frequency: CastFrequency::OncePerTurn,
         alt_cost: None,
@@ -42054,7 +42103,7 @@ fn bello_verbatim_line_retains_each_compound_subject_owner() {
 
 /// V5 — HOSTILE / lying-green: an unenforceable recursed static (Elvish
 /// Refueler's remainder parses to `Continuous` with ZERO modifications) is
-/// REFUSED by `is_enforceable_continuous_static`, so the card stays an honest
+/// REFUSED by `can_compose_leading_turn_scope`, so the card stays an honest
 /// `Effect::Unimplemented` rather than becoming a silent no-op that reports as
 /// supported.
 ///
@@ -42167,7 +42216,7 @@ fn during_your_turn_composes_with_remainder_condition() {
     // assumed).
     //
     // The always-true `StaticCondition::Unrecognized` shape is NOT what this
-    // assertion guards: `is_enforceable_continuous_static` now refuses it
+    // assertion guards: `can_compose_leading_turn_scope` now refuses it
     // upstream via `contains_unrecognized`, so such a line never reaches a
     // composed `And` at all — see
     // `during_your_turn_unrecognized_condition_remainder_stays_unsupported`,
@@ -44784,7 +44833,10 @@ fn type_phrase_keeps_post_negation_status_and_plural_shared_color_reference() {
         TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Creature)
                 .with_type(TypeFilter::Non(Box::new(TypeFilter::Artifact)))
-                .properties(vec![FilterProp::Attacking { defender: None }])
+                .properties(vec![FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }])
         )
     );
     let (filter, rest) = crate::parser::oracle_target::parse_target(

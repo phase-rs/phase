@@ -31,7 +31,7 @@ use super::super::oracle_static::{
     classify_quoted_inner, parse_static_line_multi, promote_nested_ability_quotes,
     strip_enclosing_sentence_comma,
 };
-use super::super::oracle_target::parse_target_with_ctx;
+use super::super::oracle_target::{parse_direct_attacker_target, parse_target_with_ctx};
 use super::super::oracle_util::{
     comma_short_self_name, granting_self_reference_count, normalize_card_name_refs_reporting,
     parse_count_expr, parse_count_head, parse_count_slot, parse_rounding_suffix_only,
@@ -183,6 +183,7 @@ pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Opti
         attach_to: token.attach_to,
         enters_attacking: token.enters_attacking,
         attack_destination: token.attack_destination,
+        enters_blocking: token.enters_blocking,
         // CR 205.4a: Carry parsed supertypes (e.g. "legendary" for Marit Lage)
         // onto the token so the legend rule (CR 704.5j) applies.
         supertypes: token.supertypes,
@@ -691,6 +692,39 @@ fn parse_token_description_with_context(
                 TokenAttackDestination::ControllerChooses,
             ),
         };
+    // CR 509.1h + CR 506.3e + CR 509.4: Read the blocking rider before token keywords.
+    // An attack trigger supplies its attacker; a qualified block trigger
+    // instead binds the attacker from the declared blocker/attacker pair.
+    let blocking_lower = text.to_ascii_lowercase();
+    let outside = nom_primitives::mask_double_quoted_spans_preserving_len(&blocking_lower);
+    let blocking_clause = |i| -> OracleResult<'_, TargetFilter> {
+        let (i, _) =
+            alt((tag("that's"), tag("that is"), tag("thats"), tag("that are"))).parse(i)?;
+        let (i, _) = tag(" blocking ").parse(i)?;
+        let (i, filter) = alt((
+            value(
+                ctx.blocking_rider_antecedent
+                    .clone()
+                    .unwrap_or(TargetFilter::TriggeringSource),
+                tag("that creature"),
+            ),
+            parse_direct_attacker_target,
+        ))
+        .parse(i)?;
+        let (i, _) = alt((
+            value((), nom::combinator::eof),
+            value((), tag(" ")),
+            value((), tag(",")),
+            value((), tag(".")),
+        ))
+        .parse(i)?;
+        Ok((i, filter))
+    };
+    let (text, enters_blocking) =
+        match nom_primitives::scan_at_word_boundaries_with_offset(&outside, blocking_clause) {
+            Some((offset, filter, _)) => (text[..offset].trim_end(), Some(filter)),
+            None => (text, None),
+        };
     let (mut count, leading_name, mut rest) = match slot_count {
         Some(count) => (count, None, text),
         None => {
@@ -947,6 +981,7 @@ fn parse_token_description_with_context(
         static_abilities,
         enters_attacking,
         attack_destination,
+        enters_blocking,
     })
 }
 
@@ -2397,9 +2432,10 @@ mod tests {
             panic!("expected typed target, got {target:?}");
         };
         assert!(typed_target.type_filters.contains(&TypeFilter::Creature));
-        assert!(typed_target
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(typed_target.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert_eq!(remainder, " and that's tapped and attacking.");
 
         let oracle = "Create a token that's a copy of another target attacking creature and that's tapped and attacking.";
@@ -2418,9 +2454,10 @@ mod tests {
             panic!("expected typed copy target, got {target:?}");
         };
         assert!(typed_target.type_filters.contains(&TypeFilter::Creature));
-        assert!(typed_target
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(typed_target.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(typed_target.properties.contains(&FilterProp::Another));
         assert!(tapped, "trailing tapped clause must set tapped=true");
         assert!(
@@ -2447,7 +2484,7 @@ mod tests {
         assert!(matches!(
             target,
             TargetFilter::Typed(ref typed)
-                if typed.properties.contains(&FilterProp::Attacking { defender: None })
+                if typed.properties.contains(&FilterProp::Attacking { scope: Default::default(), defender: None })
         ));
         assert!(
             !tapped,
@@ -2488,9 +2525,10 @@ mod tests {
             panic!("expected full attack trigger to start with CopyTokenOf, got {execute:?}");
         };
         assert!(target.type_filters.contains(&TypeFilter::Creature));
-        assert!(target
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(target.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(target.properties.contains(&FilterProp::Another));
         assert!(*tapped && *enters_attacking);
 

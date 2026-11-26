@@ -199,6 +199,7 @@ mod tests {
                 let oid =
                     create_object(state, card_id, AI, "Token Factory".to_string(), Zone::Hand);
                 let token_effect = Effect::Token {
+                    enters_blocking: None,
                     name: "Saproling".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),

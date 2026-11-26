@@ -304,6 +304,7 @@ fn tracked_entry_counter_token_receives_discarded_count_counters() {
     // reference is the entry-counter quantity.
     ability.sub_ability = Some(Box::new(ResolvedAbility::new(
         Effect::Token {
+            enters_blocking: None,
             name: "Zombie".to_string(),
             power: PtValue::Fixed(2),
             toughness: PtValue::Fixed(2),

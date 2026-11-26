@@ -2090,6 +2090,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Soldier".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),

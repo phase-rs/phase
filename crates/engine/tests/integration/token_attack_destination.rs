@@ -482,6 +482,7 @@ fn carrier_board_of(
 
 fn goblin_effect(destination: TokenAttackDestination) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Goblin".to_string(),
         power: PtValue::Fixed(1),
         toughness: PtValue::Fixed(1),

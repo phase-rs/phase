@@ -1268,7 +1268,9 @@ fn parse_resolution_context_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_mana_spent_threshold,
         parse_combat_context_conditions,
         parse_put_onto_battlefield_this_way,
+        parse_passive_discarded_this_way_count,
         parse_exiled_this_way_count,
+        parse_created_this_way_count,
         parse_unless_pay_condition,
         parse_player_chooses_label_condition,
     ))
@@ -1345,6 +1347,38 @@ fn parse_put_onto_battlefield_this_way(input: &str) -> OracleResult<'_, StaticCo
     ))
 }
 
+/// CR 608.2c + CR 701.9a: "[fewer|more] than <N> <noun> were discarded this
+/// way" — the passive twin of `parse_put_onto_battlefield_this_way`: a
+/// resolution-context comparison gating a follow-up effect on how many cards
+/// the immediately preceding effect discarded (Your Nightmares Are Delicious'
+/// "Then if fewer than three cards were discarded this way, you draw three
+/// cards."; Skull Raid's "If fewer than two cards were discarded this way, …").
+/// "Discarded" is the only verb this passive construction prints; other
+/// producer verbs stay out until a card prints them.
+///
+/// Like its twin, the noun is parsed only to consume text —
+/// `QuantityRef::TrackedSetSize` counts whatever the preceding discard
+/// published (discards publish with `ThisWayCause::Discarded`, so the set is
+/// exactly the discarded cards), with no per-noun filter.
+fn parse_passive_discarded_this_way_count(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, comparator) = parse_strict_comparator_prefix(input)?;
+    let (rest, n) = parse_number(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    // CR 608.2c: "this way" scopes to cards discarded by this resolution.
+    let (rest, _) = take_until(" were discarded this way").parse(rest)?;
+    let (rest, _) = tag(" were discarded this way").parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
 /// CR 608.2c: "you exiled <N> or more/or fewer card[s] this way" — a
 /// resolution-context comparison over how many cards the immediately preceding
 /// per-card-type exile placed into the chain tracked set (Portent of Calamity:
@@ -1365,6 +1399,32 @@ fn parse_exiled_this_way_count(input: &str) -> OracleResult<'_, StaticCondition>
     // The shared comparator-aware threshold authority; its comparator is kept.
     let (rest, (n, comparator)) = parse_count_threshold(rest)?;
     let (rest, _) = alt((tag("cards this way"), tag("card this way"))).parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 608.2c + CR 701.7a: "you created fewer than/more than <N> token[s] this
+/// way" — a resolution-context comparison gating a follow-up effect on how
+/// many tokens the immediately preceding creation effect produced (Your Own
+/// Face Mocks You's "If you created fewer than two tokens this way, …"). Twin
+/// of `parse_put_onto_battlefield_this_way` with the creation verb; unlike
+/// that twin the noun is fixed to "token[s]" (creation only ever produces
+/// tokens — anything else fails closed) and there is no destination phrase.
+/// `QuantityRef::TrackedSetSize` counts whatever the preceding creation
+/// published, with no per-noun filter.
+fn parse_created_this_way_count(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you created ").parse(input)?;
+    let (rest, comparator) = parse_strict_comparator_prefix(rest)?;
+    let (rest, n) = parse_number(rest)?;
+    let (rest, _) = alt((tag(" tokens this way"), tag(" token this way"))).parse(rest)?;
     Ok((
         rest,
         StaticCondition::QuantityComparison {
@@ -1882,8 +1942,17 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // subject × predicate. The subject is one `alt()`; the predicate tag is
         // matched once. Do NOT enumerate (subject × predicate) full-phrase tags.
         map(
-            terminated(parse_monarch_identity_subject, tag("the monarch")),
+            terminated(parse_player_identity_subject, tag("the monarch")),
             |player| StaticCondition::IsMonarch { player },
+        ),
+        // CR 508.5 + CR 109.5: defending-player identity — the SAME subject
+        // parser as the monarch's, a different predicate tag. "you're the
+        // defending player" is `Controller`; "that player/opponent is the
+        // defending player" is `ScopedPlayer` (rebound to the attacked player
+        // on attack triggers by `rebind_attack_anaphor_to_defending_player`).
+        map(
+            terminated(parse_player_identity_subject, tag("the defending player")),
+            |player| StaticCondition::IsDefendingPlayer { player },
         ),
         // CR 725.1: "if an opponent is the monarch" — a monarch exists and it
         // is not the controller. Distinct from `Not(IsMonarch)` (also true when
@@ -2009,7 +2078,10 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
 ///
 /// Mirrors `parse_that_player_has_conditions` in this module, which already
 /// maps the same two anaphors to [`PlayerScope::ScopedPlayer`].
-fn parse_monarch_identity_subject(input: &str) -> OracleResult<'_, PlayerScope> {
+/// CR 109.5: the subject axis shared by player-identity predicates
+/// ("you are …" / "that player/opponent is …"). Nothing monarch-specific —
+/// the monarch and defending-player arms supply their own predicate tag.
+fn parse_player_identity_subject(input: &str) -> OracleResult<'_, PlayerScope> {
     alt((
         value(
             PlayerScope::Controller,
@@ -2165,7 +2237,13 @@ pub(crate) fn parse_attached_subject_combat_state(
     let (rest, _) = tag("is ").parse(rest)?;
     let (rest, prop) = alt((
         value(FilterProp::AttackingAlone, tag("attacking alone")),
-        value(FilterProp::Attacking { defender: None }, tag("attacking")),
+        value(
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+            tag("attacking"),
+        ),
         value(FilterProp::Blocking, tag("blocking")),
     ))
     .parse(rest)?;
@@ -5139,6 +5217,8 @@ pub(crate) fn type_filter_to_core_type(type_filter: &TypeFilter) -> Option<CoreT
         TypeFilter::Battle => Some(CoreType::Battle),
         // CR 308.1: Kindred maps to its core type.
         TypeFilter::Kindred => Some(CoreType::Kindred),
+        // CR 314.1: scheme is a card type.
+        TypeFilter::Scheme => Some(CoreType::Scheme),
         TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -6093,7 +6173,13 @@ fn parse_filtered_creature_is_attacking(input: &str) -> OracleResult<'_, StaticC
         )),
     )
     .parse(remainder)?;
-    let filter = add_filter_property(filter, FilterProp::Attacking { defender });
+    let filter = add_filter_property(
+        filter,
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender,
+        },
+    );
     Ok((
         after,
         StaticCondition::IsPresent {
@@ -6123,7 +6209,10 @@ fn parse_a_type_is_in_combat(input: &str) -> OracleResult<'_, StaticCondition> {
     };
     let (rest, prop) = alt((
         value(
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
             tag("is attacking"),
         ),
         value(FilterProp::Blocking, tag("is blocking")),
@@ -6168,7 +6257,13 @@ fn parse_creatures_in_combat_count_threshold(input: &str) -> OracleResult<'_, St
     let (rest, (_, combat_prop)) = (
         alt((tag("creatures are"), tag("creature is"))),
         alt((
-            value(FilterProp::Attacking { defender: None }, tag(" attacking")),
+            value(
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None,
+                },
+                tag(" attacking"),
+            ),
             nom_quantity::parse_blocking_source_referent,
         )),
     )
@@ -14766,6 +14861,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_inner_condition_fewer_than_n_were_discarded_this_way() {
+        // CR 608.2c + CR 701.9a: Your Nightmares Are Delicious' (and Skull
+        // Raid's) passive resolution-context comparison — gates a follow-up
+        // effect on how many cards the preceding effect discarded.
+        let (rest, c) =
+            parse_inner_condition("fewer than three cards were discarded this way").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+                comparator: Comparator::LT,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            },
+        );
+    }
+
+    #[test]
     fn parse_inner_condition_this_enchantment_on_battlefield() {
         // SUB-FIX B: "this enchantment is on the battlefield" is a
         // self-referential zone check equivalent to "~ is on the battlefield".
@@ -15575,7 +15690,8 @@ mod tests {
                 tf.properties.iter().any(|p| matches!(
                     p,
                     FilterProp::Attacking {
-                        defender: Some(ControllerRef::You)
+                        defender: Some(ControllerRef::You),
+                        ..
                     }
                 )),
                 "filter should carry Attacking {{ defender: You }}, got {tf:?}"
@@ -15607,7 +15723,7 @@ mod tests {
                 assert!(
                     tf.properties
                         .iter()
-                        .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                     "filter should carry Attacking {{ defender: None }}, got {tf:?}"
                 );
             }
@@ -15647,7 +15763,7 @@ mod tests {
                 assert!(
                     tf.properties
                         .iter()
-                        .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                     "filter should carry Attacking {{ defender: None }}, got {tf:?}"
                 );
             }
@@ -16774,7 +16890,7 @@ mod tests {
                     assert!(
                         tf.properties
                             .iter()
-                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                         "expected Attacking filter, got {tf:?}"
                     );
                 } else {
@@ -16789,7 +16905,10 @@ mod tests {
     /// any controller, no defender restriction.
     fn attacking_creature_count_filter() -> TargetFilter {
         TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
+            TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            }]),
         )
     }
 
@@ -17195,7 +17314,7 @@ mod tests {
             } => assert!(
                 tf.properties
                     .iter()
-                    .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                    .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                 "the attacking sibling must still win its own input, got {tf:?}"
             ),
             other => panic!("attacking sibling was shadowed, got {other:?}"),
@@ -18363,7 +18482,13 @@ mod tests {
                 TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::EquippedBy])
             )
         );
-        assert_eq!(prop, FilterProp::Attacking { defender: None });
+        assert_eq!(
+            prop,
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }
+        );
     }
 
     #[test]
@@ -18378,7 +18503,13 @@ mod tests {
                 TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::EnchantedBy])
             )
         );
-        assert_eq!(prop, FilterProp::Attacking { defender: None });
+        assert_eq!(
+            prop,
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }
+        );
     }
 
     /// CR 611.3a: the non-creature `parse_attached_condition_subject_core`
@@ -18418,7 +18549,13 @@ mod tests {
                     TypedFilter::new(type_filter).properties(vec![attachment_prop])
                 )
             );
-            assert_eq!(prop, FilterProp::Attacking { defender: None });
+            assert_eq!(
+                prop,
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }
+            );
         }
     }
 
@@ -20227,7 +20364,13 @@ mod tests {
             parse_attached_subject_combat_state("enchanted creature is attacking")
                 .expect("existing broad attacking condition must still parse");
         assert_eq!(rest, "");
-        assert_eq!(prop, FilterProp::Attacking { defender: None });
+        assert_eq!(
+            prop,
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }
+        );
     }
 
     #[test]

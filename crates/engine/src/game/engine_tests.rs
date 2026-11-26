@@ -1406,6 +1406,7 @@ fn dragonstorm_globe_counters_created_dragon_token() {
         Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                enters_blocking: None,
                 name: "Dragon".to_string(),
                 power: crate::types::ability::PtValue::Fixed(4),
                 toughness: crate::types::ability::PtValue::Fixed(4),
@@ -11229,6 +11230,8 @@ fn once_per_turn_library_land_play_consumes_slot_and_blocks_second_play() {
     );
     {
         let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode: crate::types::ability::CardPlayMode::Play,
             frequency: CastFrequency::OncePerTurn,
             alt_cost: None,

@@ -255,6 +255,7 @@
     "commanderDamage": "Danno da comandante",
     "poisonCounters": "Segnalini veleno",
     "playerSeats": "Posti giocatore",
+    "archenemySeat": "Archenemy",
     "seat": "Posto {{number}}",
     "youHost": "Tu (Host)",
     "ai": "IA",

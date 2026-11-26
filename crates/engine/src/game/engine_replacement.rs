@@ -492,6 +492,7 @@ fn finish_simultaneous_token_clause(state: &mut GameState, events: &mut Vec<Game
     // linked-exile batch).
     let template = ResolvedAbility::new(
         Effect::Token {
+            enters_blocking: None,
             name: String::new(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -5114,6 +5115,7 @@ fn apply_copy_target_choice(
                     EngineError::InvalidAction("Copy target has no copiable values".into())
                 })?;
             let copy = crate::types::proposed_event::CopyTokenSpec {
+                blocking_attacker: None,
                 values: Box::new(values),
                 display: target.display_identity(),
                 extra_keywords: Vec::new(),
@@ -11056,6 +11058,8 @@ mod tests {
         install_optional_replacement(&mut state, ReplacementEvent::CreateToken);
 
         let spec = TokenSpec {
+            blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Soldier".to_string(),
                 power: Some(2),
@@ -11149,6 +11153,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: name.to_string(),
                     power: PtValue::Fixed(2),
                     toughness: PtValue::Fixed(2),
@@ -11189,6 +11194,8 @@ mod tests {
         state.battlefield.push_back(replacement_source);
 
         let treasure_spec = TokenSpec {
+            blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Treasure".to_string(),
                 power: None,
@@ -11314,6 +11321,7 @@ mod tests {
         let branch = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                enters_blocking: None,
                 name: "Cat".to_string(),
                 power: PtValue::Fixed(2),
                 toughness: PtValue::Fixed(2),
@@ -11354,6 +11362,8 @@ mod tests {
             redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(TokenSpec {
+                blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: TokenCharacteristics {
                     display_name: "Treasure".to_string(),
                     power: None,
@@ -11434,6 +11444,7 @@ mod tests {
         let instruction = |source_id| {
             ResolvedAbility::new(
                 Effect::Token {
+                    enters_blocking: None,
                     name: "Soldier".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),
@@ -12718,7 +12729,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Sacrifice {
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         );
@@ -13395,6 +13406,7 @@ mod tests {
         let continuation = PendingCounterPostAction::ContinueCopyTokenCreation {
             owner: PlayerId(0),
             copy: Box::new(CopyTokenSpec {
+                blocking_attacker: None,
                 values: Box::new(values),
                 display: crate::game::game_object::DisplayIdentity {
                     display_source: crate::game::game_object::DisplaySource::Token,
@@ -14069,6 +14081,7 @@ mod tests {
         state.liminal_entries.insert(
             liminal_id,
             LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(liminal),
