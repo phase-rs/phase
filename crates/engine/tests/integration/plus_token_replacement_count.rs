@@ -9,7 +9,7 @@ use engine::types::actions::GameAction;
 use engine::types::counter::parse_counter_type;
 use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -19,6 +19,20 @@ const CHATTERFANG: &str = "Chatterfang, Squirrel General";
 const DOUBLING_SEASON: &str = "Doubling Season";
 const RAISE: &str = "Raise the Alarm";
 const BESTIAL: &str = "Bestial Menace";
+const BESTIAL_ORACLE: &str =
+    "Create a 1/1 green Snake creature token, a 2/2 green Wolf creature token, and a 3/3 green Elephant creature token.";
+const FAE_OFFERING_ORACLE: &str =
+    "At the beginning of each end step, if you've cast both a creature spell and a noncreature spell this turn, create a Clue token, a Food token, and a Treasure token.";
+const BANKBUSTER_ORACLE: &str = concat!(
+    "This Vehicle enters with three charge counters on it.\n",
+    "{2}, {T}, Remove a charge counter from this Vehicle: Draw a card. Then if there are no charge counters on this Vehicle, create a Treasure token and a 1/1 colorless Pilot creature token with \"This token crews Vehicles as though its power were 2 greater.\"\n",
+    "Crew 3",
+);
+const FARMER_COTTON: &str = "Farmer Cotton";
+const FARMER_COTTON_ORACLE: &str = r#"When this creature enters, create X 1/1 white Halfling creature tokens and X Food tokens. (They're artifacts with "{2}, {T}, Sacrifice this token: You gain 3 life.")"#;
+const MANUFACTOR: &str = "Academy Manufactor";
+const VISITATION: &str = "Divine Visitation";
+const HALVING: &str = "Halving Season";
 const BESTIAL_MANA: &[ManaType] = &[
     ManaType::Green,
     ManaType::Green,
@@ -60,6 +74,25 @@ fn assert_tokens(runner: &GameRunner, owner: PlayerId, counts: &[(&str, usize)])
     }
 }
 
+fn add_bestial_menace(scenario: &mut GameScenario, caster: PlayerId, oracle: &str) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(caster, BESTIAL, false, oracle)
+        .with_mana_cost(parse_mtgjson_mana_cost("{3}{G}{G}"))
+        .id()
+}
+
+fn give_bestial_mana(scenario: &mut GameScenario, casts: usize) {
+    scenario.with_mana_pool(
+        P0,
+        BESTIAL_MANA
+            .iter()
+            .cycle()
+            .take(BESTIAL_MANA.len() * casts)
+            .map(|&color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+}
+
 fn cast_board(
     replacement_sources: &[&str],
     caster: PlayerId,
@@ -72,7 +105,14 @@ fn cast_board(
     for name in replacement_sources {
         scenario.add_real_card(P0, name, Zone::Battlefield, db);
     }
-    let spell = scenario.add_real_card(caster, spell, Zone::Hand, db);
+    let spell = match spell {
+        BESTIAL => add_bestial_menace(&mut scenario, caster, BESTIAL_ORACLE),
+        FARMER_COTTON => scenario
+            .add_creature_to_hand_from_oracle(caster, FARMER_COTTON, 1, 1, FARMER_COTTON_ORACLE)
+            .with_mana_cost(parse_mtgjson_mana_cost("{X}{G}{W}"))
+            .id(),
+        _ => scenario.add_real_card(caster, spell, Zone::Hand, db),
+    };
     scenario.with_mana_pool(
         caster,
         mana.iter()
@@ -155,6 +195,10 @@ fn choose_append_order(other: &str, first: &str) -> GameRunner {
 }
 
 fn answer_append_order(runner: &mut GameRunner, other: &str, first: &str) {
+    answer_replacement_order(runner, [ALLENAL, other], first);
+}
+
+fn answer_replacement_order(runner: &mut GameRunner, sources: [&str; 2], first: &str) {
     let WaitingFor::ReplacementChoice {
         player,
         kind,
@@ -162,12 +206,17 @@ fn answer_append_order(runner: &mut GameRunner, other: &str, first: &str) {
         ..
     } = &runner.state().waiting_for
     else {
-        panic!("expected ordering between {ALLENAL} and {other}");
+        let token_names: Vec<_> = tokens(runner, P0).iter().map(|obj| &obj.name).collect();
+        panic!(
+            "expected replacement ordering for {sources:?}; waiting for {:?}, stack has {} item(s), tokens {token_names:?}",
+            runner.state().waiting_for,
+            runner.state().stack.len()
+        );
     };
     assert_eq!(*player, P0);
     assert_eq!(*kind, ReplacementChoiceKind::Order);
     assert_eq!(candidates.len(), 2);
-    assert!([ALLENAL, other]
+    assert!(sources
         .iter()
         .all(|name| candidates.iter().any(|c| c.source_name == *name)));
     let index = candidates
@@ -229,7 +278,10 @@ fn bankbuster_appenders_use_the_admitted_batches() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.add_real_card(P0, source, Zone::Battlefield, db);
-        let bankbuster = scenario.add_real_card(P0, "Reckoner Bankbuster", Zone::Battlefield, db);
+        let bankbuster = scenario
+            .add_artifact_from_oracle(P0, "Reckoner Bankbuster", BANKBUSTER_ORACLE)
+            .with_subtypes(vec!["Vehicle"])
+            .id();
         scenario.add_real_card(P0, "Island", Zone::Library, db);
         scenario.with_mana_pool(
             P0,
@@ -260,8 +312,17 @@ fn bankbuster_appenders_use_the_admitted_batches() {
 #[test]
 fn bestial_menace_order_survives_serialization_and_publishes_all_created_ids() {
     for (first, soldiers) in [(DOUBLING_SEASON, 1), (ALLENAL, 2)] {
-        let (mut runner, spell) =
-            cast_board(&[ALLENAL, DOUBLING_SEASON], P0, BESTIAL, BESTIAL_MANA);
+        let db = crate::support::shared_card_db().expect("curated card fixture");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_real_card(P0, ALLENAL, Zone::Battlefield, db);
+        scenario.add_real_card(P0, DOUBLING_SEASON, Zone::Battlefield, db);
+        // Use Scout for Survivors' printed counter instruction as a test-local
+        // follow-up to Bestial Menace's list.
+        let oracle = format!("{BESTIAL_ORACLE} Put a +1/+1 counter on each of them.");
+        let spell = add_bestial_menace(&mut scenario, P0, &oracle);
+        give_bestial_mana(&mut scenario, 1);
+        let mut runner = scenario.build();
         runner.cast(spell).resolve();
         let pending = &runner
             .state()
@@ -304,6 +365,15 @@ fn bestial_menace_order_survives_serialization_and_publishes_all_created_ids() {
         let mut actual: Vec<_> = tokens(&runner, P0).iter().map(|obj| obj.id).collect();
         actual.sort_unstable_by_key(|id| id.0);
         assert_eq!(published, actual);
+        for id in actual {
+            assert_eq!(
+                runner.state().objects[&id]
+                    .counters
+                    .get(&parse_counter_type("+1/+1")),
+                Some(&2),
+                "the follow-up puts one counter on {id:?}, doubled by Doubling Season",
+            );
+        }
     }
 }
 
@@ -313,7 +383,7 @@ fn farmer_cotton_resolves_x_for_both_members() {
     let (mut runner, spell) = cast_board(
         &[],
         P0,
-        "Farmer Cotton",
+        FARMER_COTTON,
         &[Green, White, Colorless, Colorless, Colorless],
     );
     runner.cast(spell).x(3).resolve();
@@ -324,12 +394,38 @@ fn farmer_cotton_resolves_x_for_both_members() {
 
 #[test]
 fn fae_offering_and_manufactor_create_three_of_each_in_one_batch() {
+    let runner = resolve_fae_offering(None);
+    assert_tokens(&runner, P0, &[("Clue", 3), ("Food", 3), ("Treasure", 3)]);
+    assert_eq!(runner.state().last_created_token_ids.len(), 9);
+}
+
+#[test]
+fn manufactor_and_chatterfang_order_changes_the_squirrel_count() {
+    for (first, squirrels) in [(MANUFACTOR, 9), (CHATTERFANG, 3)] {
+        let runner = resolve_fae_offering(Some(first));
+        assert_tokens(
+            &runner,
+            P0,
+            &[
+                ("Clue", 3),
+                ("Food", 3),
+                ("Treasure", 3),
+                ("Squirrel", squirrels),
+            ],
+        );
+    }
+}
+
+fn resolve_fae_offering(first: Option<&str>) -> GameRunner {
     use ManaType::{Colorless, Red};
     let db = crate::support::shared_card_db().expect("curated card fixture");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_real_card(P0, "Fae Offering", Zone::Battlefield, db);
-    let manufactor = scenario.add_real_card(P0, "Academy Manufactor", Zone::Hand, db);
+    scenario.add_enchantment_from_oracle(P0, "Fae Offering", FAE_OFFERING_ORACLE);
+    let manufactor = scenario.add_real_card(P0, MANUFACTOR, Zone::Hand, db);
+    if first.is_some() {
+        scenario.add_real_card(P0, CHATTERFANG, Zone::Battlefield, db);
+    }
     let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
     scenario.with_mana_pool(
         P0,
@@ -342,9 +438,42 @@ fn fae_offering_and_manufactor_create_three_of_each_in_one_batch() {
     runner.cast(manufactor).resolve();
     runner.cast(bolt).target_player(P1).resolve();
     runner.advance_to_phase(Phase::End);
-    runner.advance_until_stack_empty();
-    assert_tokens(&runner, P0, &[("Clue", 3), ("Food", 3), ("Treasure", 3)]);
-    assert_eq!(runner.state().last_created_token_ids.len(), 9);
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareAttackers { .. }
+    ) {
+        runner.declare_attackers(&[]).expect("skip combat");
+        runner.advance_to_phase(Phase::End);
+    }
+    assert_eq!(runner.state().phase, Phase::End);
+    while !runner.state().stack.is_empty()
+        && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+    {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve Fae Offering's end step trigger");
+    }
+    if let Some(first) = first {
+        answer_replacement_order(&mut runner, [MANUFACTOR, CHATTERFANG], first);
+    }
+    runner
+}
+
+#[test]
+fn halving_season_counts_angels_after_divine_visitation() {
+    let db = crate::support::shared_card_db().expect("curated card fixture");
+    for (first, angels) in [(VISITATION, 1), (HALVING, 0)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_real_card(P0, VISITATION, Zone::Battlefield, db);
+        scenario.add_real_card(P1, HALVING, Zone::Battlefield, db);
+        let spell = add_bestial_menace(&mut scenario, P0, BESTIAL_ORACLE);
+        give_bestial_mana(&mut scenario, 1);
+        let mut runner = scenario.build();
+        runner.cast(spell).resolve();
+        answer_replacement_order(&mut runner, [VISITATION, HALVING], first);
+        assert_tokens(&runner, P0, &[("Angel", angels)]);
+    }
 }
 
 #[test]
@@ -355,17 +484,9 @@ fn esix_offers_one_substitution_for_all_of_bestial_menace() {
         scenario.at_phase(Phase::PreCombatMain);
         scenario.add_real_card(P0, "Esix, Fractal Bloom", Zone::Battlefield, db);
         let ox = scenario.add_creature(P0, "Decoy Ox", 5, 4).id();
-        let first = scenario.add_real_card(P0, BESTIAL, Zone::Hand, db);
-        let second = scenario.add_real_card(P0, BESTIAL, Zone::Hand, db);
-        scenario.with_mana_pool(
-            P0,
-            BESTIAL_MANA
-                .iter()
-                .cycle()
-                .take(10)
-                .map(|&color| ManaUnit::new(color, ObjectId(0), false, vec![]))
-                .collect(),
-        );
+        let first = add_bestial_menace(&mut scenario, P0, BESTIAL_ORACLE);
+        let second = add_bestial_menace(&mut scenario, P0, BESTIAL_ORACLE);
+        give_bestial_mana(&mut scenario, 2);
         let mut runner = scenario.build();
         runner.cast(first).commit().stop_at_optional().resolve();
         assert!(

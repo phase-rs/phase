@@ -15,6 +15,7 @@
 
 use engine::game::effects::{token, token_copy};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     ContinuousModification, ControllerRef, Effect, NamedDefenderScope, PlayerFilter, PtValue,
     QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef, TokenAttackDestination,
@@ -865,6 +866,43 @@ fn veteran_soldier_soldiers_attack_each_opponent() {
     assert_eq!(
         seats_in_creation_order(&runner, &soldiers),
         players_attacked(&[P1, P2, P3])
+    );
+}
+
+#[test]
+fn allenal_added_soldier_chooses_its_defender_after_veteran_soldier() {
+    let mut runner = per_opponent_board(4, |s| {
+        let db = crate::support::shared_card_db().expect("curated card fixture");
+        s.add_real_card(P0, "Queen Allenal of Ruadach", Zone::Battlefield, db);
+        s.add_enchantment_from_oracle(P0, "Veteran Soldier", VETERAN_SOLDIER);
+        s.add_creature(P0, "Commander Bear", 2, 2).commander().id()
+    });
+    runner.advance_until_stack_empty();
+    let WaitingFor::EntryAttackTargetChoice {
+        player,
+        object_id,
+        valid_targets,
+    } = &runner.state().waiting_for
+    else {
+        panic!("Allenal's Soldier needs an entry attack destination");
+    };
+    assert_eq!(*player, P0);
+    let extra = *object_id;
+    let chosen = AttackTarget::Player(P3);
+    assert!(valid_targets.contains(&chosen));
+    runner
+        .act(GameAction::ChooseEntryAttackTarget { target: chosen })
+        .expect("the extra Soldier attacks P3");
+    drain(&mut runner, TriggerOrder::AsOffered);
+
+    let mut originals = tokens_named(&runner, "Soldier");
+    assert_eq!(originals.len(), 4);
+    assert_all_tapped(&runner, &originals);
+    originals.retain(|&id| id != extra);
+    assert_eq!(attacking(&runner, extra), Some(chosen));
+    assert_eq!(
+        seats_in_creation_order(&runner, &originals),
+        players_attacked(&[P1, P2, P3]),
     );
 }
 

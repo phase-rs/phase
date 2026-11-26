@@ -6559,6 +6559,16 @@ fn create_token_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameS
     matches!(event, ProposedEvent::CreateToken { count, .. } if *count > 0)
 }
 
+fn token_specs_share_subtype(first: &TokenSpec, second: &TokenSpec) -> bool {
+    first.characteristics.subtypes.iter().any(|subtype| {
+        second
+            .characteristics
+            .subtypes
+            .iter()
+            .any(|other| subtype.eq_ignore_ascii_case(other))
+    })
+}
+
 fn token_append_definition(
     state: &GameState,
     rid: ReplacementId,
@@ -6592,11 +6602,16 @@ fn create_token_applier(
     apply_create_token_replacement(event, rid, state, None)
 }
 
+struct CompoundTokenAdjustment {
+    append_count: Option<u32>,
+    reduced_count: Option<u32>,
+}
+
 fn apply_create_token_replacement(
     event: ProposedEvent,
     rid: ReplacementId,
     state: &GameState,
-    compound_append_count: Option<u32>,
+    compound_adjustment: Option<CompoundTokenAdjustment>,
 ) -> ApplyResult {
     use crate::types::ability::QuantityModification;
     // Extract the six fields the applier reads, given a def and the controller
@@ -6692,7 +6707,10 @@ fn apply_create_token_replacement(
         // CR 614.1a: Modify token count per replacement effect.
         let new_count = match modification {
             Some(QuantityModification::Times { factor }) => count.saturating_mul(factor),
-            Some(QuantityModification::Half) => count / 2,
+            Some(QuantityModification::Half) => compound_adjustment
+                .as_ref()
+                .and_then(|adjustment| adjustment.reduced_count)
+                .unwrap_or(count / 2),
             Some(QuantityModification::Plus { value }) => count.saturating_add(value),
             Some(QuantityModification::Minus { value }) => count.saturating_sub(value),
             // CR 614.6 + CR 614.7 + CR 111.1: No printed token-creation
@@ -6760,9 +6778,12 @@ fn apply_create_token_replacement(
         // (CR 614.5), which already holds this replacement, so it cannot re-fire
         // on its own batch.
         if let Some(payload) = additional_spec {
-            let append_count = compound_append_count.unwrap_or_else(|| {
-                resolve_token_append_count(state, rid, source_controller, &payload.count, count)
-            });
+            let append_count = compound_adjustment
+                .as_ref()
+                .and_then(|adjustment| adjustment.append_count)
+                .unwrap_or_else(|| {
+                    resolve_token_append_count(state, rid, source_controller, &payload.count, count)
+                });
             let mut extra = Box::new(payload.spec);
             // Fill in the replacement source's runtime identity. The parser
             // stores placeholder ObjectId(0) / PlayerId(0) since these cannot
@@ -6783,12 +6804,13 @@ fn apply_create_token_replacement(
             // applies to it as part of the event.
             extra.tapped |= spec.tapped;
             // CR 614.6 + CR 508.4: the creating instruction still governs
-            // both whether and where the appended token enters attacking.
+            // whether it enters attacking and any destination named for the
+            // whole batch. Per-entrant destinations only seat the original tokens.
             if spec.enters_attacking {
                 extra.enters_attacking = true;
                 extra.attack_request = copy.as_deref().map_or_else(
-                    || spec.attack_request.clone(),
-                    |batch_copy| batch_copy.attack_request.clone(),
+                    || spec.attack_request.for_added_token(),
+                    |batch_copy| batch_copy.attack_request.for_added_token(),
                 );
             }
             if append_count > 0 {
@@ -6822,13 +6844,7 @@ fn apply_create_token_replacement(
                 .map(|o| o.controller)
                 .unwrap_or(owner);
             for mut extra in specs {
-                let already_present = extra.characteristics.subtypes.iter().any(|s| {
-                    spec.characteristics
-                        .subtypes
-                        .iter()
-                        .any(|already| already.eq_ignore_ascii_case(s))
-                });
-                if already_present {
+                if token_specs_share_subtype(&extra, &spec) {
                     continue;
                 }
                 extra.source_id = rid.source;
@@ -13664,7 +13680,7 @@ fn apply_single_replacement(
     mut proposed: ProposedEvent,
     rid: ReplacementId,
     branch: ReplacementBranch,
-    compound_append_count: Option<u32>,
+    compound_adjustment: Option<CompoundTokenAdjustment>,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
@@ -14379,8 +14395,8 @@ fn apply_single_replacement(
             && !matches!(proposed, ProposedEvent::Discard { .. })
         {
             ApplyResult::Modified(proposed)
-        } else if compound_append_count.is_some() {
-            apply_create_token_replacement(proposed, rid, state, compound_append_count)
+        } else if compound_adjustment.is_some() {
+            apply_create_token_replacement(proposed, rid, state, compound_adjustment)
         } else {
             (handler.applier)(proposed, rid, state, events)
         };
@@ -14962,6 +14978,60 @@ pub(crate) fn compound_optional_decider(
     replacement_choice_player(state, proposed, rid)
 }
 
+/// CR 614.1a + CR 111.1: Halving Season rounds down once per kind.
+fn halved_token_batch_counts(views: &[ProposedEvent], admits: &[bool]) -> Vec<Option<u32>> {
+    let mut remainders = Vec::new();
+    views
+        .iter()
+        .zip(admits)
+        .map(|(view, admitted)| {
+            let ProposedEvent::CreateToken {
+                spec, copy, count, ..
+            } = view
+            else {
+                unreachable!("a token batch view is a CreateToken event");
+            };
+            if !admitted {
+                return None;
+            }
+            let carry = if count.is_multiple_of(2) {
+                0
+            } else if let Some(index) = remainders.iter().position(|&(other_spec, other_copy)| {
+                same_token_kind(spec, copy.as_deref(), other_spec, other_copy)
+            }) {
+                remainders.swap_remove(index);
+                1
+            } else {
+                remainders.push((spec.as_ref(), copy.as_deref()));
+                0
+            };
+            Some(count / 2 + carry)
+        })
+        .collect()
+}
+
+fn same_token_kind(
+    spec: &TokenSpec,
+    copy: Option<&CopyTokenSpec>,
+    other_spec: &TokenSpec,
+    other_copy: Option<&CopyTokenSpec>,
+) -> bool {
+    match (copy, other_copy) {
+        (None, None) => {
+            spec.characteristics == other_spec.characteristics
+                && spec.script_name == other_spec.script_name
+                && spec.static_abilities == other_spec.static_abilities
+        }
+        (Some(copy), Some(other)) => {
+            copy.values == other.values
+                && copy.extra_keywords == other.extra_keywords
+                && copy.additional_modifications == other.additional_modifications
+                && copy.double_faced == other.double_faced
+        }
+        (None, Some(_)) | (Some(_), None) => false,
+    }
+}
+
 /// CR 614.1a + CR 616.1 + CR 101.4 + CR 614.5 + CR 616.1f: apply one chosen
 /// replacement to `owner`'s part of a compound token event — to every batch of
 /// `owner` it applies to, leaving every other batch unchanged. Each batch owner
@@ -15026,20 +15096,29 @@ fn apply_replacement_to_token_batches(
             .fold(0u32, u32::saturating_add);
         resolve_token_append_count(state, rid, controller, &definition.count, admitted_count)
     });
+    let reduced_counts = stored_replacement_definition(state, rid)
+        .filter(|def| def.quantity_modification == Some(QuantityModification::Half))
+        .map(|_| halved_token_batch_counts(&views, &admits));
     let mut survivors = Vec::with_capacity(views.len());
-    for (view, admitted) in views.into_iter().zip(admits) {
+    for (index, (view, admitted)) in views.into_iter().zip(admits).enumerate() {
         if !admitted {
             survivors.push(view);
             continue;
         }
-        let batch_append_count = append_count;
+        let reduced_count = reduced_counts.as_ref().and_then(|counts| counts[index]);
+        let adjustment = (append_count.is_some() || reduced_count.is_some()).then_some(
+            CompoundTokenAdjustment {
+                append_count,
+                reduced_count,
+            },
+        );
         append_count = append_count.map(|_| 0);
         match apply_single_replacement(
             state,
             view,
             rid,
             work.branch(),
-            batch_append_count,
+            adjustment,
             registry,
             events,
         ) {
@@ -15475,22 +15554,45 @@ pub(crate) fn replacement_ordering_is_material(
             };
             for other in candidates.iter().filter(|other| *other != rid) {
                 let other_appends = token_append_definition(state, *other);
-                let other_scales = stored_replacement_definition(state, *other)
+                let other_definition = stored_replacement_definition(state, *other);
+                let other_scales = other_definition
                     .is_some_and(|definition| definition.quantity_modification.is_some());
+                // An ensure-specs transformation changes the population read
+                // by an event-count appender. It can also transform a fixed
+                // append if the added token belongs to the ensured family.
+                let ensure_interacts = other_definition
+                    .and_then(|definition| definition.ensure_token_specs.as_deref())
+                    .is_some_and(|specs| {
+                        !matches!(append.count, QuantityExpr::Fixed { .. })
+                            || specs
+                                .iter()
+                                .any(|spec| token_specs_share_subtype(spec, &append.spec))
+                    });
                 if other_appends.is_some_and(|(other_append, _)| {
                     !matches!(other_append.count, QuantityExpr::Fixed { .. })
                 }) || (other_scales && matches!(append.count, QuantityExpr::Fixed { .. }))
+                    || ensure_interacts
                 {
                     return true;
                 }
             }
         }
     }
+    // CR 616.1e-f: per-kind halving reads the token kinds a substitution can
+    // collapse. This dependency only arises when a creation has several batches.
+    let rounds_per_kind = proposed.has_appended_token_batches()
+        && candidates.iter().any(|rid| {
+            stored_replacement_definition(state, *rid)
+                .is_some_and(|def| def.quantity_modification == Some(QuantityModification::Half))
+        });
     let mut seen_writes: Vec<(EventField, CommuteClass)> = Vec::new();
     for rid in candidates {
         match candidate_materiality(state, *rid, proposed) {
             CandidateMateriality::Unconditional => return true,
             CandidateMateriality::Writes { field, commute } => {
+                if field == EventField::TokenSpec && rounds_per_kind {
+                    return true;
+                }
                 for (seen_field, seen_commute) in &seen_writes {
                     if *seen_field == field && !commute.commutes_with(*seen_commute) {
                         return true;

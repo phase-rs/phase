@@ -97,8 +97,15 @@ pub enum TokenAttackRequest {
     /// No named destination.
     #[default]
     Unspecified,
+    /// CR 508.4: an added entrant with no defender assigned by the instruction.
+    ChooseDefender,
     /// The named players, in the order the batch's tokens are created.
     Named {
+        first: PlayerId,
+        rest: Vec<PlayerId>,
+    },
+    /// CR 508.4: each named defender applies to its corresponding entrant.
+    PerEntrant {
         first: PlayerId,
         rest: Vec<PlayerId>,
     },
@@ -121,11 +128,29 @@ impl TokenAttackRequest {
         })
     }
 
+    pub fn per_entrant(players: impl IntoIterator<Item = PlayerId>) -> Option<Self> {
+        let mut players = players.into_iter();
+        let first = players.next()?;
+        Some(Self::PerEntrant {
+            first,
+            rest: players.collect(),
+        })
+    }
+
+    /// CR 508.4: a per-entrant assignment has no destination for an extra token.
+    pub fn for_added_token(&self) -> Self {
+        match self {
+            Self::PerEntrant { .. } => Self::ChooseDefender,
+            Self::Named { rest, .. } if !rest.is_empty() => Self::ChooseDefender,
+            Self::Unspecified | Self::ChooseDefender | Self::Named { .. } => self.clone(),
+        }
+    }
+
     /// CR 508.4: the destination of the batch's `ordinal`-th created token.
     pub fn for_entrant(&self, ordinal: usize) -> EntryAttackDestination {
         match self {
-            Self::Unspecified => EntryAttackDestination::AnyDefender,
-            Self::Named { first, rest } => {
+            Self::Unspecified | Self::ChooseDefender => EntryAttackDestination::AnyDefender,
+            Self::Named { first, rest } | Self::PerEntrant { first, rest } => {
                 let player = match ordinal % (1 + rest.len()) {
                     0 => *first,
                     n => rest[n - 1],
@@ -141,20 +166,20 @@ impl TokenAttackRequest {
     /// have been created, for a resume that counts its own tokens from zero:
     /// `after_entrants(n).for_entrant(k) == self.for_entrant(n + k)`.
     pub fn after_entrants(&self, consumed: usize) -> Self {
-        match self {
-            Self::Unspecified => Self::Unspecified,
-            Self::Named { first, rest } => {
-                let mut players: Vec<PlayerId> = std::iter::once(*first)
+        let mut remaining = self.clone();
+        match &mut remaining {
+            Self::Unspecified | Self::ChooseDefender => {}
+            Self::Named { first, rest } | Self::PerEntrant { first, rest } => {
+                let mut players: Vec<_> = std::iter::once(*first)
                     .chain(rest.iter().copied())
                     .collect();
                 let shift = consumed % players.len();
                 players.rotate_left(shift);
-                Self::Named {
-                    first: players[0],
-                    rest: players[1..].to_vec(),
-                }
+                *first = players[0];
+                rest.copy_from_slice(&players[1..]);
             }
         }
+        remaining
     }
 }
 

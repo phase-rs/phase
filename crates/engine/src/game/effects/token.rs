@@ -1050,7 +1050,7 @@ pub(crate) fn resolve_token_batch(
             );
             (
                 u32::try_from(players.len()).unwrap_or(u32::MAX),
-                TokenAttackRequest::named(players),
+                TokenAttackRequest::per_entrant(players),
             )
         }
     };
@@ -1649,7 +1649,7 @@ fn deliver_token_event_positions(
                 cursor.delivered.push(PositionedTokenIds { position, ids });
                 if !completed {
                     // The active counter-additions queue is the one this batch's
-                    // entry-counter pause just stashed, whose post-actions are
+                    // entry pause just stashed, whose post-actions are
                     // `[FinalizeTokenEntry, ContinueTokenCreation]`; the rest of
                     // the event rides behind them.
                     debug_assert!(
@@ -2042,96 +2042,100 @@ fn apply_create_token_batch(
             continue;
         }
 
-        // CR 508.4: Token enters attacking — not declared as attacker.
-        if spec.enters_attacking {
-            enter_resolved_token_attacking(
-                state,
-                obj_id,
-                spec.source_id,
-                spec.controller,
-                &spec
-                    .attack_request
-                    .for_entrant(created_ids.len() - prefix_len),
-            );
-        }
+        // CR 508.4: the controller of an added attacker that had no per-entrant
+        // assignment must pick its destination before this entry is finalized.
+        let attack_choice = spec.enters_attacking
+            && match spec.attack_request {
+                TokenAttackRequest::ChooseDefender => {
+                    resolved_token_is_creature(state, obj_id)
+                        && crate::game::combat::choose_entry_attack_target_or_enter(
+                            state, obj_id, owner,
+                        )
+                        .is_some()
+                }
+                TokenAttackRequest::Unspecified
+                | TokenAttackRequest::Named { .. }
+                | TokenAttackRequest::PerEntrant { .. } => {
+                    enter_resolved_token_attacking(
+                        state,
+                        obj_id,
+                        spec.source_id,
+                        spec.controller,
+                        &spec
+                            .attack_request
+                            .for_entrant(created_ids.len() - prefix_len),
+                    );
+                    false
+                }
+            };
 
         // CR 122.6a: Place counters on the token as it enters the battlefield.
-        for (counter_index, (counter_type, counter_count)) in
-            spec.enter_with_counters.iter().enumerate()
-        {
-            if *counter_count > 0
-                && !super::counters::add_counter_with_replacement(
+        let mut counters = spec
+            .enter_with_counters
+            .iter()
+            .filter(|(_, count)| *count > 0);
+        if attack_choice
+            || counters.by_ref().any(|(counter_type, count)| {
+                !super::counters::add_counter_with_replacement(
                     state,
                     owner,
                     obj_id,
                     counter_type.clone(),
-                    *counter_count,
-                    // CR 614.16: entering-with-counters placements are
-                    // replacement-driven entry modifications.
+                    *count,
                     CounterCause::ReplacementOrPrevention,
                     events,
                 )
-            {
-                state.last_created_token_ids = created_ids.clone();
-                let remaining_counters = spec.enter_with_counters[counter_index + 1..]
-                    .iter()
-                    .filter(|(_, count)| *count > 0)
-                    .map(|(counter_type, count)| {
-                        crate::types::game_state::PendingCounterAddition::Object {
-                            actor: owner,
-                            object_id: obj_id,
-                            counter_type: counter_type.clone(),
-                            count: *count,
-                            // CR 614.16: entering-with-counters placements are
-                            // replacement-driven entry modifications.
-                            cause: CounterCause::ReplacementOrPrevention,
-                        }
-                    })
-                    .collect();
-                let remaining_count = final_count.saturating_sub(index + 1);
-                let mut resume_spec = spec.clone();
-                resume_spec.attack_request = spec
-                    .attack_request
-                    .after_entrants(created_ids.len() - prefix_len + 1);
-                let post_actions = vec![
-                    PendingCounterPostAction::FinalizeTokenEntry {
-                        object_id: obj_id,
-                        name: spec.characteristics.display_name.clone(),
-                        attach_to: spec.attach_to.bound(),
-                        sacrifice_at: spec.sacrifice_at.clone(),
-                        source_id: spec.source_id,
-                        controller: spec.controller,
-                    },
-                    PendingCounterPostAction::ContinueTokenCreation {
-                        owner,
-                        spec: resume_spec,
-                        enter_tapped,
-                        remaining_count,
-                    },
-                ];
-                let completion = match pause_completion_event {
-                    PendingEffectResolutionEvent::Emit => {
-                        crate::types::game_state::PendingEffectResolved::with_post_actions(
-                            EffectKind::Token,
-                            effect_source,
-                            post_actions,
-                        )
-                    }
-                    PendingEffectResolutionEvent::Suppress => crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
+            })
+        {
+            state.last_created_token_ids = created_ids.clone();
+            let remaining_counters = counters
+                .map(|(counter_type, count)| PendingCounterAddition::Object {
+                    actor: owner,
+                    object_id: obj_id,
+                    counter_type: counter_type.clone(),
+                    count: *count,
+                    cause: CounterCause::ReplacementOrPrevention,
+                })
+                .collect();
+            let remaining_count = final_count.saturating_sub(index + 1);
+            let mut resume_spec = spec.clone();
+            resume_spec.attack_request = spec
+                .attack_request
+                .after_entrants(created_ids.len() - prefix_len + 1);
+            let post_actions = vec![
+                PendingCounterPostAction::FinalizeTokenEntry {
+                    object_id: obj_id,
+                    name: spec.characteristics.display_name.clone(),
+                    attach_to: spec.attach_to.bound(),
+                    sacrifice_at: spec.sacrifice_at.clone(),
+                    source_id: spec.source_id,
+                    controller: spec.controller,
+                },
+                PendingCounterPostAction::ContinueTokenCreation {
+                    owner,
+                    spec: resume_spec,
+                    enter_tapped,
+                    remaining_count,
+                },
+            ];
+            let completion = match pause_completion_event {
+                PendingEffectResolutionEvent::Emit => PendingEffectResolved::with_post_actions(
+                    EffectKind::Token,
+                    effect_source,
+                    post_actions,
+                ),
+                PendingEffectResolutionEvent::Suppress => {
+                    PendingEffectResolved::with_post_actions_without_effect(
                         EffectKind::Token,
                         effect_source,
                         post_actions,
-                    ),
-                };
-                super::counters::stash_pending_counter_additions(
-                    state,
-                    remaining_counters,
-                    completion,
-                );
-                return CreateTokenDelivery::Paused {
-                    primary_ids: created_ids[prefix_len..].to_vec(),
-                };
-            }
+                    )
+                }
+            };
+            super::counters::stash_pending_counter_additions(state, remaining_counters, completion);
+            return CreateTokenDelivery::Paused {
+                primary_ids: created_ids[prefix_len..].to_vec(),
+            };
         }
 
         // CR 111.3 + CR 111.10: Predefined abilities first; catalog rules_text
@@ -3514,13 +3518,7 @@ fn enter_resolved_token_attacking(
     controller: PlayerId,
     destination: &EntryAttackDestination,
 ) {
-    crate::game::layers::mark_layers_entered(state, object_id);
-    crate::game::layers::flush_layers(state);
-    if state
-        .objects
-        .get(&object_id)
-        .is_some_and(|entrant| entrant.card_types.core_types.contains(&CoreType::Creature))
-    {
+    if resolved_token_is_creature(state, object_id) {
         crate::game::combat::enter_attacking_at_destination(
             state,
             object_id,
@@ -3529,6 +3527,15 @@ fn enter_resolved_token_attacking(
             destination,
         );
     }
+}
+
+fn resolved_token_is_creature(state: &mut GameState, object_id: ObjectId) -> bool {
+    crate::game::layers::mark_layers_entered(state, object_id);
+    crate::game::layers::flush_layers(state);
+    state
+        .objects
+        .get(&object_id)
+        .is_some_and(|entrant| entrant.card_types.core_types.contains(&CoreType::Creature))
 }
 
 pub(crate) fn finalize_committed_liminal_token_entry_from_action(
@@ -6486,7 +6493,7 @@ mod tests {
             (
                 1,
                 true,
-                TokenAttackRequest::Named {
+                TokenAttackRequest::PerEntrant {
                     first: PlayerId(1),
                     rest: vec![],
                 }
