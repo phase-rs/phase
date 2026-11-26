@@ -1572,7 +1572,20 @@ fn keeps_delayed_entry_life_body(before: TextPair<'_>, after: &str) -> bool {
         .map_or(after, |(_, sentence)| sentence);
     // allow-noncombinator: remove sentence punctuation after isolating the clause.
     let gain = gain.strip_suffix('.').unwrap_or(gain);
-    super::imperative::is_fixed_opponent_loss_and_controller_gain(loss.trim(), gain.trim())
+    let (scope, loss) = super::lower::strip_player_scope_subject(loss, false);
+    scope == Some(PlayerFilter::Opponent)
+        && all_consuming(preceded(
+            nom::bytes::complete::tag_no_case("lose "),
+            super::imperative::parse_fixed_life_amount,
+        ))
+        .parse(loss.trim())
+        .is_ok()
+        && all_consuming(preceded(
+            nom::bytes::complete::tag_no_case("you gain "),
+            super::imperative::parse_fixed_life_amount,
+        ))
+        .parse(gain.trim())
+        .is_ok()
 }
 
 // CR 603.7b + CR 608.2c: the delayed installer owns both instructions.

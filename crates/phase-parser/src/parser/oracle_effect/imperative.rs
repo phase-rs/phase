@@ -900,55 +900,6 @@ fn parse_anchored_life_verb<'a>(
     .parse(input)
 }
 
-pub(super) fn is_fixed_opponent_loss_and_controller_gain(loss: &str, gain: &str) -> bool {
-    let (scope, loss) = super::lower::strip_player_scope_subject(loss, false);
-    if scope != Some(PlayerFilter::Opponent) {
-        return false;
-    }
-    let loss_lower = loss.to_ascii_lowercase();
-    let gain_lower = gain.to_ascii_lowercase();
-    let Some(((), loss_tail)) = nom_on_lower(&loss, &loss_lower, |input| {
-        preceded(peek(tag("lose ")), |input| {
-            parse_anchored_life_verb(input, "lose", "loses")
-        })
-        .parse(input)
-    }) else {
-        return false;
-    };
-    let Some(((), gain_tail)) = nom_on_lower(gain, &gain_lower, |input| {
-        preceded(peek(tag("you ")), |input| {
-            parse_anchored_life_verb(input, "gain", "gains")
-        })
-        .parse(input)
-    }) else {
-        return false;
-    };
-
-    let complete = |tail: &str| {
-        super::parse_count_slot(tail, &mut ParseContext::default()).is_some_and(|slot| {
-            is_life_noun(slot.noun)
-                && std::ptr::eq(
-                    slot.noun.trim_end().as_bytes().as_ptr_range().end,
-                    tail.trim_end().as_bytes().as_ptr_range().end,
-                )
-        })
-    };
-    complete(loss_tail)
-        && complete(gain_tail)
-        && matches!(
-            parse_numeric_imperative_ast(&loss, &loss_lower),
-            Some(NumericImperativeAst::LoseLife {
-                amount: QuantityExpr::Fixed { .. },
-            })
-        )
-        && matches!(
-            parse_numeric_imperative_ast(gain, &gain_lower),
-            Some(NumericImperativeAst::GainLife {
-                amount: QuantityExpr::Fixed { .. },
-            })
-        )
-}
-
 fn parse_life_verb_remainder<'a>(
     text: &'a str,
     lower: &str,
@@ -1030,6 +981,34 @@ pub(super) fn is_life_noun(noun: &str) -> bool {
         .parse(noun.as_str())
         .is_ok();
     is_noun
+}
+
+/// The literal life operand shared by ordinary imperatives and clause boundaries.
+pub(super) fn parse_fixed_life_amount(input: &str) -> OracleResult<'_, QuantityExpr> {
+    let (head, remainder) = crate::parser::oracle_util::parse_count_head(input.trim_start());
+    let crate::parser::oracle_util::CountHead::Counted(amount @ QuantityExpr::Fixed { .. }) = head
+    else {
+        return Err(oracle_err(input));
+    };
+    let (remainder, _) =
+        preceded(space0, nom::bytes::complete::tag_no_case("life")).parse(remainder)?;
+    Ok((remainder, amount))
+}
+
+fn parse_life_amount(
+    input: &str,
+    ctx: &mut ParseContext,
+    parse_count: for<'a> fn(
+        &'a str,
+        &mut ParseContext,
+    ) -> Option<crate::parser::oracle_util::CountSlot<'a>>,
+) -> Option<QuantityExpr> {
+    let body = crate::parser::oracle_util::normalize_count_slot_text(input);
+    if let Ok((_, amount)) = all_consuming(parse_fixed_life_amount).parse(body) {
+        return Some(amount);
+    }
+    let slot = parse_count(input, ctx).filter(|slot| is_life_noun(slot.noun))?;
+    Some(slot.count)
 }
 
 type CountedInstruction<T> = (T, Option<QuantityExpr>);
@@ -1123,20 +1102,16 @@ fn parse_numeric_imperative_ast_with_bare_card_source(
         if let Some(amount) = parse_gain_life_per_player(&after_gain.to_ascii_lowercase()) {
             return Some(NumericImperativeAst::GainLife { amount });
         }
-        // CR 119.3: the life amount is the shared count position.
-        let slot =
-            super::parse_verb_count_slot(after_gain, ctx).filter(|slot| is_life_noun(slot.noun))?;
-        return Some(NumericImperativeAst::GainLife { amount: slot.count });
+        let amount = parse_life_amount(after_gain, ctx, super::parse_verb_count_slot)?;
+        return Some(NumericImperativeAst::GainLife { amount });
     }
 
     if let Some(after_lose) = parse_life_verb_remainder(text, lower, "lose", "loses") {
         if let Some(expr) = try_parse_half_life_amount(&after_lose.to_ascii_lowercase()) {
             return Some(NumericImperativeAst::LoseLife { amount: expr });
         }
-        // CR 119.3: the life amount is the shared count position.
-        let slot =
-            super::parse_count_slot(after_lose, ctx).filter(|slot| is_life_noun(slot.noun))?;
-        return Some(NumericImperativeAst::LoseLife { amount: slot.count });
+        let amount = parse_life_amount(after_lose, ctx, super::parse_count_slot)?;
+        return Some(NumericImperativeAst::LoseLife { amount });
     }
 
     if nom_primitives::scan_contains(lower, "gets +")
