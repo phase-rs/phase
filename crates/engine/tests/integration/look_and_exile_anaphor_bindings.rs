@@ -6,13 +6,14 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{CastingPermission, Duration, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, ManaChoice, ManaChoicePrompt, WaitingFor};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use engine::types::ObjectId;
 
+const PLACEMENT_SEEDS: [u64; 8] = [4, 19, 42, 93, 101, 109, 211, 495];
 const P2: PlayerId = PlayerId(2);
 const SVELLA: &str = "{3}, {T}: Create a colorless snow artifact token named Icy Manalith with \"{T}: Add one mana of any color.\"\n{6}{R}{G}, {T}: Look at the top four cards of your library. You may cast a spell from among them without paying its mana cost. Put the rest on the bottom of your library in a random order.";
 const ITERATION: &str = "Look at the top three cards of your library. Put one of them into your hand, put one of them on the bottom of your library, and exile one of them. You may play the exiled card this turn.";
@@ -134,7 +135,7 @@ fn assert_bottom(
 // ability finishes random bottom placement.
 fn peek_cast(marvel: bool, accept: bool) {
     let mut orders = BTreeSet::new();
-    for seed in [4, 19, 42, 93, 101, 109, 211, 495] {
+    for seed in PLACEMENT_SEEDS {
         let mut board = scenario(2, seed);
         let source = if marvel {
             board
@@ -470,43 +471,50 @@ fn prisoners_only_offers_the_newly_exiled_cards_and_grants_the_chosen_one() {
 /// bottom of that library in a random order."
 #[test]
 fn gonti_choices_and_bottom_placement_belong_to_the_second_opponent() {
-    let mut board = scenario(3, 42);
-    let gonti = board
-        .add_creature_to_hand(P0, "Gonti, Lord of Luxury", 2, 3)
-        .with_mana_cost(ManaCost::Cost {
-            generic: 2,
-            shards: vec![ManaCostShard::Black; 2],
-        })
-        .from_oracle_text_with_keywords(&["Deathtouch"], GONTI)
-        .id();
-    mana(
-        &mut board,
-        [ManaType::Black; 2]
-            .into_iter()
-            .chain([ManaType::Colorless; 2]),
+    let mut orders = BTreeSet::new();
+    for seed in PLACEMENT_SEEDS {
+        let mut board = scenario(3, seed);
+        let gonti = board
+            .add_creature_to_hand(P0, "Gonti, Lord of Luxury", 2, 3)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Black; 2],
+            })
+            .from_oracle_text_with_keywords(&["Deathtouch"], GONTI)
+            .id();
+        mana(
+            &mut board,
+            [ManaType::Black; 2]
+                .into_iter()
+                .chain([ManaType::Colorless; 2]),
+        );
+        let own = land(&mut board, P0, "P0 land");
+        let first_opponent = land(&mut board, P1, "P1 land");
+        let deeper = land(&mut board, P2, "P2 unseen land");
+        let a = land(&mut board, P2, "P2 land A");
+        let b = spell(&mut board, P2, "P2 sorcery B", false, 1);
+        let c = land(&mut board, P2, "P2 land C");
+        let d = land(&mut board, P2, "P2 land D");
+        let mut runner = board.build();
+        resolve_targeted_etb(&mut runner, gonti, P2);
+        open_optional(&mut runner);
+        assert_dig(&runner, &[a, b, c, d]);
+        select(&mut runner, vec![b]);
+        open_optional(&mut runner);
+        assert_priority(&runner, 0);
+        // CR 406.3 + CR 608.2c: the chosen card is exiled face down and
+        // the remaining looked-at cards go to the targeted player's library.
+        let object = &runner.state().objects[&b];
+        assert_eq!(object.zone, Zone::Exile, "Gonti exiles the selected card");
+        assert!(object.face_down, "Gonti exiles the selected card face down");
+        orders.insert(assert_bottom(&runner, P2, &[deeper], &[a, c, d]));
+        assert_bottom(&runner, P1, &[first_opponent], &[]);
+        assert_bottom(&runner, P0, &[own], &[]);
+    }
+    assert!(
+        orders.len() > 1,
+        "Gonti's bottom placement must vary across deterministic seeds"
     );
-    let own = land(&mut board, P0, "P0 land");
-    let first_opponent = land(&mut board, P1, "P1 land");
-    let deeper = land(&mut board, P2, "P2 unseen land");
-    let a = land(&mut board, P2, "P2 land A");
-    let b = spell(&mut board, P2, "P2 sorcery B", false, 1);
-    let c = land(&mut board, P2, "P2 land C");
-    let d = land(&mut board, P2, "P2 land D");
-    let mut runner = board.build();
-    resolve_targeted_etb(&mut runner, gonti, P2);
-    open_optional(&mut runner);
-    assert_dig(&runner, &[a, b, c, d]);
-    select(&mut runner, vec![b]);
-    open_optional(&mut runner);
-    assert_priority(&runner, 0);
-    // CR 406.3 + CR 608.2c: the chosen card is exiled face down and
-    // the remaining looked-at cards go to the targeted player's library.
-    let object = &runner.state().objects[&b];
-    assert_eq!(object.zone, Zone::Exile, "Gonti exiles the selected card");
-    assert!(object.face_down, "Gonti exiles the selected card face down");
-    assert_bottom(&runner, P2, &[deeper], &[a, c, d]);
-    assert_bottom(&runner, P1, &[first_opponent], &[]);
-    assert_bottom(&runner, P0, &[own], &[]);
 }
 
 /// CR 111.3 + CR 205.4a: "Create a colorless snow artifact token named Icy Manalith".
@@ -530,4 +538,53 @@ fn svella_creates_a_snow_artifact_token() {
     assert!(token.is_token);
     assert!(token.card_types.core_types.contains(&CoreType::Artifact));
     assert!(token.card_types.supertypes.contains(&Supertype::Snow));
+    // CR 105.2c: A colorless object has no color.
+    assert!(token.color.is_empty(), "Icy Manalith must be colorless");
+
+    let token = token.id;
+    let pool_before = runner.state().players[0].mana_pool.total();
+    let chosen = ManaType::Blue;
+    let chosen_before = runner.state().players[0].mana_pool.count_color(chosen);
+    assert!(!runner.state().objects[&token].tapped);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: token,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Icy Manalith's mana ability");
+    let WaitingFor::ChooseManaColor {
+        player: P0,
+        choice: ManaChoicePrompt::SingleColor { options },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected Icy Manalith to offer a mana color choice");
+    };
+    // CR 105.1 + CR 105.4: Any color offers all five colors.
+    assert_eq!(options.len(), 5);
+    for color in [
+        ManaType::White,
+        ManaType::Blue,
+        ManaType::Black,
+        ManaType::Red,
+        ManaType::Green,
+    ] {
+        assert!(options.contains(&color), "missing mana color {color:?}");
+    }
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(chosen),
+            count: 1,
+        })
+        .expect("choose blue mana");
+
+    // CR 107.5 + CR 106.4 + CR 605.3b: The mana ability taps its source
+    // and adds mana immediately, leaving the stack empty.
+    assert_priority(&runner, 0);
+    assert!(runner.state().objects[&token].tapped);
+    let pool = &runner.state().players[0].mana_pool;
+    assert_eq!(pool.total(), pool_before + 1);
+    assert_eq!(pool.count_color(chosen), chosen_before + 1);
 }
