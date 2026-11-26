@@ -36,7 +36,8 @@ use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
-use engine::types::mana::ManaCost;
+use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -572,6 +573,48 @@ fn tokens_with_subtype(runner: &GameRunner, subtype: &str) -> usize {
         .count()
 }
 
+fn assert_tokens_with_characteristics(
+    runner: &GameRunner,
+    subtype: &str,
+    expected_count: usize,
+    power: i32,
+    toughness: i32,
+    color: ManaColor,
+    keyword: Keyword,
+) {
+    let state = runner.state();
+    let tokens: Vec<_> = state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            let object = &state.objects[id];
+            object.is_token && object.card_types.subtypes.iter().any(|s| s == subtype)
+        })
+        .collect();
+    assert_eq!(
+        tokens.len(),
+        expected_count,
+        "expected {expected_count} {subtype} token(s)"
+    );
+    for id in tokens {
+        let object = &state.objects[id];
+        assert_eq!(
+            (object.power, object.toughness),
+            (Some(power), Some(toughness)),
+            "{subtype} token has the printed power and toughness"
+        );
+        assert_eq!(
+            object.color,
+            vec![color],
+            "{subtype} token has the printed color"
+        );
+        assert!(
+            object.has_keyword(&keyword),
+            "{subtype} token has the printed {keyword:?} keyword"
+        );
+    }
+}
+
 fn token_count(runner: &GameRunner) -> usize {
     let state = runner.state();
     state
@@ -590,6 +633,15 @@ fn genku_lookback_triggers_keep_departed_history() {
     let mut k = genku_board(1, 2);
     sacrifice_fodder(&mut k, &[FOX]);
     assert_eq!(tokens_with_subtype(&k.runner, "Fox"), 1, "reach: Fox made");
+    assert_tokens_with_characteristics(
+        &k.runner,
+        "Fox",
+        1,
+        2,
+        2,
+        ManaColor::White,
+        Keyword::Vigilance,
+    );
 
     let prompts = wipe(&mut k);
     let genku = k.genku;
@@ -611,6 +663,24 @@ fn genku_lookback_triggers_keep_departed_history() {
     );
     assert_eq!(tokens_with_subtype(&k.runner, "Moonfolk"), 1);
     assert_eq!(tokens_with_subtype(&k.runner, "Rat"), 1);
+    assert_tokens_with_characteristics(
+        &k.runner,
+        "Moonfolk",
+        1,
+        1,
+        2,
+        ManaColor::Blue,
+        Keyword::Flying,
+    );
+    assert_tokens_with_characteristics(
+        &k.runner,
+        "Rat",
+        1,
+        1,
+        1,
+        ManaColor::Black,
+        Keyword::Lifelink,
+    );
     assert_eq!(
         tokens_with_subtype(&k.runner, "Fox"),
         0,
@@ -626,6 +696,33 @@ fn genku_lookback_trigger_with_all_modes_used_is_removed() {
     let mut k = genku_board(3, 1);
     sacrifice_fodder(&mut k, &[FOX, MOONFOLK, RAT]);
     assert_eq!(token_count(&k.runner), 3, "reach: three tokens made");
+    assert_tokens_with_characteristics(
+        &k.runner,
+        "Fox",
+        1,
+        2,
+        2,
+        ManaColor::White,
+        Keyword::Vigilance,
+    );
+    assert_tokens_with_characteristics(
+        &k.runner,
+        "Moonfolk",
+        1,
+        1,
+        2,
+        ManaColor::Blue,
+        Keyword::Flying,
+    );
+    assert_tokens_with_characteristics(
+        &k.runner,
+        "Rat",
+        1,
+        1,
+        1,
+        ManaColor::Black,
+        Keyword::Lifelink,
+    );
 
     let prompts = wipe(&mut k);
     assert!(
@@ -657,6 +754,15 @@ fn genku_second_lookback_trigger_is_removed_after_last_mode() {
         "exactly one look-back trigger can choose a mode"
     );
     assert_eq!(tokens_with_subtype(&k.runner, "Rat"), 1, "exactly one Rat");
+    assert_tokens_with_characteristics(
+        &k.runner,
+        "Rat",
+        1,
+        1,
+        1,
+        ManaColor::Black,
+        Keyword::Lifelink,
+    );
     assert_eq!(token_count(&k.runner), 1, "the Rat is the only token");
 }
 
@@ -724,6 +830,15 @@ fn genku_flicker_old_trigger_uses_departed_history_while_returned_genku_is_fresh
         1,
         "reach: Moonfolk made"
     );
+    assert_tokens_with_characteristics(
+        &k.runner,
+        "Moonfolk",
+        1,
+        1,
+        2,
+        ManaColor::Blue,
+        Keyword::Flying,
+    );
     let turn = &k.runner.state().modal_modes_chosen_this_turn;
     assert!(
         turn.contains(&(departed, MOONFOLK)),
@@ -750,6 +865,15 @@ fn genku_flicker_old_trigger_uses_departed_history_while_returned_genku_is_fresh
         tokens_with_subtype(&k.runner, "Fox"),
         2,
         "the returned Genku made a Fox"
+    );
+    assert_tokens_with_characteristics(
+        &k.runner,
+        "Fox",
+        2,
+        2,
+        2,
+        ManaColor::White,
+        Keyword::Vigilance,
     );
     assert!(
         k.runner
