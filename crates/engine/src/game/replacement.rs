@@ -15607,24 +15607,26 @@ fn token_replacement_ordering_is_material(
         return true;
     };
 
-    let mut count_effects = Vec::new();
+    let mut equivalent_effects = Vec::new();
     let groups: Vec<_> = candidates
         .iter()
         .enumerate()
         .map(|(index, &rid)| {
-            let Some(effect) = source_independent_token_count_effect(state, rid) else {
+            let Some(effect) = source_independent_token_order_effect(state, rid) else {
                 return index;
             };
-            if let Some((_, representative)) =
-                count_effects.iter().find(|(other, _)| *other == effect)
+            if let Some((_, representative)) = equivalent_effects
+                .iter()
+                .find(|(other, _)| *other == effect)
             {
                 return *representative;
             }
-            count_effects.push((effect, index));
+            equivalent_effects.push((effect, index));
             index
         })
         .collect();
 
+    let _probe = super::engine::SimulationProbeGuard::enter();
     let _recorder =
         ProposedEventRecorderGuard(PROPOSED_EVENT_RECORDER.with(|cell| cell.borrow_mut().take()));
     let mut probe = TokenReplacementOrderProbe {
@@ -15651,7 +15653,7 @@ fn token_replacement_ordering_is_material(
 
 // Only merge sibling search branches for definitions whose behavior is
 // independent of source identity. Each copy still has its own application.
-fn source_independent_token_count_effect(
+fn source_independent_token_order_effect(
     state: &GameState,
     rid: ReplacementId,
 ) -> Option<(&ReplacementDefinition, PlayerId)> {
@@ -15662,18 +15664,46 @@ fn source_independent_token_count_effect(
     ) {
         return None;
     }
-    let quantity = def.quantity_modification.clone()?;
-    let mut count_only = ReplacementDefinition::new(ReplacementEvent::CreateToken);
-    count_only.quantity_modification = Some(quantity);
-    count_only.token_owner_scope = def.token_owner_scope.clone();
-    count_only.description = def.description.clone();
-    if matches!(
-        def.condition,
-        Some(ReplacementCondition::TokenCoreTypeMatches { .. })
-    ) {
-        count_only.condition = def.condition.clone();
+    let mut modifier_only = ReplacementDefinition::new(def.event.clone());
+    modifier_only.description = def.description.clone();
+    match def.event {
+        ReplacementEvent::CreateToken => {
+            modifier_only.quantity_modification = Some(def.quantity_modification.clone()?);
+            modifier_only.token_owner_scope = def.token_owner_scope.clone();
+            if matches!(
+                def.condition,
+                Some(ReplacementCondition::TokenCoreTypeMatches { .. })
+            ) {
+                modifier_only.condition = def.condition.clone();
+            }
+        }
+        ReplacementEvent::ChangeZone => {
+            let execute = def.execute.as_deref()?;
+            enter_tapped_commute_class(&execute.effect)?;
+            if let Some(filter) = def.valid_card.as_ref() {
+                let TargetFilter::Typed(filter) = filter else {
+                    return None;
+                };
+                if !filter.properties.is_empty()
+                    || !matches!(
+                        filter.controller,
+                        None | Some(ControllerRef::You | ControllerRef::Opponent)
+                    )
+                {
+                    return None;
+                }
+            }
+            modifier_only = modifier_only
+                .execute(AbilityDefinition::new(
+                    crate::types::ability::AbilityKind::Spell,
+                    execute.effect.as_ref().clone(),
+                ))
+                .destination_zone(Zone::Battlefield);
+            modifier_only.valid_card = def.valid_card.clone();
+        }
+        _ => return None,
     }
-    (def == &count_only).then(|| (def, replacement_ability_controller(state, rid, def)))
+    (def == &modifier_only).then(|| (def, replacement_ability_controller(state, rid, def)))
 }
 
 struct TokenReplacementOrderProbe<'a> {
