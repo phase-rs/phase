@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4451
-- **Total card appearances across root causes:** 4484 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4450
+- **Total card appearances across root causes:** 4483 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > **Staleness warning.** This list is pruned one card at a time and has not been
 > regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
@@ -1789,7 +1789,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 4. Conjoined / chained second effect clause dropped  (377 cards)
+### 4. Conjoined / chained second effect clause dropped  (376 cards)
 
 **Signature.** A multi-clause effect ('X and Y' / 'then Z') emits only the first conjunct; sub_ability is null and the trailing imperative/effect chain is omitted.
 
@@ -1817,7 +1817,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Barreling Attack
 - Become the Pilot
 - Benalish Partisan
-- Bestial Menace
 - Bile Blight
 - Blood Sun
 - Brass Herald
