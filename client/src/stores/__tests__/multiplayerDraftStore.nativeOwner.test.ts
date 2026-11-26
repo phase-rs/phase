@@ -1172,6 +1172,39 @@ describe("the native draft owner", () => {
     }
   });
 
+  it.each(["create", "join"] as const)(
+    "a reset while a native %s waits for its predecessor's teardown ends it before it installs anything",
+    async (start) => {
+      const teardownA = held();
+      const teardown = track(teardownA.promise);
+      hosts.nextDispose.push(() => teardownA.promise);
+      await expect(store().hostDraft({ ...hostConfig, persistenceId: "A-POD" })).resolves.toEqual({ status: "opened" });
+      const starting = start === "create"
+        ? store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings })
+        : store().joinNativeDraft({ endpoint: ENDPOINT, draftCode: "NAT001", displayName: "Bo" });
+      const opening = track(starting);
+      try {
+        // Reach: the start retired A and waits for its teardown.
+        await vi.waitFor(() => expect(hosts.instances[0]!.dispose).toHaveBeenCalledTimes(1));
+
+        store().reset();
+        await flush();
+        // Reach: the reset landed while the start still waits for A's teardown.
+        expect(teardown.state()).toBe("pending");
+        expect(opening.state()).toBe("pending");
+      } finally {
+        teardownA.resolve();
+      }
+
+      await expect(starting).resolves.toEqual({ status: "superseded" });
+      expect(native.instances).toHaveLength(0);
+      expect(storage.log).not.toContain("privateSave:enter");
+      expect(storage.log.filter((entry) => entry.startsWith("pointerWrite:"))).toEqual([]);
+      expect(storedPointer()).toBeNull();
+      expect(store()).toMatchObject({ role: null, transport: null, phase: "idle", view: null });
+    },
+  );
+
   it.each(["leave", "native join", "signal"] as const)("a superseded native resume ends its adapter at once: %s", async (by) => {
     const { capabilityId, pointerText } = await storeNativePair();
     const recordBefore = await storedRecord(capabilityId);

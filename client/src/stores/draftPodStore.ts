@@ -113,7 +113,7 @@ export function nativeDraftSetupRouteGeneration(state: unknown): number | null {
 /**
  * What a failed native start or recovery stores: the incompatible key for a
  * compatibility refusal, else its own error (an error key `usePodErrorMessage`
- * maps, or the server's text), else the connection key. `usePodErrorMessage` maps the keys.
+ * maps, or the adapter's or the server's own text), else the connection key. `usePodErrorMessage` maps the keys.
  */
 function nativeFailureError(outcome: { readonly error: string | null; readonly code?: unknown }): string {
   if (outcome.code !== undefined) return DRAFT_RECOVERY_INCOMPATIBLE_ERROR;

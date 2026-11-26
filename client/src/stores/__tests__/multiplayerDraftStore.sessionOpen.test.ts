@@ -913,4 +913,66 @@ describe("session-open outcome of a superseded attempt", () => {
     expect(guests.instances[0]!.dispose).toHaveBeenCalled();
     expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
   });
+
+  it.each(["hostDraft", "joinDraft"] as const)(
+    "a reset while a %s waits for its predecessor's teardown ends it before it installs anything",
+    async (start) => {
+      const teardownA = held();
+      const teardown = track(teardownA.promise);
+      hosts.nextDispose.push(() => teardownA.promise);
+      await expect(useMultiplayerDraftStore.getState().hostDraft({ ...hostConfig, persistenceId: "A-POD" }))
+        .resolves.toEqual({ status: "opened" });
+      localStorage.clear();
+      const starting = start === "hostDraft"
+        ? useMultiplayerDraftStore.getState().hostDraft({ ...hostConfig, persistenceId: "B-POD" })
+        : useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "BJOIN", displayName: "B" });
+      const opening = track(starting);
+      try {
+        // Reach: B retired A and waits for its teardown.
+        await vi.waitFor(() => expect(hosts.instances[0]!.dispose).toHaveBeenCalledTimes(1));
+
+        useMultiplayerDraftStore.getState().reset();
+        await flush();
+        // Reach: the reset landed while B still waits for A's teardown.
+        expect(teardown.state()).toBe("pending");
+        expect(opening.state()).toBe("pending");
+      } finally {
+        teardownA.resolve();
+      }
+
+      await expect(starting).resolves.toEqual({ status: "superseded" });
+      expect(hosts.instances).toHaveLength(1);
+      expect(guests.instances).toHaveLength(0);
+      expect(net.joinRoom).not.toHaveBeenCalled();
+      expect(inspectActiveDraftPod()).toEqual({ type: "absent" });
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, transport: null, phase: "idle" });
+    },
+  );
+
+  it("a reset while a recovered host restores its saved session ends the recovery", async () => {
+    const restore = held();
+    let committed = false;
+    hosts.nextInitialize.push(async (config) => {
+      await config.recovery!.handover!();
+      committed = true;
+      await restore.promise;
+    });
+    const recovering = useMultiplayerDraftStore.getState().resumeHostedDraft(recoveryOf("R-POD"));
+    const recovery = track(recovering);
+    try {
+      // Reach: the handover installed the recovered host, which is still restoring.
+      await vi.waitFor(() => expect(committed).toBe(true));
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "R-POD" });
+
+      useMultiplayerDraftStore.getState().reset();
+      await flush();
+      expect(recovery.state()).toBe("pending");
+    } finally {
+      restore.resolve();
+    }
+
+    await expect(recovering).resolves.toBe("superseded");
+    expect(hosts.instances).toHaveLength(1);
+    expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
+  });
 });

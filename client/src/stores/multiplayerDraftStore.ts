@@ -2151,6 +2151,8 @@ async function openNativeOwner(
   // pending attempt as it registers.
   const provisional = beginProvisionalOwner();
   const epoch = advanceDraftAdapterEpoch("replaced");
+  // A reset ends the lifecycle this start waits in, and supersedes no attempt.
+  const waitingGeneration = lifecycleGeneration;
   const previous = detachInstalledDraftOwner();
   const previousTeardown = disposeDetachedOwner(previous, true);
   retainDraftSessionTeardown(detachedPersistenceId(previous), previousTeardown);
@@ -2159,7 +2161,8 @@ async function openNativeOwner(
   } finally {
     settleProvisional(provisional);
   }
-  if (epoch !== draftAdapterEpoch) return { status: "superseded" };
+  // A successor or a reset has published its own session.
+  if (epoch !== draftAdapterEpoch || waitingGeneration !== lifecycleGeneration) return { status: "superseded" };
   if (!isCurrentProvisional(provisional) || signal?.aborted) {
     // A recovery, a leave or its route ended this start after it retired its
     // predecessor: no owner is installed, so that session must not stay published.
@@ -2406,6 +2409,7 @@ export const useMultiplayerDraftStore = create<
       // shared install step (which binds B to the route signal and publishes its
       // session), then deliver its buffered events. It contains no await.
       let committedEpoch: number | null = null;
+      let committedGeneration: number | null = null;
       const commit = (): { owner: AbortController; previousTeardown: Promise<void> } => {
         stopAbandonListeners();
         stopBuffering();
@@ -2418,6 +2422,7 @@ export const useMultiplayerDraftStore = create<
           { role: "host", adapter: provisional, persistenceId: attempt.config.persistenceId ?? null },
           attempt.routeSignal,
         );
+        committedGeneration = owner.lifetime.generation;
         attempt.onCommitted?.();
         // The wrapper emitted only into the private buffer while B was
         // provisional. Deliver those events only after the fenced install.
@@ -2491,9 +2496,11 @@ export const useMultiplayerDraftStore = create<
       }
 
       // B committed at its handover and has initialized. It is resumed unless
-      // its route or a later replacement has already ended it.
+      // its route, a later replacement or a reset has already ended it.
       if (committedEpoch !== null) {
-        return installedHost() === provisional ? "resumed" : "superseded";
+        return installedHost() === provisional && committedGeneration === lifecycleGeneration
+          ? "resumed"
+          : "superseded";
       }
 
       // A record without a draft session commits here. Every B non-commit
@@ -2531,6 +2538,8 @@ export const useMultiplayerDraftStore = create<
     // pending attempt as it registers.
     const provisional = beginProvisionalOwner();
     const epoch = advanceDraftAdapterEpoch("replaced");
+    // A reset ends the lifecycle this start waits in, and supersedes no attempt.
+    const waitingGeneration = lifecycleGeneration;
     const previous = detachInstalledDraftOwner();
     const previousTeardown = disposeDetachedOwner(previous, true);
     retainDraftSessionTeardown(detachedPersistenceId(previous), previousTeardown);
@@ -2540,7 +2549,8 @@ export const useMultiplayerDraftStore = create<
     } finally {
       settleProvisional(provisional);
     }
-    if (epoch !== draftAdapterEpoch) return { status: "superseded" };
+    // A successor or a reset has published its own session.
+    if (epoch !== draftAdapterEpoch || waitingGeneration !== lifecycleGeneration) return { status: "superseded" };
     if (!isCurrentProvisional(provisional)) {
       // A recovery superseded this start after it retired its predecessor, so
       // no owner is installed and the predecessor's session must not stay published.
@@ -2634,6 +2644,8 @@ export const useMultiplayerDraftStore = create<
     // owner first, so it ends every other pending attempt as it registers.
     const provisional = beginProvisionalOwner();
     const epoch = advanceDraftAdapterEpoch("replaced");
+    // See hostDraft: a reset ends the lifecycle this join waits in.
+    const waitingGeneration = lifecycleGeneration;
     const previous = detachInstalledDraftOwner();
     const previousTeardown = disposeDetachedOwner(previous, true);
     retainDraftSessionTeardown(detachedPersistenceId(previous), previousTeardown);
@@ -2642,7 +2654,7 @@ export const useMultiplayerDraftStore = create<
     } finally {
       settleProvisional(provisional);
     }
-    if (epoch !== draftAdapterEpoch) return { status: "superseded" };
+    if (epoch !== draftAdapterEpoch || waitingGeneration !== lifecycleGeneration) return { status: "superseded" };
     if (!isCurrentProvisional(provisional)) {
       // See hostDraft: a recovery superseded this join after it retired its predecessor.
       replaceDraftSession(set, {});
