@@ -11802,11 +11802,12 @@ mod tests {
             assert!(!priority_checkpoint_is_settled(&state));
             state.pending_liminal_entry_resume = None;
 
-            state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+            state.pending_token_battlefield_entry = Some(Box::new(PendingTokenBattlefieldEntry {
+                blocking_attacker: None,
                 object_id: ObjectId(94),
                 name: "checkpoint token".to_string(),
                 source_id: ObjectId(95),
-            });
+            }));
             assert!(!priority_checkpoint_is_settled(&state));
             state.pending_token_battlefield_entry = None;
 
@@ -13008,6 +13009,7 @@ mod tests {
         fn spec_emits_only_etb_pair_field_exclusions() {
             let base = TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: crate::types::proposed_event::TokenCharacteristics {
                     display_name: "Insect".to_string(),
                     power: Some(1),

@@ -9063,6 +9063,7 @@ fn effect_pump_creatures_attacking_opponents_and_planeswalkers() {
         panic!("expected typed target, got {target:?}");
     };
     assert!(typed.properties.contains(&FilterProp::Attacking {
+        scope: Default::default(),
         defender: Some(ControllerRef::Opponent),
     }));
     assert_eq!(power, PtValue::Fixed(2));
@@ -16090,7 +16091,8 @@ fn effect_mirror_match_copy_blockers_and_delayed_exile() {
             assert!(tf.properties.iter().any(|p| matches!(
                 p,
                 FilterProp::Attacking {
-                    defender: Some(ControllerRef::You)
+                    defender: Some(ControllerRef::You),
+                    ..
                 }
             )));
         }
@@ -43206,7 +43208,10 @@ fn strip_suffix_conditional_parses_lki_combat_status() {
     for (input, expected_prop, expected_negated) in [
         (
             "draw a card if it was attacking",
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
             false,
         ),
         (
@@ -43216,7 +43221,10 @@ fn strip_suffix_conditional_parses_lki_combat_status() {
         ),
         (
             "draw a card if it wasn't attacking",
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
             true,
         ),
         (
@@ -47401,12 +47409,9 @@ fn my_wealth_will_bury_you_full_oracle_parses_treasure_floor() {
     );
 }
 
-/// CR 509.1h + CR 506.3e: only "that creature" binds the blocking anaphor.
-/// Flash Foliage's Oracle line 2 names "target creature", so the token head
-/// parses with `enters_blocking == None` and the trailing clause stays an
-/// honest gap (unasserted here to avoid pinning gap text).
+/// CR 509.1h + CR 506.3e + CR 509.4 + CR 115.1a: The rider announces an attacker target.
 #[test]
-fn flash_foliage_blocking_target_creature_leaves_enters_blocking_none() {
+fn flash_foliage_blocking_rider_targets_a_direct_attacker() {
     let def = parse_effect_chain(
         "Create a 1/1 green Saproling creature token that's blocking target creature attacking you.",
         AbilityKind::Spell,
@@ -47428,10 +47433,18 @@ fn flash_foliage_blocking_target_creature_leaves_enters_blocking_none() {
     assert_eq!(power, &PtValue::Fixed(1));
     assert_eq!(toughness, &PtValue::Fixed(1));
     assert_eq!(colors, &vec![ManaColor::Green]);
+    let Some(TargetFilter::Typed(filter)) = enters_blocking else {
+        panic!("expected a typed blocking target");
+    };
+    assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
     assert_eq!(
-        *enters_blocking, None,
-        "only 'that creature' binds the blocker"
+        filter.properties,
+        vec![FilterProp::Attacking {
+            defender: Some(ControllerRef::You),
+            scope: phase_ast::types::ability::AttackDefenderMatch::DirectPlayer,
+        }],
     );
+    assert_eq!(def.effect.target_filter(), enters_blocking.as_ref());
 }
 
 #[test]
@@ -47981,6 +47994,7 @@ fn effect_gain_life_for_each_creature_attacking_you() {
                     qty: QuantityRef::ObjectCount {
                         filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
                             FilterProp::Attacking {
+                                scope: Default::default(),
                                 defender: Some(ControllerRef::You)
                             }
                         ]),),
@@ -48533,7 +48547,10 @@ fn effect_target_player_draws_for_each_attacking_creature_they_control() {
                     filter: TargetFilter::Typed(TypedFilter {
                         type_filters: vec![TypeFilter::Creature],
                         controller: Some(ControllerRef::TargetPlayer),
-                        properties: vec![FilterProp::Attacking { defender: None }],
+                        properties: vec![FilterProp::Attacking {
+                            scope: Default::default(),
+                            defender: None
+                        }],
                     }),
                 },
             },
@@ -52642,7 +52659,7 @@ fn combat_class_pump_all_for_each_other_than_source_is_dynamic() {
                     properties,
                     ..
                 }) if type_filters.contains(&TypeFilter::Creature)
-                    && properties.contains(&FilterProp::Attacking { defender: None })
+                    && properties.contains(&FilterProp::Attacking { scope: Default::default(), defender: None })
                     && properties.contains(&FilterProp::Another)
             ));
             assert!(matches!(
@@ -52656,7 +52673,7 @@ fn combat_class_pump_all_for_each_other_than_source_is_dynamic() {
                         })
                     }
                 }) if type_filters == &vec![TypeFilter::Creature]
-                    && properties == &vec![FilterProp::Attacking { defender: None }, FilterProp::Another]
+                    && properties == &vec![FilterProp::Attacking { scope: Default::default(), defender: None }, FilterProp::Another]
             ));
             assert_eq!(power, toughness);
         }
@@ -62558,7 +62575,7 @@ fn each_player_for_each_attacking_creature_they_control_binds_scoped_player() {
                     ..
                 })
             }
-        } if properties.as_slice() == [FilterProp::Attacking { defender: None }]
+        } if properties.as_slice() == [FilterProp::Attacking { scope: Default::default(), defender: None }]
     ));
 }
 
@@ -110560,57 +110577,57 @@ fn delayed_player_damage_full_faces_commit_compound_payloads() {
             let mut strict = Vec::new();
             let mut payloads = Vec::new();
             let mut visit = |effect: &Effect| {
-                match effect {
-                    Effect::CreateDelayedTrigger {
-                        condition:
-                            DelayedTriggerCondition::WheneverEvent {
-                                trigger,
-                                expiry: WheneverEventExpiry::EndOfTurn,
-                            },
-                        effect,
-                        ..
-                    } => {
-                        installers += 1;
-                        assert_eq!(trigger.mode, mode);
-                        assert!(trigger.batched);
-                        assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
-                        assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
-                        let mut node = Some(effect.as_ref());
-                        while let Some(def) = node {
-                            payloads.push(match def.effect.as_ref() {
-                                Effect::BecomeMonarch {
-                                    target: TargetFilter::Controller,
-                                } => "monarch",
-                                Effect::Draw {
-                                    target: TargetFilter::Controller,
-                                    count: QuantityExpr::Fixed { value: 1 },
-                                } => "draw",
-                                Effect::Discard {
-                                    count: QuantityExpr::Fixed { value: 1 },
-                                    ..
-                                } => "discard",
-                                Effect::RevealHand {
-                                    target: TargetFilter::TriggeringPlayer,
-                                    reveal: false,
-                                    ..
-                                } => "look",
-                                Effect::RevealHand {
-                                    target: TargetFilter::Controller,
-                                    reveal: false,
-                                    ..
-                                } => "look-controller",
-                                other => panic!("{name}: unexpected watcher payload {other:?}"),
-                            });
-                            node = def.sub_ability.as_deref();
-                        }
+                if let Effect::CreateDelayedTrigger {
+                    condition:
+                        DelayedTriggerCondition::WheneverEvent {
+                            trigger,
+                            expiry: WheneverEventExpiry::EndOfTurn,
+                        },
+                    effect,
+                    ..
+                } = effect
+                {
+                    installers += 1;
+                    assert_eq!(trigger.mode, mode);
+                    assert!(trigger.batched);
+                    assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+                    assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+                    let mut node = Some(effect.as_ref());
+                    while let Some(def) = node {
+                        payloads.push(match def.effect.as_ref() {
+                            Effect::BecomeMonarch {
+                                target: TargetFilter::Controller,
+                            } => "monarch",
+                            Effect::Draw {
+                                target: TargetFilter::Controller,
+                                count: QuantityExpr::Fixed { value: 1 },
+                            } => "draw",
+                            Effect::Discard {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                ..
+                            } => "discard",
+                            Effect::RevealHand {
+                                target: TargetFilter::TriggeringPlayer,
+                                reveal: false,
+                                ..
+                            } => "look",
+                            Effect::RevealHand {
+                                target: TargetFilter::Controller,
+                                reveal: false,
+                                ..
+                            } => "look-controller",
+                            other => panic!("{name}: unexpected watcher payload {other:?}"),
+                        });
+                        node = def.sub_ability.as_deref();
                     }
-                    Effect::Unimplemented { name, description }
-                        if name == "delayed_player_damage_body"
-                            || name == "delayed_player_damage_head" =>
-                    {
+                }
+                if let Effect::Unimplemented { name, description } = effect {
+                    if matches!(
+                        name.as_str(),
+                        "delayed_player_damage_body" | "delayed_player_damage_head"
+                    ) {
                         strict.push(description.clone().expect("strict failure source text"));
                     }
-                    _ => {}
                 }
                 ControlFlow::Continue(())
             };

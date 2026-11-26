@@ -11553,6 +11553,9 @@ pub struct PendingTokenBattlefieldEntry {
     /// The `TokenCreated` display name (the token's OWN name, not the copied source's).
     pub name: String,
     pub source_id: ObjectId,
+    /// CR 509.4: the bound attacker to block at completed battlefield entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_attacker: Option<ObjectIncarnationRef>,
 }
 
 /// Synchronous access to the exact batch owner parked by a paused move.
@@ -11852,6 +11855,8 @@ pub enum PendingCounterPostAction {
             skip_serializing_if = "EntryAttackDestination::is_any_defender"
         )]
         attack_destination: EntryAttackDestination,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_attacker: Option<ObjectIncarnationRef>,
         source_id: ObjectId,
         controller: PlayerId,
     },
@@ -11872,6 +11877,8 @@ pub enum PendingCounterPostAction {
             skip_serializing_if = "EntryAttackDestination::is_any_defender"
         )]
         attack_destination: EntryAttackDestination,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_attacker: Option<ObjectIncarnationRef>,
         source_id: ObjectId,
         controller: PlayerId,
         remaining_modifications: Vec<ContinuousModification>,
@@ -11920,6 +11927,9 @@ pub enum PendingCounterPostAction {
             skip_serializing_if = "EntryAttackDestination::is_any_defender"
         )]
         attack_destination: EntryAttackDestination,
+        /// CR 509.4: the bound attacker to block at completed battlefield entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_attacker: Option<ObjectIncarnationRef>,
         attach_to: Option<AttachTarget>,
         sacrifice_at: Option<Duration>,
         created_ids: Vec<ObjectId>,
@@ -29011,6 +29021,9 @@ pub struct LiminalEntry {
         skip_serializing_if = "EntryAttackDestination::is_any_defender"
     )]
     pub attack_destination: EntryAttackDestination,
+    /// CR 509.4: the bound attacker to block at completed battlefield entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_attacker: Option<ObjectIncarnationRef>,
     pub attach_to: Option<AttachTarget>,
     pub sacrifice_at: Option<Duration>,
     pub remaining_count: u32,
@@ -30252,7 +30265,7 @@ declare_game_state! {
     /// of client round-trips; realized by the single authority
     /// `crate::game::effects::token::flush_pending_token_battlefield_entry`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_token_battlefield_entry: Option<PendingTokenBattlefieldEntry>,
+    pub pending_token_battlefield_entry: Option<Box<PendingTokenBattlefieldEntry>>,
 
     // Layer system
     // CONSERVATIVE: deserialized snapshots (e.g. the WASM-export repro) rebuild
@@ -50236,6 +50249,7 @@ mod tests {
         let projection = TokenProjection::materialize(state.objects[&object_id].clone());
         check(
             |attack_destination| LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: LiminalEntrant::Token(projection.clone()),
                 name: "Goblin".to_string(),
@@ -50257,6 +50271,7 @@ mod tests {
             |entry| entry.attack_destination.clone(),
         );
         let copy = Box::new(crate::types::proposed_event::CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
                 &state.objects[&object_id],
             )),
@@ -50289,6 +50304,7 @@ mod tests {
         );
         check(
             |attack_destination| PendingCounterPostAction::FinalizeCopyTokenEntry {
+                blocking_attacker: None,
                 object_id,
                 name: "Goblin".to_string(),
                 enters_attacking: true,
@@ -50311,6 +50327,7 @@ mod tests {
     fn continue_token_event_delivery_serde_roundtrip() {
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: crate::types::proposed_event::TokenCharacteristics {
                 display_name: "Squirrel".to_string(),
                 power: Some(1),
@@ -50580,6 +50597,7 @@ mod tests {
                     owner: PlayerId(0),
                     count: 1,
                     copy: Box::new(CopyTokenSpec {
+                        blocking_attacker: None,
                         values: Box::new(intrinsic_copiable_values(&source)),
                         display: Default::default(),
                         extra_keywords: vec![Keyword::Haste],

@@ -713,6 +713,7 @@ pub fn apply_debug_action(
                 controller: owner,
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
             };
             let proposed = ProposedEvent::CreateToken {
                 redirected_to: None,
@@ -1262,6 +1263,7 @@ fn route_debug_token_to_battlefield(
         staged.base_defense,
     );
     let copy = CopyTokenSpec {
+        blocking_attacker: None,
         values: Box::new(values.clone()),
         display: super::game_object::DisplayIdentity {
             token_art: None,
@@ -1300,6 +1302,7 @@ fn route_debug_token_to_battlefield(
     state.liminal_entries.insert(
         object_id,
         LiminalEntry {
+            blocking_attacker: None,
             copy_settlement: None,
             object: crate::types::game_state::LiminalEntrant::Token(
                 crate::types::game_state::TokenProjection::materialize(token),

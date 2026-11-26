@@ -35902,6 +35902,7 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         } => controller_ref_reads_chosen_target(controller, read),
         FilterProp::Attacking {
             defender: controller,
+            ..
         }
         | FilterProp::AttackedThisTurn {
             defender: controller,
@@ -40848,6 +40849,7 @@ mod sacrifice_cost_context_identity_tests {
             .insert(P1);
         for prop in [
             FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::Opponent),
             },
             FilterProp::AttackedThisTurn {
@@ -40862,6 +40864,7 @@ mod sacrifice_cost_context_identity_tests {
         }
         for prop in [
             FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You),
             },
             FilterProp::AttackedThisTurn {

@@ -584,7 +584,8 @@ fn object_for_each_investigate_is_lifted() {
     };
     assert!(typed.type_filters.contains(&TypeFilter::Creature));
     assert!(typed.properties.contains(&FilterProp::NonToken));
-    assert!(typed
-        .properties
-        .contains(&FilterProp::Attacking { defender: None }));
+    assert!(typed.properties.contains(&FilterProp::Attacking {
+        scope: Default::default(),
+        defender: None
+    }));
 }

@@ -3426,6 +3426,8 @@ fn delayed_player_damage_admission(head: &str) -> DelayedPlayerDamageAdmission {
     {
         return Admission::OutsideFamily;
     }
+    // CR 603.2c: “one or more players” groups the damage step into one occurrence,
+    // while “a player” triggers separately for each damaged player.
     let mode = match (&head.recipient, source.properties.as_slice()) {
         (BatchedDamageRecipient::DefendingPlayer | BatchedDamageRecipient::Other(_), _) => {
             return Admission::OutsideFamily;
@@ -3439,7 +3441,9 @@ fn delayed_player_damage_admission(head: &str) -> DelayedPlayerDamageAdmission {
                 value: Keyword::Flying,
             }],
         ) => TriggerMode::DamageDone,
-        _ => return Admission::Unsupported,
+        (BatchedDamageRecipient::APlayer | BatchedDamageRecipient::OneOrMorePlayers, _) => {
+            return Admission::Unsupported;
+        }
     };
     if !rest.is_empty() || !head.source_remainder.trim().is_empty() || head.threshold.is_some() {
         return Admission::Unsupported;
@@ -50470,6 +50474,7 @@ fn parse_for_each_attacker_copy_blocker_ir(
     let source_filter =
         TargetFilter::Typed(
             TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You),
             }]),
         );
@@ -55007,6 +55012,7 @@ fn parse_effect_chain_ir_body(
             // that many tokens" chunk needs it to back-reference the cast spell's
             // colored-pip count instead of the generic EventContextAmount.
             pending_mana_symbol_count_color: ctx.pending_mana_symbol_count_color,
+            blocking_rider_antecedent: ctx.blocking_rider_antecedent.clone(),
             // CR 701.22a + CR 603.2: The completed-scry condition stages its
             // bottom-count provenance on the trigger body. Every chunk must
             // retain it so a following "exile that many cards from the bottom"

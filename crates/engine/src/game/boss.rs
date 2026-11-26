@@ -527,7 +527,10 @@ fn attacking_boss_creature_filter() -> crate::types::ability::TargetFilter {
     TargetFilter::Typed(TypedFilter {
         type_filters: vec![TypeFilter::Creature],
         controller: Some(ControllerRef::You),
-        properties: vec![FilterProp::Attacking { defender: None }],
+        properties: vec![FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        }],
     })
 }
 

@@ -12748,9 +12748,12 @@ fn static_as_long_as_equipped_creature_is_attacking_grants_first_strike_to_host(
     );
 
     let attacking_gate = StaticCondition::RecipientMatchesFilter {
-        filter: TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
-        ),
+        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+        ])),
     };
 
     // Supported static: first strike on the host, gated on the host attacking.
@@ -12805,9 +12808,12 @@ fn static_as_long_as_enchanted_creature_is_attacking_gate_binds_to_host() {
     assert_eq!(
         defs[0].condition,
         Some(StaticCondition::RecipientMatchesFilter {
-            filter: TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
-            ),
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }
+            ])),
         }),
     );
 }
@@ -12986,9 +12992,12 @@ fn static_as_long_as_attacking_bare_must_be_blocked_models_requirement() {
     assert_eq!(
         defs[1].condition,
         Some(StaticCondition::RecipientMatchesFilter {
-            filter: TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
-            ),
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }
+            ])),
         }),
     );
     // No Unimplemented residual for a fully-modeled requirement.
@@ -13011,9 +13020,12 @@ fn static_as_long_as_attacking_pure_must_be_blocked_models_requirement() {
     assert_eq!(
         defs[0].condition,
         Some(StaticCondition::RecipientMatchesFilter {
-            filter: TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
-            ),
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }
+            ])),
         }),
     );
 }
@@ -14727,7 +14739,10 @@ fn static_attacking_creatures_you_control_have_double_strike() {
         Some(TargetFilter::Typed(
             TypedFilter::creature()
                 .controller(ControllerRef::You)
-                .properties(vec![FilterProp::Attacking { defender: None }]),
+                .properties(vec![FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }]),
         ))
     );
     assert!(def
@@ -14745,6 +14760,7 @@ fn static_creatures_attacking_your_opponents_have_double_strike() {
         def.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::Opponent)
             }]
         ),))
@@ -14769,6 +14785,7 @@ fn static_creatures_attacking_enchanted_player_have_trample() {
         def.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::EnchantedPlayer)
             }]
         ),))
@@ -14791,6 +14808,7 @@ fn static_creatures_attacking_opponents_and_planeswalkers_get_pump() {
         def.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::Opponent)
             }]
         ),))
@@ -14808,6 +14826,7 @@ fn static_creatures_attacking_you_get_pump() {
         def.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You)
             }]
         ),))
@@ -14831,6 +14850,7 @@ fn static_creatures_attacking_last_chosen_player_scope() {
         menace.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::SourceChosenPlayer)
             }]
         ),))
@@ -14846,6 +14866,7 @@ fn static_creatures_attacking_last_chosen_player_scope() {
         pump.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::SourceChosenPlayer)
             }]
         ),))
@@ -14860,6 +14881,7 @@ fn static_creatures_attacking_last_chosen_player_scope() {
         short.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::SourceChosenPlayer)
             }]
         ),))
@@ -14889,6 +14911,7 @@ fn triarch_stalker_choose_opponent_persists_for_last_chosen_player_static() {
         parsed.statics.iter().any(|s| matches!(
             &s.affected,
             Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::SourceChosenPlayer),
             })
         )),
@@ -15076,6 +15099,7 @@ fn granted_static_reader_persists_last_chosen_player() {
         parsed.statics.iter().any(|s| matches!(
             &s.affected,
             Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::SourceChosenPlayer),
             })
         )),
@@ -20247,9 +20271,10 @@ fn static_unblocked_attacking_ninjas_you_control_have_lifelink() {
         assert!(tf.properties.contains(&FilterProp::BlockStatus {
             status: AttackerBlockStatus::Unblocked
         }));
-        assert!(tf
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(tf.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
     } else {
         panic!(
             "Expected Typed filter with Ninja subtype, got {:?}",
@@ -20270,9 +20295,10 @@ fn static_attacking_ninjas_you_control_have_deathtouch() {
     if let Some(TargetFilter::Typed(tf)) = &def.affected {
         assert_eq!(tf.get_subtype(), Some("Ninja"));
         assert_eq!(tf.controller, Some(ControllerRef::You));
-        assert!(tf
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(tf.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(!tf.properties.contains(&FilterProp::BlockStatus {
             status: AttackerBlockStatus::Unblocked
         }));
@@ -44807,7 +44833,10 @@ fn type_phrase_keeps_post_negation_status_and_plural_shared_color_reference() {
         TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Creature)
                 .with_type(TypeFilter::Non(Box::new(TypeFilter::Artifact)))
-                .properties(vec![FilterProp::Attacking { defender: None }])
+                .properties(vec![FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }])
         )
     );
     let (filter, rest) = crate::parser::oracle_target::parse_target(

@@ -3816,6 +3816,7 @@ fn filter_references_source_chosen_player(filter: &TargetFilter) -> bool {
                         prop,
                         FilterProp::Attacking {
                             defender: Some(ControllerRef::SourceChosenPlayer),
+                            ..
                         }
                     )
                 })

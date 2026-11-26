@@ -373,6 +373,7 @@ fn a_replacement_that_leaves_a_non_aura_entrant_still_creates_the_token() {
     let mut board = board();
     let spec = TokenSpec {
         blocking_attacker: None,
+        blocking_attacker_incarnation: None,
         characteristics: TokenCharacteristics {
             display_name: "Spirit".to_string(),
             power: Some(1),

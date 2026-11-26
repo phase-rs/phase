@@ -2050,6 +2050,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // stamp `Effect::Meld { source, partner, .. }` (the context carries the
         // source name; the gate carried the partner name).
         pending_meld_partner: meld_partner,
+        blocking_rider_antecedent: (condition == TriggerMode::Blocks
+            && partial_def.valid_target.is_some())
+        .then_some(TargetFilter::ParentTarget),
         pending_mana_symbol_count_color,
         actor: ctx.actor.clone(),
         // CR 608.2k says an effect still affects a specific untargeted object
@@ -15960,6 +15963,7 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         if let Ok((after_suffix, defender)) = parse_attacking_player_postnominal(rest.trim_start())
         {
             let attacking = FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(defender),
             };
             return (conjoin_filter_property(filter, attacking), after_suffix);
@@ -20835,7 +20839,13 @@ fn parse_count_qualified_block_filter(input: &str) -> OracleResult<'_, (i32, Tar
 /// CR 603.4: this event qualifier is not an intervening-if and must not be
 /// rechecked when the ability resolves; EventTime is stripped when stacking.
 fn source_block_count_condition(filter: TargetFilter, minimum: i32) -> TriggerCondition {
-    let filter = add_property(filter, FilterProp::Attacking { defender: None });
+    let filter = add_property(
+        filter,
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        },
+    );
     let filter = add_property(
         filter,
         FilterProp::CombatRelation {
@@ -20880,7 +20890,10 @@ fn subject_attack_count_condition(
                     qty: QuantityRef::ObjectCount {
                         filter: add_property(
                             filter.clone(),
-                            FilterProp::Attacking { defender: None },
+                            FilterProp::Attacking {
+                                scope: Default::default(),
+                                defender: None,
+                            },
                         ),
                     },
                 },
@@ -21661,13 +21674,9 @@ pub(super) fn parse_batched_damage_head(input: &str) -> OracleResult<'_, Batched
         let direct = if extra_props.is_empty() {
             (filter, remainder)
         } else {
-            let qualified = match filter {
-                TargetFilter::Typed(mut tf) => {
-                    tf.properties.extend(extra_props);
-                    TargetFilter::Typed(tf)
-                }
-                other => other,
-            };
+            let qualified = extra_props
+                .into_iter()
+                .fold(filter, conjoin_filter_property);
             (qualified, rem)
         };
         if direct.1.is_empty() {
