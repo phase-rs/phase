@@ -2694,9 +2694,11 @@ mod tests {
 
     #[test]
     fn ability_activated_fixed_count_exile_cost_round_trips() {
-        // R2-F1 (PR #11352) guard: a production-shaped activation event
-        // carrying a fixed-count exile cost (Psychatog's "Exile two cards
-        // from your graveyard") round-trips through the wire shape.
+        // A production-shaped activation event carrying a fixed-count exile
+        // cost (Psychatog's "Exile two cards from your graveyard") round-trips
+        // through serde_json. serde_json decodes the count via `visit_u64`; the
+        // WASM `visit_i64` arm is covered by phase-ast's
+        // `exile_cost_count_accepts_wasm_integer_dispatch`.
         let original = GameEvent::AbilityActivated {
             player_id: PlayerId(1),
             source_id: ObjectId(9),
