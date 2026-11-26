@@ -34910,9 +34910,12 @@ fn validate_restored_attack_authority(
         let identities = event
             .and_then(triggers::attack_count_declaration_incarnations)
             .ok_or_else(|| ERROR.to_string())?;
+        let mut seen_attackers = HashSet::new();
         for identity in identities {
             let identity = identity.ok_or_else(|| ERROR.to_string())?;
-            if combat::attack_destination_of_incarnation(state, identity).is_none() {
+            if !seen_attackers.insert(identity.object_id)
+                || combat::attack_destination_of_incarnation(state, identity).is_none()
+            {
                 return Err(ERROR.to_string());
             }
             if let Some(row) = exact_battlefield_departure_row(state, identity) {

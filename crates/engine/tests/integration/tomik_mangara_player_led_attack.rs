@@ -402,6 +402,24 @@ fn mangara_rechecks_the_departed_attackers_original_incarnation_after_restore() 
             .expect("the exact departure evidence survives checked restore");
         assert_mangara_draws(GameRunner::from_state(restored), b.draw);
 
+        let mut duplicate_attacker = saved.clone();
+        let payload = if wrapped {
+            &mut duplicate_attacker["state"]
+        } else {
+            &mut duplicate_attacker
+        };
+        let attacker_ids = payload["stack"][0]["kind"]["data"]["trigger_event"]["data"]
+            ["attacker_ids"]
+            .as_array_mut()
+            .expect("the trigger carries the declared attacker IDs");
+        attacker_ids.push(serde_json::to_value(attacker).unwrap());
+        assert!(
+            serde_json::from_value::<PersistedGameState>(duplicate_attacker)
+                .expect_err("a declared attacker can only count once in the recheck")
+                .to_string()
+                .contains("exact attack authority")
+        );
+
         for missing_target in [false, true] {
             let mut broken = saved.clone();
             let payload = if wrapped {
