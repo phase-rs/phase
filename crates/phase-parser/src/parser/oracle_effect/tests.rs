@@ -109047,16 +109047,17 @@ fn unbound_life_loss_difference_in_an_emblem() {
 
 #[test]
 fn delayed_draw_discard_rejects_unconsumed_replacement_markers() {
-    let family = DelayedPlayerDamage::PerPlayer;
-    assert!(complete_delayed_player_damage_body(
-        family,
-        "draw a card, then discard a card."
-    ));
+    let parse = |body| parse_delayed_player_damage_body(body, &mut ParseContext::default());
+    assert!(parse("draw a card, then discard a card.").is_some());
     for body in [
         "draw a card instead, then discard a card.",
         "draw a card, then discard a card instead.",
+        "draw a card and discard a card at random.",
+        "draw a card and scry 1.",
+        "draw a card and and discard a card.",
+        "draw a card and discards a card.",
     ] {
-        assert!(!complete_delayed_player_damage_body(family, body), "{body}");
+        assert!(parse(body).is_none(), "{body}");
     }
 }
 
@@ -109077,6 +109078,7 @@ fn delayed_player_damage_full_faces_commit_compound_payloads() {
             FORTH,
             &[
                 ("the monarch.", "the monarch instead."),
+                ("the monarch.", "the monarch and scry 1."),
                 ("combat damage", "combat 3 or more damage"),
                 (
                     "one or more players this turn",
@@ -109106,7 +109108,6 @@ fn delayed_player_damage_full_faces_commit_compound_payloads() {
             &["Saga"][..],
             RAVEN,
             &[
-                ("that player's hand", "your hand"),
                 ("and draw a card.", "and draw a card instead."),
                 (
                     "with flying deal",
@@ -109165,6 +109166,11 @@ fn delayed_player_damage_full_faces_commit_compound_payloads() {
                                     reveal: false,
                                     ..
                                 } => "look",
+                                Effect::RevealHand {
+                                    target: TargetFilter::Controller,
+                                    reveal: false,
+                                    ..
+                                } => "look-controller",
                                 other => panic!("{name}: unexpected watcher payload {other:?}"),
                             });
                             node = def.sub_ability.as_deref();
@@ -109217,6 +109223,15 @@ fn delayed_player_damage_full_faces_commit_compound_payloads() {
             (1, Vec::new(), expected.to_vec()),
             "{name}"
         );
+        if full == RAVEN {
+            // Structural variation on The Raven's Warning II: the controller
+            // is both the viewer and the owner of the hand being inspected.
+            let modified = full.replace("that player's hand", "your hand");
+            assert_eq!(
+                inspect(&parse(&modified)),
+                (1, Vec::new(), vec!["look-controller", "draw"])
+            );
+        }
         for (from, to) in mutations {
             let mutated = full.replace(from, to);
             let (installers, strict, payloads) = inspect(&parse(&mutated));
@@ -109232,4 +109247,42 @@ fn delayed_player_damage_full_faces_commit_compound_payloads() {
             assert!(fragment.contains(expected_span), "{name}: {fragment:?}");
         }
     }
+}
+
+#[test]
+fn delayed_player_damage_forth_head_accepts_an_independent_body() {
+    // Structural variation on Forth Eorlingas!, with a draw before the
+    // printed monarch instruction. Both belong to the same delayed ability.
+    let printed = "Whenever one or more creatures you control deal combat damage to one or more players this turn,";
+    let face = parse_named_face(
+        &format!("{printed} draw a card and you become the monarch."),
+        "Combat Draw and Monarch",
+        &["Sorcery"],
+    );
+    let Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::WheneverEvent { trigger, .. },
+        effect,
+        ..
+    } = face.abilities[0].effect.as_ref()
+    else {
+        panic!("expected a single installed watcher: {face:?}");
+    };
+    assert_eq!(trigger.mode, TriggerMode::DamageDoneOnce);
+    assert!(trigger.batched);
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    ));
+    let monarch = effect.sub_ability.as_deref().expect("monarch instruction");
+    assert!(matches!(
+        monarch.effect.as_ref(),
+        Effect::BecomeMonarch {
+            target: TargetFilter::Controller
+        }
+    ));
+    assert!(monarch.sub_ability.is_none());
+    assert!(face.abilities[0].sub_ability.is_none());
 }

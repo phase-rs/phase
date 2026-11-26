@@ -2205,12 +2205,30 @@ const RAVENS_WARNING: &str = "(As this Saga enters and after your draw step, add
 /// occurrence, with a narrowed combat aggregate for each player.
 #[test]
 fn forth_eorlingas_groups_players_in_one_combat_step() {
+    assert_forth_groups_players_in_one_combat_step(FORTH_EORLINGAS, 0, 0);
+}
+
+#[test]
+fn forth_head_resolves_a_compound_draw_gain_and_monarch_body() {
+    // Structural variation on Forth Eorlingas!, adding draw and life gain to its watcher.
+    let oracle = FORTH_EORLINGAS.replace(
+        "you become the monarch",
+        "draw two cards and gain 3 life and you become the monarch",
+    );
+    assert_forth_groups_players_in_one_combat_step(&oracle, 2, 3);
+}
+
+fn assert_forth_groups_players_in_one_combat_step(
+    oracle: &str,
+    delayed_draws: usize,
+    delayed_life: i32,
+) {
     use engine::types::events::GameEvent;
     use engine::types::mana::{ManaCostShard, ManaType, ManaUnit};
 
     let mut scenario = three_player_board();
     let forth = scenario
-        .add_spell_to_hand_from_oracle(P0, "Forth Eorlingas!", false, FORTH_EORLINGAS)
+        .add_spell_to_hand_from_oracle(P0, "Forth Eorlingas!", false, oracle)
         .with_mana_cost(ManaCost::Cost {
             shards: vec![ManaCostShard::X, ManaCostShard::Red, ManaCostShard::White],
             generic: 0,
@@ -2273,7 +2291,11 @@ fn forth_eorlingas_groups_players_in_one_combat_step() {
                 && source_incarnations[0].incarnation == runner.state().objects[&source].incarnation
         )));
     }
+    let before = hand(&runner, P0);
+    let before_life = runner.life(P0);
     resolve_top(&mut runner);
+    assert_eq!(hand(&runner, P0), before + delayed_draws);
+    assert_eq!(runner.life(P0), before_life + delayed_life);
     assert_eq!(runner.state().monarch, Some(P0));
     assert!(runner.state().stack.is_empty());
     assert!(matches!(
@@ -2286,6 +2308,21 @@ fn forth_eorlingas_groups_players_in_one_combat_step() {
 /// by qualifying recipient and looks at that hand before its controller draws.
 #[test]
 fn ravens_warning_looks_before_drawing_for_each_damaged_player() {
+    assert_ravens_warning_looks_before_drawing(RAVENS_WARNING, false);
+}
+
+#[test]
+fn ravens_warning_head_can_look_at_its_controllers_hand() {
+    // Structural variation on The Raven's Warning II: "your" names its
+    // controller, and "that player" still refers to the damage recipient.
+    let oracle = RAVENS_WARNING.replace(
+        "look at that player's hand and draw a card",
+        "look at your hand and that player loses 2 life and draw a card",
+    );
+    assert_ravens_warning_looks_before_drawing(&oracle, true);
+}
+
+fn assert_ravens_warning_looks_before_drawing(oracle: &str, looks_at_controller: bool) {
     use engine::types::ability::EffectKind;
     use engine::types::events::GameEvent;
     use engine::types::keywords::Keyword;
@@ -2294,7 +2331,7 @@ fn ravens_warning_looks_before_drawing_for_each_damaged_player() {
     let saga = scenario
         .add_enchantment_from_oracle(P0, "The Raven's Warning", "")
         .with_subtypes(vec!["Saga"])
-        .from_oracle_text(RAVENS_WARNING)
+        .from_oracle_text(oracle)
         .id();
     scenario.with_counter(saga, CounterType::Lore, 1);
     let first = scenario
@@ -2402,7 +2439,14 @@ fn ravens_warning_looks_before_drawing_for_each_damaged_player() {
             _ => unreachable!("player verified above"),
         };
         let id = item.id;
-        let before = hand(&runner, P0);
+        let controller_hand: Vec<_> = runner.state().players[P0.0 as usize]
+            .hand
+            .iter()
+            .copied()
+            .collect();
+        let before = controller_hand.len();
+        let damaged = *player_id;
+        let before_life = runner.life(damaged);
         let result = loop {
             let result = runner
                 .act(GameAction::PassPriority)
@@ -2423,9 +2467,20 @@ fn ravens_warning_looks_before_drawing_for_each_damaged_player() {
             .iter()
             .any(|event| matches!(event, GameEvent::CardsRevealed { .. })));
         assert_eq!(runner.state().private_look_player, Some(P0));
-        assert_eq!(runner.state().private_look_ids, vec![hidden]);
         let visible = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
-        assert_eq!(visible.objects[&hidden].name, name);
+        if looks_at_controller {
+            assert!(!controller_hand.is_empty());
+            assert_eq!(runner.state().private_look_ids, controller_hand);
+            assert_eq!(runner.life(damaged), before_life - 2);
+            assert_ne!(
+                visible.objects.get(&hidden).map(|card| card.name.as_str()),
+                Some(name)
+            );
+        } else {
+            assert_eq!(runner.state().private_look_ids, vec![hidden]);
+            assert_eq!(runner.life(damaged), before_life);
+            assert_eq!(visible.objects[&hidden].name, name);
+        }
         let private =
             engine::game::visibility::filter_state_for_viewer(runner.state(), other_player);
         assert_ne!(

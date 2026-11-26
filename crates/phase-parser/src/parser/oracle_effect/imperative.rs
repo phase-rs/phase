@@ -1057,6 +1057,132 @@ pub(super) fn parse_draw_instruction<'a>(
     ))
 }
 
+/// The delayed body admits only productions that prove how much text they consumed.
+pub(super) fn parse_delayed_player_instruction<'a>(
+    input: &'a str,
+    ctx: &mut ParseContext,
+) -> OracleResult<'a, (ImperativeFamilyAst, Option<TargetFilter>)> {
+    let (predicate, subject) =
+        opt(terminated(alt((tag("you"), tag("that player"))), space1)).parse(input)?;
+    let actor = match subject {
+        Some(text) => {
+            let target = super::subject::parse_subject_application(text, ctx)
+                .map(|application| application.affected)
+                .ok_or_else(|| oracle_err(input))?;
+            if target != TargetFilter::Controller
+                && !(target == TargetFilter::TriggeringPlayer
+                    && ctx.relative_player_scope == Some(ControllerRef::TriggeringPlayer))
+            {
+                return Err(oracle_err(input));
+            }
+            Some(target)
+        }
+        None => None,
+    };
+    // A conjugated continuation without an explicit subject would need
+    // subject carry. Keep it outside this table instead of defaulting it to you.
+    let event_actor = actor == Some(TargetFilter::TriggeringPlayer);
+    let verb =
+        |base, third_person| terminated(tag(if event_actor { third_person } else { base }), space1);
+    let numeric = |ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast));
+    let (remainder, ast) = alt((
+        |input| {
+            let (rest, _) = verb("draw", "draws").parse(input)?;
+            let (rest, (ast, where_x)) = parse_draw_instruction(rest, &mut ctx.clone())?;
+            if where_x.is_some()
+                || !matches!(
+                    ast,
+                    NumericImperativeAst::Draw {
+                        count: QuantityExpr::Fixed { .. },
+                        up_to: false,
+                    }
+                )
+            {
+                return Err(oracle_err(input));
+            }
+            Ok((rest, numeric(ast)))
+        },
+        |input| {
+            let (rest, _) = verb("discard", "discards").parse(input)?;
+            let (rest, (ast, where_x)) = parse_counted_discard(
+                rest,
+                rest,
+                discard_is_random(rest),
+                false,
+                &mut ctx.clone(),
+            )?;
+            if where_x.is_some()
+                || !matches!(
+                    ast,
+                    TargetedImperativeAst::Discard {
+                        count: QuantityExpr::Fixed { .. },
+                        random: false,
+                        up_to: false,
+                        unless_filter: None,
+                        filter: None,
+                    }
+                )
+            {
+                return Err(oracle_err(input));
+            }
+            Ok((
+                rest,
+                ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)),
+            ))
+        },
+        |input| {
+            let (rest, (target, count, random)) = parse_possessive_hand_look(input)?;
+            if count.is_some()
+                || random
+                || event_actor
+                || !(target == TargetFilter::Controller
+                    || (target == TargetFilter::TriggeringPlayer
+                        && ctx.relative_player_scope == Some(ControllerRef::TriggeringPlayer)))
+            {
+                return Err(oracle_err(input));
+            }
+            Ok((
+                rest,
+                ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(
+                    HandRevealImperativeAst::LookAt {
+                        target,
+                        count,
+                        random,
+                    },
+                )),
+            ))
+        },
+        preceded(peek(verb("become", "becomes")), parse_become_monarch),
+        map(
+            preceded(verb("gain", "gains"), parse_fixed_life_amount),
+            |amount| numeric(NumericImperativeAst::GainLife { amount }),
+        ),
+        map(
+            preceded(verb("lose", "loses"), parse_fixed_life_amount),
+            |amount| numeric(NumericImperativeAst::LoseLife { amount }),
+        ),
+    ))
+    .parse(predicate)?;
+    Ok((remainder, (ast, actor)))
+}
+
+pub(super) fn lower_delayed_player_instruction(
+    (ast, actor): (ImperativeFamilyAst, Option<TargetFilter>),
+) -> Effect {
+    let mut effect = lower_imperative_family_effect(ast);
+    if let Some(actor @ TargetFilter::TriggeringPlayer) = actor {
+        match &mut effect {
+            Effect::Draw { target, .. }
+            | Effect::Discard { target, .. }
+            | Effect::BecomeMonarch { target }
+            | Effect::GainLife { player: target, .. } => *target = actor,
+            Effect::LoseLife { target, .. } => *target = Some(actor),
+            _ => {}
+        }
+    }
+    effect
+}
+
 fn parse_numeric_imperative_ast_with_context(
     text: &str,
     lower: &str,

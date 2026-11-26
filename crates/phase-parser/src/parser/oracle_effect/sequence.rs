@@ -1588,25 +1588,32 @@ fn keeps_delayed_entry_life_body(before: TextPair<'_>, after: &str) -> bool {
         .is_ok()
 }
 
-// CR 603.7b + CR 608.2c: the delayed installer owns both instructions.
-// Keep recognized malformed look/draw compounds together for strict failure.
-fn keeps_delayed_player_damage_look(before: TextPair<'_>, after: &str) -> bool {
-    use super::{
-        delayed_player_damage_admission, DelayedPlayerDamage, DelayedPlayerDamageAdmission,
-    };
+// CR 603.7b + CR 608.2c: the installer owns the complete damage-trigger body,
+// including unsupported instructions that must prevent a partial installation.
+fn keeps_delayed_player_damage_body(text: TextPair<'_>) -> bool {
+    use super::{delayed_player_damage_admission, DelayedPlayerDamageAdmission};
 
-    let Some((head, look)) = super::parse_delayed_this_turn_head(before) else {
-        return false;
-    };
-    let after = after.to_lowercase();
-    matches!(
-        delayed_player_damage_admission(head),
-        DelayedPlayerDamageAdmission::Admitted(DelayedPlayerDamage::FlyingPerPlayer, _)
-            | DelayedPlayerDamageAdmission::Unsupported
-    ) && super::imperative::parse_possessive_hand_look(&look.to_lowercase()).is_ok()
-        && tag::<_, _, OracleError<'_>>("draw ")
-            .parse(after.trim())
-            .is_ok()
+    super::parse_delayed_this_turn_head(text).is_some_and(|(head, _)| {
+        !matches!(
+            delayed_player_damage_admission(head),
+            DelayedPlayerDamageAdmission::OutsideFamily
+        )
+    })
+}
+
+pub(super) fn parse_delayed_body_separator(input: &str) -> OracleResult<'_, ClauseBoundary> {
+    alt((
+        value(
+            ClauseBoundary::Then,
+            preceded(opt(tag(",")), preceded(tag(" "), parse_then_connector)),
+        ),
+        value(
+            ClauseBoundary::Comma,
+            alt((tag(", and "), tag(", "), tag(" and "))),
+        ),
+        value(ClauseBoundary::Sentence, tag(". ")),
+    ))
+    .parse(input)
 }
 
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
@@ -1706,9 +1713,11 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 // each draw a card, then discard a card" — every named player does
                 // both), so it is not a clause boundary. Splitting would strand the
                 // trailing verb on the controller alone.
+                let lower = current.to_ascii_lowercase();
                 let comma_split =
                     split_comma_clause_boundary(&current, &remainder).filter(|(boundary, _)| {
                         !(compound_subject_each_sticky && matches!(boundary, ClauseBoundary::Then))
+                            && !keeps_delayed_player_damage_body(TextPair::new(&current, &lower))
                     });
                 if let Some((boundary, chars_to_skip)) = comma_split {
                     push_clause_chunk(&mut chunks, &current, Some(boundary));
@@ -2090,10 +2099,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             TextPair::new(before_and, &before_lower),
                             remainder_trimmed,
                         )
-                        || keeps_delayed_player_damage_look(
-                            TextPair::new(before_and, &before_lower),
-                            remainder_trimmed,
-                        )
+                        || keeps_delayed_player_damage_body(TextPair::new(before_and, &before_lower))
                         || targeted_compound_continuation
                         || prevent_then_put_continuation
                         || search_with_that_name
@@ -2872,15 +2878,15 @@ fn is_for_each_copy_token_continuation(
     )
 }
 
+fn parse_then_connector(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("then, "), tag("then "))).parse(input)
+}
+
 fn strip_sequence_connector_lower(input: &str) -> &str {
     let trimmed = input.trim();
-    alt((
-        tag::<_, _, OracleError<'_>>("then, "),
-        tag::<_, _, OracleError<'_>>("then "),
-    ))
-    .parse(trimmed)
-    .map(|(rest, _)| rest.trim_start())
-    .unwrap_or(trimmed)
+    parse_then_connector(trimmed)
+        .map(|(rest, _)| rest.trim_start())
+        .unwrap_or(trimmed)
 }
 
 /// CR 120.2b: True when the closing chunk text contains a `damage to `

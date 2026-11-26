@@ -85,8 +85,7 @@ use nom::character::complete::{
     alpha1, anychar, multispace0, multispace1, one_of, satisfy, space0, space1,
 };
 use nom::combinator::{
-    all_consuming, eof, fail, map, map_opt, map_parser, not, opt, peek, recognize, rest, success,
-    value, verify,
+    all_consuming, eof, fail, map, map_opt, not, opt, peek, recognize, rest, success, value, verify,
 };
 use nom::multi::{many0, many1, many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
@@ -3082,17 +3081,10 @@ fn condition_reads_the_event_subject(condition: &AbilityCondition) -> bool {
     }
 }
 
-#[derive(Clone, Copy)]
-enum DelayedPlayerDamage {
-    WholeStep,
-    PerPlayer,
-    FlyingPerPlayer,
-}
-
 enum DelayedPlayerDamageAdmission {
     OutsideFamily,
     Unsupported,
-    Admitted(DelayedPlayerDamage, Box<TriggerDefinition>),
+    Admitted(Box<TriggerDefinition>),
 }
 
 fn delayed_player_damage_admission(head: &str) -> DelayedPlayerDamageAdmission {
@@ -3112,180 +3104,101 @@ fn delayed_player_damage_admission(head: &str) -> DelayedPlayerDamageAdmission {
     {
         return Admission::OutsideFamily;
     }
-    let family = match (&head.recipient, source.properties.as_slice()) {
+    let mode = match (&head.recipient, source.properties.as_slice()) {
         (BatchedDamageRecipient::DefendingPlayer | BatchedDamageRecipient::Other(_), _) => {
             return Admission::OutsideFamily;
         }
-        (BatchedDamageRecipient::OneOrMorePlayers, []) => DelayedPlayerDamage::WholeStep,
-        (BatchedDamageRecipient::APlayer, []) => DelayedPlayerDamage::PerPlayer,
+        // The whole-step matcher currently requires an unqualified creature filter.
+        (BatchedDamageRecipient::OneOrMorePlayers, []) => TriggerMode::DamageDoneOnce,
         (
             BatchedDamageRecipient::APlayer,
-            [FilterProp::WithKeyword {
+            []
+            | [FilterProp::WithKeyword {
                 value: Keyword::Flying,
             }],
-        ) => DelayedPlayerDamage::FlyingPerPlayer,
+        ) => TriggerMode::DamageDone,
         _ => return Admission::Unsupported,
     };
     if !rest.is_empty() || !head.source_remainder.trim().is_empty() || head.threshold.is_some() {
         return Admission::Unsupported;
     }
-    let mut trigger = TriggerDefinition::new(match family {
-        DelayedPlayerDamage::WholeStep => TriggerMode::DamageDoneOnce,
-        DelayedPlayerDamage::PerPlayer | DelayedPlayerDamage::FlyingPerPlayer => {
-            TriggerMode::DamageDone
-        }
-    })
-    .trigger_zones(vec![Zone::Battlefield]);
+    let mut trigger = TriggerDefinition::new(mode).trigger_zones(vec![Zone::Battlefield]);
     trigger.valid_source = Some(head.source);
     trigger.valid_target = Some(TargetFilter::Player);
     trigger.damage_kind = head.damage_kind;
     trigger.batched = true;
-    Admission::Admitted(family, Box::new(trigger))
+    Admission::Admitted(Box::new(trigger))
 }
 
-fn delayed_player_damage_draw(input: &str) -> OracleResult<'_, ()> {
-    let (rest, _) = tag("draw ").parse(input)?;
-    let (remainder, (draw, where_x)) =
-        imperative::parse_draw_instruction(rest, &mut ParseContext::default())?;
-    if where_x.is_some()
-        || !matches!(
-            draw,
-            NumericImperativeAst::Draw {
-                count: QuantityExpr::Fixed { value: 1 },
-                up_to: false,
-            }
-        )
-    {
-        return Err(oracle_err(input));
+// CR 608.2c: consume every instruction before lowering or installing the watcher.
+fn parse_delayed_player_damage_body(
+    body: &str,
+    ctx: &mut ParseContext,
+) -> Option<crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition>> {
+    type Instruction<'a> = (
+        &'a str,
+        (ImperativeFamilyAst, Option<TargetFilter>),
+        Option<ClauseBoundary>,
+    );
+
+    fn parse_instruction<'a>(
+        input: &'a str,
+        ctx: &mut ParseContext,
+    ) -> OracleResult<'a, Instruction<'a>> {
+        let (remainder, instruction) = recognize(many_till(
+            anychar,
+            peek(alt((
+                value((), sequence::parse_delayed_body_separator),
+                value((), tag(".")),
+                value((), eof),
+            ))),
+        ))
+        .parse(input)?;
+        let instruction = instruction.trim();
+        let (_, ast) =
+            all_consuming(|input| imperative::parse_delayed_player_instruction(input, ctx))
+                .parse(instruction)?;
+        let (_, boundary) = opt(peek(sequence::parse_delayed_body_separator)).parse(remainder)?;
+        Ok((remainder, (instruction, ast, boundary)))
     }
-    Ok((remainder, ()))
-}
 
-fn delayed_player_damage_discard(input: &str) -> OracleResult<'_, ()> {
-    let (rest, _) = tag("discard ").parse(input)?;
-    let (remainder, (discard, where_x)) = imperative::parse_counted_discard(
-        rest,
-        rest,
-        imperative::discard_is_random(rest),
-        false,
-        &mut ParseContext::default(),
-    )?;
-    if where_x.is_some()
-        || !matches!(
-            discard,
-            TargetedImperativeAst::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
-                random: false,
-                up_to: false,
-                unless_filter: None,
-                filter: None,
-            }
-        )
-    {
-        return Err(oracle_err(input));
-    }
-    Ok((remainder, ()))
-}
-
-fn complete_delayed_player_damage_body(family: DelayedPlayerDamage, body: &str) -> bool {
     let lower = body.trim().to_lowercase();
-    // Consume sentence punctuation at the body boundary, before checking instructions.
-    let lower = all_consuming(terminated(
-        take_until::<_, _, OracleError<'_>>("."),
-        tag("."),
+    let (_, instructions) = all_consuming(terminated(
+        separated_list1(sequence::parse_delayed_body_separator, |input| {
+            parse_instruction(input, ctx)
+        }),
+        opt(tag(".")),
     ))
     .parse(lower.as_str())
-    .map_or(lower.as_str(), |(_, body)| body);
-    let mut ctx = ParseContext::default();
-    match family {
-        DelayedPlayerDamage::WholeStep => {
-            subject::parse_leading_subject_application(lower, &mut ctx).is_some_and(|subject| {
-                subject.affected == TargetFilter::Controller && !subject.is_optional
-            }) && all_consuming(preceded(tag("you "), imperative::parse_become_monarch))
-                .parse(lower)
-                .is_ok()
-        }
-        DelayedPlayerDamage::PerPlayer => all_consuming((
-            terminated(
-                map_parser(
-                    take_until(", then "),
-                    all_consuming(terminated(delayed_player_damage_draw, multispace0)),
-                ),
-                tag(", then "),
-            ),
-            delayed_player_damage_discard,
-        ))
-        .parse(lower)
-        .is_ok(),
-        DelayedPlayerDamage::FlyingPerPlayer => all_consuming((
-            terminated(imperative::parse_possessive_hand_look, tag(" and ")),
-            delayed_player_damage_draw,
-        ))
-        .parse(lower)
-        .is_ok_and(|(_, ((target, count, random), ()))| {
-            target == TargetFilter::TriggeringPlayer && count.is_none() && !random
-        }),
-    }
-}
+    .ok()?;
 
-// CR 608.2c: verify the consumed instructions survived lowering in order.
-fn lowered_delayed_player_damage_body(
-    family: DelayedPlayerDamage,
-    body: &AbilityDefinition,
-) -> bool {
-    let draw = |effect: &Effect| {
-        matches!(
-            effect,
-            Effect::Draw {
-                target: TargetFilter::Controller,
-                count: QuantityExpr::Fixed { value: 1 },
-            }
-        )
-    };
-    let expected: &[fn(&Effect) -> bool] = match family {
-        DelayedPlayerDamage::WholeStep => &[|effect| {
-            matches!(
-                effect,
-                Effect::BecomeMonarch {
-                    target: TargetFilter::Controller
-                }
+    let mut builder = ClauseIrBuilder::new(&lower);
+    for (text, instruction, boundary) in instructions {
+        builder
+            .clause(
+                text,
+                parsed_clause(imperative::lower_delayed_player_instruction(instruction)),
+                boundary,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
             )
-        }],
-        DelayedPlayerDamage::PerPlayer => &[draw, |effect| {
-            matches!(
-                effect,
-                Effect::Discard {
-                    target: TargetFilter::Controller,
-                    count: QuantityExpr::Fixed { value: 1 },
-                    ..
-                }
-            )
-        }],
-        DelayedPlayerDamage::FlyingPerPlayer => &[
-            |effect| {
-                matches!(
-                    effect,
-                    Effect::RevealHand {
-                        target: TargetFilter::TriggeringPlayer,
-                        count: None,
-                        reveal: false,
-                        ..
-                    }
-                )
-            },
-            draw,
-        ],
-    };
-    let mut remaining = expected.iter();
-    crate::types::ability_visit::visit_ability_def(body, &mut |effect: &Effect| {
-        if remaining.next().is_some_and(|matches| matches(effect)) {
-            std::ops::ControlFlow::Continue(())
-        } else {
-            std::ops::ControlFlow::Break(())
-        }
-    })
-    .is_continue()
-        && remaining.next().is_none()
+            .push();
+    }
+    Some(lower::lower_effect_chain_ir_with_provenance(
+        &EffectChainIr {
+            clauses: builder.finish(),
+            kind: AbilityKind::Spell,
+            continuation_kind: None,
+            player_scope_rewrite: PlayerScopeRewrite::Apply,
+            chain_rounding: None,
+            actor: ctx.actor.clone(),
+            in_trigger: ctx.in_trigger,
+            repeat_until: None,
+            injected_color_choice: InjectedColorChoice::Permitted,
+        },
+    ))
 }
 
 fn try_parse_whenever_this_turn_from(
@@ -3417,16 +3330,8 @@ fn try_parse_whenever_this_turn_from(
     } else {
         None
     };
-    let (family, mut trigger_def, effect_text) = match admission {
-        Some((DelayedPlayerDamageAdmission::Admitted(family, trigger), body)) => {
-            if !complete_delayed_player_damage_body(family, body) {
-                return Some(parsed_clause(Effect::unimplemented(
-                    "delayed_player_damage_body",
-                    body,
-                )));
-            }
-            (Some(family), *trigger, body)
-        }
+    let (strict_body, mut trigger_def, effect_text) = match admission {
+        Some((DelayedPlayerDamageAdmission::Admitted(trigger), body)) => (true, *trigger, body),
         Some((DelayedPlayerDamageAdmission::Unsupported, _)) => {
             return Some(parsed_clause(Effect::unimplemented(
                 "delayed_player_damage_head",
@@ -3434,7 +3339,7 @@ fn try_parse_whenever_this_turn_from(
             )));
         }
         None | Some((DelayedPlayerDamageAdmission::OutsideFamily, _)) => (
-            None,
+            false,
             parse_dealt_damage_this_way_dies_trigger(condition_text, &mut inner_ctx)
                 .unwrap_or_else(|| {
                     let (_, trigger_def) = super::oracle_trigger::parse_trigger_condition(
@@ -3458,13 +3363,9 @@ fn try_parse_whenever_this_turn_from(
     // is already lowercase (`before.lower`).
     inner_ctx.relative_player_scope =
         crate::parser::oracle_trigger::relative_player_scope_for_condition(condition_text);
-    if let Some(family) = family {
-        inner_ctx.relative_player_scope = match family {
-            DelayedPlayerDamage::WholeStep => None,
-            DelayedPlayerDamage::PerPlayer | DelayedPlayerDamage::FlyingPerPlayer => {
-                Some(ControllerRef::TriggeringPlayer)
-            }
-        };
+    if strict_body {
+        inner_ctx.relative_player_scope = (trigger_def.mode == TriggerMode::DamageDone)
+            .then_some(ControllerRef::TriggeringPlayer);
     }
     // CR 608.2k: an untargeted object anaphor in the delayed effect body names
     // the object the trigger condition referred to — the per-firing attacker or
@@ -3480,12 +3381,22 @@ fn try_parse_whenever_this_turn_from(
     inner_ctx.object_pronoun_ref = anaphors.object_pronoun_ref;
     inner_ctx.condition_object_antecedent = anaphors.condition_object_antecedent;
     inner_ctx.demonstrative_object_ref = anaphors.demonstrative_object_ref;
-    let inner_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
-        effect_text,
-        AbilityKind::Spell,
-        &mut inner_ctx,
-        DamageTargetContext::InheritedTargets,
-    );
+    let inner_lowered = if strict_body {
+        let Some(body) = parse_delayed_player_damage_body(effect_text, &mut inner_ctx) else {
+            return Some(parsed_clause(Effect::unimplemented(
+                "delayed_player_damage_body",
+                effect_text,
+            )));
+        };
+        body
+    } else {
+        parse_nested_effect_chain_with_damage_context_and_provenance(
+            effect_text,
+            AbilityKind::Spell,
+            &mut inner_ctx,
+            DamageTargetContext::InheritedTargets,
+        )
+    };
     let inner = inner_lowered.value;
     // CR 603.4: a delayed body that opens with an intervening "if" clause must
     // carry that condition on its root ability. When the shared conditional
@@ -3520,13 +3431,6 @@ fn try_parse_whenever_this_turn_from(
     } else {
         inner
     };
-
-    if family.is_some_and(|family| !lowered_delayed_player_damage_body(family, &inner)) {
-        return Some(parsed_clause(Effect::unimplemented(
-            "delayed_player_damage_body",
-            effect_text,
-        )));
-    }
 
     Some(ParsedEffectClause {
         history: inner_lowered
