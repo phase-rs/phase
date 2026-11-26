@@ -945,6 +945,345 @@ fn broodmoth_keeps_merged_component_in_graveyard_after_cremate_exiles_the_surviv
     assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
 }
 
+#[test]
+fn departing_merged_hushbringer_suppresses_a_good_day_to_die() {
+    good_day_to_die_on_merged_host("Hushbringer", "Murder", 0);
+}
+
+#[test]
+fn a_good_day_to_die_draws_once_for_an_unsuppressed_merged_death() {
+    good_day_to_die_on_merged_host("Grizzly Bears", "Murder", 1);
+}
+
+#[test]
+fn simultaneous_lethal_damage_to_merged_hushbringer_suppresses_a_good_day_to_die() {
+    good_day_to_die_on_merged_host("Hushbringer", "Pyroclasm", 0);
+}
+
+#[test]
+fn a_good_day_to_die_draws_once_after_unsuppressed_simultaneous_lethal_damage() {
+    good_day_to_die_on_merged_host("Grizzly Bears", "Pyroclasm", 1);
+}
+
+fn good_day_to_die_on_merged_host(host_name: &str, removal_name: &str, expected_draws: usize) {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Green; 3]
+            .into_iter()
+            .chain([ManaType::Black; 4])
+            .chain([ManaType::Red])
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let host = scenario.add_real_card(P0, host_name, Zone::Battlefield, &db);
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let watcher = scenario.add_real_card(P0, "A Good Day to Die", Zone::Hand, &db);
+    let removal = scenario.add_real_card(P0, removal_name, Zone::Hand, &db);
+    let co_departure = (removal_name == "Pyroclasm")
+        .then(|| scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, &db));
+    scenario.add_card_to_library_top(P0, "Extra card");
+    let draw = scenario.add_card_to_library_top(P0, "Delayed draw");
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+
+    runner.cast(watcher).target_object(host).resolve();
+    assert_eq!(
+        only_delayed(&runner)
+            .ability
+            .context
+            .delayed_watch_incarnation,
+        Some(incarnation(&runner, host))
+    );
+    if let Some(co_departure) = co_departure {
+        runner.cast(removal).commit();
+        runner.act(GameAction::PassPriority).unwrap();
+        let death = runner.act(GameAction::PassPriority).unwrap();
+        // CR 704.5g + CR 704.3: Pyroclasm's lethal damage destroys both creatures
+        // in one state-based action check.
+        assert_eq!(zone(&runner, co_departure), Zone::Graveyard);
+        assert!(death.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, record, .. }
+                if *object_id == host && record.co_departed.contains(&co_departure)
+        )));
+    } else {
+        cast_and_resolve_only(&mut runner, removal, TargetRef::Object(host));
+    }
+    assert_eq!(zone(&runner, host), Zone::Graveyard);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    // CR 603.10a: the departing merged permanent's static still applies to its death.
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == watcher)
+            .count(),
+        expected_draws,
+        "A Good Day to Die triggers queued after {removal_name}"
+    );
+    let hand_at_death = runner.state().players[0].hand.len();
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_at_death + expected_draws
+    );
+    let expected_zone = if expected_draws == 0 {
+        Zone::Library
+    } else {
+        Zone::Hand
+    };
+    assert_eq!(zone(&runner, draw), expected_zone);
+}
+
+#[test]
+fn legend_rule_answer_does_not_replay_a_suppressed_merged_death() {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Green; 3]
+            .into_iter()
+            .chain([ManaType::Blue; 3])
+            .chain([ManaType::Black; 4])
+            .chain([ManaType::White])
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let host = scenario.add_real_card(P0, "Hushbringer", Zone::Battlefield, &db);
+    let survivor = scenario.add_real_card(P0, "Hushbringer", Zone::Battlefield, &db);
+    let gallery = scenario.add_real_card(P0, "Mirror Gallery", Zone::Battlefield, &db);
+    scenario.add_real_card(P0, "Leyline of Singularity", Zone::Battlefield, &db);
+    let crawler = scenario.add_real_card(P0, "Psychosis Crawler", Zone::Battlefield, &db);
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let watcher = scenario.add_real_card(P0, "A Good Day to Die", Zone::Hand, &db);
+    let command = scenario.add_real_card(P0, "Cryptic Command", Zone::Hand, &db);
+    scenario.add_real_card(P0, "Plains", Zone::Hand, &db);
+    let humble = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Humble",
+            true,
+            "Until end of turn, target creature loses all abilities and has base power and toughness 0/1.",
+        )
+        .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::White], generic: 1 })
+        .id();
+    let delayed_draw = scenario.add_card_to_library_top(P0, "Delayed draw");
+    let command_draw = scenario.add_card_to_library_top(P0, "Command draw");
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+    runner.cast(watcher).target_object(host).resolve();
+    assert_eq!(
+        only_delayed(&runner)
+            .ability
+            .context
+            .delayed_watch_incarnation,
+        Some(incarnation(&runner, host))
+    );
+    runner.cast(humble).target_object(survivor).resolve();
+
+    // CR 704.5j: removing Gallery makes the two Hushbringers subject to the
+    // legend rule. Crawler's draw observer is waiting when the choice opens.
+    runner
+        .cast(command)
+        .modes(&[1, 3])
+        .target_object(gallery)
+        .commit();
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+    assert_eq!(zone(&runner, gallery), Zone::Hand);
+    assert_eq!(zone(&runner, command_draw), Zone::Hand);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseLegend { .. }
+    ));
+    assert!(runner
+        .state()
+        .deferred_triggers
+        .iter()
+        .any(|trigger| trigger.pending.source_id == crawler));
+
+    runner
+        .act(GameAction::ChooseLegend { keep: survivor })
+        .unwrap();
+    assert_eq!(zone(&runner, host), Zone::Graveyard);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    assert_eq!(zone(&runner, survivor), Zone::Battlefield);
+    // CR 603.10a: the departing Hushbringer alone suppresses its death.
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, crawler);
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().players[1].life, 19);
+    assert_eq!(zone(&runner, delayed_draw), Zone::Library);
+}
+
+#[test]
+fn automatic_mana_payment_preserves_suppression_of_a_merged_death() {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Green; 3]
+            .into_iter()
+            .chain([ManaType::Black])
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let host = scenario.add_real_card(P0, "Hushbringer", Zone::Battlefield, &db);
+    let cauldron = scenario.add_real_card(P0, "Agatha's Soul Cauldron", Zone::Battlefield, &db);
+    let pet = scenario.add_real_card(P0, "Blood Pet", Zone::Graveyard, &db);
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let watcher = scenario.add_real_card(P0, "A Good Day to Die", Zone::Hand, &db);
+    let ritual = scenario.add_real_card(P0, "Dark Ritual", Zone::Hand, &db);
+    let draw = scenario.add_card_to_library_top(P0, "Delayed draw");
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+
+    let grant = runner
+        .activate(cauldron, 0)
+        .target_objects(&[pet, host])
+        .resolve();
+    grant.assert_zone(&[pet], Zone::Exile);
+    grant.assert_counters(host, engine::types::counter::CounterType::Plus1Plus1, 1);
+    runner.cast(watcher).target_object(host).resolve();
+    assert_eq!(
+        only_delayed(&runner)
+            .ability
+            .context
+            .delayed_watch_incarnation,
+        Some(incarnation(&runner, host))
+    );
+
+    let outcome = runner.cast(ritual).resolve();
+    outcome.assert_zone(&[host, gemrazer, ritual], Zone::Graveyard);
+    // CR 603.10a: the payment's later scan must preserve the death's suppression.
+    outcome.assert_hand_drawn(P0, 0);
+    outcome.assert_zone(&[draw], Zone::Library);
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn rootless_mana_payment_preserves_suppression_of_a_merged_death() {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Green; 3]
+            .into_iter()
+            .chain([ManaType::Black; 6])
+            .chain([ManaType::Blue, ManaType::White])
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let host = scenario.add_real_card(P0, "Hushbringer", Zone::Battlefield, &db);
+    let cauldron = scenario.add_real_card(P0, "Agatha's Soul Cauldron", Zone::Battlefield, &db);
+    let cantor = scenario.add_real_card(P0, "Wild Cantor", Zone::Graveyard, &db);
+    let tyrant = scenario.add_real_card(P0, "Leyline Tyrant", Zone::Battlefield, &db);
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let watcher = scenario.add_real_card(P0, "A Good Day to Die", Zone::Hand, &db);
+    let aura = scenario.add_real_card(P0, "Witness Protection", Zone::Hand, &db);
+    let disenchant = scenario.add_real_card(P0, "Disenchant", Zone::Hand, &db);
+    let murder = scenario.add_real_card(P0, "Murder", Zone::Hand, &db);
+    let draw = scenario.add_card_to_library_top(P0, "Delayed draw");
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+    let grant = runner
+        .activate(cauldron, 0)
+        .target_objects(&[cantor, host])
+        .resolve();
+    grant.assert_zone(&[cantor], Zone::Exile);
+    grant.assert_counters(host, engine::types::counter::CounterType::Plus1Plus1, 1);
+    runner.cast(watcher).target_object(host).resolve();
+    assert_eq!(
+        only_delayed(&runner)
+            .ability
+            .context
+            .delayed_watch_incarnation,
+        Some(incarnation(&runner, host))
+    );
+
+    // Let Tyrant trigger with Hushbringer's abilities removed, then restore
+    // both its suppressor and the granted mana ability before answering Tyrant.
+    runner
+        .cast(aura)
+        .target_object(host)
+        .resolve()
+        .assert_zone(&[aura], Zone::Battlefield);
+    cast_and_resolve_only(&mut runner, murder, TargetRef::Object(tyrant));
+    assert_eq!(zone(&runner, tyrant), Zone::Graveyard);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, tyrant);
+    cast_and_resolve_only(&mut runner, disenchant, TargetRef::Object(aura));
+    assert_eq!(zone(&runner, aura), Zone::Graveyard);
+    runner.advance_until_stack_empty();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayAmountChoice {
+            player: P0,
+            max: 1,
+            ..
+        }
+    ));
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 1 })
+        .unwrap();
+    assert_eq!(zone(&runner, host), Zone::Graveyard);
+    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().players[1].life, 19);
+    // CR 603.10a: Hushbringer suppressed the watched death during the payment.
+    assert_eq!(zone(&runner, draw), Zone::Library);
+}
+
 fn together_forever_merged_death(with_scarblades_malice: bool) {
     let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
         .expect("integration card fixture must load");

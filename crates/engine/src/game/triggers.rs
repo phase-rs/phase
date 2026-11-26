@@ -6334,8 +6334,14 @@ pub(crate) fn settle_choice_free_delayed_mana(
     if events_before >= events.len() {
         return Ok(());
     }
-    let raw_batch = &events[events_before..];
-    let (accepted, ordinary) = collect_mana_frame_triggers(state, raw_batch);
+    // CR 603.2c: a completed zone owner already observed its claimed events.
+    let unclaimed = filter_consumed_trigger_events_from(
+        events,
+        events_before,
+        TriggerCollectionRequester::Delayed,
+        &state.consumed_before_priority_trigger_events,
+    );
+    let (accepted, ordinary) = collect_mana_frame_triggers(state, &unclaimed);
     let settlement = settle_choice_free_mana_firings(state, accepted);
     if settlement.settled == 0 && settlement.carried.is_empty() && ordinary.is_empty() {
         return Ok(());
@@ -6393,8 +6399,14 @@ pub(crate) fn settle_skipped_echo_before_spend(
     events_before: usize,
     outer_resume: crate::types::game_state::ManaTriggerFixedPointResume,
 ) -> Option<WaitingFor> {
-    let raw_batch: Vec<GameEvent> = events[events_before..].to_vec();
-    let pause = collect_mana_action_trigger_batch(state, &raw_batch, outer_resume);
+    // CR 603.2c: do not reopen occurrences claimed for both collectors.
+    let unclaimed = filter_consumed_trigger_events_from(
+        events,
+        events_before,
+        TriggerCollectionRequester::Delayed,
+        &state.consumed_before_priority_trigger_events,
+    );
+    let pause = collect_mana_action_trigger_batch(state, &unclaimed, outer_resume);
     // Only after the combined collection result is durably owned: claim every
     // exact live occurrence this payment is responsible for, by full-action
     // index, so the post-action pipeline cannot collect them a second time.
@@ -7234,11 +7246,17 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority_for(
             }
         }
         if !deaths.is_empty() {
+            // CR 603.10a: the owner observed the death before delivering the
+            // move, when a departing permanent's suppressor could still apply.
+            let (_, suppressors) = group
+                .immediately_before_latches()
+                .expect("completed departure owner must have an immediately-before latch");
             let matched = collect_matching_delayed_triggers_with(
                 state,
                 &deaths,
                 DelayedTriggerEventScope::Any,
                 AsEntersRollScan::Held,
+                Some(suppressors),
                 Some(&|delayed| {
                     delayed
                         .ability
@@ -12050,6 +12068,7 @@ pub(crate) fn collect_as_enters_roll_observers(
         DelayedTriggerEventScope::Any,
         AsEntersRollScan::AtEmission,
         None,
+        None,
     )
     .contexts;
     // CR 603.2 + CR 603.10 + CR 603.6d + CR 611.3b: the roll triggers what is on
@@ -15916,6 +15935,7 @@ pub(crate) fn collect_activation_event_at_boundary(
             seed,
             raw_batch,
             DelayedTriggerEventScope::Any,
+            None,
         );
     // Anything irreversible the observation did binds it: an admitted trigger
     // (even one later pruned), a collected context, or a one-shot delayed
@@ -20641,7 +20661,8 @@ fn delayed_whenever_event_firings(
     events: &[GameEvent],
     scope: DelayedTriggerEventScope,
     scan: AsEntersRollScan,
-    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+    live_suppressors: &[ActiveSuppressTriggerStatic],
+    immediately_before_suppressors: Option<&[LatchedSuppressTrigger]>,
 ) -> Option<Vec<DelayedEventFiring>> {
     let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger, .. } =
         &delayed.condition
@@ -20697,16 +20718,24 @@ fn delayed_whenever_event_firings(
         } else {
             matcher(event, trigger, source_context, state)
         };
+        if !admitted || !scope.accepts(event) {
+            continue;
+        }
+        let latched;
+        let active_suppress_triggers =
+            if let Some(immediately_before) = immediately_before_suppressors {
+                latched = latched_suppress_trigger_statics(immediately_before, event);
+                latched.as_slice()
+            } else {
+                live_suppressors
+            };
         // CR 603.2g: a statically suppressed event triggers nothing.
-        if !admitted
-            || !scope.accepts(event)
-            || event_is_suppressed_by_static_triggers_cached(
-                state,
-                event,
-                Some(source_context),
-                active_suppress_triggers,
-            )
-        {
+        if event_is_suppressed_by_static_triggers_cached(
+            state,
+            event,
+            Some(source_context),
+            active_suppress_triggers,
+        ) {
             continue;
         }
         let groups = trigger_firing_groups(
@@ -20768,7 +20797,7 @@ fn collect_matching_delayed_triggers(
     events: &[GameEvent],
     scope: DelayedTriggerEventScope,
 ) -> DelayedTriggerMatch {
-    collect_matching_delayed_triggers_with(state, events, scope, AsEntersRollScan::Held, None)
+    collect_matching_delayed_triggers_with(state, events, scope, AsEntersRollScan::Held, None, None)
 }
 
 /// [`collect_matching_delayed_triggers`], naming which scan an as-enters roll
@@ -20779,6 +20808,7 @@ fn collect_matching_delayed_triggers_with(
     events: &[GameEvent],
     scope: DelayedTriggerEventScope,
     scan: AsEntersRollScan,
+    immediately_before_suppressors: Option<&[LatchedSuppressTrigger]>,
     admits_watcher: Option<&dyn Fn(&DelayedTrigger) -> bool>,
 ) -> DelayedTriggerMatch {
     if state.delayed_triggers.is_empty() && state.epic_effects.is_empty() {
@@ -20805,17 +20835,17 @@ fn collect_matching_delayed_triggers_with(
     let mut to_fire: Vec<FiringTuple> = Vec::new();
     let mut to_remove: Vec<(usize, DelayedEventFiring, usize)> = Vec::new();
     let mut to_discard: Vec<(usize, super::lifecycle::DelayedTerminalDisposition)> = Vec::new();
-    let active_suppress_triggers = if state.delayed_triggers.iter().any(|delayed| {
-        matches!(
-            delayed.condition,
-            crate::types::ability::DelayedTriggerCondition::WheneverEvent { .. }
-        )
-    }) {
+    let active_suppress_triggers = if immediately_before_suppressors.is_none()
+        && state.delayed_triggers.iter().any(|delayed| {
+            matches!(
+                delayed.condition,
+                crate::types::ability::DelayedTriggerCondition::WheneverEvent { .. }
+            )
+        }) {
         active_suppress_trigger_statics(state)
     } else {
         Vec::new()
     };
-
     for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
         if admits_watcher.is_some_and(|admits| !admits(delayed)) {
             continue;
@@ -20827,6 +20857,7 @@ fn collect_matching_delayed_triggers_with(
             scope,
             scan,
             &active_suppress_triggers,
+            immediately_before_suppressors,
         ) {
             // Only WhenNextEvent has an or_trigger, so the alternative is 0.
             for firing in firings {
@@ -21271,6 +21302,7 @@ fn collect_pending_and_delayed_triggers_for_batch(
         normal_pending,
         delayed_events,
         delayed_scope,
+        None,
     )
     .0
 }
@@ -21283,13 +21315,21 @@ fn collect_pending_and_delayed_triggers_reporting_terminalized(
     normal_pending: Vec<PendingTriggerContext>,
     delayed_events: &[GameEvent],
     delayed_scope: DelayedTriggerEventScope,
+    admits_watcher: Option<&dyn Fn(&DelayedTrigger) -> bool>,
 ) -> (CollectedTriggerContextBatch, usize) {
     let normal_was_non_empty = !normal_pending.is_empty();
     let DelayedTriggerMatch {
         contexts: delayed_pending,
         consumed: delayed_consumed,
         terminalized_unfired,
-    } = collect_matching_delayed_triggers(state, delayed_events, delayed_scope);
+    } = collect_matching_delayed_triggers_with(
+        state,
+        delayed_events,
+        delayed_scope,
+        AsEntersRollScan::Held,
+        None,
+        admits_watcher,
+    );
     let mut contexts = normal_pending;
     contexts.extend(delayed_pending);
     // CR 603.3b + CR 101.4: placement part, then APNAP order.
@@ -21352,6 +21392,7 @@ pub(crate) fn process_collected_triggers_with_delayed_phase_events(
         normal_pending,
         delayed_events,
         DelayedTriggerEventScope::PhaseChangedOnly,
+        None,
         events_out,
     )
 }
@@ -21369,6 +21410,26 @@ pub(crate) fn process_collected_triggers_with_delayed_events(
         normal_pending,
         delayed_events,
         DelayedTriggerEventScope::Any,
+        None,
+        events_out,
+    )
+}
+
+/// CR 603.2c: pinned death watchers already observed the answer in the
+/// claimed-event-aware priority scan or at the logical owner's handoff.
+/// Preserve the answer replay for legacy delayed watchers.
+pub(crate) fn process_collected_triggers_with_sba_answer_events(
+    state: &mut GameState,
+    normal_pending: Vec<PendingTriggerContext>,
+    delayed_events: &[GameEvent],
+    events_out: &mut Vec<GameEvent>,
+) -> TriggerBatchOutcome {
+    process_collected_triggers_with_delayed_events_scoped(
+        state,
+        normal_pending,
+        delayed_events,
+        DelayedTriggerEventScope::Any,
+        Some(&|delayed| delayed.ability.context.delayed_watch_incarnation.is_none()),
         events_out,
     )
 }
@@ -21378,6 +21439,7 @@ fn process_collected_triggers_with_delayed_events_scoped(
     normal_pending: Vec<PendingTriggerContext>,
     delayed_events: &[GameEvent],
     delayed_scope: DelayedTriggerEventScope,
+    admits_watcher: Option<&dyn Fn(&DelayedTrigger) -> bool>,
     events_out: &mut Vec<GameEvent>,
 ) -> TriggerBatchOutcome {
     let stack_before = state.stack.len();
@@ -21395,6 +21457,7 @@ fn process_collected_triggers_with_delayed_events_scoped(
         normal_pending,
         delayed_events,
         delayed_scope,
+        admits_watcher,
     )
     .0;
     terminalize_unmatched_reflexives_for_closed_batch(state, delayed_events, delayed_scope);
@@ -21471,6 +21534,7 @@ pub(crate) fn process_triggers_with_delayed_declaration_events(
         normal_pending,
         events,
         DelayedTriggerEventScope::DeclarationSettlement,
+        None,
         events_out,
     )
 }
