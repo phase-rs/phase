@@ -2499,7 +2499,7 @@ fn standalone_batch_record(state: &mut GameState, destination: Zone) -> PendingB
 /// combat snapshot before the physical move writes its record.
 pub(crate) struct SimultaneousEntrants {
     entrants: Vec<ObjectId>,
-    departure_combat: HashMap<ObjectId, crate::types::game_state::DepartureCombatSnapshot>,
+    departure_combat: Vec<crate::types::game_state::DepartureCombatSnapshot>,
 }
 
 impl SimultaneousEntrants {
@@ -2511,11 +2511,7 @@ impl SimultaneousEntrants {
                 .iter()
                 .map(|member| member.identity.object_id)
                 .collect(),
-            departure_combat: group
-                .departure_combat
-                .iter()
-                .map(|snapshot| (snapshot.identity.object_id, snapshot.clone()))
-                .collect(),
+            departure_combat: group.departure_combat.clone(),
         }
     }
 
@@ -2531,7 +2527,10 @@ impl SimultaneousEntrants {
         std::mem::swap(&mut state.active_simultaneous_entrants, &mut self.entrants);
         let previous = std::mem::replace(
             &mut state.active_departure_combat,
-            self.departure_combat.get(&member).cloned(),
+            self.departure_combat
+                .iter()
+                .find(|snapshot| snapshot.identity.object_id == member)
+                .cloned(),
         );
         let result = deliver(state);
         state.active_departure_combat = previous;
@@ -20734,7 +20733,7 @@ mod simultaneous_entry_tests {
             );
         }
         assert_eq!(
-            entrants.0,
+            entrants.entrants,
             members.to_vec(),
             "the list is intact after the loop"
         );
