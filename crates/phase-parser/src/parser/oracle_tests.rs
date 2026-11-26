@@ -7299,6 +7299,114 @@ fn eldritch_evolution_parses_sacrifice_cost_and_dynamic_search_filter() {
     );
 }
 
+/// Anchor to Reality: required artifact-or-creature sacrifice + tutor to the
+/// battlefield, with scry 2 gated by "it has mana value less than the
+/// sacrificed permanent's mana value" — the subject-verb dynamic-threshold
+/// surface. Without the surface the guard is swallowed and the scry fires
+/// unconditionally (a `Condition_If` warning instead of a gate).
+#[test]
+fn anchor_to_reality_parses_dynamic_it_has_mana_value_gate() {
+    let r = parse(
+        "As an additional cost to cast this spell, sacrifice an artifact or creature.\n\
+         Search your library for an Equipment or Vehicle card, put that card onto the battlefield, then shuffle. \
+         If it has mana value less than the sacrificed permanent's mana value, scry 2.",
+        "Anchor to Reality",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        r.parse_warnings.is_empty(),
+        "unexpected parse warnings: {:?}",
+        r.parse_warnings
+    );
+    match r.additional_cost.expect("additional cost") {
+        AdditionalCost::Required(AbilityCost::Sacrifice(ref sac)) => {
+            assert_eq!(sac.requirement.fixed_count(), Some(1));
+            assert!(
+                matches!(sac.target, TargetFilter::Or { .. }),
+                "sacrifice must accept an artifact or a creature, got {:?}",
+                sac.target
+            );
+        }
+        other => panic!("expected required sacrifice cost, got {other:?}"),
+    }
+    assert_eq!(r.abilities.len(), 1);
+    let root = &r.abilities[0];
+    assert!(
+        matches!(root.effect.as_ref(), Effect::SearchLibrary { .. }),
+        "expected SearchLibrary root, got {:?}",
+        root.effect
+    );
+    let battlefield = root.sub_ability.as_deref().expect("change-zone sub");
+    assert!(
+        matches!(
+            battlefield.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "expected ChangeZone to battlefield, got {:?}",
+        battlefield.effect
+    );
+    let shuffle = battlefield.sub_ability.as_deref().expect("shuffle sub");
+    assert!(
+        matches!(shuffle.effect.as_ref(), Effect::Shuffle { .. }),
+        "expected Shuffle, got {:?}",
+        shuffle.effect
+    );
+    let scry = shuffle.sub_ability.as_deref().expect("scry sub");
+    assert!(
+        matches!(
+            scry.effect.as_ref(),
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ),
+        "expected Scry 2, got {:?}",
+        scry.effect
+    );
+    let AbilityCondition::TargetMatchesFilter {
+        filter,
+        use_lki,
+        subject,
+        ..
+    } = scry
+        .condition
+        .as_ref()
+        .expect("scry must carry the MV gate")
+    else {
+        panic!(
+            "expected TargetMatchesFilter gate on scry, got {:?}",
+            scry.condition
+        );
+    };
+    assert!(!*use_lki, "present-tense gate reads live, not LKI");
+    assert_eq!(*subject, ObjectScope::Target);
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected typed MV filter, got {filter:?}");
+    };
+    let (comparator, value) = typed
+        .properties
+        .iter()
+        .find_map(|p| match p {
+            FilterProp::Cmc { comparator, value } => Some((comparator, value)),
+            _ => None,
+        })
+        .expect("gate must carry a Cmc property");
+    assert_eq!(*comparator, Comparator::LT);
+    assert_eq!(
+        *value,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject,
+            },
+        }
+    );
+}
+
 #[test]
 fn sift_through_sands_condition_requires_both_named_spells() {
     let r = parse(
@@ -37863,8 +37971,10 @@ fn ltb_return_promotion_keeps_the_actor() {
 /// the clause means — the announced target in a resolving spell ("that spell" after "Counter target
 /// spell"; "that permanent" after "Destroy/Exile target ..."), the trigger event's spell in a
 /// triggered ability ("Whenever you cast a creature spell, ... that spell has mana value 5 or
-/// greater"). Grammatical tense sets the `use_lki` hint; CR 608.2h governs the runtime
-/// read. The gate sits on the instruction the printed text conditions and on nothing else.
+/// greater"), or the selected card in a dig/reveal chain ("that card" after "Look at the top N ...",
+/// read through the gated node's own target chain). Grammatical tense sets the `use_lki` hint;
+/// CR 608.2h governs the runtime read. The gate sits on the instruction the printed text
+/// conditions and on nothing else.
 #[test]
 fn mana_value_referent_gate_binds_the_object_the_clause_names() {
     use crate::types::ability::{Comparator, ObjectScope};
@@ -37965,6 +38075,20 @@ fn mana_value_referent_gate_binds_the_object_the_clause_names() {
             &[Keyword::Trample][..],
             "Trample\nWhenever you cast a creature spell, put two +1/+1 counters on this creature. If that spell has mana value 5 or greater, this creature deals damage equal to the number of counters on it to each opponent.",
             ("DamageEachPlayer", ObjectScope::EventSource, false, Comparator::GE, 5),
+        ),
+        (
+            "Break Out",
+            "Sorcery",
+            &[][..],
+            "Look at the top six cards of your library. You may reveal a creature card from among them. If that card has mana value 2 or less, you may put it onto the battlefield and it gains haste until end of turn. If you didn't put the revealed card onto the battlefield this way, put it into your hand. Put the rest on the bottom of your library in a random order.",
+            ("ChangeZone", ObjectScope::Target, false, Comparator::LE, 2),
+        ),
+        (
+            "Turntimber Symbiosis",
+            "Sorcery",
+            &[][..],
+            "Look at the top seven cards of your library. You may put a creature card from among them onto the battlefield. If that card has mana value 3 or less, it enters with three additional +1/+1 counters on it. Put the rest on the bottom of your library in a random order.",
+            ("Unimplemented", ObjectScope::Target, false, Comparator::LE, 3),
         ),
     ] {
         let found = gates_of(text, name, type_line, keywords);
@@ -38295,4 +38419,286 @@ fn cross_line_population_condition_does_not_rebind_sequential_sibling() {
         &TargetFilter::ParentTarget,
         "the independent sibling must not inherit the producer population"
     );
+}
+
+/// Break Out (verbatim MKM Oracle text): the revealed creature card may be put
+/// onto the battlefield only "if that card has mana value 2 or less" — the noun
+/// surface's "that card" leg. Before it existed the #2277 structural fallback
+/// stripped the head (the body starts with "you may") and the Condition_If
+/// detector stayed silent (the hand branch's own condition counts as a populated
+/// slot for the whole unit), so the put — and the haste — fired for any mana
+/// value with zero warnings.
+#[test]
+fn break_out_that_card_mana_value_gate() {
+    let r = parse(
+        "Look at the top six cards of your library. You may reveal a creature card from among them. \
+         If that card has mana value 2 or less, you may put it onto the battlefield and it gains haste until end of turn. \
+         If you didn't put the revealed card onto the battlefield this way, put it into your hand. \
+         Put the rest on the bottom of your library in a random order.",
+        "Break Out",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        r.parse_warnings.is_empty(),
+        "unexpected parse warnings: {:?}",
+        r.parse_warnings
+    );
+    assert_eq!(r.abilities.len(), 1);
+    let root = &r.abilities[0];
+    assert!(
+        !has_unimplemented(root),
+        "Break Out must parse without gaps: {root:#?}"
+    );
+    let Effect::Dig {
+        count,
+        keep_count,
+        up_to,
+        filter,
+        reveal,
+        ..
+    } = root.effect.as_ref()
+    else {
+        panic!("expected Dig root, got {:?}", root.effect);
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 6 });
+    assert_eq!(*keep_count, Some(1));
+    assert!(*up_to);
+    assert!(
+        matches!(filter, TargetFilter::Typed(t) if t.type_filters == vec![TypeFilter::Creature]),
+        "dig must keep a creature card, got {filter:?}"
+    );
+    assert!(*reveal);
+    // The gated put: optional, forwarding its result to the haste tail.
+    let put = root.sub_ability.as_deref().expect("battlefield put sub");
+    assert!(
+        matches!(
+            put.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "expected ChangeZone to battlefield, got {:?}",
+        put.effect
+    );
+    assert!(put.optional, "the put keeps its may-choice");
+    assert!(put.forward_result, "the put forwards to the haste tail");
+    let AbilityCondition::TargetMatchesFilter {
+        filter,
+        use_lki,
+        subject,
+        ..
+    } = put.condition.as_ref().expect("put must carry the MV gate")
+    else {
+        panic!(
+            "expected TargetMatchesFilter gate on put, got {:?}",
+            put.condition
+        );
+    };
+    assert!(!*use_lki, "present-tense gate reads live, not LKI");
+    assert_eq!(*subject, ObjectScope::Target);
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected typed MV filter, got {filter:?}");
+    };
+    let (comparator, value) = typed
+        .properties
+        .iter()
+        .find_map(|p| match p {
+            FilterProp::Cmc { comparator, value } => Some((comparator, value)),
+            _ => None,
+        })
+        .expect("gate must carry a Cmc property");
+    assert_eq!(*comparator, Comparator::LE);
+    assert_eq!(*value, QuantityExpr::Fixed { value: 2 });
+    // The compound tail: no gate of its own — the head's `forward_result`
+    // binding leaves it a no-op when the put is skipped, and the hand branch
+    // below fires instead. Either moved-card encoding (legacy embedded
+    // `SelfRef`, rewired by `bind_forwarded_generic_self_ref`, or direct
+    // `ParentTarget`) resolves to the put creature.
+    let haste = put.sub_ability.as_deref().expect("haste tail");
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = haste.effect.as_ref()
+    else {
+        panic!("expected haste grant tail, got {:?}", haste.effect);
+    };
+    assert_eq!(
+        *duration,
+        Some(crate::types::ability::Duration::UntilEndOfTurn)
+    );
+    assert_eq!(static_abilities.len(), 1);
+    let grant = &static_abilities[0];
+    assert!(
+        matches!(
+            grant.affected,
+            Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
+        ),
+        "haste must name the moved card, got {:?}",
+        grant.affected
+    );
+    assert!(
+        grant
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }),
+        "tail must grant haste, got {:?}",
+        grant.modifications
+    );
+    // The decline branch and the rest instruction are untouched by the gate.
+    let hand = haste.sub_ability.as_deref().expect("hand branch");
+    assert!(
+        matches!(
+            hand.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "expected ChangeZone to hand, got {:?}",
+        hand.effect
+    );
+    assert!(
+        matches!(hand.condition, Some(AbilityCondition::Not { .. })),
+        "hand branch keeps its did-not-put gate, got {:?}",
+        hand.condition
+    );
+    let rest = hand.sub_ability.as_deref().expect("rest branch");
+    assert!(
+        matches!(rest.effect.as_ref(), Effect::PutAtLibraryPosition { .. }),
+        "expected rest-to-bottom, got {:?}",
+        rest.effect
+    );
+    assert!(rest.sub_ability.is_none());
+}
+
+/// Turntimber Symbiosis (verbatim ZNR sorcery face): the same "that card has
+/// mana value N or less" gate, here over the "it enters with three additional
+/// +1/+1 counters" rider. The rider itself stays the explicit gap the primary-
+/// mover test pins (CR 608.2c + CR 614.12: a preceding mover's subject is not a
+/// replacement on the sorcery) — the fix only represents the gate on it.
+#[test]
+fn turntimber_that_card_mana_value_gate_on_counters_gap() {
+    let r = parse(
+        "Look at the top seven cards of your library. You may put a creature card from among them \
+         onto the battlefield. If that card has mana value 3 or less, it enters with three \
+         additional +1/+1 counters on it. Put the rest on the bottom of your library in a random order.",
+        "Turntimber Symbiosis",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        r.parse_warnings.is_empty(),
+        "unexpected parse warnings: {:?}",
+        r.parse_warnings
+    );
+    assert_eq!(r.abilities.len(), 1);
+    assert!(
+        r.replacements.is_empty(),
+        "the rider is not a replacement on the sorcery: {r:?}"
+    );
+    let root = &r.abilities[0];
+    assert!(
+        matches!(root.effect.as_ref(), Effect::Dig { .. }),
+        "expected Dig root, got {:?}",
+        root.effect
+    );
+    let rider = root.sub_ability.as_deref().expect("counters rider");
+    assert!(
+        rider
+            .effect
+            .unimplemented_description()
+            .is_some_and(|text| text.contains("enters with")),
+        "the rider stays an explicit gap: {r:?}"
+    );
+    let AbilityCondition::TargetMatchesFilter {
+        filter,
+        use_lki,
+        subject,
+        ..
+    } = rider
+        .condition
+        .as_ref()
+        .expect("rider must carry the MV gate")
+    else {
+        panic!(
+            "expected TargetMatchesFilter gate on rider, got {:?}",
+            rider.condition
+        );
+    };
+    assert!(!*use_lki, "present-tense gate reads live, not LKI");
+    assert_eq!(*subject, ObjectScope::Target);
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected typed MV filter, got {filter:?}");
+    };
+    let (comparator, value) = typed
+        .properties
+        .iter()
+        .find_map(|p| match p {
+            FilterProp::Cmc { comparator, value } => Some((comparator, value)),
+            _ => None,
+        })
+        .expect("gate must carry a Cmc property");
+    assert_eq!(*comparator, Comparator::LE);
+    assert_eq!(*value, QuantityExpr::Fixed { value: 3 });
+}
+
+/// Fling (verbatim Oracle text): sacrifice-a-creature additional cost plus
+/// "deals damage equal to the sacrificed creature's power to any target" — the
+/// cost-paid power quantity in a damage amount. Regression pin: the damage path
+/// must reach the cost-paid quantity arm rather than failing `unparsed_quantity`.
+#[test]
+fn fling_damage_equal_to_sacrificed_power() {
+    let r = parse(
+        "As an additional cost to cast this spell, sacrifice a creature.\n\
+         Fling deals damage equal to the sacrificed creature's power to any target.",
+        "Fling",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert!(
+        r.parse_warnings.is_empty(),
+        "unexpected parse warnings: {:?}",
+        r.parse_warnings
+    );
+    match r.additional_cost.expect("additional cost") {
+        AdditionalCost::Required(AbilityCost::Sacrifice(ref sac)) => {
+            assert_eq!(sac.requirement.fixed_count(), Some(1));
+            assert!(
+                matches!(
+                    sac.target,
+                    TargetFilter::Typed(ref t) if t.type_filters == vec![TypeFilter::Creature]
+                ),
+                "sacrifice must take a creature, got {:?}",
+                sac.target
+            );
+        }
+        other => panic!("expected required sacrifice cost, got {other:?}"),
+    }
+    assert_eq!(r.abilities.len(), 1);
+    let root = &r.abilities[0];
+    assert!(
+        !has_unimplemented(root),
+        "Fling must parse without gaps: {root:#?}"
+    );
+    let Effect::DealDamage { amount, target, .. } = root.effect.as_ref() else {
+        panic!("expected DealDamage root, got {:?}", root.effect);
+    };
+    assert_eq!(
+        *amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+        }
+    );
+    assert_eq!(*target, TargetFilter::Any);
 }
