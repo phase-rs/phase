@@ -1052,6 +1052,7 @@ face = [
   { key = "hunding gjornersen", class = "wrong_duration", clauses = ["Rampage 1"] },
   { key = "hundred-talon strike", class = "cost_wrong", clauses = ["Splice onto Arcane—Tap an untapped white creature you control."] },
   { key = "hungry for more", class = "extra_effect", clauses = ["Create a 3/1 black and red Vampire creature token with trample, lifelink, and haste."] },
+  { key = "hungry lynx", class = "wrong_object", clauses = ["Cats you control have protection from Rats."] },
   { key = "hunt down", class = "target_wrong", clauses = ["Target creature blocks target creature this turn if able."] },
   { key = "hunt for specimens", class = "missing_effect", clauses = ["Learn."] },
   { key = "hunter's ambush", class = "wrong_count", clauses = ["Prevent all combat damage that would be dealt by nongreen creatures this turn."] },

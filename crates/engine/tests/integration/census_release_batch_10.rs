@@ -1,6 +1,8 @@
-//! Runtime witnesses for the `confirmed-misparses.toml` rows released in batch 10: "target opponent
-//! creates ..." token instructions (Hungry Lynx, Wanted Scoundrels) whose typed opponent owner already
-//! binds the chosen player, the same route Forbidden Orchard uses. Every card is the printed card
+//! Runtime witnesses for "target opponent creates ..." token instructions whose typed opponent owner
+//! already binds the chosen player, the same route Forbidden Orchard uses. Batch 10 releases Wanted
+//! Scoundrels' census row. Hungry Lynx's token clause is witnessed here too, but its row stays, now
+//! citing "Cats you control have protection from Rats.": the static's subject parses as Cat
+//! *creatures*, so a noncreature Cat (a changeling artifact) gets no protection (CR 109.2). Every card is the printed card
 //! loaded through `add_real_card` and driven through public `GameRunner` actions in a three-player
 //! game; the only synthetic setup is a mana pool. Each group picks the second opponent (so a
 //! first-opponent default would fail), checks no other seat gets a token, and has a negative where
