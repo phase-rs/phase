@@ -7920,7 +7920,7 @@ pub(crate) fn static_condition_to_ability_condition(
         // Default (`AnyPlayer`) scope: it drives a self-spell cost reduction
         // (Avenge), not an effect-resolution rider.
         //
-        // Anchored (`DefendingPlayer { reading: AsDeclared }`) scope: an `AbilityCondition` is evaluated
+        // Anchored (`AttackedPlayer`) scope: an `AbilityCondition` is evaluated
         // during RESOLUTION (CR 608.2), by which point the declare-attackers
         // turn-based action is long past and no `declared_attack` is in context;
         // the resolving ability need not belong to an attacking creature at all,

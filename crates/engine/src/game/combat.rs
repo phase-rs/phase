@@ -14685,7 +14685,7 @@ mod tests {
     /// on this exact shape, and asserting it at the CONSUMER is what stops them from
     /// silently passing against a hand-made static if the parse ever regresses.
     ///
-    /// Reverting the classifier, the normalization, the `DefendingPlayer { reading: AsDeclared }` anchoring
+    /// Reverting the classifier, the normalization, the `AttackedPlayer` anchoring
     /// map, or production (b)'s widened scan each fires a named assertion here.
     #[test]
     fn weathered_sentinels_line_parses_to_anchored_can_attack_with_defender() {

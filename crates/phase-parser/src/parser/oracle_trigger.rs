@@ -8061,7 +8061,7 @@ pub fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Tri
         // continuous-static predicate (Avenge); the intervening-if vocabulary has
         // no existential turn-history member to lower onto.
         //
-        // Anchored (`DefendingPlayer { reading: AsDeclared }`) scope: an intervening-if is checked at
+        // Anchored (`AttackedPlayer`) scope: an intervening-if is checked at
         // trigger time and again on resolution (CR 603.4), and NEITHER checkpoint
         // carries an attack anchor — `TriggerCondition` has no `declared_attack`
         // and no per-attacker binding. Lowering it would produce a condition that
