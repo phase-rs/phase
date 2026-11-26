@@ -8054,7 +8054,7 @@ fn collect_pending_triggers_with_collection(
                         AbilityKind::Spell,
                         Effect::Sacrifice {
                             target: TargetFilter::SelfRef,
-                            count: QuantityExpr::Fixed { value: 1 },
+                            count: QuantityExpr::Fixed { value: 1 }.into(),
                             min_count: 0,
                         },
                     );
@@ -10244,7 +10244,7 @@ fn ring_level_three_ability(
         AbilityKind::Spell,
         Effect::Sacrifice {
             target,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -45090,7 +45090,7 @@ pub mod tests {
     fn extract_target_skips_sacrifice() {
         let effect = Effect::Sacrifice {
             target: TargetFilter::Typed(TypedFilter::creature()),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         };
         assert!(
@@ -58563,7 +58563,7 @@ pub mod tests {
                         .with_type(TypeFilter::Creature)
                         .controller(ControllerRef::You),
                 ),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         )
@@ -58589,7 +58589,7 @@ pub mod tests {
                     .with_type(TypeFilter::Creature)
                     .controller(ControllerRef::Opponent),
             ),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         }
     }
@@ -61245,7 +61245,7 @@ pub mod tests {
         let ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
-                count: QuantityExpr::Fixed { value: 99 },
+                count: QuantityExpr::Fixed { value: 99 }.into(),
                 min_count: 0,
             },
             Vec::new(),

@@ -1817,7 +1817,7 @@ mod tests {
                 ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::SelfRef,
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![],
@@ -1838,7 +1838,7 @@ mod tests {
                     own_top(
                         Effect::Sacrifice {
                             target: TargetFilter::TriggeringSource,
-                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                             min_count: 0,
                         },
                         vec![],
@@ -1911,7 +1911,7 @@ mod tests {
                 ability.sub_ability = Some(Box::new(ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::ParentTarget,
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![],
@@ -1977,7 +1977,7 @@ mod tests {
                 let mut ability = ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::ParentTarget,
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![],
@@ -2072,7 +2072,7 @@ mod tests {
             let sacrifice_those = own_top(
                 Effect::Sacrifice {
                     target: TargetFilter::TrackedSet { id: concrete },
-                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
                 vec![],
@@ -2136,7 +2136,7 @@ mod tests {
                 let mut ability = ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: your_lands(),
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![],

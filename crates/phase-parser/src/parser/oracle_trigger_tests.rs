@@ -1041,7 +1041,7 @@ fn gut_attack_trigger_sacrifice_is_a_scoped_type_union() {
     assert_no_unimplemented(execute);
     let Effect::Sacrifice {
         target: TargetFilter::Or { filters },
-        count: QuantityExpr::Fixed { value: 1 },
+        count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 }),
         ..
     } = execute.effect.as_ref()
     else {
@@ -1131,7 +1131,7 @@ fn old_man_willow_token_rhs_remains_honestly_unsupported() {
     assert_no_unimplemented(sacrifice);
     let Effect::Sacrifice {
         target: TargetFilter::Or { filters },
-        count: QuantityExpr::Fixed { value: 1 },
+        count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 }),
         ..
     } = sacrifice.effect.as_ref()
     else {
@@ -1217,7 +1217,7 @@ fn attack_trigger_supports_complete_articleless_sacrifice_union() {
     assert_no_unimplemented(sacrifice);
     let Effect::Sacrifice {
         target: TargetFilter::Or { filters },
-        count: QuantityExpr::Fixed { value: 1 },
+        count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 }),
         ..
     } = sacrifice.effect.as_ref()
     else {
@@ -26432,7 +26432,11 @@ fn grave_pact_scopes_sacrifice_to_other_players() {
 
     let execute = def.execute.as_deref().expect("execute ability");
     match &*execute.effect {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
             assert_eq!(
                 *target,
@@ -26452,7 +26456,11 @@ fn portal_to_phyrexia_etb_scopes_each_opponent_sacrifice_to_scoped_player() {
     let execute = def.execute.as_deref().expect("execute ability");
     assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
     match &*execute.effect {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
             assert_eq!(
                 *target,
@@ -37288,7 +37296,11 @@ fn basalt_golem_delayed_sacrifice_names_the_blocker_and_its_controller() {
         "CR 603.7a: 'at end of combat' schedules a delayed triggered ability"
     );
     match effect.effect.as_ref() {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert_eq!(
                 *target,
                 TargetFilter::ParentTarget,
@@ -38137,7 +38149,12 @@ fn assert_reanimator_chain(oracle: &str, card_name: &str, expect_tapped: bool) {
         },
         "{card_name}: delayed leaves-battlefield condition on the Aura (SelfRef)",
     );
-    let Effect::Sacrifice { target, count, .. } = effect.effect.as_ref() else {
+    let Effect::Sacrifice {
+        target,
+        count: crate::types::ability::SacrificeSelection::Count(count),
+        ..
+    } = effect.effect.as_ref()
+    else {
         panic!("{card_name}: expected Sacrifice, got {:?}", effect.effect);
     };
     assert_eq!(

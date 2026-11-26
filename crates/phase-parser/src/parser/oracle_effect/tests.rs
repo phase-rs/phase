@@ -12477,7 +12477,11 @@ fn for_each_sacrifice_target_opponent_dynamic_count_binds_target_opponent() {
              into your graveyard from the battlefield this turn.",
     );
     match e {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert_eq!(
                 target_filter_controller_ref(&target),
                 Some(ControllerRef::TargetOpponent),
@@ -12509,7 +12513,11 @@ fn for_each_sacrifice_target_player_counters_on_source_binds_target_player() {
              on this Equipment.",
     );
     match e {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert_eq!(
                 target_filter_controller_ref(&target),
                 Some(ControllerRef::TargetPlayer),
@@ -12552,7 +12560,11 @@ fn for_each_sacrifice_din_first_leg_binds_target_opponent() {
         .first()
         .expect("Din should produce a spell ability");
     match &*def.effect {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert_eq!(
                 target_filter_controller_ref(target),
                 Some(ControllerRef::TargetOpponent),
@@ -40869,7 +40881,12 @@ fn crackling_doom_sacrifice_preserves_greatest_power_filter() {
         .as_ref()
         .expect("damage clause should chain to opponent sacrifice");
     assert_eq!(sacrifice.player_scope, Some(PlayerFilter::Opponent));
-    let Effect::Sacrifice { target, count, .. } = &*sacrifice.effect else {
+    let Effect::Sacrifice {
+        target,
+        count: crate::types::ability::SacrificeSelection::Count(count),
+        ..
+    } = &*sacrifice.effect
+    else {
         panic!("expected sacrifice clause, got {:?}", sacrifice.effect);
     };
     assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
@@ -65152,7 +65169,7 @@ fn replace_target_with_parent_recurses_delayed_trigger_sub_ability() {
                 AbilityKind::Spell,
                 Effect::Sacrifice {
                     target: TargetFilter::SelfRef,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
             )),
@@ -103738,7 +103755,7 @@ fn def_chain_is_zone_ledger_invisible_walks_the_nested_compound_chain() {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -108761,6 +108778,127 @@ fn assert_goaded_restriction_tail_declined(parsed: &ParsedAbilities) {
         parsed.abilities.first().map(|def| &*def.effect),
         Some(Effect::ChangeZone { .. })
     ));
+}
+
+fn parsed_sacrifice_selections(
+    oracle: &str,
+    name: &str,
+    card_type: &str,
+) -> Vec<(TargetFilter, crate::types::ability::SacrificeSelection)> {
+    use crate::types::ability_visit::visit_ability_def;
+    use std::ops::ControlFlow;
+
+    let parsed = parse_oracle_text(oracle, name, &[], &[card_type.into()], &[]);
+    let mut sacrifices = Vec::new();
+    for root in parsed.abilities.iter().chain(
+        parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref()),
+    ) {
+        let _ = visit_ability_def(root, &mut |effect| {
+            if let Effect::Sacrifice { target, count, .. } = effect {
+                sacrifices.push((target.clone(), count.clone()));
+            }
+            ControlFlow::Continue(())
+        });
+    }
+    sacrifices
+}
+
+#[test]
+fn plural_sacrifice_selects_entire_admitted_last_created_cohorts() {
+    use crate::types::ability::SacrificeSelection;
+
+    for (name, card_type, oracle) in [
+        ("City of the Daleks", "Plane", "Whenever you attack, target opponent loses X life, where X is the number of artifacts you control.\nWhenever chaos ensues, for each opponent, you create a 3/3 black Dalek artifact creature token with menace that attacks that opponent this turn if able. Those tokens gain haste. Sacrifice them at the beginning of the next end step."),
+        ("Dalkovan Encampment", "Land", "This land enters tapped unless you control a Swamp or a Mountain.\n{T}: Add {W}.\n{2}{W}, {T}: Whenever you attack this turn, create two 1/1 red Warrior creature tokens that are tapped and attacking. Sacrifice them at the beginning of the next end step."),
+        ("Devastating Onslaught", "Sorcery", "Create X tokens that are copies of target artifact or creature you control. Those tokens gain haste until end of turn. Sacrifice them at the beginning of the next end step."),
+        ("Gut, Zealous Fanatic", "Creature", "When this creature specializes, create two tokens that are copies of a creature card exiled with this creature, except they're 2/2 and have haste. Sacrifice them at the beginning of your next end step."),
+        ("Salt Road Skirmish", "Sorcery", "Destroy target creature. Create two 1/1 red Warrior creature tokens. They gain haste until end of turn. Sacrifice them at the beginning of the next end step."),
+        ("Venser, Fervent Forger", "Creature", "Flash\nWhen Venser enters, choose one —\n• Copy target instant or sorcery spell an opponent controls twice. You may choose new targets for the copies.\n• Create two tokens that are copies of target permanent an opponent controls. They gain haste. At the beginning of the next end step, sacrifice them."),
+    ] {
+        assert_eq!(
+            parsed_sacrifice_selections(oracle, name, card_type),
+            [(TargetFilter::LastCreated, SacrificeSelection::EntireReferent)],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn plural_sacrifice_keeps_deferred_routes_counted() {
+    use crate::types::ability::SacrificeSelection;
+
+    let tracked = TargetFilter::TrackedSet {
+        id: TrackedSetId(0),
+    };
+    for (name, card_type, target, oracle) in [
+        ("Depthshaker Titan", "Creature", Some(TargetFilter::ParentTarget), "When this creature enters, any number of target noncreature artifacts you control become 3/3 artifact creatures. Sacrifice them at the beginning of the next end step.\nEach artifact creature you control has melee, trample, and haste. (Whenever a creature with melee attacks, it gets +1/+1 until end of turn for each opponent you attacked this combat.)"),
+        ("Mardu Siegebreaker", "Creature", Some(tracked.clone()), "Deathtouch, haste\nWhen this creature enters, exile up to one other target creature you control until this creature leaves the battlefield.\nWhenever this creature attacks, for each opponent, create a tapped token that's a copy of the exiled card attacking that opponent. At the beginning of your next end step, sacrifice those tokens."),
+        ("Tears of Rage", "Instant", Some(tracked), "Cast this spell only during the declare attackers step.\nAttacking creatures you control get +X/+0 until end of turn, where X is the number of attacking creatures. Sacrifice those creatures at the beginning of the next end step."),
+        ("Malik, Grim Manipulator", "Creature", None, "When Malik, Grim Manipulator enters, you and target opponent each secretly choose a creature that player controls. Then those choices are revealed, and that player sacrifices those creatures.\nWhenever an opponent sacrifices a creature, you create a Treasure token."),
+    ] {
+        let sacrifices = parsed_sacrifice_selections(oracle, name, card_type);
+        let one = SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 });
+        if let Some(target) = target {
+            assert_eq!(sacrifices, [(target, one)], "{name}");
+        } else {
+            assert!(!sacrifices.is_empty(), "{name}");
+            assert!(sacrifices.iter().all(|(_, count)| *count == one), "{name}: {sacrifices:?}");
+        }
+    }
+}
+
+#[test]
+fn plural_token_sacrifice_stops_at_nearer_producers() {
+    use crate::types::ability::SacrificeSelection;
+    use crate::types::ability_visit::visit_ability_def;
+    use std::ops::ControlFlow;
+
+    type InstructionCheck = fn(&Effect) -> bool;
+    let fixtures: [(&str, InstructionCheck, bool); 3] = [
+        // Salt Road Skirmish has the same plural cleanup with intervening haste.
+        // Insert a draw to isolate a plain instruction that publishes no referent.
+        ("Create two 1/1 white Soldier creature tokens. Draw a card. Sacrifice them at the beginning of the next end step.", |effect| matches!(effect, Effect::Draw { .. }), true),
+        // Coursers' Accord creates a token then populates. The synthetic cleanup
+        // probes which producer wins when a plural anaphor follows both.
+        ("Create two 1/1 white Soldier creature tokens. Populate. Sacrifice them at the beginning of the next end step.", |effect| matches!(effect, Effect::Populate), false),
+        // Thatcher Revolt supplies the cleanup; Final Judgment supplies the
+        // exile instruction. A combined fixture probes the competing referents.
+        ("Create two 1/1 white Soldier creature tokens. Exile all creatures. Sacrifice them at the beginning of the next end step.", |effect| matches!(effect, Effect::ChangeZoneAll { destination: Zone::Exile, .. }), false),
+    ];
+    for (oracle, intervening_instruction, entire) in fixtures {
+        let parsed = parse_effect_chain(oracle, AbilityKind::Spell);
+        let mut has_token_producer = false;
+        let mut has_intervening_instruction = false;
+        let mut gaps = 0;
+        let mut counts = Vec::new();
+        let _ = visit_ability_def(&parsed, &mut |effect| {
+            has_token_producer |= matches!(effect, Effect::Token { .. });
+            has_intervening_instruction |= intervening_instruction(effect);
+            gaps += usize::from(matches!(effect, Effect::Unimplemented { .. }));
+            if let Effect::Sacrifice { count, .. } = effect {
+                counts.push(count.clone());
+            }
+            ControlFlow::Continue(())
+        });
+        assert!(
+            has_token_producer,
+            "missing original token producer: {oracle}"
+        );
+        assert!(
+            has_intervening_instruction,
+            "missing intervening instruction: {oracle}"
+        );
+        assert_eq!(gaps, 0, "{oracle}: {parsed:#?}");
+        let expected = if entire {
+            SacrificeSelection::EntireReferent
+        } else {
+            SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 })
+        };
+        assert_eq!(counts, [expected], "{oracle}");
+    }
 }
 
 #[test]

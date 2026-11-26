@@ -3687,7 +3687,7 @@ mod tests {
         let sacrifice_rider = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::ParentTarget,
-                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],

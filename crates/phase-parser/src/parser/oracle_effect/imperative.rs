@@ -1869,6 +1869,24 @@ fn tap_remainder_mentions_total_power(rem_lower: &str) -> bool {
         .is_ok()
 }
 
+/// CR 608.2c: Distinguish a bare set anaphor from a counted partitive
+/// before their target filters lose that grammatical distinction.
+pub(super) fn starts_with_countless_plural_sacrifice(lower: &str) -> bool {
+    (
+        tag::<_, _, OracleError<'_>>("sacrifice "),
+        alt((
+            tag("them"),
+            preceded(
+                tag("those "),
+                alt((tag("tokens"), tag("creatures"), tag("permanents"))),
+            ),
+        )),
+        peek(alt((tag(" "), tag("."), nom::combinator::eof))),
+    )
+        .parse(lower.trim_start())
+        .is_ok()
+}
+
 pub(super) fn parse_targeted_action_ast(
     text: &str,
     lower: &str,
@@ -3124,7 +3142,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             min_count,
         } => Effect::Sacrifice {
             target,
-            count,
+            count: count.into(),
             min_count,
         },
         // CR 701.9b + CR 608.2d: Lower the AST `up_to: bool` into the typed
@@ -23264,7 +23282,8 @@ mod tests {
                 .expect("sacrifice filter union");
             let Effect::Sacrifice {
                 target: TargetFilter::Or { filters },
-                count: QuantityExpr::Fixed { value: 1 },
+                count:
+                    crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 }),
                 ..
             } = lower_targeted_action_ast(ast)
             else {
@@ -23341,7 +23360,7 @@ mod tests {
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice {
                 target,
-                count,
+                count: crate::types::ability::SacrificeSelection::Count(count),
                 min_count,
             } => {
                 assert_eq!(min_count, 1);
@@ -23380,7 +23399,7 @@ mod tests {
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice {
                 target,
-                count,
+                count: crate::types::ability::SacrificeSelection::Count(count),
                 min_count,
             } => {
                 assert_eq!(min_count, 0);
@@ -23416,7 +23435,11 @@ mod tests {
         let result =
             parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
-            Effect::Sacrifice { target, count, .. } => {
+            Effect::Sacrifice {
+                target,
+                count: crate::types::ability::SacrificeSelection::Count(count),
+                ..
+            } => {
                 let TargetFilter::Typed(tf) = &target else {
                     panic!("expected Typed target, got {target:?}");
                 };
@@ -23455,7 +23478,12 @@ mod tests {
             };
             let result =
                 parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
-            let Effect::Sacrifice { target, count, .. } = lower_targeted_action_ast(result) else {
+            let Effect::Sacrifice {
+                target,
+                count: crate::types::ability::SacrificeSelection::Count(count),
+                ..
+            } = lower_targeted_action_ast(result)
+            else {
                 panic!("expected Effect::Sacrifice for {text:?}");
             };
             let TargetFilter::Typed(ref tf) = target else {
@@ -23560,7 +23588,7 @@ mod tests {
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice {
                 target,
-                count,
+                count: crate::types::ability::SacrificeSelection::Count(count),
                 min_count,
             } => {
                 assert_eq!(min_count, 0, "\"any number\" includes zero (CR 107.1c)");

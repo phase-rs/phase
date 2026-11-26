@@ -15825,7 +15825,6 @@ fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a Quant
         | Effect::Draw { count: amount, .. }
         | Effect::GainLife { amount, .. }
         | Effect::LoseLife { amount, .. }
-        | Effect::Sacrifice { count: amount, .. }
         | Effect::Mill { count: amount, .. }
         | Effect::Scry { count: amount, .. }
         | Effect::DamageAll { amount, .. }
@@ -15861,6 +15860,7 @@ fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a Quant
         | Effect::Renown { count: amount, .. }
         | Effect::Bolster { count: amount, .. }
         | Effect::Adapt { count: amount, .. } => out.push(amount),
+        Effect::Sacrifice { count, .. } => out.extend(count.count_expr()),
         // Only `Exactly` carries a flip-count expression; `UntilLoss` carries none.
         Effect::FlipCoins { flips, .. } => out.extend(flips.count_expr()),
         Effect::Token {
@@ -21828,7 +21828,10 @@ pub(crate) fn opponent_may_selection_pool(
     // CR 608.2d: the printed count is exact ("sacrifice two creatures"), so a
     // smaller pool can't perform the option.
     let required = match &ability.effect {
-        Effect::Sacrifice { count, .. } => {
+        Effect::Sacrifice {
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             let (count, _) = count.peel_up_to();
             crate::game::quantity::resolve_quantity_with_targets(state, count, ability).max(1)
                 as usize
@@ -24888,7 +24891,7 @@ fn player_scope_sacrifice_step(
     let scoped = scoped_player_sacrifice_ability(template, original_controller, player);
     let Effect::Sacrifice {
         target,
-        count,
+        count: crate::types::ability::SacrificeSelection::Count(count),
         min_count,
     } = &scoped.effect
     else {
@@ -25377,7 +25380,7 @@ pub(crate) fn perform_collected_player_scope_sacrifices_with_completion(
     let ability = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::Any,
-            count: QuantityExpr::Fixed { value: 0 },
+            count: QuantityExpr::Fixed { value: 0 }.into(),
             min_count: 0,
         },
         Vec::new(),
@@ -48637,7 +48640,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![TargetRef::Object(source)],
@@ -49701,7 +49704,7 @@ mod tests {
         let sacrifice = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Typed(TypedFilter::creature()),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],
@@ -51400,7 +51403,7 @@ mod tests {
         let dependent = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::ParentTarget,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],
@@ -51496,7 +51499,7 @@ mod tests {
         let sacrifice_moved = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::ParentTarget,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],
@@ -51577,7 +51580,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],
@@ -52144,7 +52147,7 @@ mod tests {
                     controller: Some(ControllerRef::TargetPlayer),
                     properties: vec![],
                 }),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -52271,7 +52274,7 @@ mod tests {
                     controller: Some(ControllerRef::TargetPlayer),
                     properties: vec![],
                 }),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -58705,7 +58708,7 @@ mod tests {
                 ability: Box::new(ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::Any,
-                        count: QuantityExpr::Fixed { value: 1 },
+                        count: QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 1,
                     },
                     Vec::new(),
@@ -58815,7 +58818,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-                count: QuantityExpr::Fixed { value: 3 },
+                count: QuantityExpr::Fixed { value: 3 }.into(),
                 min_count: 0,
             },
             vec![],
@@ -60694,7 +60697,7 @@ mod tests {
 
         let sacrifice_last_created = || Effect::Sacrifice {
             target: TargetFilter::LastCreated,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         };
         let delayed = |payload: AbilityDefinition| Effect::CreateDelayedTrigger {
@@ -61988,7 +61991,7 @@ mod tests {
             }),
             ("Sacrifice.target", |target| Effect::Sacrifice {
                 target,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             }),
             ("ChangeZone.target", |target| Effect::ChangeZone {
@@ -71005,7 +71008,7 @@ mod tests {
             let mut grandchild = ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: TargetFilter::TriggeringSource,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
                 vec![],
@@ -75877,7 +75880,7 @@ mod resolution_progress_contract_tests {
         let sacrifice = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![TargetRef::Object(victim)],
@@ -76836,7 +76839,7 @@ mod resolution_progress_contract_tests {
         let dependent = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::ParentTarget,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],
@@ -76942,7 +76945,7 @@ mod resolution_progress_contract_tests {
         let mut ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 1,
             },
             vec![],

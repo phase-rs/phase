@@ -19209,7 +19209,11 @@ fn parse_for_each_one_life_changed_full_cards() {
         &[],
     );
     let sac = execute_effect(&lichs_tomb, &|e| matches!(e, Effect::Sacrifice { .. }));
-    let Effect::Sacrifice { count, .. } = sac else {
+    let Effect::Sacrifice {
+        count: crate::types::ability::SacrificeSelection::Count(count),
+        ..
+    } = sac
+    else {
         unreachable!()
     };
     assert_eq!(
@@ -26341,7 +26345,11 @@ fn pox_plague_full_parse() {
     // as count, and the same Typed filter lifted into target.
     let sacrifice = discard.sub_ability.as_ref().expect("sacrifice sub_ability");
     match &*sacrifice.effect {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert!(!count.is_up_to(), "expected non-UpTo sacrifice count");
             match count {
                 QuantityExpr::DivideRounded {
@@ -31575,7 +31583,9 @@ fn depletion_land_rider_sacrifice_binds_self_ref() {
             rider.effect.as_ref(),
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
+                    value: 1
+                }),
                 ..
             }
         ),
@@ -31662,7 +31672,9 @@ fn typed_trigger_source_counter_rider_binds_self_ref_not_triggering_source() {
             rider.effect.as_ref(),
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
+                    value: 1
+                }),
                 ..
             }
         ),

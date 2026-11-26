@@ -392,7 +392,6 @@ fn effect_quantity(effect: &Effect) -> Option<&QuantityExpr> {
         | Effect::Discard { count, .. }
         | Effect::Scry { count, .. }
         | Effect::Surveil { count, .. }
-        | Effect::Sacrifice { count, .. }
         | Effect::Dig { count, .. }
         | Effect::ExileTop { count, .. }
         | Effect::PutAtLibraryPosition { count, .. }
@@ -400,6 +399,7 @@ fn effect_quantity(effect: &Effect) -> Option<&QuantityExpr> {
         | Effect::PutCounterAll { count, .. }
         | Effect::CopyTokenOf { count, .. }
         | Effect::SearchLibrary { count, .. } => Some(count),
+        Effect::Sacrifice { count, .. } => count.count_expr(),
         Effect::Token { count, .. } => Some(count),
         _ => None,
     }

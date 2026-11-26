@@ -899,7 +899,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
                 AbilityKind::Spell,
                 Effect::Sacrifice {
                     target: TargetFilter::LastCreated,
-                    count: qty.clone(),
+                    count: crate::types::ability::SacrificeSelection::EntireReferent,
                     min_count: 0,
                 },
             )),
@@ -3393,7 +3393,7 @@ pub(crate) fn build_evoke_etb_sac_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -5228,7 +5228,7 @@ fn build_echo_trigger(cost: EchoCost) -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -5334,7 +5334,7 @@ pub(crate) fn build_cumulative_upkeep_trigger(base_cost: AbilityCost) -> Trigger
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -5391,7 +5391,7 @@ fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
         target: TargetFilter::Typed(
             TypedFilter::permanent().controller(ControllerRef::DefendingPlayer),
         ),
-        count: QuantityExpr::Fixed { value: n as i32 },
+        count: QuantityExpr::Fixed { value: n as i32 }.into(),
         min_count: 0,
     };
 
@@ -7070,7 +7070,7 @@ fn build_fading_upkeep_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     )
@@ -7112,7 +7112,7 @@ fn build_vanishing_sacrifice_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -8155,7 +8155,9 @@ fn is_champion_self_sacrifice_ability(ability: &AbilityDefinition) -> bool {
         &*ability.effect,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
+                value: 1
+            }),
             ..
         }
     )
@@ -8234,7 +8236,7 @@ fn build_champion_etb_trigger(type_str: &str) -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     )
@@ -8945,7 +8947,8 @@ pub fn synthesize_devour(face: &mut CardFace) {
                             TypedFilter::new(quality.clone()).controller(ControllerRef::You),
                         ),
                     },
-                }),
+                })
+                .into(),
                 min_count: 0,
             },
         )
@@ -14310,7 +14313,7 @@ mod annihilator_synthesis_tests {
         };
         let Effect::Sacrifice {
             target,
-            count,
+            count: crate::types::ability::SacrificeSelection::Count(count),
             min_count,
         } = &*execute.effect
         else {
@@ -14391,12 +14394,14 @@ mod annihilator_synthesis_tests {
         // Both N=1 and N=3 must be present from the first pass.
         let ns: Vec<i32> = triggers
             .iter()
-            .filter_map(|t| match t.execute.as_deref().map(|a| &*a.effect) {
-                Some(Effect::Sacrifice {
-                    count: QuantityExpr::Fixed { value },
-                    ..
-                }) => Some(*value),
-                _ => None,
+            .filter_map(|t| {
+                let Effect::Sacrifice { count, .. } = t.execute.as_deref()?.effect.as_ref() else {
+                    return None;
+                };
+                let QuantityExpr::Fixed { value } = count.count_expr()? else {
+                    return None;
+                };
+                Some(*value)
             })
             .collect();
         assert!(ns.contains(&1) && ns.contains(&3));
@@ -19046,7 +19051,7 @@ mod idempotency_tests {
                 match &*effect.effect {
                     Effect::Sacrifice {
                         target: TargetFilter::LastCreated,
-                        count: QuantityExpr::Fixed { value: 2 },
+                        count: crate::types::ability::SacrificeSelection::EntireReferent,
                         ..
                     } => {}
                     other => panic!("expected LastCreated Sacrifice, got {other:?}"),
@@ -23799,7 +23804,7 @@ mod devour_synthesis_tests {
         // Parent effect: ranged "sacrifice up to N of your creatures".
         let Effect::Sacrifice {
             target,
-            count,
+            count: crate::types::ability::SacrificeSelection::Count(count),
             min_count,
         } = &*execute.effect
         else {
@@ -24785,7 +24790,9 @@ mod fading_vanishing_tests {
             &*sacrifice.effect,
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
+                    value: 1
+                }),
                 min_count: 0,
             }
         ));
