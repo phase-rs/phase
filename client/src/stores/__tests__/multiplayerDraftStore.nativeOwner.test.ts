@@ -543,7 +543,7 @@ describe("the native draft owner", () => {
     expect(store()).toMatchObject({ role: "guest", transport: "native", phase: "lobby", draftCode: "NAT001", seatIndex: 3 });
     expect(storedPointer()).toMatchObject({ transport: "native", capabilityId, participant: "guest" });
 
-    // Hostile: the join's view is refused, as the real adapter's refused `DraftJoined` is.
+    // Hostile: the join's view is refused, as the real adapter refuses one its join's `Joined` result carries.
     storage.log.length = 0;
     const failure = {
       kind: "incompatible" as const,

@@ -110,8 +110,27 @@ describe("classifySetupFrame", () => {
     expect(classifySetupFrame("game", frame("StateWithheld", {}))).toEqual({ kind: "other" });
   });
 
-  it.each(["DraftStateUpdate", "DraftMatchStart"])("treats draft %s as the positive bootstrap", (type) => {
-    expect(classifySetupFrame("draft", frame(type, {}))).toEqual({ kind: "positive", message: { type, data: {} } });
+  it("treats draft DraftMatchStart as the positive bootstrap", () => {
+    expect(classifySetupFrame("draft", frame("DraftMatchStart", {})))
+      .toEqual({ kind: "positive", message: { type: "DraftMatchStart", data: {} } });
+  });
+
+  it("treats a draft DraftCommandAccepted as positive only when it carries the reattach's own id", () => {
+    const accepted = (requestId: number) => frame("DraftCommandAccepted", {
+      request_id: requestId, result: { type: "Reconnected", data: { view: {} } },
+    });
+    expect(classifySetupFrame("draft", accepted(4), 4)).toEqual({
+      kind: "positive",
+      message: { type: "DraftCommandAccepted", data: { request_id: 4, result: { type: "Reconnected", data: { view: {} } } } },
+    });
+    // Another command's result, or no reattach id to compare with, answers no reattach.
+    expect(classifySetupFrame("draft", accepted(5), 4)).toEqual({ kind: "other" });
+    expect(classifySetupFrame("draft", accepted(4))).toEqual({ kind: "other" });
+    expect(classifySetupFrame("game", accepted(4), 4)).toEqual({ kind: "other" });
+  });
+
+  it("leaves a draft DraftStateUpdate unclassified: it is never the reattach's answer", () => {
+    expect(classifySetupFrame("draft", frame("DraftStateUpdate", { view: {} }), 4)).toEqual({ kind: "other" });
   });
 
   it("does not let one surface's bootstrap adopt the other's", () => {
@@ -127,11 +146,16 @@ describe("classifySetupFrame", () => {
     });
   });
 
-  it("reads DraftActionRejected as the draft server's answer, not a refusal", () => {
-    expect(classifySetupFrame("draft", frame("DraftActionRejected", { reason: "why" }))).toEqual({
-      kind: "answered", message: { type: "DraftActionRejected", data: { reason: "why" } },
+  it("reads the reattach's own DraftCommandRefused as the draft server's answer, not a refusal", () => {
+    const refused = (requestId: number) => frame("DraftCommandRefused", {
+      request_id: requestId, refusal: { type: "Rejected", data: { reason: "why" } },
     });
-    expect(classifySetupFrame("game", frame("DraftActionRejected", { reason: "why" }))).toEqual({ kind: "other" });
+    expect(classifySetupFrame("draft", refused(4), 4)).toEqual({
+      kind: "answered",
+      message: { type: "DraftCommandRefused", data: { request_id: 4, refusal: { type: "Rejected", data: { reason: "why" } } } },
+    });
+    expect(classifySetupFrame("draft", refused(5), 4)).toEqual({ kind: "other" });
+    expect(classifySetupFrame("game", refused(4), 4)).toEqual({ kind: "other" });
   });
 
   it.each(["Pong", "OpponentReconnected", "PlayerSlotsUpdate"])("leaves %s unclassified", (type) => {
@@ -141,10 +165,10 @@ describe("classifySetupFrame", () => {
   it.each([
     ["game", '{"type":"GameStarted","data":{"state":'],
     ["game", '{"type":"Error","data":{"message":'],
-    ["draft", '{"type":"DraftStateUpdate","data":{"view":'],
-    ["draft", '{"type":"DraftActionRejected","data":'],
+    ["draft", '{"type":"DraftCommandAccepted","data":{"request_id":4,"result":'],
+    ["draft", '{"type":"DraftCommandRefused","data":{"request_id":4,"refusal":'],
   ] as const)("leaves a truncated canonical %s frame unclassified: %s", (surface, text) => {
-    expect(classifySetupFrame(surface, text)).toEqual({ kind: "other" });
+    expect(classifySetupFrame(surface, text, 4)).toEqual({ kind: "other" });
   });
 
   it("leaves malformed or non-text frames unclassified", () => {
@@ -167,10 +191,17 @@ describe("SetupConfirmation.observe", () => {
     expect(confirmation.refusal).toEqual({ message: "gone" });
   });
 
-  it("confirms on a draft DraftActionRejected, the server's answer on the candidate", async () => {
+  it("confirms on the reattach's own DraftCommandRefused, the server's answer on the candidate", async () => {
     const confirmation = new SetupConfirmation();
-    confirmation.observe("draft", frame("DraftActionRejected", { reason: "Reconnect grace period expired" }));
+    const refused = (requestId: number) => frame("DraftCommandRefused", {
+      request_id: requestId, refusal: { type: "Rejected", data: { reason: "Reconnect grace period expired" } },
+    });
+    // Another command's refusal neither confirms nor refuses.
+    expect(confirmation.observe("draft", refused(8), 7)).toBeUndefined();
+    expect(confirmation.current).toBeNull();
+    expect(confirmation.observe("draft", refused(7), 7)).toMatchObject({ type: "DraftCommandRefused" });
     await expect(confirmation.settled).resolves.toBe("confirmed");
+    expect(confirmation.refusal).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -222,7 +253,8 @@ describe("SetupBufferBudget", () => {
   const large = (type: string) => `{"type":"${type}","data":{"padding":"${"x".repeat(SETUP_BUFFER_MAX_TEXT_BYTES / 2)}"}}`;
 
   it.each([
-    ["game", "GameStarted"], ["game", "StateUpdate"], ["draft", "GameStarted"], ["draft", "DraftStateUpdate"], ["draft", "DraftJoined"],
+    ["game", "GameStarted"], ["game", "StateUpdate"], ["draft", "GameStarted"], ["draft", "DraftStateUpdate"],
+    ["draft", "DraftCommandAccepted"],
   ] as const)("does not charge the %s surface's first %s, wherever it sits behind a prefix", (surface, type) => {
     const budget = new SetupBufferBudget(surface);
     expect(budget.admit('{"type":"SessionAttached","data":{}}')).toBe(true);

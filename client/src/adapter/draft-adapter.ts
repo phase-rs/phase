@@ -571,6 +571,14 @@ export interface FifoPromptId {
   generation: number;
 }
 
+/** The FIFO selection policy a session asks for, mirrored for the native
+ * create's policy intent. The engine owns its meaning; no page sets it yet. */
+// @sync-with: crates/draft-core/src/types.rs
+export interface DraftSelectionPolicy {
+  burns_per_pick: number;
+  discard_threshold: number;
+}
+
 export type FifoClockTarget =
   | { type: "Pick"; prompt_id: FifoPromptId }
   | { type: "Review"; next_round: number };

@@ -42,6 +42,8 @@ import { isValidWebSocketUrl } from "../services/serverDetection";
 import { captureSubmissionArtPreferences, submitDeckList } from "../services/deckSubmission";
 import type {
   DraftPlayerView,
+  DraftSelectionPolicy,
+  FifoPromptId,
   StandingEntry,
   TournamentFormat,
   PodPolicy,
@@ -55,6 +57,7 @@ import {
   type Draft27CompatibilityError,
 } from "./draft-compatibility";
 import { SubmissionSlot } from "./submissionSlot";
+import { assertNever } from "../utils/assertNever";
 import type { FullSessionKey, ServerInfo } from "./ws-adapter";
 import { getSharedAdapter } from "./wasm-adapter";
 import type { StateCodecSession } from "./state-codec-runtime";
@@ -108,6 +111,62 @@ export interface CreateDraftSettings {
   tournamentFormat: TournamentFormat;
   podPolicy: PodPolicy;
   podSize: number;
+  /** The FIFO policy the host asks for; omitted asks for none. No page sets it yet. */
+  fifoPolicy?: NativeFifoPolicyIntent;
+}
+
+/** The FIFO policy a native create may ask for. */
+// @sync-with: crates/server-core/src/protocol.rs
+export interface NativeFifoPolicyIntent {
+  selection: DraftSelectionPolicy;
+  review_seconds: number;
+}
+
+/** What an accepted native draft command produced (`DraftCommandAccepted.result`). */
+// @sync-with: crates/server-core/src/protocol.rs
+export type DraftCommandResult =
+  | { type: "Created"; data: { draft_code: string; player_token: string; seat_index: number } }
+  | {
+    type: "Joined";
+    data: { draft_code: string; player_token: string; seat_index: number; view: DraftPlayerView };
+  }
+  | { type: "Reconnected"; data: { view: DraftPlayerView } }
+  | { type: "Applied"; data: { prompt_id: FifoPromptId | null; view: DraftPlayerView } };
+
+/** Why a native draft command was refused (`DraftCommandRefused.refusal`). */
+// @sync-with: crates/server-core/src/protocol.rs
+export type DraftCommandRefusal =
+  | { type: "PasswordRequired" }
+  | { type: "Rejected"; data: { reason: string } };
+
+/**
+ * The player-visible error for a refused native draft command: the protected
+ * pod's password text through `t()`, or the server's reason as written.
+ */
+function draftCommandRefusalError(refusal: DraftCommandRefusal): AdapterError {
+  switch (refusal.type) {
+    case "PasswordRequired":
+      return new AdapterError(
+        "PASSWORD_REQUIRED",
+        i18n.t("lobbyView.passwordRequired", { ns: "multiplayer" }),
+        true,
+      );
+    case "Rejected":
+      return new AdapterError("ACTION_REJECTED", refusal.data.reason, true);
+    default:
+      return assertNever(refusal);
+  }
+}
+
+/**
+ * Only a server whose hello says `Full` hosts native drafts. Any other server
+ * (a lobby-only one, or a hello with no recognizable mode) can answer a draft
+ * command only with an uncorrelated `Error`, so no command could ever settle
+ * there: it is refused before its setup frame is written.
+ */
+function draftHostRefusal(info: ServerInfo): AdapterError | null {
+  if (info.mode === "Full") return null;
+  return new AdapterError("WS_ERROR", i18n.t("podError.connection", { ns: "draft" }), false);
 }
 
 function draftSourceIntent(settings: CreateDraftSettings): DraftSourceIntent {
@@ -164,6 +223,8 @@ interface StateBearingPayload {
 type DraftInit = {
   resolve: () => void;
   reject: (error: Error) => void;
+  /** The id the setup frame carries; only its own result settles this. */
+  requestId: number;
 } & (
   | { kind: "create" }
   | { kind: "reconnect"; draftCode: string; playerToken: string }
@@ -176,6 +237,36 @@ type AttachmentOwner =
     resolve: (view: DraftPlayerView) => void;
     reject: (error: Error) => void;
   };
+
+/** The pending native draft command a correlated result answers. */
+type DraftCommandOwner =
+  | { kind: "init"; init: DraftInit }
+  | { kind: "action"; answers: DraftActionAnswer }
+  | { kind: "matchReattach" };
+
+/** The accepted result a pending action expects: a join's seat, or an applied action. */
+type DraftActionAnswer = "Joined" | "Applied";
+
+/** The one accepted result kind each pending command accepts. */
+function expectedResult(owner: DraftCommandOwner): DraftCommandResult["type"] {
+  switch (owner.kind) {
+    case "init":
+      switch (owner.init.kind) {
+        case "create":
+          return "Created";
+        case "reconnect":
+          return "Reconnected";
+        default:
+          return assertNever(owner.init);
+      }
+    case "action":
+      return owner.answers;
+    case "matchReattach":
+      return "Reconnected";
+    default:
+      return assertNever(owner);
+  }
+}
 
 interface DraftAttachment {
   controller: AbortController;
@@ -220,7 +311,7 @@ export interface ServerDraftAdapterOptions {
  *
  * Follows the WebSocketAdapter pattern (openPhaseSocket handshake, phase-
  * gated handleMessage dispatch, promise-based submitAction). Draft-specific
- * messages (DraftCreated, DraftStateUpdate, DraftMatchStart, etc.) are
+ * messages (DraftCommandAccepted, DraftStateUpdate, DraftMatchStart, etc.) are
  * handled alongside the standard game messages (GameStarted, StateUpdate,
  * GameOver, etc.) based on the current `phase`.
  *
@@ -228,16 +319,23 @@ export interface ServerDraftAdapterOptions {
  * Per T-59-09: does NOT send ReportMatchResult on GameOver — server
  * handles match result reporting automatically.
  *
- * Creation completes on DraftCreated; reconnect completes on DraftStateUpdate
- * after installing the authoritative view/phase, not on match progress frames.
+ * Every native draft command (create, join, reconnect, each draft action and
+ * a match transition's reattach) carries a request id this adapter mints, and
+ * settles only on the `DraftCommandAccepted` or `DraftCommandRefused` that
+ * carries that id, on the socket the command was written on, and only with the
+ * result kind the command expects. An unsolicited `DraftStateUpdate`, a peer's
+ * broadcast, an `Error`, another socket's frame or another command's result
+ * settles nothing, and a result no pending command owns changes nothing. Every
+ * view a result carries is classified before any effect.
  * A new attachment supersedes pending initialization and cancels an attachment
  * whose setup has not been sent; setup-sent draft actions retain their replies.
- * DraftActionRejected rejects initialization without retiring the transport:
- * the seat may already be reattached and a later state update remains valid.
- * A reconnect candidate is adopted on its positive bootstrap or on that
- * rejection (`SetupConfirmation`), so the rejection replays on the adopted
- * candidate as before; an `Error`, a close, an abort or no answer within
- * `SETUP_CONFIRMATION_TIMEOUT_MS` retires it and its incumbent. Create and
+ * A refusal rejects its command without retiring the transport: the seat may
+ * already be reattached and later updates remain valid. A reconnect candidate
+ * is adopted on its positive bootstrap or on its own refusal
+ * (`SetupConfirmation`), so the refusal is dispatched on the adopted candidate;
+ * an `Error`, a close, an abort or no answer within
+ * `SETUP_CONFIRMATION_TIMEOUT_MS` retires it and its incumbent. A server whose
+ * hello does not say `Full` hosts no drafts and is sent no command. Create and
  * Join impose no setup-response deadline; a silent server can leave them
  * pending.
  */
@@ -295,12 +393,15 @@ export class ServerDraftAdapter implements EngineAdapter {
   // Meaningful only while the callback pair owns an action.
   private draftActionStage: "PreparingDeck" | "AwaitingReply" = "AwaitingReply";
   private draftActionSocket: PhaseSocketTransport | null = null;
-  private draftPick: {
-    draftCode: string;
-    playerToken: string | null;
-    instanceId: string;
-    completeSelection: boolean;
-  } | null = null;
+  /** The id and expected result of the action the pair owns, once its frame is built. */
+  private draftActionCommand: { requestId: number; answers: DraftActionAnswer } | null = null;
+  /**
+   * The reattach a match transition wrote (`DraftMatchStart`), with the socket
+   * it was written on. It has no caller; its own result installs its view.
+   */
+  private matchReattach: { requestId: number; socket: PhaseSocketTransport } | null = null;
+  /** The next native draft command id: one counter per adapter, never reused. */
+  private nextDraftRequestId = 1;
   private pendingInit: DraftInit | null = null;
   private unfinishedAttachment: DraftAttachment | null = null;
   /**
@@ -640,7 +741,8 @@ export class ServerDraftAdapter implements EngineAdapter {
       throw new AdapterError("WS_ERROR", "Invalid WebSocket URL", false);
     }
     return new Promise<void>((resolve, reject) => {
-      this.beginAttachment({ type: "init", init: { kind: "create", resolve, reject } }, {
+      const requestId = this.mintDraftRequestId();
+      this.beginAttachment({ type: "init", init: { kind: "create", requestId, resolve, reject } }, {
         type: "CreateDraftWithSettings",
         data: {
           display_name: settings.displayName,
@@ -652,9 +754,17 @@ export class ServerDraftAdapter implements EngineAdapter {
           tournament_format: settings.tournamentFormat,
           pod_policy: settings.podPolicy,
           pod_size: settings.podSize,
+          // Absent is the wire's one spelling of "no FIFO policy".
+          ...(settings.fifoPolicy !== undefined ? { fifo_policy: settings.fifoPolicy } : {}),
+          request_id: requestId,
         },
       });
     });
+  }
+
+  /** Mints the next native draft command id: distinct and increasing per adapter. */
+  private mintDraftRequestId(): number {
+    return this.nextDraftRequestId++;
   }
 
   /**
@@ -685,13 +795,11 @@ export class ServerDraftAdapter implements EngineAdapter {
    * first caller's promise never settled at all. Not a lost result: a
    * permanently pending `await`, with whatever UI awaited it stuck behind it.
    *
-   * Single-flight rather than request correlation, because the wire carries no
-   * correlation id: `DraftAction` frames are unlabelled and the server answers
-   * with a bare `DraftStateUpdate`. Adding an id is a protocol change; refusing
-   * to have two in flight is not, and these actions are user-initiated and
-   * mutually exclusive by phase anyway. The refusal is explicit and immediate,
-   * which is the part that matters -- the caller learns now instead of awaiting
-   * forever.
+   * Still single-flight now that each action carries its own request id and
+   * settles only on its own result: these actions are user-initiated and
+   * mutually exclusive by phase, and one slot keeps one pending answer per
+   * adapter. The refusal is explicit and immediate, which is the part that
+   * matters -- the caller learns now instead of awaiting forever.
    *
    * The callback pair is the pending authority; settlement clears it together
    * with its socket owner before retiring an otherwise idle attachment.
@@ -730,12 +838,15 @@ export class ServerDraftAdapter implements EngineAdapter {
         return;
       }
 
+      const requestId = this.mintDraftRequestId();
+      this.draftActionCommand = { requestId, answers: "Joined" };
       this.beginAttachment({ type: "join", resolve, reject }, {
         type: "JoinDraftWithPassword",
         data: {
           draft_code: draftCode,
           display_name: displayName,
           password: password ?? null,
+          request_id: requestId,
         },
       });
     });
@@ -746,34 +857,17 @@ export class ServerDraftAdapter implements EngineAdapter {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
     this.assertNoReattachInterval();
-    const view = this.draftView;
-    if (view?.pool.some((card) => card.instance_id === cardInstanceId)) {
+    if (this.draftView?.pool.some((card) => card.instance_id === cardInstanceId)) {
       // An already-owned instance can never be the outcome of this request,
-      // and a later broadcast (any source) would otherwise look like one.
-      // Refuse before claiming the slot so nothing is sent.
+      // and the server would refuse it. Refuse before claiming the slot so
+      // nothing is sent.
       throw new AdapterError("PHASE_ERROR", "That card is already in your draft pool", false);
     }
-    const draftCode = this.draftCode;
-    const playerToken = this.draftToken;
     return new Promise<DraftPlayerView>((resolve, reject) => {
       if (!this.claimDraftAction("Pick", resolve, reject)) return;
-      this.draftPick = {
-        draftCode,
-        playerToken,
-        instanceId: cardInstanceId,
-        completeSelection: view?.required_pick_count === 1
-          && view.current_pack?.some((card) => card.instance_id === cardInstanceId) === true
-          && !view.pool.some((card) => card.instance_id === cardInstanceId),
-      };
-      const sent = this.send({
-        type: "DraftAction",
-        data: {
-          draft_code: this.draftCode,
-          action: {
-            type: "Pick",
-            data: { seat: this.seatIndex, card_instance_ids: [cardInstanceId] },
-          },
-        },
+      const sent = this.sendDraftAction(this.draftCode, {
+        type: "Pick",
+        data: { seat: this.seatIndex, card_instance_ids: [cardInstanceId] },
       });
       if (!sent) {
         this.settleDraftAction(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
@@ -803,15 +897,9 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.assertNoReattachInterval();
     return new Promise<DraftPlayerView>((resolve, reject) => {
       if (!this.claimDraftAction("SharedStackDecision", resolve, reject)) return;
-      const sent = this.send({
-        type: "DraftAction",
-        data: {
-          draft_code: this.draftCode,
-          action: {
-            type: "SharedStackDecision",
-            data: { seat: this.seatIndex, pile, decision },
-          },
-        },
+      const sent = this.sendDraftAction(this.draftCode, {
+        type: "SharedStackDecision",
+        data: { seat: this.seatIndex, pile, decision },
       });
       if (!sent) {
         this.settleDraftAction(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
@@ -824,8 +912,9 @@ export class ServerDraftAdapter implements EngineAdapter {
    * the submitter's pins/chain. Only main-deck cards are decorated, including
    * commander-labelled main cards; pool art is not an entry source. Empty or
    * timed-out decoration omits the sidecar, replacing previous submission art.
-   * Preparation reserves the action slot and cannot be acknowledged by a
-   * broadcast. After sending, acknowledgements remain uncorrelated as before.
+   * Preparation reserves the action slot and owns no request id until its
+   * frame is written, so no result can settle it before then; once sent it
+   * settles only on its own result.
    */
   async submitDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<DraftPlayerView> {
     if (this.seatIndex === null || this.draftCode === null) {
@@ -851,21 +940,15 @@ export class ServerDraftAdapter implements EngineAdapter {
         // A reattach written while the deck was being prepared gates it too.
         this.assertNoReattachInterval();
         this.draftActionStage = "AwaitingReply";
-        const sent = this.send({
-          type: "DraftAction",
+        const sent = this.sendDraftAction(draftCode, {
+          type: "SubmitDeck",
+          // Key order matches the Rust carrier (`seat`, `main_deck`,
+          // `commanders`, `companion`, `printings`); absent companion and
+          // art keep old bytes, and the frame's `request_id` follows `action`.
           data: {
-            draft_code: draftCode,
-            action: {
-              type: "SubmitDeck",
-              // Key order matches the Rust carrier (`seat`, `main_deck`,
-              // `commanders`, `companion`, `printings`); absent companion and
-              // art keep old bytes.
-              data: {
-                seat, main_deck: deck.main_deck, commanders: capturedCommanders,
-                ...(companion !== undefined ? { companion } : {}),
-                ...(deck.printings?.length ? { printings: deck.printings } : {}),
-              },
-            },
+            seat, main_deck: deck.main_deck, commanders: capturedCommanders,
+            ...(companion !== undefined ? { companion } : {}),
+            ...(deck.printings?.length ? { printings: deck.printings } : {}),
           },
         });
         if (!sent) throw new AdapterError("WS_CLOSED", "Failed to send draft action", true);
@@ -875,6 +958,38 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.settleDraftAction(error instanceof Error ? error : new Error(String(error)));
       });
     });
+  }
+
+  /**
+   * The one write site of a `DraftAction` frame. The id is minted and latched
+   * on the action slot at the write, so the action settles only on the result
+   * that carries it.
+   */
+  private sendDraftAction(draftCode: string | null, action: unknown): boolean {
+    const requestId = this.mintDraftRequestId();
+    this.draftActionCommand = { requestId, answers: "Applied" };
+    return this.send({ type: "DraftAction", data: { draft_code: draftCode, action, request_id: requestId } });
+  }
+
+  /**
+   * The one write site of a match transition's reattach, sent by the socket
+   * that saw the transition or by an incumbent whose deferred reattach was
+   * never written. Each write is its own command with a fresh id; a later
+   * transition replaces it.
+   */
+  private sendMatchReattach(
+    draftCode: string,
+    playerToken: string,
+    socket: PhaseSocketTransport | null = this.ws,
+  ): boolean {
+    const requestId = this.mintDraftRequestId();
+    this.matchReattach = socket === null ? null : { requestId, socket };
+    const sent = this.send({
+      type: "ReconnectDraft",
+      data: { draft_code: draftCode, player_token: playerToken, request_id: requestId },
+    }, socket);
+    if (!sent && this.matchReattach?.requestId === requestId) this.matchReattach = null;
+    return sent;
   }
 
   // ── Socket management ──────────────────────────────────────────────
@@ -915,7 +1030,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.draftResolve = null;
     this.draftReject = null;
     this.draftActionSocket = null;
-    this.draftPick = null;
+    this.draftActionCommand = null;
     if (result instanceof Error) reject(result);
     else resolve(result);
     this.retireIdleSockets();
@@ -923,69 +1038,114 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   /**
-   * A pick sent without the engine's complete selection can only be proven by
-   * its own sending socket's inventory. Once a different socket is adopted the
-   * server's success fan-out follows the registered sender, so the original
-   * request may never be answered on its sender. Retire it as unconfirmed
-   * (recoverable) instead of leaving the caller awaiting forever.
+   * The pending command a correlated result answers, or null. A result owns a
+   * command only when it carries that command's id and arrives on the socket
+   * the command was written on: the attachment's own initialization (bound to
+   * this socket's handler), the action slot, or the match reattach. A
+   * superseded or settled command, a deck still being prepared, or the same id
+   * on another socket owns nothing.
    */
-  private retireUnprovablePick(replacement: PhaseSocketTransport): void {
-    if (this.draftReject === null || this.draftActionStage !== "AwaitingReply") return;
-    const pick = this.draftPick;
-    if (!pick || pick.completeSelection || this.draftActionSocket === replacement) return;
-    this.settleDraftAction(new AdapterError(
-      "WS_CLOSED",
-      "The draft connection changed before this pick was confirmed",
-      true,
-    ));
+  private draftCommandOwner(
+    requestId: unknown,
+    initOwner: DraftInit | null,
+    sourceSocket: PhaseSocketTransport,
+  ): DraftCommandOwner | null {
+    if (initOwner !== null && this.pendingInit === initOwner && initOwner.requestId === requestId) {
+      return { kind: "init", init: initOwner };
+    }
+    const action = this.draftActionCommand;
+    if (action !== null && this.draftResolve !== null && this.draftReject !== null
+      && this.draftActionStage === "AwaitingReply" && action.requestId === requestId
+      && this.draftActionSocket === sourceSocket) {
+      return { kind: "action", answers: action.answers };
+    }
+    const reattach = this.matchReattach;
+    if (reattach !== null && reattach.requestId === requestId && reattach.socket === sourceSocket) {
+      return { kind: "matchReattach" };
+    }
+    return null;
+  }
+
+  /** Settles one owned command: its view or error for a caller, a clear for the match reattach. */
+  private settleDraftCommand(owner: DraftCommandOwner, outcome: DraftPlayerView | Error | null): void {
+    switch (owner.kind) {
+      case "init":
+        this.settleInit(owner.init, outcome instanceof Error ? outcome : undefined);
+        return;
+      case "action":
+        if (outcome !== null) this.settleDraftAction(outcome);
+        return;
+      case "matchReattach":
+        this.matchReattach = null;
+        return;
+      default:
+        assertNever(owner);
+    }
   }
 
   /**
-   * Draft broadcasts are not acknowledgements. A pick completes when its
-   * inventory proves the exact newly selected instance. A request backed by the
-   * complete selection offered in the original view can complete from any
-   * source with the captured draft identity; a request without that authority
-   * can only be completed by its own sending socket, which is the
-   * request-scoped receipt and never a replacement's snapshot.
-   * Counter/phase changes and reply ownership alone are not outcome evidence.
-   * The wire cannot distinguish a timer selecting that same instance.
+   * An owned command's accepted result. A view it carries passes the shared
+   * classifier before any credential, view or phase is installed; an admitted
+   * one is installed only from the current socket, and the command settles
+   * either way.
    */
-  private settleDraftView(
-    view: DraftPlayerView,
+  private acceptDraftCommand(
+    owner: DraftCommandOwner,
+    result: DraftCommandResult,
     sourceSocket: PhaseSocketTransport,
-    initOwner: DraftInit | null,
   ): void {
-    if (this.draftActionStage !== "AwaitingReply") return;
-    const pick = this.draftPick;
-    if (pick) {
-      if (!view.pool.some((card) => card.instance_id === pick.instanceId)) return;
-      const ownsAction = this.draftActionSocket === sourceSocket;
-      if (!ownsAction) {
-        const sameDraft = initOwner?.kind === "reconnect"
-          && initOwner.draftCode === pick.draftCode
-          && initOwner.playerToken === pick.playerToken;
-        if (!pick.completeSelection || !sameDraft) return;
+    switch (result.type) {
+      case "Created":
+        this.draftCode = result.data.draft_code;
+        this.draftToken = result.data.player_token;
+        this.seatIndex = result.data.seat_index;
+        this.settleDraftCommand(owner, null);
+        this.emit({ type: "waitingForPlayers" });
+        return;
+      case "Joined":
+      case "Reconnected":
+      case "Applied": {
+        const view = result.data.view;
+        const admission = classifyDraft27Compatibility(view);
+        if (!admission.ok) {
+          this.refuseView(admission.error, sourceSocket, owner);
+          return;
+        }
+        const current = this.ws === sourceSocket;
+        if (current) {
+          if (result.type === "Joined") {
+            this.draftCode = result.data.draft_code;
+            this.draftToken = result.data.player_token;
+            this.seatIndex = result.data.seat_index;
+          }
+          this.draftView = view;
+          this.updatePhaseFromView(view);
+        }
+        this.settleDraftCommand(owner, view);
+        // A reconnect's result is its only view. A join announces nothing, and
+        // an applied action's view is announced once by the pod's update that
+        // follows its result, as every other seat's is.
+        if (result.type === "Reconnected" && current) this.emit({ type: "draftViewUpdated", view });
+        return;
       }
+      default:
+        assertNever(result);
     }
-    // Non-pick actions retain the legacy current-stream completion semantics;
-    // retired frames have already been restricted to their own pending reply.
-    this.settleDraftAction(view);
   }
 
   /**
    * A view the shared classifier refused touches no seat, view or phase state.
-   * The typed event comes first, as on the P2P guest, then the reconnect or
-   * join it answered rejects with the same refusal.
+   * The typed event comes first, as on the P2P guest, then the command whose
+   * result carried it, if any, rejects with the same refusal. An unsolicited
+   * view rejects nothing.
    */
   private refuseView(
     failure: Draft27CompatibilityError,
     sourceSocket: PhaseSocketTransport,
-    initOwner: DraftInit | null,
+    owner: DraftCommandOwner | null,
   ): void {
-    const error = new Draft27IncompatibilityError(failure);
     if (this.ws === sourceSocket) this.emit({ type: "incompatible", failure });
-    if (this.ws === sourceSocket) this.settleInit(initOwner, error);
-    this.settleDraftAction(error, sourceSocket);
+    if (owner !== null) this.settleDraftCommand(owner, new Draft27IncompatibilityError(failure));
   }
 
   private takeInteractionPreview(socket: PhaseSocketTransport, requestId: string) {
@@ -1066,8 +1226,9 @@ export class ServerDraftAdapter implements EngineAdapter {
   private ownsAttachment(attachment: DraftAttachment): boolean {
     return this.unfinishedAttachment === attachment
       && !attachment.controller.signal.aborted
-      // Draft replies are uncorrelated: another socket can release a join's
-      // pair before its handshake resumes. It still must send the claimed join.
+      // A join's pair is bound to the previous socket until its handshake, so
+      // that socket's close can release it before the handshake resumes. The
+      // attachment still must send the claimed join.
       && (attachment.owner.type === "join" || this.pendingInit === attachment.owner.init);
   }
 
@@ -1117,6 +1278,8 @@ export class ServerDraftAdapter implements EngineAdapter {
         source,
       );
     }
+    // A match reattach written on this source can no longer be answered.
+    if (this.matchReattach?.socket === source) this.matchReattach = null;
     if (this.submissionSocket !== source) return;
     const dropped = this.submission.drop();
     this.submissionSocket = null;
@@ -1291,6 +1454,12 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.abandonCandidate(socket, bootstrap);
         return;
       }
+      // A server that hosts no drafts answers a draft command only with an
+      // uncorrelated `Error`, so the command could never settle: refuse it
+      // from the hello, before any handler or setup frame. The catch below
+      // rejects the owner and retires the candidate; an incumbent stays.
+      const hostRefusal = draftHostRefusal(socket.serverInfo);
+      if (hostRefusal !== null) throw hostRefusal;
       const sourceSocket = socket.ws;
       // Do not publish a request-capable candidate until its setup is sent
       // (Create, Join) or, for a ReconnectDraft, until its positive bootstrap.
@@ -1319,10 +1488,10 @@ export class ServerDraftAdapter implements EngineAdapter {
           bufferBudget.waive(event.data);
           return;
         }
-        // The positive bootstrap or the server's `DraftActionRejected` answer
-        // adopts (the seat may already be this candidate's); an `Error` ends
-        // the interval.
-        const parsed = confirmation?.observe("draft", event.data);
+        // The positive bootstrap or the reattach's own correlated result
+        // adopts (on a refusal the seat may already be this candidate's); an
+        // `Error` ends the interval.
+        const parsed = confirmation?.observe("draft", event.data, initOwner?.requestId);
         if (parsed !== undefined) {
           parsedSetupFrames.set(event, parsed);
           return;
@@ -1356,12 +1525,10 @@ export class ServerDraftAdapter implements EngineAdapter {
               case "StateWithheld":
                 if (!this.submission.occupied || this.submissionSocket !== sourceSocket) return;
                 break;
-              case "DraftJoined":
-              case "DraftStateUpdate":
-              case "DraftActionRejected":
-                if (!this.draftReject || this.draftActionStage !== "AwaitingReply"
-                  || this.draftActionSocket !== sourceSocket) return;
-                break;
+              // A retired socket's command results reach the owner lookup,
+              // which settles only a command written on this socket.
+              case "DraftCommandAccepted":
+              case "DraftCommandRefused":
               case "ManaPaymentPreview":
               case "ManaPaymentPreviewRejected":
               case "ManaPaymentPreviewFailed":
@@ -1524,10 +1691,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         // The setup never reached the wire, so the kept incumbent still owns the
         // seat: a match transition it left to this reattach is its own to attach.
         if (deferredMatch && incumbent !== null && this.ws === incumbent && this.draftCode && this.draftToken) {
-          this.send({
-            type: "ReconnectDraft",
-            data: { draft_code: this.draftCode, player_token: this.draftToken },
-          }, incumbent);
+          this.sendMatchReattach(this.draftCode, this.draftToken, incumbent);
         }
         throw new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
       }
@@ -1541,8 +1705,9 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.retireSwappedIncumbent(incumbent, sourceSocket, attachment.owner);
         // The server's `Error`, surfaced as the `Error` handler surfaces it on
         // an adopted socket: the reattach rejects with its reason and the same
-        // event follows. A `DraftActionRejected` never reaches here: it is the
-        // server's answer on a candidate that may hold the seat, so it adopts.
+        // event follows. The reattach's own `DraftCommandRefused` never
+        // reaches here: it may answer a candidate that holds the seat, so it
+        // adopts.
         const refusal = unconfirmed === "refused" ? confirmation!.refusal : null;
         if (unconfirmed === "timeout") {
           this.rejectAttachment(attachment.owner, new AdapterError(
@@ -1575,9 +1740,8 @@ export class ServerDraftAdapter implements EngineAdapter {
       this.stateCodec.adopt(bootstrap, sourceSocket);
       this.ws = sourceSocket;
       this.acceptedGameSocket = null;
-      // A pick awaiting proof on the replaced socket can no longer be
-      // confirmed here: retire it before any listener observes the successor.
-      this.retireUnprovablePick(sourceSocket);
+      // An action pending on the replaced socket keeps waiting for its own
+      // result there, or that socket's close.
       if (initOwner?.kind !== "reconnect") {
         // Create/Join attach a new draft seat, not the previous draft's Full
         // game. Only replies on this attachment may establish its authority.
@@ -1624,7 +1788,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           handleMessage(setupMessages[index]!);
         } catch (error) {
           // For a confirmed reattach, a `DraftMatchStart` confirms the candidate
-          // but does not settle the reattach (its `DraftStateUpdate` does), so a
+          // but does not settle the reattach (its own result does), so a
           // subscriber that throws on it leaves the bootstrap's remaining frames
           // to settle it. An unconfirmed attachment has no confirming frame: its
           // pending initialization alone decides.
@@ -1649,7 +1813,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         // After acquisition it is a listener/setup failure and keeps its
         // identity (the setup-send path already throws an AdapterError).
         : socket === null
-          ? new AdapterError("WS_ERROR", String(error), true)
+          ? new AdapterError("WS_ERROR", error instanceof Error ? error.message : String(error), true)
           : error instanceof Error ? error : new Error(String(error));
       this.rejectAttachment(attachment.owner, failure);
       if (socket) this.abandonCandidate(socket, bootstrap);
@@ -1673,62 +1837,40 @@ export class ServerDraftAdapter implements EngineAdapter {
   ): true | void {
     switch (msg.type) {
       // ── Draft-phase messages ──────────────────────────────────────
-      case "DraftCreated": {
-        const data = msg.data as {
-          draft_code: string;
-          player_token: string;
-          seat_index: number;
-        };
-        this.draftCode = data.draft_code;
-        this.draftToken = data.player_token;
-        this.seatIndex = data.seat_index;
-        if (initOwner?.kind === "create" && this.ws === sourceSocket) this.settleInit(initOwner);
-        this.emit({ type: "waitingForPlayers" });
+      case "DraftCommandAccepted": {
+        const data = msg.data as { request_id: unknown; result: DraftCommandResult };
+        const owner = this.draftCommandOwner(data.request_id, initOwner, sourceSocket);
+        // A result no pending command owns, or of a kind its command does not
+        // expect, installs nothing and announces nothing.
+        if (owner === null || data.result.type !== expectedResult(owner)) break;
+        this.acceptDraftCommand(owner, data.result, sourceSocket);
         break;
       }
 
-      case "DraftJoined": {
-        const data = msg.data as {
-          draft_code: string;
-          player_token: string;
-          seat_index: number;
-          view: DraftPlayerView;
-        };
-        const admission = classifyDraft27Compatibility(data.view);
-        if (!admission.ok) {
-          this.refuseView(admission.error, sourceSocket, initOwner);
-          break;
-        }
-        if (this.ws === sourceSocket) {
-          this.draftCode = data.draft_code;
-          this.draftToken = data.player_token;
-          this.seatIndex = data.seat_index;
-          this.draftView = data.view;
-          this.updatePhaseFromView(data.view);
-        }
-        this.settleDraftView(data.view, sourceSocket, initOwner);
+      case "DraftCommandRefused": {
+        const data = msg.data as { request_id: unknown; refusal: DraftCommandRefusal };
+        const owner = this.draftCommandOwner(data.request_id, initOwner, sourceSocket);
+        if (owner === null) break;
+        const error = draftCommandRefusalError(data.refusal);
+        this.settleDraftCommand(owner, error);
+        this.emit({ type: "draftActionRejected", reason: error.message });
         break;
       }
 
       case "DraftStateUpdate": {
+        // Unsolicited: the pod's fan-out after a change, or the view that
+        // follows a refused match attachment. It settles no command.
         const data = msg.data as { view: DraftPlayerView };
         const admission = classifyDraft27Compatibility(data.view);
         if (!admission.ok) {
-          this.refuseView(admission.error, sourceSocket, initOwner);
+          this.refuseView(admission.error, sourceSocket, null);
           break;
         }
-        const current = this.ws === sourceSocket;
-        if (current) {
+        if (this.ws === sourceSocket) {
           this.draftView = data.view;
           this.updatePhaseFromView(data.view);
-          if (initOwner?.kind === "reconnect") this.settleInit(initOwner);
+          this.emit({ type: "draftViewUpdated", view: data.view });
         }
-        // Reconnect captures B's bootstrap after installing its sender. An A
-        // selection accepted before that cutover is already in B's pool; a
-        // later A selection is rejected on A. Either stream must prove the
-        // captured selection, and A can settle only its reply, never B's view.
-        this.settleDraftView(data.view, sourceSocket, initOwner);
-        if (current) this.emit({ type: "draftViewUpdated", view: data.view });
         break;
       }
 
@@ -1813,13 +1955,7 @@ export class ServerDraftAdapter implements EngineAdapter {
               // turns out not to have been written.
               this.deferredMatchReattach = this.confirmingAttachment;
             } else if (this.draftCode && this.draftToken) {
-              this.send({
-                type: "ReconnectDraft",
-                data: {
-                  draft_code: this.draftCode,
-                  player_token: this.draftToken,
-                },
-              });
+              this.sendMatchReattach(this.draftCode, this.draftToken);
             } else {
               this.emit({
                 type: "error",
@@ -1848,22 +1984,6 @@ export class ServerDraftAdapter implements EngineAdapter {
       case "DraftTimerSync": {
         const data = msg.data as { remaining_ms: number };
         this.emit({ type: "timerSync", remainingMs: data.remaining_ms });
-        break;
-      }
-
-      case "DraftActionRejected": {
-        const data = msg.data as { reason: string };
-        if (this.ws === sourceSocket) {
-          this.settleInit(initOwner, new AdapterError("ACTION_REJECTED", data.reason, true));
-        }
-        // The wire carries no correlation id, and preparation has not sent a
-        // frame yet: while SubmitDeck is still `PreparingDeck`, a rejection can
-        // only answer an EARLIER action, so it must not abort this submission
-        // with another action's reason.
-        if (this.draftActionStage === "AwaitingReply") {
-          this.settleDraftAction(new AdapterError("ACTION_REJECTED", data.reason, true), sourceSocket);
-        }
-        this.emit({ type: "draftActionRejected", reason: data.reason });
         break;
       }
 
@@ -1999,8 +2119,9 @@ export class ServerDraftAdapter implements EngineAdapter {
           // everywhere else.
           //
           // The mana-payment preview handler below routes through the same
-          // classifier. Deliberately NOT applied to `DraftActionRejected`: that
-          // carries a pick/pass rejection, which is not a `GameAction` at all,
+          // classifier. Deliberately NOT applied to a draft command's
+          // `DraftCommandRefused`: that carries a pick/pass refusal, which is
+          // not a `GameAction` at all,
           // so no stale-action verdict is possible — it is a separate draft
           // protocol concern and stays a plain recoverable rejection.
           pending.reject(
@@ -2185,10 +2306,9 @@ export class ServerDraftAdapter implements EngineAdapter {
       }
 
       case "Error": {
+        // Uncorrelated: it answers no draft command this adapter sends to a
+        // draft host, so it settles none and is only surfaced.
         const data = msg.data as { message: string };
-        if (this.ws === sourceSocket) {
-          this.settleInit(initOwner, new AdapterError("WS_ERROR", data.message, true));
-        }
         this.emit({ type: "error", message: data.message });
         break;
       }
@@ -2197,7 +2317,7 @@ export class ServerDraftAdapter implements EngineAdapter {
 
   /**
    * Maps DraftPlayerView.status to the adapter's internal phase.
-   * Called after receiving DraftJoined and DraftStateUpdate.
+   * Called when a view from a command's result or a DraftStateUpdate is installed.
    */
   private updatePhaseFromView(view: DraftPlayerView): void {
     switch (draftViewPresentation(view).podPhase) {
@@ -2254,11 +2374,16 @@ export class ServerDraftAdapter implements EngineAdapter {
     }
 
     return new Promise<void>((resolve, reject) => {
-      this.beginAttachment({ type: "init", init: { kind: "reconnect", draftCode, playerToken, resolve, reject } }, {
+      const requestId = this.mintDraftRequestId();
+      this.beginAttachment({
+        type: "init",
+        init: { kind: "reconnect", draftCode, playerToken, requestId, resolve, reject },
+      }, {
         type: "ReconnectDraft",
         data: {
           draft_code: draftCode,
           player_token: playerToken,
+          request_id: requestId,
         },
       });
     });
@@ -2347,6 +2472,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       new AdapterError("WS_CLOSED", "Adapter disposed during interaction preview", true),
     );
     this.settleDraftAction(new AdapterError("WS_CLOSED", "Adapter disposed during draft operation", true));
+    this.matchReattach = null;
     const disposed = new AdapterError("WS_CLOSED", "Adapter disposed before draft started", true);
     this.settleInit(this.pendingInit, disposed);
     this.cancelAttachment(disposed);
