@@ -21,6 +21,7 @@ pub(crate) struct Hooks {
     quota_flush: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     parser_work: Arc<Mutex<Option<Arc<ParserWork>>>>,
     hello_accept: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
+    draft_create_listing: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     resync: Arc<Mutex<ResyncGates>>,
 }
 
@@ -241,6 +242,20 @@ impl Hooks {
 
     pub(crate) async fn before_hello_accept(&self) {
         let gate = self.hello_accept.lock().take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+
+    pub(crate) fn arm_draft_create_listing(&self) -> Arc<BootstrapGate> {
+        let gate = Arc::new(BootstrapGate::default());
+        *self.draft_create_listing.lock() = Some(gate.clone());
+        gate
+    }
+
+    pub(crate) async fn before_draft_create_listing(&self) {
+        let gate = self.draft_create_listing.lock().take();
         if let Some(gate) = gate {
             gate.entered.notify_one();
             gate.release.notified().await;

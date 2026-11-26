@@ -1220,40 +1220,44 @@ describe("a native seat's private record once no pointer leads to it", () => {
       const predecessor = await joinNative();
       const removalGate = held();
       storage.removalGate = removalGate.promise;
-      const creating = store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings });
-      const created = track(creating);
-      await vi.waitFor(() => expect(storage.heldRemoval).not.toBeNull());
-      const removal = track(storage.heldRemoval!);
-      const capabilityId = storage.lastSavedId!;
-      await flush();
-      // Reach: the create's pointer is written, and the removal of the record the
-      // replaced pointer named is still pending, so the create has not settled.
-      expect(storedPointer()).toMatchObject({ transport: "native", capabilityId, participant: "host" });
-      expect(removal.state()).toBe("pending");
-      expect(created.state()).toBe("pending");
-
-      if (leg === "overtaken by a successor") {
-        const succeeding = store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings });
-        // Reach: the successor's first step retired the create's owner while that removal was pending.
-        expect(native.instances[1]!.disposeCount).toBe(1);
+      try {
+        const creating = store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings });
+        const created = track(creating);
+        await vi.waitFor(() => expect(storage.heldRemoval).not.toBeNull());
+        const removal = track(storage.heldRemoval!);
+        const capabilityId = storage.lastSavedId!;
+        await flush();
+        // Reach: the create's pointer is written, and the removal of the record the
+        // replaced pointer named is still pending, so the create has not settled.
+        expect(storedPointer()).toMatchObject({ transport: "native", capabilityId, participant: "host" });
         expect(removal.state()).toBe("pending");
+        expect(created.state()).toBe("pending");
+
+        if (leg === "overtaken by a successor") {
+          const succeeding = store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings });
+          // Reach: the successor's first step retired the create's owner while that removal was pending.
+          expect(native.instances[1]!.disposeCount).toBe(1);
+          expect(removal.state()).toBe("pending");
+          removalGate.resolve();
+          await expect(creating).resolves.toEqual({ status: "superseded" });
+          await expect(succeeding).resolves.toEqual({ status: "opened" });
+          expect(native.instances).toHaveLength(3);
+          const successor = storedPointer()?.capabilityId as string;
+          expect(successor).not.toBe(capabilityId);
+          await expect(storedRecord(successor)).resolves.toMatchObject({ capabilityId: successor });
+        } else {
+          removalGate.resolve();
+          await expect(creating).resolves.toEqual({ status: "opened" });
+          expect(native.instances).toHaveLength(2);
+          expect(native.instances[1]!.disposeCount).toBe(0);
+          expect(storedPointer()).toMatchObject({ capabilityId });
+        }
+        expect(removal.state()).toBe("resolved");
+        expect(store()).toMatchObject({ role: "host", transport: "native", phase: "lobby" });
+        await expect(storedRecord(predecessor)).resolves.toBeUndefined();
+      } finally {
         removalGate.resolve();
-        await expect(creating).resolves.toEqual({ status: "superseded" });
-        await expect(succeeding).resolves.toEqual({ status: "opened" });
-        expect(native.instances).toHaveLength(3);
-        const successor = storedPointer()?.capabilityId as string;
-        expect(successor).not.toBe(capabilityId);
-        await expect(storedRecord(successor)).resolves.toMatchObject({ capabilityId: successor });
-      } else {
-        removalGate.resolve();
-        await expect(creating).resolves.toEqual({ status: "opened" });
-        expect(native.instances).toHaveLength(2);
-        expect(native.instances[1]!.disposeCount).toBe(0);
-        expect(storedPointer()).toMatchObject({ capabilityId });
       }
-      expect(removal.state()).toBe("resolved");
-      expect(store()).toMatchObject({ role: "host", transport: "native", phase: "lobby" });
-      await expect(storedRecord(predecessor)).resolves.toBeUndefined();
     },
   );
 

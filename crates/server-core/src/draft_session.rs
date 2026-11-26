@@ -1251,26 +1251,16 @@ impl DraftSessionManager {
         Ok(())
     }
 
-    /// The earliest running core deadline of a FIFO session: every seat
-    /// prompt's clock and the Review clock. `None` when the code holds no FIFO
-    /// session, a result is unsaved, or no clock runs. Decides nothing about
-    /// expiry: core's `AdvanceClock` is the one expiry transaction.
+    /// The earliest running core deadline of a FIFO session, as draft-core's
+    /// clock reports it. `None` when the code holds no FIFO session, a result
+    /// is unsaved, or no clock runs. Decides nothing about expiry: core's
+    /// `AdvanceClock` is the one expiry transaction.
     pub fn fifo_next_due(&self, draft_code: &str) -> Option<u64> {
         let session = self.sessions.get(draft_code)?;
         if session.fifo_schedule()?.pending.is_some() {
             return None;
         }
-        let state = session.session.fifo.as_ref()?;
-        state
-            .seats
-            .iter()
-            .filter_map(|seat| seat.prompt.as_ref()?.clock.as_ref())
-            .chain(state.review.iter().map(|review| &review.clock))
-            .filter_map(|clock| match clock.state {
-                draft_core::types::DraftClockState::Running { deadline_ms } => Some(deadline_ms),
-                draft_core::types::DraftClockState::Frozen { .. } => None,
-            })
-            .min()
+        draft_core::clock::next_running_deadline(&session.session)
     }
 
     /// Registers a new wake for a FIFO session's owner, replacing (and

@@ -106,6 +106,7 @@ import {
   DRAFT_OFFLINE_ERROR,
   DRAFT_RECOVERY_CONNECTION_ERROR,
   DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+  currentDraftOwnerGeneration,
   useMultiplayerDraftStore,
 } from "../multiplayerDraftStore";
 import { isHostedPodRecoveryFailureCurrent, useDraftPodStore } from "../draftPodStore";
@@ -608,22 +609,43 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
     });
 
     it("a second recovery started during the first's peer allocation supersedes it and keeps the installed host until its own handover", async () => {
+      const initialized = vi.spyOn(DraftPodHostAdapter.prototype, "initialize");
       await startInstalledHost();
       const held = holdNextRoom();
       const first = recover();
       await untilRoomRequests(2);
       // Reach: B's peer allocation is held.
       expect(hostRoom).toHaveBeenCalledTimes(2);
-      const disposed = vi.spyOn(DraftPodHostAdapter.prototype, "dispose");
+      expect(initialized).toHaveBeenCalledTimes(2);
+      const installedA = initialized.mock.contexts[0];
+      const provisionalB = initialized.mock.contexts[1];
+      expect(provisionalB).not.toBe(installedA);
+      const disposals: { receiver: DraftPodHostAdapter; generation: number }[] = [];
+      const dispose = DraftPodHostAdapter.prototype.dispose;
+      vi.spyOn(DraftPodHostAdapter.prototype, "dispose").mockImplementation(function (
+        this: DraftPodHostAdapter,
+        ...args: Parameters<DraftPodHostAdapter["dispose"]>
+      ) {
+        disposals.push({ receiver: this, generation: currentDraftOwnerGeneration() });
+        return dispose.apply(this, args);
+      });
 
       const second = recover();
       // Reach: C's sweep ended B, which is disposed while C is still provisional.
-      await vi.waitFor(() => expect(disposed).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(disposals).toHaveLength(1));
+      // Identity, not equality: two adapters can be deep-equal.
+      expect(disposals[0]!.receiver).toBe(provisionalB);
+      const beforeHandover = currentDraftOwnerGeneration();
       expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "installed-owner" });
 
       held.release();
       await expect(first).resolves.toBe("superseded");
       await expect(second).resolves.toBe("resumed");
+      // A is disposed once, and only after C's handover retired it.
+      const disposalsOfA = disposals.filter(({ receiver }) => receiver === installedA);
+      expect(disposalsOfA).toHaveLength(1);
+      expect(disposalsOfA[0]!.generation).toBeGreaterThan(beforeHandover);
+      expect(disposals.filter(({ receiver }) => receiver === provisionalB)).toHaveLength(1);
       expect(engine.imports).toEqual([recoveredSession]);
       expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "recovered-b", error: null });
     });

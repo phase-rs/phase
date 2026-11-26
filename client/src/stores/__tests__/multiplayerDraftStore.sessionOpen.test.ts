@@ -731,8 +731,22 @@ describe("session-open outcome of a superseded attempt", () => {
       await vi.waitFor(() => expect(hosts.instances).toHaveLength(2));
       await vi.waitFor(() => expect(initializing).toBe(true));
 
-      teardownA.resolve();
-      await expect(starting).resolves.toEqual({ status: "superseded" });
+      // C stays held from here on, so every publication recorded belongs to
+      // the superseded start.
+      const published: Pick<ReturnType<typeof useMultiplayerDraftStore.getState>, "role" | "phase">[] = [];
+      const unsubscribe = useMultiplayerDraftStore.subscribe(({ role, phase }) => {
+        published.push({ role, phase });
+      });
+      try {
+        teardownA.resolve();
+        await expect(starting).resolves.toEqual({ status: "superseded" });
+      } finally {
+        unsubscribe();
+      }
+      // Reach: the superseded start's own reset was recorded.
+      expect(published).toContainEqual({ role: null, phase: "idle" });
+      expect(published.filter(({ phase }) => phase === "connecting")).toEqual([]);
+      expect(handovers).toBe(0);
       expect(hosts.instances).toHaveLength(2);
       expect(guests.instances).toHaveLength(0);
       expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });

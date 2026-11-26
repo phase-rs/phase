@@ -2351,9 +2351,41 @@ async fn transition_listing(
     transition: impl FnOnce(&mut lobby_broker::lobby::LobbyManager),
 ) {
     let mut lob_guard = lobby.lock().await;
+    transition_listing_locked(&mut lob_guard, lobby_subscribers, game_code, transition).await;
+}
+
+/// Runs a presence transition on the row `registration` created, and announces
+/// the listing change it made, only while that registration is still the row
+/// under its code; a replacement row is left as it is and announces nothing.
+async fn transition_registered_listing(
+    lobby: &SharedLobby,
+    lobby_subscribers: &SharedLobbySubscribers,
+    registration: &LobbyRegistration,
+    transition: impl FnOnce(&mut lobby_broker::lobby::LobbyManager),
+) {
+    let mut lob_guard = lobby.lock().await;
+    if lob_guard.lobby().is_current(registration) {
+        transition_listing_locked(
+            &mut lob_guard,
+            lobby_subscribers,
+            registration.game_code(),
+            transition,
+        )
+        .await;
+    }
+}
+
+/// Runs a presence transition on `game_code`'s lobby row under the caller's
+/// lobby guard, and announces the listing change it made.
+async fn transition_listing_locked(
+    lob_guard: &mut LobbyGuard<'_>,
+    lobby_subscribers: &SharedLobbySubscribers,
+    game_code: &str,
+    transition: impl FnOnce(&mut lobby_broker::lobby::LobbyManager),
+) {
     let delta = lob_guard.lobby_mut().listing_delta(game_code, transition);
     if let Some(frame) = listing_frame(game_code, delta) {
-        broadcast_to_lobby_subscribers(&lob_guard, lobby_subscribers, frame).await;
+        broadcast_to_lobby_subscribers(lob_guard, lobby_subscribers, frame).await;
     }
 }
 
@@ -14802,9 +14834,9 @@ async fn handle_client_message(
                 .as_ref()
                 .map(|h| (h.client_version.clone(), h.build_commit.clone()))
                 .unwrap_or_default();
-            {
+            let registration = {
                 let mut lob_guard = lobby.lock().await;
-                lob_guard.lobby_mut().register_game(
+                let registration = lob_guard.lobby_mut().register_game(
                     &draft_code,
                     RegisterGameRequest {
                         host_name: display_name.clone(),
@@ -14828,17 +14860,28 @@ async fn handle_client_message(
                     },
                     &SysEnv,
                 );
-                // Unlisted until the recheck below confirms the pod, so no
+                // Unlisted until the step below confirms the pod, so no
                 // subscriber can see a row that may yet be withdrawn.
                 lob_guard.lobby_mut().mark_host_away(&draft_code);
-            }
+                registration
+            };
+
+            #[cfg(test)]
+            context.socket_hooks.before_draft_create_listing().await;
 
             // The registration ran after the create released the draft guard,
-            // so the pod may have been removed, and its code claimed by a FIFO
-            // owner, in between. Registering under the create's own guard would
-            // make the creator's bootstrap wait on unrelated lobby work, so
-            // the listing is rechecked here instead: a code no legacy pod holds
-            // is withdrawn while still unlisted, so nothing is announced.
+            // so since then the pod may have been removed and its code given
+            // to a FIFO owner or to another lobby row, and a newer socket may
+            // have taken the host seat. Registering under the create's own
+            // guard would make the creator's bootstrap wait on unrelated lobby
+            // work, so the listing is settled here, under the draft guard,
+            // against the row this create registered: a code no legacy pod
+            // holds withdraws that row while it is still unlisted, so nothing
+            // is announced; otherwise the row is listed with the creator's
+            // build only while the creator's socket still holds the host seat,
+            // so a newer host's build and presence are left as that host's
+            // reconnect or departure set them. Another row under the code is
+            // never touched.
             {
                 let mgr = draft_state.lock().await;
                 if !mgr
@@ -14846,21 +14889,24 @@ async fn handle_client_message(
                     .get(&draft_code)
                     .is_some_and(|session| matches!(session.schedule, DraftSchedule::Legacy(_)))
                 {
-                    delist_and_announce(
-                        lobby,
-                        lobby_subscribers,
-                        std::iter::once(draft_code.as_str()),
-                    )
+                    transition_registered_listing(lobby, lobby_subscribers, &registration, |lob| {
+                        lob.unregister_registration(&registration);
+                    })
+                    .await;
+                } else if draft_socket_is_current_while_state_locked(
+                    &mgr,
+                    connections,
+                    identity,
+                    tx,
+                )
+                .await
+                {
+                    transition_registered_listing(lobby, lobby_subscribers, &registration, |lob| {
+                        lob.mark_host_returned(&draft_code, host_version, host_build_commit)
+                    })
                     .await;
                 }
             }
-
-            // Lists the confirmed row and announces a public one. A row
-            // withdrawn since is absent, so this lists and announces nothing.
-            transition_listing(lobby, lobby_subscribers, &draft_code, |lob| {
-                lob.mark_host_returned(&draft_code, host_version, host_build_commit)
-            })
-            .await;
 
             info!(draft = %draft_code, host = %display_name, "draft created");
         }
@@ -21744,16 +21790,15 @@ mod issue_4548_full_create_tests {
         let create = pod_frame(8, true);
         let id = draft_command_id(&create);
         send_test_message(&mut host, &create, false).await;
-        let code = loop {
-            if let Some(code) = app.draft_sessions.lock().await.sessions.keys().next() {
-                break code.clone();
-            }
-            tokio::task::yield_now().await;
-        };
-        assert!(matches!(
-            super::draft_socket_authority_tests::next_draft_result(&mut host).await,
-            ServerMessage::DraftCommandAccepted { request_id, .. } if request_id == id
-        ));
+        // The create answers under the draft guard, before it waits on the
+        // lobby guard this test holds.
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            super::draft_socket_authority_tests::next_draft_result(&mut host),
+        )
+        .await
+        .expect("the create's reply");
+        let (code, _) = created_pod(reply, id);
         let mut manager = app.draft_sessions.lock().await;
         manager.remove_draft(&code).expect("the created pod");
         let staged = manager
@@ -21768,12 +21813,13 @@ mod issue_4548_full_create_tests {
         // Holding the draft guard keeps the create between its registration
         // and its recheck. The row is registered there, but a subscriber
         // arriving then is not shown it.
-        loop {
-            if app.lobby.lock().await.lobby().has_game(&code) {
-                break;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !app.lobby.lock().await.lobby().has_game(&code) {
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
+        })
+        .await
+        .expect("the create registers its row");
         let window_snapshot = tokio::time::timeout(
             Duration::from_secs(10),
             snapshot_lists(&url, "build-a", &code),
@@ -21811,6 +21857,243 @@ mod issue_4548_full_create_tests {
         assert_eq!(listing_of(&frames, &code), Vec::<&str>::new());
         assert_eq!(listing_of(&frames, &other), vec!["Added"]);
         drop(other_host);
+        server.abort();
+    }
+
+    /// The code and host token of create `id`'s own accepted result.
+    fn created_pod(reply: ServerMessage, id: DraftRequestId) -> (String, String) {
+        match reply {
+            ServerMessage::DraftCommandAccepted {
+                request_id,
+                result:
+                    DraftCommandResult::Created {
+                        draft_code,
+                        player_token,
+                        ..
+                    },
+            } if request_id == id => (draft_code, player_token),
+            other => panic!("expected the create's accepted result, got {other:?}"),
+        }
+    }
+
+    /// A public pod's create, held after it registered its lobby row and
+    /// before it settles that row's listing.
+    struct HeldCreate {
+        sub: TestWs,
+        host: TestWs,
+        code: String,
+        token: String,
+        gate: Arc<socket_test_hooks::BootstrapGate>,
+    }
+
+    /// Creates a public pod from a `build-a` host, watched by a `build-a`
+    /// subscriber, and holds the create at its listing.
+    async fn create_held_at_listing(url: &str, app: &AppState) -> HeldCreate {
+        let (sub, _) = subscribe_as(url, "build-a").await;
+        let mut host = connect_as(url, "build-a").await;
+        let gate = app.context.socket_hooks.arm_draft_create_listing();
+        let create = pod_frame(8, true);
+        let id = draft_command_id(&create);
+        send_test_message(&mut host, &create, false).await;
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            super::draft_socket_authority_tests::next_draft_result(&mut host),
+        )
+        .await
+        .expect("the create's reply");
+        let (code, token) = created_pod(reply, id);
+        tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+            .await
+            .expect("the create reaches its listing");
+        {
+            let lob = app.lobby.lock().await;
+            assert_eq!(
+                lob.lobby().host_build_commit(&code),
+                Some("build-a"),
+                "reach guard: the create registered its own row"
+            );
+            assert!(
+                lob.lobby().public_game(&code).is_none(),
+                "reach guard: the create has not listed its row yet"
+            );
+        }
+        HeldCreate {
+            sub,
+            host,
+            code,
+            token,
+            gate,
+        }
+    }
+
+    /// Registers another listed row under `code`, from a `build-z` host, as a
+    /// later owner of the code would.
+    async fn replace_row(app: &AppState, code: &str) {
+        let mut lob = app.lobby.lock().await;
+        lob.lobby_mut().register_game(
+            code,
+            RegisterGameRequest {
+                host_name: "Replacement".to_string(),
+                public: true,
+                password: None,
+                timer_seconds: None,
+                host_version: "v-build-z".to_string(),
+                host_build_commit: "build-z".to_string(),
+                current_players: 1,
+                max_players: 8,
+                format_config: None,
+                match_config: Default::default(),
+                room_name: None,
+                host_peer_id: String::new(),
+                draft_metadata: None,
+                ranked: false,
+            },
+            &SysEnv,
+        );
+        assert!(
+            lob.lobby().public_game(code).is_some(),
+            "reach guard: the replacement row is listed"
+        );
+    }
+
+    /// Releases the held create and returns once its handler has finished:
+    /// the socket's next create is refused only after the first returned.
+    async fn release_and_finish(held: &mut HeldCreate) {
+        held.gate.release.notify_one();
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            send_draft(&mut held.host, &pod_frame(8, true)),
+        )
+        .await
+        .expect("the socket's next create is answered");
+        assert_eq!(draft_refusal(reply), DRAFT_SOCKET_FRESH_REJECTION);
+    }
+
+    /// The listing frames `sub` was sent for `code`, read through a fresh
+    /// lobby snapshot.
+    async fn lobby_frames(sub: &mut TestWs, code: &str) -> Vec<&'static str> {
+        let frames =
+            tokio::time::timeout(Duration::from_secs(10), frames_until_lobby_snapshot(sub))
+                .await
+                .expect("a lobby snapshot");
+        listing_of(&frames, code)
+    }
+
+    /// A newer `build-b` socket reconnects to the held create's host seat.
+    async fn reconnect_newer_host(url: &str, app: &AppState, held: &HeldCreate) -> TestWs {
+        let mut newer = connect_as(url, "build-b").await;
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            send_draft(&mut newer, &draft_reconnect(&held.code, &held.token)),
+        )
+        .await
+        .expect("the reconnect's reply");
+        assert!(reconnected(reply), "the newer socket takes the host seat");
+        assert_eq!(
+            app.lobby.lock().await.lobby().host_build_commit(&held.code),
+            Some("build-b"),
+            "reach guard: the reconnect stamped its own build"
+        );
+        newer
+    }
+
+    #[tokio::test]
+    async fn a_late_create_listing_leaves_a_replacement_row_unlisted_and_unstamped() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_listing(&url, &app).await;
+        replace_row(&app, &held.code).await;
+        app.lobby
+            .lock()
+            .await
+            .lobby_mut()
+            .mark_host_away(&held.code);
+        release_and_finish(&mut held).await;
+        {
+            let lob = app.lobby.lock().await;
+            assert_eq!(lob.lobby().host_build_commit(&held.code), Some("build-z"));
+            assert!(lob.lobby().public_game(&held.code).is_none());
+        }
+        assert_eq!(
+            lobby_frames(&mut held.sub, &held.code).await,
+            Vec::<&str>::new()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_withdrawn_create_leaves_a_replacement_row_under_its_code() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_listing(&url, &app).await;
+        app.draft_sessions
+            .lock()
+            .await
+            .remove_draft(&held.code)
+            .expect("the created pod");
+        replace_row(&app, &held.code).await;
+        release_and_finish(&mut held).await;
+        {
+            let lob = app.lobby.lock().await;
+            assert_eq!(lob.lobby().host_build_commit(&held.code), Some("build-z"));
+            assert!(lob.lobby().public_game(&held.code).is_some());
+        }
+        assert_eq!(
+            lobby_frames(&mut held.sub, &held.code).await,
+            Vec::<&str>::new()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_newer_host_reconnect_keeps_its_build_over_a_late_create_listing() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_listing(&url, &app).await;
+        let newer = reconnect_newer_host(&url, &app, &held).await;
+        release_and_finish(&mut held).await;
+        {
+            let lob = app.lobby.lock().await;
+            assert_eq!(lob.lobby().host_build_commit(&held.code), Some("build-b"));
+            assert!(lob.lobby().public_game(&held.code).is_some());
+        }
+        // The newer host's listing is withheld from a `build-a` subscriber.
+        assert_eq!(
+            lobby_frames(&mut held.sub, &held.code).await,
+            Vec::<&str>::new()
+        );
+        drop(newer);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_departed_newer_host_stays_unlisted_after_a_late_create_listing() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_listing(&url, &app).await;
+        let newer = reconnect_newer_host(&url, &app, &held).await;
+        drop(newer);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            await_draft_seat_departed(&app, &held.code, 0),
+        )
+        .await
+        .expect("the newer host's departure");
+        assert!(
+            app.lobby
+                .lock()
+                .await
+                .lobby()
+                .public_game(&held.code)
+                .is_none(),
+            "reach guard: the departure delisted the row"
+        );
+        release_and_finish(&mut held).await;
+        {
+            let lob = app.lobby.lock().await;
+            assert_eq!(lob.lobby().host_build_commit(&held.code), Some("build-b"));
+            assert!(lob.lobby().public_game(&held.code).is_none());
+        }
+        assert_eq!(
+            lobby_frames(&mut held.sub, &held.code).await,
+            vec!["Removed"]
+        );
         server.abort();
     }
 

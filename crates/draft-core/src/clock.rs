@@ -160,24 +160,40 @@ pub(crate) fn control(
     }])
 }
 
+/// A session's clock scopes: each seat prompt's clock, then the Review clock.
+/// [`clocks_mut`] walks the same scopes in the same order.
+fn clocks(fifo: &FifoDraftState) -> impl Iterator<Item = &DraftClock> {
+    fifo.seats
+        .iter()
+        .filter_map(|seat| seat.prompt.as_ref()?.clock.as_ref())
+        .chain(fifo.review.iter().map(|review| &review.clock))
+}
+
+/// [`clocks`], borrowed for writing.
+fn clocks_mut(fifo: &mut FifoDraftState) -> impl Iterator<Item = &mut DraftClock> {
+    fifo.seats
+        .iter_mut()
+        .filter_map(|seat| seat.prompt.as_mut()?.clock.as_mut())
+        .chain(fifo.review.iter_mut().map(|review| &mut review.clock))
+}
+
 fn for_each_clock(
     session: &mut DraftSession,
-    mut f: impl FnMut(&mut DraftClock) -> Result<(), DraftError>,
+    f: impl FnMut(&mut DraftClock) -> Result<(), DraftError>,
 ) -> Result<(), DraftError> {
-    let fifo = session.fifo_mut()?;
-    for seat in &mut fifo.seats {
-        if let Some(clock) = seat
-            .prompt
-            .as_mut()
-            .and_then(|prompt| prompt.clock.as_mut())
-        {
-            f(clock)?;
-        }
-    }
-    if let Some(review) = &mut fifo.review {
-        f(&mut review.clock)?;
-    }
-    Ok(())
+    clocks_mut(session.fifo_mut()?).try_for_each(f)
+}
+
+/// The earliest running deadline among a session's clock scopes. `None` for a
+/// session without FIFO state, or with no running clock (paused or untimed).
+/// A host schedules its next `AdvanceClock` by it; the expiry is [`advance`]'s.
+pub fn next_running_deadline(session: &DraftSession) -> Option<u64> {
+    clocks(session.fifo.as_ref()?)
+        .filter_map(|clock| match clock.state {
+            DraftClockState::Running { deadline_ms } => Some(deadline_ms),
+            DraftClockState::Frozen { .. } => None,
+        })
+        .min()
 }
 
 pub(crate) fn advance(session: &mut DraftSession, now: u64) -> Result<Vec<DraftDelta>, DraftError> {
