@@ -458,7 +458,7 @@ and the bootstrap neither socket is known to own the seat. The incumbent stays
 current for the replies it still owes, but new seat-bound submissions (game
 commands, draft picks, decisions and decks) are refused with the typed unsent
 error, and an `Error` it receives answers only its own request (the draft
-adapter settles no command on an `Error`). A close, an
+adapter settles no command on an `Error` the incumbent receives). A close, an
 `Error` refusal, an abort or the bound (`SETUP_CONFIRMATION_TIMEOUT_MS`, counted
 from the write) retires both sockets and settles the incumbent's work (an abort
 while the write receipt is still pending retires the candidate and releases the
@@ -471,7 +471,7 @@ is not waited for past the bound or once the server has answered, on initial
 attachments (the first frame received after the setup write) as on reconnects,
 and a cancellation raised synchronously inside the transport's setup send
 retires the candidate at once (a game reconnect can decode its bootstrap Full inside the interval; a
-draft reattach is answered by plain frames, `DraftMatchStart` and then its own
+draft reattach is answered by a plain frame first, `DraftMatchStart` or its own
 correlated result, so this server never puts a decode there). A draft
 reattach's interval is classified by the results that carry the reattach's own
 request id: its `DraftCommandAccepted` is positive, and its

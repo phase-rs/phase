@@ -13,7 +13,7 @@ import { frameType } from "./stateCodecSocket";
  * interval: a delivered bootstrap confirms, and a terminal `decodeFailure`
  * closes the candidate with its failure recorded for the episode. A game
  * reconnect can decode its bootstrap `Full` inside the interval; a draft
- * reattach is answered by plain frames (`DraftMatchStart`, then its own
+ * reattach is answered by a plain frame first (`DraftMatchStart`, or its own
  * `DraftCommandAccepted` or `DraftCommandRefused`), so with this server no
  * decode is in flight there.
  */

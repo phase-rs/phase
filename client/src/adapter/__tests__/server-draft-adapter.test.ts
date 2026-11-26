@@ -2373,7 +2373,8 @@ describe("draft attachment settlement", () => {
     });
     expect(events).toHaveBeenCalledWith({ type: "draftActionRejected", reason: "Drafts unavailable in LobbyOnly mode" });
     if (kind === "reconnect") {
-      // The refusal answered on the candidate, which may hold the seat: adopted.
+      // Adopted on the handshake helper's stand-in `DraftMatchStart`, before the
+      // refusal; adoption on the refusal itself is the "adopts on the reattach's own refusal" row's.
       expect(established.close).toHaveBeenCalled();
       expect(ws.close).not.toHaveBeenCalled();
     }
