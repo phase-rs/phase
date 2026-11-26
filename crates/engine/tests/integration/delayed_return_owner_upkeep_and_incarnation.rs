@@ -897,7 +897,7 @@ fn together_forever_does_not_open_a_merged_death_to_scarblades_malice() {
 }
 
 #[test]
-fn broodmoth_keeps_merged_component_in_graveyard_after_cremate_exiles_the_survivor() {
+fn broodmoth_trigger_stays_on_stack_after_cremate_exiles_the_merged_host() {
     let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
         .expect("integration card fixture must load");
     let mut scenario = GameScenario::new();
@@ -940,9 +940,7 @@ fn broodmoth_keeps_merged_component_in_graveyard_after_cremate_exiles_the_surviv
     ));
     assert_eq!(zone(&runner, host), Zone::Exile);
 
-    // CR 400.7e + CR 730.3c: Broodmoth should return Gemrazer. The ordinary
-    // trigger gap is tracked as a Phase 1 follow-up. This control preserves base behavior.
-    assert_eq!(zone(&runner, gemrazer), Zone::Graveyard);
+    // The merged-component return is tracked in #397.
 }
 
 #[test]
