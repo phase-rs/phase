@@ -469,7 +469,6 @@ face = [
   { key = "dakkon blackblade avatar", class = "missing_effect", clauses = ["You may play any colored card from your hand as a copy of a basic land card chosen at random that can produce mana of one of the card's colors."] },
   { key = "dakra mystic", class = "wrong_zone", clauses = ["You may put the revealed cards into their owners' graveyards.", "If you don't, each player draws a card."] },
   { key = "dalek drone", class = "wrong_player", clauses = ["That player loses 3 life."] },
-  { key = "dalkovan encampment", class = "wrong_duration", clauses = ["{2}{W}, {T}: Whenever you attack this turn, create two 1/1 red Warrior creature tokens that are tapped and attacking.", "Sacrifice them at the beginning of the next end step."] },
   { key = "dan lewis", class = "missing_effect", clauses = ["and equip {1}."] },
   { key = "dangerous", class = "missing_effect", clauses = ["All creatures able to block target creature this turn do so."] },
   { key = "danitha, benalia's hope", class = "missing_effect", clauses = ["When Danitha enters, you may put an Aura or Equipment card from your hand or graveyard onto the battlefield attached to Danitha."] },

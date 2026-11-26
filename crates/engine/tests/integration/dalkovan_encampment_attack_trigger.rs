@@ -21,6 +21,7 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{DelayedTriggerCondition, Effect, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -433,8 +434,11 @@ fn dalkovan_encampment_installs_a_distinct_token_batch_per_declaration() {
 
     let mut all_warriors = BTreeSet::new();
     let mut expected_sets = Vec::new();
+    let old_turn = runner.state().turn_number;
+    // CR 603.7b + CR 508.4: each declaration this turn creates its own attacking batch.
     for attackers in [&attackers[..], &attackers[..1]] {
         advance_dalkovan_combat(&mut runner, at_declaration);
+        assert_eq!(runner.state().turn_number, old_turn);
         declare(&mut runner, attackers);
         assert!(matches!(
             runner.state().waiting_for,
@@ -504,6 +508,14 @@ fn dalkovan_encampment_installs_a_distinct_token_batch_per_declaration() {
         matches!(r.state().waiting_for, WaitingFor::OrderTriggers { .. })
     });
     assert_eq!(runner.state().phase, Phase::End);
+    assert_eq!(runner.state().turn_number, old_turn);
+    assert_eq!(
+        warrior_ids_on_battlefield(&runner)
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        all_warriors,
+        "both batches must survive until the end-step triggers resolve"
+    );
     let WaitingFor::OrderTriggers { player, triggers } = &runner.state().waiting_for else {
         panic!("the two end-step installers must reach trigger ordering");
     };
@@ -516,7 +528,47 @@ fn dalkovan_encampment_installs_a_distinct_token_batch_per_declaration() {
         .act(GameAction::OrderTriggers { order: vec![0, 1] })
         .expect("order the two end-step triggers");
 
-    let old_turn = runner.state().turn_number;
+    // CR 603.7c + CR 701.21a: resolve both triggers with priority passes alone,
+    // and record exactly which permanents were sacrificed.
+    let mut sacrificed = Vec::new();
+    for _ in 0..16 {
+        assert_eq!(runner.state().phase, Phase::End);
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "end-step sacrifice must resolve without a choice prompt: {:?}",
+            runner.state().waiting_for
+        );
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        let result = runner
+            .act(GameAction::PassPriority)
+            .expect("resolve end-step sacrifice");
+        sacrificed.extend(result.events.into_iter().filter_map(|event| match event {
+            GameEvent::PermanentSacrificed {
+                object_id,
+                player_id,
+            } => {
+                assert_eq!(player_id, P0);
+                Some(object_id)
+            }
+            _ => None,
+        }));
+    }
+    assert!(runner.state().stack.is_empty());
+    sacrificed.sort_unstable();
+    assert_eq!(
+        sacrificed,
+        all_warriors.into_iter().collect::<Vec<_>>(),
+        "the end-step triggers must sacrifice every Warrior from both batches exactly once"
+    );
+    assert!(warrior_ids_on_battlefield(&runner).is_empty());
+    assert_eq!(
+        soldiers(&runner),
+        prior_ids,
+        "unrelated tokens must survive"
+    );
+    // CR 514.2: the attack watcher expires at cleanup.
     advance_dalkovan_combat(&mut runner, |r| {
         r.state().turn_number > old_turn && r.state().active_player == P0 && at_declaration(r)
     });
