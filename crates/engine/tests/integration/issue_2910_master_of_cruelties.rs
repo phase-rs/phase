@@ -19,6 +19,7 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
+use engine::types::ability::AttackRelationReading;
 use engine::types::ability::{Effect, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
@@ -115,7 +116,9 @@ fn master_of_cruelties_unblocked_trigger_names_the_defending_player() {
     };
     assert_eq!(
         *target,
-        TargetFilter::DefendingPlayer,
+        TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::Current
+        },
         "CR 508.5: \"that player\" is the player this creature is attacking"
     );
     assert!(

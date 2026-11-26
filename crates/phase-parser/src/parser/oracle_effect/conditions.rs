@@ -3437,7 +3437,7 @@ fn bind_possessive_it(ctx: &ParseContext, gated_instruction: &str) -> ItsReferen
                 | TargetFilter::PostReplacementDamageSource
                 | TargetFilter::PostReplacementDamageTarget
                 | TargetFilter::PostReplacementDamageTargetOwner
-                | TargetFilter::DefendingPlayer
+                | TargetFilter::DefendingPlayer { .. }
                 | TargetFilter::HasChosenName
                 | TargetFilter::ChosenDamageSource { .. }
                 | TargetFilter::Named { .. }
@@ -7415,7 +7415,10 @@ fn player_attack_endpoint_to_scope(scope: &ControllerRef) -> Option<PlayerScope>
         | ControllerRef::TargetOpponent
         | ControllerRef::ChosenPlayer { .. } => Some(PlayerScope::Target),
         ControllerRef::SourceChosenPlayer => Some(PlayerScope::SourceChosenPlayer),
-        ControllerRef::DefendingPlayer => Some(PlayerScope::DefendingPlayer),
+        // CR 508.5 / CR 508.7a: the attack-relation reading carries over unchanged.
+        ControllerRef::DefendingPlayer { reading } => {
+            Some(PlayerScope::DefendingPlayer { reading: *reading })
+        }
         ControllerRef::ScopedPlayer => Some(PlayerScope::ScopedPlayer),
         // No exact mapping: `Opponent` needs an aggregate the source lacks,
         // the target/event-relative refs name no single endpoint, and
@@ -7458,7 +7461,7 @@ fn ability_condition_from_poisoned_player(player: &PlayerScope) -> Option<Abilit
         PlayerScope::ScopedPlayer => CountScope::ScopedPlayer,
         PlayerScope::AllPlayers { .. } => CountScope::All,
         // Trigger-specific scopes not supported in static abilities
-        PlayerScope::DefendingPlayer
+        PlayerScope::DefendingPlayer { .. }
         | PlayerScope::Target
         | PlayerScope::RecipientController
         | PlayerScope::ParentObjectTarget { .. }
@@ -10960,6 +10963,7 @@ mod tests {
     use crate::parser::oracle_ir::context::ResolvedChainRoot;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::parser::parse_oracle_text;
+    use crate::types::ability::AttackRelationReading;
     use crate::types::ability::{
         AggregateFunction, CardTypeSetSource, CommanderOwnership, CostCategory, PlayerFilter,
         SharedQuality, SharedQualityRelation,
@@ -11810,7 +11814,9 @@ mod tests {
             Some(ControllerRef::TriggeringPlayer),
             Some(ControllerRef::TargetPlayer),
             Some(ControllerRef::ParentTargetController),
-            Some(ControllerRef::DefendingPlayer),
+            Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            }),
             Some(ControllerRef::SourceChosenPlayer),
             None,
         ] {

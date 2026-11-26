@@ -7,6 +7,7 @@ use crate::parser::oracle_ir::doc::{
 };
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, BlockPairDirection, ChooseOneOfKind,
@@ -24620,16 +24621,17 @@ fn parse_mbaku() -> ParsedAbilities {
     )
 }
 
-/// CR 603.4 + CR 508.5 + CR 725.1: M'Baku's second trigger must retain its
-/// intervening-if, bound to the ATTACKED player (CR 508.5), not dropped as a
-/// swallowed clause and not left anchored to the attacking player.
+/// CR 603.4 + CR 508.7a + CR 725.1: M'Baku's second trigger must retain its
+/// intervening-if, bound to the player the attack DECLARED (CR 508.7a: a
+/// reselection does not change it), not dropped as a swallowed clause and not
+/// left anchored to the attacking player.
 ///
 /// Revert-failing three ways: without the parser subject axis the condition is
 /// `None`; without the `PlayerScope` parameterization the bridge cannot carry a
 /// subject at all; without the attack anaphor rebind the condition is
 /// `IsMonarch { ScopedPlayer }`, which resolves to the ATTACKING player.
 #[test]
-fn mbaku_attack_trigger_keeps_monarch_intervening_if_bound_to_defending_player() {
+fn mbaku_attack_trigger_keeps_monarch_intervening_if_bound_to_attacked_player() {
     let result = parse_mbaku();
 
     assert!(
@@ -24647,9 +24649,11 @@ fn mbaku_attack_trigger_keeps_monarch_intervening_if_bound_to_defending_player()
     assert_eq!(
         attack.condition,
         Some(TriggerCondition::IsMonarch {
-            player: PlayerScope::DefendingPlayer,
+            player: PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared
+            },
         }),
-        "intervening-if must bind the attacked player (CR 508.5), got {:?}",
+        "intervening-if must bind the attacked player (CR 508.7a), got {:?}",
         attack.condition
     );
 
@@ -24825,7 +24829,7 @@ fn untargeted_become_monarch_keeps_the_controller_default_cr_109_5() {
 /// with `valid_target: None`.
 #[test]
 fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
-    use crate::parser::oracle_trigger::attack_intervening_if_anaphor_is_defending_player;
+    use crate::parser::oracle_trigger::attack_intervening_if_anaphor_is_attacked_player;
 
     let base = |filter: Option<AttackTargetFilter>| {
         let mut def = TriggerDefinition::new(TriggerMode::Attacks);
@@ -24866,13 +24870,13 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
             | AttackTargetFilter::PlayerAttackedBySourceThisTurn => false,
         };
         assert_eq!(
-            attack_intervening_if_anaphor_is_defending_player(&base(Some(scope.clone()))),
+            attack_intervening_if_anaphor_is_attacked_player(&base(Some(scope.clone()))),
             expected_rebind,
             "{scope:?} rebind classification must be exhaustive"
         );
     }
     // No attack-target clause at all (Goblin Guide / Ulamog shape).
-    assert!(!attack_intervening_if_anaphor_is_defending_player(&base(
+    assert!(!attack_intervening_if_anaphor_is_attacked_player(&base(
         None
     )));
 
@@ -24886,12 +24890,12 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
     let mut monarch_production_shape = base(Some(AttackTargetFilter::Monarch));
     monarch_production_shape.valid_target = None;
     assert!(
-        attack_intervening_if_anaphor_is_defending_player(&monarch_production_shape),
+        attack_intervening_if_anaphor_is_attacked_player(&monarch_production_shape),
         "the monarch designation IS the attacked-player noun; requiring \
          `valid_target` makes this arm unreachable: {monarch_production_shape:?}"
     );
     // …and it still rebinds in the redundant belt-and-braces shape.
-    assert!(attack_intervening_if_anaphor_is_defending_player(&base(
+    assert!(attack_intervening_if_anaphor_is_attacked_player(&base(
         Some(AttackTargetFilter::Monarch)
     )));
 
@@ -24906,7 +24910,7 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
         let mut no_target = base(Some(scope.clone()));
         no_target.valid_target = None;
         assert!(
-            !attack_intervening_if_anaphor_is_defending_player(&no_target),
+            !attack_intervening_if_anaphor_is_attacked_player(&no_target),
             "{scope:?} without a named attacked player must not rebind"
         );
     }
@@ -24921,7 +24925,7 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
         properties: vec![],
     }));
     assert!(
-        attack_intervening_if_anaphor_is_defending_player(&object_source),
+        attack_intervening_if_anaphor_is_attacked_player(&object_source),
         "an object-shaped valid_source must still rebind"
     );
 
@@ -24929,7 +24933,7 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
     // candidate antecedent, so the rebind must not fire (Suppressor Skyguard).
     let mut player_source = base(Some(AttackTargetFilter::Player));
     player_source.valid_source = Some(TargetFilter::Player);
-    assert!(!attack_intervening_if_anaphor_is_defending_player(
+    assert!(!attack_intervening_if_anaphor_is_attacked_player(
         &player_source
     ));
 
@@ -24937,7 +24941,7 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
     // antecedent (Ghirapur Orrery).
     let mut phase_mode = base(Some(AttackTargetFilter::Player));
     phase_mode.mode = TriggerMode::Phase;
-    assert!(!attack_intervening_if_anaphor_is_defending_player(
+    assert!(!attack_intervening_if_anaphor_is_attacked_player(
         &phase_mode
     ));
 }
@@ -24948,7 +24952,7 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
 /// cannot make the negative pass vacuously.
 #[test]
 fn attack_anaphor_rebind_leaves_sibling_trigger_shapes_untouched() {
-    use crate::parser::oracle_trigger::attack_intervening_if_anaphor_is_defending_player;
+    use crate::parser::oracle_trigger::attack_intervening_if_anaphor_is_attacked_player;
 
     // "Whenever a PLAYER attacks you" — player-scope `valid_source`, so the
     // attacking player is also a candidate antecedent.
@@ -24971,7 +24975,7 @@ fn attack_anaphor_rebind_leaves_sibling_trigger_shapes_untouched() {
         "Suppressor Skyguard must keep its intervening-if"
     );
     assert!(
-        !attack_intervening_if_anaphor_is_defending_player(skyguard_trigger),
+        !attack_intervening_if_anaphor_is_attacked_player(skyguard_trigger),
         "an attacking-PLAYER clause supplies its own antecedent; the rebind must \
          not fire: {skyguard_trigger:?}"
     );
@@ -24994,7 +24998,7 @@ fn attack_anaphor_rebind_leaves_sibling_trigger_shapes_untouched() {
         "Ghirapur Orrery must keep its intervening-if"
     );
     assert!(
-        !attack_intervening_if_anaphor_is_defending_player(orrery_trigger),
+        !attack_intervening_if_anaphor_is_attacked_player(orrery_trigger),
         "a non-attack mode must not reach the attack anaphor rebind: {orrery_trigger:?}"
     );
 
@@ -25018,7 +25022,7 @@ fn attack_anaphor_rebind_leaves_sibling_trigger_shapes_untouched() {
         "Aerial Surveyor must keep its intervening-if"
     );
     assert!(
-        !attack_intervening_if_anaphor_is_defending_player(surveyor_trigger),
+        !attack_intervening_if_anaphor_is_attacked_player(surveyor_trigger),
         "Aerial Surveyor names no attacked player and must not be rebound: \
          {surveyor_trigger:?}"
     );
@@ -32720,17 +32724,42 @@ fn namor_attack_trigger(parsed: &ParsedAbilities) -> &TriggerDefinition {
         .expect("Namor must have an Attacks trigger")
 }
 
-fn target_filter_has_defending_player_anaphor(filter: &TargetFilter) -> bool {
+/// Whether `filter` carries an `Attacking { defender }` property whose defender
+/// satisfies `accept`.
+fn target_filter_has_attacking_defender(
+    filter: &TargetFilter,
+    accept: &dyn Fn(&ControllerRef) -> bool,
+) -> bool {
     match filter {
-        TargetFilter::Typed(typed) => typed.properties.contains(&FilterProp::Attacking {
-            defender: Some(ControllerRef::DefendingPlayer),
+        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| {
+            matches!(prop, FilterProp::Attacking { defender: Some(defender) } if accept(defender))
         }),
-        TargetFilter::Not { filter } => target_filter_has_defending_player_anaphor(filter),
+        TargetFilter::Not { filter } => target_filter_has_attacking_defender(filter, accept),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter()
-            .any(target_filter_has_defending_player_anaphor),
+            .any(|filter| target_filter_has_attacking_defender(filter, accept)),
         _ => false,
     }
+}
+
+/// The "attacking that player" anaphor in either form: the context-free
+/// `DefendingPlayer` placeholder, or the `DefendingPlayer { reading: AsDeclared }` an attack-declaration
+/// head rebinds it to (CR 508.7a). Matching both keeps the exclusion negatives
+/// discriminating for rebound and non-rebound heads alike.
+fn target_filter_has_defending_player_anaphor(filter: &TargetFilter) -> bool {
+    target_filter_has_attacking_defender(filter, &|defender| {
+        matches!(defender, ControllerRef::DefendingPlayer { .. })
+    })
+}
+
+/// The anaphor as rebound by an attack-declaration head (CR 508.7a), exactly.
+fn target_filter_has_attacked_player_anaphor(filter: &TargetFilter) -> bool {
+    target_filter_has_attacking_defender(filter, &|defender| {
+        *defender
+            == ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            }
+    })
 }
 
 /// V2 — Namor's effect body must scope the pump to the co-attackers on the
@@ -32743,7 +32772,7 @@ fn target_filter_has_defending_player_anaphor(filter: &TargetFilter) -> bool {
 /// `Effect::Pump { target: TargetFilter::Any }` sentinel — a board-wide pump
 /// that hits both players' permanents, lands included.
 #[test]
-fn namor_pump_scopes_to_other_attackers_of_the_defending_player() {
+fn namor_pump_scopes_to_other_attackers_of_the_attacked_player() {
     let result = parse_namor();
 
     // Positive reach-guard: the card parses with zero Unimplemented, so the
@@ -32786,9 +32815,11 @@ fn namor_pump_scopes_to_other_attackers_of_the_defending_player() {
     );
     assert!(
         typed.properties.contains(&FilterProp::Attacking {
-            defender: Some(ControllerRef::DefendingPlayer),
+            defender: Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared
+            }),
         }),
-        "pump filter must carry the CR 508.5 defending-player anaphor, got {:?}",
+        "pump filter must carry the CR 508.7a attacked-player anaphor, got {:?}",
         typed.properties
     );
     assert!(
@@ -32800,10 +32831,10 @@ fn namor_pump_scopes_to_other_attackers_of_the_defending_player() {
 
 /// V10 — the anaphor covers the CLASS, not just Namor: both printed cards that
 /// place "attacking that player" in a genuine TARGET filter must now carry the
-/// CR 508.5 property. Echoing Assault additionally exercises an EXCLUDED
-/// position in its second sentence, so one card proves both halves.
+/// CR 508.7a attacked-player property. Echoing Assault additionally exercises
+/// an EXCLUDED position in its second sentence, so one card proves both halves.
 #[test]
-fn attacking_that_player_target_filters_carry_the_defending_player_anaphor() {
+fn attacking_that_player_target_filters_carry_the_attacked_player_anaphor() {
     // Verbatim Oracle text (MTGJSON); a paraphrase can take a different parser
     // branch and go green while the real card stays broken.
     let ordruun = parse(
@@ -32818,7 +32849,7 @@ fn attacking_that_player_target_filters_carry_the_defending_player_anaphor() {
             .triggers
             .iter()
             .filter_map(|t| t.execute.as_deref())
-            .any(definition_chain_has_defending_player_anaphor),
+            .any(definition_chain_has_attacked_player_anaphor),
         "Ordruun Mentor's target filter must scope to the attacked player: {ordruun:#?}"
     );
 
@@ -32834,23 +32865,32 @@ fn attacking_that_player_target_filters_carry_the_defending_player_anaphor() {
             .triggers
             .iter()
             .filter_map(|t| t.execute.as_deref())
-            .any(definition_chain_has_defending_player_anaphor),
+            .any(definition_chain_has_attacked_player_anaphor),
         "Echoing Assault's target filter must scope to the attacked player: {echoing:#?}"
     );
 }
 
-fn definition_chain_has_defending_player_anaphor(def: &AbilityDefinition) -> bool {
-    def.effect
-        .target_filter()
-        .is_some_and(target_filter_has_defending_player_anaphor)
+fn definition_chain_has_filter(
+    def: &AbilityDefinition,
+    has: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    def.effect.target_filter().is_some_and(has)
         || def
             .sub_ability
             .as_deref()
-            .is_some_and(definition_chain_has_defending_player_anaphor)
+            .is_some_and(|sub| definition_chain_has_filter(sub, has))
         || def
             .else_ability
             .as_deref()
-            .is_some_and(definition_chain_has_defending_player_anaphor)
+            .is_some_and(|branch| definition_chain_has_filter(branch, has))
+}
+
+fn definition_chain_has_defending_player_anaphor(def: &AbilityDefinition) -> bool {
+    definition_chain_has_filter(def, &target_filter_has_defending_player_anaphor)
+}
+
+fn definition_chain_has_attacked_player_anaphor(def: &AbilityDefinition) -> bool {
+    definition_chain_has_filter(def, &target_filter_has_attacked_player_anaphor)
 }
 
 /// V9 — the anaphor must not steal the token-spec / battlefield-entry /

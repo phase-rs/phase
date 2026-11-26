@@ -94,6 +94,8 @@
 
 use crate::analysis::resource::{HistoryMember, HistoryReads};
 use crate::game::filter::{shared_quality_characteristic_reads, CharacteristicKinds};
+#[cfg(test)]
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AttachCardinality, AttachSelection,
     AttachmentReferent, AttackSubject, AttackersDeclaredCountSubject, CardTypeSetSource,
@@ -2014,6 +2016,11 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             acc
         }
         Effect::BecomeBlocked { target } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            acc
+        }
+        Effect::ReselectAttackTarget { target } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
@@ -5145,7 +5152,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             history: HistoryReads::NONE,
             that_player: false,
         },
-        TargetFilter::DefendingPlayer => Axes::NONE,
+        TargetFilter::DefendingPlayer { .. } => Axes::NONE,
         // CR 506.3: reads the bound attack event (event) and live combat and
         // battlefield state (a planeswalker's loyalty is changed by the damage it
         // receives, so a sibling trigger can interact: sibling). Not DefendingPlayer's NONE.
@@ -7070,7 +7077,7 @@ fn scan_player_scope(x: &PlayerScope) -> Axes<'_> {
             acc
         }
         PlayerScope::RecipientController => Axes::NONE,
-        PlayerScope::DefendingPlayer => Axes::NONE,
+        PlayerScope::DefendingPlayer { .. } => Axes::NONE,
         PlayerScope::ParentObjectTarget { .. } => Axes {
             event: true,
             sibling: SiblingReads::None,
@@ -7157,7 +7164,7 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes<'_> {
             history: HistoryReads::NONE,
             that_player: false,
         },
-        ControllerRef::DefendingPlayer => Axes::NONE,
+        ControllerRef::DefendingPlayer { .. } => Axes::NONE,
         ControllerRef::ChosenPlayer { index: _ } => Axes::NONE,
         ControllerRef::SourceChosenPlayer => Axes::NONE,
         ControllerRef::TriggeringPlayer => Axes {
@@ -7502,6 +7509,7 @@ pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
@@ -9801,6 +9809,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::BecomeUnprepared { scope: EffectScope::Single, .. }
         | Effect::BecomeSaddled { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
         | Effect::CreateBoon { .. }
@@ -10232,6 +10241,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         }
         | Effect::BecomeSaddled { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
         | Effect::CreateBoon { .. }
@@ -11502,7 +11512,9 @@ mod tests {
         ] {
             let unnamed = scan_effect(&build(None), ScanMode::LoopFirewall).detached();
             let defending = scan_effect(
-                &build(Some(ControllerRef::DefendingPlayer)),
+                &build(Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                })),
                 ScanMode::LoopFirewall,
             )
             .detached();
@@ -15730,7 +15742,9 @@ mod attacked_referent_scan_tests {
                 "{mode:?}"
             );
             let none = scan_target_filter(
-                &TargetFilter::DefendingPlayer,
+                &TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
                 FilterReadContext::SnapshotOrEvent,
                 mode,
             );
@@ -15756,7 +15770,12 @@ mod poison_condition_scan_tests {
         for player in [
             PlayerScope::Controller,
             PlayerScope::ScopedPlayer,
-            PlayerScope::DefendingPlayer,
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
             PlayerScope::Opponent {
                 aggregate: AggregateFunction::Max,
             },

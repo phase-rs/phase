@@ -1,3 +1,4 @@
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     ChoiceType, Comparator, ControllerRef, Effect, EffectError, EffectKind, GuessSubject,
     ObjectScope, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
@@ -158,9 +159,9 @@ fn resolve_guesser(
     ability: &ResolvedAbility,
 ) -> Option<PlayerId> {
     match guesser {
-        ControllerRef::DefendingPlayer => {
-            crate::game::combat::defending_player_for_attacker(state, ability.source_id)
-        }
+        ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        } => crate::game::combat::defending_player_for_attacker(state, ability.source_id),
         ControllerRef::ChosenPlayer { index } => {
             ability.chosen_players.get(index as usize).copied()
         }

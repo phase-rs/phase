@@ -19,6 +19,7 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::speed::effective_speed;
 use crate::game::targeting::StackTriggerContext;
 use crate::game::targeting::TriggeringSpell;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     filter_recipient_read, quantity_ref_object_scope_read, AbilityCondition, AbilityCost,
     AbilityDefinition, AggregateFunction, BasicLandType, CardTypeSetSource, CastManaObjectScope,
@@ -998,11 +999,21 @@ fn source_controller_for_context(state: &GameState, ctx: &QuantityContext) -> Op
 /// empty (an Equipment/Aura source is never in `combat.attackers`), silently
 /// making every comparison against it false; the shared authority supplies the
 /// event and live-combat fallbacks the other doors already had.
+///
+/// CR 508.7a: `reading` selects the attack relation; the
+/// [`AttackRelationReading::AsDeclared`] reading names the player the
+/// triggering attack declared, with the same arguments.
 fn source_defending_player_for_context(
     state: &GameState,
     ctx: &QuantityContext,
+    reading: AttackRelationReading,
 ) -> Option<PlayerId> {
-    crate::game::combat::defending_player_cr508_5(state, ctx.source, ctx.trigger_source.as_ref())
+    crate::game::combat::attack_defender_cr508(
+        state,
+        ctx.source,
+        ctx.trigger_source.as_ref(),
+        reading,
+    )
 }
 
 /// Drive the production `ControllerRef::DefendingPlayer` quantity-context door
@@ -1022,6 +1033,7 @@ pub(crate) fn source_defending_player_for_context_for_test(
             trigger_source: trigger_source.cloned(),
             ..QuantityContext::new(source)
         },
+        AttackRelationReading::Current,
     )
 }
 
@@ -1977,7 +1989,7 @@ pub(crate) fn player_scope_is_source_context_previewable(scope: &PlayerScope) ->
     match scope {
         PlayerScope::Controller
         | PlayerScope::Opponent { .. }
-        | PlayerScope::DefendingPlayer
+        | PlayerScope::DefendingPlayer { .. }
         | PlayerScope::SourceChosenPlayer => true,
         PlayerScope::AllPlayers { exclude, .. } => exclude
             .as_deref()
@@ -3707,8 +3719,9 @@ pub(crate) fn resolve_quantity_for_trigger_check(
 /// the identical `QuantityContext` from the same four inputs and delegates to
 /// `resolve_single_player_scope`, the existing single authority for
 /// `PlayerScope` → `PlayerId`. No per-scope logic is re-implemented here, and
-/// `PlayerScope::DefendingPlayer` therefore reaches
-/// `combat::defending_player_cr508_5` on the same path as every other door.
+/// `PlayerScope::DefendingPlayer { reading }` therefore reaches
+/// `combat::attack_defender_cr508` under its reading on the same path as every
+/// other door.
 ///
 /// Trigger conditions are checked before targets exist at fire time (CR 603.4),
 /// so `targets` is empty and `ability` is `None`; scopes that need either
@@ -3736,7 +3749,7 @@ pub(crate) fn resolve_quantity_for_trigger_check(
 /// intervening-if about the ABILITY CONTROLLER — silently the wrong player, and
 /// with no gate rejection to catch it. This is reachable for any
 /// `ScopedPlayer` anchor the parser's attack-trigger rebind does not convert to
-/// [`PlayerScope::DefendingPlayer`] (a non-`Attacks` mode, or an `Attacks`
+/// [`PlayerScope::DefendingPlayer`] (`AsDeclared` reading) (a non-`Attacks` mode, or an `Attacks`
 /// trigger whose attacked noun is not a player).
 pub(crate) fn resolve_player_scope_for_trigger_check(
     state: &GameState,
@@ -3791,7 +3804,7 @@ std::thread_local! {
     /// the same precedence applied to `scoped_player` just above it).
     /// Consumed by `ObjectCount` evaluation (see `resolve_ref`) to implement
     /// `FilterProp::OtherThanTriggerObject` semantics, and by
-    /// `combat::defending_player_cr508_5` for the CR 508.5 anchor binding.
+    /// `combat::attack_defender_cr508` for the CR 508.5 anchor binding.
     static DETECTION_TRIGGER_EVENT: std::cell::RefCell<Option<crate::types::events::GameEvent>>
         = const { std::cell::RefCell::new(None) };
 }
@@ -7504,8 +7517,10 @@ fn resolve_ref(
                         Some(ControllerRef::ParentTargetOwner) => ability
                             .and_then(|a| crate::game::ability_utils::parent_target_owner(a, state))
                             .is_some_and(|pid| pid == snap.controller),
-                        Some(ControllerRef::DefendingPlayer) => {
-                            source_defending_player_for_context(state, &ctx)
+                        // CR 508.5 / CR 508.7a: the player the source's attack
+                        // relates to, under the leaf's reading.
+                        Some(ControllerRef::DefendingPlayer { reading }) => {
+                            source_defending_player_for_context(state, &ctx, *reading)
                                 .is_some_and(|pid| pid == snap.controller)
                         }
                         // CR 613.1: Attachment controlled by the source's chosen player.
@@ -7597,8 +7612,11 @@ fn damage_source_controller_matches(
         ControllerRef::ParentTargetOwner => ability
             .and_then(|ability| crate::game::ability_utils::parent_target_owner(ability, state))
             .is_some_and(|player| actual == player),
-        ControllerRef::DefendingPlayer => {
-            source_defending_player_for_context(state, &ctx).is_some_and(|player| actual == player)
+        // CR 508.5 / CR 508.7a: the player the source's attack relates to,
+        // under the leaf's reading.
+        ControllerRef::DefendingPlayer { reading } => {
+            source_defending_player_for_context(state, &ctx, *reading)
+                .is_some_and(|player| actual == player)
         }
         // CR 613.1: Damage source controlled by the source's chosen player.
         ControllerRef::SourceChosenPlayer => {
@@ -10055,7 +10073,11 @@ pub(crate) fn resolve_single_player_scope(
                 .and_then(|id| state.objects.get(&id).map(|object| object.controller))
                 .or_else(|| source_controller_for_context(state, &ctx))
         }
-        PlayerScope::DefendingPlayer => defending_player_for_quantity_context(state, ctx),
+        // CR 508.5 / CR 508.7a: the player the source's attack relates to,
+        // under the leaf's reading.
+        PlayerScope::DefendingPlayer { reading } => {
+            defending_player_for_quantity_context(state, ctx, *reading)
+        }
         // CR 109.4: controller of the parent object target.
         PlayerScope::ParentObjectTarget {
             possession: PossessionAxis::Controller,
@@ -10166,9 +10188,13 @@ where
                 .and_then(|pid| state.players.iter().find(|p| p.id == pid))
                 .map_or(0, &mut extract)
         }
-        PlayerScope::DefendingPlayer => defending_player_for_quantity_context(state, ctx)
-            .and_then(|pid| state.players.iter().find(|p| p.id == pid))
-            .map_or(0, &mut extract),
+        // CR 508.5 / CR 508.7a: the player the source's attack relates to,
+        // under the leaf's reading.
+        PlayerScope::DefendingPlayer { reading } => {
+            defending_player_for_quantity_context(state, ctx, *reading)
+                .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+                .map_or(0, &mut extract)
+        }
         // CR 109.4 + CR 608.2c: controller of the parent object target.
         PlayerScope::ParentObjectTarget {
             possession: PossessionAxis::Controller,
@@ -10288,7 +10314,7 @@ where
         | PlayerScope::ScopedPlayer
         | PlayerScope::Target
         | PlayerScope::RecipientController
-        | PlayerScope::DefendingPlayer
+        | PlayerScope::DefendingPlayer { .. }
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
@@ -10413,17 +10439,25 @@ where
     }
 }
 
-/// CR 508.5: `PlayerScope::DefendingPlayer` door.
+/// CR 508.5 / CR 508.7a: `PlayerScope::DefendingPlayer { reading }` door.
 ///
-/// The single authority `combat::defending_player_cr508_5` owns BOTH the
-/// binding rule and the precedence. Do NOT read `state.current_trigger_event`,
-/// the detection TLS, or `combat_status.defending_player` here — one anaphor
-/// must not be able to bind two different players across doors.
+/// The single authority `combat::attack_defender_cr508` owns BOTH the
+/// binding rule and the precedence, for either reading (the `AsDeclared`
+/// reading is unchanged by a reselection). Do NOT read
+/// `state.current_trigger_event`, the detection TLS, or
+/// `combat_status.defending_player` here — one anaphor must not be able to
+/// bind two different players across doors.
 fn defending_player_for_quantity_context(
     state: &GameState,
     ctx: QuantityContext,
+    reading: AttackRelationReading,
 ) -> Option<PlayerId> {
-    crate::game::combat::defending_player_cr508_5(state, ctx.source, ctx.trigger_source.as_ref())
+    crate::game::combat::attack_defender_cr508(
+        state,
+        ctx.source,
+        ctx.trigger_source.as_ref(),
+        reading,
+    )
 }
 
 /// Drive the production `PlayerScope::DefendingPlayer` door from the cross-door
@@ -10441,6 +10475,7 @@ pub(crate) fn defending_player_for_quantity_context_for_test(
             trigger_source: trigger_source.cloned(),
             ..QuantityContext::new(source)
         },
+        AttackRelationReading::Current,
     )
 }
 
@@ -10885,7 +10920,9 @@ pub(crate) fn player_count_matching_ids(
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(
                             state,
-                            &TargetFilter::DefendingPlayer,
+                            &TargetFilter::DefendingPlayer {
+                                reading: AttackRelationReading::Current,
+                            },
                             source_id,
                             state.current_trigger_event.as_ref(),
                         )
@@ -16628,9 +16665,11 @@ mod tests {
 
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount {
-                filter: TargetFilter::Typed(
-                    TypedFilter::land().controller(ControllerRef::DefendingPlayer),
-                ),
+                filter: TargetFilter::Typed(TypedFilter::land().controller(
+                    ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current,
+                    },
+                )),
             },
         };
 

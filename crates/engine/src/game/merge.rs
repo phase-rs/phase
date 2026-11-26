@@ -1421,6 +1421,7 @@ fn is_census_publisher(effect: &Effect) -> bool {
         | Effect::SetDayNight { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::Conjure { .. }
         | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }

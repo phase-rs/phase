@@ -54,6 +54,7 @@ use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_may_look_at_face_down_filter,
     parse_quoted_ability_modifications,
 };
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     is_oneshot_target_source_prevent_shape, AbilityCondition, AbilityCost, AbilityDefinition,
     AbilityKind, AttachCardinality, AttachSelection, AttachmentReferent, BounceSelection,
@@ -3064,7 +3065,7 @@ pub(crate) fn return_all_to_zone_effect(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -5253,7 +5254,9 @@ fn parse_hand_possessive_target(input: &str) -> nom::IResult<&str, TargetFilter,
         value(TargetFilter::TriggeringPlayer, tag("that player's hand")),
         value(TargetFilter::TriggeringPlayer, tag("their hand")),
         value(
-            TargetFilter::DefendingPlayer,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             tag("defending player's hand"),
         ),
     ))
@@ -14701,6 +14704,45 @@ fn parse_assimilate_target(lower: &str, ctx: &mut ParseContext) -> Option<Target
     (target.extract_in_zone() == Some(Zone::Graveyard)).then_some(target)
 }
 
+/// CR 508.7 + CR 115.1: recognize "reselect which player or permanent
+/// <target phrase> is attacking" and return the phrase's target filter.
+///
+/// Anchored on `tag("reselect which ")` + `tag("player or permanent ")`, with
+/// the subject running up to the terminal " is attacking" and an optional
+/// period before end of input. The target phrase itself is delegated to
+/// `parse_target_with_ctx`, the shared target-phrase authority.
+///
+/// Fails closed (returns `None`, so the caller falls through to the imperative
+/// `Effect::Unimplemented` fallback and coverage stays red) when the subject is
+/// not an announced target, when the target phrase leaves an unconsumed
+/// remainder, or when it does not resolve to a typed filter. This keeps the
+/// per-attacker "for each attacking creature, you may reselect … that
+/// creature" (Windshaper Planetar, Tuvok) and the player-only "reselect which
+/// player ~ is attacking" (Capricopian) shapes reporting as unsupported.
+fn parse_reselect_attack_target(lower: &str, ctx: &mut ParseContext) -> Option<TargetFilter> {
+    let (rest, _) = (
+        tag::<_, _, OracleError<'_>>("reselect which "),
+        tag("player or permanent "),
+    )
+        .parse(lower.trim())
+        .ok()?;
+    let (_, (subject, _, _, _)) = (
+        take_until::<_, _, OracleError<'_>>(" is attacking"),
+        tag(" is attacking"),
+        opt(tag(".")),
+        eof,
+    )
+        .parse(rest)
+        .ok()?;
+    // Only an announced target is claimed; "that creature" (Windshaper Planetar,
+    // Tuvok) and "~" (Capricopian) stay red.
+    peek(tag::<_, _, OracleError<'_>>("target "))
+        .parse(subject)
+        .ok()?;
+    let (target, remainder) = parse_target_with_ctx(subject, ctx);
+    (remainder.trim().is_empty() && !matches!(target, TargetFilter::Any)).then_some(target)
+}
+
 /// CR 701.71a: recognize the `empower Jace N` keyword action.
 ///
 /// Anchored on `tag("empower jace ")` — the trailing space is the word
@@ -15119,7 +15161,7 @@ fn is_player_axis_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         // CR 508.1b + CR 601.2c: "the attacked player or planeswalker" can name
         // a player, so it is not a plain object host filter — fail closed here
         // rather than admitting it through the object default.
@@ -15518,6 +15560,13 @@ pub(super) fn parse_imperative_family_ast(
     // forbids.
     if let Some(target) = parse_assimilate_target(lower, ctx) {
         return Some(ImperativeFamilyAst::Assimilate { target });
+    }
+
+    // CR 508.7: "reselect which player or permanent <target> is attacking".
+    // Anchored nom production beside `assimilate` for the same family (B)
+    // reason: no new string-literal `match first_word` arm.
+    if let Some(target) = parse_reselect_attack_target(lower, ctx) {
+        return Some(ImperativeFamilyAst::ReselectAttackTarget(target));
     }
 
     // CR 701.71a: `empower Jace N` is a standalone keyword action. Anchored nom
@@ -19355,6 +19404,10 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         },
         // CR 506.4: Remove from combat.
         ImperativeFamilyAst::RemoveFromCombat(target) => Effect::RemoveFromCombat { target },
+        // CR 508.7: reselect what an attacking creature is attacking.
+        ImperativeFamilyAst::ReselectAttackTarget(target) => {
+            Effect::ReselectAttackTarget { target }
+        }
         // Shuffle and Support are handled in `lower_imperative_family_ast` directly.
         ImperativeFamilyAst::Shuffle(_) | ImperativeFamilyAst::Support { .. } => unreachable!(),
     }
@@ -32611,7 +32664,9 @@ mod tests {
             };
             assert!(
                 target.properties.contains(&FilterProp::Owned {
-                    controller: ControllerRef::DefendingPlayer,
+                    controller: ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    },
                 }),
                 "{name}: target must be owned by the defending player: {target:?}"
             );
@@ -34438,7 +34493,12 @@ mod loyalty_symbol_effect_tests {
             TargetFilter::EventTargetController,
             TargetFilter::ParentTargetController,
             TargetFilter::ParentTargetOwner,
-            TargetFilter::DefendingPlayer,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
             TargetFilter::Owner,
             TargetFilter::AllPlayers,
             TargetFilter::Not {

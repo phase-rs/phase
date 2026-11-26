@@ -2729,6 +2729,7 @@ pub(super) fn handle_resolution_choice(
                 player,
                 object_id,
                 valid_targets,
+                purpose,
             },
             GameAction::ChooseEntryAttackTarget { target },
         ) => {
@@ -2741,17 +2742,56 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             state.waiting_for = WaitingFor::Priority { player };
-            if let Some(defending_player) =
-                crate::game::combat::entry_attack_target_defender(state, player, target)
-            {
-                crate::game::combat::enter_attacking_at_target(
-                    state,
-                    object_id,
-                    defending_player,
-                    target,
-                );
+            let reprompted = match purpose {
+                crate::types::game_state::AttackTargetChoicePurpose::EnterAttacking => {
+                    if let Some(defending_player) =
+                        crate::game::combat::entry_attack_target_defender(state, player, target)
+                    {
+                        crate::game::combat::enter_attacking_at_target(
+                            state,
+                            object_id,
+                            defending_player,
+                            target,
+                        );
+                    }
+                    false
+                }
+                // CR 508.7: the chooser reselects; legality is the attacking
+                // creature's controller's (CR 508.7c), re-validated by the writer.
+                crate::types::game_state::AttackTargetChoicePurpose::Reselect => {
+                    match crate::game::combat::reselect_attack_target(state, object_id, target) {
+                        crate::game::combat::ReselectOutcome::Reselected
+                        | crate::game::combat::ReselectOutcome::Unchanged => false,
+                        // CR 608.2d + CR 508.7c: the offered destination stopped
+                        // being legal while the choice was pending (its player left
+                        // the game, CR 104.3a / CR 800.4a, or the permanent left or
+                        // changed). The player can't choose an illegal option, so
+                        // the choice is made again among the destinations that are
+                        // still legal: none leaves the creature as it is, one is
+                        // forced, several are offered again.
+                        crate::game::combat::ReselectOutcome::Refused => {
+                            debug_assert!(
+                                !crate::game::combat::valid_reselect_attack_targets(
+                                    state, object_id
+                                )
+                                .contains(&target),
+                                "the writer refuses only a destination that is no longer listed"
+                            );
+                            crate::game::combat::choose_reselected_attack_target_or_apply(
+                                state, object_id, player,
+                            )
+                            .is_some()
+                        }
+                    }
+                }
+            };
+            if reprompted {
+                // The continuation stays pending until the re-offered choice is
+                // settled (the `MeldPairChoice` precedent above).
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            } else {
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
             }
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
             WaitingFor::ScryChoice { player, cards },

@@ -2793,6 +2793,14 @@ export type CastOpponentChoicePurpose =
   | { type: "Gift" }
   | { type: "EffectCost"; cost: SerializedAbilityCost };
 
+/**
+ * CR 508.4 + CR 508.7: why `EntryAttackTargetChoice` asks for a destination —
+ * engine-provided purpose; absent = EnterAttacking (serde default).
+ */
+export type AttackTargetChoicePurpose =
+  | { type: "EnterAttacking" }
+  | { type: "Reselect" };
+
 export type ResolutionOptionalPaymentChoice =
   | { type: "Decline" }
   | { type: "Pay"; data: { index: number } };
@@ -3101,7 +3109,7 @@ export type WaitingFor =
   | { type: "ResolveAllReady"; data: { epoch: number } }
   | { type: "MeldPairChoice"; data: { player: PlayerId; choices: MeldSelection[] } }
   | { type: "MeldAttackTargetChoice"; data: { player: PlayerId; context: MeldSelection; valid_targets: AttackTarget[] } }
-  | { type: "EntryAttackTargetChoice"; data: { player: PlayerId; object_id: ObjectId; valid_targets: AttackTarget[] } }
+  | { type: "EntryAttackTargetChoice"; data: { player: PlayerId; object_id: ObjectId; valid_targets: AttackTarget[]; purpose?: AttackTargetChoicePurpose } }
   | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: SerializedAbilityCost[]; pending_cast: PendingCast } }
   | {
       type: "MulliganDecision";

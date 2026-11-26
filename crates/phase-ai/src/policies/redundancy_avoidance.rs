@@ -654,6 +654,9 @@ fn redundancy_delta(
         // CR 509.1h: "becomes blocked" has no static redundancy signal (the
         // target's blocked state is combat-scoped) — leave it to the resolver.
         | Effect::BecomeBlocked { .. }
+        // CR 508.7: a reselection's destinations depend on live combat; no
+        // static redundancy signal — leave it to the resolver.
+        | Effect::ReselectAttackTarget { .. }
         // CR 702.95c-d: PairWith mutates the source/target pair relationship;
         // redundancy depends on trigger timing and revalidation, so this policy
         // leaves it to the resolver.

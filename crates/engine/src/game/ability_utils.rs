@@ -1,4 +1,5 @@
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     attach_attachment_claims_announcement_slot, attach_host_filter_needs_target_slot,
     become_copy_recipient_slot_filter, damage_replacement_source_slot_filter,
@@ -6530,7 +6531,7 @@ fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
 }
 
 /// CR 508.5 + CR 508.5a + CR 603.3d: a filter whose evaluation asks
-/// `combat::defending_player_cr508_5` for the attacked-player anaphor, or whose
+/// `combat::attack_defender_cr508` for the attacked-player anaphor, or whose
 /// `FilterProp::OtherThanTriggerObject` compares against the event subject,
 /// needs the resolving trigger context. The former needs the ability's
 /// `trigger_source`, because that authority's binding rule is
@@ -6611,10 +6612,10 @@ fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
     fn prop_needs(prop: &FilterProp) -> bool {
         match prop {
             FilterProp::Attacking {
-                defender: Some(ControllerRef::DefendingPlayer),
+                defender: Some(ControllerRef::DefendingPlayer { .. }),
             }
             | FilterProp::AttackedThisTurn {
-                defender: Some(ControllerRef::DefendingPlayer),
+                defender: Some(ControllerRef::DefendingPlayer { .. }),
             }
             // CR 115.1d + CR 400.7: "other" in a triggered target clause is
             // relative to the event object, so enumeration must carry the
@@ -6626,10 +6627,19 @@ fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
         }
     }
 
-    crate::types::ability::filter_contains(
-        filter,
-        &|inner| matches!(inner, TargetFilter::Typed(typed) if typed.properties.iter().any(prop_needs)),
-    )
+    // CR 508.7a: unlike `DefendingPlayer` (deliberately excluded above), an
+    // `DefendingPlayer { reading: AsDeclared }` controller has no live-combat fallback — with no trigger
+    // source `combat::attack_defender_cr508` names no one — so it always
+    // needs the trigger context ("target creature that player controls",
+    // Gornog, the Red Reaper).
+    crate::types::ability::filter_contains(filter, &|inner| {
+        matches!(
+            inner,
+            TargetFilter::Typed(typed)
+                if typed.properties.iter().any(prop_needs)
+                    || typed.controller == Some(ControllerRef::DefendingPlayer { reading: AttackRelationReading::AsDeclared })
+        )
+    })
 }
 
 // CR 102.1 + CR 608.2c: "that player controls" filters lowered to
@@ -7263,7 +7273,7 @@ pub(crate) fn filter_selects_players(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -7441,7 +7451,7 @@ pub(crate) fn collect_player_targets(
                     ) == Some(p.id)
                 }
                 Some(ControllerRef::ParentTargetOwner) => false,
-                Some(ControllerRef::DefendingPlayer) => false,
+                Some(ControllerRef::DefendingPlayer { .. }) => false,
                 // CR 613.1: no card scopes this shape to a persisted chosen
                 // player; fail closed (mirrors DefendingPlayer).
                 Some(ControllerRef::SourceChosenPlayer) => false,
@@ -12525,9 +12535,9 @@ fn filter_needs_trigger_source_for_retarget(filter: &TargetFilter) -> bool {
         matches!(
             prop,
             FilterProp::Attacking {
-                defender: Some(ControllerRef::DefendingPlayer)
+                defender: Some(ControllerRef::DefendingPlayer { .. })
             } | FilterProp::AttackedThisTurn {
-                defender: Some(ControllerRef::DefendingPlayer)
+                defender: Some(ControllerRef::DefendingPlayer { .. })
             }
         )
     }
@@ -15128,12 +15138,14 @@ mod tests {
     /// none of them reads `trigger_source` — so leaving the existing corpus
     /// producers on the bare door is behaviour-preserving by construction, not
     /// by luck. Only `DefendingPlayer` reaches
-    /// `combat::defending_player_cr508_5`, whose binding rule requires a
+    /// `combat::attack_defender_cr508`, whose binding rule requires a
     /// `trigger_source` to consult the attack entries at all.
     #[test]
     fn filter_needs_trigger_source_routes_only_trigger_context_values() {
         // Positive: both trigger-context values, bare and under every recursive shape.
-        let bare = typed_with(vec![attacking(ControllerRef::DefendingPlayer)]);
+        let bare = typed_with(vec![attacking(ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        })]);
         let other_than_trigger_object = typed_with(vec![FilterProp::OtherThanTriggerObject]);
         assert!(filter_needs_trigger_source(&bare));
         assert!(filter_needs_trigger_source(&other_than_trigger_object));
@@ -15151,18 +15163,27 @@ mod tests {
         }));
         assert!(filter_needs_trigger_source(&typed_with(vec![
             FilterProp::AnyOf {
-                props: vec![FilterProp::Token, attacking(ControllerRef::DefendingPlayer)],
+                props: vec![
+                    FilterProp::Token,
+                    attacking(ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    })
+                ],
             }
         ])));
         assert!(filter_needs_trigger_source(&typed_with(vec![
             FilterProp::Not {
-                prop: Box::new(attacking(ControllerRef::DefendingPlayer)),
+                prop: Box::new(attacking(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                })),
             }
         ])));
         // Sibling prop that shares the same `attacking_defender_matches` door.
         assert!(filter_needs_trigger_source(&typed_with(vec![
             FilterProp::AttackedThisTurn {
-                defender: Some(ControllerRef::DefendingPlayer),
+                defender: Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                }),
             }
         ])));
 
@@ -15209,7 +15230,9 @@ mod tests {
     fn filter_needs_trigger_source_descends_every_nesting_variant() {
         use crate::types::ability::PlayerRelation;
 
-        let bare = typed_with(vec![attacking(ControllerRef::DefendingPlayer)]);
+        let bare = typed_with(vec![attacking(ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        })]);
         let controls_bare = PlayerFilter::ControlsCount {
             relation: PlayerRelation::All,
             filter: bare.clone(),
@@ -15295,7 +15318,9 @@ mod tests {
     fn filter_needs_trigger_source_does_not_widen_to_defending_player_controller() {
         let controller_scoped = TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Creature],
-            controller: Some(ControllerRef::DefendingPlayer),
+            controller: Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            }),
             ..Default::default()
         });
         assert!(
@@ -17022,8 +17047,11 @@ mod tests {
         );
         // Sibling: DefendingPlayer stays fail-closed (empty) — proves the new arm
         // is genuinely resolvable, not a fail-closed default.
-        let defending =
-            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::DefendingPlayer));
+        let defending = TargetFilter::Typed(TypedFilter::default().controller(
+            ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+        ));
         assert!(collect_player_targets(&state, &ability, &defending).is_empty());
     }
 

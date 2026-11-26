@@ -526,7 +526,7 @@ pub(crate) fn try_parse_impose_additional_cost(
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
-            Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::DefendingPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::SourceChosenPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ChosenPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::TriggeringPlayer) => TargetFilter::Typed(TypedFilter::card()),
@@ -986,7 +986,7 @@ pub(crate) fn try_parse_cost_modification(
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
-            Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::DefendingPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             // CR 613.1: chosen-player scope is not emitted for cost statics.
             Some(ControllerRef::SourceChosenPlayer) => TargetFilter::Typed(TypedFilter::card()),
             // CR 109.4: Chosen-player scope is not emitted for cost statics.
@@ -1843,7 +1843,7 @@ fn parse_untap_step_antecedent(input: &str) -> OracleResult<'_, Option<PlayerSco
 /// CR 502.3 + CR 303.4m: the named untap step supplies the controller of the
 /// enchanted creature as an antecedent. Rebinding is a parser act: the inner
 /// condition parser sees only `ScopedPlayer`, not the owning clause. This is
-/// the static-side sibling of `oracle_trigger::rebind_attack_anaphor_to_defending_player`.
+/// the static-side sibling of `oracle_trigger::rebind_attack_anaphor_to_attacked_player`.
 /// `QuantityComparison` operands and nested filter scopes are deliberately
 /// outside this rewrite; no printed untap-step gate needs them.
 fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent: &PlayerScope) {

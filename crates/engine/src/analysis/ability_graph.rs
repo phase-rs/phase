@@ -1187,6 +1187,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }

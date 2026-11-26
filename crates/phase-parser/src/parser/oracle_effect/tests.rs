@@ -17,6 +17,7 @@ use crate::parser::oracle_nom::enters_under::{
 use crate::parser::parse_oracle_text;
 use crate::parser::swallow_evidence::UnitEvidence;
 use crate::types::ability::extract_target_filter_from_effect;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
@@ -6978,11 +6979,19 @@ fn effect_damage_to_defending_player_counts_defending_player_objects() {
                             filter: TargetFilter::Typed(tf),
                         },
                 },
-            target: TargetFilter::DefendingPlayer,
+            target:
+                TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
             damage_source: None,
             excess: _,
         } => {
-            assert_eq!(tf.controller, Some(ControllerRef::DefendingPlayer));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                })
+            );
             assert!(tf
                 .type_filters
                 .iter()
@@ -34628,7 +34637,9 @@ fn parse_look_at_possessive_hands_targets_player_axes() {
         ),
         (
             "Look at defending player's hand.",
-            TargetFilter::DefendingPlayer,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
         ),
     ];
 
@@ -35215,7 +35226,9 @@ fn defending_player_exiles_top_twenty_cards() {
         matches!(
             &*def.effect,
             Effect::ExileTop {
-                player: TargetFilter::DefendingPlayer,
+                player: TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                },
                 count: QuantityExpr::Fixed { value: 20 },
                 position: LibraryPosition::Top,
                 face_down: false,
@@ -55610,7 +55623,12 @@ fn defending_player_skips_next_untap_step_uses_defending_player_target() {
         panic!("expected SkipNextStep, got {:?}", def.effect);
     };
     assert_eq!(scope, &SkipScope::NextOccurrence);
-    assert_eq!(target, &TargetFilter::DefendingPlayer);
+    assert_eq!(
+        target,
+        &TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::Current
+        }
+    );
     assert_eq!(step, &StepSkipTarget::Step(Phase::Untap));
     assert_eq!(
         count,
@@ -56196,7 +56214,12 @@ fn the_motherlode_excavator_destroy_target_excludes_creatures() {
                     panic!("expected Typed filter for destroy target, got {target:?}");
                 };
                 assert_eq!(typed.type_filters, vec![TypeFilter::Land]);
-                assert_eq!(typed.controller, Some(ControllerRef::DefendingPlayer));
+                assert_eq!(
+                    typed.controller,
+                    Some(ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    })
+                );
                 assert_eq!(
                     typed.properties,
                     vec![FilterProp::NotSupertype {
@@ -70743,10 +70766,10 @@ fn glen_elendras_answer_counter_all_conjunction_parses_single_or() {
 }
 
 /// The `EnchantedPlayer` relative-player scope produced by an "attack enchanted
-/// player" trigger must bind a bare player anaphor to the defender captured at
-/// attack declaration uniformly across every "that player"/"them"
+/// player" trigger must bind a bare player anaphor to the player the attack was
+/// declared against (CR 508.7a) uniformly across every "that player"/"them"
 /// resolver. `enchanted_player_anaphor_filter` is the single authority; this
-/// pins that it maps `EnchantedPlayer → DefendingPlayer` and nothing else, and that
+/// pins that it maps `EnchantedPlayer` → as-declared `DefendingPlayer` and nothing else, and that
 /// the library-owner sibling resolver (`that_player_library_filter`, the sibling
 /// of the subject.rs and damage-recipient resolvers) consults it — so "that
 /// player's library" in this trigger class belongs to that attacked player, not
@@ -70757,10 +70780,12 @@ fn enchanted_player_anaphor_binding_is_shared_across_resolvers() {
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::types::ability::{ControllerRef, TargetFilter};
 
-    // Shared authority: EnchantedPlayer → DefendingPlayer; every other scope → None.
+    // Shared authority: EnchantedPlayer → as-declared DefendingPlayer; every other scope → None.
     assert_eq!(
         super::subject::enchanted_player_anaphor_filter(Some(&ControllerRef::EnchantedPlayer)),
-        Some(TargetFilter::DefendingPlayer)
+        Some(TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::AsDeclared
+        })
     );
     assert_eq!(
         super::subject::enchanted_player_anaphor_filter(Some(&ControllerRef::TriggeringPlayer)),
@@ -70775,8 +70800,8 @@ fn enchanted_player_anaphor_binding_is_shared_across_resolvers() {
     };
     assert_eq!(
         super::imperative::that_player_library_filter(&ctx),
-        TargetFilter::DefendingPlayer,
-        "'that player's library' under an attack-enchanted-player scope must use the captured defender"
+        TargetFilter::DefendingPlayer { reading: AttackRelationReading::AsDeclared },
+        "'that player's library' under an attack-enchanted-player scope must use the declared attacked player"
     );
 }
 
@@ -74185,7 +74210,7 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -74802,6 +74827,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::Conjure { .. }
         | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
@@ -77094,13 +77120,15 @@ fn subject_anchored_may_names_the_announcing_player_across_the_anaphor_family() 
             .expect("the reveal clause is the sub_ability of the attacks trigger");
         assert!(node.optional, "reach-guard: the clause carries a may");
         assert!(
-            matches!(&*node.effect, Effect::RevealHand { target, .. } if *target == TargetFilter::DefendingPlayer),
+            matches!(&*node.effect, Effect::RevealHand { target, .. } if *target == TargetFilter::DefendingPlayer { reading: AttackRelationReading::Current }),
             "reach-guard: expected RevealHand{{DefendingPlayer}}, got {:?}",
             node.effect
         );
         assert_eq!(
             node.optional_player,
-            Some(TargetFilter::DefendingPlayer),
+            Some(TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }),
             "\"they\" is anchored to defending player, who announces the reveal"
         );
     }
@@ -77271,11 +77299,13 @@ fn defending_player_reveal_pair_splits_on_provenance_not_on_effect_shape() {
     assert!(smart_ass_node.optional);
     assert!(matches!(
         &*smart_ass_node.effect,
-        Effect::RevealHand { target, .. } if *target == TargetFilter::DefendingPlayer
+        Effect::RevealHand { target, .. } if *target == TargetFilter::DefendingPlayer { reading: AttackRelationReading::Current }
     ));
     assert_eq!(
         smart_ass_node.optional_player,
-        Some(TargetFilter::DefendingPlayer),
+        Some(TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::Current
+        }),
         "subject-anchored \"they may\" is announced by the named defending player"
     );
 
@@ -77294,7 +77324,7 @@ fn defending_player_reveal_pair_splits_on_provenance_not_on_effect_shape() {
     assert!(port_inspector_node.optional);
     assert!(matches!(
         &*port_inspector_node.effect,
-        Effect::RevealHand { target, .. } if *target == TargetFilter::DefendingPlayer
+        Effect::RevealHand { target, .. } if *target == TargetFilter::DefendingPlayer { reading: AttackRelationReading::Current }
     ));
     assert_eq!(
         port_inspector_node.optional_player, None,
@@ -77449,7 +77479,7 @@ fn chunk_level_you_may_have_keeps_the_may_with_the_controller() {
             .expect("Port Inspector has a becomes-blocked trigger");
         assert!(node.optional, "reach-guard: the clause carries a may");
         assert!(
-            matches!(&*node.effect, Effect::RevealHand { target, .. } if *target == TargetFilter::DefendingPlayer),
+            matches!(&*node.effect, Effect::RevealHand { target, .. } if *target == TargetFilter::DefendingPlayer { reading: AttackRelationReading::Current }),
             "reach-guard: expected RevealHand{{DefendingPlayer}}, got {:?}",
             node.effect
         );
@@ -77797,7 +77827,12 @@ fn they_may_trigger_head_defers_to_a_clause_local_anaphor() {
     );
     let slot = node.effect.target_filter().cloned();
     assert!(
-        matches!(slot, Some(TargetFilter::DefendingPlayer)),
+        matches!(
+            slot,
+            Some(TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            })
+        ),
         "UNTESTED FORWARD GUARD: Fixture A did not reach the DefendingPlayer slot, got {slot:?}"
     );
     assert_ne!(
@@ -77913,7 +77948,9 @@ fn a_delayed_payload_with_an_event_context_anaphor_lifts_the_may_and_drops_the_s
             slot,
             Some(
                 TargetFilter::TriggeringPlayer
-                    | TargetFilter::DefendingPlayer
+                    | TargetFilter::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    }
                     | TargetFilter::TriggeringSourceController
                     | TargetFilter::EventTargetController
                     | TargetFilter::ScopedPlayer
@@ -87884,7 +87921,13 @@ fn that_player_keeper_scope_binds_only_a_trigger_event_player() {
     assert_eq!(that_player_keeper_scope(&ctx(true, None, None)), None);
     // (g) a defending player is not the trigger event's player.
     assert_eq!(
-        that_player_keeper_scope(&ctx(true, Some(ControllerRef::DefendingPlayer), None)),
+        that_player_keeper_scope(&ctx(
+            true,
+            Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }),
+            None
+        )),
         None
     );
 }
@@ -92115,7 +92158,12 @@ fn put_top_of_library_into_graveyard_carries_owner_and_count() {
     // Only a `ScopedPlayer` relative scope (an enclosing "Each player ...") makes
     // the literal "each player's library" anaphoric; under any other scope it is
     // still the per-player fan-out and fails closed.
-    for scope in [ControllerRef::DefendingPlayer, ControllerRef::TargetPlayer] {
+    for scope in [
+        ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        },
+        ControllerRef::TargetPlayer,
+    ] {
         let mut ctx = ParseContext {
             relative_player_scope: Some(scope.clone()),
             ..ParseContext::default()
@@ -95124,7 +95172,9 @@ fn coordinated_member_maps_each_relative_antecedent() {
             PlayerFilter::ChosenPlayer { index: 1 },
         ),
         (
-            ControllerRef::DefendingPlayer,
+            ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             PlayerFilter::DefendingPlayer,
         ),
         (ControllerRef::TargetPlayer, PlayerFilter::TargetPlayer),
@@ -96008,14 +96058,16 @@ fn plural_damage_heads_keep_their_parse() {
 }
 
 /// P-5. CR 508.6: the "one or more players" antecedent is confined to attack
-/// heads. Zurzoth's head introduces the attacked (defending) players; the plural
+/// heads. Zurzoth's head introduces the attacked players (CR 508.7a); the plural
 /// damage head, whose players are damaged rather than attacked, introduces none.
 #[test]
 fn one_or_more_players_antecedent_is_confined_to_attack_heads() {
     let scope = crate::parser::oracle_trigger::relative_player_scope_for_condition;
     assert_eq!(
         scope("whenever one or more devils you control attack one or more players"),
-        Some(ControllerRef::DefendingPlayer)
+        Some(ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::AsDeclared
+        })
     );
     assert_eq!(
         scope(

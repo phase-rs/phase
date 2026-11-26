@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use super::counter::CounterType;
 use crate::types::ability::AttachmentReferent;
+#[cfg(test)]
+use crate::types::ability::AttackRelationReading;
 
 use super::ability::{
     AbilityCost, AbilityDefinition, AbilityTag, AttachmentKind, CostPaidObjectSnapshot, EffectKind,
@@ -720,7 +722,7 @@ impl EventObjectSnapshot {
             | TargetFilter::PlayerWhoChoseLabel { .. }
             | TargetFilter::PlayerMatching { .. }
             | TargetFilter::Neighbor { .. }
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::SourceChosenPlayer
             | TargetFilter::OriginalController
             | TargetFilter::TriggeringPlayer
@@ -3053,7 +3055,9 @@ mod attacked_referent_snapshot_tests {
             EventObjectFilterSupport::Unsupported
         ));
         assert!(matches!(
-            EventObjectSnapshot::classify_filter_shape(&TargetFilter::DefendingPlayer),
+            EventObjectSnapshot::classify_filter_shape(&TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }),
             EventObjectFilterSupport::PermanentDomainFalse
         ));
     }

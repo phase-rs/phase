@@ -959,6 +959,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::Conjure { .. }
         | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
@@ -4818,6 +4819,7 @@ impl ResolvedAbility {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }

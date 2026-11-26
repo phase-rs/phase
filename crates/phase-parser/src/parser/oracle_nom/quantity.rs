@@ -37,6 +37,7 @@ use crate::parser::oracle_target::{
     TargetSyntax,
 };
 use crate::parser::oracle_util::parse_subtype;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AggregateFunction, AttachmentReferent, CardTypeSetSource, CastManaObjectScope,
@@ -741,7 +742,7 @@ fn admits_quantity_controller(controller: &ControllerRef, form: ControllerForm) 
         | ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
-        | ControllerRef::DefendingPlayer
+        | ControllerRef::DefendingPlayer { .. }
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::TriggeringPlayer
         | ControllerRef::EnchantedPlayer
@@ -1979,7 +1980,9 @@ fn population_reads_relative_player(type_text: &str, ctx: &ParseContext) -> bool
         probe.relative_player_scope = Some(player);
         parse_type_phrase_folding_with_ctx(type_text, &mut probe)
     };
-    read_under(ControllerRef::DefendingPlayer) != read_under(ControllerRef::TargetPlayer)
+    read_under(ControllerRef::DefendingPlayer {
+        reading: AttackRelationReading::Current,
+    }) != read_under(ControllerRef::TargetPlayer)
 }
 
 /// CR 122.1: Parse "[kind] counters on [object]" after "the number of".
@@ -3253,7 +3256,9 @@ fn parse_defending_player_hand_count(input: &str) -> OracleResult<'_, QuantityRe
     Ok((
         rest,
         QuantityRef::HandSize {
-            player: PlayerScope::DefendingPlayer,
+            player: PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
         },
     ))
 }
@@ -3346,7 +3351,7 @@ pub(crate) fn is_admissible_zone_card_count_filter(filter: &TargetFilter) -> boo
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -3620,7 +3625,7 @@ fn add_zone_card_count_property(
             | TargetFilter::PostReplacementDamageSource
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }
@@ -3863,7 +3868,7 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -4006,7 +4011,7 @@ pub fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -8174,7 +8179,7 @@ fn parse_put_into_graveyard_origin_zones_for_owner(
         | ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
-        | ControllerRef::DefendingPlayer
+        | ControllerRef::DefendingPlayer { .. }
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::TriggeringPlayer
@@ -12716,7 +12721,9 @@ mod tests {
             assert_eq!(
                 q,
                 QuantityRef::HandSize {
-                    player: PlayerScope::DefendingPlayer,
+                    player: PlayerScope::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    },
                 },
                 "phrase: {phrase}"
             );

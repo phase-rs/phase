@@ -666,8 +666,14 @@ fn raph_and_mikey_kept_creature_entry_attack_choice_selects_a_planeswalker() {
             player,
             object_id,
             valid_targets,
+            purpose,
         } => {
             assert_eq!(*player, P0, "the entrant's controller chooses");
+            assert_eq!(
+                *purpose,
+                engine::types::game_state::AttackTargetChoicePurpose::EnterAttacking,
+                "an entering creature's choice"
+            );
             assert_eq!(
                 *object_id, dreadmaw,
                 "the choice is for the revealed creature"

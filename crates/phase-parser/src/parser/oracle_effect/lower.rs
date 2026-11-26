@@ -43,6 +43,7 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
     AcceptingPlayerBinding, ClauseIr, EffectChainIr, RepeatCount,
 };
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
@@ -468,7 +469,7 @@ fn target_filter_is_player_scoped(filter: &TargetFilter) -> bool {
         TargetFilter::Player
             | TargetFilter::Controller
             | TargetFilter::AllPlayers
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::ScopedPlayer
             | TargetFilter::TriggeringPlayer
             | TargetFilter::OriginalController
@@ -3605,6 +3606,7 @@ impl ReflexiveGateParent {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
@@ -4801,7 +4803,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::PostReplacementDamageSource
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
@@ -4904,7 +4906,7 @@ pub(super) fn filter_tree_has_chosen_card(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -11427,7 +11429,9 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
             // amount parses under that one scope, so a composite ("twice the
             // number of … that player controls") reaches its inner count too.
             let scope = if references_defending_player {
-                Some(ControllerRef::DefendingPlayer)
+                Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                })
             } else if each_player_scope {
                 Some(ControllerRef::ScopedPlayer)
             } else {
@@ -12068,7 +12072,10 @@ fn resolve_player_anaphor_damage_recipient(
         Some(ControllerRef::TriggeringPlayer) | Some(ControllerRef::TargetPlayer) => {
             Some(TargetFilter::TriggeringPlayer)
         }
-        Some(ControllerRef::DefendingPlayer) => Some(TargetFilter::DefendingPlayer),
+        // CR 508.5 / CR 508.7a: the attack-relation reading carries over unchanged.
+        Some(ControllerRef::DefendingPlayer { reading }) => {
+            Some(TargetFilter::DefendingPlayer { reading })
+        }
         // CR 608.2k: No explicit player scope — fall back to the trigger
         // subject. A player-actor subject (a bare player filter: empty type
         // filters with a controller ref, e.g. "an opponent draws a card", or
@@ -19655,7 +19662,9 @@ mod token_anaphor_rewrite_tests {
         use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
 
         let destination = TokenAttackDestination::Player {
-            player: ControllerRef::DefendingPlayer,
+            player: ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             scope: NamedDefenderScope::Player,
         };
         let antecedent = Effect::Token {
@@ -19699,7 +19708,9 @@ mod token_anaphor_rewrite_tests {
         use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
 
         let destination = TokenAttackDestination::Player {
-            player: ControllerRef::DefendingPlayer,
+            player: ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             scope: NamedDefenderScope::Player,
         };
         let antecedent = Effect::CopyTokenOf {

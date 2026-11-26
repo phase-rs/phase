@@ -22882,6 +22882,26 @@ impl CastOpponentChoicePurpose {
     }
 }
 
+/// CR 508.4 + CR 508.7: why `WaitingFor::EntryAttackTargetChoice` asks for a
+/// destination; the purpose decides how the answer is consumed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AttackTargetChoicePurpose {
+    /// CR 508.4: a permanent entering the battlefield attacking. Default, so
+    /// prompts saved without the field read back unchanged.
+    #[default]
+    EnterAttacking,
+    /// CR 508.7: an attacking creature whose attacked player or permanent is
+    /// reselected; the creature stays attacking.
+    Reselect,
+}
+
+impl AttackTargetChoicePurpose {
+    fn is_enter_attacking(&self) -> bool {
+        matches!(self, Self::EnterAttacking)
+    }
+}
+
 /// CR 608.2f: what a [`WaitingFor::MemberOrderChoice`] prompt orders. A
 /// member-driven loop pauses for player input either because it puts a copy of
 /// each member spell on the stack, or because each member's instruction itself
@@ -22947,12 +22967,18 @@ pub enum WaitingFor {
         context: MeldSelection,
         valid_targets: Vec<AttackTarget>,
     },
-    /// CR 508.4: choose a defending player, planeswalker, or battle for a
-    /// creature that entered the battlefield attacking during resolution.
+    /// CR 508.4 / CR 508.7: choose a defending player, planeswalker, or battle
+    /// for a creature that entered the battlefield attacking during resolution,
+    /// or that is having its attacked player or permanent reselected (`purpose`).
     EntryAttackTargetChoice {
         player: PlayerId,
         object_id: ObjectId,
         valid_targets: Vec<AttackTarget>,
+        #[serde(
+            default,
+            skip_serializing_if = "AttackTargetChoicePurpose::is_enter_attacking"
+        )]
+        purpose: AttackTargetChoicePurpose,
     },
     /// CR 103.5 + 103.5b: London mulligan — each un-kept player decides
     /// simultaneously. The `pending` list holds every player who has not yet
@@ -45251,6 +45277,12 @@ impl GameState {
                 .attacking_incarnations_this_combat
                 .iter()
                 .chain(combat.attacked_permanents.values())
+                .chain(
+                    combat
+                        .removed_attacker_defenders
+                        .iter()
+                        .map(|record| &record.attacker),
+                )
             {
                 present
                     .entry(reference.object_id)
@@ -45613,6 +45645,9 @@ impl GameState {
             );
             for reference in combat.attacked_permanents.values_mut() {
                 rank_incarnation(reference);
+            }
+            for record in combat.removed_attacker_defenders.iter_mut() {
+                rank_incarnation(&mut record.attacker);
             }
         }
         self.crew_activated_this_turn = rank_hash_set(
@@ -46252,6 +46287,7 @@ impl GameState {
                 attacking_incarnations_this_combat: _,
                 attacked_permanents: _,
                 creature_blocked_attackers_this_combat: _,
+                removed_attacker_defenders: _,
                 // NOT THIS CLASS — stable ids only:
                 attackers: _,
                 attacked_permanent_kinds: _,
@@ -62069,6 +62105,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
     enum CarrierKind {
         Attacking,
         AttackedPermanent,
+        /// CR 508.5 (last clause) + CR 506.4: the removed-attacker defender record.
+        RemovedAttackerDefender,
         CrewActivated,
         CrewResolved,
         CrewHistory,
@@ -62349,6 +62387,17 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     ..CombatState::default()
                 });
             }
+            CarrierKind::RemovedAttackerDefender => {
+                state.combat = Some(CombatState {
+                    removed_attacker_defenders: vec![
+                        crate::game::combat::RemovedAttackerDefender {
+                            attacker: reference,
+                            defending_player: PlayerId(1),
+                        },
+                    ],
+                    ..CombatState::default()
+                });
+            }
             CarrierKind::CrewActivated => {
                 state.crew_activated_this_turn = HashSet::from([reference]);
             }
@@ -62578,6 +62627,19 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 carrier_naming(CarrierKind::AttackedPermanent, incarnation, incarnation)
             },
             merge: |carrier, live| carrier_naming(CarrierKind::AttackedPermanent, live, carrier),
+        },
+        CarrierCase {
+            name: "removed_attacker_defenders",
+            split: |incarnation| {
+                carrier_naming(
+                    CarrierKind::RemovedAttackerDefender,
+                    incarnation,
+                    incarnation,
+                )
+            },
+            merge: |carrier, live| {
+                carrier_naming(CarrierKind::RemovedAttackerDefender, live, carrier)
+            },
         },
         CarrierCase {
             name: "crew_activated_this_turn",
@@ -69370,6 +69432,50 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         assert_eq!(json["data"]["purpose"]["type"], "EffectCost");
         assert_eq!(json["data"]["purpose"]["cost"]["type"], "EffectCost");
         assert!(json["data"].get("gift_kind").is_none());
+        let back: WaitingFor = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, prompt);
+    }
+
+    fn entry_attack_target_prompt(purpose: AttackTargetChoicePurpose) -> WaitingFor {
+        WaitingFor::EntryAttackTargetChoice {
+            player: PlayerId(1),
+            object_id: ObjectId(7),
+            valid_targets: vec![
+                AttackTarget::Player(PlayerId(1)),
+                AttackTarget::Player(PlayerId(2)),
+            ],
+            purpose,
+        }
+    }
+
+    /// CR 508.4: an entering-attacking prompt serializes exactly as before the
+    /// `purpose` field existed (no `purpose` key), and that legacy shape reads
+    /// back as `EnterAttacking`.
+    #[test]
+    fn reselect_purpose_entry_attack_prompt_wire_shape_unchanged() {
+        let json = serde_json::to_value(entry_attack_target_prompt(
+            AttackTargetChoicePurpose::EnterAttacking,
+        ))
+        .expect("serialize entry prompt");
+        assert_eq!(json["type"], "EntryAttackTargetChoice");
+        assert!(json["data"].get("purpose").is_none(), "legacy shape");
+        let back: WaitingFor = serde_json::from_value(json).expect("legacy frame deserializes");
+        let WaitingFor::EntryAttackTargetChoice { purpose, .. } = back else {
+            panic!("round-trip changed the variant: {back:?}");
+        };
+        assert_eq!(purpose, AttackTargetChoicePurpose::EnterAttacking);
+    }
+
+    /// CR 508.7: a reselection prompt carries its purpose on the wire and
+    /// round-trips.
+    #[test]
+    fn reselect_purpose_entry_attack_prompt_round_trips() {
+        let prompt = entry_attack_target_prompt(AttackTargetChoicePurpose::Reselect);
+        let json = serde_json::to_value(&prompt).expect("serialize reselect prompt");
+        assert_eq!(
+            json["data"]["purpose"],
+            serde_json::json!({"type": "Reselect"})
+        );
         let back: WaitingFor = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, prompt);
     }

@@ -1834,7 +1834,7 @@ fn subject_anchored_optional_actor(
             // survive the delay — they would resolve against the delayed
             // ability's own firing event.
             TargetFilter::TriggeringPlayer
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
@@ -1908,7 +1908,7 @@ fn subject_anchored_optional_actor(
             TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
             | TargetFilter::TriggeringPlayer
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
             | TargetFilter::ScopedPlayer

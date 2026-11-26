@@ -807,7 +807,7 @@ fn static_affects_player(
             // Fail closed, mirroring the parent-target refs above.
             Some(ControllerRef::EventTargetController) => false,
             Some(ControllerRef::ParentTargetOwner) => false,
-            Some(ControllerRef::DefendingPlayer) => false,
+            Some(ControllerRef::DefendingPlayer { .. }) => false,
             // CR 613.1: chosen-player scope has no meaning here. Fail closed.
             Some(ControllerRef::SourceChosenPlayer) => false,
             // CR 109.4: Chosen-player scope has no resolution context here.

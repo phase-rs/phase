@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::game::engine::EngineError;
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::TurnWindow;
 pub(crate) use crate::types::ability::{
     effect_owns_resolution_zone_choice, effect_refs_parent_target,
@@ -232,6 +233,7 @@ pub mod remember_card;
 pub mod remove_all_damage;
 pub mod remove_from_combat;
 pub mod renown;
+pub mod reselect_attack_target;
 pub mod return_as_aura;
 pub mod reveal;
 pub mod reveal_chosen_numbers;
@@ -513,7 +515,9 @@ pub fn matches_player_scope(
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(
                             state,
-                            &TargetFilter::DefendingPlayer,
+                            &TargetFilter::DefendingPlayer {
+                                reading: AttackRelationReading::Current,
+                            },
                             source_id,
                             state.current_trigger_event.as_ref(),
                         )
@@ -6975,6 +6979,7 @@ fn effect_enters_battlefield(effect: &Effect) -> bool {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::ChooseOneOf { .. }
@@ -7632,6 +7637,7 @@ impl MovedObjectsSource {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
@@ -7831,7 +7837,7 @@ fn moved_objects_referent(
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::Owner
         | TargetFilter::AllPlayers
         | TargetFilter::StackAbility { .. }
@@ -8118,6 +8124,7 @@ fn effect_may_name_moved_objects(effect: &Effect, source: MovedObjectsSource) ->
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::Conjure { .. }
         | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
@@ -8266,7 +8273,7 @@ fn animate_names_moved_objects(target: &TargetFilter, source: MovedObjectsSource
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -8355,6 +8362,7 @@ fn node_with_entry_modifications(
         | Effect::AssembleContraptionsFromRollDifference
         | Effect::Attach { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::BecomeCopy { .. }
         | Effect::BecomeMonarch { .. }
         | Effect::BecomePrepared { .. }
@@ -9291,7 +9299,7 @@ fn declined_search_player_scope_dependency(
         | PlayerScope::ScopedPlayer
         | PlayerScope::Opponent { .. }
         | PlayerScope::AllPlayers { .. }
-        | PlayerScope::DefendingPlayer
+        | PlayerScope::DefendingPlayer { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => false,
@@ -10585,7 +10593,7 @@ fn duration_outlives_declined_gate(duration: &Duration) -> bool {
                 exclude: _,
             }
             | PlayerScope::RecipientController
-            | PlayerScope::DefendingPlayer
+            | PlayerScope::DefendingPlayer { .. }
             | PlayerScope::ParentObjectTarget { .. }
             | PlayerScope::SourceChosenPlayer
             | PlayerScope::AnyTurn
@@ -11010,6 +11018,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::Conjure { .. }
         | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
@@ -11204,7 +11213,7 @@ fn referent_exists_without_gated_action(
                         | ControllerRef::ParentTargetController
                         | ControllerRef::EventTargetController
                         | ControllerRef::ParentTargetOwner
-                        | ControllerRef::DefendingPlayer
+                        | ControllerRef::DefendingPlayer { .. }
                         | ControllerRef::ChosenPlayer { index: _ }
                         | ControllerRef::SourceChosenPlayer
                         | ControllerRef::TriggeringPlayer
@@ -11271,7 +11280,7 @@ fn referent_exists_without_gated_action(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -12224,6 +12233,7 @@ fn effect_fields_read_filter_population(
         Effect::GiveControl { target, recipient } => has_filter(target) || has_filter(recipient),
         Effect::RemoveFromCombat { target } => has_filter(target),
         Effect::BecomeBlocked { target } => has_filter(target),
+        Effect::ReselectAttackTarget { target } => has_filter(target),
         Effect::ApplyPerpetual {
             target,
             modification,
@@ -16524,6 +16534,9 @@ fn resolve_legacy_effect(
         Effect::BecomeSaddled { .. } => saddle::resolve(state, ability, events),
         Effect::BecomeBlocked { .. } => {
             become_blocked::resolve_become_blocked(state, ability, events)
+        }
+        Effect::ReselectAttackTarget { .. } => {
+            reselect_attack_target::resolve(state, ability, events)
         }
         Effect::SetClassLevel { .. } => set_class_level::resolve(state, ability, events),
         Effect::CreateDelayedTrigger { .. } => delayed_trigger::resolve(state, ability, events),
@@ -22680,6 +22693,20 @@ pub(crate) fn resolve_player_for_context_ref(
         TargetFilter::Owner | TargetFilter::SpecificPlayer { .. } => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
         }
+        // CR 508.7a: the player the triggering attack declared the referent
+        // creature as attacking, through the single as-declared authority with
+        // the ability's captured trigger context. A reselection does not change
+        // it. A missing referent, or one who has left the game (CR 800.4a),
+        // names no player — never the controller fallback below.
+        TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::AsDeclared,
+        } => crate::game::combat::attack_defender_cr508(
+            state,
+            ability.source_id,
+            ability.trigger_source.as_ref(),
+            AttackRelationReading::AsDeclared,
+        )
+        .filter(|player| crate::game::players::is_alive(state, *player)),
         _ if declared_player_slot_is_empty(state, ability, target_filter) => None,
         _ => Some(resolve_context_player(state, ability, target_filter)),
     }
@@ -23225,7 +23252,7 @@ fn hydratable_event_context_filter(filter: &TargetFilter) -> bool {
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTarget
             | TargetFilter::StackSpell
@@ -36044,13 +36071,19 @@ fn resolve_unless_payer(
         // triggering `AttackersDeclared` event once the creature has left
         // combat, so a trigger that resolves after its attacker died still
         // taxes the right player.
-        TargetFilter::DefendingPlayer => {
-            crate::game::targeting::resolve_event_context_target(state, payer, ability.source_id)
-                .and_then(|target| match target {
-                    TargetRef::Player(player) => Some(player),
-                    _ => None,
-                })
-        }
+        TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+            // allow-raw-event-referent: resolves a player referent (the tax payer), not an affected object
+        } => crate::game::targeting::resolve_event_context_target(state, payer, ability.source_id)
+            .and_then(|target| match target {
+                TargetRef::Player(player) => Some(player),
+                _ => None,
+            }),
+        // CR 508.7a + CR 118.12a: "that player" after an attack-declaration head
+        // pays as the player the attack was declared against.
+        TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::AsDeclared,
+        } => resolve_player_for_context_ref(state, ability, payer),
         // CR 118.12a + CR 608.2f: "Each player/each opponent ... unless they pay" —
         // the payer is the player_scope iteration's scoped player, not a chosen
         // target. resolve_effect_player_ref maps ScopedPlayer -> ability.scoped_player,
@@ -36357,7 +36390,7 @@ fn resolve_grant_next_spell_ability(
         // CR 611.2 + CR 514.2: duration-timing-only, like `AnyTurn` — never reached
         // from a value/quantity/player-selection position.
         | PlayerScope::SpecificPlayer { .. }
-        | PlayerScope::DefendingPlayer
+        | PlayerScope::DefendingPlayer { .. }
         | PlayerScope::SourceChosenPlayer => Some(ability.controller),
         // CR 109.4 + CR 108.3: the controller/owner of the parent object target.
         PlayerScope::ParentObjectTarget { possession } => match possession {
@@ -42863,7 +42896,9 @@ mod tests {
             panic!("expected a Token effect");
         };
         *attack_destination = TokenAttackDestination::Player {
-            player: ControllerRef::DefendingPlayer,
+            player: ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             scope: NamedDefenderScope::Player,
         };
         assert!(audit_later_instruction(&effect).referents.is_none());

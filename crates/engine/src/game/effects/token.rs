@@ -11,6 +11,8 @@ use crate::game::quantity::{
 };
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
+#[cfg(test)]
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     quantity_expr_recipient_read, AbilityCost, AbilityDefinition, AbilityKind,
     ActivationRestriction, AttachCardinality, AttachSelection, CastingPermission, ChosenAttribute,
@@ -4953,7 +4955,7 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::Owner
         | TargetFilter::SpecificPlayer { .. }
@@ -6308,7 +6310,9 @@ mod tests {
         let mut events = Vec::new();
         let named = ResolvedAbility::new(
             goblin_token_effect(TokenAttackDestination::Player {
-                player: ControllerRef::DefendingPlayer,
+                player: ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
                 scope: NamedDefenderScope::Player,
             }),
             vec![],

@@ -248,7 +248,7 @@ fn map_relative_player_scope(scope: &ControllerRef) -> Option<ControllerRef> {
         | ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
-        | ControllerRef::DefendingPlayer
+        | ControllerRef::DefendingPlayer { .. }
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::EnchantedPlayer
         | ControllerRef::ActivePlayer
@@ -368,6 +368,7 @@ pub(crate) fn bind_control_clause(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::AttackRelationReading;
     use crate::types::ability::{TypeFilter, TypedFilter};
 
     fn possessor(text: &str) -> Option<ControlClausePossessor> {
@@ -607,7 +608,12 @@ mod tests {
             ControllerRef::TargetOpponent,
             ControllerRef::ParentTargetController,
             ControllerRef::ParentTargetOwner,
-            ControllerRef::DefendingPlayer,
+            ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
             ControllerRef::SourceChosenPlayer,
             ControllerRef::EnchantedPlayer,
             ControllerRef::ActivePlayer,

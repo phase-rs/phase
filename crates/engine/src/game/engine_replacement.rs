@@ -8103,7 +8103,7 @@ fn ability_definition_uses_post_replacement_event_target(ability: &AbilityDefini
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::PostReplacementDamageSource
             | TargetFilter::PostReplacementDamageTargetOwner
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }

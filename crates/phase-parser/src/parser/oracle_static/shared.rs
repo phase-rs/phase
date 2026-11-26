@@ -5,6 +5,7 @@ use super::anthem::{rewrite_self_pronoun_subject, PrintedSubject};
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{BlockPairDirection, PlayerScope};
 use nom::bytes::complete::is_not;
 use nom::character::complete::anychar;
@@ -1561,7 +1562,7 @@ fn filter_zone_truth(filter: &TargetFilter, zone: Zone) -> SourceZoneTruth {
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -4421,7 +4422,9 @@ fn is_defending_player_poisoned_for_attack_restriction(cond: &StaticCondition) -
     matches!(
         cond,
         StaticCondition::PlayerIsPoisoned {
-            player: PlayerScope::DefendingPlayer
+            player: PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }
         }
     ) || matches!(cond, StaticCondition::Not { condition } if is_defending_player_poisoned_for_attack_restriction(condition))
         || matches!(cond, StaticCondition::And { conditions } | StaticCondition::Or { conditions } if conditions.iter().any(is_defending_player_poisoned_for_attack_restriction))
@@ -6338,10 +6341,11 @@ fn admits_static_subject_controller(
             nom_target::ControllerForm::Plural | nom_target::ControllerForm::Negated => true,
             nom_target::ControllerForm::Singular | nom_target::ControllerForm::Passive => false,
         },
-        // `TargetPlayer` and `DefendingPlayer` are deliberately excluded because
-        // this call site builds a continuous static `TargetFilter` with no
-        // companion target-player authority or combat context.
-        ControllerRef::TargetPlayer | ControllerRef::DefendingPlayer => false,
+        // `TargetPlayer` and `DefendingPlayer { .. }` (either reading) are deliberately
+        // excluded because this call site builds a continuous static
+        // `TargetFilter` with no companion target-player authority or combat
+        // context.
+        ControllerRef::TargetPlayer | ControllerRef::DefendingPlayer { .. } => false,
         ControllerRef::ScopedPlayer
         | ControllerRef::TargetOpponent
         | ControllerRef::ParentTargetController

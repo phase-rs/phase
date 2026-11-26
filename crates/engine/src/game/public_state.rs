@@ -55,7 +55,8 @@ pub fn finalize_public_state(state: &mut GameState) {
 ///   These are a sub-step of the declaration with their own re-entry
 ///   (`engine_combat::handle_pay_combat_tax`), not the declaration itself.
 /// * `MeldAttackTargetChoice`, `EntryAttackTargetChoice` — CR 508.4 "put onto
-///   the battlefield attacking". This is a RESOLUTION-time choice: CR 508.4d
+///   the battlefield attacking", and CR 508.7 reselection: resolution-time
+///   choices. CR 508.4d
 ///   explicitly contemplates it during the declare blockers, combat damage, and
 ///   end of combat steps, and `combat::choose_entry_attack_target_or_enter` is
 ///   reached from effect resolution in any phase.
@@ -650,7 +651,8 @@ mod tests {
     ///   — CR 508.1g optional attack costs (CR 701.43d exert, CR 702.154b
     ///   enlist): a sub-step of the declaration, not the declaration.
     /// * `MeldAttackTargetChoice`, `EntryAttackTargetChoice` — CR 508.4 "put
-    ///   onto the battlefield attacking", a resolution-time choice that CR 508.4d
+    ///   onto the battlefield attacking", and CR 508.7 reselection:
+    ///   resolution-time choices that CR 508.4d
     ///   explicitly contemplates during declare blockers, combat damage, and end
     ///   of combat.
     /// * `Priority` (CR 117.3a) and `OrderTriggers` (CR 603.3b) are not
@@ -788,6 +790,7 @@ mod tests {
                 player: PlayerId(0),
                 object_id: ObjectId(1),
                 valid_targets: Vec::new(),
+                purpose: Default::default(),
             }),
             None,
         );

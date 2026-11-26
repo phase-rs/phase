@@ -2176,7 +2176,7 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
                 | TargetFilter::PostReplacementDamageSource
                 | TargetFilter::PostReplacementDamageTarget
                 | TargetFilter::PostReplacementDamageTargetOwner
-                | TargetFilter::DefendingPlayer
+                | TargetFilter::DefendingPlayer { .. }
                 | TargetFilter::HasChosenName
                 | TargetFilter::ChosenDamageSource { .. }
                 | TargetFilter::Named { .. }
@@ -8852,7 +8852,7 @@ fn replacement_active_player_matches(
         // CR 120.1 + CR 109.4: the damage recipient's controller.
         Some(ControllerRef::EventTargetController) => false,
         Some(ControllerRef::ParentTargetOwner) => false,
-        Some(ControllerRef::DefendingPlayer) => false,
+        Some(ControllerRef::DefendingPlayer { .. }) => false,
         Some(ControllerRef::SourceChosenPlayer) => false,
         Some(ControllerRef::ChosenPlayer { .. }) => false,
         Some(ControllerRef::TriggeringPlayer) => false,
@@ -8993,7 +8993,7 @@ fn evaluate_replacement_condition(
                 // CR 120.1 + CR 109.4: the damage recipient's controller.
                 Some(ControllerRef::EventTargetController) => false,
                 Some(ControllerRef::ParentTargetOwner) => false,
-                Some(ControllerRef::DefendingPlayer) => false,
+                Some(ControllerRef::DefendingPlayer { .. }) => false,
                 // CR 613.1: "the chosen player" is undefined at replacement-check
                 // time here. Fail closed.
                 Some(ControllerRef::SourceChosenPlayer) => false,
@@ -9053,7 +9053,7 @@ fn evaluate_replacement_condition(
                 // CR 120.1 + CR 109.4: the damage recipient's controller.
                 Some(ControllerRef::EventTargetController) => false,
                 Some(ControllerRef::ParentTargetOwner) => false,
-                Some(ControllerRef::DefendingPlayer) => false,
+                Some(ControllerRef::DefendingPlayer { .. }) => false,
                 // CR 613.1: "the chosen player" is undefined at replacement-check
                 // time here. Fail closed.
                 Some(ControllerRef::SourceChosenPlayer) => false,
@@ -9253,7 +9253,7 @@ fn evaluate_replacement_condition(
                 | ControllerRef::ParentTargetController
                 | ControllerRef::EventTargetController
                 | ControllerRef::ParentTargetOwner
-                | ControllerRef::DefendingPlayer
+                | ControllerRef::DefendingPlayer { .. }
                 | ControllerRef::SourceChosenPlayer
                 | ControllerRef::ChosenPlayer { .. }
                 | ControllerRef::TriggeringPlayer
@@ -9537,7 +9537,7 @@ fn apply_state_level_gates(
                 // check does not have. Fails closed like the parent-target refs.
                 | crate::types::ability::ControllerRef::EventTargetController
                 | crate::types::ability::ControllerRef::ParentTargetOwner
-                | crate::types::ability::ControllerRef::DefendingPlayer
+                | crate::types::ability::ControllerRef::DefendingPlayer { .. }
                 | crate::types::ability::ControllerRef::SourceChosenPlayer
                 | crate::types::ability::ControllerRef::ChosenPlayer { .. }
                 | crate::types::ability::ControllerRef::TriggeringPlayer
@@ -10186,7 +10186,7 @@ fn object_replacement_candidate_applies_on_entry_board(
                 // refs.
                 | crate::types::ability::ControllerRef::EventTargetController
                 | crate::types::ability::ControllerRef::ParentTargetOwner
-                | crate::types::ability::ControllerRef::DefendingPlayer
+                | crate::types::ability::ControllerRef::DefendingPlayer { .. }
                 | crate::types::ability::ControllerRef::SourceChosenPlayer
                 | crate::types::ability::ControllerRef::ChosenPlayer { .. }
                 | crate::types::ability::ControllerRef::TriggeringPlayer

@@ -18,6 +18,7 @@ use crate::game::quantity::{
     resolve_quantity_with_ctx, QuantityContext,
 };
 use crate::game::targeting::{DeclaredSlotBinding, SlotReferent};
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     filter_contains, filter_grammar_any, filter_prop_grammar_any, player_filter_grammar_any,
     quantity_expr_grammar_any, quantity_ref_grammar_any, rewrite_filter_prop, rewrite_filter_props,
@@ -226,7 +227,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -496,7 +497,7 @@ pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -663,7 +664,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::Owner
         | TargetFilter::AffectedObjectOwner
@@ -1070,7 +1071,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -2524,15 +2525,19 @@ pub(crate) fn controller_ref_player(
         // controller sacrifices a noncreature, nonland permanent").
         ControllerRef::EventTargetController => event_target_controller_player(state, ability),
         ControllerRef::ParentTargetOwner => parent_target_owner_player(state, ability),
-        // CR 508.5 + CR 113.7a: route through the single defending-player
+        // CR 508.5 + CR 113.7a: route through the single attack-relation
         // authority with the ability's captured trigger context, so a source
         // removed from combat (or from the battlefield) after its ability
         // triggered still names the player it was attacking. With no trigger
-        // context the authority falls back to the live per-attacker lookup.
-        ControllerRef::DefendingPlayer => crate::game::combat::defending_player_cr508_5(
+        // context the `Current` reading falls back to the live per-attacker
+        // lookup. CR 508.7a: the `AsDeclared` reading names the player the
+        // triggering attack declared; a reselection does not change it, and it
+        // never falls back to live combat.
+        ControllerRef::DefendingPlayer { reading } => crate::game::combat::attack_defender_cr508(
             state,
             source_id,
             ability.and_then(|ability| ability.trigger_source.as_ref()),
+            *reading,
         ),
         // CR 608.2c + CR 109.4: The player chosen by the Nth `Choose(Player)`
         // in this resolution — read from the resolution-scoped list.
@@ -2961,7 +2966,7 @@ fn filter_contains_input(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -4467,7 +4472,7 @@ fn absent_search_predicate_truth(filter: &TargetFilter) -> Option<bool> {
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -5063,8 +5068,11 @@ fn stack_entry_controller_matches(
         }
         Some(ControllerRef::ParentTargetOwner) => parent_target_owner_player(state, ctx.ability)
             .is_some_and(|pid| pid == entry_controller),
-        Some(ControllerRef::DefendingPlayer) => {
-            source_defending_player(state, &source_ctx).is_some_and(|pid| pid == entry_controller)
+        // CR 508.5 / CR 508.7a: the player the source's attack relates to,
+        // under the leaf's reading.
+        Some(ControllerRef::DefendingPlayer { reading }) => {
+            source_defending_player(state, &source_ctx, *reading)
+                .is_some_and(|pid| pid == entry_controller)
         }
         Some(ControllerRef::SourceChosenPlayer) => {
             source_chosen_player(&source_ctx).is_some_and(|pid| pid == entry_controller)
@@ -6402,7 +6410,7 @@ fn filter_verdict_is_identity_only(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -7847,7 +7855,13 @@ fn filter_inner_for_object(
                     // fizzling (issue #6678). A bespoke `.map().unwrap_or_else()`
                     // here collapsed the captured `None` into `Some(None)` and
                     // suppressed that fallback.
-                    ControllerRef::DefendingPlayer => {
+                    //
+                    // CR 508.7a: under the `AsDeclared` reading, "creature that
+                    // player controls" after an attack-declaration head matches
+                    // the object's controller against the player the attack was
+                    // declared against (Gornog, the Red Reaper), through the
+                    // same source context.
+                    ControllerRef::DefendingPlayer { reading } => {
                         let source_ctx = source_context_from_filter(
                             state,
                             source_id,
@@ -7858,7 +7872,7 @@ fn filter_inner_for_object(
                             triggering_object,
                             granting_object,
                         );
-                        match source_defending_player(state, &source_ctx) {
+                        match source_defending_player(state, &source_ctx, *reading) {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
@@ -8312,7 +8326,7 @@ fn filter_inner_for_object(
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker => false,
         // CR 608.2k: `TriggeringSource` IS object-valued (unlike its player-axis
         // siblings above — types/ability.rs documents it as "the source object
@@ -8772,7 +8786,7 @@ fn zone_change_filter_inner(
                     | ControllerRef::Opponent
                     | ControllerRef::SpecificPlayer { .. }
                     | ControllerRef::ParentTargetOwner
-                    | ControllerRef::DefendingPlayer
+                    | ControllerRef::DefendingPlayer { .. }
                     | ControllerRef::SourceChosenPlayer
                     | ControllerRef::TriggeringPlayer
                     | ControllerRef::ActivePlayer => {}
@@ -8953,7 +8967,7 @@ fn zone_change_filter_inner(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -9218,7 +9232,7 @@ pub fn spell_record_matches_filter(
                     ControllerRef::ParentTargetController => return false,
                     // CR 120.1 + CR 109.4: the damage recipient's controller.
                     ControllerRef::EventTargetController => return false,
-                    ControllerRef::DefendingPlayer => return false,
+                    ControllerRef::DefendingPlayer { .. } => return false,
                     // CR 613.1: "the chosen player" has no meaning for a
                     // spell-history record. Fail closed.
                     ControllerRef::SourceChosenPlayer => return false,
@@ -9330,7 +9344,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -9618,7 +9632,7 @@ fn spell_object_matches_filter_inner(
                     ControllerRef::ParentTargetController => return false,
                     // CR 120.1 + CR 109.4: the damage recipient's controller.
                     ControllerRef::EventTargetController => return false,
-                    ControllerRef::DefendingPlayer => return false,
+                    ControllerRef::DefendingPlayer { .. } => return false,
                     // CR 109.4: Chosen-player scope is undefined for spell-cast
                     // history (no resolution context). Fail closed.
                     ControllerRef::ChosenPlayer { .. } => return false,
@@ -9721,7 +9735,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -9900,7 +9914,7 @@ pub(super) fn filter_reads_pt(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -10486,7 +10500,7 @@ impl<'a> SourceContext<'a> {
 ///
 /// Identical call, identical arguments, identical rule as the two quantity
 /// doors. The binding decision is NOT made here — see
-/// `combat::defending_player_cr508_5`, which owns it so one anaphor read once
+/// `combat::attack_defender_cr508`, which owns it so one anaphor read once
 /// as a `PlayerScope` and once as a `ControllerRef` cannot bind two different
 /// players.
 ///
@@ -10500,8 +10514,17 @@ impl<'a> SourceContext<'a> {
 /// door remains byte-identical to its previous `resolve_defending_player`
 /// behaviour and no unrelated in-flight combat can leak into continuous-effect
 /// filter evaluation.
-fn source_defending_player(state: &GameState, source: &SourceContext<'_>) -> Option<PlayerId> {
-    crate::game::combat::defending_player_cr508_5(state, source.id, source.trigger_source)
+///
+/// CR 508.7a: `reading` selects the attack relation. The
+/// [`AttackRelationReading::AsDeclared`] reading names the player the
+/// triggering attack declared, through the same authority and captured trigger
+/// context; a reselection does not change it.
+fn source_defending_player(
+    state: &GameState,
+    source: &SourceContext<'_>,
+    reading: AttackRelationReading,
+) -> Option<PlayerId> {
+    crate::game::combat::attack_defender_cr508(state, source.id, source.trigger_source, reading)
 }
 
 /// Drive the production `ControllerRef::DefendingPlayer` door from the
@@ -10524,7 +10547,7 @@ pub(crate) fn source_defending_player_for_test(
         None,
         None,
     );
-    source_defending_player(state, &context)
+    source_defending_player(state, &context, AttackRelationReading::Current)
 }
 
 fn source_enchanted_player(source: &SourceContext<'_>) -> Option<PlayerId> {
@@ -10537,7 +10560,9 @@ fn source_controller_ref_player(
     controller: &ControllerRef,
 ) -> Option<PlayerId> {
     match controller {
-        ControllerRef::DefendingPlayer => source_defending_player(state, source),
+        ControllerRef::DefendingPlayer { reading } => {
+            source_defending_player(state, source, *reading)
+        }
         ControllerRef::SourceChosenPlayer => source_chosen_player(source),
         ControllerRef::EnchantedPlayer => source_enchanted_player(source),
         _ => controller_ref_player(
@@ -11457,8 +11482,10 @@ pub(crate) fn owned_axis_admits(
         ControllerRef::ParentTargetOwner => {
             parent_target_owner_player(state, source.ability).is_some_and(|pid| pid == owner)
         }
-        ControllerRef::DefendingPlayer => {
-            source_defending_player(state, source).is_some_and(|pid| pid == owner)
+        // CR 508.5 / CR 508.7a: ownership relative to the player the source's
+        // attack relates to, under the leaf's reading.
+        ControllerRef::DefendingPlayer { reading } => {
+            source_defending_player(state, source, *reading).is_some_and(|pid| pid == owner)
         }
         // CR 613.1: Ownership relative to the source's persisted chosen player.
         ControllerRef::SourceChosenPlayer => {
@@ -11827,7 +11854,9 @@ fn matches_filter_prop(
                         perm.controller == pid
                     }
                     (Some(ControllerRef::ParentTargetOwner), Some(pid)) => perm.owner == pid,
-                    (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
+                    (Some(ControllerRef::DefendingPlayer { .. }), Some(pid)) => {
+                        perm.controller == pid
+                    }
                     (Some(ControllerRef::SourceChosenPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::ChosenPlayer { .. }), Some(pid)) => perm.controller == pid,
                     // CR 603.2 + CR 109.4: triggering-player-scoped name match.
@@ -13374,8 +13403,11 @@ fn attachment_controller_matches(
         }
         Some(ControllerRef::ParentTargetOwner) => parent_target_owner_player(state, source.ability)
             .is_some_and(|pid| pid == attachment_controller),
-        Some(ControllerRef::DefendingPlayer) => {
-            source_defending_player(state, source).is_some_and(|pid| pid == attachment_controller)
+        // CR 508.5 / CR 508.7a: attachment controller relative to the player
+        // the source's attack relates to, under the leaf's reading.
+        Some(ControllerRef::DefendingPlayer { reading }) => {
+            source_defending_player(state, source, *reading)
+                .is_some_and(|pid| pid == attachment_controller)
         }
         // CR 613.1: Attachment controller relative to the source's chosen player.
         Some(ControllerRef::SourceChosenPlayer) => {
@@ -14286,7 +14318,7 @@ pub(crate) fn single_target_count(filter: &TargetFilter) -> Option<SingleTargetC
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -14439,7 +14471,7 @@ fn player_matches_target_filter_with(
             // CR 120.1 + CR 109.4: the damage recipient's controller.
             Some(ControllerRef::EventTargetController) => false,
             Some(ControllerRef::ParentTargetOwner) => false,
-            Some(ControllerRef::DefendingPlayer) => false,
+            Some(ControllerRef::DefendingPlayer { .. }) => false,
             // CR 613.1: "the chosen player" has no meaning in this name-filter
             // context. Fail closed (mirrors `TargetPlayer`).
             Some(ControllerRef::SourceChosenPlayer) => false,

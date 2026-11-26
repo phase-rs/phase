@@ -310,7 +310,7 @@ fn population_side(filter: &TargetFilter, actor: BoonTargetSide) -> Option<BoonT
         Some(
             ControllerRef::Opponent
             | ControllerRef::TargetOpponent
-            | ControllerRef::DefendingPlayer,
+            | ControllerRef::DefendingPlayer { .. },
         ) => Some(BoonTargetSide::Enemy),
         _ => None,
     }
@@ -644,6 +644,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::RememberCard { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         // CR 725.1: crowning a player OTHER than yourself ("target opponent
         // becomes the monarch"). Whether handing out the designation helps you
         // is card-specific — Jared Carthalion wants an opponent crowned so it
@@ -1157,7 +1158,7 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::Owner
         | TargetFilter::AllPlayers => FilterDomain::SOME_PLAYER,
 
@@ -2097,8 +2098,9 @@ fn boon_filter_side(filter: &TargetFilter) -> BoonTargetSide {
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::SelfRef
         | TargetFilter::ParentTarget => BoonTargetSide::Holder,
-        // CR 506.2: the defending player is always an opponent of the attacker.
-        TargetFilter::Opponent | TargetFilter::DefendingPlayer => BoonTargetSide::Enemy,
+        // CR 506.2: the defending player is always an opponent of the attacker,
+        // as is the player an attack was declared against (CR 508.7a).
+        TargetFilter::Opponent | TargetFilter::DefendingPlayer { .. } => BoonTargetSide::Enemy,
         TargetFilter::Player | TargetFilter::Any => BoonTargetSide::Chosen,
         TargetFilter::Typed(typed) => match typed.controller {
             // Unrestricted "target creature" — the holder aims it.
@@ -2107,7 +2109,7 @@ fn boon_filter_side(filter: &TargetFilter) -> BoonTargetSide {
             Some(
                 ControllerRef::Opponent
                 | ControllerRef::TargetOpponent
-                | ControllerRef::DefendingPlayer,
+                | ControllerRef::DefendingPlayer { .. },
             ) => BoonTargetSide::Enemy,
             // The holder targets the player first, then aims within.
             Some(ControllerRef::TargetPlayer) => BoonTargetSide::Chosen,

@@ -391,7 +391,7 @@ pub fn apnap_order_from(
             | ControllerRef::ParentTargetController
             | ControllerRef::EventTargetController
             | ControllerRef::ParentTargetOwner
-            | ControllerRef::DefendingPlayer
+            | ControllerRef::DefendingPlayer { .. }
             | ControllerRef::SourceChosenPlayer
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::TriggeringPlayer

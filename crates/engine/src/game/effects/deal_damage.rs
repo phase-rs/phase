@@ -16,6 +16,7 @@ use crate::game::quantity::{
     resolve_quantity_with_targets_slice,
 };
 use crate::game::replacement::{self, ReplacementResult};
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
     DamageInstructionResult, DamageKindFilter, DamageSource, DeferredDamageChoice,
@@ -87,9 +88,15 @@ fn player_context_target(
 ) -> Option<PlayerRecipient> {
     if matches!(
         target_filter,
-        TargetFilter::DeclaredPlayer { .. } | TargetFilter::SpecificPlayer { .. }
+        TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared
+            }
     ) {
         // CR 608.2b: a declared player with no legal referent is dealt nothing.
+        // CR 508.7a: likewise the player an attack was declared against, once
+        // absent.
         return Some(
             match super::resolve_player_for_context_ref(state, ability, target_filter) {
                 Some(player) => PlayerRecipient::Bound(TargetRef::Player(player)),
@@ -169,7 +176,7 @@ fn bound_player_context_target(
             | TargetFilter::TriggeringSpellController
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::ParentTargetOwner
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::PostReplacementDamageTargetOwner
@@ -4894,7 +4901,9 @@ fn collect_matching_players(
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(
                             state,
-                            &TargetFilter::DefendingPlayer,
+                            &TargetFilter::DefendingPlayer {
+                                reading: AttackRelationReading::Current,
+                            },
                             source_id,
                             state.current_trigger_event.as_ref(),
                         )
@@ -5204,7 +5213,9 @@ fn resolve_each_player_portions(
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(
                             state,
-                            &TargetFilter::DefendingPlayer,
+                            &TargetFilter::DefendingPlayer {
+                                reading: AttackRelationReading::Current,
+                            },
                             ability.source_id,
                             state.current_trigger_event.as_ref(),
                         )

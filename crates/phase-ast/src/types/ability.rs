@@ -6934,8 +6934,38 @@ where
     }
 }
 
+/// Which attack relation a player reference after an attack reads — the one
+/// parameter of the `DefendingPlayer` leaf on [`ControllerRef`],
+/// [`PlayerScope`] and [`TargetFilter`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AttackRelationReading {
+    /// CR 508.5: the defending player the creature IS attacking (live; a CR 508.7
+    /// reselection changes it), or had when it was removed from combat. The
+    /// printed "defending player".
+    #[default]
+    Current,
+    /// CR 508.7a: the player the creature was declared as attacking. A
+    /// reselection never changes it ("it's still considered to have attacked the
+    /// player or permanent chosen as it was declared as an attacker").
+    AsDeclared,
+}
+
+impl AttackRelationReading {
+    /// `skip_serializing_if` predicate — the default reading needs no JSON byte.
+    pub fn is_current(&self) -> bool {
+        matches!(self, Self::Current)
+    }
+}
+
 /// Controller reference for filter matching.
+///
+/// Serde goes through the derived implementation (`remote = "Self"`) except for
+/// `DefendingPlayer` with the default [`AttackRelationReading::Current`], which
+/// keeps its bare unit form `"DefendingPlayer"` both ways, so card data and
+/// saved states written before the leaf carried a reading still load and the
+/// default encodes byte-identically.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub enum ControllerRef {
     You,
     Opponent,
@@ -6978,11 +7008,20 @@ pub enum ControllerRef {
     /// CR 608.2c + CR 108.3: Filter owner is the owner of the parent object
     /// target inherited by this chained effect ("its owner's graveyard").
     ParentTargetOwner,
-    /// CR 508.5 / CR 508.5a: Filter controller is the defending player for
-    /// the source attacking creature, resolved per attacker through
-    /// `combat::defending_player_for_attacker`. Used by intervening-if
-    /// quantity checks such as "defending player controls more lands than you."
-    DefendingPlayer,
+    /// CR 508.5 / CR 508.5a + CR 508.7a: Filter controller is the player the
+    /// source attacking creature's attack relates to, resolved per attacker
+    /// through `combat::attack_defender_cr508`. `reading` selects which
+    /// relation: [`AttackRelationReading::Current`] is the printed "defending
+    /// player" ("defending player controls more lands than you");
+    /// [`AttackRelationReading::AsDeclared`] is "that player"/"that opponent"
+    /// after an attack-declaration head (Gornog, the Red Reaper's "target
+    /// creature that player controls"; Soaring Lightbringer's token "attacking
+    /// that player"). Not `AttackedYouScope::AttackedPlayer`, a different enum
+    /// (turn-history scope).
+    DefendingPlayer {
+        #[serde(default)]
+        reading: AttackRelationReading,
+    },
     /// CR 608.2c + CR 109.4: Filter controller is the player chosen by the
     /// Nth `Effect::Choose { choice_type: ChoiceType::Player }` in this
     /// resolving ability chain (`index` is 0-based: 0 = the first choose).
@@ -7062,10 +7101,121 @@ pub enum ControllerRef {
     },
 }
 
+/// Unit-variant name of the default-reading `ControllerRef::DefendingPlayer`.
+const BARE_DEFENDING_PLAYER: &str = "DefendingPlayer";
+
+impl Serialize for ControllerRef {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            } => serializer.serialize_unit_variant("ControllerRef", 8, BARE_DEFENDING_PLAYER),
+            _ => ControllerRef::serialize(self, serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ControllerRef {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        if raw.as_str() == Some(BARE_DEFENDING_PLAYER) {
+            return Ok(Self::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            });
+        }
+        ControllerRef::deserialize(raw).map_err(de::Error::custom)
+    }
+}
+
 impl ControllerRef {
     /// `skip_serializing_if` predicate — the controller default needs no JSON byte.
     pub fn is_you(&self) -> bool {
         matches!(self, Self::You)
+    }
+}
+
+#[cfg(test)]
+mod attack_relation_reading_wire_tests {
+    use super::*;
+
+    const CURRENT: AttackRelationReading = AttackRelationReading::Current;
+    const AS_DECLARED: AttackRelationReading = AttackRelationReading::AsDeclared;
+
+    /// The default reading keeps the pre-parameterization encoding on all three
+    /// leaves, both ways: the bare `ControllerRef` unit name and the bare
+    /// internally tagged `{"type":"DefendingPlayer"}`.
+    #[test]
+    fn current_reading_keeps_the_bare_encoding() {
+        let controller = ControllerRef::DefendingPlayer { reading: CURRENT };
+        assert_eq!(
+            serde_json::to_string(&controller).unwrap(),
+            r#""DefendingPlayer""#
+        );
+        assert_eq!(
+            serde_json::from_str::<ControllerRef>(r#""DefendingPlayer""#).unwrap(),
+            controller
+        );
+
+        let scope = PlayerScope::DefendingPlayer { reading: CURRENT };
+        assert_eq!(
+            serde_json::to_string(&scope).unwrap(),
+            r#"{"type":"DefendingPlayer"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<PlayerScope>(r#"{"type":"DefendingPlayer"}"#).unwrap(),
+            scope
+        );
+
+        let filter = TargetFilter::DefendingPlayer { reading: CURRENT };
+        assert_eq!(
+            serde_json::to_string(&filter).unwrap(),
+            r#"{"type":"DefendingPlayer"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<TargetFilter>(r#"{"type":"DefendingPlayer"}"#).unwrap(),
+            filter
+        );
+    }
+
+    /// The as-declared reading carries its parameter and round-trips; the other
+    /// `ControllerRef` variants still go through the derived encoding.
+    #[test]
+    fn as_declared_reading_round_trips_with_its_parameter() {
+        let controller = ControllerRef::DefendingPlayer {
+            reading: AS_DECLARED,
+        };
+        let json = serde_json::to_string(&controller).unwrap();
+        assert_eq!(json, r#"{"DefendingPlayer":{"reading":"AsDeclared"}}"#);
+        assert_eq!(
+            serde_json::from_str::<ControllerRef>(&json).unwrap(),
+            controller
+        );
+
+        let scope = PlayerScope::DefendingPlayer {
+            reading: AS_DECLARED,
+        };
+        let json = serde_json::to_string(&scope).unwrap();
+        assert_eq!(json, r#"{"type":"DefendingPlayer","reading":"AsDeclared"}"#);
+        assert_eq!(serde_json::from_str::<PlayerScope>(&json).unwrap(), scope);
+
+        let filter = TargetFilter::DefendingPlayer {
+            reading: AS_DECLARED,
+        };
+        let json = serde_json::to_string(&filter).unwrap();
+        assert_eq!(json, r#"{"type":"DefendingPlayer","reading":"AsDeclared"}"#);
+        assert_eq!(serde_json::from_str::<TargetFilter>(&json).unwrap(), filter);
+
+        for other in [
+            ControllerRef::You,
+            ControllerRef::SpecificPlayer { id: PlayerId(1) },
+        ] {
+            let json = serde_json::to_string(&other).unwrap();
+            assert_eq!(serde_json::from_str::<ControllerRef>(&json).unwrap(), other);
+        }
+        assert_eq!(
+            serde_json::to_string(&ControllerRef::You).unwrap(),
+            r#""You""#
+        );
     }
 }
 
@@ -9223,10 +9373,19 @@ pub enum TargetFilter {
     /// is the rule this variant is deliberately DISTINCT from; the same
     /// owner-vs-controller split the sibling `ParentTargetOwner` cites.
     PostReplacementDamageTargetOwner,
-    /// CR 508.5 / CR 508.5a: Resolves to the defending player for the source
-    /// attacking creature, looked up per attacker through
-    /// `combat::defending_player_for_attacker`.
-    DefendingPlayer,
+    /// CR 508.5 / CR 508.5a + CR 508.7a: Resolves to the player the source
+    /// attacking creature's attack relates to, looked up per attacker through
+    /// `combat::attack_defender_cr508`; a context reference, never a declared
+    /// target. `reading` selects which relation:
+    /// [`AttackRelationReading::Current`] is the printed "defending player";
+    /// [`AttackRelationReading::AsDeclared`] is "that player" after an
+    /// attack-declaration head (Archnemesis's "Whenever you attack enchanted
+    /// player, that player loses 2 life"). Not `AttackedYouScope::AttackedPlayer`,
+    /// a different enum (turn-history scope).
+    DefendingPlayer {
+        #[serde(default, skip_serializing_if = "AttackRelationReading::is_current")]
+        reading: AttackRelationReading,
+    },
     /// Matches objects whose name equals the source's ChosenAttribute::CardName.
     /// Used for "card with the chosen name" patterns.
     HasChosenName,
@@ -9537,7 +9696,7 @@ pub fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter) -> bo
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -9845,7 +10004,7 @@ pub fn filter_grammar_any(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -10413,7 +10572,7 @@ pub fn rewrite_filter_props<C>(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -11311,7 +11470,7 @@ pub(crate) fn filter_binds_player(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -11943,6 +12102,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::Conjure { .. }
         | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
@@ -12408,12 +12568,21 @@ pub enum PlayerScope {
     /// "enchanted creature gets +1/+1 for each card in its controller's
     /// hand", where "its" refers to the enchanted creature, not the Aura.
     RecipientController,
-    /// CR 508.5 / CR 508.5a: The defending player for the source attacking
-    /// creature, resolved per attacker through
-    /// `combat::defending_player_for_attacker`. Used by attack-trigger
-    /// intervening-if quantities such as "no opponent has more life than that
-    /// player."
-    DefendingPlayer,
+    /// CR 508.5 / CR 508.5a + CR 508.7a: The player the source attacking
+    /// creature's attack relates to, resolved per attacker through
+    /// `combat::attack_defender_cr508`. `reading` selects which relation:
+    /// [`AttackRelationReading::Current`] (live: a CR 508.7 reselection changes
+    /// it) is the printed literal "defending player": Septic Rats ("if defending
+    /// player is poisoned") and Scourge of the Throne ("if it's attacking the
+    /// player with the most life or tied for most life").
+    /// [`AttackRelationReading::AsDeclared`] is "that player"/"that opponent"
+    /// after an attack-declaration head: M'Baku, Jabari Chieftain's "if that
+    /// player is the monarch"; Dethrone. Not `AttackedYouScope::AttackedPlayer`,
+    /// a different enum (turn-history scope).
+    DefendingPlayer {
+        #[serde(default, skip_serializing_if = "AttackRelationReading::is_current")]
+        reading: AttackRelationReading,
+    },
     /// CR 109.4 + CR 108.3 + CR 608.2c: The controller or owner (per
     /// `possession`) of the first object target of the resolving ability —
     /// "that opponent" anaphoring the controller of a bounced creature, or
@@ -12981,7 +13150,7 @@ fn target_filter_has_unsupported_selected_ref(filter: &TargetFilter, nested: boo
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -13232,7 +13401,7 @@ fn controller_ref_is_selected_dependent(reference: &ControllerRef, direct_member
         ControllerRef::You
         | ControllerRef::Opponent
         | ControllerRef::ScopedPlayer
-        | ControllerRef::DefendingPlayer
+        | ControllerRef::DefendingPlayer { .. }
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::TriggeringPlayer
         | ControllerRef::EnchantedPlayer
@@ -13253,7 +13422,7 @@ fn player_scope_is_selected_dependent(scope: &PlayerScope) -> bool {
         | PlayerScope::ScopedPlayer
         | PlayerScope::Opponent { .. }
         | PlayerScope::AllPlayers { .. }
-        | PlayerScope::DefendingPlayer
+        | PlayerScope::DefendingPlayer { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => false,
@@ -16921,6 +17090,7 @@ impl Effect {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
@@ -17231,6 +17401,7 @@ pub fn indicated_action_commit(effect: &Effect) -> IndicatedActionCommit {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        | Effect::ReselectAttackTarget { .. }
         | Effect::Conjure { .. }
         | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
@@ -17908,7 +18079,7 @@ impl StaticMode {
         match scope {
             PlayerScope::Controller => true,
             PlayerScope::RecipientController => matches!(self, StaticMode::CantUntap),
-            PlayerScope::DefendingPlayer => false,
+            PlayerScope::DefendingPlayer { .. } => false,
             // Engine limitation, not CR-mandated: these scopes have no binding
             // authority in this static enforcement context.
             PlayerScope::ScopedPlayer
@@ -18115,9 +18286,10 @@ pub enum StaticCondition {
     ///   anaphor to the player named by the triggering event)
     /// - [`PlayerScope::RecipientController`] ← the enchanted creature's
     ///   controller in an untap-step clause (CR 303.4m + CR 502.3)
-    /// - [`PlayerScope::DefendingPlayer`] ← the same anaphor once an attack
-    ///   trigger's clause has bound it (CR 508.5; see
-    ///   `parser::oracle_trigger::rebind_attack_anaphor_to_defending_player`)
+    /// - [`PlayerScope::DefendingPlayer`] (`AsDeclared` reading) ← the same anaphor once an attack
+    ///   trigger's clause has bound it to the player the attack declared
+    ///   (CR 508.7a; see
+    ///   `parser::oracle_trigger::rebind_attack_anaphor_to_attacked_player`)
     ///
     /// A scope the evaluation context cannot bind, or a designation no player
     /// currently holds (CR 725.5), makes the static condition UNANSWERABLE.
@@ -27453,6 +27625,13 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 508.7 + CR 508.7a: reselect which player, planeswalker, or battle the
+    /// target attacking creature is attacking. It stays attacking and is still
+    /// considered to have attacked what it was declared attacking.
+    ReselectAttackTarget {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// Digital-only keyword action (no CR entry): Conjure creates a card from outside
     /// the game and places it into a specified zone. Unlike tokens, conjured cards are
     /// "real" cards with full characteristics (mana value, types, abilities, etc.).
@@ -27984,7 +28163,7 @@ pub fn phase_out_filter_is_context_union(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -29661,7 +29840,7 @@ fn player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::ScopedPlayer
         | PlayerScope::Target
         | PlayerScope::Opponent { .. }
-        | PlayerScope::DefendingPlayer
+        | PlayerScope::DefendingPlayer { .. }
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
@@ -29678,7 +29857,7 @@ fn single_player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::Controller
         | PlayerScope::ScopedPlayer
         | PlayerScope::Target
-        | PlayerScope::DefendingPlayer
+        | PlayerScope::DefendingPlayer { .. }
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
@@ -29753,7 +29932,7 @@ pub fn filter_recipient_read(filter: &TargetFilter) -> RecipientRead {
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -30777,7 +30956,7 @@ impl TargetFilter {
             | TargetFilter::PostReplacementDamageSource
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
@@ -30859,7 +31038,7 @@ impl TargetFilter {
             | TargetFilter::PostReplacementDamageSource
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
@@ -30925,7 +31104,7 @@ impl TargetFilter {
     /// a player attacks you") or an attacking OBJECT (`valid_source_matches`).
     ///
     /// Single authority: the parser's intervening-if anaphor gate
-    /// (`oracle_trigger::attack_intervening_if_anaphor_is_defending_player`)
+    /// (`oracle_trigger::attack_intervening_if_anaphor_is_attacked_player`)
     /// asks the same question and MUST ask it with this method, not with a
     /// `valid_source.is_none()` proxy — that proxy silently excludes every
     /// attack trigger whose attacker filter is an OBJECT filter in
@@ -31276,7 +31455,7 @@ impl TargetFilter {
             | TargetFilter::PostReplacementDamageSource
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
@@ -31444,7 +31623,7 @@ impl TargetFilter {
                 | TargetFilter::TriggeringPlayer
                 | TargetFilter::TriggeringSource
                 | TargetFilter::EventTarget
-                | TargetFilter::DefendingPlayer
+                | TargetFilter::DefendingPlayer { .. }
                 // CR 506.3 + CR 115.10a: read from combat at resolution, never declared.
                 | TargetFilter::AttackedPlayerOrPlaneswalker
                 // CR 608.2c + CR 115.1: "that token" / "those tokens"
@@ -32330,6 +32509,7 @@ impl Effect {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
@@ -32584,6 +32764,7 @@ impl Effect {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
@@ -32703,6 +32884,7 @@ impl Effect {
             | Effect::GiveControl { target, .. }
             | Effect::RemoveFromCombat { target, .. }
             | Effect::BecomeBlocked { target, .. }
+            | Effect::ReselectAttackTarget { target, .. }
             | Effect::PutSticker { target, .. }
             | Effect::ApplySticker { target, .. }
             | Effect::ProliferateTarget { target, .. }
@@ -33359,6 +33541,7 @@ impl Effect {
             | Effect::GiveControl { target, .. }
             | Effect::RemoveFromCombat { target, .. }
             | Effect::BecomeBlocked { target, .. }
+            | Effect::ReselectAttackTarget { target, .. }
             | Effect::PutSticker { target, .. }
             | Effect::ApplySticker { target, .. }
             | Effect::ProliferateTarget { target, .. }
@@ -34254,6 +34437,7 @@ impl Effect {
             | Effect::AssembleContraptionOnSprocket { .. }
             | Effect::Attach { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::BecomeCopy { .. }
             | Effect::BecomeMonarch { .. }
             | Effect::BecomePrepared { .. }
@@ -34483,6 +34667,7 @@ impl Effect {
             | Effect::AssembleContraptionsFromRollDifference
             | Effect::Attach { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::BecomeCopy { .. }
             | Effect::BecomeMonarch { .. }
             | Effect::BecomePrepared { .. }
@@ -35392,6 +35577,7 @@ macro_rules! define_effect_quantity_walk {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
@@ -35761,6 +35947,7 @@ macro_rules! define_nested_definition_walk {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::Conjure { .. }
             | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
@@ -35965,6 +36152,7 @@ impl Effect {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::ChangeTargets { .. }
             | Effect::AddRestriction { .. }
             | Effect::AddTargetReplacement { .. }
@@ -36240,6 +36428,7 @@ impl Effect {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
+            | Effect::ReselectAttackTarget { .. }
             | Effect::ChangeTargets { .. }
             | Effect::AddRestriction { .. }
             | Effect::AddTargetReplacement { .. }
@@ -36594,6 +36783,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GiveControl { .. } => "GiveControl",
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
         Effect::BecomeBlocked { .. } => "BecomeBlocked",
+        Effect::ReselectAttackTarget { .. } => "ReselectAttackTarget",
         Effect::Conjure { .. } => "Conjure",
         Effect::CreateCardCopyByName { .. } => "CreateCardCopyByName",
         Effect::Intensify { .. } => "Intensify",
@@ -36854,6 +37044,7 @@ pub enum EffectKind {
     GiveControl,
     RemoveFromCombat,
     BecomeBlocked,
+    ReselectAttackTarget,
     Conjure,
     CreateCardCopyByName,
     Intensify,
@@ -37152,6 +37343,7 @@ impl From<&Effect> for EffectKind {
             Effect::GiveControl { .. } => EffectKind::GiveControl,
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
             Effect::BecomeBlocked { .. } => EffectKind::BecomeBlocked,
+            Effect::ReselectAttackTarget { .. } => EffectKind::ReselectAttackTarget,
             Effect::Conjure { .. } => EffectKind::Conjure,
             Effect::CreateCardCopyByName { .. } => EffectKind::CreateCardCopyByName,
             Effect::Intensify { .. } => EffectKind::Intensify,
@@ -41130,8 +41322,9 @@ pub enum TriggerCondition {
     /// `player` is the CR 109.5 subject axis; see
     /// [`StaticCondition::IsMonarch`] for the full axis rationale. "if you're
     /// the monarch" is [`PlayerScope::Controller`]; "if that player is the
-    /// monarch" on an attack trigger is [`PlayerScope::DefendingPlayer`]
-    /// (CR 508.5 — the player the triggering creature is attacking).
+    /// monarch" on an attack trigger is [`PlayerScope::DefendingPlayer`] (`AsDeclared` reading)
+    /// (CR 508.7a — the player the triggering creature was declared as
+    /// attacking; a reselection does not change it).
     ///
     /// An unresolvable scope makes the condition UNANSWERABLE, not false:
     /// `triggers::check_trigger_condition_with_source` rejects the whole
@@ -46096,7 +46289,9 @@ mod tests {
     #[test]
     fn token_attack_destination_wire_shape_is_additive() {
         let named = TokenAttackDestination::Player {
-            player: ControllerRef::DefendingPlayer,
+            player: ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             scope: NamedDefenderScope::PlayerOrPlaneswalker,
         };
         for build in [goblin_token, copy_token] {
@@ -53684,7 +53879,9 @@ mod monarch_subject_axis_tests {
     #[test]
     fn is_monarch_serializes_a_non_default_subject() {
         let trigger = TriggerCondition::IsMonarch {
-            player: PlayerScope::DefendingPlayer,
+            player: PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
         };
         let json = serde_json::to_string(&trigger).unwrap();
         assert_eq!(
@@ -53715,7 +53912,12 @@ mod monarch_subject_axis_tests {
         for ok in [
             PlayerScope::Controller,
             PlayerScope::ScopedPlayer,
-            PlayerScope::DefendingPlayer,
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
         ] {
             assert!(!ok.duration_timing_only(), "{ok:?} must resolve normally");
         }
@@ -53727,11 +53929,15 @@ mod monarch_subject_axis_tests {
     fn evaluation_anchor_reports_each_anchor_kind_and_nothing_else() {
         assert_eq!(
             TriggerCondition::IsMonarch {
-                player: PlayerScope::DefendingPlayer
+                player: PlayerScope::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                }
             }
             .evaluation_anchor(),
             Some(TriggerConditionAnchor::Player(
-                &PlayerScope::DefendingPlayer
+                &PlayerScope::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                }
             ))
         );
         // CR 607.1c + CR 113.2c: the self-linked leaf needs its own trigger
@@ -53762,7 +53968,9 @@ mod monarch_subject_axis_tests {
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::LifeTotal {
-                        player: PlayerScope::DefendingPlayer
+                        player: PlayerScope::DefendingPlayer {
+                            reading: AttackRelationReading::Current
+                        }
                     }
                 },
                 comparator: Comparator::GT,
@@ -53858,11 +54066,15 @@ mod monarch_subject_axis_tests {
         let mut life = QuantityRef::LifeTotal {
             player: PlayerScope::ScopedPlayer,
         };
-        *life.player_scope_mut().unwrap() = PlayerScope::DefendingPlayer;
+        *life.player_scope_mut().unwrap() = PlayerScope::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        };
         assert_eq!(
             life,
             QuantityRef::LifeTotal {
-                player: PlayerScope::DefendingPlayer
+                player: PlayerScope::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                }
             }
         );
 

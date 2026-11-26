@@ -229,6 +229,21 @@
 //! the same rule admitted — so the ceiling moves to
 //! 16,416.next_multiple_of(256) + 256 = 16,768.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-11-18`) at
+//! 16,416 B, with a const `size_of` probe, when the CR 508.5 removed-attacker
+//! defender record landed: `CombatState::removed_attacker_defenders`, a 24 B
+//! `Vec` held inline in `GameState::combat` and written whenever an attacking
+//! creature is removed from combat, in place or by leaving the battlefield,
+//! plus padding. It is not a large
+//! rarely-populated struct, so the ceiling moves by the rule to
+//! 16,416.next_multiple_of(256) + 256 = 16,896.
+//!
+//! With both records merged (`departed_triggered_abilities` and
+//! `removed_attacker_defenders`), `GameState` re-measured on
+//! x86_64-pc-windows-msvc (`nightly-2026-11-18`) at 16,432 B with a const
+//! `size_of` probe; the rule keeps the ceiling at
+//! 16,432.next_multiple_of(256) + 256 = 16,896.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!
@@ -238,7 +253,7 @@
 const _: () = {
     use core::mem::size_of;
     assert!(
-        size_of::<crate::types::game_state::GameState>() <= 16_768,
+        size_of::<crate::types::game_state::GameState>() <= 16_896,
         "GameState grew past its stack budget. It is moved by value through the \
          phase-server action + AI path, so an overrun is an uncatchable \
          guard-page abort, not a panic. Re-run the -Zprint-type-sizes command in \

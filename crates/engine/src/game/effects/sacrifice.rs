@@ -1,4 +1,5 @@
 use crate::game::quantity::resolve_quantity_with_targets;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     ControllerRef, Effect, EffectError, EffectKind, EffectResolutionResult, QuantityExpr,
     ResolvedAbility, TargetFilter, TargetRef, ThisWayCause,
@@ -90,11 +91,23 @@ fn resolve_sacrifice_scope(
             .map(|pid| vec![pid])
             .unwrap_or_default()
         }
-        Some(ControllerRef::DefendingPlayer) => {
-            crate::game::combat::resolve_defending_player(state, ability.source_id)
-                .map(|pid| vec![pid])
-                .unwrap_or_default()
-        }
+        Some(ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        }) => crate::game::combat::resolve_defending_player(state, ability.source_id)
+            .map(|pid| vec![pid])
+            .unwrap_or_default(),
+        // CR 508.7a: the player the triggering attack declared; no referent
+        // means no sacrificing player.
+        Some(ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::AsDeclared,
+        }) => crate::game::combat::attack_defender_cr508(
+            state,
+            ability.source_id,
+            ability.trigger_source.as_ref(),
+            AttackRelationReading::AsDeclared,
+        )
+        .map(|pid| vec![pid])
+        .unwrap_or_default(),
         // CR 613.1: Player persisted on the source via an "as ~ enters, choose
         // a player" replacement.
         Some(ControllerRef::SourceChosenPlayer) => {
@@ -427,7 +440,7 @@ pub fn resolve(
             | TargetFilter::PostReplacementDamageSource
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }

@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::parser::parse_oracle_text;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::LibraryInstructionActor;
 
 /// Every zone move in the card's parsed abilities and trigger bodies, in walk
@@ -302,14 +303,14 @@ fn trigger_that_player_names_the_earlier_player_reference() {
             "Creature",
             "Haste\nWhenever this creature attacks, defending player reveals the top card of their library. If it's a land card, that player puts it into their hand.",
             1,
-            TargetFilter::DefendingPlayer,
+            TargetFilter::DefendingPlayer { reading: AttackRelationReading::Current },
         ),
         (
             "Trepanation Blade",
             "Artifact",
             "Whenever equipped creature attacks, defending player reveals cards from the top of their library until they reveal a land card. The creature gets +1/+0 until end of turn for each card revealed this way. That player puts the revealed cards into their graveyard.\nEquip {2}",
             2,
-            TargetFilter::DefendingPlayer,
+            TargetFilter::DefendingPlayer { reading: AttackRelationReading::Current },
         ),
         (
             "Conundrum Sphinx",

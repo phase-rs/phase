@@ -30,6 +30,7 @@ use crate::parser::oracle_target::{
     parse_zone_suffix, parse_zone_word, peek_zone_boundary, superlative_property_filter_prop,
 };
 use crate::parser::oracle_util::parse_subtype;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     is_any_target_filter, AbilityCondition, AggregateFunction, AttachmentReferent,
@@ -588,7 +589,7 @@ fn parse_source_controlled_or_your_commander(input: &str) -> OracleResult<'_, St
 fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_opponent_poison_conditions,
-        parse_defending_player_more_life_than_another_opponent,
+        parse_attack_player_more_life_than_another_opponent,
         parse_defending_player_comparison_conditions,
         parse_that_player_controls_more_comparison,
         parse_no_opponent_comparison_conditions,
@@ -2003,9 +2004,9 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
 /// player"/"that opponent" is the anaphoric event-scoped player; this
 /// combinator cannot see the owning trigger, so it emits the generic
 /// [`PlayerScope::ScopedPlayer`] anchor, which an attack trigger rebinds to
-/// [`PlayerScope::DefendingPlayer`] when its clause supplies a more specific
-/// antecedent (CR 508.5 — see
-/// `oracle_trigger::rebind_attack_anaphor_to_defending_player`).
+/// [`PlayerScope::DefendingPlayer`] (`AsDeclared` reading) when its clause supplies a more specific
+/// antecedent (CR 508.7a — see
+/// `oracle_trigger::rebind_attack_anaphor_to_attacked_player`).
 ///
 /// Mirrors `parse_that_player_has_conditions` in this module, which already
 /// maps the same two anaphors to [`PlayerScope::ScopedPlayer`].
@@ -2062,7 +2063,12 @@ fn parse_player_poisoned_condition(input: &str) -> OracleResult<'_, StaticCondit
             PlayerScope::ScopedPlayer,
             alt((tag("that player "), tag("that opponent "))),
         ),
-        value(PlayerScope::DefendingPlayer, tag("defending player ")),
+        value(
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            tag("defending player "),
+        ),
     ))
     .parse(input)?;
     let (rest, _) = alt((tag("are poisoned"), tag("is poisoned"))).parse(rest)?;
@@ -5096,7 +5102,7 @@ fn typed_slot_type_axis_matches(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::HasChosenName
         | TargetFilter::Owner
         | TargetFilter::AllPlayers => false,
@@ -5951,7 +5957,9 @@ fn parse_control_scope_prefix(input: &str) -> OracleResult<'_, ControllerRef> {
         // Ayesha Tanaka, Armorer, "…can't be blocked as long as defending
         // player controls three or more artifacts".
         value(
-            ControllerRef::DefendingPlayer,
+            ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             tag("defending player controls "),
         ),
     ))
@@ -11690,21 +11698,35 @@ fn parse_that_player_controls_more_comparison(input: &str) -> OracleResult<'_, S
 /// comparing the defending player's permanents to the trigger controller's.
 /// The object-count machinery already handles `ControllerRef::You`; this arm
 /// adds the combat-context controller axis for the LHS.
-/// CR 508.5 + CR 603.4: "that opponent has more life than another of your
-/// opponents" — defending player's life exceeds the lowest life total among
-/// the source controller's opponents (Breena, the Demagogue).
-fn parse_defending_player_more_life_than_another_opponent(
+/// CR 508.7a + CR 603.4: "that opponent has more life than another of your
+/// opponents" — the attacked player's life exceeds the lowest life total among
+/// the source controller's opponents (Breena, the Demagogue). "That opponent"
+/// is the player the attack declared (CR 508.7a: a reselection does not change
+/// it); the literal "defending player" is the live CR 508.5 defending player.
+fn parse_attack_player_more_life_than_another_opponent(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("that opponent "), tag("defending player "))).parse(input)?;
+    let (rest, player) = alt((
+        value(
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
+            tag("that opponent "),
+        ),
+        value(
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            tag("defending player "),
+        ),
+    ))
+    .parse(input)?;
     let (rest, _) = tag("has more life than another of your opponents").parse(rest)?;
     Ok((
         rest,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal {
-                    player: PlayerScope::DefendingPlayer,
-                },
+                qty: QuantityRef::LifeTotal { player },
             },
             comparator: Comparator::GT,
             rhs: QuantityExpr::Ref {
@@ -11726,7 +11748,9 @@ fn parse_defending_player_comparison_conditions(input: &str) -> OracleResult<'_,
     let (filter, _) = parse_type_phrase_folding(type_text.trim());
     let defending_filter = match filter {
         TargetFilter::Typed(tf) => {
-            TargetFilter::Typed(tf.controller(ControllerRef::DefendingPlayer))
+            TargetFilter::Typed(tf.controller(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            }))
         }
         other => other,
     };
@@ -11754,13 +11778,28 @@ fn parse_defending_player_comparison_conditions(input: &str) -> OracleResult<'_,
 /// Parse "no opponent has more life than that/defending player".
 ///
 /// This is the negated form of the cross-player life comparison used on attack
-/// triggers such as Guild Artisan. The referenced player is the defending
-/// player from the attack event, so the condition composes as:
-/// max(opponent life) <= defending-player life.
+/// triggers such as Guild Artisan, so the condition composes as:
+/// max(opponent life) <= referenced-player life. CR 508.7a: "that player" is
+/// the player the attack declared (a reselection does not change it); CR 508.5:
+/// the literal "defending player" is the live defending player.
 fn parse_no_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("no opponent ").parse(input)?;
     let (rest, _) = tag("has more life than ").parse(rest)?;
-    let (rest, _) = alt((tag("that player"), tag("defending player"))).parse(rest)?;
+    let (rest, player) = alt((
+        value(
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
+            tag("that player"),
+        ),
+        value(
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            tag("defending player"),
+        ),
+    ))
+    .parse(rest)?;
     Ok((
         rest,
         StaticCondition::QuantityComparison {
@@ -11773,9 +11812,7 @@ fn parse_no_opponent_comparison_conditions(input: &str) -> OracleResult<'_, Stat
             },
             comparator: Comparator::LE,
             rhs: QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal {
-                    player: PlayerScope::DefendingPlayer,
-                },
+                qty: QuantityRef::LifeTotal { player },
             },
         },
     ))
@@ -14314,7 +14351,9 @@ mod tests {
         assert_eq!(tf.type_filters, vec![TypeFilter::Artifact]);
         assert_eq!(
             tf.controller,
-            Some(ControllerRef::DefendingPlayer),
+            Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }),
             "the count must be scoped to the defending player, not the source's \
              controller"
         );
@@ -14352,7 +14391,12 @@ mod tests {
         assert_eq!(quality, SharedQuality::CreatureType);
         assert_eq!(aggregate, AggregateFunction::Max);
         assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
-        assert_eq!(tf.controller, Some(ControllerRef::DefendingPlayer));
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            })
+        );
     }
 
     /// CR 205.3m + CR 603.4 + CR 601.2f: "you control <threshold> creatures
@@ -21106,7 +21150,12 @@ mod tests {
                 let TargetFilter::Typed(lhs) = lhs else {
                     panic!("expected typed lhs filter");
                 };
-                assert_eq!(lhs.controller, Some(ControllerRef::DefendingPlayer));
+                assert_eq!(
+                    lhs.controller,
+                    Some(ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    })
+                );
                 let TargetFilter::Typed(rhs) = rhs else {
                     panic!("expected typed rhs filter");
                 };
@@ -21567,7 +21616,10 @@ mod tests {
                     QuantityExpr::Ref {
                         qty:
                             QuantityRef::LifeTotal {
-                                player: PlayerScope::DefendingPlayer,
+                                player:
+                                    PlayerScope::DefendingPlayer {
+                                        reading: AttackRelationReading::AsDeclared,
+                                    },
                             },
                     },
                 comparator: Comparator::GT,
@@ -21582,12 +21634,14 @@ mod tests {
                             },
                     },
             } => {}
-            other => panic!("expected defending life GT min opponent life, got {other:?}"),
+            other => panic!("expected attacked-player life GT min opponent life, got {other:?}"),
         }
     }
 
     #[test]
     fn test_no_opponent_has_more_life_than_that_player() {
+        // Guild Artisan's clause: "that player" is the player the attack
+        // declared (CR 508.7a).
         let (rest, c) =
             parse_inner_condition("no opponent has more life than that player").unwrap();
         assert_eq!(rest, "");
@@ -21608,12 +21662,15 @@ mod tests {
                     QuantityExpr::Ref {
                         qty:
                             QuantityRef::LifeTotal {
-                                player: PlayerScope::DefendingPlayer,
+                                player:
+                                    PlayerScope::DefendingPlayer {
+                                        reading: AttackRelationReading::AsDeclared,
+                                    },
                             },
                     },
             } => {}
             other => {
-                panic!("expected OpponentLifeTotal LE DefendingPlayerLifeTotal, got {other:?}")
+                panic!("expected OpponentLifeTotal LE AttackedPlayerLifeTotal, got {other:?}")
             }
         }
     }
@@ -28016,7 +28073,7 @@ mod tests {
             | TargetFilter::PostReplacementDamageSource
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }
