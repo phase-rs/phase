@@ -6706,7 +6706,7 @@ fn create_token_applier(
                 // the `sacrifice_at` rider rule in
                 // `keep_creating_instruction_entry`.
                 if spec.blocking_attacker.is_some() {
-                    substitute_spec.blocking_attacker = spec.blocking_attacker;
+                    substitute_spec.set_blocking_attacker_ref(spec.blocking_attacker_ref());
                 }
                 match copy.as_deref() {
                     Some(batch_copy) => {
@@ -6764,7 +6764,7 @@ fn create_token_applier(
             // alongside tapped. Pinned-incarnation id travels verbatim
             // (CR 400.7 + CR 608.2k) — no re-resolution.
             if spec.blocking_attacker.is_some() {
-                extra.blocking_attacker = spec.blocking_attacker;
+                extra.set_blocking_attacker_ref(spec.blocking_attacker_ref());
             }
             push_appended_token_batch(
                 &mut appended,
@@ -6904,6 +6904,7 @@ fn create_entry_copy_spec_for_replacement(
         )
     };
     Some(CopyTokenSpec {
+        blocking_attacker: None,
         values: Box::new(values),
         display,
         extra_keywords: Vec::new(),
@@ -10662,6 +10663,7 @@ fn stage_transformed_entry_projection(
     state.liminal_entries.insert(
         entrant,
         LiminalEntry {
+            blocking_attacker: None,
             copy_settlement: None,
             object: crate::types::game_state::LiminalEntrant::Card(projected),
             name,
@@ -15095,6 +15097,7 @@ trait SubstituteEntryTarget {
     fn enters_attacking(&self) -> bool;
     fn set_enters_attacking(&mut self, enters_attacking: bool);
     fn set_attack_request(&mut self, request: TokenAttackRequest);
+    fn set_blocking_attacker(&mut self, attacker: ObjectIncarnationRef);
     fn set_sacrifice_at(&mut self, sacrifice_at: Option<Duration>);
 }
 
@@ -15114,6 +15117,10 @@ impl SubstituteEntryTarget for TokenSpec {
     fn set_attack_request(&mut self, request: TokenAttackRequest) {
         self.attack_request = request;
     }
+    fn set_blocking_attacker(&mut self, attacker: ObjectIncarnationRef) {
+        self.set_blocking_attacker_ref(Some(attacker));
+    }
+
     fn set_sacrifice_at(&mut self, sacrifice_at: Option<Duration>) {
         self.sacrifice_at = sacrifice_at;
     }
@@ -15135,6 +15142,10 @@ impl SubstituteEntryTarget for CopyTokenSpec {
     fn set_attack_request(&mut self, request: TokenAttackRequest) {
         self.attack_request = request;
     }
+    fn set_blocking_attacker(&mut self, attacker: ObjectIncarnationRef) {
+        self.blocking_attacker = Some(attacker);
+    }
+
     fn set_sacrifice_at(&mut self, sacrifice_at: Option<Duration>) {
         self.sacrifice_at = sacrifice_at;
     }
@@ -15150,6 +15161,9 @@ fn keep_creating_instruction_entry(orig: &TokenSpec, sub: &mut impl SubstituteEn
     sub.set_enters_attacking(sub.enters_attacking() | orig.enters_attacking);
     if !orig.attack_request.is_unspecified() {
         sub.set_attack_request(orig.attack_request.clone());
+    }
+    if let Some(attacker) = orig.blocking_attacker_ref() {
+        sub.set_blocking_attacker(attacker);
     }
     if orig.sacrifice_at.is_some() {
         sub.set_sacrifice_at(orig.sacrifice_at.clone());
@@ -15209,6 +15223,7 @@ fn substitute_token_batch(
             spec.tapped = copy.tapped;
             spec.enters_attacking = copy.enters_attacking;
             spec.attack_request = copy.attack_request.clone();
+            spec.set_blocking_attacker_ref(copy.blocking_attacker);
             Ok(ProposedEvent::CreateToken {
                 owner,
                 spec: Box::new(spec),
@@ -20237,6 +20252,7 @@ mod tests {
         walker.base_card_types.core_types = vec![CoreType::Planeswalker];
         walker.base_loyalty = Some(3);
         let spec = CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
                 &walker,
             )),
@@ -21627,6 +21643,7 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(liminal),
@@ -25425,6 +25442,7 @@ mod tests {
 
             let spec = TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: TokenCharacteristics {
                     display_name: "Soldier".to_string(),
                     power: Some(1),
@@ -27524,6 +27542,7 @@ mod tests {
         use crate::types::proposed_event::TokenCharacteristics;
         TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Test Token".to_string(),
                 power: Some(1),
@@ -29449,6 +29468,7 @@ mod tests {
         liminal_state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
+                blocking_attacker: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(liminal),
                 ),
@@ -32144,6 +32164,7 @@ mod tests {
         let chatterfang = ObjectId(500);
         let squirrel_spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Squirrel".to_string(),
                 power: Some(1),
@@ -32174,6 +32195,7 @@ mod tests {
 
         let plant_spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Plant".to_string(),
                 power: Some(0),
@@ -32251,6 +32273,7 @@ mod tests {
             use crate::types::proposed_event::TokenCharacteristics;
             TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: TokenCharacteristics {
                     display_name: name.to_string(),
                     power: None,
@@ -32344,6 +32367,7 @@ mod tests {
         let creature = core == CoreType::Creature;
         TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: name.to_string(),
                 power: creature.then_some(1),
@@ -32576,6 +32600,7 @@ mod tests {
 
         let food_spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Food".to_string(),
                 power: None,
@@ -32924,6 +32949,7 @@ mod tests {
         // Copy arm: carried onto the copy payload and the probe spec alike.
         let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&donor]);
         let copy = CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(values),
             display: DisplayIdentity {
                 display_source: DisplaySource::Token,
@@ -33109,6 +33135,7 @@ mod tests {
         use crate::types::proposed_event::TokenCharacteristics;
         TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: name.to_string(),
                 power: (core == CoreType::Creature).then_some(1),
@@ -33365,6 +33392,7 @@ mod tests {
 
         let soldier_spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Soldier".to_string(),
                 power: Some(1),
@@ -33902,6 +33930,7 @@ mod tests {
         fn artifact_spec(name: &str) -> TokenSpec {
             TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: TokenCharacteristics {
                     display_name: name.to_string(),
                     power: None,
@@ -34025,6 +34054,7 @@ mod tests {
         fn artifact_spec(name: &str) -> TokenSpec {
             TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: TokenCharacteristics {
                     display_name: name.to_string(),
                     power: None,
@@ -34211,6 +34241,7 @@ mod tests {
             owner: PlayerId(0),
             spec: Box::new(TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: crate::types::proposed_event::TokenCharacteristics {
                     display_name: "Token".to_string(),
                     power: None,

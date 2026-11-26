@@ -9813,7 +9813,13 @@ fn spell_targets_attacking_or_blocking_creature_as_disjunction() {
     };
     assert_eq!(filters.len(), 2);
     for (filter, property) in [
-        (&filters[0], FilterProp::Attacking { defender: None }),
+        (
+            &filters[0],
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+        ),
         (&filters[1], FilterProp::Blocking),
     ] {
         let TargetFilter::Typed(typed) = filter else {
@@ -32838,6 +32844,7 @@ fn namor_attack_trigger(parsed: &ParsedAbilities) -> &TriggerDefinition {
 fn target_filter_has_defending_player_anaphor(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => typed.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::DefendingPlayer),
         }),
         TargetFilter::Not { filter } => target_filter_has_defending_player_anaphor(filter),
@@ -32901,6 +32908,7 @@ fn namor_pump_scopes_to_other_attackers_of_the_defending_player() {
     );
     assert!(
         typed.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::DefendingPlayer),
         }),
         "pump filter must carry the CR 508.5 defending-player anaphor, got {:?}",

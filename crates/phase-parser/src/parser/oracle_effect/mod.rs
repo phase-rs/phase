@@ -50470,6 +50470,7 @@ fn parse_for_each_attacker_copy_blocker_ir(
     let source_filter =
         TargetFilter::Typed(
             TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You),
             }]),
         );
@@ -55007,6 +55008,7 @@ fn parse_effect_chain_ir_body(
             // that many tokens" chunk needs it to back-reference the cast spell's
             // colored-pip count instead of the generic EventContextAmount.
             pending_mana_symbol_count_color: ctx.pending_mana_symbol_count_color,
+            blocking_rider_antecedent: ctx.blocking_rider_antecedent.clone(),
             // CR 701.22a + CR 603.2: The completed-scry condition stages its
             // bottom-count provenance on the trigger body. Every chunk must
             // retain it so a following "exile that many cards from the bottom"

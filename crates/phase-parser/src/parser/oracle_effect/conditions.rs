@@ -3041,7 +3041,13 @@ fn parse_reflexive_object_property(input: &str) -> OracleResult<'_, FilterProp> 
         // `tapped` is immaterial. The verb parser supplies tense and polarity.
         value(FilterProp::Untapped, tag("untapped")),
         // CR 508.1b: combat status (Wisecrack "is attacking").
-        value(FilterProp::Attacking { defender: None }, tag("attacking")),
+        value(
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+            tag("attacking"),
+        ),
         // CR 509.1a: combat status (blocking sibling).
         value(FilterProp::Blocking, tag("blocking")),
         // CR 202.3: "mana value N or less/greater" (Consuming Ashes).
@@ -7848,7 +7854,7 @@ pub(crate) fn static_condition_to_ability_condition(
         // an additional combat phase") gate.
         StaticCondition::SourceIsAttacking => Some(AbilityCondition::SourceMatchesFilter {
             filter: TargetFilter::Typed(TypedFilter {
-                properties: vec![FilterProp::Attacking { defender: None }],
+                properties: vec![FilterProp::Attacking { scope: Default::default(), defender: None }],
                 ..Default::default()
             }),
         }),
@@ -9191,7 +9197,13 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                 value(false, tag("it was ")),
             )),
             alt((
-                value(FilterProp::Attacking { defender: None }, tag("attacking")),
+                value(
+                    FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None,
+                    },
+                    tag("attacking"),
+                ),
                 value(FilterProp::Blocking, tag("blocking")),
             )),
         );
@@ -17355,7 +17367,13 @@ mod tests {
             panic!("expected Not, got {cond:?}");
         };
         let (prop, use_lki) = single_prop(condition);
-        assert_eq!(*prop, FilterProp::Attacking { defender: None });
+        assert_eq!(
+            *prop,
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }
+        );
         assert!(!use_lki, "present-tense 'isn't' must read live state");
     }
 
@@ -17436,7 +17454,13 @@ mod tests {
         let cond =
             parse_target_reflexive_property_condition_text("that creature is attacking").unwrap();
         let (prop, use_lki) = single_prop(&cond);
-        assert_eq!(*prop, FilterProp::Attacking { defender: None });
+        assert_eq!(
+            *prop,
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }
+        );
         assert!(!use_lki, "present-tense 'is attacking' reads live combat");
     }
 
@@ -18314,7 +18338,10 @@ mod tests {
         let cases = [
             (
                 StaticCondition::SourceIsAttacking,
-                vec![FilterProp::Attacking { defender: None }],
+                vec![FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None,
+                }],
             ),
             (
                 StaticCondition::SourceIsBlocking,

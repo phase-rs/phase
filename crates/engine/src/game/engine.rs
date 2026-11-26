@@ -7805,6 +7805,7 @@ fn seed_representative_fodder(
         owner,
         count: 1,
         copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(profile.clone()),
             display: crate::game::game_object::DisplayIdentity {
                 display_source: crate::game::game_object::DisplaySource::Token,
