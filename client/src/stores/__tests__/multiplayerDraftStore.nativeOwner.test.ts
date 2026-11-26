@@ -273,7 +273,7 @@ vi.mock("../../adapter/draftPodHostAdapter", () => ({
   }),
 }));
 
-import { useMultiplayerDraftStore } from "../multiplayerDraftStore";
+import { currentDraftOwnerGeneration, useMultiplayerDraftStore } from "../multiplayerDraftStore";
 import { useMultiplayerStore } from "../multiplayerStore";
 import { useConnectivityStore } from "../connectivityStore";
 import { Draft27IncompatibilityError } from "../../adapter/draft-compatibility";
@@ -461,40 +461,45 @@ async function joinNative(signal?: AbortSignal): Promise<string> {
   return capabilityId;
 }
 
-describe("the native draft owner", () => {
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    localStorage.clear();
-    await idbClear(getDraftStore());
-    native.state.instances.length = 0;
-    native.state.nextCreate.length = 0;
-    native.state.nextJoin.length = 0;
-    native.state.nextReconnect.length = 0;
-    native.state.log.length = 0;
-    storage.log.length = 0;
-    storage.saveGate = null;
-    storage.failSave = false;
-    storage.loadGate = null;
-    storage.failLoad = false;
-    storage.clearGate = null;
-    storage.lastSavedId = null;
-    guests.instances = [];
-    guests.nextLeave = [];
-    hosts.instances = [];
-    hosts.nextInitialize = [];
-    hosts.nextDispose = [];
-    net.joinRoom.mockImplementation(async (code: string): Promise<JoinResult> => ({
-      conn: { peer: `phase2-${code}` },
-      peer: { id: `peer-${code}`, destroy: vi.fn() },
-      closeConn: vi.fn(),
-      destroyPeer: vi.fn(),
-    }));
-  });
+/** Every double, script, gate and store back to its starting state. */
+async function resetHarness(): Promise<void> {
+  vi.clearAllMocks();
+  localStorage.clear();
+  await idbClear(getDraftStore());
+  native.state.instances.length = 0;
+  native.state.nextCreate.length = 0;
+  native.state.nextJoin.length = 0;
+  native.state.nextReconnect.length = 0;
+  native.state.log.length = 0;
+  storage.log.length = 0;
+  storage.saveGate = null;
+  storage.failSave = false;
+  storage.loadGate = null;
+  storage.failLoad = false;
+  storage.clearGate = null;
+  storage.lastSavedId = null;
+  guests.instances = [];
+  guests.nextLeave = [];
+  hosts.instances = [];
+  hosts.nextInitialize = [];
+  hosts.nextDispose = [];
+  net.joinRoom.mockImplementation(async (code: string): Promise<JoinResult> => ({
+    conn: { peer: `phase2-${code}` },
+    peer: { id: `peer-${code}`, destroy: vi.fn() },
+    closeConn: vi.fn(),
+    destroyPeer: vi.fn(),
+  }));
+}
 
-  afterEach(async () => {
-    useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
-    await store().leave(true);
-  });
+/** Ends whatever a test left installed. */
+async function endHarness(): Promise<void> {
+  useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
+  await store().leave(true);
+}
+
+describe("the native draft owner", () => {
+  beforeEach(resetHarness);
+  afterEach(endHarness);
 
   it("a native create commits its capability, then its owner publishes the pointer", async () => {
     const outcome = await store().createNativeDraft({ endpoint: " wss://NATIVE.example/ws ", settings: createSettings });
@@ -1105,5 +1110,89 @@ describe("the native draft owner", () => {
         return;
       }
     }
+  });
+});
+
+describe("the draft owner generation", () => {
+  beforeEach(resetHarness);
+  afterEach(endHarness);
+
+  it.each(["host start", "join", "native create", "native join"] as const)(
+    "a %s moves it once as it retires the seated guest, and once more as it installs",
+    async (start) => {
+      await joinP2PGuest();
+      const before = currentDraftOwnerGeneration();
+
+      const starting = start === "host start"
+        ? store().hostDraft({ ...hostConfig, persistenceId: "B-POD" })
+        : start === "join"
+          ? store().joinDraft({ kind: "new", roomCode: "NEXT", displayName: "A" })
+          : start === "native create"
+            ? store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings })
+            : store().joinNativeDraft({ endpoint: ENDPOINT, draftCode: "NAT001", displayName: "Bo" });
+      // The retirement moves it before the start's first await.
+      expect(currentDraftOwnerGeneration()).toBe(before + 1);
+
+      await expect(starting).resolves.toEqual({ status: "opened" });
+      expect(currentDraftOwnerGeneration()).toBe(before + 2);
+    },
+  );
+
+  it("a native recovery moves it only at its handoff, which retires and installs", async () => {
+    await joinP2PGuest();
+    await storeNativePair();
+    const reconnect = holdNextReconnect();
+    const before = currentDraftOwnerGeneration();
+
+    const resuming = store().resumeNativeDraft();
+    await vi.waitFor(() => expect(reconnect.entered()).toBe(true));
+    // Reach: the provisional recovery is reconnecting, with the guest still installed.
+    expect(store()).toMatchObject({ role: "guest", transport: "p2p" });
+    expect(currentDraftOwnerGeneration()).toBe(before);
+
+    reconnect.release();
+    await expect(resuming).resolves.toEqual({ status: "resumed" });
+    expect(currentDraftOwnerGeneration()).toBe(before + 2);
+  });
+
+  it("a leave moves it as it begins, and a reset moves it again", async () => {
+    await joinP2PGuest();
+    const before = currentDraftOwnerGeneration();
+
+    const leaving = store().leave(false);
+    expect(currentDraftOwnerGeneration()).toBe(before + 1);
+    await leaving;
+    // Reach: the leave ended the guest.
+    expect(store().role).toBeNull();
+    expect(currentDraftOwnerGeneration()).toBe(before + 1);
+
+    store().reset();
+    expect(currentDraftOwnerGeneration()).toBe(before + 2);
+  });
+
+  it("an owner's own start failure, a view and its route's end leave it as it was", async () => {
+    native.nextJoin.push((_double, settle) => {
+      settle.reject(new Error("Draft is full"));
+    });
+    const failing = store().joinNativeDraft({ endpoint: ENDPOINT, draftCode: "NAT001", displayName: "Bo" });
+    // Reach: the failing join's double was constructed.
+    expect(native.instances).toHaveLength(1);
+    const afterStart = currentDraftOwnerGeneration();
+    await expect(failing).resolves.toEqual({ status: "failed", error: "Draft is full" });
+    expect(store().error).toBe("Draft is full");
+    expect(currentDraftOwnerGeneration()).toBe(afterStart);
+
+    const route = new AbortController();
+    await joinNative(route.signal);
+    const seated = currentDraftOwnerGeneration();
+    native.instances[1]!.emit({ type: "draftViewUpdated", view: native.state.draftingView });
+    // Reach: the view was applied.
+    expect(store().view).toBe(native.state.draftingView);
+    expect(currentDraftOwnerGeneration()).toBe(seated);
+
+    route.abort();
+    // Reach: the route's end ended the owner.
+    expect(store().role).toBeNull();
+    expect(currentDraftOwnerGeneration()).toBe(seated);
   });
 });

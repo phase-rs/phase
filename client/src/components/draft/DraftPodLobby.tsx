@@ -135,7 +135,7 @@ function SeatCard({
 // ── DraftPodLobby ─────────────────────────────────────────────────────
 
 interface DraftPodLobbyProps {
-  /** Callback when host leaves the pod (navigates back). */
+  /** The page's exit. It leaves the session once, and goes home only if no successor took the tab while it waited. */
   onLeave: () => void;
 }
 
@@ -150,7 +150,6 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
   const seatIndex = useMultiplayerDraftStore((s) => s.seatIndex);
   const error = useMultiplayerDraftStore((s) => s.error);
   const kickPlayer = useMultiplayerDraftStore((s) => s.kickPlayer);
-  const leave = useMultiplayerDraftStore((s) => s.leave);
 
   const botFillEnabled = useDraftPodStore((s) => s.botFillEnabled);
   const toggleBotFill = useDraftPodStore((s) => s.toggleBotFill);
@@ -217,11 +216,6 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
       },
     );
   }
-
-  const handleLeave = useCallback(async () => {
-    await leave();
-    onLeave();
-  }, [leave, onLeave]);
 
   const handleStart = useCallback(async () => {
     await startDraft();
@@ -326,7 +320,7 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
 
           {/* Leave button */}
           <button
-            onClick={handleLeave}
+            onClick={onLeave}
             className={menuButtonClass({ tone: "red", size: "sm" })}
           >
             {t("lobby.leave")}
@@ -355,7 +349,7 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
           </p>
           <div className="flex-1" />
           <button
-            onClick={handleLeave}
+            onClick={onLeave}
             className={menuButtonClass({ tone: "red", size: "sm" })}
           >
             {t("lobby.leave")}

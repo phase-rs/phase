@@ -528,7 +528,8 @@ interface MultiplayerDraftActions {
   /** Host: resume the draft. */
   requestResume: () => void;
   /** Both: tear down the connection and reset state. Lifecycle callers retain
-   * recovery; an explicit leave revokes it only after host acknowledgement. */
+   * recovery; an explicit leave revokes it only after host acknowledgement.
+   * It moves the draft owner generation as it begins, before any await. */
   leave: (preserveRecovery?: boolean) => Promise<void>;
   /** Reset store to initial state (without network cleanup). */
   reset: () => void;
@@ -836,6 +837,17 @@ type DraftOwnerSuccession = "replaced" | "ended";
 let draftAdapterEpoch = 0;
 /** Aborted, then renewed, whenever a successor replaces the owner, so a `leave` still waiting for it settles. */
 let ownerReplaced = new AbortController();
+/**
+ * The generation a pod-page exit compares. Only an owner's install (the
+ * retirement a successor's start or handoff performs included), a leave and a
+ * reset move it, so nothing a session publishes reads as a change of owner.
+ */
+let draftOwnerGeneration = 0;
+
+/** The current {@link draftOwnerGeneration}, which a pod-page exit reads before and after its leave. */
+export function currentDraftOwnerGeneration(): number {
+  return draftOwnerGeneration;
+}
 
 function advanceDraftAdapterEpoch(succession: DraftOwnerSuccession): number {
   draftAdapterEpoch += 1;
@@ -843,6 +855,8 @@ function advanceDraftAdapterEpoch(succession: DraftOwnerSuccession): number {
     case "replaced": {
       const replaced = ownerReplaced;
       ownerReplaced = new AbortController();
+      // Before the abort that settles a waiting leave, so its exit sees the move.
+      draftOwnerGeneration += 1;
       replaced.abort();
       break;
     }
@@ -2013,6 +2027,7 @@ function installDraftOwner(
   routeSignal: AbortSignal | undefined,
 ): InstalledDraftOwner {
   const generation = beginDraftLifecycle();
+  draftOwnerGeneration += 1;
   const controller = new AbortController();
 
   // The route's end ends this owner, and is not a successor: a leave still
@@ -4162,7 +4177,10 @@ export const useMultiplayerDraftStore = create<
   },
 
   leave: async (preserveRecovery = false) => {
-    // First, before any read or await: every attempt that has not installed an
+    // Moved as the leave begins, before any await, so an exit reads its own
+    // leave's generation right after calling it.
+    draftOwnerGeneration += 1;
+    // Then, before any read or await: every attempt that has not installed an
     // owner ends here, whether it is still reading, allocating or waiting for
     // its predecessor's teardown. The installed owner is this leave's own.
     supersedeProvisionalOwners();
@@ -4226,6 +4244,7 @@ export const useMultiplayerDraftStore = create<
   },
 
   reset: () => {
+    draftOwnerGeneration += 1;
     beginDraftLifecycle();
     disposeMatchAdapter(set);
     replaceDraftSession(set, { interactionGeneration: lifecycleGeneration });

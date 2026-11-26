@@ -18,6 +18,7 @@ import { create } from "zustand";
 import i18n from "i18next";
 
 import { DraftAdapter, distinctJoined, setPackSequence, type CubeDraftSettings, type DraftProcedure, type PackDistribution, type PoolInput, type PostDraftPlay, type SetLayoutKind, type SetPackSequence, type TournamentFormat, type PodPolicy } from "../adapter/draft-adapter";
+import type { CreateDraftSettings } from "../adapter/server-draft-adapter";
 import { CUSTOM_CUBE_SET_CODE } from "../adapter/draftKinds";
 import type { DraftPackChoice } from "./draftStore";
 import type { DraftPodHostConfig, DraftPodListing } from "../adapter/draftPodHostAdapter";
@@ -25,6 +26,7 @@ import type { DraftPodGuestConfig } from "../adapter/draftPodGuestAdapter";
 import type { DraftLobbyMetadata } from "../adapter/types";
 import { openBrokerClient, type BrokerClient } from "../services/brokerClient";
 import {
+  canonicalNativeDraftEndpoint,
   clearActiveDraftPodIfCurrent,
   inspectActiveDraftPod,
   loadDraftHostSession,
@@ -43,6 +45,7 @@ import {
   type DraftSessionOpenOutcome,
   type HostedDraftRecoveryOutcome,
   type MultiplayerDraftPhase,
+  type NativeDraftResumeOutcome,
   type NewDraftPodHostConfig,
 } from "./multiplayerDraftStore";
 import { preflightDraftPodHostRecovery } from "../adapter/draftPodHostAdapter";
@@ -76,6 +79,45 @@ export interface HostedPodRecoveryFailure {
   /** The route and store generation that were current when this became visible. */
   routeToken: number;
   orchestrationGeneration: number;
+}
+
+/** A server the pod setup creates and joins on, admitted for one navigation. */
+export interface NativeDraftSetup {
+  readonly endpoint: string;
+  readonly generation: number;
+}
+
+/** What admitting a native setup answers: the route to open, or a refusal. */
+export type NativeDraftSetupAdmission =
+  | { readonly type: "admitted"; readonly to: string; readonly state: { readonly nativeDraftSetup: number } }
+  | { readonly type: "refused" };
+
+/** A native seat recovery's failure, bound to the page entry that started it. */
+export interface NativeRecoveryFailure {
+  /** An error key `usePodErrorMessage` maps, or the server's own text. */
+  readonly error: string;
+  readonly routeToken: number;
+}
+
+/**
+ * The native setup generation a navigation's history state names, or `null`
+ * when the state names none: the `nativeDraftSetup` field of an object, when
+ * it is a positive safe integer.
+ */
+export function nativeDraftSetupRouteGeneration(state: unknown): number | null {
+  if (typeof state !== "object" || state === null) return null;
+  const generation: unknown = (state as { readonly nativeDraftSetup?: unknown }).nativeDraftSetup;
+  return typeof generation === "number" && Number.isSafeInteger(generation) && generation > 0 ? generation : null;
+}
+
+/**
+ * What a failed native start or recovery stores: the incompatible key for a
+ * compatibility refusal, else its own error (an offline sentinel or the
+ * server's text), else the connection key. `usePodErrorMessage` maps the keys.
+ */
+function nativeFailureError(outcome: { readonly error: string | null; readonly code?: unknown }): string {
+  if (outcome.code !== undefined) return DRAFT_RECOVERY_INCOMPATIBLE_ERROR;
+  return outcome.error ?? DRAFT_RECOVERY_CONNECTION_ERROR;
 }
 
 /** The backup API is served beside the selected phase-server's WebSocket API. */
@@ -250,6 +292,10 @@ interface DraftPodState {
   configError: string | null;
   /** Capture-bound host recovery error. It is deliberately not guest state. */
   hostRecoveryFailure: HostedPodRecoveryFailure | null;
+  /** The server this tab's pod setup was admitted to create and join on; `null` for P2P setup. */
+  nativeSetup: NativeDraftSetup | null;
+  /** The native route entry's own seat recovery failure, bound to that entry's route token. */
+  nativeRecoveryFailure: NativeRecoveryFailure | null;
   /** Exact engine-allowed seat counts for the selected tournament format. */
   allowedPodSizes: number[] | null;
   /** Configuration for which the procedure cache was published. */
@@ -345,10 +391,25 @@ interface DraftPodActions {
   setSetDraftMode: (mode: SetDraftMode) => void;
   /** Set the cube form (name + list text + settings) for cube-mode host setup. */
   setCubeForm: (form: CubeForm | null) => void;
-  /** Load the set pool data and create a new pod as host. */
-  createPod: () => Promise<void>;
-  /** Join an existing pod as guest. */
-  joinPod: () => Promise<void>;
+  /** Load the set pool data and create a new pod as host. With `native`, the
+   *  pod is created on that admitted server instead, and only while the store
+   *  still holds that setup. */
+  createPod: (native?: NativeDraftSetup | null) => Promise<void>;
+  /** Join an existing pod as guest. With `native`, the join is made on that
+   *  admitted server instead, and only while the store still holds that setup. */
+  joinPod: (native?: NativeDraftSetup | null) => Promise<void>;
+  /**
+   * Admit one server, through the one native endpoint canonicalizer, for the
+   * native setup route, and answer the route to open. A refused endpoint
+   * writes nothing. It starts no pod operation.
+   */
+  admitNativeDraftSetup: (endpoint: string) => NativeDraftSetupAdmission;
+  /**
+   * The native route's entry recovery of the tab's own native seat. It starts
+   * no pod operation, and stores a failure bound to `routeToken` unless
+   * `signal` ended the entry first.
+   */
+  resumeNativeDraftPod: (options: { routeToken: number; signal: AbortSignal }) => Promise<void>;
   /** Resume the active hosted pod from local persistence. With `entry: "auto"`
    *  it yields (`"superseded"`) to a session this tab already holds. */
   resumeHostedPod: (options?: {
@@ -394,6 +455,8 @@ const initialState: DraftPodState = {
   loadingPool: false,
   configError: null,
   hostRecoveryFailure: null,
+  nativeSetup: null,
+  nativeRecoveryFailure: null,
   allowedPodSizes: null,
   procedureCacheKey: null,
   pendingProcedureDefault: null,
@@ -480,6 +543,9 @@ let resumeHostedPodAttempt: HostedPodResumeAttempt | null = null;
 // same kind (for example, setup entry followed by a refresh). Keep one
 // monotonically increasing identity so only the newest read may publish.
 let podOrchestrationGeneration = 0;
+
+/** The generation the newest admitted native setup carries. */
+let nativeSetupGeneration = 0;
 
 /**
  * A recovery probe has its own ownership, but retiring it must not always
@@ -939,7 +1005,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
       set({ cubeForm: form, configError: null });
     },
 
-    createPod: async () => {
+    createPod: async (native = null) => {
       if (getEffectiveOffline()) {
         beginPodOrchestration(set);
         set({ configError: DRAFT_OFFLINE_ERROR });
@@ -976,7 +1042,8 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           set({ configError: DRAFT_OFFLINE_ERROR });
           return;
         }
-        if (procedure.distribution === "AllAtOnce" && poolMode !== "set") {
+        // Native setup offers sets only.
+        if (native === null && procedure.distribution === "AllAtOnce" && poolMode !== "set") {
           set({ configError: "This procedure requires a set pool" });
           return;
         }
@@ -998,6 +1065,38 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           configError: err instanceof Error ? err.message : String(err),
           loadingPool: false,
         });
+        return;
+      }
+
+      if (native !== null) {
+        // Only the setup this route admitted, still the store's, creates on its server.
+        if (get().nativeSetup !== native) return;
+        if (config.packs.length === 0) {
+          set({ configError: "Select a set first" });
+          return;
+        }
+        const codes = config.packs.map((pack) => pack.code);
+        // The server lists a pod of any size it admits. No password is sent,
+        // since this route's join form carries none.
+        const settings: CreateDraftSettings = {
+          displayName: hostDisplayName.trim(),
+          source: setDraftMode === "chaos"
+            ? { type: "Chaos", data: { candidate_codes: codes } }
+            : { type: "Uniform", data: { set_codes: codes } },
+          kind: config.kind,
+          public: listing.isPublic,
+          tournamentFormat: config.tournamentFormat,
+          podPolicy: config.podPolicy,
+          podSize: config.podSize,
+        };
+        // A later explicit action supersedes the entry recovery's failure.
+        set({ nativeRecoveryFailure: null });
+        const outcome = await useMultiplayerDraftStore.getState().createNativeDraft({
+          endpoint: native.endpoint,
+          settings,
+        });
+        if (!isCurrentPodOrchestration(procedureRequest) || get().config !== config) return;
+        if (outcome.status === "failed") set({ configError: nativeFailureError(outcome) });
         return;
       }
 
@@ -1449,7 +1548,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
       set({ hostRecoveryFailure: null });
     },
 
-    joinPod: async () => {
+    joinPod: async (native = null) => {
       if (getEffectiveOffline()) {
         beginPodOrchestration(set);
         set({ configError: DRAFT_OFFLINE_ERROR });
@@ -1467,6 +1566,21 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
       }
 
       set({ configError: null });
+
+      if (native !== null) {
+        // Only the setup this route admitted, still the store's, joins on its server.
+        if (get().nativeSetup !== native) return;
+        const nativeRequest = beginPodOrchestration(set);
+        set({ nativeRecoveryFailure: null });
+        const joined = await useMultiplayerDraftStore.getState().joinNativeDraft({
+          endpoint: native.endpoint,
+          draftCode: joinCode.trim(),
+          displayName: guestDisplayName.trim(),
+        });
+        if (!isCurrentPodOrchestration(nativeRequest)) return;
+        if (joined.status === "failed") set({ configError: nativeFailureError(joined) });
+        return;
+      }
 
       const guestConfig: DraftPodGuestConfig = {
         kind: "new",
@@ -1494,6 +1608,38 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         }
         const message = err instanceof Error ? err.message : String(err);
         set({ configError: message });
+      }
+    },
+
+    admitNativeDraftSetup: (endpoint) => {
+      const canonical = canonicalNativeDraftEndpoint(endpoint);
+      if (canonical === null) return { type: "refused" };
+      nativeSetupGeneration += 1;
+      const generation = nativeSetupGeneration;
+      set({ nativeSetup: { endpoint: canonical, generation } });
+      return { type: "admitted", to: "/draft-pod?entry=native", state: { nativeDraftSetup: generation } };
+    },
+
+    // Publishes no procedure, so it takes no pod orchestration: a setup
+    // refresh neither supersedes it nor is superseded by it.
+    resumeNativeDraftPod: async ({ routeToken, signal }) => {
+      set({ nativeRecoveryFailure: null });
+      const outcome: NativeDraftResumeOutcome = await useMultiplayerDraftStore.getState().resumeNativeDraft({ signal });
+      if (signal.aborted) return;
+      switch (outcome.status) {
+        case "failed":
+          set({ nativeRecoveryFailure: { error: nativeFailureError(outcome), routeToken } });
+          return;
+        case "offline":
+          set({ nativeRecoveryFailure: { error: DRAFT_OFFLINE_ERROR, routeToken } });
+          return;
+        case "resumed":
+        case "absent":
+        case "invalid":
+        case "superseded":
+          return;
+        default:
+          assertNever(outcome);
       }
     },
 
