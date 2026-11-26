@@ -11,7 +11,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{
     ObjectId, ObjectIncarnationRef, TrackedSetId, TriggeringObjectRef,
 };
-use crate::types::keywords::{HexproofFilter, Keyword};
+use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::resolution::CapturedDeclarationPayload;
 use crate::types::zones::Zone;
