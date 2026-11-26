@@ -5,7 +5,7 @@ use engine::game::ability_utils::{declared_targets_in_chain, flatten_targets_in_
 use engine::game::combat::AttackTarget;
 use engine::game::derived_views::derive_views;
 use engine::game::effects::attach::attach_to;
-use engine::game::game_object::AttachTarget;
+use engine::game::game_object::{AttachTarget, PhaseOutCause};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityCondition, ChosenTargetSlots, ControllerRef, CountBinding, Effect, ManaProduction,
@@ -164,6 +164,129 @@ fn a_granting_attack_trigger_targets_none_of_the_attackers_it_holds() {
         "reach guard: the effect has no target filter"
     );
     assert_eq!(declared, Vec::new());
+}
+
+#[test]
+fn opponent_attack_destination_resolves_each_firing_against_its_own_creatures() {
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    for (name, oracle) in [
+        ("Frontier Warmonger", FRONTIER_WARMONGER),
+        (
+            "Gahiji, Honored One",
+            "Whenever a creature attacks one of your opponents or a planeswalker an opponent controls, that creature gets +2/+0 until end of turn.",
+        ),
+        (
+            "Frenzied Gorespawn",
+            "When this creature enters, for each opponent, goad target creature that player controls.\nWhenever one or more creatures attack one of your opponents, those creatures gain menace until end of turn.",
+        ),
+    ] {
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario.add_creature_from_oracle(P0, name, 4, 4, oracle).id();
+        let toward_p2 = scenario.add_creature(P1, "Attacks P2", 2, 2).id();
+        let also_toward_p2 = scenario.add_creature(P1, "Also attacks P2", 2, 2).id();
+        let toward_p2_walker = scenario.add_creature(P1, "Attacks P2 walker", 2, 2).id();
+        let toward_p3 = scenario.add_creature(P1, "Attacks P3", 2, 2).id();
+        let toward_p0 = scenario.add_creature(P1, "Attacks P0", 2, 2).id();
+        let toward_p0_walker = scenario.add_creature(P1, "Attacks P0 walker", 2, 2).id();
+        let p2_walker = scenario
+            .add_planeswalker_from_oracle(p2, "Karn Stand-in", "Karn", 5, "+1: You gain 1 life.")
+            .as_planeswalker_with_loyalty("Karn", 5)
+            .id();
+        let p0_walker = scenario
+            .add_planeswalker_from_oracle(P0, "Jace Stand-in", "Jace", 5, "+1: You gain 1 life.")
+            .as_planeswalker_with_loyalty("Jace", 5)
+            .id();
+        let mut runner = p1_priority(scenario);
+        runner.advance_to_combat();
+        let attacks = [
+            (toward_p2, AttackTarget::Player(p2)),
+            (also_toward_p2, AttackTarget::Player(p2)),
+            (toward_p2_walker, AttackTarget::Planeswalker(p2_walker)),
+            (toward_p3, AttackTarget::Player(p3)),
+            (toward_p0, AttackTarget::Player(P0)),
+            (toward_p0_walker, AttackTarget::Planeswalker(p0_walker)),
+        ];
+        runner.declare_attackers(&attacks).expect("declare attacks");
+        let expected_groups = match name {
+            "Frontier Warmonger" => {
+                vec![vec![toward_p2, also_toward_p2, toward_p2_walker], vec![toward_p3]]
+            }
+            "Gahiji, Honored One" => {
+                vec![vec![toward_p2], vec![also_toward_p2], vec![toward_p2_walker], vec![toward_p3]]
+            }
+            "Frenzied Gorespawn" => vec![vec![toward_p2, also_toward_p2], vec![toward_p3]],
+            _ => unreachable!(),
+        };
+        match &runner.state().waiting_for {
+            WaitingFor::OrderTriggers { player, triggers } => {
+                assert_eq!(*player, P0);
+                assert_eq!(triggers.len(), expected_groups.len(), "{name}");
+                let order = (0..triggers.len()).rev().collect();
+                runner.act(GameAction::OrderTriggers { order }).expect("order triggers");
+            }
+            WaitingFor::Priority { .. } => {}
+            waiting => panic!("{name} could not place its triggers: {waiting:?}"),
+        }
+        let mut pending_groups = expected_groups;
+        let mut granted = Vec::new();
+        while !pending_groups.is_empty() {
+            assert_eq!(runner.state().stack.len(), pending_groups.len(), "{name}");
+            let entry = runner.state().stack.last().expect("trigger on stack");
+            assert_eq!(entry.source_id, source);
+            let StackEntryKind::TriggeredAbility {
+                trigger_event: Some(GameEvent::AttackersDeclared { attacker_ids, .. }),
+                ..
+            } = &entry.kind else {
+                panic!("expected the narrowed attack declaration");
+            };
+            let index = pending_groups.iter().position(|group| {
+                group.len() == attacker_ids.len() && group.iter().all(|id| attacker_ids.contains(id))
+            }).expect("one firing for this attacker group");
+            let ids = pending_groups.remove(index);
+            let (held, declared) = both(runner.state(), entry.id);
+            assert!(declared.is_empty(), "{name} has no targets");
+            if name != "Gahiji, Honored One" {
+                assert_eq!(held, attacker_ids.iter().copied().map(TargetRef::Object).collect::<Vec<_>>());
+            }
+
+            let mut phased = None;
+            if name == "Frontier Warmonger" && ids.len() == 3 {
+                assert!(engine::game::effects::remove_from_combat::remove_object_from_combat(
+                    runner.state_mut(), toward_p2,
+                ));
+                assert_eq!(
+                    engine::game::phasing::phase_out_object(
+                        runner.state_mut(), also_toward_p2, PhaseOutCause::Directly, &mut Vec::new(),
+                    ),
+                    vec![also_toward_p2],
+                );
+                phased = Some(also_toward_p2);
+            }
+            granted.extend(ids.into_iter().filter(|id| Some(*id) != phased));
+            for _ in 0..4 {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            assert_eq!(runner.state().stack.len(), pending_groups.len(), "{name}");
+            assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { .. }));
+            if let Some(id) = phased {
+                assert_eq!(
+                    engine::game::phasing::phase_in_object(runner.state_mut(), id, &mut Vec::new()),
+                    vec![id],
+                );
+                engine::game::layers::flush_layers(runner.state_mut());
+            }
+            for (id, _) in attacks {
+                let object = &runner.state().objects[&id];
+                if name == "Gahiji, Honored One" {
+                    assert_eq!(object.power, Some(if granted.contains(&id) { 4 } else { 2 }));
+                } else {
+                    assert_eq!(object.has_keyword(&Keyword::Menace), granted.contains(&id), "{name} {id:?}");
+                }
+            }
+        }
+    }
 }
 
 #[test]

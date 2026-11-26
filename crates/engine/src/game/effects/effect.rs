@@ -1372,6 +1372,14 @@ fn transient_bound_filters(
         // dropped (CR 400.7).
         return crate::game::effects::effect_object_targets(filter, &live_targets)
             .into_iter()
+            // CR 702.26e + CR 611.2c: a phased-out referent cannot enter the
+            // affected population when a characteristic grant begins.
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|object| object.is_phased_in())
+            })
             .map(|id| TargetFilter::SpecificObject { id })
             .collect();
     }

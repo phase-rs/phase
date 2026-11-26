@@ -1266,6 +1266,27 @@ fn parse_one_of_your_opponents(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 508.1b + CR 508.3a: both legs name attack destinations. The
+/// planeswalker leg carries the same opponent relation as the player leg.
+fn parse_opponent_attack_destination(input: &str) -> OracleResult<'_, AttackTargetFilter> {
+    let (rest, ()) = parse_one_of_your_opponents(input)?;
+    alt((
+        value(
+            AttackTargetFilter::PlayerOrPlaneswalker,
+            (
+                tag(" or a planeswalker "),
+                alt((tag("they control"), tag("an opponent controls"))),
+                nom_primitives::peek_clause_terminator,
+            ),
+        ),
+        value(
+            AttackTargetFilter::Player,
+            not(tag::<_, _, OracleError<'_>>(" or ")),
+        ),
+    ))
+    .parse(rest)
+}
+
 fn parse_referenced_player_phrase(input: &str) -> OracleResult<'_, ()> {
     alt((
         value(
@@ -17419,10 +17440,7 @@ fn try_parse_event(
                     AttackTargetFilter::Planeswalker { subtype: None },
                     tag(" a planeswalker"),
                 ),
-                value(
-                    AttackTargetFilter::Player,
-                    preceded(tag(" "), parse_one_of_your_opponents),
-                ),
+                preceded(tag(" "), parse_opponent_attack_destination),
                 value(AttackTargetFilter::Player, tag(" a player")),
                 // CR 508.3a: an attack head naming players restricts its
                 // attackers to player attacks.
@@ -17485,6 +17503,9 @@ fn try_parse_event(
         )
         .parse(after)
         .is_ok();
+        if attacks_one_of_your_opponents && attack_target_parsed.is_none() {
+            return Some(unknown_trigger_definition(full_lower));
+        }
         let mut def = make_base();
         // CR 508.3d: "Whenever [a player] attacks" triggers fire once per attack declaration,
         // not once per attacker. This applies to "opponent attacks you" patterns (e.g., Lulu,
@@ -17527,12 +17548,9 @@ fn try_parse_event(
         // would wrongly remove the ability from the stack if the defender's life
         // changed in response.
         //
-        // `AttackTargetFilter::PlayerOrPlaneswalker` is deliberately NOT in this
-        // gate: it is produced only by the "you or a planeswalker you control"
-        // tags, after which a `who`-headed clause is grammatically impossible,
-        // and `attack_target_matches` would resolve such a candidate through
-        // `defending_player_for_target_or` (a planeswalker's CONTROLLER) — a
-        // different referent that needs its own fixture, not a quiet inclusion.
+        // The player/planeswalker union binds its controller scope below.
+        // A player-only predicate here would otherwise read the controller of
+        // the planeswalker rather than the attacked player named by the text.
         let mut declined_unmodelled_predicate = false;
         if matches!(def.attack_target_filter, Some(AttackTargetFilter::Player)) {
             if let Some((rest_after_noun, _)) = &attack_target_parsed {

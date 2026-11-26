@@ -1831,6 +1831,8 @@ fn matching_batched_attack_events_by_defending_player(
 /// opponents", `Controller` for "you"). That grammar fires once per defended
 /// player with that player's own attacker set (see
 /// `matching_attack_events_by_defending_player`).
+/// For the opponent-or-planeswalker union, an attack on an opponent and an
+/// attack on their planeswalker belong to the same opponent's firing.
 ///
 /// Two neighbouring shapes deliberately stay on the aggregate branch:
 /// the passive "one or more of your opponents are attacked" head lowers its

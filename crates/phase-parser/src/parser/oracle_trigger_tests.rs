@@ -48911,3 +48911,68 @@ fn delayed_player_damage_head_preserves_recipient_and_remainder() {
     )
     .is_none());
 }
+#[test]
+fn opponent_attack_destination_keeps_the_union_in_one_trigger() {
+    use crate::parser::oracle::parse_oracle_text;
+
+    for (subject, tail, batched, kinds) in [
+        (
+            "one or more creatures attack",
+            " or a planeswalker they control",
+            true,
+            AttackTargetFilter::PlayerOrPlaneswalker,
+        ),
+        (
+            "a creature attacks",
+            " or a planeswalker an opponent controls",
+            false,
+            AttackTargetFilter::PlayerOrPlaneswalker,
+        ),
+        (
+            "one or more creatures attack",
+            "",
+            true,
+            AttackTargetFilter::Player,
+        ),
+    ] {
+        let body = if batched {
+            "those creatures gain menace until end of turn."
+        } else {
+            "that creature gets +2/+0 until end of turn."
+        };
+        let oracle = format!("Whenever {subject} one of your opponents{tail}, {body}");
+        let parsed = parse_oracle_text(&oracle, "Witness", &[], &["Creature".into()], &[]);
+        let [trigger] = parsed.triggers.as_slice() else {
+            panic!("expected one trigger for {oracle}");
+        };
+        assert_eq!(trigger.mode, TriggerMode::Attacks, "{oracle}");
+        assert_eq!(trigger.attack_target_filter, Some(kinds), "{oracle}");
+        assert_eq!(trigger.batched, batched, "{oracle}");
+        assert_eq!(
+            trigger.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+            "{oracle}",
+        );
+        match trigger.execute.as_deref().map(|ability| &*ability.effect) {
+            Some(Effect::GenericEffect {
+                target: None,
+                static_abilities,
+                ..
+            }) if batched => {
+                assert_eq!(static_abilities.len(), 1, "{oracle}");
+                assert_eq!(
+                    static_abilities[0].affected,
+                    Some(TargetFilter::ParentTarget),
+                    "{oracle}",
+                );
+            }
+            Some(Effect::Pump {
+                target: TargetFilter::TriggeringSource,
+                ..
+            }) if !batched => {}
+            other => panic!("unexpected application for {oracle}: {other:?}"),
+        }
+    }
+}
