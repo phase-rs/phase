@@ -149,6 +149,9 @@ pub(crate) struct TokenDescription {
     /// CR 508.4: the defender named by an inline "attacking that player".
     #[serde(skip_serializing_if = "TokenAttackDestination::is_controller_chooses")]
     pub(crate) attack_destination: TokenAttackDestination,
+    /// CR 509.1h + CR 506.3e: the attacker named by an inline "that's
+    /// blocking that creature" clause. `None` = no blocking rider.
+    pub(crate) enters_blocking: Option<TargetFilter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
@@ -1119,6 +1122,13 @@ pub(crate) enum ImperativeFamilyAst {
     /// sourced it (ongoing-scheme "abandon this scheme" clauses). No-op unless
     /// the source is a face-up ongoing scheme.
     AbandonScheme,
+    /// CR 701.32b: An ability sets a scheme in motion again (My Laughter
+    /// Echoes: "set that scheme in motion again"). The referent is
+    /// event-context (`TriggeringSource`) or the ability source (`SelfRef`),
+    /// never a chosen target.
+    SetSchemeInMotion {
+        target: TargetFilter,
+    },
     /// CR 701.51b: "open N Attractions"
     OpenAttractions {
         count: u32,
@@ -1251,6 +1261,7 @@ impl ImperativeFamilyAst {
             | Self::TakeTheInitiative
             | Self::Planeswalk
             | Self::AbandonScheme
+            | Self::SetSchemeInMotion { .. }
             | Self::OpenAttractions { .. }
             | Self::RollToVisitAttractions
             | Self::AssembleContraptions { .. }
@@ -1454,7 +1465,8 @@ impl TargetedImperativeAst {
             | Self::ControlNextTurn { .. }
             | Self::Earthbend { .. }
             | Self::Airbend { .. }
-            | Self::ZoneCounterProxy(..) => None,
+            | Self::ZoneCounterProxy(..)
+            | Self::Unimplemented { .. } => None,
         }
     }
 }
@@ -1703,6 +1715,14 @@ pub(crate) enum TargetedImperativeAst {
     /// Proxy for zone-counter family (destroy/exile/put counter) used during
     /// compound splitting to unify targeted and zone-counter parsing.
     ZoneCounterProxy(Box<ZoneCounterImperativeAst>),
+    /// A targeted clause the parser recognized but must not execute (CR 201.4a: a
+    /// "with that name" discard after a name choice whose characteristic
+    /// `ChoiceType::CardName` cannot carry). Lowers to an honest `Effect::unimplemented`
+    /// named `gap` carrying the printed clause, mirroring `PutImperativeAst::Unimplemented`.
+    Unimplemented {
+        gap: &'static str,
+        fragment: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3539,6 +3559,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -4144,11 +4165,13 @@ mod duration_distribution_tests_7923 {
     #[test]
     fn reconciled_cast_seam_refuses_the_bound_before_gapping_the_lifetime() {
         use crate::types::ability::{
-            CastFromZoneDriver, ResolutionCastWindow, CAST_BOUND_LOST_TO_DURATION_GAP,
+            CastFromZoneDriver, ResolutionCastPool, ResolutionCastWindow,
+            CAST_BOUND_LOST_TO_DURATION_GAP,
         };
 
         let refusable = CastFromZoneDriver::ResolutionWindow {
             bounds: ResolutionCastWindow {
+                pool: ResolutionCastPool::CurrentResolution,
                 max_casts: Some(1),
                 max_total_mv: None,
             },

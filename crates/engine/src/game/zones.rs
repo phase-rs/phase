@@ -264,6 +264,7 @@ pub(super) fn capture_exit_lki(
         intensity: obj.intensity,
         // CR 701.3d: the caller captures these before any attachment sever.
         attachments,
+        produceable_mana_types: Vec::new(),
     };
     state.lki_cache.insert(object_id, lki.clone());
     state
@@ -852,6 +853,27 @@ pub(crate) fn apply_zone_exit_cleanup(
     }
 }
 
+/// Reserve an identity and build the object without publishing it to the game.
+pub(crate) fn new_detached_object(
+    state: &mut GameState,
+    card_id: CardId,
+    owner: PlayerId,
+    name: String,
+    zone: Zone,
+) -> GameObject {
+    let id = ObjectId(state.next_object_id);
+    state.next_object_id += 1;
+
+    GameObject::new(id, card_id, owner, name, zone)
+}
+
+/// Publish a newly constructed object to its first in-game zone.
+pub(crate) fn place_new_object(state: &mut GameState, object: GameObject) {
+    let (id, zone, owner) = (object.id, object.zone, object.owner);
+    state.objects.insert(id, object);
+    add_to_zone(state, id, zone, owner);
+}
+
 /// Allocate a new ObjectId, create a GameObject with defaults, insert into state.objects, and add to the specified zone.
 pub fn create_object(
     state: &mut GameState,
@@ -860,12 +882,9 @@ pub fn create_object(
     name: String,
     zone: Zone,
 ) -> ObjectId {
-    let id = ObjectId(state.next_object_id);
-    state.next_object_id += 1;
-
-    let obj = GameObject::new(id, card_id, owner, name, zone);
-    state.objects.insert(id, obj);
-    add_to_zone(state, id, zone, owner);
+    let object = new_detached_object(state, card_id, owner, name, zone);
+    let id = object.id;
+    place_new_object(state, object);
 
     // CR 302.6 + CR 403.4: Record ETB turn as a global counter (used by
     // "this turn" triggers and filters). NOTE: this helper is used both for
@@ -1759,7 +1778,8 @@ pub(crate) fn move_to_zone_with_entry_flags(
                     // are released before the caller delivers the move (see
                     // `replacement::release_transformed_entry_projection`).
                     // This arm exists for exhaustiveness only.
-                    crate::types::game_state::LiminalEntryKind::TransformedEntry => None,
+                    crate::types::game_state::LiminalEntryKind::TransformedEntry
+                    | crate::types::game_state::LiminalEntryKind::OutsideGameCard { .. } => None,
                 })
         })
         .flatten();

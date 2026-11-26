@@ -217,30 +217,29 @@ fn angrath_batch_anaphor_in_a_non_trigger_ability_stays_an_honest_red() {
     );
 }
 
-/// CR 603.2c: HONEST-RED CONTROL #2 — a batch anaphor inside a trigger whose
-/// EVENT carries no object set.
-///
-/// Being inside a trigger is not enough: the triggering event must actually
-/// expose its subjects to `extract_sources_from_event`, which only the
-/// declared-attackers batch (CR 508.1) and the per-object zone-change batch
-/// (CR 603.10a) do. A Premonition of Your Demise's "their total mana value" sits
-/// in a `SetInMotion` scheme trigger, whose event carries no revealed cards — so
-/// binding it to "the batch" deals 0 damage while rendering as fully supported.
-///
-/// This face was caught by the full-pool ledger (it went RED -> GREEN as a
-/// silent 0), which is exactly what the ledger is for. It must stay an honest gap
-/// until the reveal batch is a real carrier.
+/// CR 608.2c + CR 202.3a: A Premonition of Your Demise's "their total mana
+/// value" never binds to the `SetInMotion` trigger's event, which carries no
+/// revealed cards. It binds to the CHAIN set the reveal published ("the
+/// nonland cards revealed this way"), so the damage reads the real revealed
+/// cards. Lands in that set have mana value 0 (CR 202.3a), so the sum equals
+/// the nonland total. The runtime witnesses in `a_premonition_of_your_demise.rs`
+/// pin the damage itself; this pins that the batch reading, the silent 0
+/// this test once guarded against, is not the one emitted.
 #[test]
-fn scheme_reveal_batch_anaphor_stays_an_honest_red() {
+fn scheme_reveal_anaphor_binds_the_revealed_chain_set() {
     let bound = aggregates("A Premonition of Your Demise", PREMONITION);
-    assert!(
-        bound.is_empty(),
-        "a SetInMotion trigger's event exposes no revealed-card set, so the batch \
-         anaphor is unbindable and must not be emitted. Got {bound:?}"
+    assert_eq!(
+        bound,
+        vec![(
+            AggregateFunction::Sum,
+            ObjectProperty::ManaValue,
+            TrackedAnaphorSource::ChainSet
+        )],
+        "the anaphor must read the reveal's chain set, never the scheme event's batch"
     );
     assert!(
-        has_unimplemented("A Premonition of Your Demise", PREMONITION),
-        "the unbindable anaphor must fail honestly, not deal 0 damage as a green"
+        !has_unimplemented("A Premonition of Your Demise", PREMONITION),
+        "a bound chain-set anaphor leaves no gap"
     );
 }
 
@@ -1380,6 +1379,7 @@ fn scoped_player_member_filter_follows_the_resolution_scope() {
         entering: None,
         source: oak,
         trigger_source: None,
+        stack_trigger_context: None,
         recipient: None,
         scoped_player,
         damage_source: None,

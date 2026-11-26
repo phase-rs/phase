@@ -31,7 +31,7 @@ use super::oracle_effect::{
 use super::oracle_ir::ast::AnaphorNumber;
 use super::oracle_ir::context::{
     bind_controller_phrase, ChainPriorPublishers, ChosenColorQualifierScope, ParseContext,
-    SpellAnaphorBinding,
+    SpellAnaphorBinding, TriggerConditionObjects,
 };
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
@@ -3457,6 +3457,15 @@ fn rewrite_other_as_parent_target_exclusion(
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter_mut()
             .for_each(|leg| rewrite_other_as_parent_target_exclusion(leg, applies)),
+        // CR 608.2c: the sweep's member filter nests inside the tracked-set
+        // wrapper ("all other cards revealed this way" — the Marionette
+        // sweep), so descend through it (and through negation) to reach the
+        // typed legs. The subject-led caller has no such nesting today, so it
+        // is unaffected; the contract ("every typed leg's other") reads the
+        // same from its side.
+        TargetFilter::TrackedSetFiltered { filter, .. } | TargetFilter::Not { filter } => {
+            rewrite_other_as_parent_target_exclusion(filter, applies)
+        }
         _ => {}
     }
 }
@@ -3971,7 +3980,7 @@ fn parse_type_phrase_folding_unbound<'a>(
                     // changed which downstream condition-builder claimed the
                     // clause and regressed that specialized parser (issue
                     // #6321 / PR #6533 review —
-                    // urzas_lands_share_delta_shape /
+                    // urzas_lands_share_conditional_mana_swap_shape /
                     // legacy_misparses_are_now_honest_gaps). Staying out of
                     // every noncreature category's way, not just this one
                     // land cycle, is why the check is by vocabulary
@@ -4424,7 +4433,7 @@ fn parse_type_phrase_folding_unbound<'a>(
     }
 
     // Check "with power N or less/greater" suffix
-    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx) {
+    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx, &mut properties) {
         properties.push(prop);
         pos += consumed;
     }
@@ -4479,14 +4488,24 @@ fn parse_type_phrase_folding_unbound<'a>(
         pos += consumed;
     }
 
-    // CR 113.1 + CR 113.3: "<type> with no abilities" — an object with none of the
-    // four ability categories. Narrow predicate combinator lives in oracle_nom/filter.rs;
-    // this arm supplies the "with " lead + offset handling, mirroring parse_counter_suffix.
+    // CR 605.1 + CR 113.1 + CR 113.3: "<type> with a mana ability" (Raggadragga
+    // clause 2: "a creature you control with a mana ability attacks"),
+    // "<type> with mana abilities" (Power Sink: "tap all lands with mana
+    // abilities they control"), and "<type> with no abilities" — the
+    // ability-category object predicates. The bare predicate combinators live
+    // in oracle_nom/filter.rs; this arm supplies the "with " lead + offset
+    // handling, mirroring parse_counter_suffix. The predicates have disjoint
+    // heads ("a ..."/"mana ..." vs "no ..."), so alt order is immaterial.
     {
         let after_ws = lower[pos..].trim_start();
         let ws = lower[pos..].len() - after_ws.len();
         if let Ok((with_rest, _)) = (tag::<_, _, OracleError<'_>>("with"), space1).parse(after_ws) {
-            if let Ok((rest, prop)) = nom_filter::parse_no_abilities(with_rest) {
+            if let Ok((rest, prop)) = alt((
+                nom_filter::parse_mana_ability,
+                nom_filter::parse_no_abilities,
+            ))
+            .parse(with_rest)
+            {
                 properties.push(prop);
                 pos += ws + (after_ws.len() - rest.len());
             }
@@ -5417,6 +5436,28 @@ fn classify_negation(negated: &str) -> NegationResult {
     {
         return NegationResult::Prop(FilterProp::NotHistoric);
     }
+    // CR 205.4a + CR 314.1: "non-ongoing scheme" (My Laughter Echoes).
+    // CR 903.3: "noncommander" (You Will Know True Suffering, Subjugate the
+    // Hobbits, Shield Broker, Become the Pilot) — commander is a
+    // deck-construction designation, not a subtype, so it must not fall
+    // through to the vacuous `Non(Subtype("Commander"))` below (no object
+    // carries that subtype, so the exclusion would match everything).
+    if let Ok((_, result)) = all_consuming(alt((
+        map(tag::<_, _, OracleError<'_>>("ongoing"), |_| {
+            NegationResult::Prop(FilterProp::NotSupertype {
+                value: Supertype::Ongoing,
+            })
+        }),
+        map(tag("commander"), |_| {
+            NegationResult::Prop(FilterProp::Not {
+                prop: Box::new(FilterProp::IsCommander),
+            })
+        }),
+    )))
+    .parse(negated)
+    {
+        return result;
+    }
 
     match negated {
         // Color negation — parallel to HasColor
@@ -6262,6 +6303,9 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // CR 105.1 + CR 205.2: color / supertype adjectives.
             | FilterProp::HasColor { .. }
             | FilterProp::ColorCount { .. }
+            // CR 205.2a: "with <n> or more card types" suffix binds to the leg
+            // whose type phrase parsed it, never retroactively onto earlier legs.
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::NotColor { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::NotSupertype { .. }
@@ -6428,6 +6472,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::OtherThanTriggerObject
         | FilterProp::HasColor { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -6515,6 +6560,8 @@ fn type_filter_guarantees_creature(tf: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 314.1: Scheme pins a noncreature card type.
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -6546,7 +6593,9 @@ fn is_noncreature_core_type_pin(tf: &TypeFilter) -> bool {
         | TypeFilter::Instant
         | TypeFilter::Sorcery
         | TypeFilter::Planeswalker
-        | TypeFilter::Battle => true,
+        | TypeFilter::Battle
+        // CR 205.2a: "scheme" is in the quoted card-type list above.
+        | TypeFilter::Scheme => true,
         // CR 208.3 names "noncreature" directly: a NONCREATURE permanent has no
         // power or toughness. A `Non(Creature)` pin is exactly that subject.
         TypeFilter::Non(inner) => **inner == TypeFilter::Creature,
@@ -6671,6 +6720,8 @@ fn type_filter_anchors_creature(tf: &TypeFilter) -> bool {
         // `Permanent`/`Card`/`Any` are type-open quantifiers.
         TypeFilter::Non(_)
         | TypeFilter::Kindred
+        // CR 314.1: Scheme alone names no creature.
+        | TypeFilter::Scheme
         | TypeFilter::Land
         | TypeFilter::Artifact
         | TypeFilter::Enchantment
@@ -8133,8 +8184,61 @@ fn parse_attacking_status_clause_boundary(input: &str) -> OracleResult<'_, ()> {
 /// into the byte-offset return contract this call site expects. Used by Arnyn
 /// Deathbloom Botanist, Stern Scolding, Leonardo Sewer Samurai, Warping Wail,
 /// etc.
-fn parse_power_suffix(text: &str, ctx: &mut ParseContext) -> Option<(FilterProp, usize)> {
+fn parse_power_suffix(
+    text: &str,
+    ctx: &mut ParseContext,
+    properties: &mut [FilterProp],
+) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
+
+    // CR 208.1 + CR 603.10a + CR 608.2h: an implicit lesser-power/toughness
+    // suffix is meaningful here only when the enclosing trigger supplies the
+    // event object whose current/LKI characteristic is the comparison value.
+    // Prior target/choice clauses are deliberately declined: ObjectScope::Target
+    // resolves the first object target, while this parser cannot prove that it
+    // is the particular choice named by the printed clause.
+    if let Ok((after, (stat, comparator))) = nom_filter::parse_relative_pt_comparison(trimmed) {
+        let has_prior_object = ctx.chain_declared_object_target.is_some();
+        let has_trigger_event_context = ctx.in_trigger
+            || !matches!(
+                ctx.trigger_condition_objects,
+                TriggerConditionObjects::Unestablished
+            );
+        if !has_trigger_event_context || has_prior_object {
+            return None;
+        }
+        // CR 115.1d: in a triggered ability, "another" in this target noun
+        // phrase excludes the object that caused the trigger, not the ability
+        // source. Preserve the typed exclusion marker used by the runtime
+        // trigger-object authority; leaving `Another` here would incorrectly
+        // exclude Colfenor when another creature dies.
+        if let Some(property) = properties
+            .iter_mut()
+            .find(|property| **property == FilterProp::Another)
+        {
+            *property = FilterProp::OtherThanTriggerObject;
+        }
+        let value = QuantityExpr::Ref {
+            qty: match stat {
+                PtStat::Power => QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                PtStat::Toughness => QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                PtStat::TotalPowerToughness => return None,
+            },
+        };
+        return Some((
+            FilterProp::PtComparison {
+                stat,
+                scope: PtValueScope::Current,
+                comparator,
+                value,
+            },
+            text.len() - after.len(),
+        ));
+    }
 
     // CR 208.1 + CR 509.1b: "with greater power" — relative to the source
     // object. CR 208.1 is the authority for power being the characteristic
@@ -8328,6 +8432,8 @@ fn type_filter_includes_card(filter: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 109.2a: Scheme is a specific card type, not the generic `Card` leg.
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Any
         | TypeFilter::Subtype(_) => false,
@@ -9971,7 +10077,7 @@ pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
 ///
 /// CR 608.2c + CR 701.68c: the filter also names an object an earlier
 /// instruction of the same resolution bound, as "the blighted creature" does.
-fn parse_cost_paid_object_reference<'a>(
+pub(crate) fn parse_cost_paid_object_reference<'a>(
     input: &'a str,
     ctx: &ParseContext,
 ) -> nom::IResult<&'a str, TargetFilter, OracleError<'a>> {
@@ -12227,6 +12333,8 @@ pub(crate) fn scan_zone_phrase_span(
 /// - Your: "from your graveyard" → `InZone` + `ControllerRef::You`.
 /// - Target player's: "from target player's graveyard" → `[Owned{TargetPlayer}, InZone]`
 ///   so the card selection is constrained by the companion player target.
+/// - Target opponent's: "from target opponent's graveyard" → `[Owned{TargetOpponent}, InZone]`
+///   (Hypnox, Into the Earthen Maw) — same companion-target scoping, opponent-restricted.
 /// - "Their": "from their graveyard" → `[Owned{ScopedPlayer}, InZone]` so in an
 ///   each-player iteration the candidate set is scoped to the iterated player's
 ///   own graveyard (CR 110.1/108.3: membership is owner-keyed).
@@ -12344,7 +12452,9 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
         return None;
     }
     match qualifier {
-        ZoneQual::OtherPoss | ZoneQual::Owner(ControllerRef::TargetPlayer) => return None,
+        ZoneQual::OtherPoss
+        | ZoneQual::Owner(ControllerRef::TargetPlayer)
+        | ZoneQual::Owner(ControllerRef::TargetOpponent) => return None,
         ZoneQual::Plain => {
             // This adapter admits only the singular unowned object form. The
             // shared grammar still owns adjective/plural/selection spellings.
@@ -12640,6 +12750,12 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
         value(
             ZoneQual::Owner(ControllerRef::TargetPlayer),
             tag("target player's "),
+        ),
+        // CR 115.1: "target opponent's" declares a stack target slot, unlike the
+        // untargeted "an opponent's".
+        value(
+            ZoneQual::Owner(ControllerRef::TargetOpponent),
+            tag("target opponent's "),
         ),
         value(ZoneQual::Owner(ControllerRef::ScopedPlayer), tag("their ")),
         // CR 508.5a: "defending player's" binds one specific defending player.
@@ -13205,8 +13321,9 @@ mod tests {
     fn superlative_least_toughness_suffix_emits_min_aggregate_pt_comparison() {
         let text = "with the least toughness among creatures you control";
         let mut ctx = ParseContext::default();
-        let (prop, consumed) =
-            parse_power_suffix(text, &mut ctx).expect("least-toughness suffix should parse");
+        let mut properties = Vec::new();
+        let (prop, consumed) = parse_power_suffix(text, &mut ctx, &mut properties)
+            .expect("least-toughness suffix should parse");
         assert_eq!(consumed, text.len(), "the whole suffix must be consumed");
         let FilterProp::PtComparison {
             stat,
@@ -16040,6 +16157,70 @@ mod tests {
     }
 
     #[test]
+    fn mana_ability_suffix_folds_with_empty_rest() {
+        // CR 605.1: Raggadragga clause-2 subject shape — "creature you control
+        // with a mana ability" folds to Typed(Creature, You, [HasManaAbility])
+        // with nothing left over.
+        let (f, rest) = parse_type_phrase_folding("creature you control with a mana ability");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::HasManaAbility));
+    }
+
+    #[test]
+    fn mana_ability_suffix_passes_through_trailing_event() {
+        // Mid-phrase rest passthrough: the event verb after the qualifier stays
+        // in the remainder for try_parse_event's Attacks arm.
+        let (f, rest) =
+            parse_type_phrase_folding("creature you control with a mana ability attacks");
+        assert_eq!(rest.trim(), "attacks", "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(tf.properties.contains(&FilterProp::HasManaAbility));
+    }
+
+    #[test]
+    fn mana_ability_suffix_does_not_shadow_keyword_suffix() {
+        // Adjacent-suffix guard: "creature with flying" still lowers to a
+        // keyword prop, with NO HasManaAbility.
+        let (f, rest) = parse_type_phrase_folding("creature with flying");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(tf
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::WithKeyword { .. })));
+        assert!(
+            !tf.properties.contains(&FilterProp::HasManaAbility),
+            "keyword suffix must not gain HasManaAbility, got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
+    fn mana_ability_suffix_accepts_plural_head() {
+        // CR 605.1: plural "mana abilities" (Power Sink: "tap all lands with
+        // mana abilities they control") folds to the same HasManaAbility
+        // predicate as the singular.
+        let (f, rest) = parse_type_phrase_folding("lands with mana abilities they control");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::HasManaAbility),
+            "plural head must attach HasManaAbility, got {:?} (rest: '{rest}')",
+            tf.properties
+        );
+    }
+
+    #[test]
     fn colorless_adjective_does_not_distribute_across_or() {
         let (f, rest) = parse_type_phrase_folding("artifact or colorless creature");
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
@@ -16703,8 +16884,10 @@ mod tests {
     fn creature_with_power_x_or_less() {
         // CR 107.3a + CR 601.2b: X is announced at cast; the filter retains the
         // `Variable("X")` marker so it can resolve against `chosen_x` at effect time.
-        let (prop, _) = parse_power_suffix("with power x or less", &mut ParseContext::default())
-            .expect("parses");
+        let mut ctx = ParseContext::default();
+        let mut properties = Vec::new();
+        let (prop, _) =
+            parse_power_suffix("with power x or less", &mut ctx, &mut properties).expect("parses");
         assert_eq!(
             prop,
             FilterProp::PtComparison {
@@ -16722,7 +16905,9 @@ mod tests {
 
     #[test]
     fn creature_with_power_x_or_greater() {
-        let (prop, _) = parse_power_suffix("with power x or greater", &mut ParseContext::default())
+        let mut ctx = ParseContext::default();
+        let mut properties = Vec::new();
+        let (prop, _) = parse_power_suffix("with power x or greater", &mut ctx, &mut properties)
             .expect("parses");
         assert_eq!(
             prop,
@@ -16737,6 +16922,49 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[test]
+    fn parse_power_suffix_relative_pt_requires_trigger_context() {
+        let mut ctx = ParseContext::default();
+        assert!(parse_power_suffix("with lesser power", &mut ctx, &mut Vec::new()).is_none());
+    }
+
+    #[test]
+    fn parse_power_suffix_relative_pt_binds_cost_paid_object() {
+        let mut ctx = ParseContext {
+            in_trigger: true,
+            ..ParseContext::default()
+        };
+        let mut properties = vec![FilterProp::Another];
+        let (prop, consumed) =
+            parse_power_suffix("with equal or lesser toughness.", &mut ctx, &mut properties)
+                .expect("trigger-relative toughness suffix should parse");
+        assert_eq!(consumed, "with equal or lesser toughness".len());
+        assert_eq!(properties, vec![FilterProp::OtherThanTriggerObject]);
+        assert_eq!(
+            prop,
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_power_suffix_relative_pt_declines_prior_choice_context() {
+        let mut ctx = ParseContext {
+            in_trigger: true,
+            chain_declared_object_target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..ParseContext::default()
+        };
+        assert!(parse_power_suffix("with lesser power", &mut ctx, &mut Vec::new()).is_none());
     }
 
     #[test]
@@ -24503,7 +24731,7 @@ mod tests {
     /// `Typed{Subtype("Urza's"), Subtype("Mine")}` filter with an empty
     /// remainder, which changes which downstream condition-builder claims the
     /// clause and regresses the dedicated Urza-lands
-    /// `ControllerControlsMatching` parser (`urzas_lands_share_delta_shape` /
+    /// `ControllerControlsMatching` parser (`urzas_lands_share_conditional_mana_swap_shape` /
     /// `legacy_misparses_are_now_honest_gaps` in oracle_tests.rs /
     /// oracle_condition.rs — issue #6321 / PR #6533 review), which
     /// deliberately extracts only the discriminating second word ("Mine" —
@@ -26341,9 +26569,10 @@ mod tests {
     #[test]
     fn superlative_power_suffix_emits_aggregate_pt_comparison() {
         let mut ctx = ParseContext::default();
+        let mut properties = Vec::new();
         let input = "with the greatest power among creatures they control";
-        let (prop, consumed) =
-            parse_power_suffix(input, &mut ctx).expect("superlative suffix should parse");
+        let (prop, consumed) = parse_power_suffix(input, &mut ctx, &mut properties)
+            .expect("superlative suffix should parse");
         assert_eq!(consumed, input.len(), "should consume the whole suffix");
         let FilterProp::PtComparison {
             stat,

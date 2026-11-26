@@ -265,8 +265,8 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
     // permanent. Defer it to the effect-chain parser, whose keeper-dispose
     // recognizer owns the sentence. The predicate is that recognizer's own head
     // combinator INCLUDING its supported-combination gate — the parser is the
-    // detector — so a line the recognizer would refuse (Covetous Elegy, Divine
-    // Reckoning) keeps its current routing.
+    // detector — so a line the recognizer would refuse (Divine Reckoning)
+    // keeps its current routing.
     if super::oracle_effect::is_keeper_dispose_head(lower) {
         return true;
     }
@@ -829,6 +829,15 @@ fn is_static_compound_pattern(lower: &str) -> bool {
             // of the Priority-8 replacement gate. Narrowly widens the exile
             // anchor to accept the ownership infix.
             || scan_contains(lower, "from among cards you own exiled with")
+            // CR 406.2 + CR 122.1: the counter-keyed exile-play shape — "you
+            // may play cards you don't own with stash counters on them from
+            // exile" (Tinybones, Bauble Burglar). The head-anchored "you may
+            // play/cast" gate above plus this `(from exile && counter)`
+            // conjunction matches exactly the static counter-permission lines
+            // (Tinybones + Evelyn's collection line per the class census);
+            // Lara/Critter counter lines are trigger/activated text and never
+            // reach this gate.
+            || (scan_contains(lower, "from exile") && scan_contains(lower, "counter"))
             // CR 601.2a + CR 400.7: the graveyard-side mirror of the exile
             // anchors above — "cast a creature spell from among cards in your
             // graveyard that were put there from anywhere other than the

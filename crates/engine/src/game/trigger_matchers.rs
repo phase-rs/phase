@@ -6132,6 +6132,13 @@ pub(super) fn match_planeswalked(
 /// CR 904.9 / CR 701.32b: "When you set this scheme in motion" — fires for the
 /// scheme set in motion; "you" resolves to the archenemy via the scheme's
 /// controller (stamped in `archenemy::set_in_motion`).
+///
+/// Watching form (My Laughter Echoes: "whenever you set a non-ongoing scheme
+/// in motion") — when `valid_card` is set (self-triggers never set it), the
+/// trigger fires for any set-in-motion event whose scheme passes the filter,
+/// mirroring `ChangesZone`: no source-identity check, so the filter alone
+/// decides self-inclusion (Laughter Echoes' own ongoing scheme fails its own
+/// `NotSupertype{Ongoing}` leg).
 pub(super) fn match_set_in_motion(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -6139,9 +6146,20 @@ pub(super) fn match_set_in_motion(
     state: &GameState,
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
-    matches!(event, GameEvent::SchemeSetInMotion { scheme_id, player_id }
-        if *scheme_id == source_id
-        && valid_player_matches(trigger, state, *player_id, source_context))
+    match event {
+        GameEvent::SchemeSetInMotion {
+            scheme_id,
+            player_id,
+        } if valid_player_matches(trigger, state, *player_id, source_context) => {
+            match &trigger.valid_card {
+                // Self form: the event names this scheme.
+                None => *scheme_id == source_id,
+                // Watching form: the event names a scheme passing the filter.
+                Some(_) => valid_card_matches(trigger, state, *scheme_id, source_context),
+            }
+        }
+        _ => false,
+    }
 }
 
 /// CR 701.33b: "When you abandon this scheme" — fires for the abandoned scheme.
@@ -8860,6 +8878,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: ObjectId(10),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(match_play_card(
             &spell_event,
@@ -8934,6 +8954,8 @@ mod tests {
             controller: PlayerId(1),
             object_id: ObjectId(10),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(!match_play_card(
             &opponent_spell,
@@ -9310,6 +9332,7 @@ mod tests {
                     trigger_state: crate::types::events::ActivationTriggerState::Pending,
                     stack_entry: None,
                     activation_cost: BoundActivationCost::Cost(Box::new(AbilityCost::Tap)),
+                    loyalty_counters_removed: None,
                 },
                 trigger,
                 &test_trigger_source_context(&state, source),
@@ -9358,6 +9381,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9373,6 +9397,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9415,6 +9440,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9430,6 +9456,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9474,6 +9501,7 @@ mod tests {
                     },
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             };
             assert!(!match_ability_activated(
                 &collected, &trigger, &context, &state
@@ -9513,6 +9541,8 @@ mod tests {
                 controller: PlayerId(1),
                 object_id: ObjectId(99),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9572,6 +9602,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -9605,6 +9636,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9619,6 +9651,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9652,6 +9685,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -9687,6 +9721,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -9723,6 +9758,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -9774,6 +9810,7 @@ mod tests {
                     trigger_state: crate::types::events::ActivationTriggerState::Pending,
                     stack_entry: None,
                     activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                    loyalty_counters_removed: None,
                 };
                 assert_eq!(
                     match_loyalty_ability_activated(&event, &trigger, &context, state),
@@ -9862,6 +9899,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             };
             let matches = |state: &GameState, player, source| {
                 match_loyalty_ability_activated(
@@ -12650,6 +12688,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: ObjectId(10),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(match_spell_cast(
             &event,
@@ -12724,6 +12764,8 @@ mod tests {
             controller: opponent,
             object_id: spell_id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(!match_spell_cast(
             &event,
@@ -12763,6 +12805,8 @@ mod tests {
             controller: opponent,
             object_id: spell_id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(match_spell_cast(
             &event,
@@ -12798,6 +12842,8 @@ mod tests {
             controller: caster,
             object_id: gy_id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(match_spell_cast(
             &event,
@@ -12814,6 +12860,8 @@ mod tests {
             controller: caster,
             object_id: hand_id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(!match_spell_cast(
             &event,

@@ -13,6 +13,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{EndEffectPermission, GameState, TransientContinuousEffectBindings};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::statics::StaticMode;
 
 pub use crate::types::ability::{
     generic_effect_affected_uses_inherited_targets, generic_effect_application_filter,
@@ -396,6 +397,26 @@ fn bind_transient_effect(
     end_permission: Option<&EndEffectPermission>,
     modifications: Vec<ContinuousModification>,
 ) {
+    // CR 608.2c + CR 500.7: "that turn" names the extra turn the preceding
+    // instruction of this resolution granted
+    // (`last_granted_extra_turn_ids`). When none was granted (no recipient,
+    // a count of zero) no such turn exists and no prohibition is installed.
+    // The anaphor is singular, so several granted turns are not a reading of
+    // the text either, and also install nothing. An already-bound window
+    // (defensive; the parser never emits one) passes through.
+    let bound_duration: Duration;
+    let duration: &Duration = match duration {
+        Duration::UntilEndOfGrantedTurn { turn: None } => {
+            let [granted] = state.last_granted_extra_turn_ids.as_slice() else {
+                return;
+            };
+            bound_duration = Duration::UntilEndOfGrantedTurn {
+                turn: Some(*granted),
+            };
+            &bound_duration
+        }
+        _ => duration,
+    };
     // CR 109.5: resolve the def's bound subject role once — every arm below
     // installs the same def, so the resolved actor is identical for all of
     // them. `controller_ref_player` is the shared single-ref resolver; an
@@ -409,6 +430,53 @@ fn bind_transient_effect(
             role,
         )
     });
+
+    // CR 608.2b + CR 611.2c: bind the library owner while the announced
+    // target is available. The grantee and duration live on the player-scoped
+    // effect, whose permission follows the top card even after the source leaves.
+    let mut modifications = modifications;
+    let original_modification_count = modifications.len();
+    let mut has_library_permission = false;
+    modifications.retain_mut(|modification| {
+        let ContinuousModification::AddStaticMode {
+            mode:
+                StaticMode::MayLookAtTopOfLibrary { library }
+                | StaticMode::TopOfLibraryCastPermission { library, .. },
+        } = modification
+        else {
+            return true;
+        };
+        let Some(id) = filter::controller_ref_player(
+            state,
+            ability.source_id,
+            Some(ability.controller),
+            Some(ability),
+            library,
+        ) else {
+            return false;
+        };
+        *library = ControllerRef::SpecificPlayer { id };
+        has_library_permission = true;
+        true
+    });
+    if modifications.is_empty() && original_modification_count != 0 {
+        return;
+    }
+    if has_library_permission {
+        install_transient(
+            state,
+            end_permission,
+            ability,
+            duration.clone(),
+            TargetFilter::SpecificPlayer {
+                id: ability.controller,
+            },
+            modifications,
+            static_def.condition.clone(),
+            bound_actor,
+        );
+        return;
+    }
 
     // CR 708.5: A duration-bound "you may look at face-down [permanents] you don't
     // control any time" permission (Lumbering Laundry) is a *player-scoped* look
@@ -614,6 +682,42 @@ fn bind_transient_effect(
                     characteristics,
                 );
             }
+            return;
+        }
+    }
+
+    // CR 701.32a + CR 904.9 + CR 611.2c: A duration-bound "schemes can't be
+    // set in motion" prohibition (All in Good Time) modifies the rules of the
+    // game, and its population — the scheme deck plus the face-up scheme —
+    // lives in the command zone, which the battlefield broadcast below cannot
+    // reach (it would match zero objects and install nothing). Keep the
+    // affected filter INTACT on one TCE so the archenemy gate
+    // (`scheme_setting_in_motion_prohibited`) reads it via
+    // `transient_grants_static_mode_to_object`, which evaluates intact
+    // filters against the queried object. Mirrors the
+    // `MustAttackAwayFromSource` branch above; like `ReduceAbilityCost` (and
+    // unlike `MustAttackAwayFromSource`) it is never grafted onto objects —
+    // schemes sit outside the layer population — so it stays out of the layer
+    // skip list for the opposite reason: there is nothing to graft to.
+    if modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: crate::types::statics::StaticMode::CantSetSchemeInMotion,
+            }
+        )
+    }) {
+        if let Some(affected) = static_def.affected.clone() {
+            install_transient(
+                state,
+                end_permission,
+                ability,
+                duration.clone(),
+                affected,
+                modifications,
+                static_def.condition.clone(),
+                bound_actor,
+            );
             return;
         }
     }
@@ -3372,6 +3476,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: cast_spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let static_def = StaticDefinition::continuous()
@@ -3658,6 +3764,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: cast_spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let static_def = StaticDefinition::continuous()

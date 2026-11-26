@@ -17,6 +17,7 @@ import {
   loadActiveDraftPod,
   type ActiveDraftGuestMeta,
   type ActiveDraftPodMeta,
+  type ActiveDraftPodPhase,
 } from "../services/draftPersistence";
 import { loadGame } from "../services/gamePersistence";
 import { useEffectiveOffline } from "../stores/connectivityStore";
@@ -185,6 +186,27 @@ export function DraftLandingPage() {
   );
 }
 
+/**
+ * What the hosted pod card shows for its saved `phase`. A Review is the drafting
+ * workspace between rounds, so it reads as drafting: label and pick count alike.
+ * The count is the host's own drafted cards.
+ */
+function activePodCardPresentation(
+  phase: ActiveDraftPodPhase,
+  t: TFunction<"draft">,
+): { label: string; showsPickCount: boolean } {
+  switch (phase) {
+    case "lobby": return { label: t("podPhase.lobby"), showsPickCount: false };
+    case "drafting":
+    case "review":
+      return { label: t("podPhase.drafting"), showsPickCount: true };
+    case "deckbuilding": return { label: t("podPhase.deckbuilding"), showsPickCount: false };
+    case "pairing": return { label: t("podPhase.pairing"), showsPickCount: false };
+    case "matchInProgress": return { label: t("podPhase.matchInProgress"), showsPickCount: false };
+    case "complete": return { label: t("podPhase.complete"), showsPickCount: false };
+  }
+}
+
 function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
   const { t } = useTranslation("draft");
   const navigate = useNavigate();
@@ -192,20 +214,7 @@ function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
   // "CommanderDraft Pod". `draftKindLabels` is the single authority for that
   // rendering, shared with the pod lobby header.
   const kindLabel = draftKindLabels(t);
-
-  function getPhaseLabel(): string {
-    switch (meta.phase) {
-      case "lobby": return t("podPhase.lobby");
-      case "drafting": return t("podPhase.drafting");
-      // Review remains on the existing drafting workspace, so use its existing
-      // localized label rather than adding a locale surface here.
-      case "review": return t("podPhase.drafting");
-      case "deckbuilding": return t("podPhase.deckbuilding");
-      case "pairing": return t("podPhase.pairing");
-      case "matchInProgress": return t("podPhase.matchInProgress");
-      case "complete": return t("podPhase.complete");
-    }
-  }
+  const presentation = activePodCardPresentation(meta.phase, t);
 
   return (
     <div className="mb-8">
@@ -227,11 +236,11 @@ function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-white/45">
             <span className="rounded-md border border-cyan-300/20 bg-cyan-400/10 px-2 py-0.5 text-xs font-medium text-cyan-100">
-              {getPhaseLabel()}
+              {presentation.label}
             </span>
             <span>{t("landing.seatCount", { count: meta.podSize })}</span>
             {meta.roomCode && <span>{t("landing.roomLabel", { code: meta.roomCode })}</span>}
-            {meta.phase === "drafting" && meta.pickCount > 0 && (
+            {presentation.showsPickCount && meta.pickCount > 0 && (
               <span>{t("landing.cardsPicked", { count: meta.pickCount })}</span>
             )}
             <span>{formatRelativeTime(meta.updatedAt, t)}</span>

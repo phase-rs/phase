@@ -33,7 +33,7 @@ use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIn
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::TokenAttackRequest;
+use crate::types::proposed_event::{ProposedEvent, TokenAttackRequest};
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
 use crate::types::resolution::ResolutionFrame;
@@ -1100,16 +1100,22 @@ pub fn apply_verified_ai_priority_pass(
                 .to_string(),
         ));
     };
-    if player != contract.semantic_owner {
+    // CR 805.5a: the verified pass belongs to the window's team, which the
+    // representative parks on — a teammate's pass continues the same window,
+    // so the owner check admits every living team decision owner, not just
+    // the holder. CR 805.5b: the authorization is recorded against the
+    // semantic owner, never the parked representative — recording the
+    // representative would let one teammate's verified pass authorize
+    // another member's automatic pass. The representative below only checks
+    // that the window's team is covered by the fenced cohort.
+    if !turn_control::decision_owners(state).contains(&contract.semantic_owner) {
         return Err(EngineError::ActionNotAllowed(
             "AI stack continuation requires the issued nonempty priority window".to_string(),
         ));
     }
-
+    let owner = contract.semantic_owner;
     let representative = super::topology::priority_pass_representative(state, player);
-    let inserted_verified_representative = if let Some(session) =
-        state.stack_resolution_session.as_ref()
-    {
+    let inserted_verified_owner = if let Some(session) = state.stack_resolution_session.as_ref() {
         let current_representatives = super::topology::canonical_priority_representatives(
             state,
             session.representatives.iter().copied(),
@@ -1133,8 +1139,8 @@ pub fn apply_verified_ai_priority_pass(
             .stack_resolution_session
             .as_mut()
             .expect("the validated active session remains installed")
-            .verified_pass_representatives
-            .insert(representative)
+            .verified_pass_owners
+            .insert(owner)
     } else {
         // The shared session is installed before the ordinary action boundary
         // so its explicit-pass seam applies the session's skipped-window authority
@@ -1161,8 +1167,8 @@ pub fn apply_verified_ai_priority_pass(
             .stack_resolution_session
             .as_mut()
             .expect("the newly installed session exists")
-            .verified_pass_representatives
-            .insert(representative);
+            .verified_pass_owners
+            .insert(owner);
         return match apply_interaction(state, authenticated_actor, contract.semantic_owner, action)
         {
             Ok(result) => Ok(result),
@@ -1177,11 +1183,9 @@ pub fn apply_verified_ai_priority_pass(
     match apply_interaction(state, authenticated_actor, contract.semantic_owner, action) {
         Ok(result) => Ok(result),
         Err(error) => {
-            if inserted_verified_representative {
+            if inserted_verified_owner {
                 if let Some(session) = state.stack_resolution_session.as_mut() {
-                    session
-                        .verified_pass_representatives
-                        .remove(&representative);
+                    session.verified_pass_owners.remove(&owner);
                 }
             }
             Err(error)
@@ -1442,6 +1446,7 @@ fn apply_action_boundary_core(
     stack_resolution_limit: Option<u32>,
     authorize_actor: bool,
 ) -> Result<RawActionApplication, EngineError> {
+    let _damage_scope = effects::DamageDeliveryScope::enter(None);
     let lifecycle = super::lifecycle::enter_action_frame();
     if let Err(error) = mana_sources::preflight_tap_land_action(state, authenticated_actor, &action)
     {
@@ -1481,10 +1486,10 @@ fn apply_action_boundary_core(
     // dispatcher's cleanup, and the sweep's exhaustive match pops only
     // `Dispatching`.
     //
-    // This is the OUTER action funnel — `apply_action_boundary_core` has exactly
-    // three call sites: two public/simulation entry points and one internal
-    // clone-local life-safety preview. Deliberately NOT `apply_action`, which
-    // the auto-pass and shortcut loops re-enter twelve further ways.
+    // This is the OUTER action funnel: every reducer action (public, simulation,
+    // prospective, replay, Resolve-All, and the clone-local life-safety preview)
+    // passes through `apply_action_boundary_core`. Deliberately NOT
+    // `apply_action`, its reducer.
     //
     // BEFORE `boundary_snapshot`, deliberately: every failure path restores that
     // same snapshot, and removing an impossible state is not part of the action
@@ -1618,10 +1623,14 @@ fn apply_action_boundary_core(
         && action.is_submitter_scoped()
         && !matches!(action, GameAction::Concede { .. } | GameAction::Debug(_)))
     .then(|| (action.clone(), authenticated_actor));
+    // The paused token clause this action begins with (if any): it is fed this
+    // action's whole buffer at the end of the core, after the follow-up below.
+    let token_clause_at_start = super::engine_replacement::paused_token_clause_source(state);
     // CR 510.2: whether this action answers a parked combat damage batch's choice.
     // The reducer fills a fresh `ActionResult`, so its events begin at index 0.
     let parked_combat_damage_answer =
         super::combat_damage::ParkedCombatDamageAnswer::begin(state, 0);
+    super::visibility::begin_foreign_library_look_boundary(state, semantic_owner, &action);
     let mut result = match if payment_transaction::owns_action(state, &action) {
         // All staged-payment actions enter through this admission point. The
         // authenticated actor is recorded for deterministic replay; the
@@ -1725,6 +1734,7 @@ fn apply_action_boundary_core(
         let reversal = result.waiting_for.clone();
         *state = boundary_snapshot.as_ref().clone();
         state.waiting_for = reversal;
+        super::visibility::finish_foreign_library_look_boundary(state, &result);
         return Ok(RawActionApplication {
             result,
             journal_start,
@@ -1847,6 +1857,21 @@ fn apply_action_boundary_core(
                 Ok(moved) => moved,
                 Err(err) => break 'follow_up Some(err),
             };
+            // CR 800.4b + CR 608.2f + CR 616.1: a concession that left a parked
+            // token-creation replacement without its chooser or substitute
+            // decider is reconciled before the action returns. A park that
+            // re-proposed to a survivor prompt stands; one that settled joins
+            // the convergence pass below.
+            let reconciled_token_replacement =
+                match reconcile_parked_token_replacement_after_departure(
+                    state,
+                    committed_departure.as_ref(),
+                    &mut result,
+                    scan_from,
+                ) {
+                    Ok(moved) => moved,
+                    Err(err) => break 'follow_up Some(err),
+                };
             let realized_token_entry =
                 effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
             // CR 603.6a + CR 603.3b: the same convergence for entries of a completed
@@ -1869,7 +1894,10 @@ fn apply_action_boundary_core(
             let settled_entry_continuation_is_parked =
                 matches!(result.waiting_for, WaitingFor::Priority { .. })
                     && !state.deferred_entry_events.is_empty();
-            if ((resumed_combat_damage || resumed_parked_root || reconciled_unless_payment)
+            if ((resumed_combat_damage
+                || resumed_parked_root
+                || reconciled_unless_payment
+                || reconciled_token_replacement)
                 && matches!(result.waiting_for, WaitingFor::Priority { .. }))
                 || realized_token_entry
                 || settled_entry_batch
@@ -1909,6 +1937,15 @@ fn apply_action_boundary_core(
             }
             None
         };
+    // A paused simultaneous token clause owns every later action's events until
+    // it finishes, whatever the action answered; the follow-up above can still
+    // realize its token entries, so this runs after it.
+    super::engine_replacement::feed_paused_token_clause_after_action(
+        state,
+        token_clause_at_start,
+        &result.events,
+    );
+    super::visibility::finish_foreign_library_look_boundary(state, &result);
     // Do not carry the core's window into finalization: that pass owns its own
     // scope over convergence, auto-pass, and re-convergence.
     state.ingress_life_window = None;
@@ -2210,6 +2247,107 @@ fn parked_unless_payment_repair(
         {
             Some(ParkedPaymentRepair::LostPrompt)
         }
+        _ => None,
+    }
+}
+
+/// CR 800.4b + CR 800.4d + CR 608.2f + CR 616.1 + CR 101.4: the
+/// departure-boundary reconciliation of a parked token-creation replacement
+/// whose chooser — or its accepted substitute's decider — left the game. The
+/// pruned event is re-proposed through the replacement authority before the
+/// action returns, so the survivors keep choosing for their own parts in APNAP
+/// order; the boundary feed then delivers the re-proposed creation's events to
+/// the paused clause, which finishes at its resumer. A park whose chooser is
+/// still in the game is untouched. Inert for an action that committed no
+/// departure; `true` when the park moved.
+fn reconcile_parked_token_replacement_after_departure(
+    state: &mut GameState,
+    departure: Option<&CommittedDeparture>,
+    result: &mut ActionResult,
+    _scan_from: usize,
+) -> Result<bool, EngineError> {
+    // The clause feed owns event collection (it feeds the whole action buffer
+    // after the follow-up block), so this repair takes no scan window of its
+    // own; the parameter mirrors the unless-payment sibling's signature.
+    if departure.is_none() {
+        return Ok(false);
+    }
+    reconcile_parked_token_replacement_inner(state, &mut result.waiting_for, &mut result.events)
+}
+
+/// The departure-agnostic core of the token-park repair, shared by the
+/// concession-boundary site above and the SBA-net site in
+/// `reconcile_terminal_sba` (an SBA departure carries no `CommittedDeparture`).
+/// The leaving set is always re-derived from liveness, never trusted from the
+/// triggering departure: prune is a fixpoint, the substitute record-take is
+/// single-fire, and once the chooser is alive the detection below renders
+/// re-entry inert — so SBA-then-Concede orderings and a restored save holding
+/// a stale park are each repaired correctly at the next boundary.
+fn reconcile_parked_token_replacement_inner(
+    state: &mut GameState,
+    waiting_for: &mut WaitingFor,
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, EngineError> {
+    if parked_token_replacement_repair(state, waiting_for).is_none() {
+        return Ok(false);
+    }
+    sync_waiting_for(state, waiting_for);
+    // Defensive prune: the repair never depends on prune having run — the
+    // leaving set is re-derived from liveness right here.
+    let leaving: HashSet<PlayerId> = state
+        .players
+        .iter()
+        .map(|player| player.id)
+        .filter(|player| !super::players::is_alive(state, *player))
+        .collect();
+    let Some(pending) = state.pending_replacement.as_mut() else {
+        return Ok(false);
+    };
+    match replacement::prune_departed_token_batches(pending, &leaving) {
+        replacement::TokenPruneOutcome::Survives => {
+            // No answer is read: the replacement authority re-proposes a park
+            // whose chooser left before it applies an index
+            // (`handle_replacement_choice`, `continue_replacement`).
+            *waiting_for = engine_replacement::handle_replacement_choice(state, 0, events)?;
+            state.waiting_for = waiting_for.clone();
+        }
+        replacement::TokenPruneOutcome::NoSurvivor => {
+            replacement::abandon_survivorless_token_park(state, &leaving);
+            *waiting_for = state.waiting_for.clone();
+        }
+        replacement::TokenPruneOutcome::NotATokenEvent => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// What a departure left to repair on a parked token-creation replacement.
+enum ParkedTokenRepair {
+    /// CR 616.1 + CR 800.4a: the park's chooser — or its substitute's decider —
+    /// left the game. The pruned event is re-proposed to whoever now chooses
+    /// for the surviving batches.
+    DepartedChooser,
+}
+
+/// The one reading of whether a parked token-creation replacement needs the
+/// departure's reconciliation: a token park whose chooser or decider left,
+/// under its prompt or the priority window the departure handed on while
+/// keeping the record.
+fn parked_token_replacement_repair(
+    state: &GameState,
+    waiting_for: &WaitingFor,
+) -> Option<ParkedTokenRepair> {
+    let pending = state.pending_replacement.as_ref()?;
+    if !matches!(pending.proposed, ProposedEvent::CreateToken { .. }) {
+        return None;
+    }
+    if !replacement::parked_token_chooser_has_left(state, pending) {
+        return None;
+    }
+    match waiting_for {
+        WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::ChooseOneOfBranch { .. }
+        | WaitingFor::CopyTargetChoice { .. }
+        | WaitingFor::Priority { .. } => Some(ParkedTokenRepair::DepartedChooser),
         _ => None,
     }
 }
@@ -2570,10 +2708,21 @@ fn restore_engine_derived_retarget_prompts(
     if let WaitingFor::RetargetChoice {
         player,
         stack_entry_index,
+        stack_entry_id,
         scope,
         ..
     } = state.waiting_for.clone()
     {
+        if stack_entry_id.is_some_and(|expected| {
+            state
+                .stack
+                .get(stack_entry_index)
+                .is_none_or(|entry| entry.id != expected)
+        }) {
+            return Err(PersistedRestoreError::PrioritySettlementFailed(
+                "retarget prompt stack entry identity no longer matches".into(),
+            ));
+        }
         if let Some(prompt) =
             effects::change_targets::retarget_prompt(state, stack_entry_index, &scope, player)
         {
@@ -2979,6 +3128,7 @@ fn finish_action_boundary_with_lifecycle(
         carry_answer_receipts(&boundary_snapshot, state);
     }
     result.waiting_for = state.waiting_for.clone();
+    super::visibility::finish_foreign_library_look_boundary(state, &result);
     if matches!(mode, PublicFinalizeMode::Immediate) {
         finalize_display_state(state);
     }
@@ -3209,14 +3359,21 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     // mana ability (CR 605.4a). Paying life down to 0 is a legal payment
     // (CR 119.4), so the 0-life check waits until that process ends and a
     // player would next receive priority. Until then that player is still in
-    // the game, so waiting on their choices is not the #962 softlock; prompts
-    // owned by a resolution keep the net. CR 117.2e + CR 121.4: one exception is
+    // the game, so waiting on their choices is not the #962 softlock.
+    // CR 117.2e + CR 121.4: one further exclusion is
     // a parked unless payment of draws: a draw from an empty library loses at the
     // next priority, after the payment's later replacement prompts.
     // CR 510.2 + CR 704.3: a parked combat damage batch is not a point where a
     // player would receive priority; its state-based actions are checked once it
     // completes.
-    if sba::has_pending_player_loss_sba(state)
+    // CR 117.2e + CR 704.4: during a live spell or ability's choice, preserve
+    // the #962 emergency only if a chooser will depart. The loss of another
+    // player must wait until the resolution finishes and priority can return.
+    // Sandbox and priority waits do not have this restriction.
+    let choosing_players = (state.resolving_stack_entry.is_some()
+        && !matches!(state.waiting_for, WaitingFor::Priority { .. }))
+    .then(|| state.waiting_for.acting_players());
+    if sba::has_pending_player_loss_sba(state, choosing_players.as_deref())
         && !state.withholds_priority()
         && !engine_payment_choices::draw_payment_is_parked(state)
         && !state.combat_damage_batch_parked()
@@ -3229,7 +3386,9 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
         // its events (CR 603.10a, CR 603.2c), so the settlement's scan from
         // `departure_start` takes only what happened after it.
         let departure_start = result.events.len();
-        match sba::check_state_based_actions_reporting_departure(state, &mut result.events) {
+        let (resume, departure_queued) =
+            sba::check_state_based_actions_reporting_departure(state, &mut result.events);
+        match resume {
             super::elimination::DepartureResume::ResolutionTail => {
                 settle_resolution_resumed_after_departure(
                     state,
@@ -3242,6 +3401,26 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
             // go on the stack before the next player has priority, as after a
             // concession.
             super::elimination::DepartureResume::Settled => {
+                if state.game_end.is_none() && departure_start < result.events.len() {
+                    // CR 603.2c + CR 117.5: the departure's snapshot already
+                    // claimed its occurrences. Add the unclaimed suffix, including
+                    // later SBA checks, before the one legal trigger placement.
+                    let first_owned = state
+                        .deferred_triggers
+                        .len()
+                        .saturating_sub(departure_queued);
+                    super::triggers::collect_departure_triggers_into_deferred(
+                        state,
+                        &result.events,
+                        departure_start,
+                        None,
+                    );
+                    let origin = engine_priority::parked_batch_origin(&state.waiting_for);
+                    if origin == super::triggers::DeferredTriggerBatchOrigin::StateBasedActionChoice
+                    {
+                        super::triggers::stamp_deferred_triggers_from(state, first_owned, origin);
+                    }
+                }
                 super::elimination::drain_or_clear_deferred_triggers_after_elimination(
                     state,
                     super::elimination::DepartureTriggers::ScannedByCaller,
@@ -3255,6 +3434,31 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     }
 
     super::elimination::ensure_game_over_if_terminal(state, &mut result.events);
+    // CR 800.4b + CR 608.2f: the same token-park repair behind the SBA
+    // trigger (an SBA departure leaves the same stale park a concession
+    // does). Inert when the game ended; otherwise the adopted wait is
+    // re-synced and settlement proceeds as below. A departure is never
+    // undone, so a failure is reported rather than returned.
+    if state.game_end.is_none() {
+        match reconcile_parked_token_replacement_inner(
+            state,
+            &mut result.waiting_for,
+            &mut result.events,
+        ) {
+            Ok(moved) => {
+                if moved {
+                    sync_waiting_for(state, &result.waiting_for);
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "a parked token replacement repair after a departure did not settle");
+                debug_assert!(
+                    false,
+                    "a parked token replacement repair after a departure did not settle: {error}"
+                );
+            }
+        }
+    }
     settle_finished_game(state, result);
 }
 
@@ -8899,6 +9103,13 @@ pub(crate) fn drain_pending_cost_move_resume(
                             // still has to resume then.
                             | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
                             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                            // CR 616.1 + CR 606.4: after the replacement subtree
+                            // retires at ordinary priority, finish the owning
+                            // loyalty activation exactly once.
+                            | PendingCostMoveResume::LoyaltyActivation {
+                                paused_removal: Some(_),
+                                ..
+                            }
                     )
                 )
         }
@@ -9061,6 +9272,8 @@ pub(crate) fn cost_includes_draw_instruction(cost: &crate::types::ability::Abili
 /// replaced is still resolving). That repeat follows the whole pass, so the
 /// pass's entry commits (CR 614.12a) land before the exposed owner completes.
 /// A repeat needs the position to strictly decrease, so the loop ends.
+/// Every pass starts and ends with the paused-token-clause finish
+/// (`finish_simultaneous_token_clause_if_ready`).
 pub(super) fn resume_pending_continuation_if_priority(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -9069,24 +9282,11 @@ pub(super) fn resume_pending_continuation_if_priority(
         let before = state.resolution_stack.position();
         resume_pending_continuation_pass(state, events)?;
         let after = state.resolution_stack.position();
-        // CR 117.2e + CR 608.2 + CR 614.6: a pass that shrinks the subtree and
-        // leaves a copy owner or a post-replacement drain on top has exposed it (a
-        // substitute's drain retired, or an inner copy owner completed). The work
-        // that frame belongs to is unfinished (for a copy owner, the ability whose
-        // creation the substitute replaced is still resolving), so no player may
-        // receive priority: pass again. The repeat follows the whole pass, so that
-        // pass's entry commits land first (CR 614.12a).
-        // CR 608.2c: a retired as-enters dispatch can also expose the zone-move
-        // owner above the spell's parked tail. Finish that move before returning
-        // priority, so its later instructions resume in this same action.
-        let exposes_resolving_owner = matches!(
-            state.resolution_stack.last(),
-            Some(
-                ResolutionFrame::CopyToken(_)
-                    | ResolutionFrame::PostReplacement(_)
-                    | ResolutionFrame::ChangeZone(_)
-            )
-        );
+        // A pass that shrinks the subtree and leaves an owner with unfinished
+        // resolving work on top has exposed it: no player may receive priority, so
+        // pass again. The repeat follows the whole pass, so that pass's entry
+        // commits land first (CR 614.12a).
+        let exposes_resolving_owner = top_frame_owes_resolving_work(state);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
             || (state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
                 && !exposes_resolving_owner)
@@ -9112,6 +9312,25 @@ pub(super) fn resume_pending_continuation_if_priority(
     }
 }
 
+/// CR 117.2e + CR 608.2 + CR 614.6: whether the frame on top owes unfinished
+/// resolving work — a copy owner or a post-replacement drain (a substitute's
+/// drain retired, or an inner copy owner completed). The work that frame belongs
+/// to is unfinished (for a copy owner, the ability whose creation the substitute
+/// replaced is still resolving), so no player may receive priority.
+/// CR 608.2c: a retired as-enters dispatch can also expose the zone-move owner
+/// above the spell's parked tail; that move finishes before priority returns, so
+/// its later instructions resume in the same action.
+pub(super) fn top_frame_owes_resolving_work(state: &GameState) -> bool {
+    matches!(
+        state.resolution_stack.last(),
+        Some(
+            ResolutionFrame::CopyToken(_)
+                | ResolutionFrame::PostReplacement(_)
+                | ResolutionFrame::ChangeZone(_)
+        )
+    )
+}
+
 /// CR 601.2h + CR 605.3b + CR 608.2c + CR 616.1: once a parked counter-cost
 /// root's replacement subtree has retired, resume that root at this boundary
 /// before any further frame, liminal-entry or phase-transition work.
@@ -9132,6 +9351,10 @@ fn resume_pending_continuation_pass(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    // CR 608.2f + CR 608.2c: a paused simultaneous token clause whose every seat
+    // has committed finishes here, at the common priority boundary every answer
+    // reaches, before the outer continuation resumes.
+    super::engine_replacement::finish_simultaneous_token_clause_if_ready(state, events);
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         // CR 118.3b + CR 119.4 + CR 616.1: A life-payment replacement child
         // drains to its recorded resolution boundary before the paid outer
@@ -9203,6 +9426,12 @@ fn resume_pending_continuation_pass(
         // Inert unless a `Token` resume with a live liminal entry is parked.
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             super::life_safety::observe_boundary_carrier(state);
+            if state.outside_game_entry_resume_is_due() {
+                super::engine_replacement::resume_pending_outside_game_card_entry(state, events);
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    effects::drain_pending_continuation(state, events);
+                }
+            }
             if let Some(waiting_for) =
                 super::engine_replacement::resume_pending_liminal_token_entry(state, events)
             {
@@ -9240,6 +9469,10 @@ fn resume_pending_continuation_pass(
             }
         }
     }
+    // CR 608.2f: and once more after this pass, which may have retired the
+    // clause's last resolving owner; the loop repeats only while an owner stays
+    // exposed, so the clause is never left for an unrelated later action.
+    super::engine_replacement::finish_simultaneous_token_clause_if_ready(state, events);
     settle_resolving_stack_entry_after_continuation_resume(state);
     Ok(())
 }
@@ -9763,6 +9996,24 @@ fn pass_priority_once_with_pipeline(
     events: &mut Vec<GameEvent>,
     stack_resolution_limit: Option<u32>,
 ) -> Result<PriorityPassPipelineOutcome, EngineError> {
+    // CR 117.4 + CR 723.5/723.8: pass the *seat* that holds priority, not
+    // `priority_player` — under turn-control the latter is the authorized
+    // submitter (the controller), which would mis-count consecutive passes and
+    // soft-lock the game.
+    let current_seat = turn_control::priority_seat(state);
+    pass_priority_once_with_pipeline_for(state, current_seat, events, stack_resolution_limit)
+}
+
+/// CR 805.5b: pass for an explicit seat rather than the window holder. The
+/// manual PassPriority arm resolves the acting teammate and records their
+/// individual pass here; the team advances only when every living member has
+/// passed.
+fn pass_priority_once_with_pipeline_for(
+    state: &mut GameState,
+    current_seat: PlayerId,
+    events: &mut Vec<GameEvent>,
+    stack_resolution_limit: Option<u32>,
+) -> Result<PriorityPassPipelineOutcome, EngineError> {
     if let WaitingFor::Priority { player } = &state.waiting_for {
         if super::precast_copy_shortcut::blocks_pass(state, *player) {
             let waiting_for = state.waiting_for.clone();
@@ -9782,11 +10033,6 @@ fn pass_priority_once_with_pipeline(
 
     let stack_was_empty = state.stack.is_empty();
     let phase_before_pass = state.phase;
-    // CR 117.4 + CR 723.5/723.8: pass the *seat* that holds priority, not
-    // `priority_player` — under turn-control the latter is the authorized
-    // submitter (the controller), which would mis-count consecutive passes and
-    // soft-lock the game.
-    let current_seat = turn_control::priority_seat(state);
     let final_part_owed_before_pass = super::stack::resolving_spell_owes_final_part(state);
     let priority_outcome = priority::handle_priority_pass_with_limit(
         current_seat,
@@ -10003,6 +10249,17 @@ pub(crate) fn no_living_player_has_meaningful_priority_action(state: &GameState)
     })
 }
 
+/// CR 805.5b: scrub one seat's standing preference from both the live map
+/// and a live session's teardown baseline, so a later teardown cannot
+/// resurrect a preference the seat already finished, cancelled, or revoked.
+/// Shared by the finish sweep and the runner's per-candidate Finish drive.
+fn scrub_seat_auto_pass(state: &mut GameState, seat: PlayerId) {
+    state.auto_pass.remove(&seat);
+    if let Some(session) = state.stack_resolution_session.as_mut() {
+        session.auto_pass_overlay.baseline.remove(&seat);
+    }
+}
+
 fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameState) -> bool {
     let session_representatives = state
         .stack_resolution_session
@@ -10015,9 +10272,9 @@ fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameSt
             AutoPassMode::UntilStackEmpty {
                 initial_stack_len, ..
             } if !session_representatives.is_some_and(|representatives| {
-                representatives.contains(&super::topology::priority_pass_representative(
-                    state, *player,
-                ))
+                // Self-membership: only a seat of the frozen cohort keeps its
+                // overlay entry while the session runs.
+                representatives.contains(player)
             }) && (state.stack.is_empty() || state.stack.len() > *initial_stack_len) =>
             {
                 Some(*player)
@@ -10027,7 +10284,7 @@ fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameSt
         .collect();
 
     for player in &finished {
-        state.auto_pass.remove(player);
+        scrub_seat_auto_pass(state, *player);
     }
 
     !finished.is_empty()
@@ -10231,29 +10488,43 @@ fn stack_resolution_session_participant_authorizes_pass(
         // A representative consented to the session. A non-representative's
         // skipped windows are not rechecked for a meaningful action (only its
         // live window is, in `stack_resolution_session_priority_decision`).
-        // CR 117.1: Full Control is the one skipped window consent doesn't cover
-        // (an activated ability, the untap reason's entry, is never skipped), so
-        // the standing-pass ladder isn't read.
-        StackResolutionPolicy::Committed => !priority::holds_full_control(state, participant),
+        // CR 117.1 + CR 732.2b: Full Control is the one skipped window consent
+        // doesn't cover — each other player may shorten the shortcut at their
+        // own window — so every living member's Full Control is checked, not
+        // just the representative's. (An activated ability, the untap reason's
+        // entry, is never skipped, so the standing-pass ladder isn't read.)
+        StackResolutionPolicy::Committed => super::topology::team_members(state, participant)
+            .into_iter()
+            .all(|member| !priority::holds_full_control(state, member)),
         // A verified AI pass authorizes later windows in this exact fenced
         // cohort; CR 117.3d + CR 732.2b: a representative's standing pass over
-        // this window's top authorizes this window.
+        // this window's top authorizes this window. CR 805.5b: passing for a
+        // shared team's seat decides for every living member, so every
+        // member authorizes its own window — its own standing pass or its
+        // own verified pass. One teammate's verified pass never authorizes
+        // another member's window. An individual seat is its own whole
+        // team, preserving the single-seat rule exactly.
         StackResolutionPolicy::RecheckNoMeaningfulPriorityAction => {
-            let standing_pass =
-                match priority::standing_priority_pass(state, participant, Some(window_top)) {
-                    // CR 117.1: Full Control is a standing refusal to give up any
-                    // window — the session's own representative's included.
-                    priority::StandingPriorityPass::Withheld => return false,
-                    priority::StandingPriorityPass::Granted => true,
-                    // CR 117.1d + CR 605.3a: an own object that can remove an
-                    // activatable mana source, or an own activated ability that
-                    // would waste an untap on its own source, is no standing
-                    // pass; only explicit consent skips it.
-                    priority::StandingPriorityPass::Held
-                    | priority::StandingPriorityPass::Undecided => false,
-                };
             session.representatives.contains(&participant)
-                && (standing_pass || session.verified_pass_representatives.contains(&participant))
+                && super::topology::team_members(state, participant)
+                    .into_iter()
+                    .all(|member| {
+                        match priority::standing_priority_pass(state, member, Some(window_top)) {
+                            // CR 117.1: Full Control is a standing refusal to give up any
+                            // window — the session's own verified pass included.
+                            priority::StandingPriorityPass::Withheld => false,
+                            priority::StandingPriorityPass::Granted => true,
+                            // CR 117.1d + CR 605.3a: an own object that can remove an
+                            // activatable mana source, or an own activated ability that
+                            // would waste an untap on its own source, is no standing
+                            // pass; only explicit consent or that member's own
+                            // verified pass skips it.
+                            priority::StandingPriorityPass::Held
+                            | priority::StandingPriorityPass::Undecided => {
+                                session.verified_pass_owners.contains(&member)
+                            }
+                        }
+                    })
         }
     }
 }
@@ -10438,14 +10709,156 @@ fn priority_pass_needs_checkpoint(state: &GameState) -> bool {
 }
 
 fn priority_pass_will_close_window(state: &GameState) -> bool {
-    let participants = super::topology::priority_pass_participants(state);
-    !participants.is_empty() && state.priority_passes.len().saturating_add(1) >= participants.len()
+    // CR 805.5b: the window closes when every living player has passed - count
+    // individuals across all teams, not team representatives.
+    let living = super::topology::all_living_players_in_team_order(state);
+    !living.is_empty() && state.priority_passes.len().saturating_add(1) >= living.len()
 }
 
 #[cfg(test)]
 thread_local! {
     static AUTO_PASS_WINDOW_SAMPLES: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+}
+
+/// CR 805.5b: one runner iteration's drive instruction for a Priority window.
+/// The runner drives each living unpassed member of the holding team from that
+/// member's own preference only.
+enum AutoPassDrive {
+    /// Pass for `seat`. `limit` carries the live session's next authorized
+    /// entries, and only a holder-driven session beat sets it: a teammate
+    /// drive passes that one seat with no session consumption.
+    Drive { seat: PlayerId, limit: Option<u32> },
+    /// Leave the window for a fresh decision.
+    Stop,
+}
+
+/// CR 805.5b + CR 117.4: select which living unpassed seat of the holder's
+/// team the auto-pass runner passes for on this beat, consulting only each
+/// candidate's own preference. An individual window drives the holder alone,
+/// exactly as before; a shared-team window scans holder-first across the
+/// living unpassed members.
+///
+/// CR 732.2c: a seat whose divergence latch is set is skipped before its
+/// preference is read — a bare pass can never discharge that obligation.
+/// Skips count: a scan that skipped anyone and drove nobody stops without
+/// the all-Exit sweep, so a latched seat is never passed over.
+fn select_auto_pass_drive(state: &mut GameState, holder: PlayerId) -> AutoPassDrive {
+    // Individual seat: the holder is its own whole team. This block is the
+    // base runner arm moved verbatim, including the Exit fallthrough: the
+    // live-only holder removal on Finish is safe because NotActive implies no
+    // session is live.
+    if !super::topology::side_takes_shared_turn(state, holder) {
+        let stack_resolution_limit = match stack_resolution_session_priority_decision(
+            state,
+            holder,
+            StackResolutionSessionPassKind::Automatic,
+        ) {
+            StackResolutionSessionPriorityDecision::Resolve { limit } => Some(limit),
+            StackResolutionSessionPriorityDecision::Pause
+            | StackResolutionSessionPriorityDecision::PauseRetained => {
+                return AutoPassDrive::Stop;
+            }
+            StackResolutionSessionPriorityDecision::NotActive => {
+                match priority_auto_pass_decision(state, holder) {
+                    AutoPassDecision::Exit => {
+                        let Some(requester) = active_until_stack_empty_requester(state) else {
+                            return AutoPassDrive::Stop;
+                        };
+                        if requester == holder {
+                            return AutoPassDrive::Stop;
+                        }
+                        if finish_completed_or_interrupted_until_stack_empty_sessions(state) {
+                            return AutoPassDrive::Stop;
+                        }
+                        if priority_player_has_meaningful_action(state)
+                            || window_held_for_mana(state, holder)
+                        {
+                            return AutoPassDrive::Stop;
+                        }
+                    }
+                    AutoPassDecision::Finish => {
+                        state.auto_pass.remove(&holder);
+                        return AutoPassDrive::Stop;
+                    }
+                    AutoPassDecision::Break => return AutoPassDrive::Stop,
+                    AutoPassDecision::Pass => {}
+                }
+                None
+            }
+        };
+        return AutoPassDrive::Drive {
+            seat: holder,
+            limit: stack_resolution_limit,
+        };
+    }
+
+    // Shared team turn: the holder consults the live session seam only while
+    // it has not passed. A passed holder already took its cohort beat, so the
+    // runner scans the members' own preferences directly.
+    if !state.priority_passes.contains(&holder) {
+        match stack_resolution_session_priority_decision(
+            state,
+            holder,
+            StackResolutionSessionPassKind::Automatic,
+        ) {
+            StackResolutionSessionPriorityDecision::Resolve { limit } => {
+                return AutoPassDrive::Drive {
+                    seat: holder,
+                    limit: Some(limit),
+                };
+            }
+            StackResolutionSessionPriorityDecision::Pause
+            | StackResolutionSessionPriorityDecision::PauseRetained => {
+                return AutoPassDrive::Stop;
+            }
+            StackResolutionSessionPriorityDecision::NotActive => {}
+        }
+    }
+
+    // Per-candidate scan: living unpassed members, holder-first. Each
+    // candidate's latch gates before its preference is read.
+    let mut candidates = Vec::new();
+    if !state.priority_passes.contains(&holder) {
+        candidates.push(holder);
+    }
+    for member in super::topology::team_members(state, holder) {
+        if member != holder && !state.priority_passes.contains(&member) {
+            candidates.push(member);
+        }
+    }
+    let mut skipped = 0usize;
+    for candidate in candidates {
+        if super::precast_copy_shortcut::blocks_pass(state, candidate) {
+            skipped += 1;
+            continue;
+        }
+        match priority_auto_pass_decision(state, candidate) {
+            AutoPassDecision::Pass => {
+                // CR 117.4: one seat per boundary. The drive carries no
+                // session limit, so it records the seat's pass without
+                // consuming another seat's authorized entries.
+                return AutoPassDrive::Drive {
+                    seat: candidate,
+                    limit: None,
+                };
+            }
+            AutoPassDecision::Finish => {
+                scrub_seat_auto_pass(state, candidate);
+                return AutoPassDrive::Stop;
+            }
+            AutoPassDecision::Break => return AutoPassDrive::Stop,
+            AutoPassDecision::Exit => {}
+        }
+    }
+    if skipped > 0 {
+        return AutoPassDrive::Stop;
+    }
+    // All-Exit with no skips: sweep finished preferences and stop. Unlike
+    // the individual Exit arm, no seat without its own preference is ever
+    // passed on another seat's behalf.
+    finish_completed_or_interrupted_until_stack_empty_sessions(state);
+    AutoPassDrive::Stop
 }
 
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
@@ -10513,44 +10926,9 @@ fn run_auto_pass_loop(
                 if super::precast_copy_shortcut::blocks_pass(state, player) {
                     break;
                 }
-                let stack_resolution_limit = match stack_resolution_session_priority_decision(
-                    state,
-                    player,
-                    StackResolutionSessionPassKind::Automatic,
-                ) {
-                    StackResolutionSessionPriorityDecision::Resolve { limit } => Some(limit),
-                    StackResolutionSessionPriorityDecision::Pause => break,
-                    StackResolutionSessionPriorityDecision::PauseRetained => break,
-                    StackResolutionSessionPriorityDecision::NotActive => {
-                        let decision = priority_auto_pass_decision(state, player);
-                        match decision {
-                            AutoPassDecision::Exit => {
-                                let Some(requester) = active_until_stack_empty_requester(state)
-                                else {
-                                    break;
-                                };
-                                if requester == player {
-                                    break;
-                                }
-                                if finish_completed_or_interrupted_until_stack_empty_sessions(state)
-                                {
-                                    break;
-                                }
-                                if priority_player_has_meaningful_action(state)
-                                    || window_held_for_mana(state, player)
-                                {
-                                    break;
-                                }
-                            }
-                            AutoPassDecision::Finish => {
-                                state.auto_pass.remove(&player);
-                                break;
-                            }
-                            AutoPassDecision::Break => break,
-                            AutoPassDecision::Pass => {}
-                        }
-                        None
-                    }
+                let (seat, stack_resolution_limit) = match select_auto_pass_drive(state, player) {
+                    AutoPassDrive::Stop => break,
+                    AutoPassDrive::Drive { seat, limit } => (seat, limit),
                 };
 
                 let mut events = Vec::new();
@@ -10559,7 +10937,28 @@ fn run_auto_pass_loop(
                 } else {
                     None
                 };
-                match pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit) {
+                let phase_before_pass = state.phase;
+                let stack_len_before_pass = state.stack.len();
+                let stack_top_before_pass = state.stack.back().map(|entry| entry.id);
+                // A round-clearing pass empties the records it just completed,
+                // so growth is read per-seat, not per-count: a pass for an
+                // already-passed seat with no other progress is the only
+                // idempotent beat.
+                let seat_already_passed = state.priority_passes.contains(&seat);
+                // CR 805.5b: a teammate drive passes that one seat through
+                // the per-seat pipeline; the holder keeps the window's own
+                // pipeline. Either way the limit travels with the drive.
+                let pass_result = if seat == player {
+                    pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit)
+                } else {
+                    pass_priority_once_with_pipeline_for(
+                        state,
+                        seat,
+                        &mut events,
+                        stack_resolution_limit,
+                    )
+                };
+                match pass_result {
                     Ok(outcome) => {
                         // Check the life failure BEFORE aggregating this
                         // iteration's events or starting the next one: the
@@ -10567,6 +10966,28 @@ fn run_auto_pass_loop(
                         // these events may escape into the result.
                         if let Some(player) = boundary_life_change_failure(state) {
                             return Err(EngineError::LifeChangeUnrepresentable { player });
+                        }
+                        // CR 805.5b: the runner continues while its passes
+                        // record new seats. Only total stasis stops it: the
+                        // driven seat was already passed (an idempotent
+                        // re-pass) and the pass moved neither the phase nor
+                        // the stack. Length alone cannot prove that — a
+                        // resolution that regrows the stack nets to the same
+                        // length — so the top entry's identity is compared
+                        // too. Continuing is the safe direction: the loop cap
+                        // bounds a redundant drive, while stopping early
+                        // strands fence teardown and continuations.
+                        if seat_already_passed
+                            && state.phase == phase_before_pass
+                            && state.stack.len() == stack_len_before_pass
+                            && state.stack.back().map(|entry| entry.id) == stack_top_before_pass
+                        {
+                            let session_finished = outcome.session_restored;
+                            result.events.extend(events);
+                            result.waiting_for = outcome.waiting_for;
+                            let _ = session_finished;
+                            advanced = true;
+                            break;
                         }
                         advanced = true;
                         let stack_empty_or_grew =
@@ -11174,7 +11595,7 @@ pub(crate) fn install_stack_resolution_session(
             .collect(),
         cursor: 0,
         representatives,
-        verified_pass_representatives: BTreeSet::new(),
+        verified_pass_owners: BTreeSet::new(),
         budget,
         policy,
         auto_pass_overlay: StackResolutionAutoPassOverlay { baseline },
@@ -11266,8 +11687,12 @@ fn install_auto_pass_and_pass_priority(
         unreachable!("auto-pass may only be installed from a Priority window");
     };
     let player = *player;
+    // CR 805.5b: the immediate pass is the owner's own pass. It fires only
+    // when the owner holds the window; a teammate's install stores under the
+    // teammate and the boundary runner drives that seat from its own
+    // preference instead.
     let pass_immediately = player == auto_pass_owner;
-    if pass_immediately && super::precast_copy_shortcut::blocks_pass(state, player) {
+    if pass_immediately && super::precast_copy_shortcut::blocks_pass(state, auto_pass_owner) {
         return Err(EngineError::ActionNotAllowed(
             "A shortened shortcut requires a different meaningful action before passing"
                 .to_string(),
@@ -11280,7 +11705,7 @@ fn install_auto_pass_and_pass_priority(
             state.waiting_for.clone(),
         ));
     }
-    pass_installed_auto_pass_priority(state, player, events)
+    pass_installed_auto_pass_priority(state, auto_pass_owner, events)
 }
 
 /// Consume the immediate pass implied by a successful direct auto-pass request.
@@ -11312,7 +11737,10 @@ fn pass_installed_auto_pass_priority(
         }
         StackResolutionSessionPriorityDecision::NotActive => None,
     };
-    let outcome = pass_priority_once_with_pipeline(state, events, stack_resolution_limit)?;
+    // CR 805.5b: record the pass for the acting seat (the teammate who
+    // passed), not the window holder.
+    let outcome =
+        pass_priority_once_with_pipeline_for(state, player, events, stack_resolution_limit)?;
     Ok(ActionResult::applied(
         std::mem::take(events),
         outcome.waiting_for,
@@ -11339,15 +11767,16 @@ fn store_legacy_auto_pass_request(
 /// so omitting this mirror would resurrect a preference the player withdrew
 /// while another representative was considering the authorization.
 fn cancel_pending_resolve_all_auto_pass(state: &mut GameState, actor: PlayerId) -> bool {
-    let representative = super::topology::priority_pass_representative(state, actor);
     let Some(run) = state.resolve_all_consent_run.as_mut() else {
         return false;
     };
     let Some(baseline) = run.auto_pass_baseline.as_mut() else {
         return false;
     };
-    state.auto_pass.remove(&representative);
-    baseline.remove(&representative);
+    // CR 805.5b: the pending-consent cancel mirrors the actor's own key in
+    // both representations, so rollback restores every seat but this one.
+    state.auto_pass.remove(&actor);
+    baseline.remove(&actor);
     true
 }
 
@@ -11356,23 +11785,27 @@ fn store_direct_auto_pass_request(
     auto_pass_owner: PlayerId,
     mode: AutoPassRequest,
 ) {
-    let representative = super::topology::priority_pass_representative(state, auto_pass_owner);
+    // CR 805.5b + CR 805.5a + CR 117.3d: a seat's own decision bookkeeping is
+    // keyed to that seat. Storage below always uses the acting owner, never
+    // its priority representative; parking/cursors/cohorts stay rep-keyed.
     if let Some(representatives) = state
         .stack_resolution_session
         .as_ref()
         .map(|session| session.representatives.clone())
     {
-        if representatives.contains(&representative) {
+        // Self-membership: only a seat of the frozen cohort replaces it.
+        if representatives.contains(&auto_pass_owner) {
             take_and_restore_stack_resolution_session(state);
         } else {
-            // A different priority seat may update only its own standing
-            // preference; it cannot replace another seat's frozen cohort. The
-            // same preference becomes part of the teardown baseline so a later
-            // session stop never erases a valid intervening player choice.
-            store_legacy_auto_pass_request(state, representative, mode);
+            // A seat outside the frozen cohort may update only its own
+            // standing preference; it cannot replace another seat's frozen
+            // cohort. The same preference becomes part of the teardown
+            // baseline so a later session stop never erases a valid
+            // intervening player choice.
+            store_legacy_auto_pass_request(state, auto_pass_owner, mode);
             let updated_mode = *state
                 .auto_pass
-                .get(&representative)
+                .get(&auto_pass_owner)
                 .expect("the legacy request was just stored");
             state
                 .stack_resolution_session
@@ -11380,20 +11813,30 @@ fn store_direct_auto_pass_request(
                 .expect("the nonrepresentative path preserves the live session")
                 .auto_pass_overlay
                 .baseline
-                .insert(representative, updated_mode);
+                .insert(auto_pass_owner, updated_mode);
             return;
         }
     }
 
     if !matches!(mode, AutoPassRequest::UntilStackEmpty) || state.stack.is_empty() {
-        store_legacy_auto_pass_request(state, representative, mode);
+        store_legacy_auto_pass_request(state, auto_pass_owner, mode);
+        return;
+    }
+
+    // A non-representative's UntilStackEmpty request on a nonempty stack is a
+    // standing preference under its own key. It never installs or replaces the
+    // representative's Committed session/overlay; the runner drives the seat
+    // from that preference instead.
+    let representative = super::topology::priority_pass_representative(state, auto_pass_owner);
+    if representative != auto_pass_owner {
+        store_legacy_auto_pass_request(state, auto_pass_owner, mode);
         return;
     }
 
     let representatives =
         super::topology::canonical_priority_representatives(state, [auto_pass_owner]);
     if representatives.is_empty() {
-        store_legacy_auto_pass_request(state, representative, mode);
+        store_legacy_auto_pass_request(state, auto_pass_owner, mode);
         return;
     }
 
@@ -11782,6 +12225,93 @@ pub(super) fn transient_reveal_outlives_action_boundary(state: &GameState) -> bo
     }
 }
 
+/// CR 805.5a: resolve which team member a Priority action acts for. The window
+/// holder (`holder`) is the team's representative, but the submitter may be any
+/// living teammate: they act for themselves. Under turn-decision control
+/// (CR 805.8: the controller controls the whole team) the submitter is the
+/// controller, so the owner is inferred from the action's object when it names
+/// one on the team; otherwise the holder is returned, preserving single-player
+/// behavior exactly.
+fn resolve_team_priority_owner(
+    state: &GameState,
+    holder: PlayerId,
+    submitter: PlayerId,
+    action: &GameAction,
+) -> PlayerId {
+    if submitter == holder || !super::topology::side_takes_shared_turn(state, holder) {
+        return holder;
+    }
+    let members = super::topology::team_members(state, holder);
+    if members.contains(&submitter) {
+        return submitter;
+    }
+    team_priority_action_owner(state, &members, action).unwrap_or(holder)
+}
+
+/// Infer which living team member a Priority action belongs to from its
+/// object/source, for the turn-control case where the submitter is the team's
+/// controller rather than a member. Returns `None` when the action names no
+/// object on the team (passes, planar die, companion) so the caller falls back
+/// to the window holder.
+fn team_priority_action_owner(
+    state: &GameState,
+    members: &[PlayerId],
+    action: &GameAction,
+) -> Option<PlayerId> {
+    /// Owner-or-controller lookup: hand/library/graveyard/exile objects belong
+    /// to their owner; battlefield objects and activations belong to their
+    /// controller. Either hit on the team resolves the member.
+    fn member_for_object(
+        state: &GameState,
+        members: &[PlayerId],
+        id: ObjectId,
+    ) -> Option<PlayerId> {
+        let obj = state.objects.get(&id)?;
+        [obj.controller, obj.owner]
+            .into_iter()
+            .find(|candidate| members.contains(candidate))
+    }
+    match action {
+        GameAction::PlayLand { object_id, .. }
+        | GameAction::CastSpell { object_id, .. }
+        | GameAction::Foretell { object_id, .. }
+        | GameAction::CastSpellForFree { object_id, .. }
+        | GameAction::PlayFaceDown { object_id, .. }
+        | GameAction::TurnFaceUp { object_id, .. }
+        | GameAction::UntapLandForMana { object_id }
+        | GameAction::UnlockRoomDoor { object_id, .. }
+        | GameAction::Transform { object_id } => member_for_object(state, members, *object_id),
+        GameAction::ActivateAbility { source_id, .. }
+        | GameAction::Equip {
+            equipment_id: source_id,
+            ..
+        }
+        | GameAction::CrewVehicle {
+            vehicle_id: source_id,
+            ..
+        }
+        | GameAction::ActivateStation {
+            spacecraft_id: source_id,
+            ..
+        }
+        | GameAction::SaddleMount {
+            mount_id: source_id,
+            ..
+        } => member_for_object(state, members, *source_id),
+        GameAction::ActivateNinjutsu {
+            ninjutsu_object_id, ..
+        } => member_for_object(state, members, *ninjutsu_object_id),
+        GameAction::CastSpellAsSneak { hand_object, .. }
+        | GameAction::CastSpellAsWebSlinging { hand_object, .. } => {
+            member_for_object(state, members, *hand_object)
+        }
+        GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
+            member_for_object(state, members, selection.source.object_id)
+        }
+        _ => None,
+    }
+}
+
 fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -11833,11 +12363,13 @@ fn apply_action(
     // `authorized_submitter(state)`, which silently cancelled the wrong player's
     // session when fired while an opponent held the prompt.
     if matches!(action, GameAction::CancelAutoPass) {
-        let representative = super::topology::priority_pass_representative(state, actor);
+        // CR 805.5b: cancel revokes the actor's own preference. Only a seat
+        // of the frozen cohort tears it down (self-membership); a teammate's
+        // cancel removes that teammate's key and never ends the live session.
         if state
             .stack_resolution_session
             .as_ref()
-            .is_some_and(|session| session.representatives.contains(&representative))
+            .is_some_and(|session| session.representatives.contains(&actor))
         {
             take_and_restore_stack_resolution_session(state);
         } else if cancel_pending_resolve_all_auto_pass(state, actor) {
@@ -12149,15 +12681,16 @@ fn apply_action(
     // the preference, which is what `semantic_actor` names; its
     // `unwrap_or(actor)` fallback keeps the authenticated actor wherever
     // `state.waiting_for` names no single seat.
-    // CR 117.6 + CR 805.5b: Canonicalize that seat before consulting a
-    // session, because a shared team's representative owns its priority pass.
+    // CR 805.5b: a deliberate action revokes the acting seat's own
+    // preference. The Priority-window seat resolves through the same teammate
+    // ownership the pass arm uses; parking stays rep-keyed.
     let session_preference_owner = match (&state.waiting_for, &action) {
         // CR 104.3a: Concede is the one self-authorized action that may be
         // submitted while another player holds priority, so it remains scoped
         // to its authenticated actor rather than that other priority seat.
         (_, GameAction::Concede { .. }) => actor,
         (WaitingFor::Priority { player }, _) => {
-            super::topology::priority_pass_representative(state, *player)
+            resolve_team_priority_owner(state, *player, actor, &action)
         }
         _ => semantic_actor,
     };
@@ -12244,16 +12777,33 @@ fn apply_action(
         // AI candidate-legality hatch and the projection fast path so the three
         // cannot drift.
         super::priority::pass_priority_legality(state, *player)?;
+        // CR 805.5a + CR 805.5b: the pass is recorded for the acting teammate
+        // individually; the team passes only when no member wishes to act.
+        let acting = resolve_team_priority_owner(state, *player, actor, &action);
+        // CR 805.8: a controller controls the whole team, so their pass is the
+        // team's pass — record every living member, not just the holder.
+        if acting == *player
+            && super::topology::side_takes_shared_turn(state, *player)
+            && !super::topology::team_members(state, *player).contains(&actor)
+        {
+            for member in super::topology::team_members(state, *player) {
+                state.priority_passes.insert(member);
+            }
+        }
         // An explicit pass can be the final CR 117.4 pass. Route it through the
         // same fenced session seam as an installed auto-pass, so its resolved-entry
         // count advances the persisted cursor rather than silently bypassing a live
         // stack-resolution authorization.
         if stack_resolution_limit.is_some() {
-            let outcome =
-                pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit)?;
+            let outcome = pass_priority_once_with_pipeline_for(
+                state,
+                acting,
+                &mut events,
+                stack_resolution_limit,
+            )?;
             return Ok(ActionResult::applied(events, outcome.waiting_for));
         }
-        return pass_installed_auto_pass_priority(state, *player, &mut events);
+        return pass_installed_auto_pass_priority(state, acting, &mut events);
     }
 
     apply_non_priority_pass_action(state, actor, action, events, semantic_actor)
@@ -12430,6 +12980,17 @@ fn apply_non_priority_pass_action(
     // `PendingCast` exists.
     let answers_a_cast_step = state.waiting_for.has_pending_cast()
         || matches!(state.waiting_for, WaitingFor::ModalFaceChoice { .. });
+    // CR 805.5a: under shared team turns the Priority submitter may be any
+    // living teammate, acting for themselves. Resolve the acting member once
+    // here (the match below moves `action`, so per-arm resolution cannot borrow
+    // it); Priority arms use this instead of the window holder for the
+    // game action itself, while window-liveness checks stay on the holder.
+    let team_priority_acting = match (&state.waiting_for, &action) {
+        (WaitingFor::Priority { player }, _) => {
+            resolve_team_priority_owner(state, *player, actor, &action)
+        }
+        _ => actor,
+    };
     // CR 510.2: whether this action answers a parked combat damage batch's choice,
     // and where its events begin — see the convergence below the match.
     let parked_combat_damage_answer =
@@ -12442,7 +13003,29 @@ fn apply_non_priority_pass_action(
                 max_resolutions,
                 scope,
             },
-        ) => begin_resolve_all_consent(state, *player, max_resolutions, scope)?,
+        ) => {
+            // CR 805.5b: a non-representative teammate's Resolve All entry
+            // binds only that seat. Unlimited `Own` is exactly their own
+            // UntilStackEmpty install; anything stronger is refused before
+            // any mutation. Representatives keep the consent protocol below.
+            let acting = team_priority_acting;
+            if super::topology::priority_pass_representative(state, acting) != acting {
+                super::priority::pass_priority_legality(state, acting)?;
+                if scope == ResolveAllScope::Own && max_resolutions == 0 {
+                    return install_auto_pass_and_pass_priority(
+                        state,
+                        acting,
+                        AutoPassRequest::UntilStackEmpty,
+                        &mut events,
+                    );
+                }
+                return Err(EngineError::ActionNotAllowed(
+                    "Only the team's representative may begin a shared or limited Resolve All"
+                        .to_string(),
+                ));
+            }
+            begin_resolve_all_consent(state, *player, max_resolutions, scope)?
+        }
         (
             WaitingFor::ResolveAllConsent {
                 epoch,
@@ -12482,10 +13065,13 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            // CR 805.5a: the land is played by the acting teammate, not the
+            // window holder.
+            let acting = team_priority_acting;
             state.cancelled_casts.clear();
             // CR 116.2a: Playing a land is a special action — sorcery-speed, once per turn, stack must be empty.
             // CR 305.2: Playing a land is a special action, not a spell.
-            handle_play_land(state, *player, object_id, card_id, &mut events)?
+            handle_play_land(state, acting, object_id, card_id, &mut events)?
         }
         (WaitingFor::Priority { player }, GameAction::TapLandForMana { selection }) => {
             if state.priority_player
@@ -12493,10 +13079,11 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            let acting = team_priority_acting;
             let events_before = events.len();
             let waiting_for = handle_tap_land_for_mana(
                 state,
-                *player,
+                acting,
                 &selection,
                 ManaAbilityResume::Priority,
                 &mut events,
@@ -12521,10 +13108,11 @@ fn apply_non_priority_pass_action(
                     "Land mana abilities use TapLandForMana".to_string(),
                 ));
             }
+            let acting = team_priority_acting;
             let events_before = events.len();
             let waiting_for = mana_sources::activate_mana_source_selection(
                 state,
-                *player,
+                acting,
                 &selection,
                 &mut events,
                 ManaAbilityResume::Priority,
@@ -12538,9 +13126,11 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            // CR 805.5a: the undo is booked to the acting teammate's seat.
+            let acting = team_priority_acting;
             // CR 723.5a: the tap booked to the seat, so the undo must look it up
             // there rather than under its authorized submitter.
-            handle_untap_land_for_mana(state, *player, object_id, &mut events)?;
+            handle_untap_land_for_mana(state, acting, object_id, &mut events)?;
             WaitingFor::Priority { player: *player }
         }
         (
@@ -12571,7 +13161,7 @@ fn apply_non_priority_pass_action(
             }
             casting::handle_cast_spell_with_payment_mode(
                 state,
-                *player,
+                team_priority_acting,
                 object_id,
                 card_id,
                 payment_mode,
@@ -12584,7 +13174,7 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            casting::handle_foretell(state, *player, object_id, card_id, &mut events)?
+            casting::handle_foretell(state, team_priority_acting, object_id, card_id, &mut events)?
         }
         // CR 602.1: Activated abilities have a cost and an effect, written as "[Cost]: [Effect.]"
         (
@@ -12600,6 +13190,8 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            // CR 805.5a: the activation belongs to the acting teammate.
+            let acting = team_priority_acting;
             // Check if this is a mana ability -- resolve instantly without the stack
             let obj = state
                 .objects
@@ -12617,7 +13209,7 @@ fn apply_non_priority_pass_action(
                 let wf = mana_abilities::activate_mana_ability_with_payment_mode(
                     state,
                     source_id,
-                    *player,
+                    acting,
                     ability_index,
                     &ability_def,
                     &mut events,
@@ -12638,7 +13230,7 @@ fn apply_non_priority_pass_action(
                     && mana_sources::object_mana_ability_penalty(state, source_id, &ability_def)
                         .is_undoable()
                 {
-                    mana_sources::record_undoable_mana_tap(state, *player, source_id, &events);
+                    mana_sources::record_undoable_mana_tap(state, acting, source_id, &events);
                 }
                 wf
             } else if obj.loyalty.is_some()
@@ -12649,10 +13241,10 @@ fn apply_non_priority_pass_action(
                 )
             {
                 // CR 606.3: Loyalty abilities activate once per turn at sorcery speed.
-                state.lands_tapped_for_mana.remove(player);
+                state.lands_tapped_for_mana.remove(&acting);
                 planeswalker::handle_activate_loyalty_with_payment_mode(
                     state,
-                    *player,
+                    acting,
                     source_id,
                     ability_index,
                     payment_mode,
@@ -12660,10 +13252,10 @@ fn apply_non_priority_pass_action(
                 )?
             } else {
                 // Non-mana activated ability — the acceptance authority brackets it.
-                let cleared = begin_non_mana_activation(state, *player);
+                let cleared = begin_non_mana_activation(state, acting);
                 let wf = casting::handle_activate_ability_with_payment_mode(
                     state,
-                    *player,
+                    acting,
                     source_id,
                     ability_index,
                     payment_mode,
@@ -12675,7 +13267,7 @@ fn apply_non_priority_pass_action(
                     // announcement), so it is not accepted yet — leave the
                     // mana-undo window as it was, so a reversal before the lock
                     // returns to exactly the pre-activation state. The lock accepts it.
-                    restore_non_mana_activation(state, *player, cleared);
+                    restore_non_mana_activation(state, acting, cleared);
                 }
                 wf
             }
@@ -12686,7 +13278,13 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            super::room::handle_unlock_room_door(state, *player, object_id, door, &mut events)?
+            super::room::handle_unlock_room_door(
+                state,
+                team_priority_acting,
+                object_id,
+                door,
+                &mut events,
+            )?
         }
         (WaitingFor::Priority { player }, GameAction::RollPlanarDie) => {
             if state.priority_player
@@ -12700,8 +13298,11 @@ fn apply_non_priority_pass_action(
             // CR 605.3b + CR 616.1: a paused cost move or pre-spend echo choice
             // leaves the action uncommitted; the typed planar-die root returns
             // its prompt and finishes the locked-cost roll once answered.
-            match crate::game::planechase::take_paid_planar_die_action(state, *player, &mut events)?
-            {
+            match crate::game::planechase::take_paid_planar_die_action(
+                state,
+                team_priority_acting,
+                &mut events,
+            )? {
                 crate::game::planechase::PaidPlanarDieAction::Rolled(_) => {
                     WaitingFor::Priority { player: *player }
                 }
@@ -12792,6 +13393,19 @@ fn apply_non_priority_pass_action(
             let resolution_permission = casting::current_resolution_cast_permission_index(
                 state, *player, *object_id, *card_id,
             );
+            if resolution_permission.is_none()
+                && casting::library_spell_face_choice(state, *object_id)
+                && !casting::library_spell_face_is_castable(
+                    state,
+                    *player,
+                    *object_id,
+                    casting::ModalCardFace::from_back_face(back_face),
+                )
+            {
+                return Err(EngineError::InvalidAction(
+                    "That face cannot be cast from the library now".to_string(),
+                ));
+            }
             // Validate the exact indexed paid-cleanup root before changing the
             // visible face or its election flags. A forged receipt must leave
             // the prompt, object, permissions, triggers, journal, and events
@@ -14445,9 +15059,10 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => mana_abilities::resume_mana_ability_root(
+        ) => mana_abilities::cancel_mana_ability_activation(
             state,
             pending_mana_ability.player,
+            pending_mana_ability.source_id,
             pending_mana_ability.resume.clone(),
             &mut events,
         )?,
@@ -15710,6 +16325,40 @@ fn apply_non_priority_pass_action(
             let returned = *returned_id;
             let active_player = *player;
             let action_event_start = events.len();
+            if let Some(crate::types::game_state::PendingLiminalEntryResume::OutsideGameCard {
+                source_id,
+                player,
+                ..
+            }) = state.pending_liminal_entry_resume.as_ref()
+            {
+                if *source_id == returned && *player == active_player {
+                    let Some(
+                        crate::types::game_state::PendingLiminalEntryResume::OutsideGameCard {
+                            event,
+                            ..
+                        },
+                    ) = state.pending_liminal_entry_resume.take()
+                    else {
+                        unreachable!()
+                    };
+                    state.waiting_for = WaitingFor::Priority {
+                        player: active_player,
+                    };
+                    super::zone_pipeline::deliver_outside_game_card_entry(
+                        state,
+                        event,
+                        Some(chosen),
+                        &mut events,
+                    );
+                    resume_pending_continuation_if_priority(state, &mut events)?;
+                    triggers::collect_and_drain_entry_observer_triggers_if_settled(
+                        state,
+                        &mut events,
+                        action_event_start,
+                    );
+                    return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+                }
+            }
             let (filter, grants) = match &pending.effect {
                 crate::types::ability::Effect::ReturnAsAura {
                     enchant_filter,
@@ -15940,13 +16589,14 @@ fn apply_non_priority_pass_action(
         (WaitingFor::EquipTarget { player, .. }, GameAction::CancelCast) => {
             WaitingFor::Priority { player: *player }
         }
-        (WaitingFor::Priority { player }, GameAction::Equip { equipment_id, .. }) => {
-            let p = *player;
+        (WaitingFor::Priority { player: _ }, GameAction::Equip { equipment_id, .. }) => {
+            // CR 805.5a: the acting teammate equips, not the window holder.
+            let p = team_priority_acting;
             handle_equip_activation(state, p, equipment_id, &mut events)?
         }
         // CR 702.122a: Crew activation from Priority
-        (WaitingFor::Priority { player }, GameAction::CrewVehicle { vehicle_id, .. }) => {
-            let p = *player;
+        (WaitingFor::Priority { player: _ }, GameAction::CrewVehicle { vehicle_id, .. }) => {
+            let p = team_priority_acting;
             handle_crew_activation(state, p, vehicle_id, &mut events)?
         }
         // CR 702.122a: Crew creature selection from CrewVehicle state
@@ -15979,13 +16629,13 @@ fn apply_non_priority_pass_action(
         }
         // CR 702.184a: Station activation from Priority — enters target-selection state.
         (
-            WaitingFor::Priority { player },
+            WaitingFor::Priority { player: _ },
             GameAction::ActivateStation {
                 spacecraft_id,
                 creature_id: None,
             },
         ) => {
-            let p = *player;
+            let p = team_priority_acting;
             handle_station_activation(state, p, spacecraft_id, &mut events)?
         }
         // CR 702.184a: Station creature selection — resolves the ability.
@@ -16014,8 +16664,8 @@ fn apply_non_priority_pass_action(
             WaitingFor::Priority { player: *player }
         }
         // CR 702.171a: Saddle activation from Priority — enters target-selection state.
-        (WaitingFor::Priority { player }, GameAction::SaddleMount { mount_id, .. }) => {
-            let p = *player;
+        (WaitingFor::Priority { player: _ }, GameAction::SaddleMount { mount_id, .. }) => {
+            let p = team_priority_acting;
             handle_saddle_activation(state, p, mount_id, &mut events)?
         }
         // CR 702.171a: Saddle creature selection — announces, pays cost, pushes stack entry.
@@ -16045,8 +16695,8 @@ fn apply_non_priority_pass_action(
         (WaitingFor::SaddleMount { player, .. }, GameAction::CancelCast) => {
             WaitingFor::Priority { player: *player }
         }
-        (WaitingFor::Priority { player }, GameAction::Transform { object_id }) => {
-            let p = *player;
+        (WaitingFor::Priority { player: _ }, GameAction::Transform { object_id }) => {
+            let p = team_priority_acting;
             let obj = state
                 .objects
                 .get(&object_id)
@@ -16079,13 +16729,13 @@ fn apply_non_priority_pass_action(
         }
         // CR 702.49: Ninjutsu-family activation during combat
         (
-            WaitingFor::Priority { player },
+            WaitingFor::Priority { player: _ },
             GameAction::ActivateNinjutsu {
                 ninjutsu_object_id,
                 creature_to_return,
             },
         ) => {
-            let p = *player;
+            let p = team_priority_acting;
             super::keywords::activate_ninjutsu(
                 state,
                 p,
@@ -16109,7 +16759,7 @@ fn apply_non_priority_pass_action(
         // Applies to any card type; permanent-spell placement (CR 702.190b)
         // is handled at resolution based on the variant's `placement`.
         (
-            WaitingFor::Priority { player },
+            WaitingFor::Priority { player: _ },
             GameAction::CastSpellAsSneak {
                 hand_object,
                 card_id,
@@ -16118,7 +16768,7 @@ fn apply_non_priority_pass_action(
             },
         ) => super::casting::handle_cast_spell_as_sneak_with_payment_mode(
             state,
-            *player,
+            team_priority_acting,
             hand_object,
             card_id,
             creature_to_return,
@@ -16128,7 +16778,7 @@ fn apply_non_priority_pass_action(
         // CR 702.188a: Web-slinging — cast a spell from hand by paying the
         // Web-slinging cost and returning a tapped creature you control.
         (
-            WaitingFor::Priority { player },
+            WaitingFor::Priority { player: _ },
             GameAction::CastSpellAsWebSlinging {
                 hand_object,
                 card_id,
@@ -16137,7 +16787,7 @@ fn apply_non_priority_pass_action(
             },
         ) => super::casting::handle_cast_spell_as_web_slinging_with_payment_mode(
             state,
-            *player,
+            team_priority_acting,
             hand_object,
             card_id,
             creature_to_return,
@@ -16147,7 +16797,7 @@ fn apply_non_priority_pass_action(
         // CR 601.2b + CR 118.9a: CastFromHandFree opt-in path — cast a hand
         // spell for free via a once-per-turn permission source (Zaffai).
         (
-            WaitingFor::Priority { player },
+            WaitingFor::Priority { player: _ },
             GameAction::CastSpellForFree {
                 object_id,
                 card_id,
@@ -16156,7 +16806,7 @@ fn apply_non_priority_pass_action(
             },
         ) => super::casting::handle_cast_spell_for_free_with_payment_mode(
             state,
-            *player,
+            team_priority_acting,
             object_id,
             card_id,
             source_id,
@@ -16446,7 +17096,7 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            let p = *player;
+            let p = team_priority_acting;
             // Validate object_id matches card_id and is in hand
             let valid = state.objects.get(&object_id).is_some_and(|obj| {
                 obj.card_id == card_id && obj.owner == p && obj.zone == Zone::Hand
@@ -16469,7 +17119,13 @@ fn apply_non_priority_pass_action(
             // legality, the CR 106.6 spend-restricted payment, CR 107.3d's X
             // announcement and the flip — belongs to one authority, shared with the
             // CR 616.1 resume that finishes a payment whose mana source paused.
-            super::morph::handle_turn_face_up(state, *player, object_id, x, &mut events)?
+            super::morph::handle_turn_face_up(
+                state,
+                team_priority_acting,
+                object_id,
+                x,
+                &mut events,
+            )?
         }
         (
             WaitingFor::TriggerTargetSelection {
@@ -16569,8 +17225,8 @@ fn apply_non_priority_pass_action(
                 .map_err(EngineError::InvalidAction)?
         }
         // CR 702.139a: Special action — pay {3} to put companion into hand (see rule 116.2g).
-        (WaitingFor::Priority { player }, GameAction::CompanionToHand) => {
-            super::companion::handle_companion_to_hand(state, *player, &mut events)?
+        (WaitingFor::Priority { player: _ }, GameAction::CompanionToHand) => {
+            super::companion::handle_companion_to_hand(state, team_priority_acting, &mut events)?
         }
         // CR 116.2c: Special action — pay a continuous effect's printed
         // termination cost to end it ("You may pay {W} to end this effect").
@@ -16590,7 +17246,7 @@ fn apply_non_priority_pass_action(
             }
             super::end_continuous_effect::handle_end_continuous_effect(
                 state,
-                *player,
+                team_priority_acting,
                 group,
                 &mut events,
             )?
@@ -16599,8 +17255,8 @@ fn apply_non_priority_pass_action(
         // prepared face through the normal spell-casting pipeline (costs,
         // targeting, and mode choices all run through casting.rs single
         // authority). Assign when WotC publishes SOS CR update.
-        (WaitingFor::Priority { player }, GameAction::CastPreparedCopy { source }) => {
-            let p = *player;
+        (WaitingFor::Priority { player: _ }, GameAction::CastPreparedCopy { source }) => {
+            let p = team_priority_acting;
             // Validate controller.
             let src = source;
             let Some(obj) = state.objects.get(&src) else {
@@ -16663,8 +17319,15 @@ fn apply_non_priority_pass_action(
             },
             GameAction::PassParadigmOffer,
         ) => WaitingFor::Priority { player: *player },
-        (WaitingFor::Priority { player }, GameAction::SetAutoPass { mode }) => {
-            return install_auto_pass_and_pass_priority(state, *player, mode, &mut events);
+        (WaitingFor::Priority { player: _ }, GameAction::SetAutoPass { mode }) => {
+            // CR 805.5a: the auto-pass preference belongs to the acting
+            // teammate, and the pass counts for them individually.
+            return install_auto_pass_and_pass_priority(
+                state,
+                team_priority_acting,
+                mode,
+                &mut events,
+            );
         }
         // CR 701.34a: Proliferate — player selected targets to proliferate.
         (
@@ -17013,13 +17676,19 @@ fn apply_non_priority_pass_action(
                     state.priority_player = active;
                     match unit {
                         DistributionUnit::Damage => {
-                            effects::deal_damage::resume_resolution_division(
+                            effects::resume_damage_delivery(
                                 state,
-                                &pending_effect,
-                                &distribution,
-                                &mut events,
+                                pending_effect.context.damage_delivery_owner,
+                                |state| {
+                                    effects::deal_damage::resume_resolution_division(
+                                        state,
+                                        &pending_effect,
+                                        &distribution,
+                                        &mut events,
+                                    )
+                                },
                             )
-                            .map_err(|err| EngineError::InvalidAction(err.to_string()))?
+                            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
                         }
                         DistributionUnit::EvenSplitDamage
                         | DistributionUnit::Counters(_)
@@ -17245,6 +17914,7 @@ fn apply_non_priority_pass_action(
             WaitingFor::RetargetChoice {
                 player,
                 stack_entry_index,
+                stack_entry_id,
                 scope,
                 current_targets,
                 slots,
@@ -17259,6 +17929,7 @@ fn apply_non_priority_pass_action(
             RetargetSubmission {
                 player: *player,
                 stack_entry_index: *stack_entry_index,
+                stack_entry_id: *stack_entry_id,
                 scope,
                 current_targets,
                 slots,
@@ -17276,6 +17947,7 @@ fn apply_non_priority_pass_action(
             WaitingFor::RetargetChoice {
                 player,
                 stack_entry_index,
+                stack_entry_id,
                 scope: RetargetScope::Single,
                 current_targets,
                 slots,
@@ -17290,6 +17962,7 @@ fn apply_non_priority_pass_action(
             RetargetSubmission {
                 player: *player,
                 stack_entry_index: *stack_entry_index,
+                stack_entry_id: *stack_entry_id,
                 scope: &RetargetScope::Single,
                 current_targets,
                 slots,
@@ -17583,6 +18256,7 @@ fn check_debug_action_access(state: &GameState, actor: PlayerId) -> Result<(), E
 #[derive(Clone, Copy)]
 pub(crate) struct RetargetProposal<'a> {
     pub(crate) stack_entry_index: usize,
+    pub(crate) stack_entry_id: Option<ObjectId>,
     pub(crate) scope: &'a RetargetScope,
     pub(crate) current_targets: &'a [TargetRef],
     pub(crate) slots: &'a [RetargetSlotAddress],
@@ -17595,6 +18269,7 @@ pub(crate) struct RetargetProposal<'a> {
 struct RetargetSubmission<'a> {
     player: PlayerId,
     stack_entry_index: usize,
+    stack_entry_id: Option<ObjectId>,
     scope: &'a RetargetScope,
     current_targets: &'a [TargetRef],
     slots: &'a [RetargetSlotAddress],
@@ -17614,10 +18289,21 @@ fn apply_retarget(
 ) -> Result<WaitingFor, EngineError> {
     let player = submission.player;
     let stack_entry_index = submission.stack_entry_index;
+    if submission.stack_entry_id.is_some_and(|expected| {
+        state
+            .stack
+            .get(stack_entry_index)
+            .is_none_or(|entry| entry.id != expected)
+    }) {
+        return Err(EngineError::InvalidAction(
+            "Retarget prompt no longer refers to the selected stack entry".into(),
+        ));
+    }
     let mutated = validate_retarget_submission(
         state,
         &RetargetProposal {
             stack_entry_index,
+            stack_entry_id: submission.stack_entry_id,
             scope: submission.scope,
             current_targets: submission.current_targets,
             slots: submission.slots,
@@ -17793,6 +18479,7 @@ pub(crate) fn validate_retarget_submission(
 ) -> Result<crate::types::ability::ResolvedAbility, EngineError> {
     let RetargetProposal {
         stack_entry_index,
+        stack_entry_id,
         scope,
         current_targets,
         slots,
@@ -17801,15 +18488,38 @@ pub(crate) fn validate_retarget_submission(
         new_targets,
     } = *proposal;
 
+    let Some(entry) = state.stack.get(stack_entry_index) else {
+        return Err(EngineError::InvalidAction(
+            "Invalid stack entry index for retargeting".to_string(),
+        ));
+    };
+    if stack_entry_id.is_some_and(|expected| entry.id != expected) {
+        return Err(EngineError::InvalidAction(
+            "Retarget prompt no longer refers to the selected stack entry".to_string(),
+        ));
+    }
+    let trigger_context = Some(crate::game::targeting::StackTriggerContext::for_entry(
+        state, entry,
+    ));
+    // CR 603.2 + CR 115.7e + CR 400.7: a restored triggered entry whose own event
+    // provenance is absent cannot safely accept a changed target. The prompt's
+    // saved pool may still contain the pre-save alternatives, but re-evaluating
+    // a trigger-relative filter without its event would otherwise let that
+    // stale pool bypass the live provenance check. Keeping every target is
+    // still the CR 115.7d no-change path; any election fails closed.
+    let missing_trigger_event = matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })
+        && trigger_context.is_some_and(|context| context.event.is_none())
+        && entry
+            .ability()
+            .is_some_and(crate::game::ability_utils::retarget_requires_trigger_event_provenance);
+
     // CR 115.7d + CR 601.2c: derived here (rather than only after the match
     // below) because H3's outer-empty re-derivation needs it before
     // `pool_for` is built. The address space the player was OFFERED must be
     // the one their submission is validated, admitted and written against;
     // the payload snapshots it, `chain_retarget_slots` re-derives it.
-    let derived = state
-        .stack
-        .get(stack_entry_index)
-        .and_then(|entry| entry.ability())
+    let derived = entry
+        .ability()
         .map(crate::game::ability_utils::chain_retarget_slots)
         .unwrap_or_default();
 
@@ -17843,6 +18553,7 @@ pub(crate) fn validate_retarget_submission(
                     entry,
                     stack_ability,
                     &derived,
+                    trigger_context,
                 )
             }
             None => Vec::new(),
@@ -17934,12 +18645,7 @@ pub(crate) fn validate_retarget_submission(
         slot_pools.is_empty() || slot_pools.len() == slots.len(),
         "slot_pools must be aligned 1:1 with slots or absent",
     );
-    if stack_entry_index >= state.stack.len() {
-        return Err(EngineError::InvalidAction(
-            "Invalid stack entry index for retargeting".to_string(),
-        ));
-    }
-    let Some(pre) = state.stack[stack_entry_index].ability() else {
+    let Some(pre) = entry.ability() else {
         return Err(EngineError::InvalidAction(
             "Retarget: stack entry has no ability to retarget".to_string(),
         ));
@@ -17963,6 +18669,11 @@ pub(crate) fn validate_retarget_submission(
     // announced incarnation is gone (an election of the returned object).
     let positions_changed =
         crate::game::ability_utils::retarget_positions_changed(state, pre, &written, new_targets);
+    if missing_trigger_event && positions_changed.iter().any(|changed| *changed) {
+        return Err(EngineError::InvalidAction(
+            "Retarget: triggered entry is missing its event provenance".into(),
+        ));
+    }
     // CR 115.7a + CR 115.7b: Single changes one target; keeping the same
     // occurrence is not a response, including through the legacy pool fallback.
     if matches!(scope, RetargetScope::Single) && positions_changed.first() != Some(&true) {
@@ -18098,6 +18809,7 @@ pub(crate) fn validate_retarget_submission(
         &derived,
         &changed,
         pool_controller,
+        trigger_context,
     )?;
     crate::game::ability_utils::changed_dependent_targets_are_legal(
         state,
@@ -18106,6 +18818,7 @@ pub(crate) fn validate_retarget_submission(
         &derived,
         &changed,
         pool_controller,
+        trigger_context,
     )?;
     Ok(mutated)
 }
@@ -18526,7 +19239,7 @@ fn record_exile_play_permission(
 /// CR 116.2a) — not a spell cast — so CR 601.2a does not apply here; CR 401.5
 /// governs top-of-library visibility during the special action. Receives the
 /// pre-captured `(src_id, frequency)` that was resolved BEFORE the zone change
-/// — `top_of_library_permission_source` reads `library.front()`, which no
+/// — `top_of_library_grant_for_object` reads `library.front()`, which no
 /// longer points to the played land after the land is delivered to the
 /// battlefield. `Unlimited` permissions (Future Sight, Bolas's Citadel) do not
 /// spend a slot.
@@ -18973,33 +19686,19 @@ fn handle_play_land(
     // Bolas's Citadel, Magus of the Future, The Fourth Doctor).
     //
     // IMPORTANT: capture (src_id, frequency) HERE — before the zone change.
-    // `top_of_library_permission_source` reads `library.front()`, which will
+    // `top_of_library_grant_for_object` reads `library.front()`, which will
     // point to the next card once the land is delivered to the battlefield.
     // Recording in the post-delivery epilogue would always see the wrong top
     // card and silently skip the once-per-turn slot, allowing a OncePerTurn
     // permission to be reused indefinitely. CR 305.1 + CR 116.2a + CR 401.5:
     // land play is a special action, not a spell cast (CR 601.2a does not apply).
-    let library_permission_src: Option<(ObjectId, crate::types::statics::CastFrequency)> =
-        super::casting::top_of_library_permission_source(
-            state,
-            player,
-            Some(crate::types::ability::CardPlayMode::Play),
-        )
-        .and_then(|(top_id, src_id, frequency, _)| {
-            if top_id != object_id {
-                return None;
-            }
-            // CR 305.1: only land cards qualify for the Play-permission path.
-            let obj = state.objects.get(&top_id)?;
-            if !obj
-                .card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Land)
-            {
-                return None;
-            }
-            Some((src_id, frequency))
-        });
+    let library_permission_src = super::casting::top_of_library_grant_for_object(
+        state,
+        player,
+        object_id,
+        crate::types::ability::CardPlayMode::Play,
+    )
+    .map(|grant| (grant.source, grant.frequency));
     let in_library_with_permission = library_permission_src.is_some();
     // CR 116.2a: a land is put onto the battlefield "from the zone it was in", so
     // the play authority is elected by ZONE ELIGIBILITY, not by the exile zone
@@ -21387,7 +22086,7 @@ mod priority_reducer_census_tests {
         let start = source
             .find("(WaitingFor::Priority { player }, GameAction::PassPriority)")
             .expect("Priority reducer starts at PassPriority");
-        let end_marker = "(WaitingFor::Priority { player }, GameAction::SetAutoPass { mode })";
+        let end_marker = "GameAction::SetAutoPass { mode })";
         let end = source[start..]
             .find(end_marker)
             .map(|offset| start + offset + end_marker.len())
@@ -21396,7 +22095,9 @@ mod priority_reducer_census_tests {
         let mut families = BTreeSet::new();
         let mut lines_after_priority_pattern = 0usize;
         for line in source[start..end].lines() {
-            if line.contains("WaitingFor::Priority { player }") {
+            if line.contains("WaitingFor::Priority { player }")
+                || line.contains("WaitingFor::Priority { player: _ }")
+            {
                 lines_after_priority_pattern = 6;
             }
             if lines_after_priority_pattern > 0 {
@@ -21719,6 +22420,85 @@ mod priority_principal_tests {
             PriorityPreflight::Actionless
         );
         assert_eq!(state, before);
+    }
+
+    /// CR 805.5a: the room preflight enumerates every living teammate's
+    /// locked doors on a shared-team window — not just the holder's — so a
+    /// teammate-only unlock reads Indeterminate (the holder-probed apply
+    /// fails closed on the controller check) rather than Actionless.
+    /// Controls: holder-only doors enumerate (pre-existing behavior); no
+    /// rooms announce nothing.
+    #[test]
+    fn priority_preflight_sees_teammate_room_doors_on_a_parked_team_window() {
+        fn parked_2hg_window() -> crate::types::game_state::GameState {
+            let mut state = crate::types::game_state::GameState::new(
+                crate::types::format::FormatConfig::two_headed_giant(),
+                4,
+                42,
+            );
+            state.turn_number = 2;
+            state.active_player = PlayerId(0);
+            state.phase = crate::types::phase::Phase::PreCombatMain;
+            state.priority_player = PlayerId(0);
+            state.waiting_for = crate::types::game_state::WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            state.stack.clear();
+            state
+        }
+
+        fn add_locked_room(state: &mut crate::types::game_state::GameState, controller: PlayerId) {
+            let id = crate::game::zones::create_object(
+                state,
+                crate::types::identifiers::CardId(state.next_object_id),
+                controller,
+                "Locked Room".to_string(),
+                crate::types::zones::Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).expect("room exists");
+            obj.card_types.subtypes.push("Room".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // Teammate-only unlock: enumerated, and the window is NOT actionless.
+        let mut state = parked_2hg_window();
+        add_locked_room(&mut state, PlayerId(1));
+        let principal =
+            priority_principal_for_preflight(&state).expect("a live window has a principal");
+        assert!(
+            !crate::game::room::priority_unlock_room_door_announcements(&state, &principal)
+                .is_empty(),
+            "the teammate's locked doors must enumerate"
+        );
+        assert!(
+            matches!(
+                preflight_priority_window(&state),
+                PriorityPreflight::Indeterminate { .. }
+            ),
+            "a teammate-only unlock must block actionless progress, got {:?}",
+            preflight_priority_window(&state)
+        );
+
+        // Control: holder-only doors enumerate (pre-existing behavior).
+        let mut holder_only = parked_2hg_window();
+        add_locked_room(&mut holder_only, PlayerId(0));
+        let principal =
+            priority_principal_for_preflight(&holder_only).expect("a live window has a principal");
+        assert!(
+            !crate::game::room::priority_unlock_room_door_announcements(&holder_only, &principal)
+                .is_empty(),
+            "the holder's locked doors must enumerate"
+        );
+
+        // Control: no rooms announce nothing.
+        let bare = parked_2hg_window();
+        let principal =
+            priority_principal_for_preflight(&bare).expect("a live window has a principal");
+        assert!(
+            crate::game::room::priority_unlock_room_door_announcements(&bare, &principal)
+                .is_empty(),
+            "no rooms must announce no doors"
+        );
     }
 
     #[test]
@@ -23691,6 +24471,13 @@ mod stage2_injector_tests {
     /// no producer moved; the assertion that the phase_out file contributes exactly one
     /// in-test site is what makes that delta an explicit adjudication instead of a number
     /// bump.
+    ///
+    /// The next in-test site takes the same route: `game/triggers.rs`'s
+    /// `accepted_triggered_mana_pauses` fixture constructs each of the five pauses
+    /// `is_accepted_triggered_mana_pause` admits, for the legacy-save placement predicate's
+    /// carrier row (`placement_may_be_under_way_is_each_carrier`). It is `#[cfg(test)]`-only
+    /// and mints no production producer; the producer and reader multisets are unchanged,
+    /// so the partition moves from `4 / 9 / 42` to `4 / 9 / 43`.
     #[test]
     fn the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event() {
         /// Every `.rs` under the crate's `src`.
@@ -23733,7 +24520,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test.len(),
-            55,
+            56,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -23741,12 +24528,13 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test.len()),
-            (4, 9, 42),
+            (4, 9, 43),
             "the partition, not just the total: four PRODUCTION producers, nine PRODUCTION \
-             readers (including the two optional-subject projection reads), and 42 \
+             readers (including the two optional-subject projection reads), and 43 \
              `#[cfg(test)]` sites, including the ChooseOneOf, retained optional/outer, \
              retained repeat/choice restore fixtures, and the `phase_out` suspension fixture \
-             that parks a typed prompt on a clone (test-only: it mints no producer).\n\
+             that parks a typed prompt on a clone, and the legacy-placement predicate fixture that \
+             constructs each accepted triggered-mana pause (both test-only: neither mints a producer).\n\
              producers={producers:#?}\nreaders={readers:#?}"
         );
         // The one delta against the first pin, named rather than counted away: the `phase_out`
@@ -24106,6 +24894,7 @@ mod stage2_injector_tests {
             let mut a = shape_b(
                 src,
                 Effect::Token {
+                    enters_blocking: None,
                     name: "Cursed Role".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),
@@ -25031,6 +25820,127 @@ mod resolving_carrier_settle_tests {
     use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    // CR 810.8a: the P1 chooser departs when P0 cannot draw, but an
+    // opposing P2 chooser can still complete their printed replacement.
+    #[test]
+    fn team_chooser_departure_follows_effective_loss_membership() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::format::FormatConfig;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+
+        let p2 = PlayerId(2);
+        let p3 = PlayerId(3);
+        let db = crate::test_support::load_fixture();
+        for chooser in [P1, p2] {
+            let mut sc = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+            sc.at_phase(Phase::PreCombatMain);
+            let skeins = sc.add_real_card(P0, "Vision Skeins", Zone::Hand, &db);
+            let imp = sc.add_real_card(chooser, "Stinkweed Imp", Zone::Graveyard, &db);
+            for seat in [P1, p2, p3] {
+                for _ in 0..7 {
+                    sc.add_real_card(seat, "Island", Zone::Library, &db);
+                }
+            }
+            sc.with_mana_pool(
+                P0,
+                vec![
+                    ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+                    ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ],
+            );
+            let mut runner = sc.build();
+            assert_eq!(crate::game::players::teammates(runner.state(), P0), [P1]);
+            assert_eq!(crate::game::players::teammates(runner.state(), p2), [p3]);
+            assert!(runner.state().players[0].library.is_empty());
+            assert!(runner
+                .state()
+                .players
+                .iter()
+                .all(|seat| !seat.drew_from_empty_library));
+            drop(runner.cast(skeins).commit());
+
+            let state = runner.state_mut();
+            let mut losses = Vec::new();
+            for _ in 0..8 {
+                let WaitingFor::Priority { player } = state.waiting_for else {
+                    panic!(
+                        "unexpected wait before Vision Skeins resolves: {:?}",
+                        state.waiting_for
+                    );
+                };
+                // CR 805.5b (F8-class driver): one seat's pass never passes for the
+                // team, so each beat passes the next unpassed member of the
+                // holding team — re-passing the parked holder would stall the
+                // window and Vision Skeins would never resolve.
+                let seat = crate::game::topology::next_team_passer(state, player);
+                let raw = super::apply_action_boundary_core(
+                    state,
+                    seat,
+                    seat,
+                    GameAction::PassPriority,
+                    None,
+                    true,
+                )
+                .expect("normal priority pass reaches the production action boundary");
+                let parked = match &raw.result.waiting_for {
+                    WaitingFor::Priority { .. } => false,
+                    WaitingFor::ReplacementChoice {
+                        player, candidates, ..
+                    } => {
+                        assert_eq!(*player, chooser);
+                        assert_eq!(candidates.len(), 2);
+                        assert!(candidates
+                            .iter()
+                            .all(|candidate| candidate.source_id == imp));
+                        assert!(state.players[0].drew_from_empty_library);
+                        assert!(state
+                            .players
+                            .iter()
+                            .skip(1)
+                            .all(|seat| !seat.drew_from_empty_library));
+                        assert!(state.players.iter().all(|seat| !seat.is_eliminated));
+                        assert!(state.resolving_stack_entry.is_some());
+                        true
+                    }
+                    other => panic!("expected the printed Dredge replacement, got {other:?}"),
+                };
+                let final_result =
+                    super::finish_action_boundary(state, raw, super::PublicFinalizeMode::Immediate)
+                        .expect("finish the production priority boundary");
+                losses.extend(final_result.events.iter().filter_map(|event| match event {
+                    GameEvent::PlayerLost { player_id, .. } => Some(*player_id),
+                    _ => None,
+                }));
+                if parked {
+                    break;
+                }
+            }
+            if chooser == p2 {
+                assert!(losses.is_empty(), "loss waits on the opposing chooser");
+                assert!(state.players.iter().all(|seat| !seat.is_eliminated));
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == p2)
+                );
+                let answer = super::apply(state, p2, GameAction::ChooseReplacement { index: 0 })
+                    .expect("answer the opposing player's printed Dredge");
+                assert!(state.players[2].hand.contains(&imp));
+                losses.extend(answer.events.iter().filter_map(|event| match event {
+                    GameEvent::PlayerLost { player_id, .. } => Some(*player_id),
+                    _ => None,
+                }));
+            }
+            assert_eq!(losses, [P0, P1]);
+            assert!(state.players[0].is_eliminated && state.players[1].is_eliminated);
+            assert!(!state.players[2].is_eliminated && !state.players[3].is_eliminated);
+            assert!(
+                matches!(state.waiting_for, WaitingFor::GameOver { winner: Some(winner) } if [p2, p3].contains(&winner))
+            );
+        }
+    }
 
     const SOURCE: ObjectId = ObjectId(60);
 
@@ -27082,6 +27992,7 @@ mod cost_move_drain_priority_boundary_tests {
                     counter_count_before: 1,
                 },
                 remaining: Vec::new(),
+                aggregate_credit: crate::types::game_state::CounterRemovalAggregateCredit::Credit,
                 replacement_subtree: ReplacementSubtreeBoundary::at(&state.resolution_stack),
             }),
             cost_paid_object: None,

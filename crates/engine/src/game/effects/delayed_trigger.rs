@@ -2185,7 +2185,14 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
         // `TargetFilter::rebind_tracked_set_sentinel` (types/ability.rs) — the
         // single authority for rewriting `TrackedSet{0}`/`TrackedSetFiltered{0}` →
         // concrete inside a filter (recursing And/Or/Not).
-        Effect::DestroyAll { target, .. } => target.rebind_tracked_set_sentinel(real_id),
+        Effect::DestroyAll { target, .. }
+        | Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::EntireReferent,
+            ..
+        } => {
+            target.rebind_tracked_set_sentinel(real_id);
+        }
         // Upgrade ChangeZone → ChangeZoneAll: ChangeZone uses ability.targets (empty for
         // delayed triggers), so it would move nothing. ChangeZoneAll scans by filter.
         Effect::ChangeZone {
@@ -6212,6 +6219,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         // Demonstrative "that spell" ref with NO parent target -> event-context path.
@@ -6729,6 +6738,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -6868,7 +6878,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Sacrifice {
                 target: crate::types::ability::TargetFilter::LastCreated,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         );
@@ -6952,7 +6962,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Sacrifice {
                 target: crate::types::ability::TargetFilter::LastCreated,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         );

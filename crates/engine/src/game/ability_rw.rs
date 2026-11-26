@@ -1698,6 +1698,7 @@ fn collect_type_tags(type_filters: &[TypeFilter], tags: &mut BTreeSet<String>) -
             TypeFilter::Planeswalker => tags.insert("planeswalker".into()),
             TypeFilter::Battle => tags.insert("battle".into()),
             TypeFilter::Kindred => tags.insert("kindred".into()),
+            TypeFilter::Scheme => tags.insert("scheme".into()),
             TypeFilter::Subtype(s) => tags.insert(s.to_lowercase()),
             // Broad / non-positive / disjunctive type constraints ⇒ unextractable.
             TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any => return Some(Census::Any),
@@ -2064,6 +2065,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana
+        | TriggerCondition::LoyaltyCountersRemovedAtLeast { .. }
         | TriggerCondition::FirstTimeObjectTappedThisTurn
         // Both first-time siblings are terminal here: neither carries a legacy
         // player-filter/quantity ref, so the D5 legacy-batch-prompt flag is
@@ -2081,6 +2083,10 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         // `ControllerRef` analogues, so the monarch subject axis stays here.
         | TriggerCondition::IsMonarch { .. }
         | TriggerCondition::IsPoisoned { .. }
+        // CR 508.5: same current-family subject scopes as the monarch's, and
+        // the defending anchor resolves from the same trigger event at fire
+        // time and resolution — stable, never a legacy re-prompt.
+        | TriggerCondition::IsDefendingPlayer { .. }
         | TriggerCondition::HasBoon { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
@@ -2234,6 +2240,8 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         // CR 725.1: no `legacy_player_scope` classifier exists; see the
         // `legacy_trigger_condition` sibling arm for the same reasoning.
         | StaticCondition::IsMonarch { .. }
+        // CR 508.5: same current-family subject scopes as the monarch's.
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 122.1f: no `legacy_player_scope` classifier exists — same
         // reasoning as the monarch arm above.
@@ -2275,6 +2283,7 @@ fn legacy_duration(x: &Duration) -> bool {
         | Duration::Permanent
         | Duration::UntilNextTurnOf { .. }
         | Duration::UntilEndOfNextTurnOf { .. }
+        | Duration::UntilEndOfGrantedTurn { .. }
         | Duration::UntilNextStepOf { .. } => false,
     }
 }
@@ -2720,6 +2729,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -3058,6 +3068,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -3377,7 +3388,6 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Scry { count, target }
         | Effect::Surveil { count, target }
         | Effect::RemoveCounter { count, target, .. }
-        | Effect::Sacrifice { target, count, .. }
         | Effect::PutCounter { count, target, .. }
         | Effect::PutCounterAll { count, target, .. }
         | Effect::Connive { target, count }
@@ -3389,6 +3399,9 @@ fn legacy_effect(x: &Effect) -> bool {
             amount: count,
             target,
         } => legacy_quantity_expr(count) || legacy_target_filter(target),
+        Effect::Sacrifice { target, count, .. } => {
+            count.count_expr().is_some_and(legacy_quantity_expr) || legacy_target_filter(target)
+        }
         Effect::PutAtLibraryPosition {
             target,
             count,
@@ -3639,7 +3652,7 @@ fn legacy_effect(x: &Effect) -> bool {
             target_player,
             ..
         } => legacy_target_filter(filter) || legacy_quantity_expr(count) || otf(target_player),
-        // `keeper_constraint`'s `ExactCount { count }` and
+        // `keeper_constraint`'s `Count { count }` and
         // `keeper_counter`'s `KeeperCounterMark::count` are both unread
         // `QuantityExpr` positions closed together here — the pre-existing
         // `keeper_constraint` omission is the same fail-open shape the new
@@ -3656,7 +3669,7 @@ fn legacy_effect(x: &Effect) -> bool {
                 || legacy_target_filter(sacrifice_filter)
                 || oqe(total_power_cap)
                 || keeper_constraint.as_ref().is_some_and(
-                    |KeeperConstraint::ExactCount { count }| legacy_quantity_expr(count),
+                    |KeeperConstraint::Count { count }| legacy_quantity_expr(count),
                 )
                 || keeper_counter
                     .as_ref()
@@ -3972,6 +3985,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptionsFromRollDifference
@@ -4528,6 +4542,7 @@ fn filter_prop_operand_reads(prop: &FilterProp) -> RwProfile {
         | FilterProp::OtherThanTriggerObject
         | FilterProp::HasColor { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -5092,6 +5107,10 @@ fn rw_duration(x: &Duration) -> RwProfile {
         // module has no read/write walker for (delayed-trigger conditions are
         // not walked either).
         | Duration::UntilEvent { .. }
+        // CR 611.2a + CR 500.7: a turn identity, not player scope or
+        // condition — reads the global `current_extra_turn`, neither
+        // member-bound nor event-live.
+        | Duration::UntilEndOfGrantedTurn { .. }
         | Duration::Permanent => RwProfile::empty(),
         Duration::UntilNextTurnOf { player, .. }
         | Duration::UntilEndOfNextTurnOf { player, .. }
@@ -5668,7 +5687,9 @@ fn rw_effect(
             min_count: _,
         } => {
             let (mut p, sc) = mem(target, Some(Zone::Battlefield), Zone::Graveyard);
-            p.merge(rw_quantity_expr(count));
+            if let Some(count) = count.count_expr() {
+                p.merge(rw_quantity_expr(count));
+            }
             (p, sc)
         }
         Effect::Bounce {
@@ -6096,6 +6117,7 @@ fn rw_effect(
             attach_to: _,
             enters_attacking: _,
             attack_destination,
+            enters_blocking,
             supertypes: _,
             static_abilities: _,
             enter_with_counters,
@@ -6118,6 +6140,13 @@ fn rw_effect(
             p.merge(rw_pt_value(power));
             p.merge(rw_pt_value(toughness));
             p.merge(rw_token_attack_destination(attack_destination));
+            // CR 509.1h: the blocking rider assigns a blocker in combat — a
+            // turn-structure write on the resolved attacker, like
+            // `BecomeBlocked`.
+            if let Some(blocking) = enters_blocking {
+                p.merge(ext_write(StateKind::TurnStructure));
+                flag_legacy_write_target(&mut p, blocking);
+            }
             (p, Some(WriteScope::Created))
         }
         Effect::CopyTokenOf {
@@ -6696,6 +6725,13 @@ fn rw_effect(
         | Effect::AbandonScheme
         | Effect::VentureIntoDungeon
         | Effect::SolveCase => (ext_write(StateKind::Other), None),
+        // CR 701.32b + CR 608.2h: re-firing reads the triggering event's
+        // scheme (identity plus the live face-down/command-zone check) and
+        // mutates no profiled state itself — the emitted event's downstream
+        // triggers carry their own profiles. `reads_event_live` (no KindSet)
+        // orders it against same-event writers of that scheme instead of
+        // auto-ordering.
+        Effect::SetSchemeInMotion { target: _ } => (reads_event_live(), None),
         // CR 725.1 + CR 725.3: the designation write, plus the chosen-target
         // write axis — "target opponent becomes the monarch" writes to a player
         // named by a CR 115.1 target slot, exactly like `Effect::ExtraTurn`.
@@ -7651,6 +7687,14 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         // member/event binding; the read profile is entirely determined by the
         // subject scope, classified through the shared `PlayerScope` walker.
         TriggerCondition::IsMonarch { player } => rw_player_scope(player),
+        // CR 508.5: the defending-player identity resolves two scopes — the
+        // subject and the defending anchor — both profiled through the
+        // shared `PlayerScope` walker.
+        TriggerCondition::IsDefendingPlayer { player } => {
+            let mut profile = rw_player_scope(player);
+            profile.merge(rw_player_scope(&PlayerScope::DefendingPlayer));
+            profile
+        }
         // Digital-only Alchemy (no CR entry): "if you have a boon" reads the
         // holder's installed boons; like the monarch designation the read
         // profile is entirely determined by the subject scope.
@@ -7768,6 +7812,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana
+        | TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum: _ }
         | TriggerCondition::FirstTimeObjectTappedThisTurn
         | TriggerCondition::WasType { .. }
         | TriggerCondition::AttackedThisTurn
@@ -7811,6 +7856,13 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         // CR 725.1: see the `rw_trigger_condition` sibling — the read profile is
         // entirely determined by the monarch subject scope.
         StaticCondition::IsMonarch { player } => rw_player_scope(player),
+        // CR 508.5: see the `TriggerCondition::IsDefendingPlayer` arm — the
+        // subject and the defending anchor both profile.
+        StaticCondition::IsDefendingPlayer { player } => {
+            let mut profile = rw_player_scope(player);
+            profile.merge(rw_player_scope(&PlayerScope::DefendingPlayer));
+            profile
+        }
         StaticCondition::HasBoon { player } => rw_player_scope(player),
         // CR 122.1f: the poison predicate reads the scoped player's poison
         // total (the sibling-mutable `PlayerLife` row), exactly like the
@@ -8932,12 +8984,13 @@ mod tests {
     fn sacrifice_self() -> Effect {
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: qfix(1),
+            count: qfix(1).into(),
             min_count: 0,
         }
     }
     fn token(types: &[&str], count: QuantityExpr) -> Effect {
         Effect::Token {
+            enters_blocking: None,
             name: "t".into(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -10129,7 +10182,7 @@ mod tests {
             assert!(
                 legacy(&ra(Effect::Sacrifice {
                     target: creature(),
-                    count: qref(tag.clone()),
+                    count: qref(tag.clone()).into(),
                     min_count: 0,
                 })),
                 "Sacrifice count {tag:?}"
@@ -10197,7 +10250,7 @@ mod tests {
         assert!(
             !legacy(&ra(Effect::Sacrifice {
                 target: creature(),
-                count: qfix(1),
+                count: qfix(1).into(),
                 min_count: 0,
             })),
             "Sacrifice with a fixed count carries no frozen tag"

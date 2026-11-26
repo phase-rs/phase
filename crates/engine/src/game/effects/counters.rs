@@ -24,7 +24,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CounterCause, CounterMoveStage, CounterPlacement, ProposedEvent,
+    CounterCause, CounterMoveStage, CounterPlacement, LoyaltyCostRoot, ProposedEvent,
 };
 use crate::types::resolution::{ChildStackDepth, FrameGate, ResolutionFrame};
 use crate::types::resolved_commands::{
@@ -640,7 +640,29 @@ fn ready_copy_entry_completion(
     }
 }
 
+/// CR 608.2f + CR 614.5 (F1): append `events` to a paused simultaneous
+/// multi-seat token clause's reunited span. Early-returns unless the clause
+/// record is installed; callers pass the slice that belongs to the clause
+/// (the installing action passes its clause window, later actions pass whole
+/// buffers). Consumers dedup the overlapping feeds.
+pub(crate) fn feed_simultaneous_token_clause(state: &mut GameState, events: &[GameEvent]) {
+    let Some(record) = state.pending_simultaneous_token_clause.as_mut() else {
+        return;
+    };
+    record.accumulated.extend(events.iter().cloned());
+}
+
+/// CR 608.2f + CR 614.5 (F1): entry/exit feeds around the counter drain so a
+/// paused token clause captures each seat's committed entry events however the
+/// drain exits — stash+return, merge+return, incomplete-remaining return,
+/// while-exhaustion falloff, or a no-active-frame call.
 pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    feed_simultaneous_token_clause(state, events);
+    drain_pending_counter_additions_inner(state, events);
+    feed_simultaneous_token_clause(state, events);
+}
+
+fn drain_pending_counter_additions_inner(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // Leave a ready fallible action resident without cloning or re-parking it.
     while let Some(mut queue) = state
         .active_counter_additions()
@@ -868,6 +890,19 @@ fn apply_pending_counter_post_action(
     events: &mut Vec<GameEvent>,
 ) -> bool {
     match action {
+        PendingCounterPostAction::FinalizeOutsideGameCardEntry {
+            object_id,
+            source_id,
+            name,
+        } => {
+            crate::game::zone_pipeline::finalize_outside_game_card_entry(
+                state,
+                Some((object_id, name)),
+                source_id,
+                events,
+            );
+            true
+        }
         PendingCounterPostAction::EmitEffectResolved { kind, source_id } => {
             events.push(GameEvent::EffectResolved {
                 kind,
@@ -1022,7 +1057,7 @@ fn apply_pending_counter_post_action(
                     ability: Box::new(ResolvedAbility::new(
                         Effect::Sacrifice {
                             target: TargetFilter::Any,
-                            count: QuantityExpr::Fixed { value: 1 },
+                            count: QuantityExpr::Fixed { value: 1 }.into(),
                             min_count: 0,
                         },
                         vec![TargetRef::Object(object_id)],
@@ -1785,6 +1820,36 @@ pub fn remove_counter_with_replacement(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) -> CounterRemovalOutcome {
+    remove_counter_with_replacement_inner(state, object_id, counter_type, count, None, events)
+}
+
+/// CR 602.2b + CR 606.4: propose one loyalty-counter cost removal with an
+/// identity marker that survives replacement ordering and distinguishes this
+/// root from any identical child removal.
+pub(crate) fn remove_loyalty_cost_counter_with_replacement(
+    state: &mut GameState,
+    object_id: ObjectId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> CounterRemovalOutcome {
+    remove_counter_with_replacement_inner(
+        state,
+        object_id,
+        CounterType::Loyalty,
+        count,
+        Some(LoyaltyCostRoot::InitiatingRemoval),
+        events,
+    )
+}
+
+fn remove_counter_with_replacement_inner(
+    state: &mut GameState,
+    object_id: ObjectId,
+    counter_type: CounterType,
+    count: u32,
+    loyalty_cost_root: Option<LoyaltyCostRoot>,
+    events: &mut Vec<GameEvent>,
+) -> CounterRemovalOutcome {
     // CR 101.2: "Can't" overrides "can" — if a static prohibits removal of
     // this counter type from this object, bail out immediately.
     if counter_removal_blocked(state, object_id, &counter_type) {
@@ -1795,6 +1860,7 @@ pub fn remove_counter_with_replacement(
         object_id,
         counter_type,
         count,
+        loyalty_cost_root,
         applied: HashSet::new(),
     };
 
@@ -7160,6 +7226,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );

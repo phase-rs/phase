@@ -24,10 +24,13 @@ use engine::parser::parse_oracle_text;
 use engine::types::ability::{
     Effect, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, TargetFilter, TriggerConstraint,
 };
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 use engine::types::ObjectId;
 
 const P1: PlayerId = PlayerId(1);
@@ -128,64 +131,83 @@ fn lady_loki_deals_mv_difference_to_each_opponent() {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime: X spell — mana value is read OFF the stack (CR 202.3e)
+// Runtime: X spell — the triggering spell keeps its last stack mana value
 // ---------------------------------------------------------------------------
 
-/// The triggering spell is `{2}{R}{X}` cast with X = 3. Lady Loki exiles it, so
-/// "that spell's mana value" is read while the card is OFF the stack, where X is
-/// treated as 0 (CR 202.3e): off-stack MV = 2 + 1 + 0 = 3. Hit MV = 1, so each
-/// opponent takes |3 − 1| = 2. This value is non-degenerate against the two
-/// wrong readings the plan flagged: an on-stack (X = 3) snapshot would give
-/// |6 − 1| = 5, and a fail-closed read would give |0 − 1| = 1.
+/// CR 202.3e + CR 608.2h: Torment of Hailfire with X=2 has a last-known stack
+/// mana value of 4. Living Laser's mana value in exile is 5. Each opponent
+/// takes |4 − 5| = 1. The exiled Torment card itself has mana value 2.
 #[test]
-fn lady_loki_x_spell_reads_off_stack_mana_value() {
+fn lady_loki_x_spell_reads_its_last_stack_mana_value() {
     let mut scenario = GameScenario::new_n_player(3, 11);
     scenario.at_phase(Phase::PreCombatMain);
-    // {2}{R} + X=3 → {5}{R} = 6 mana.
-    scenario.with_mana_pool(P0, red_pool(6));
-
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
     scenario.add_creature_from_oracle(P0, "Lady Loki, Agent of Chaos", 5, 5, LADY_LOKI);
 
-    let spell = {
-        let mut b =
-            scenario.add_spell_to_hand_from_oracle(P0, "Chaos X Spell", true, "Draw a card.");
-        b.with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::Red, ManaCostShard::X],
-            generic: 2,
-        });
-        b.id()
-    };
-
-    let hit = {
-        let mut b = scenario.add_spell_to_library_top(P0, "Nonland Hit", false);
-        b.with_mana_cost(ManaCost::Cost {
-            shards: vec![],
-            generic: 1,
-        });
-        b.id()
-    };
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Torment of Hailfire",
+            false,
+            "Repeat the following process X times. Each opponent loses 3 life unless that player sacrifices a nonland permanent of their choice or discards a card.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black, ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let hit = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Living Laser",
+            4,
+            4,
+            "Haste\nWhenever Living Laser attacks, for each card you've discarded this turn, create a token that's a copy of Living Laser, except the token isn't legendary. The tokens enter tapped and attacking. Exile the tokens at the beginning of the next end step.",
+        )
+        .as_legendary()
+        .with_subtypes(vec!["Elemental", "Villain"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 4,
+        })
+        .id();
 
     let mut runner = scenario.build();
-    let outcome = runner.cast(spell).x(3).resolve();
+    engine::game::zones::move_to_library_position(runner.state_mut(), hit, true, &mut Vec::new());
+    let outcome = runner
+        .cast(spell)
+        .x(2)
+        .commit()
+        .stop_at_optional()
+        .resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice {
+            player: P0,
+            decision_subject_id: Some(subject),
+            ..
+        } if subject == hit
+    ));
+    assert_eq!(outcome.zone_of(spell), Zone::Exile);
+    assert_eq!(outcome.zone_of(hit), Zone::Exile);
 
-    // Reach guard: the dig exiled the nonland hit, so MV(hit) = 1 was the value
-    // read for the |MV(spell) − MV(hit)| difference below. The free cast is not
-    // accepted here, so the hit stays in Exile.
-    assert_eq!(
-        outcome.zone_of(hit),
-        engine::types::zones::Zone::Exile,
-        "the nonland hit must be exiled by the dig"
-    );
-
-    // CR 202.3e: off the stack X = 0, so MV(spell) = 3, and |3 − 1| = 2.
-    assert_eq!(
-        outcome.life_delta(P1),
-        -2,
-        "off-stack MV (X=0) = 3, hit MV = 1 → |3 − 1| = 2 (on-stack X snapshot \
-         would be 5; fail-closed would be 1)"
-    );
-    assert_eq!(outcome.life_delta(P2), -2, "same off-stack MV difference");
-    assert_eq!(outcome.life_delta(P0), 0, "caster unaffected");
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("decline casting the found card");
+    assert_eq!(runner.life(P1), 19, "use Torment's last stack value of 4");
+    assert_eq!(runner.life(P2), 19, "damage reaches each opponent");
+    assert_eq!(runner.life(P0), 20, "Lady Loki's controller is unaffected");
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Exile);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 // ---------------------------------------------------------------------------

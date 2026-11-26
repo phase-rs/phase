@@ -2503,6 +2503,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: ObjectId(7),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(!should_exclude_event(&cast));
     }
@@ -2653,6 +2655,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         let entries = resolve_log_entries(&[event], &state, &state);
         assert_eq!(entries.len(), 1);
@@ -3133,6 +3137,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -4207,6 +4212,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         let keyword = |source_id| GameEvent::KeywordAbilityActivated {
             ability_tag: AbilityTag::Equip,
@@ -4231,6 +4237,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         assert_eq!(lines(&[mana]), 0);
     }

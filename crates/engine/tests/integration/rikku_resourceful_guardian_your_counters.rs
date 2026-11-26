@@ -150,10 +150,10 @@ fn multiplayer(with_rikku: bool) -> Board {
 }
 
 fn pass(runner: &mut GameRunner) -> Vec<GameEvent> {
-    runner
-        .act(GameAction::PassPriority)
-        .expect("priority pass")
-        .events
+    // CR 805.5b (F8-class driver): pass the whole holding team — passing only
+    // the parked holder stalls a shared-team window. Identical to a holder
+    // pass in individual-turn formats.
+    runner.pass_holding_team().expect("priority pass")
 }
 
 fn priority_of(runner: &mut GameRunner, player: PlayerId) {

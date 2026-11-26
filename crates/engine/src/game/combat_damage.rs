@@ -20,9 +20,9 @@ use crate::types::ability::{DamageContextSnapshot, ShieldKind, TargetRef};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CombatDamageAssignmentMode, CombatDamageSubStep, CombatPreventionTally, DamageSlot, GameState,
-    PendingCombatDamageEntry, PendingCombatDamageReplacement, PendingCombatLeg,
-    PendingCombatLegProgress, PendingCombatLifelink, PendingCombatPhaseCRemnant,
+    CombatDamageAssignmentMode, CombatDamageSplit, CombatDamageSubStep, CombatPreventionTally,
+    DamageSlot, GameState, PendingCombatDamageEntry, PendingCombatDamageReplacement,
+    PendingCombatLeg, PendingCombatLegProgress, PendingCombatLifelink, PendingCombatPhaseCRemnant,
     PendingLifelinkGain, PerPlayerCombatDamage, PreventedDamageEntry, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -1436,6 +1436,71 @@ pub(crate) fn compute_pw_loyalty_threshold(
     }
 }
 
+/// CR 702.19c: trample over planeswalkers assigns damage up to the planeswalker's
+/// effective loyalty before any spills over to its controller. Returns
+/// `(to_planeswalker, to_controller)`.
+fn split_over_planeswalker(excess: u32, effective_loyalty: u32) -> (u32, u32) {
+    let to_planeswalker = excess.min(effective_loyalty);
+    (to_planeswalker, excess - to_planeswalker)
+}
+
+/// Where a lethal-first split sends what is left once every blocker has its
+/// lethal damage. Each caller picks the route from the inputs it is entitled to
+/// read; [`lethal_first_split`] owns the arithmetic.
+pub(crate) enum ExcessRoute {
+    /// CR 510.1c: no trample, or (CR 506.4c) trample with no current recipient —
+    /// all damage stays on the blockers.
+    ToBlockers,
+    /// CR 702.19b: the excess goes to what the creature is attacking.
+    Trample,
+    /// CR 702.19c: the excess goes to the attacked planeswalker up to `loyalty`,
+    /// then to its controller. CR 702.19e: a planeswalker that left combat has
+    /// no threshold (`loyalty` 0), so all of it goes to the defending player.
+    OverPlaneswalker { loyalty: u32 },
+}
+
+/// The default `Normal`-mode combat damage assignment: lethal damage to each
+/// blocker in order, as far as the damage reaches, then the remainder by `route`.
+///
+/// Single authority for this arithmetic. The AI's default candidate and the
+/// `DerivedViews::combat_damage_suggestion` view both call it, and neither
+/// re-derives the walk or the planeswalker split.
+pub(crate) fn lethal_first_split(
+    total_damage: u32,
+    blockers: &[DamageSlot],
+    route: ExcessRoute,
+) -> CombatDamageSplit {
+    let mut remaining = total_damage;
+    // CR 510.1c: Divide damage among blockers.
+    // CR 702.19b: Assign lethal to each blocker before assigning trample excess.
+    let assignments = blockers
+        .iter()
+        .map(|slot| {
+            let amount = remaining.min(slot.lethal_minimum);
+            remaining -= amount;
+            (slot.blocker_id, amount)
+        })
+        .collect();
+    let mut split = CombatDamageSplit {
+        assignments,
+        ..CombatDamageSplit::default()
+    };
+    match route {
+        ExcessRoute::ToBlockers => {
+            // With no blockers left there is nothing to assign to: the empty split.
+            if let Some((_, amount)) = split.assignments.last_mut() {
+                *amount += remaining;
+            }
+        }
+        ExcessRoute::Trample => split.trample_damage = remaining,
+        ExcessRoute::OverPlaneswalker { loyalty } => {
+            (split.trample_damage, split.controller_damage) =
+                split_over_planeswalker(remaining, loyalty);
+        }
+    }
+    split
+}
+
 /// Assign trample excess damage when attacking a PW with trample-over-PW.
 /// CR 702.19c: lethal to blocker(s) → loyalty-worth to PW → excess to PW controller.
 fn assign_trample_over_pw_excess(
@@ -1448,9 +1513,7 @@ fn assign_trample_over_pw_excess(
         return result;
     }
     let (pw_loyalty, pw_controller) = compute_pw_loyalty_threshold(state, attacker_info);
-    let effective_loyalty = pw_loyalty.unwrap_or(0);
-    let to_pw = excess.min(effective_loyalty);
-    let to_controller = excess.saturating_sub(to_pw);
+    let (to_pw, to_controller) = split_over_planeswalker(excess, pw_loyalty.unwrap_or(0));
 
     if to_pw > 0 {
         // CR 702.19e: trample_over_pw=true so PW removal falls back to defending player.
@@ -4960,7 +5023,6 @@ mod tests {
             return;
         }
         while let WaitingFor::AssignCombatDamage {
-            attacker_id,
             total_damage,
             ref blockers,
             ref trample,
@@ -4969,30 +5031,22 @@ mod tests {
             ..
         } = state.waiting_for
         {
-            let _ = attacker_id;
-            let mut remaining = total_damage;
-            let mut assignments: Vec<(ObjectId, u32)> = Vec::new();
-            for slot in blockers {
-                let assign = remaining.min(slot.lethal_minimum);
-                assignments.push((slot.blocker_id, assign));
-                remaining = remaining.saturating_sub(assign);
-            }
-            if trample.is_none() && remaining > 0 {
-                if let Some(last) = assignments.last_mut() {
-                    last.1 += remaining;
-                    remaining = 0;
+            let route = match (trample, attack_target) {
+                (None, _) => ExcessRoute::ToBlockers,
+                (Some(TrampleKind::OverPlaneswalkers), AttackTarget::Planeswalker(_)) => {
+                    ExcessRoute::OverPlaneswalker {
+                        loyalty: pw_loyalty.unwrap_or(0),
+                    }
                 }
-            }
-            let (trample_damage, controller_damage) = if *trample
-                == Some(TrampleKind::OverPlaneswalkers)
-                && matches!(attack_target, AttackTarget::Planeswalker(_))
-            {
-                let loyalty = pw_loyalty.unwrap_or(0);
-                let to_pw = remaining.min(loyalty);
-                (to_pw, remaining.saturating_sub(to_pw))
-            } else {
-                (if trample.is_some() { remaining } else { 0 }, 0)
+                (Some(TrampleKind::Standard | TrampleKind::OverPlaneswalkers), _) => {
+                    ExcessRoute::Trample
+                }
             };
+            let CombatDamageSplit {
+                assignments,
+                trample_damage,
+                controller_damage,
+            } = lethal_first_split(total_damage, blockers, route);
             // The answering apply runs the damage batch inline, so its events
             // (damage, lifelink gains, `DamagePrevented` aggregates, rider
             // follow-ups) would be dropped with the `ActionResult`. Collect
@@ -7550,6 +7604,7 @@ mod tests {
 
         let mut token = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Inkling".to_string(),
                 power: PtValue::Fixed(2),
                 toughness: PtValue::Fixed(1),

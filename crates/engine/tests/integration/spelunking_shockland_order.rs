@@ -381,6 +381,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
     };
     let state = runner.state_mut();
     state.pending_replacement = Some(PendingReplacement {
+        damage_delivery_owner: None,
         settled_damage_guards: Vec::new(),
         proposed: ProposedEvent::SearchFound {
             searcher: P0,
@@ -389,6 +390,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
             disposition: SearchFoundDisposition::Original,
             applied: Default::default(),
         },
+        token_substitute: None,
         sacrifice_provenance: None,
         candidates: vec![rid],
         search_found_candidates: vec![candidate],

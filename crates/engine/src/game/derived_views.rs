@@ -19,8 +19,10 @@ use std::num::NonZeroUsize;
 
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::{declared_targets_in_chain, flatten_targets_in_chain};
-use crate::game::combat::{active_attack_target, AttackTarget};
-use crate::game::combat_damage::combat_damage_to_defender;
+use crate::game::combat::{active_attack_target, AttackTarget, TrampleKind};
+use crate::game::combat_damage::{
+    combat_damage_to_defender, compute_pw_loyalty_threshold, lethal_first_split, ExcessRoute,
+};
 use crate::game::effects::deal_damage::DamageContext;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource, GameObject};
@@ -30,6 +32,7 @@ use crate::game::stack::{
     stack_revealed_card_names, StackDisplayGroup,
 };
 use crate::game::topology::Side;
+use crate::game::turn_control::DecisionBinding;
 use crate::types::ability::{
     AbilityCost, ContinuousModification, Duration, Effect, GameRestriction, KeywordAction,
     ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
@@ -43,8 +46,9 @@ use crate::types::display_only::{CanonicalDigest, DisplayOnly};
 use crate::types::events::GameEvent;
 use crate::types::format::{GameFormat, TurnStructure};
 use crate::types::game_state::{
-    CastingVariant, CombatDamageSubStep, GameState, PendingManaAbility, StackEntry, StackEntryKind,
-    StackPaidSnapshot, SyntheticTriggerProvenance, TriggerSourceRead, WaitingFor,
+    CastingVariant, CombatDamageSplit, CombatDamageSubStep, GameState, PendingManaAbility,
+    StackEntry, StackEntryKind, StackPaidSnapshot, SyntheticTriggerProvenance, TriggerSourceRead,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::InteractionId;
@@ -722,6 +726,19 @@ pub struct DerivedViews {
     /// when there is no actor or multiple distinct authorized submitters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_authorized_submitter: Option<PlayerId>,
+    /// CR 805.5a + CR 723.5: each living seat entitled to answer the live
+    /// priority window that has not passed it yet — the parked representative
+    /// plus every unpassed teammate on a shared-team window — paired with its
+    /// authorized actor. Omitted on any non-priority window and whenever the
+    /// owners would name only the holder (always so for individual seats),
+    /// where consumers fall back to `WaitingFor::Priority`'s player. The
+    /// browser AI scheduler drives the AI actors in this list so a teammate
+    /// stays eligible while the window sits on its representative, and so an
+    /// AI controller of humans is scheduled while a human controller of AI
+    /// stays manual; it mirrors the headless driver's owner filter minus the
+    /// AI membership check, which only the client knows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub priority_decision_bindings: Vec<DecisionBinding>,
     /// The authorized viewer's Scry identity, retained when the bounded
     /// interaction projection omits its opportunities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1154,6 +1171,15 @@ pub struct DerivedViews {
     /// is not attacking any player, planeswalker, or battle.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub attack_targets: HashMap<ObjectId, AttackTarget>,
+
+    /// CR 510.1c + CR 702.19b: the lethal-first default for the open
+    /// `WaitingFor::AssignCombatDamage` prompt — lethal damage to each blocker in order, then
+    /// the excess to whatever can currently receive it (CR 702.19c, CR 702.19e, CR 506.4c).
+    /// Derived from live combat state on every delivery, so it follows a recipient that leaves
+    /// while the prompt stays open. Advisory only: action validation never reads it. Absent
+    /// outside that prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combat_damage_suggestion: Option<CombatDamageSplit>,
 }
 
 /// Serialize-only wrapper. The wire shape is
@@ -1211,6 +1237,7 @@ fn client_state_wire_value(state: &GameState) -> serde_json::Result<serde_json::
     root.remove("next_delayed_trigger_token");
     root.remove("next_delayed_trigger_instance");
     root.remove("next_resolution_cast_offer_id");
+    root.remove("next_damage_delivery_owner_id");
     root.remove("pending_trigger_firing");
     root.remove("stack_trigger_firings");
     root.remove("resolving_trigger_firing");
@@ -1239,6 +1266,7 @@ fn redact_private_trigger_firing(value: &mut serde_json::Value) {
                 "provenance",
                 "firing",
                 "firing_classification",
+                "damage_delivery_owner",
                 "trigger_firing",
                 "stack_trigger_firings",
                 "resolving_trigger_firing",
@@ -1812,6 +1840,7 @@ fn temporary_cant_be_blocked_source(
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews {
         unique_authorized_submitter: unique_authorized_submitter(state),
+        priority_decision_bindings: priority_decision_bindings(state),
         scry_prompt_id: viewer
             .and_then(|viewer| crate::game::interaction::scry_prompt_id_for_viewer(state, viewer)),
         blocker_assignment_pairs: blocker_assignment_pairs(state),
@@ -1824,6 +1853,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         storm_count: storm_count(state),
         unblocked_attack_previews: unblocked_attack_previews(state),
         attack_targets: attack_targets(state),
+        combat_damage_suggestion: combat_damage_suggestion(state),
         ..DerivedViews::default()
     };
 
@@ -2483,6 +2513,7 @@ pub fn derive_filtered_views(
         _ => Vec::new(),
     };
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    views.priority_decision_bindings = priority_decision_bindings(authoritative_state);
     // CR 702.24a: whether the prompt continues a payment already begun is read
     // from the payment's parked owner, which the viewer projection drops.
     if let Some(draw) = views.unless_draw_cost.as_mut() {
@@ -2582,6 +2613,47 @@ fn unblocked_attack_previews(state: &GameState) -> HashMap<ObjectId, UnblockedAt
             Some((id, UnblockedAttackPreview { damage, life_loss }))
         })
         .collect()
+}
+
+/// CR 510.1c + CR 702.19b: the excess route is read from live state exactly as the
+/// `AssignCombatDamage` validator reads it — the current excess recipient (CR 506.4c) and the
+/// planeswalker's effective loyalty (CR 702.19c, CR 702.19e) — so the published split is one
+/// the validator accepts. `None` once the prompted attacker is no longer in combat, where
+/// the validator rejects the action before looking at any split.
+fn combat_damage_suggestion(state: &GameState) -> Option<CombatDamageSplit> {
+    let WaitingFor::AssignCombatDamage {
+        attacker_id,
+        total_damage,
+        blockers,
+        trample,
+        ..
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    let info = state
+        .combat
+        .as_ref()?
+        .attackers
+        .iter()
+        .find(|info| info.object_id == *attacker_id)?;
+    let route = match (trample, info.attack_target) {
+        (None, _) => ExcessRoute::ToBlockers,
+        (Some(TrampleKind::OverPlaneswalkers), AttackTarget::Planeswalker(_)) => {
+            let (loyalty, _) = compute_pw_loyalty_threshold(state, info);
+            ExcessRoute::OverPlaneswalker {
+                loyalty: loyalty.unwrap_or(0),
+            }
+        }
+        (Some(TrampleKind::Standard | TrampleKind::OverPlaneswalkers), _) => {
+            if info.resolve_damage_target(state, false).is_some() {
+                ExcessRoute::Trample
+            } else {
+                ExcessRoute::ToBlockers
+            }
+        }
+    };
+    Some(lethal_first_split(*total_damage, blockers, route))
 }
 
 /// CR 400.7 + CR 506.4c: each attacker's relation read through the combat authority, which
@@ -2754,6 +2826,35 @@ fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
     submitters.sort_unstable_by_key(|player| player.0);
     submitters.dedup();
     (submitters.len() == 1).then(|| submitters[0])
+}
+
+/// CR 805.5a + CR 723.5: the living seats entitled to answer the live
+/// priority window that have not passed it yet, each paired with its
+/// authorized actor. A member who already passed has no new decision until
+/// someone acts (which clears passes), so passed owners are excluded — the
+/// same strict-pending authority the headless AI driver reads.
+///
+/// A list whose owners name only the holder adds nothing to
+/// `WaitingFor::Priority`, and every consumer already falls back to the
+/// holder, so it is left empty (and omitted from the wire). The collapse keys
+/// on the OWNER projection, not the actors: a controlled holder-only window
+/// still collapses, and consumers fall back to `priority_player`, which the
+/// engine re-derives to the controller. The list is published only when a
+/// teammate can act on the window, which keeps individual-seat updates
+/// unchanged.
+fn priority_decision_bindings(state: &GameState) -> Vec<DecisionBinding> {
+    let WaitingFor::Priority { player: holder } = state.waiting_for else {
+        return Vec::new();
+    };
+    let bindings = crate::game::turn_control::pending_decision_bindings(state);
+    let owners: Vec<PlayerId> = bindings
+        .iter()
+        .map(|binding| binding.semantic_owner)
+        .collect();
+    if owners == [holder] {
+        return Vec::new();
+    }
+    bindings
 }
 
 /// CR 103.1: the starting player of the game this state describes, once it has
@@ -9688,14 +9789,24 @@ mod tests {
     /// serializer's own `redact_waiting_for_iteration_members` call is removed.
     #[test]
     fn client_wire_redacts_resolution_division_provenance_without_viewer_filter() {
+        use crate::types::ability::{QuantityExpr, TargetFilter};
+        use crate::types::identifiers::DamageDeliveryOwnerId;
+
         let mut state = GameState::new_two_player(42);
         let mut pending = ResolvedAbility::new(
-            Effect::unimplemented("private loop probe", "private loop probe"),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
             vec![],
             ObjectId(10),
             PlayerId(0),
         );
         pending.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(2)]);
+        pending.context.damage_delivery_owner = Some(DamageDeliveryOwnerId(12));
+        state.next_damage_delivery_owner_id = 13;
         state.waiting_for = WaitingFor::DistributeAmong {
             player: PlayerId(0),
             total: 3,
@@ -9718,6 +9829,27 @@ mod tests {
                 .is_none(),
             "wire payload leaked iteration members: {pending_effect}"
         );
+        assert!(pending_effect["context"]
+            .get("damage_delivery_owner")
+            .is_none());
+        assert!(wire.get("next_damage_delivery_owner_id").is_none());
+
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(filtered.next_damage_delivery_owner_id, 0);
+        let filtered_json = serde_json::to_value(&filtered).expect("filtered view serializes");
+        let filtered_pending =
+            &filtered_json["waiting_for"]["data"]["scope"]["data"]["pending_effect"];
+        assert!(filtered_pending.is_object());
+        assert!(filtered_pending["context"]
+            .get("damage_delivery_owner")
+            .is_none());
+        let decoded: GameState =
+            serde_json::from_value(filtered_json).expect("viewer state decodes");
+        assert!(matches!(
+            decoded.waiting_for,
+            WaitingFor::DistributeAmong { .. }
+        ));
+
         // Reach guard: the trusted serialization of the same state carries the
         // provenance, so its absence above is the projection's own redaction.
         let trusted = serde_json::to_value(&state).expect("trusted state serializes");
@@ -9726,6 +9858,12 @@ mod tests {
                 .get("parent_target_iteration_members")
                 .is_some()
         );
+        assert_eq!(
+            trusted["waiting_for"]["data"]["scope"]["data"]["pending_effect"]["context"]
+                ["damage_delivery_owner"],
+            12
+        );
+        assert_eq!(trusted["next_damage_delivery_owner_id"], 13);
     }
 
     /// CR 605.4a + CR 117.3c: `client_state_wire_value` is a defence-in-depth
@@ -9929,7 +10067,7 @@ mod tests {
             entries: vec![StackResolutionEntryFence::capture(&entry)],
             cursor: 0,
             representatives: BTreeSet::from([PlayerId(0)]),
-            verified_pass_representatives: BTreeSet::new(),
+            verified_pass_owners: BTreeSet::new(),
             budget: StackResolutionBudget::from_legacy_max_resolutions(3),
             policy: StackResolutionPolicy::Committed,
             auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -10913,5 +11051,137 @@ mod tests {
                 printing: Default::default(),
             }]
         );
+    }
+
+    /// CR 805.5a: the browser scheduler's owner list names every living
+    /// teammate on a parked shared-team window, minus seats that already
+    /// passed — and collapses to the single holder in individual formats.
+    #[test]
+    fn priority_decision_bindings_list_unpassed_teammates_on_a_parked_window() {
+        let binding = |semantic_owner: PlayerId, authorized_actor: PlayerId| DecisionBinding {
+            semantic_owner,
+            authorized_actor,
+        };
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert_eq!(
+            derive_views(&state, None).priority_decision_bindings,
+            vec![
+                binding(PlayerId(0), PlayerId(0)),
+                binding(PlayerId(1), PlayerId(1))
+            ]
+        );
+
+        // A passed member has no new decision until someone acts.
+        state.priority_passes.insert(PlayerId(0));
+        assert_eq!(
+            derive_views(&state, None).priority_decision_bindings,
+            vec![binding(PlayerId(1), PlayerId(1))]
+        );
+
+        // Only the holder left unpassed: the list would repeat the window's
+        // player, so it is omitted and consumers fall back to the holder.
+        state.priority_passes.clear();
+        state.priority_passes.insert(PlayerId(1));
+        assert!(derive_views(&state, None)
+            .priority_decision_bindings
+            .is_empty());
+
+        // Non-priority windows carry no binding list.
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+        assert!(derive_views(&state, None)
+            .priority_decision_bindings
+            .is_empty());
+
+        // Individual formats never publish a list: the holder is the only
+        // owner, which `WaitingFor::Priority` already names.
+        let mut solo = GameState::new(FormatConfig::standard(), 2, 42);
+        solo.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        assert!(derive_views(&solo, None)
+            .priority_decision_bindings
+            .is_empty());
+
+        // A live non-Priority prompt with a non-empty authority still
+        // publishes nothing: this pins the Priority gate, not vacuity.
+        state.priority_passes.clear();
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: PlayerId(0),
+            pending_cast: Box::new(PendingCast::new(
+                ObjectId(1),
+                CardId(1),
+                ResolvedAbility::new(
+                    Effect::unimplemented("damage", "inert fixture effect"),
+                    vec![],
+                    ObjectId(1),
+                    PlayerId(0),
+                ),
+                ManaCost::NoCost,
+            )),
+            target_slots: vec![target_slot(vec![])],
+            mode_labels: Vec::new(),
+            selection: TargetSelectionProgress::default(),
+        };
+        assert!(
+            !crate::game::turn_control::pending_decision_bindings(&state).is_empty(),
+            "reach: the authority is non-empty on this prompt, so [] proves the gate"
+        );
+        assert!(derive_views(&state, None)
+            .priority_decision_bindings
+            .is_empty());
+    }
+
+    /// VM-D2: a controlled holder-only window publishes an empty view while
+    /// the authority stays non-empty — the collapse keys on the OWNER
+    /// projection, not the actors. Labeled predicate pin: per-seat pass
+    /// states under control are unreachable through the production pass
+    /// boundary (a controller-submitted pass records the whole team).
+    #[test]
+    fn controlled_holder_only_window_collapses_to_submitter_fallback() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = PlayerId(0);
+        // The engine re-derives `priority_player` to the controller on a
+        // controlled window; the imperative fixture carries that value so the
+        // fallback target the collapse relies on exists.
+        state.priority_player = PlayerId(2);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.turn_decision_controller = Some(PlayerId(2));
+        state.priority_passes.insert(PlayerId(1));
+
+        assert_eq!(
+            state.priority_player,
+            PlayerId(2),
+            "reach: the re-derived submitter — the fallback target — exists"
+        );
+        assert_eq!(
+            crate::game::turn_control::pending_decision_bindings(&state),
+            vec![DecisionBinding {
+                semantic_owner: PlayerId(0),
+                authorized_actor: PlayerId(2),
+            }],
+            "the authority is non-empty: only the view collapses"
+        );
+        assert!(
+            derive_views(&state, None)
+                .priority_decision_bindings
+                .is_empty(),
+            "the holder-only view collapses even though the actor differs"
+        );
+        // The filtered-views site re-reads the same authoritative projection.
+        for viewer in [None, Some(PlayerId(0)), Some(PlayerId(2))] {
+            assert!(
+                derive_filtered_views(&state, &state, viewer)
+                    .priority_decision_bindings
+                    .is_empty(),
+                "filtered views collapse for viewer {viewer:?}"
+            );
+        }
     }
 }

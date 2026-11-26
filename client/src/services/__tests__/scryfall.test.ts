@@ -1303,6 +1303,381 @@ describe("Scryfall generation scripts — printings face images (#10899)", () =>
   });
 });
 
+describe("Scryfall generation scripts — scheme layouts (Archenemy)", () => {
+  // Real oracle_ids, sets, and collector numbers (Behold My Grandeur is an
+  // OARC — API code oe01 — scheme; Behold the Power of Destruction sits at
+  // DSC 328 inside the 328-367 scheme run). Image URLs are synthetic: only
+  // their flow-through matters, matching the other suites in this file.
+  const grandeurOracleId = "e59e0318-85ef-4e58-92d8-c0be1d0b6072";
+  const destructionOracleId = "990cea79-6413-46fc-acfb-1a77638253c0";
+
+  function schemeImagesFixture(
+    name: string,
+    oracleId: string,
+    colorIdentity: string[],
+  ) {
+    return {
+      oracle_id: oracleId,
+      layout: "scheme",
+      name,
+      mana_cost: "",
+      cmc: 0,
+      type_line: "Scheme",
+      colors: [],
+      color_identity: colorIdentity,
+      keywords: [],
+      image_uris: {
+        normal: `https://img.example/${encodeURIComponent(name)}.jpg`,
+        art_crop: `https://img.example/${encodeURIComponent(name)}-art.jpg`,
+      },
+    };
+  }
+
+  it("keys scheme image data by oracle_id and name like any playable card", () => {
+    withTempDir((dir) => {
+      const input = path.join(dir, "oracle-cards.json");
+      const output = path.join(dir, "scryfall-data.json");
+      writeFileSync(
+        input,
+        JSON.stringify([
+          schemeImagesFixture("Behold My Grandeur", grandeurOracleId, ["B", "R", "U"]),
+          schemeImagesFixture("Behold the Power of Destruction", destructionOracleId, []),
+          {
+            oracle_id: "bolt",
+            layout: "normal",
+            name: "Lightning Bolt",
+            type_line: "Instant",
+            image_uris: {
+              normal: "https://img.example/bolt.jpg",
+              art_crop: "https://img.example/bolt-art.jpg",
+            },
+          },
+          {
+            oracle_id: "saproling",
+            layout: "token",
+            name: "Saproling",
+            type_line: "Token Creature — Saproling",
+            image_uris: {
+              normal: "https://img.example/saproling.jpg",
+              art_crop: "https://img.example/saproling-art.jpg",
+            },
+          },
+        ]),
+      );
+
+      execFileSync("bash", [path.join(REPO_ROOT, "scripts/gen-scryfall-images.sh")], {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          SCRYFALL_ORACLE_FILE: input,
+          SCRYFALL_IMAGES_OUTPUT: output,
+        },
+        stdio: "pipe",
+      });
+
+      const generated = JSON.parse(readFileSync(output, "utf8"));
+      for (const [oracleId, name] of [
+        [grandeurOracleId, "Behold My Grandeur"],
+        [destructionOracleId, "Behold the Power of Destruction"],
+      ] as const) {
+        // Canonical path: the ArchenemyPanel resolves by printed_ref.oracle_id.
+        expect(generated[oracleId].name).toBe(name);
+        expect(generated[oracleId].layout).toBe("scheme");
+        expect(generated[oracleId].faces).toHaveLength(1);
+        expect(generated[oracleId].faces[0].orientation).toBe("portrait");
+        expect(generated[oracleId].faces[0].normal).toContain("https://img.example/");
+        // Legacy path: name-keyed like any playable card.
+        expect(generated[name.toLowerCase()]).toEqual(generated[oracleId]);
+      }
+      // The playable stream and the token prefix are undisturbed.
+      expect(generated["lightning bolt"].name).toBe("Lightning Bolt");
+      expect(generated.saproling).toBeUndefined();
+      expect(generated["token:saproling"].name).toBe("Saproling");
+    });
+  });
+
+  it("groups scheme printings across sets newest-first", () => {
+    withTempDir((dir) => {
+      const input = path.join(dir, "default-cards.json");
+      const output = path.join(dir, "scryfall-printings.json");
+      const destructionImages = (tag: string) => ({
+        normal: `https://img.example/destruction-${tag}.jpg`,
+        art_crop: `https://img.example/destruction-${tag}-art.jpg`,
+      });
+      writeFileSync(
+        input,
+        JSON.stringify([
+          ...basicLandPrintingFixtures(),
+          {
+            id: "c539d952-5c3d-4351-b682-db966348f862",
+            oracle_id: destructionOracleId,
+            layout: "scheme",
+            name: "Behold the Power of Destruction",
+            set: "dsc",
+            set_name: "Duskmourn: House of Horror Commander",
+            collector_number: "328",
+            released_at: "2024-09-27",
+            border_color: "black",
+            full_art: false,
+            image_uris: destructionImages("dsc"),
+          },
+          {
+            id: "arch-printing",
+            oracle_id: destructionOracleId,
+            layout: "scheme",
+            name: "Behold the Power of Destruction",
+            set: "arch",
+            set_name: "Archenemy",
+            collector_number: "12",
+            released_at: "2010-06-18",
+            border_color: "black",
+            full_art: false,
+            image_uris: destructionImages("arch"),
+          },
+          {
+            id: "bolt-printing",
+            oracle_id: "bolt",
+            layout: "normal",
+            name: "Lightning Bolt",
+            set: "lea",
+            set_name: "Limited Edition Alpha",
+            collector_number: "161",
+            released_at: "1993-08-05",
+            border_color: "black",
+            full_art: false,
+            image_uris: {
+              normal: "https://img.example/bolt.jpg",
+              art_crop: "https://img.example/bolt-art.jpg",
+            },
+          },
+          {
+            id: "saproling-printing",
+            oracle_id: "saproling",
+            layout: "token",
+            name: "Saproling",
+            set: "mmq",
+            set_name: "Mercadian Masques",
+            collector_number: "7",
+            released_at: "1999-10-04",
+            border_color: "black",
+            full_art: false,
+            image_uris: {
+              normal: "https://img.example/saproling.jpg",
+              art_crop: "https://img.example/saproling-art.jpg",
+            },
+          },
+        ]),
+      );
+
+      execFileSync("bash", [path.join(REPO_ROOT, "scripts/gen-scryfall-printings.sh")], {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          SCRYFALL_DEFAULT_CARDS_FILE: input,
+          SCRYFALL_PRINTINGS_OUTPUT: output,
+        },
+        stdio: "pipe",
+      });
+
+      const generated = JSON.parse(readFileSync(output, "utf8"));
+      expect(generated[destructionOracleId]).toHaveLength(2);
+      expect(generated[destructionOracleId][0].set).toBe("dsc");
+      expect(generated[destructionOracleId][0].collector_number).toBe("328");
+      expect(generated[destructionOracleId][1].set).toBe("arch");
+      // Single-artwork cards and tokens stay out of the printings map.
+      expect(generated.bolt).toBeUndefined();
+      expect(generated.saproling).toBeUndefined();
+    });
+  });
+});
+
+describe("Scryfall generation scripts — planar layouts (Planechase)", () => {
+  // Real oracle_ids, sets, and collector numbers (Agyrem is an OHOP plane
+  // reprinted in OPCA; Spatial Merging is a phenomenon — both share
+  // Scryfall's `planar` layout). Image URLs are synthetic: only their
+  // flow-through matters, matching the other suites in this file.
+  const agyremOracleId = "38f84e55-049c-441e-b4e2-1e207ab5dbe5";
+  const mergingOracleId = "aa166578-b13b-4adb-a78e-d5183e987112";
+
+  function planarImagesFixture(
+    name: string,
+    oracleId: string,
+    typeLine: string,
+  ) {
+    return {
+      oracle_id: oracleId,
+      layout: "planar",
+      name,
+      mana_cost: "",
+      cmc: 0,
+      type_line: typeLine,
+      colors: [],
+      color_identity: [],
+      keywords: [],
+      image_uris: {
+        normal: `https://img.example/${encodeURIComponent(name)}.jpg`,
+        art_crop: `https://img.example/${encodeURIComponent(name)}-art.jpg`,
+      },
+    };
+  }
+
+  it("keys planar image data by oracle_id and name like any playable card", () => {
+    withTempDir((dir) => {
+      const input = path.join(dir, "oracle-cards.json");
+      const output = path.join(dir, "scryfall-data.json");
+      writeFileSync(
+        input,
+        JSON.stringify([
+          planarImagesFixture("Agyrem", agyremOracleId, "Plane — Ravnica"),
+          planarImagesFixture("Spatial Merging", mergingOracleId, "Phenomenon"),
+          {
+            oracle_id: "bolt",
+            layout: "normal",
+            name: "Lightning Bolt",
+            type_line: "Instant",
+            image_uris: {
+              normal: "https://img.example/bolt.jpg",
+              art_crop: "https://img.example/bolt-art.jpg",
+            },
+          },
+          {
+            oracle_id: "saproling",
+            layout: "token",
+            name: "Saproling",
+            type_line: "Token Creature — Saproling",
+            image_uris: {
+              normal: "https://img.example/saproling.jpg",
+              art_crop: "https://img.example/saproling-art.jpg",
+            },
+          },
+        ]),
+      );
+
+      execFileSync("bash", [path.join(REPO_ROOT, "scripts/gen-scryfall-images.sh")], {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          SCRYFALL_ORACLE_FILE: input,
+          SCRYFALL_IMAGES_OUTPUT: output,
+        },
+        stdio: "pipe",
+      });
+
+      const generated = JSON.parse(readFileSync(output, "utf8"));
+      for (const [oracleId, name] of [
+        [agyremOracleId, "Agyrem"],
+        [mergingOracleId, "Spatial Merging"],
+      ] as const) {
+        // Canonical path: the PlanechasePanel resolves by printed_ref.oracle_id.
+        expect(generated[oracleId].name).toBe(name);
+        expect(generated[oracleId].layout).toBe("planar");
+        expect(generated[oracleId].faces).toHaveLength(1);
+        expect(generated[oracleId].faces[0].orientation).toBe("portrait");
+        expect(generated[oracleId].faces[0].normal).toContain("https://img.example/");
+        // Legacy path: name-keyed like any playable card.
+        expect(generated[name.toLowerCase()]).toEqual(generated[oracleId]);
+      }
+      // The playable stream and the token prefix are undisturbed.
+      expect(generated["lightning bolt"].name).toBe("Lightning Bolt");
+      expect(generated.saproling).toBeUndefined();
+      expect(generated["token:saproling"].name).toBe("Saproling");
+    });
+  });
+
+  it("groups planar printings across sets newest-first", () => {
+    withTempDir((dir) => {
+      const input = path.join(dir, "default-cards.json");
+      const output = path.join(dir, "scryfall-printings.json");
+      const agyremImages = (tag: string) => ({
+        normal: `https://img.example/agyrem-${tag}.jpg`,
+        art_crop: `https://img.example/agyrem-${tag}-art.jpg`,
+      });
+      writeFileSync(
+        input,
+        JSON.stringify([
+          ...basicLandPrintingFixtures(),
+          {
+            id: "6caf8b21-1807-442c-a461-c89c7591df70",
+            oracle_id: agyremOracleId,
+            layout: "planar",
+            name: "Agyrem",
+            set: "opca",
+            set_name: "Planechase Anthology Planes",
+            collector_number: "11",
+            released_at: "2016-11-25",
+            border_color: "black",
+            full_art: false,
+            image_uris: agyremImages("opca"),
+          },
+          {
+            id: "3d03025d-a53e-4bd4-9f21-1249d0af5bc2",
+            oracle_id: agyremOracleId,
+            layout: "planar",
+            name: "Agyrem",
+            set: "ohop",
+            set_name: "Planechase Planes",
+            collector_number: "3",
+            released_at: "2009-09-04",
+            border_color: "black",
+            full_art: false,
+            image_uris: agyremImages("ohop"),
+          },
+          {
+            id: "bolt-printing",
+            oracle_id: "bolt",
+            layout: "normal",
+            name: "Lightning Bolt",
+            set: "lea",
+            set_name: "Limited Edition Alpha",
+            collector_number: "161",
+            released_at: "1993-08-05",
+            border_color: "black",
+            full_art: false,
+            image_uris: {
+              normal: "https://img.example/bolt.jpg",
+              art_crop: "https://img.example/bolt-art.jpg",
+            },
+          },
+          {
+            id: "saproling-printing",
+            oracle_id: "saproling",
+            layout: "token",
+            name: "Saproling",
+            set: "mmq",
+            set_name: "Mercadian Masques",
+            collector_number: "7",
+            released_at: "1999-10-04",
+            border_color: "black",
+            full_art: false,
+            image_uris: {
+              normal: "https://img.example/saproling.jpg",
+              art_crop: "https://img.example/saproling-art.jpg",
+            },
+          },
+        ]),
+      );
+
+      execFileSync("bash", [path.join(REPO_ROOT, "scripts/gen-scryfall-printings.sh")], {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          SCRYFALL_DEFAULT_CARDS_FILE: input,
+          SCRYFALL_PRINTINGS_OUTPUT: output,
+        },
+        stdio: "pipe",
+      });
+
+      const generated = JSON.parse(readFileSync(output, "utf8"));
+      expect(generated[agyremOracleId]).toHaveLength(2);
+      expect(generated[agyremOracleId][0].set).toBe("opca");
+      expect(generated[agyremOracleId][0].collector_number).toBe("11");
+      expect(generated[agyremOracleId][1].set).toBe("ohop");
+      // Single-artwork cards and tokens stay out of the printings map.
+      expect(generated.bolt).toBeUndefined();
+      expect(generated.saproling).toBeUndefined();
+    });
+  });
+});
 describe("fetchTokenImageUrl — ability-aware printing selection (issue #502)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

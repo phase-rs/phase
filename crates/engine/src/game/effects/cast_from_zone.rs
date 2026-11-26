@@ -3,7 +3,7 @@ use crate::types::ability::{
     graveyard_destination_rider, is_graveyard_exile_rider_subability, AbilityCondition,
     AbilityCost, CastPermissionConstraint, CastingPermission, Duration, Effect, EffectError,
     EffectKind, QuantityExpr, ResolvedAbility, SpellStackToGraveyardReplacement, TargetFilter,
-    TargetRef,
+    TargetRef, ThisWayCause,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -202,13 +202,31 @@ fn resolution_window_linked_batch_candidates(
     state: &GameState,
     source_id: ObjectId,
 ) -> Option<Vec<ObjectId>> {
-    let members = state
-        .chain_tracked_set_id
-        .and_then(|id| state.tracked_object_sets.get(&id))?;
+    let set_id = state.chain_tracked_set_id?;
+    let members = state.tracked_object_sets.get(&set_id)?;
     let linked = crate::game::players::linked_exile_cards_for_source(state, source_id);
+    let linked_ids: HashSet<ObjectId> = linked.iter().map(|link| link.exiled_id).collect();
+    // CR 608.2c: a current-resolution batch can be extended by a later
+    // instruction that publishes a different population into the same chain
+    // set. The action stamp identifies the cards exiled by this resolution;
+    // cleanup cards (for example, Portent of Calamity's revealed cards put
+    // into a graveyard) are not part of that cast window even though they share
+    // the chain set. An unannotated mixed set remains ambiguous and must fall
+    // through to the durable source-linked binding below.
+    let batch = if members.iter().all(|id| linked_ids.contains(id)) {
+        members.clone()
+    } else {
+        let causes = state.tracked_set_member_causes.get(&set_id)?;
+        let exiled_members: Vec<ObjectId> = members
+            .iter()
+            .copied()
+            .filter(|id| causes.get(id) == Some(&ThisWayCause::Exiled) && linked_ids.contains(id))
+            .collect();
+        exiled_members
+    };
     let mut seen = HashSet::new();
     Some(
-        members
+        batch
             .iter()
             .copied()
             .filter(|id| {
@@ -908,10 +926,33 @@ pub fn resolve(
         // seam and can span several player-scope publishes or follow a later
         // producer barrier, so it remains the stronger exact authority.
         if !exact_bound_batch {
-            if let Some(active_batch) =
-                resolution_window_linked_batch_candidates(state, ability.source_id)
-            {
-                target_ids = active_batch;
+            match resolution_window_linked_batch_candidates(state, ability.source_id) {
+                Some(active_batch) => {
+                    // CR 608.2c: an active producer owns even an empty batch;
+                    // do not reopen an earlier linked-exile ledger in that case.
+                    target_ids = active_batch;
+                }
+                None if matches!(
+                    driver,
+                    crate::types::ability::CastFromZoneDriver::ResolutionWindow {
+                        bounds: crate::types::ability::ResolutionCastWindow {
+                            pool: crate::types::ability::ResolutionCastPool::SourceLinked,
+                            ..
+                        }
+                    }
+                ) && target_ids.is_empty() =>
+                {
+                    // CR 607.2a + CR 608.2g: a source-anchored plural anaphor can
+                    // open a one-card resolution window over the source's durable
+                    // linked-exile ledger (Evercoat Ursine). Use that ledger only
+                    // when no current-resolution batch was published.
+                    if let ExiledBySourceBinding::LinkedExile(ids) =
+                        exiled_by_source_fallback_binding(state, ability, target_filter)
+                    {
+                        target_ids = ids;
+                    }
+                }
+                None => {}
             }
         }
     }

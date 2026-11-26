@@ -120,6 +120,7 @@ fn add_counter_count_replacement(
 
 fn squirrel_spec() -> TokenSpec {
     TokenSpec {
+        blocking_attacker: None,
         characteristics: TokenCharacteristics {
             display_name: "Squirrel".to_string(),
             power: Some(1),

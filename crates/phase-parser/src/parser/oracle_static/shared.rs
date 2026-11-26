@@ -1256,6 +1256,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::SourceIsBlocking
             | StaticCondition::SourceIsBlocked
             | StaticCondition::IsMonarch { .. }
+            | StaticCondition::IsDefendingPlayer { .. }
             | StaticCondition::HasBoon { .. }
             | StaticCondition::IsInitiative
             | StaticCondition::NoMonarch
@@ -1422,6 +1423,7 @@ fn prop_zone_truth(prop: &FilterProp, zone: Zone) -> SourceZoneTruth {
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType

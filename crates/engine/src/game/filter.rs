@@ -15,14 +15,14 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::keywords::HeldObject;
 use crate::game::quantity::{
     counter_count_from_map, quantity_expr_characteristic_reads_at, resolve_quantity,
-    resolve_quantity_with_ctx, resolve_quantity_with_targets, QuantityContext,
+    resolve_quantity_with_ctx, QuantityContext,
 };
 use crate::game::targeting::{DeclaredSlotBinding, SlotReferent};
 use crate::types::ability::{
     filter_contains, filter_grammar_any, filter_prop_grammar_any, player_filter_grammar_any,
     quantity_expr_grammar_any, quantity_ref_grammar_any, rewrite_filter_prop, rewrite_filter_props,
     rewrite_player_filter_props, rewrite_quantity_expr_filter_props, AbilityCondition,
-    AttachmentReferent, AttackerBlockStatus, BlockPairDirection, CardTypeSetSource,
+    AttachmentKind, AttachmentReferent, AttackerBlockStatus, BlockPairDirection, CardTypeSetSource,
     CastManaSpentMetric, ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject,
     ContinuousModification, ControllerRef, CountScope, CrewRelation, FilterGrammarNode, FilterProp,
     Parity, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
@@ -34,7 +34,8 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
-    AttackDeclarationRecord, CounterAddedRecord, DamageEventKey, DamageRecord, GameState,
+    battlefield_departure_source_context_from_record, AttackDeclarationRecord,
+    BattlefieldDepartureSourceContext, CounterAddedRecord, DamageEventKey, DamageRecord, GameState,
     LKISnapshot, SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggeringObjectRef};
@@ -302,6 +303,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
@@ -694,6 +696,7 @@ fn type_filter_characteristic_reads(tf: &TypeFilter) -> CharacteristicKinds {
         | TypeFilter::Kindred
         | TypeFilter::Permanent
         | TypeFilter::Card
+        | TypeFilter::Scheme
         | TypeFilter::Any => CharacteristicKinds::CARD_TYPES,
     }
 }
@@ -767,6 +770,8 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::Historic
         | FilterProp::NotHistoric
         | FilterProp::IsChosenCardType
+        // CR 205.2a: distinct core card-type count.
+        | FilterProp::CardTypeCount { .. }
         // CR 303.4 + CR 301.5: both read the attachment's subtype (Aura /
         // Equipment) to decide the relationship.
         | FilterProp::EnchantedBy
@@ -1153,6 +1158,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
@@ -1576,6 +1582,10 @@ pub struct FilterContext<'a> {
     /// source-relative filter fact must read through it rather than rebinding
     /// `source_id` to whichever object currently owns that storage slot.
     pub trigger_source: Option<&'a TriggerSourceContext>,
+    /// CR 603.2 + CR 400.7: selected stack-entry trigger provenance for a
+    /// retarget legality call. This is absent for ordinary callers, which keep
+    /// their existing ambient fallback.
+    pub stack_trigger_context: Option<crate::game::targeting::StackTriggerContext<'a>>,
     /// CR 613.4c: Per-recipient binding for dynamic P/T statics whose quantity
     /// is relative to the affected object ("attached to it", "other", "shares a
     /// type with it"). The pronoun "it" refers to the per-id recipient in
@@ -1589,12 +1599,13 @@ pub struct FilterContext<'a> {
     /// trigger whose intervening-`if` is being evaluated — the referent of
     /// "another" in a trigger-anaphoric filter ("another creature you control",
     /// where "another" means "other than the creature that just entered", not
-    /// "other than the ability source"). Bound only inside
-    /// `matches_zone_change_event_object_filter`, which is the one place holding
-    /// the `GameEvent::ZoneChanged` both CR 603.4 legs are handed; `None`
-    /// everywhere else, where `FilterProp::OtherThanTriggerObject` keeps its
-    /// transparent pass-through and the `ObjectCount` / `PropertyAggregate`
-    /// resolvers apply the exclusion at the set level instead.
+    /// "other than the ability source"). Bound inside
+    /// `matches_zone_change_event_object_filter` for trigger condition checks
+    /// and by triggered-ability target enumeration while the current event is
+    /// pushed; `None` everywhere else, where
+    /// `FilterProp::OtherThanTriggerObject` keeps its transparent pass-through
+    /// and the `ObjectCount` / `PropertyAggregate` resolvers apply the
+    /// exclusion at the set level instead.
     ///
     /// CR 400.7: carried as a `TriggeringObjectRef` (id + the incarnation the
     /// event proves) rather than a bare `ObjectId`, so a leave-and-re-enter at
@@ -1632,6 +1643,7 @@ impl<'a> FilterContext<'a> {
             source_controller: source.controller,
             ability: source.ability,
             trigger_source: source.trigger_source,
+            stack_trigger_context: source.stack_trigger_context,
             recipient_id: source.recipient_id,
             scoped_iteration_player: None,
             triggering_object: source.triggering_object,
@@ -1651,6 +1663,17 @@ impl<'a> FilterContext<'a> {
     ) -> FilterContext<'a> {
         FilterContext {
             declared_slot_view: Some(view),
+            ..*self
+        }
+    }
+
+    /// CR 603.2: bind the selected stack entry's event for one legality call.
+    pub(crate) fn with_stack_trigger_context(
+        &self,
+        context: crate::game::targeting::StackTriggerContext<'a>,
+    ) -> FilterContext<'a> {
+        FilterContext {
+            stack_trigger_context: Some(context),
             ..*self
         }
     }
@@ -1742,6 +1765,7 @@ impl<'a> FilterContext<'a> {
             ability: None,
             ability_targets: None,
             trigger_source: None,
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1765,6 +1789,7 @@ impl<'a> FilterContext<'a> {
             ability: None,
             ability_targets: None,
             trigger_source: None,
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1784,6 +1809,7 @@ impl<'a> FilterContext<'a> {
             ability: None,
             ability_targets: None,
             trigger_source: None,
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1803,6 +1829,7 @@ impl<'a> FilterContext<'a> {
             ability: None,
             ability_targets: None,
             trigger_source: Some(source),
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1825,6 +1852,7 @@ impl<'a> FilterContext<'a> {
             ability: None,
             ability_targets: None,
             trigger_source: Some(source),
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1849,6 +1877,7 @@ impl<'a> FilterContext<'a> {
             ability: None,
             ability_targets: None,
             trigger_source: None,
+            stack_trigger_context: None,
             recipient_id: Some(recipient_id),
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1868,6 +1897,7 @@ impl<'a> FilterContext<'a> {
             ability: Some(ability),
             ability_targets: None,
             trigger_source: ability.trigger_source.as_ref(),
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1889,6 +1919,7 @@ impl<'a> FilterContext<'a> {
             ability: Some(ability),
             ability_targets: None,
             trigger_source: ability.trigger_source.as_ref(),
+            stack_trigger_context: None,
             recipient_id: Some(recipient_id),
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1913,6 +1944,7 @@ impl<'a> FilterContext<'a> {
             ability: Some(ability),
             ability_targets: None,
             trigger_source: ability.trigger_source.as_ref(),
+            stack_trigger_context: None,
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
@@ -1956,13 +1988,11 @@ fn scoped_player_or_controller(
     source_controller: Option<PlayerId>,
     scoped_iteration_player: Option<PlayerId>,
 ) -> Option<PlayerId> {
-    // CR 109.5 + CR 120.3: `ControllerRef::ScopedPlayer` first uses an
-    // ability-scoped binding, then the per-player binding from
-    // DamageEachPlayer quantity resolution; `source_controller` remains the
-    // fallback for "you"/"your" when no scoped player is active.
-    ability
-        .and_then(|a| a.scoped_player)
-        .or(scoped_iteration_player)
+    // CR 109.5 + CR 120.3: damage quantities can explicitly bind
+    // `ControllerRef::ScopedPlayer` to the current recipient while "you"
+    // stays bound to the ability's controller.
+    scoped_iteration_player
+        .or_else(|| ability.and_then(|a| a.scoped_player))
         .or_else(|| crate::game::quantity::triggering_event_player(state))
         .or(source_controller)
 }
@@ -3123,6 +3153,7 @@ fn filter_prop_contains_input(
             | FilterProp::HasColor { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -3909,6 +3940,7 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -4498,6 +4530,7 @@ fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -4631,7 +4664,11 @@ pub(crate) fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> boo
             TypeFilter::AnyOf(inners) => {
                 !inners.is_empty() && inners.iter().all(type_implies_battlefield)
             }
-            TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card | TypeFilter::Any => false,
+            TypeFilter::Instant
+            | TypeFilter::Sorcery
+            | TypeFilter::Card
+            | TypeFilter::Scheme
+            | TypeFilter::Any => false,
         }
     }
     // CR 109.2: Descriptions that include the word "card" do not denote
@@ -4792,6 +4829,7 @@ pub(crate) fn matches_target_filter_on_entry_observation(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
@@ -5082,6 +5120,7 @@ pub fn matches_target_filter_including_phased_out(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOnly,
@@ -5241,6 +5280,19 @@ fn controller_ref_face_state(
     }
 }
 
+/// CR 205.2a: number of distinct card types in a `core_types` list — the single
+/// counting authority for `FilterProp::CardTypeCount` on every evaluation path
+/// (live object, spell record, zone-change record, face). Supertypes and
+/// subtypes live on other fields and never count; each `CoreType` value counts
+/// once no matter how many times it was granted.
+fn distinct_core_type_count(core_types: &[CoreType]) -> i32 {
+    let mut seen = HashSet::new();
+    for core_type in core_types {
+        seen.insert(*core_type);
+    }
+    i32::try_from(seen.len()).unwrap_or(i32::MAX)
+}
+
 /// CR 205 + CR 202: Evaluate one `FilterProp` against a bare `CardFace`.
 ///
 /// `Some(true)` / `Some(false)` = the property has a context-free reading and
@@ -5272,6 +5324,11 @@ pub fn context_free_prop_matches_face(face: &CardFace, prop: &FilterProp) -> Opt
         FilterProp::NotColor { color } => Some(!face_colors(face).contains(color)),
         FilterProp::ColorCount { comparator, count } => Some(comparator.evaluate(
             i32::try_from(face_colors(face).len()).unwrap_or(i32::MAX),
+            i32::from(*count),
+        )),
+        // CR 205.2a: printed card-type line.
+        FilterProp::CardTypeCount { comparator, count } => Some(comparator.evaluate(
+            distinct_core_type_count(&face.card_type.core_types),
             i32::from(*count),
         )),
         // CR 702: printed keyword line. The keyword authorities in
@@ -5372,6 +5429,8 @@ pub fn matches_type_filter_against_face(face: &CardFace, filter: &TypeFilter) ->
         TypeFilter::Battle => face.card_type.core_types.contains(&CoreType::Battle),
         // CR 308.1: Kindred card-type check.
         TypeFilter::Kindred => face.card_type.core_types.contains(&CoreType::Kindred),
+        // CR 314.1: Scheme card-type check.
+        TypeFilter::Scheme => face.card_type.core_types.contains(&CoreType::Scheme),
         TypeFilter::Permanent => face
             .card_type
             .core_types
@@ -5423,6 +5482,7 @@ pub fn matches_target_filter_in_owner_zone(
             ctx.recipient_id,
             ctx.scoped_iteration_player,
             ctx.triggering_object,
+            ctx.stack_trigger_context,
             ctx.declared_slot_view,
             ctx.granting_object,
             ControllerLookup::OwnerZone,
@@ -5445,6 +5505,7 @@ pub fn matches_target_filter_in_owner_zone(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::OwnerZone,
@@ -5999,6 +6060,39 @@ impl BattlefieldEntrantProjection {
         pre_entry: Cow<'_, GameState>,
         body: &GameObject,
     ) -> Option<Self> {
+        Self::from_no_zone_on_pre_entry_board(pre_entry, body, true)
+    }
+
+    pub(crate) fn for_outside_game_card(state: &GameState, event: &ProposedEvent) -> Option<Self> {
+        let ProposedEvent::OutsideGameCardEntry {
+            entry_ref,
+            destination: Zone::Battlefield,
+            enter_tapped,
+            enter_with_choices,
+            controller_override,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        let entry = state.outside_game_card_entry(*entry_ref)?;
+        let mut body = entry.object.projected().clone();
+        body.controller = controller_override.unwrap_or(entry.controller);
+        body.tapped = enter_tapped.resolve(false);
+        body.timestamp = state.next_timestamp;
+        body.chosen_attributes.extend(
+            crate::types::proposed_event::EntryChoices::of(enter_with_choices)
+                .iter()
+                .cloned(),
+        );
+        Self::from_no_zone_on_pre_entry_board(Cow::Borrowed(state), &body, false)
+    }
+
+    fn from_no_zone_on_pre_entry_board(
+        pre_entry: Cow<'_, GameState>,
+        body: &GameObject,
+        token: bool,
+    ) -> Option<Self> {
         let mut placed = body.clone();
         placed.phase_status = crate::game::game_object::PhaseStatus::PhasedIn;
         if placed.zone != Zone::Battlefield {
@@ -6007,22 +6101,27 @@ impl BattlefieldEntrantProjection {
         let entrant = placed.id;
         let pins = crate::game::layers::EntryPopulationRewrites::for_token(&pre_entry, &placed);
         #[cfg(any(test, feature = "test-support"))]
-        TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
-            let mut counts = work.get();
-            counts.projections += 1;
-            counts.projection_state_clones += usize::from(matches!(pre_entry, Cow::Borrowed(_)));
-            work.set(counts);
-        });
+        if token {
+            TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.projections += 1;
+                counts.projection_state_clones +=
+                    usize::from(matches!(pre_entry, Cow::Borrowed(_)));
+                work.set(counts);
+            });
+        }
         let mut scratch = pre_entry.into_owned();
         scratch.liminal_entries.remove(&entrant);
         if scratch.battlefield.contains(&entrant) {
             scratch.objects.insert(entrant, placed);
-        } else {
+        } else if token {
             crate::game::effects::token::place_liminal_token_on_battlefield(
                 &mut scratch,
                 entrant,
                 placed,
             );
+        } else {
+            crate::game::zones::place_new_object(&mut scratch, placed);
         }
         pins.apply(&mut scratch);
         Some(Self::finish(scratch, None, entrant, None))
@@ -6498,6 +6597,7 @@ pub(crate) fn matches_target_filter_on_object(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
@@ -6543,6 +6643,7 @@ fn entry_filter_matches_staged(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
@@ -6624,6 +6725,10 @@ pub fn matches_target_filter_on_battlefield_entry(
     ctx: &FilterContext<'_>,
 ) -> bool {
     match event {
+        ProposedEvent::OutsideGameCardEntry { .. } => {
+            BattlefieldEntrantProjection::for_outside_game_card(state, event)
+                .is_some_and(|projection| projection.matches(filter, ctx))
+        }
         ProposedEvent::ZoneChange {
             object_id,
             to,
@@ -6668,6 +6773,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.recipient_id,
                     ctx.scoped_iteration_player,
                     ctx.triggering_object,
+                    ctx.stack_trigger_context,
                     ctx.declared_slot_view,
                     ctx.granting_object,
                     ControllerLookup::LiveOrLki,
@@ -6740,6 +6846,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.recipient_id,
                     ctx.scoped_iteration_player,
                     ctx.triggering_object,
+                    ctx.stack_trigger_context,
                     ctx.declared_slot_view,
                     ctx.granting_object,
                     ControllerLookup::LiveOrLki,
@@ -6767,6 +6874,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 ctx.recipient_id,
                 ctx.scoped_iteration_player,
                 ctx.triggering_object,
+                ctx.stack_trigger_context,
                 ctx.declared_slot_view,
                 ctx.granting_object,
                 ControllerLookup::LiveOrLki,
@@ -6845,6 +6953,7 @@ pub fn matches_target_filter_on_counter_added_record(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
@@ -6895,6 +7004,7 @@ pub fn matches_target_filter_on_attack_declaration_record(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
@@ -6978,6 +7088,7 @@ pub fn matches_target_filter_on_damage_record_source(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
@@ -7350,6 +7461,7 @@ pub(crate) fn matches_target_filter_on_event_snapshot(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOnly,
@@ -7535,6 +7647,7 @@ fn filter_inner_with_lookup(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.stack_trigger_context,
         ctx.declared_slot_view,
         ctx.granting_object,
         controller_lookup,
@@ -7556,6 +7669,7 @@ fn filter_inner_for_object(
     recipient_id: Option<ObjectId>,
     scoped_iteration_player: Option<PlayerId>,
     triggering_object: Option<TriggeringObjectRef>,
+    stack_trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
     declared_slot_view: Option<&[Option<crate::game::targeting::DeclaredSlotBinding>]>,
     granting_object: Option<ObjectIncarnationRef>,
     controller_lookup: ControllerLookup,
@@ -7849,6 +7963,7 @@ fn filter_inner_for_object(
             );
             source_ctx.declared_slot_view = declared_slot_view;
             source_ctx.ability_targets = ability_targets;
+            source_ctx.stack_trigger_context = stack_trigger_context;
             properties.iter().all(|p| match p {
                 FilterProp::Owned { controller } => {
                     zone_axis_admits(state, licensed, obj.owner, |owner| {
@@ -7870,6 +7985,7 @@ fn filter_inner_for_object(
             recipient_id,
             scoped_iteration_player,
             triggering_object,
+            stack_trigger_context,
             declared_slot_view,
             granting_object,
             controller_lookup,
@@ -7889,6 +8005,7 @@ fn filter_inner_for_object(
                 recipient_id,
                 scoped_iteration_player,
                 triggering_object,
+                stack_trigger_context,
                 declared_slot_view,
                 granting_object,
                 controller_lookup,
@@ -7909,6 +8026,7 @@ fn filter_inner_for_object(
                 recipient_id,
                 scoped_iteration_player,
                 triggering_object,
+                stack_trigger_context,
                 declared_slot_view,
                 granting_object,
                 controller_lookup,
@@ -7932,6 +8050,7 @@ fn filter_inner_for_object(
                     recipient_id,
                     scoped_iteration_player,
                     triggering_object,
+                    stack_trigger_context,
                     declared_slot_view,
                     granting_object,
                     pre_entry_battlefield: None,
@@ -8156,6 +8275,7 @@ fn filter_inner_for_object(
                     recipient_id,
                     scoped_iteration_player,
                     triggering_object,
+                    stack_trigger_context,
                     declared_slot_view,
                     granting_object,
                     controller_lookup,
@@ -8346,6 +8466,7 @@ fn filter_inner_for_object(
                 recipient_id,
                 scoped_iteration_player,
                 triggering_object,
+                stack_trigger_context,
                 declared_slot_view,
                 granting_object,
                 pre_entry_battlefield: None,
@@ -8972,6 +9093,7 @@ pub fn type_filter_matches(
             | TypeFilter::Planeswalker
             | TypeFilter::Battle
             | TypeFilter::Kindred
+            | TypeFilter::Scheme
             | TypeFilter::Permanent
             | TypeFilter::Subtype(_) => false,
         };
@@ -8991,6 +9113,8 @@ pub fn type_filter_matches(
         TypeFilter::Battle => obj.card_types.core_types.contains(&CoreType::Battle),
         // CR 308.1: Kindred type check.
         TypeFilter::Kindred => obj.card_types.core_types.contains(&CoreType::Kindred),
+        // CR 314.1: Scheme type check.
+        TypeFilter::Scheme => obj.card_types.core_types.contains(&CoreType::Scheme),
         // CR 403.3: Permanents exist only on the battlefield — creatures, artifacts, enchantments, lands, planeswalkers, battles.
         TypeFilter::Permanent => {
             obj.card_types.core_types.contains(&CoreType::Creature)
@@ -9037,6 +9161,8 @@ fn zone_change_record_matches_type_filter(
         TypeFilter::Battle => record.core_types.contains(&CoreType::Battle),
         // CR 308.1: Kindred type check.
         TypeFilter::Kindred => record.core_types.contains(&CoreType::Kindred),
+        // CR 314.1: Scheme type check.
+        TypeFilter::Scheme => record.core_types.contains(&CoreType::Scheme),
         TypeFilter::Permanent => {
             record.core_types.contains(&CoreType::Creature)
                 || record.core_types.contains(&CoreType::Artifact)
@@ -9673,6 +9799,7 @@ pub(super) fn filter_reads_pt(filter: &TargetFilter) -> bool {
             | FilterProp::HasColor { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -10006,6 +10133,8 @@ fn spell_record_matches_type_filter(
         TypeFilter::Battle => record.core_types.contains(&CoreType::Battle),
         // CR 308.1: Kindred type check.
         TypeFilter::Kindred => record.core_types.contains(&CoreType::Kindred),
+        // CR 314.1: Scheme type check.
+        TypeFilter::Scheme => record.core_types.contains(&CoreType::Scheme),
         TypeFilter::Permanent => {
             record.core_types.contains(&CoreType::Creature)
                 || record.core_types.contains(&CoreType::Artifact)
@@ -10063,6 +10192,13 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::NotHistoric => !spell_record_matches_property(record, &FilterProp::Historic),
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(record.colors.len() as i32, i32::from(*count))
+        }
+        // CR 205.2a: distinct card types on the cast-time record.
+        FilterProp::CardTypeCount { comparator, count } => {
+            comparator.evaluate(
+                distinct_core_type_count(&record.core_types),
+                i32::from(*count),
+            )
         }
         FilterProp::Cmc { comparator, value } => match value {
             QuantityExpr::Fixed { value: v } => comparator.evaluate(record.mana_value as i32, *v),
@@ -10273,6 +10409,9 @@ pub(crate) struct SourceContext<'a> {
     /// projection so nested filter evaluation cannot rebind a recycled id.
     pub(crate) lki: LKISnapshot,
     pub(crate) trigger_source: Option<&'a TriggerSourceContext>,
+    /// CR 603.2 + CR 400.7: selected stack-entry trigger provenance carried
+    /// into dynamic quantity thresholds.
+    pub(crate) stack_trigger_context: Option<crate::game::targeting::StackTriggerContext<'a>>,
     /// CR 303.4 + CR 301.5: Resolved host of the source's attachment, if any.
     /// Widened to `AttachTarget` so attachment-aware filter properties
     /// (`EnchantedBy`, `EquippedBy`) can route on Object vs Player. The
@@ -10336,9 +10475,11 @@ impl<'a> SourceContext<'a> {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             trigger_source: None,
+            stack_trigger_context: None,
             attached_to: None,
             source_is_aura: false,
             source_is_equipment: false,
@@ -10573,6 +10714,7 @@ fn source_context_from_filter<'a>(
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             });
         (
@@ -10598,6 +10740,7 @@ fn source_context_from_filter<'a>(
         declared_slot_view: None,
         lki: lki.clone(),
         trigger_source,
+        stack_trigger_context: None,
         attached_to,
         source_is_aura,
         source_is_equipment,
@@ -11093,6 +11236,7 @@ fn aura_can_enchant_referenced_target(
                 triggering_object: source.triggering_object,
                 declared_slot_view: source.declared_slot_view,
                 granting_object: source.granting_object,
+                stack_trigger_context: source.stack_trigger_context,
                 pre_entry_battlefield: None,
             };
             filter_inner(state, *target_id, enchant_filter, &ctx)
@@ -11118,12 +11262,18 @@ fn resolve_filter_threshold(
     source: &SourceContext<'_>,
 ) -> i32 {
     match source.ability {
-        Some(ability) => resolve_quantity_with_targets(state, expr, ability),
+        Some(ability) => crate::game::quantity::resolve_quantity_with_targets_and_trigger_context(
+            state,
+            expr,
+            ability,
+            source.stack_trigger_context,
+        ),
         None => resolve_quantity_with_ctx(
             state,
             expr,
             source.controller.unwrap_or(PlayerId(0)),
             QuantityContext {
+                stack_trigger_context: source.stack_trigger_context,
                 granting_object: source.granting_object,
                 ..QuantityContext::new(source.id)
             },
@@ -11591,12 +11741,20 @@ fn matches_filter_prop(
             }
             !obj.kickers_paid.is_empty()
         }
-        // CR 605.1: Delegate to the single mana-ability classifier instead of
-        // duplicating the definition at the filter layer.
-        FilterProp::HasManaAbility => obj
-            .abilities
-            .iter()
-            .any(crate::game::mana_abilities::is_mana_ability),
+        // CR 605.1: both mana-ability categories — an activated one (CR 605.1a,
+        // via the single activated classifier) or a triggered one (CR 605.1b,
+        // via the static definition classifier over the live trigger list).
+        // Both arms read live lists, so granted abilities count (R-PS3).
+        FilterProp::HasManaAbility => {
+            obj.abilities
+                .iter()
+                .any(crate::game::mana_abilities::is_mana_ability)
+                || obj.trigger_definitions.iter_all().any(|entry| {
+                    crate::game::mana_abilities::is_triggered_mana_ability_definition(
+                        &entry.definition,
+                    )
+                })
+        }
         // CR 113.1 + CR 113.3: "no abilities" means no keyword abilities and
         // no activated, triggered, replacement, or static abilities.
         FilterProp::HasNoAbilities => object_has_no_abilities(obj),
@@ -11954,6 +12112,11 @@ fn matches_filter_prop(
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(obj.effective_colors().len() as i32, i32::from(*count))
         }
+        // CR 205.2a: distinct card types of the candidate object.
+        FilterProp::CardTypeCount { comparator, count } => comparator.evaluate(
+            distinct_core_type_count(&obj.card_types.core_types),
+            i32::from(*count),
+        ),
         FilterProp::HasSupertype { value } => obj.card_types.supertypes.contains(value),
         // CR 202.2 + CR 709.4b: Object does NOT have this color (combined colors
         // off the stack for a split card).
@@ -12037,17 +12200,14 @@ fn matches_filter_prop(
         FilterProp::Modified => {
             let has_counter = obj.counters.values().any(|&n| n > 0);
             let has_qualifying_attachment = phased_in_attachments(state, obj).any(|att| {
-                let is_equipment = att.card_types.subtypes.iter().any(|s| s == "Equipment");
-                if is_equipment {
-                    // CR 301.5: Equipment attachment alone is sufficient — no
-                    // controller constraint (a creature equipped by anyone's
-                    // Equipment is modified).
-                    return true;
-                }
-                let is_aura = att.card_types.subtypes.iter().any(|s| s == "Aura");
-                // CR 303.4: Aura counts only if controlled by the permanent's
-                // controller.
-                is_aura && att.controller == obj.controller
+                let kind = if att.card_types.subtypes.iter().any(|s| s == "Equipment") {
+                    AttachmentKind::Equipment
+                } else if att.card_types.subtypes.iter().any(|s| s == "Aura") {
+                    AttachmentKind::Aura
+                } else {
+                    return false;
+                };
+                attachment_modifies_permanent(&kind, att.controller, obj.controller)
             });
             has_counter || has_qualifying_attachment
         }
@@ -12525,18 +12685,18 @@ pub(crate) fn spell_has_chosen_name(spell: &GameObject, fused: bool, chosen: &st
 
 /// CR 603.10: Evaluate a `FilterProp` against a zone-change event snapshot.
 ///
-/// Properties fall into four groups:
+/// Properties fall into five groups:
 /// 1. **Snapshot-derivable.** Read directly from the captured record — P/T, colors, CMC,
-///    keywords, supertypes, types, owner/controller, name.
+///    keywords, supertypes, types, owner/controller, name, and departure-time
+///    modification (`Modified`).
 /// 2. **Source/event relational.** Compare the record against the source object or its
 ///    chosen attributes — `Another`, `Owned`, `IsChosenCreatureType`, `Named`,
 ///    `SharesQuality` (`None` and direct-`ParentTarget` references only).
 /// 3. **Combat snapshot state.** Attacking/blocking/unblocked predicates read
 ///    `ZoneChangeRecord::combat_status`, because leaving a zone removes the
 ///    object from live combat.
-/// 4. **Dynamic battlefield state.** Inherently requires the live object (tapped,
-///    counters, attached-to). A zone-change subject has already left its public
-///    zone, so these are semantically not applicable and return `false`.
+/// 4. **Exit-time LKI cache.** `Counters`, `Tapped`, and `Untapped` read the
+///    cached state for the record's object ID.
 /// 5. **Not-yet-supported.** Could plausibly be snapshotted or cross-referenced but
 ///    are not currently required. Returning `false` is a known conservative gap.
 fn zone_change_record_matches_property(
@@ -12620,6 +12780,13 @@ fn zone_change_record_matches_property(
         FilterProp::NotColor { color } => !record.colors.contains(color),
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(record.colors.len() as i32, i32::from(*count))
+        }
+        // CR 205.2a: distinct card types on the zone-change snapshot.
+        FilterProp::CardTypeCount { comparator, count } => {
+            comparator.evaluate(
+                distinct_core_type_count(&record.core_types),
+                i32::from(*count),
+            )
         }
         // CR 208.1 / CR 107.2: `toughness > power` comparison on the snapshot.
         FilterProp::ToughnessGTPower => record.toughness.unwrap_or(0) > record.power.unwrap_or(0),
@@ -12987,6 +13154,29 @@ fn zone_change_record_matches_property(
                     .contains(&record.object_id)
         }
 
+        // CR 700.9 + CR 603.10a: The attachment check reads `record.attachments`,
+        // which `zones::capture_attachment_snapshot` fills per moved object.
+        // Attachments that left earlier in the same batch are missing here,
+        // as they are for `EnchantedBy` and `EquippedBy`.
+        // An attachment that is both an Aura and an Equipment is recorded with one kind.
+        FilterProp::Modified => {
+            // The context authority also rejects records from zones other than the battlefield.
+            let has_counter = match battlefield_departure_source_context_from_record(record) {
+                BattlefieldDepartureSourceContext::Present(context) => {
+                    context.lki.counters.values().any(|&count| count > 0)
+                }
+                BattlefieldDepartureSourceContext::Absent => false,
+                BattlefieldDepartureSourceContext::Malformed => return false,
+            };
+            has_counter
+                || record.attachments.iter().any(|attachment| {
+                    attachment_modifies_permanent(
+                        &attachment.kind,
+                        attachment.controller,
+                        record.controller,
+                    )
+                })
+        }
         // CR 603.10a + CR 704.5n: the departure record captures the attachment
         // relation at the instant before the zone change, so an "equipped" /
         // "enchanted" look-back reads THAT snapshot — the live object has already
@@ -13080,9 +13270,6 @@ fn zone_change_record_matches_property(
         // CR 701.15b/c: goad is not snapshotted onto the zone-change record
         // (unlike Suspected's `record.is_suspected`). Fail closed.
         | FilterProp::Goaded
-        // CR 700.9: Modified is a live-battlefield predicate (counters +
-        // attachments) — a zone-change snapshot cannot represent it.
-        | FilterProp::Modified
         | FilterProp::DifferentNameFrom { .. }
         // CR 109.1: identity-exclusion is a live-battlefield predicate; a
         // zone-change snapshot cannot represent it. Fail closed.
@@ -13147,6 +13334,19 @@ pub(crate) fn phased_in_attachments<'a>(
         .iter()
         .filter_map(|id| state.objects.get(id))
         .filter(|att| !att.is_phased_out())
+}
+
+/// CR 700.9: Equipment qualifies under any controller (CR 301.5).
+/// An Aura qualifies only under the attached permanent's controller (CR 303.4).
+fn attachment_modifies_permanent(
+    kind: &AttachmentKind,
+    attachment_controller: PlayerId,
+    permanent_controller: PlayerId,
+) -> bool {
+    match kind {
+        AttachmentKind::Equipment => true,
+        AttachmentKind::Aura => attachment_controller == permanent_controller,
+    }
 }
 
 fn attachment_controller_matches(
@@ -13572,6 +13772,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         });
     SourceContext {
@@ -13583,6 +13784,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
         triggering_object: None,
         declared_slot_view: None,
         trigger_source: None,
+        stack_trigger_context: None,
         attached_to: source_obj.and_then(|o| o.attached_to),
         source_is_aura: source_obj
             .is_some_and(|o| source_is_aura_or_bestow(&o.card_types.subtypes, &o.keywords)),
@@ -13777,6 +13979,7 @@ fn object_shares_quality_with_reference_filter(
         triggering_object: source.triggering_object,
         declared_slot_view: source.declared_slot_view,
         granting_object: source.granting_object,
+        stack_trigger_context: source.stack_trigger_context,
         pre_entry_battlefield: None,
     };
     // CR 109.2 + CR 205.3m: resolve a bare descriptive reference such as "a
@@ -17946,6 +18149,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -18322,7 +18526,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],
@@ -18436,7 +18640,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],
@@ -22599,6 +22803,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             incarnation: departed.objects[&gone].incarnation,
@@ -26209,6 +26414,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
         let filter =
@@ -26259,6 +26465,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
         let entrant = ObjectId(700);
@@ -26399,6 +26606,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
         let filter =
@@ -26547,6 +26755,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
 
@@ -26887,6 +27096,97 @@ mod tests {
             PlayerId(0),
             &[],
         ));
+    }
+
+    #[test]
+    fn modified_look_back_reads_the_departure_record() {
+        use crate::types::counter::CounterType;
+
+        let mut state = setup();
+        let id = add_creature(&mut state, PlayerId(0), "Grizzly Bears");
+        let equipment = AttachmentSnapshot {
+            object_id: ObjectId(100),
+            identity: None,
+            controller: PlayerId(1),
+            kind: AttachmentKind::Equipment,
+        };
+        let from_hand = ZoneChangeRecord {
+            attachments: vec![equipment.clone()],
+            ..ZoneChangeRecord::test_minimal(id, Some(Zone::Hand), Zone::Graveyard)
+        };
+        let absent = ZoneChangeRecord::test_minimal(id, Some(Zone::Battlefield), Zone::Graveyard);
+        let empty = ZoneChangeRecord {
+            trigger_source_context: state.objects[&id]
+                .snapshot_for_zone_change(id, Some(Zone::Battlefield), Zone::Graveyard)
+                .trigger_source_context,
+            ..absent.clone()
+        };
+        let mut counted = empty.clone();
+        counted
+            .trigger_source_context
+            .as_mut()
+            .unwrap()
+            .lki
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        let malformed = ZoneChangeRecord {
+            object_id: ObjectId(101),
+            ..counted.clone()
+        };
+        let malformed_equipped = ZoneChangeRecord {
+            object_id: malformed.object_id,
+            attachments: vec![equipment],
+            ..empty.clone()
+        };
+        let mut mismatches = Vec::new();
+        // CR 700.9 + CR 603.10a: Read the modification of the departing permanent
+        // from its own record, even if a later departure has overwritten the cache.
+        for (case, record, cached, expected) in [
+            ("a: from hand", &from_hand, &empty, false),
+            ("b: record has counters", &counted, &empty, true),
+            ("c: only cache has counters", &empty, &counted, false),
+            ("d: absent context", &absent, &counted, false),
+            (
+                "e: malformed context with counters",
+                &malformed,
+                &empty,
+                false,
+            ),
+            (
+                "f: malformed context with Equipment",
+                &malformed_equipped,
+                &empty,
+                false,
+            ),
+        ] {
+            state.lki_cache.insert(
+                record.object_id,
+                cached.trigger_source_context().unwrap().lki.clone(),
+            );
+            let source_ctx = source_context_from_filter(
+                &state,
+                id,
+                Some(PlayerId(0)),
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            let actual = zone_change_record_matches_property(
+                &FilterProp::Modified,
+                &state,
+                record,
+                &source_ctx,
+            );
+            if actual != expected {
+                mismatches.push(case);
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "mismatched Modified cases: {mismatches:?}"
+        );
     }
 
     /// CR 111.1: `FilterProp::Token` on a zone-change snapshot must read the
@@ -27544,6 +27844,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
         let land_lki = LKISnapshot {
@@ -27567,6 +27868,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
 
@@ -27685,6 +27987,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
         let filter = TargetFilter::Typed(
@@ -27830,6 +28133,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -27903,6 +28207,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -28942,6 +29247,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::PtComparison { .. }
             | FilterProp::PowerGTSource
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::IsChosenCreatureType
@@ -30696,8 +31002,10 @@ mod entry_projection_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         let record = |proposed: ProposedEvent| PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed,
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
@@ -31351,6 +31659,7 @@ mod attached_set_host_filter_tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         }
     }
@@ -31562,6 +31871,7 @@ mod attached_set_host_filter_tests {
                     controller: PlayerId(1),
                     kind: crate::types::ability::AttachmentKind::Aura,
                 }],
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );

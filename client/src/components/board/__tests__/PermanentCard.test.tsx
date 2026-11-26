@@ -403,7 +403,7 @@ describe("PermanentCard", () => {
     renderPermanent();
 
     const badge = screen.getByLabelText("Can't be blocked");
-    fireEvent.pointerEnter(badge.closest(".group")!);
+    fireEvent.pointerMove(badge.closest(".group")!, { pointerType: "mouse" });
 
     expect(screen.getByRole("tooltip")).toBeVisible();
     expect(screen.getByRole("tooltip")).toHaveTextContent(

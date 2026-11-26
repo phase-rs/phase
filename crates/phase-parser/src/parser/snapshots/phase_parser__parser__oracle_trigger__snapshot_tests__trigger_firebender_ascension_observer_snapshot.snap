@@ -1,0 +1,98 @@
+---
+source: crates/phase-parser/src/parser/oracle_trigger_snapshot_tests.rs
+assertion_line: 1427
+expression: def
+---
+{
+  "mode": {
+    "AbilityTriggered": {
+      "cause": "CreatureAttacking",
+      "source": "CausingObject"
+    }
+  },
+  "execute": {
+    "kind": "Spell",
+    "effect": {
+      "type": "PutCounter",
+      "counter_type": "quest",
+      "count": {
+        "type": "Fixed",
+        "value": 1
+      },
+      "target": {
+        "type": "SelfRef"
+      }
+    },
+    "cost": null,
+    "sub_ability": {
+      "kind": "Spell",
+      "effect": {
+        "type": "CopySpell",
+        "target": {
+          "type": "ParentTarget"
+        },
+        "retarget": {
+          "type": "MayChooseNewTargets"
+        },
+        "starting_loyalty_from_casualty_sacrifice": false
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": null,
+      "target_prompt": null,
+      "condition": {
+        "type": "QuantityCheck",
+        "lhs": {
+          "type": "Ref",
+          "qty": {
+            "type": "CountersOn",
+            "scope": {
+              "type": "Source"
+            },
+            "counter_type": "quest"
+          }
+        },
+        "comparator": "GE",
+        "rhs": {
+          "type": "Fixed",
+          "value": 4
+        }
+      },
+      "optional_targeting": false,
+      "optional": true,
+      "forward_result": false,
+      "sub_link": "SequentialSibling"
+    },
+    "duration": null,
+    "description": null,
+    "target_prompt": null,
+    "condition": null,
+    "optional_targeting": false,
+    "optional": false,
+    "forward_result": false
+  },
+  "valid_card": {
+    "type": "Typed",
+    "type_filters": [
+      "Creature"
+    ],
+    "controller": "You",
+    "properties": []
+  },
+  "origin": null,
+  "destination": null,
+  "trigger_zones": [
+    "Battlefield"
+  ],
+  "phase": null,
+  "optional": false,
+  "damage_kind": "Any",
+  "secondary": false,
+  "valid_target": null,
+  "valid_source": null,
+  "description": "Whenever a creature you control attacking causes a triggered ability of that creature to trigger, put a quest counter on this enchantment. Then if it has four or more quest counters on it, you may copy that ability. You may choose new targets for the copy.",
+  "constraint": null,
+  "condition": null,
+  "batched": false
+}

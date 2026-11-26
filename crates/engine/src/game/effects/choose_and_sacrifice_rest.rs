@@ -59,15 +59,14 @@ pub fn resolve(
     // nomination. No other keeper mode has a nomination step to place it in, and the
     // parser's head gate cannot produce the combination. Refuse loudly rather than
     // resolve with the printed instruction silently dropped. Placed ABOVE the
-    // `KeeperConstraint::ExactCount` early return below: every other mode is reachable
+    // `KeeperConstraint::Count` early return below: every other mode is reachable
     // only below BOTH early returns -- total_power_cap returns first, so a guard
     // sited between the two would miss it.
     if keeper_counter.is_some()
-        && !matches!(keeper_constraint, Some(KeeperConstraint::ExactCount { .. }))
+        && !matches!(keeper_constraint, Some(KeeperConstraint::Count { .. }))
     {
         return Err(EffectError::InvalidParam(
-            "ChooseAndSacrificeRest: keeper_counter requires KeeperConstraint::ExactCount"
-                .to_string(),
+            "ChooseAndSacrificeRest: keeper_counter requires KeeperConstraint::Count".to_string(),
         ));
     }
 
@@ -122,15 +121,18 @@ pub fn resolve(
         );
     }
 
-    // CR 101.4 + CR 701.21a: exact-cardinality keeper mode. This is a
-    // separate constraint from the legacy category and total-power modes: a
-    // player protects exactly N eligible permanents, then the reusable
-    // player-scope sacrifice queue moves every unprotected permanent after all
-    // APNAP choices are known.
-    if let Some(KeeperConstraint::ExactCount { count }) = keeper_constraint {
+    // CR 101.4 + CR 701.21a: keeper-cardinality mode, exact or "up to". This
+    // is a separate constraint from the legacy category and total-power modes:
+    // a player protects exactly N (or, for "up to N", any number from zero to
+    // N) eligible permanents, then the reusable player-scope sacrifice queue
+    // moves every unprotected permanent after all APNAP choices are known.
+    if let Some(KeeperConstraint::Count { count }) = keeper_constraint {
+        let (max_expr, up_to) = count.peel_up_to();
+        // CR 608.2h: resolved once, when the effect is applied.
         let keep_count =
-            crate::game::quantity::resolve_quantity_with_targets(state, &count, ability).max(0)
+            crate::game::quantity::resolve_quantity_with_targets(state, max_expr, ability).max(0)
                 as usize;
+        let minimum_count = up_to.then_some(0);
         // CR 608.2h: the printed count is resolved once, here, at the same
         // point the keeper cardinality itself resolves.
         let keeper_counter = keeper_counter.map(|mark| {
@@ -139,7 +141,7 @@ pub fn resolve(
                     .max(0) as u32;
             (mark.counter_type, count)
         });
-        return step_exact_count(
+        return step_keeper_count(
             state,
             ability.source_id,
             ability.controller,
@@ -149,6 +151,7 @@ pub fn resolve(
             &choose_filter,
             &sacrifice_filter,
             keep_count,
+            minimum_count,
             keeper_counter.as_ref(),
             &player_order,
             events,
@@ -177,7 +180,7 @@ pub fn resolve(
     // If all categories are empty for all players, skip directly to sacrifice.
     if eligible.iter().all(|e| e.is_empty()) && remaining_players.is_empty() {
         // Category mode has no nomination step to carry a keeper mark in — the
-        // `resolve` guard above refuses `keeper_counter` outside `ExactCount`.
+        // `resolve` guard above refuses `keeper_counter` outside `Count`.
         sacrifice_unchosen(
             state,
             &[],
@@ -342,7 +345,7 @@ pub(crate) fn step_total_power(
 ) -> Result<(), EffectError> {
     let Some((&current_player, rest)) = players_remaining.split_first() else {
         // Total-power mode has no nomination step to carry a keeper mark in —
-        // the `resolve` guard above refuses `keeper_counter` outside `ExactCount`.
+        // the `resolve` guard above refuses `keeper_counter` outside `Count`.
         sacrifice_unchosen(
             state,
             &all_kept,
@@ -413,11 +416,13 @@ pub(crate) fn step_total_power(
     Ok(())
 }
 
-/// CR 101.4 + CR 701.21a: Process the next exact-keeper choice. Every player
-/// chooses before any unchosen permanent is sacrificed; the terminal action is
-/// delegated to the reusable replacement-safe scope-sacrifice executor.
+/// CR 101.4 + CR 701.21a: Process the next exact or up-to keeper choice. Every
+/// player chooses before any unchosen permanent is sacrificed; the terminal
+/// action is delegated to the reusable replacement-safe scope-sacrifice
+/// executor. `minimum_count == None` is an exact keeper; `Some(min)` lets the
+/// seat keep any number in `min..=count`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn step_exact_count(
+pub(crate) fn step_keeper_count(
     state: &mut GameState,
     source_id: ObjectId,
     source_controller: PlayerId,
@@ -427,6 +432,7 @@ pub(crate) fn step_exact_count(
     choose_filter: &TargetFilter,
     sacrifice_filter: &TargetFilter,
     count: usize,
+    minimum_count: Option<usize>,
     keeper_counter: Option<&(CounterType, u32)>,
     scoped_players: &[PlayerId],
     events: &mut Vec<GameEvent>,
@@ -447,10 +453,14 @@ pub(crate) fn step_exact_count(
 
     let filter_ctx = FilterContext::from_source_with_controller(source_id, source_controller);
     let eligible = compute_eligible_creatures(state, target_player, choose_filter, &filter_ctx);
-    if eligible.len() <= count {
+    // CR 609.3: an exact keeper with no more eligible permanents than its count
+    // keeps them all. An "up to" keeper auto-advances only on an empty pool:
+    // Covetous Elegy's ruling lets a seat keep fewer, so every non-empty pool
+    // is a choice.
+    if eligible.len() <= minimum_count.unwrap_or(count) {
         let mut all_kept = all_kept;
         all_kept.extend(eligible);
-        return step_exact_count(
+        return step_keeper_count(
             state,
             source_id,
             source_controller,
@@ -460,6 +470,7 @@ pub(crate) fn step_exact_count(
             choose_filter,
             sacrifice_filter,
             count,
+            minimum_count,
             keeper_counter,
             scoped_players,
             events,
@@ -470,15 +481,15 @@ pub(crate) fn step_exact_count(
         CategoryChooserScope::EachPlayerSelf => target_player,
         CategoryChooserScope::ControllerForAll => source_controller,
     };
-    // CR 609.3: If fewer than the required count are eligible, this instruction
-    // does as much as possible by keeping every eligible permanent. Publish the
-    // resulting exact requirement so the caller has no legality arithmetic left.
-    let required_count = count.min(eligible.len());
+    // The printed count is published uncapped: the resume hands it to the next
+    // seat, so a small first pool must not shrink a later seat's maximum
+    // (Covetous Elegy ruling: each player in turn order chooses up to two).
     state.waiting_for = WaitingFor::KeepExactPermanentsChoice {
         player,
         target_player,
         eligible,
-        required_count,
+        required_count: count,
+        minimum_count,
         keeper_counter: keeper_counter.cloned(),
         choose_filter: choose_filter.clone(),
         sacrifice_filter: sacrifice_filter.clone(),
@@ -530,7 +541,7 @@ pub(crate) fn advance_to_next_player(
     dedupe_object_ids(&mut all_kept);
     if remaining.is_empty() {
         // Category mode has no nomination step to carry a keeper mark in — the
-        // `resolve` guard above refuses `keeper_counter` outside `ExactCount`.
+        // `resolve` guard above refuses `keeper_counter` outside `Count`.
         sacrifice_unchosen(
             state,
             &all_kept,
@@ -623,7 +634,7 @@ pub(crate) fn sacrifice_unchosen_from_handler(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     // Category mode has no nomination step to carry a keeper mark in — the
-    // `resolve` guard above refuses `keeper_counter` outside `ExactCount`, and
+    // `resolve` guard above refuses `keeper_counter` outside `Count`, and
     // this handler resumes only the category-choice path.
     sacrifice_unchosen(
         state,
@@ -676,7 +687,7 @@ fn sacrifice_unchosen(
     // this file reaches it, including the exact-count terminal resumed from
     // `WaitingFor::KeepExactPermanentsChoice` and the category terminal, so the
     // synchronous and resumed paths publish the same thing. `advance_to_next_player`
-    // and `step_exact_count` accumulate `all_kept` across seats and call this
+    // and `step_keeper_count` accumulate `all_kept` across seats and call this
     // funnel once, when no player remains, so `kept` is the UNION across seats
     // rather than the last seat's choice.
     //
@@ -1575,7 +1586,7 @@ mod tests {
                 choose_filter: permanent_filter(),
                 sacrifice_filter: permanent_filter(),
                 total_power_cap: None,
-                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                keeper_constraint: Some(KeeperConstraint::Count {
                     count: QuantityExpr::Fixed { value: 1 },
                 }),
                 keeper_counter: None,
@@ -1588,7 +1599,7 @@ mod tests {
 
         let mut events = Vec::new();
         // Both players have exactly one eligible creature for a
-        // keep-exactly-one constraint, so `step_exact_count` auto-keeps both
+        // keep-exactly-one constraint, so `step_keeper_count` auto-keeps both
         // and reaches `sacrifice_unchosen` synchronously — no interactive
         // `WaitingFor::KeepExactPermanentsChoice` in between.
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -1657,19 +1668,19 @@ mod tests {
     }
 
     /// V-F1d — CR 122.1 + CR 608.2c: `keeper_counter` requires
-    /// `KeeperConstraint::ExactCount`; every other keeper mode refuses rather
+    /// `KeeperConstraint::Count`; every other keeper mode refuses rather
     /// than silently dropping the printed instruction.
     ///
     /// The category-mode row and the total-power-mode row are BOTH
     /// required, not redundant — `resolve`'s two early returns fire in the
-    /// order `total_power_cap` THEN `KeeperConstraint::ExactCount`, so a guard
-    /// placed between them would see the `ExactCount` early return happen
+    /// order `total_power_cap` THEN `KeeperConstraint::Count`, so a guard
+    /// placed between them would see the `Count` early return happen
     /// first and never observe a total-power effect at all. Only a guard
     /// placed ABOVE both catches the total-power row; reverting the guard's
     /// placement to between the two early returns reddens the total-power row
     /// specifically while leaving the category row green.
     #[test]
-    fn keeper_counter_refuses_a_non_exact_count_mode() {
+    fn keeper_counter_refuses_a_non_count_mode() {
         let mark = KeeperCounterMark {
             counter_type: CounterType::Generic("vow".to_string()),
             count: QuantityExpr::Fixed { value: 1 },
@@ -1727,7 +1738,7 @@ mod tests {
             "total-power mode must refuse a keeper_counter mark"
         );
 
-        // Positive: ExactCount mode accepts the mark and proceeds.
+        // Positive: Count mode accepts the mark and proceeds.
         let mut state = setup_two_player();
         let _creature = add_battlefield_permanent(
             &mut state,
@@ -1736,14 +1747,14 @@ mod tests {
             "Bear",
             vec![CoreType::Creature],
         );
-        let exact_count_ability = ResolvedAbility::new(
+        let count_ability = ResolvedAbility::new(
             Effect::ChooseAndSacrificeRest {
                 categories: vec![],
                 chooser_scope: CategoryChooserScope::EachPlayerSelf,
                 choose_filter: permanent_filter(),
                 sacrifice_filter: permanent_filter(),
                 total_power_cap: None,
-                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                keeper_constraint: Some(KeeperConstraint::Count {
                     count: QuantityExpr::Fixed { value: 1 },
                 }),
                 keeper_counter: Some(mark),
@@ -1754,8 +1765,141 @@ mod tests {
         );
         let mut events = Vec::new();
         assert!(
-            resolve(&mut state, &exact_count_ability, &mut events).is_ok(),
-            "ExactCount mode must accept the keeper_counter mark"
+            resolve(&mut state, &count_ability, &mut events).is_ok(),
+            "Count mode must accept the keeper_counter mark"
         );
+    }
+
+    /// V12 — CR 101.4 + CR 701.21a: an "up to" keeper prompts even when the
+    /// seat's eligible pool does not exceed its maximum (Covetous Elegy:
+    /// "Players may choose fewer than two creatures even if they control two
+    /// or more creatures."), and publishes the uncapped maximum with a zero
+    /// minimum. Its exact twin on the same board auto-keeps (CR 609.3).
+    #[test]
+    fn up_to_keeper_prompts_when_eligible_does_not_exceed_its_max() {
+        let keeper_ability = |count: QuantityExpr| {
+            let mut ability = ResolvedAbility::new(
+                Effect::ChooseAndSacrificeRest {
+                    categories: vec![],
+                    chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                    choose_filter: permanent_filter(),
+                    sacrifice_filter: permanent_filter(),
+                    total_power_cap: None,
+                    keeper_constraint: Some(KeeperConstraint::Count { count }),
+                    keeper_counter: None,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            ability.player_scope = Some(PlayerFilter::Controller);
+            ability
+        };
+        let board = || {
+            let mut state = setup_two_player();
+            let a = add_battlefield_permanent(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Bear A",
+                vec![CoreType::Creature],
+            );
+            let b = add_battlefield_permanent(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Bear B",
+                vec![CoreType::Creature],
+            );
+            (state, a, b)
+        };
+
+        // Up to two: a prompt with bounds 0..=2 over both creatures.
+        let (mut state, a, b) = board();
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &keeper_ability(QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 })),
+            &mut events,
+        )
+        .unwrap();
+        match &state.waiting_for {
+            WaitingFor::KeepExactPermanentsChoice {
+                player,
+                eligible,
+                required_count,
+                minimum_count,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*required_count, 2);
+                assert_eq!(*minimum_count, Some(0));
+                assert_eq!(eligible.len(), 2);
+            }
+            other => panic!("an up-to keeper must prompt, got {other:?}"),
+        }
+        assert!(state.battlefield.contains(&a) && state.battlefield.contains(&b));
+
+        // Exact twin: two eligible for an exact two auto-keeps; nothing is
+        // sacrificed and no prompt is published.
+        let (mut state, a, b) = board();
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &keeper_ability(QuantityExpr::Fixed { value: 2 }),
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            !matches!(
+                state.waiting_for,
+                WaitingFor::KeepExactPermanentsChoice { .. }
+            ),
+            "an exact keeper with eligible == count must auto-keep"
+        );
+        assert!(state.battlefield.contains(&a) && state.battlefield.contains(&b));
+    }
+
+    /// V7 — `minimum_count` is optional on the wire: a legacy prompt without
+    /// the key reads as an exact keeper (`None`), and `None` is not written.
+    #[test]
+    fn keep_exact_prompt_minimum_count_is_optional_on_the_wire() {
+        let prompt = WaitingFor::KeepExactPermanentsChoice {
+            player: PlayerId(0),
+            target_player: PlayerId(0),
+            eligible: vec![ObjectId(1)],
+            required_count: 1,
+            minimum_count: None,
+            keeper_counter: None,
+            choose_filter: permanent_filter(),
+            sacrifice_filter: permanent_filter(),
+            chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            source_id: ObjectId(100),
+            source_controller: PlayerId(0),
+            remaining_players: vec![],
+            all_kept: vec![],
+            scoped_players: vec![PlayerId(0)],
+        };
+        let json = serde_json::to_value(&prompt).unwrap();
+        let data = &json["data"];
+        assert!(
+            data.get("required_count").is_some(),
+            "reach guard: the prompt payload is under `data`: {json}"
+        );
+        assert!(
+            data.get("minimum_count").is_none(),
+            "None must not be serialized: {json}"
+        );
+        let back: WaitingFor = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, prompt);
+
+        let mut up_to = prompt.clone();
+        if let WaitingFor::KeepExactPermanentsChoice { minimum_count, .. } = &mut up_to {
+            *minimum_count = Some(0);
+        }
+        let json = serde_json::to_value(&up_to).unwrap();
+        assert_eq!(json["data"]["minimum_count"], 0);
+        let back: WaitingFor = serde_json::from_value(json).unwrap();
+        assert_eq!(back, up_to);
     }
 }

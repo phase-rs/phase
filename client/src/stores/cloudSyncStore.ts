@@ -19,6 +19,7 @@ import {
   type SyncIdentity,
 } from "../services/cloudSync";
 import { computeBackupDigest, summarizeBackupDiff, type ConflictDiffSummary } from "../services/cloudSync/backupDiff";
+import { BUILD_TIME_SUPABASE_CONFIG, SUPABASE_CONFIG } from "../services/cloudSync/supabaseConfig";
 import { watchUserStorage, withStorageWatchSuppressed } from "../services/cloudSync/storageWatcher";
 import { withSavedDeckLibraryOrSkip, type SavedDeckTxnFailure } from "../services/savedDeckTransaction";
 import { busyOrStorageDescription, notifySavedDeckLibraryBusy } from "../services/savedDeckWriteFailure";
@@ -49,6 +50,41 @@ interface CloudSyncState {
   signOut: () => Promise<void>;
   syncNow: () => Promise<void>;
   resolveConflict: (choice: ConflictChoice) => Promise<void>;
+}
+
+/**
+ * The sync markers as persisted, tagged with the Supabase project they
+ * describe. Revisions are per-project counters, so a marker read against a
+ * different project would make reconciliation skip that project's backup and
+ * push over it with a revision that happens to match.
+ */
+interface PersistedSyncMarkers {
+  project: string;
+  dirty: boolean;
+  lastSyncedRevision: number | null;
+  lastSyncedDigest: string | null;
+  lastSyncedAt: string | null;
+}
+
+/**
+ * Version 1 added `project`. A version 0 record was written before
+ * `/config.js` could name a project, so it describes the build-time one.
+ */
+function migratePersistedSyncMarkers(persisted: unknown, version: number): unknown {
+  if (version !== 0 || persisted === null || typeof persisted !== "object") return persisted;
+  return { ...persisted, project: BUILD_TIME_SUPABASE_CONFIG.url };
+}
+
+/**
+ * Restores the markers only for the project this page syncs with. Markers for
+ * any other project are dropped, so the first reconcile treats the project as
+ * never synced: it reads that project's backup before pushing anything, and
+ * local data that differs from it becomes a conflict for the player to settle.
+ */
+function mergePersistedSyncMarkers(persisted: unknown, current: CloudSyncState): CloudSyncState {
+  if (persisted === null || typeof persisted !== "object") return current;
+  const { project, ...markers } = persisted as Partial<PersistedSyncMarkers>;
+  return project === SUPABASE_CONFIG.url ? { ...current, ...markers } : current;
 }
 
 interface Generation {
@@ -779,7 +815,11 @@ export const useCloudSyncStore = create<CloudSyncState>()(persist((set, get) => 
   },
 }), {
   name: "phase-cloud-sync",
-  partialize: (state) => ({
+  version: 1,
+  migrate: migratePersistedSyncMarkers,
+  merge: mergePersistedSyncMarkers,
+  partialize: (state): PersistedSyncMarkers => ({
+    project: SUPABASE_CONFIG.url,
     dirty: state.dirty,
     lastSyncedRevision: state.lastSyncedRevision,
     lastSyncedDigest: state.lastSyncedDigest,

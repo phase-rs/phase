@@ -139,7 +139,6 @@ expression: "&ir"
             },
             "description": "{R/W}: ~ becomes a Kithkin Spirit with base power and toughness 2/2.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
@@ -302,7 +301,6 @@ expression: "&ir"
             },
             "description": "{R/W}{R/W}{R/W}: If ~ is a Spirit, it becomes a Kithkin Spirit Warrior with base power and toughness 4/4.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
@@ -476,7 +474,6 @@ expression: "&ir"
             },
             "description": "{R/W}{R/W}{R/W}{R/W}{R/W}{R/W}: If ~ is a Warrior, it becomes a Kithkin Spirit Warrior Avatar with base power and toughness 8/8, flying, and first strike.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

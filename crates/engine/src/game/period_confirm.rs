@@ -2057,7 +2057,7 @@ fn cycle_complete(items: &[PeriodItem], done: &[bool]) -> bool {
         })
 }
 
-/// CR 117.4: `player` passes, noting the triggered ability the pass resolves.
+/// CR 117.4: `player`'s side passes one seat, noting the triggered ability the pass resolves.
 fn pass(
     replay: &mut GameState,
     player: PlayerId,
@@ -2067,9 +2067,13 @@ fn pass(
     let top = replay.stack.back().and_then(|entry| {
         play_trace::resolution_identity(replay, entry).map(|identity| (entry.id, identity))
     });
+    // CR 805.5b: a team passes only when every living member has, so once the
+    // holder's pass is recorded the next beat is a teammate's — re-passing the
+    // holder would leave the team holding priority for every remaining beat.
+    let seat = super::topology::next_team_passer(replay, player);
     step(
         replay,
-        player,
+        seat,
         GameAction::PassPriority,
         OfferRefusal::UnanswerablePrompt,
         events,
@@ -5073,7 +5077,7 @@ mod tests {
             entries: Vec::new(),
             cursor: 0,
             representatives: [PlayerId(0)].into_iter().collect(),
-            verified_pass_representatives: BTreeSet::new(),
+            verified_pass_owners: BTreeSet::new(),
             budget: StackResolutionBudget::Unlimited,
             policy: StackResolutionPolicy::Committed,
             auto_pass_overlay: StackResolutionAutoPassOverlay {

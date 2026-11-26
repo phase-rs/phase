@@ -4,7 +4,7 @@
 //! FIXTURE CONVENTION, stated because it is load-bearing. The validator
 //! computes the UNION `main_deck.len() + (commander.len() - represented_in_main)`,
 //! so it is convention-agnostic per logical deck but NOT agnostic about what a
-//! fixture author means by "a 59-card deck". Every fixture here is
+//! fixture author means by "a 59-card deck". The original Draft fixtures below are
 //! commanders-INSIDE: `main_deck` carries the complete list and the designated
 //! commander is a member of it (CR 903.5a, "including its commander", which
 //! CR 903.13f(1) rescales to "at least 60" without disturbing the "including").
@@ -18,12 +18,18 @@ use std::collections::BTreeMap;
 
 use engine::database::CardDatabase;
 use engine::game::{
-    evaluate_deck_compatibility, is_commander_eligible, validate_name_deck_for_format_full,
-    DeckCompatibilityRequest,
+    can_pair_commanders, commander_candidates, evaluate_deck_compatibility, infer_commander,
+    is_card_commander_eligible_for_format, is_commander_eligible, validate_deck_for_format,
+    validate_name_deck_for_format_full,
+    CommanderDeckComposition::{CommandersInside, CommandersOutside},
+    CommanderInferenceRow, DeckCompatibilityRequest,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType, Supertype};
-use engine::types::format::{FormatConfig, GameFormat, SelectedFormat};
+use engine::types::custom_format::CustomFormatDef;
+use engine::types::format::{
+    ChallengeDeck, FormatConfig, GameFormat, SelectedFormat, SurvivorDeckFormat,
+};
 use engine::types::keywords::{Keyword, PartnerType};
 use engine::types::mana::ManaColor;
 
@@ -558,4 +564,795 @@ fn the_grant_does_not_legalise_a_two_colour_legend() {
         reasons.iter().any(|r| r.contains("partner")),
         "expected the pairing reason, got {reasons:?}"
     );
+}
+
+const ISAMARU: &str = "Isamaru, Hound of Konda";
+const YARGLE: &str = "Yargle, Glutton of Urborg";
+const ROGRAKH: &str = "Rograkh, Son of Rohgahh";
+const SHEOLDRED: &str = "Sheoldred";
+const SHEOLDRED_COMPOSITE: &str = "Sheoldred // The True Scriptures";
+const RING: &str = "The One Ring";
+
+fn picker_db() -> CardDatabase {
+    CardDatabase::from_json_str(r#"
+{
+  "isamaru, hound of konda": {
+    "name": "Isamaru, Hound of Konda",
+    "legalities": {"commander": "legal"},
+    "mana_cost": {"type": "Cost", "shards": ["White"], "generic": 0},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Dog"]},
+    "oracle_text": null,
+    "is_commander": true,
+    "brawl_commander": true,
+    "rarities": ["rare"],
+    "keywords": [],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "yargle, glutton of urborg": {
+    "name": "Yargle, Glutton of Urborg",
+    "legalities": {"commander": "legal"},
+    "mana_cost": {"type": "Cost", "shards": ["Black"], "generic": 4},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Frog", "Spirit"]},
+    "oracle_text": null,
+    "is_commander": true,
+    "brawl_commander": true,
+    "rarities": ["uncommon", "rare"],
+    "keywords": [],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "rograkh, son of rohgahh": {
+    "name": "Rograkh, Son of Rohgahh",
+    "mana_cost": {"type": "Cost", "shards": [], "generic": 0},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Kobold", "Warrior"]},
+    "oracle_text": "First strike, menace, trample\nPartner (You can have two commanders if both have partner.)",
+    "is_commander": true,
+    "brawl_commander": true,
+    "rarities": ["uncommon", "rare"],
+    "keywords": ["FirstStrike", "Menace", {"Partner": {"type": "Generic"}}, "Trample"],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "sheoldred": {
+    "name": "Sheoldred",
+    "mana_cost": {"type": "Cost", "shards": ["Black", "Black"], "generic": 3},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Phyrexian", "Praetor"]},
+    "oracle_text": "Menace\nWhen Sheoldred enters, each opponent sacrifices a nontoken creature or planeswalker of their choice.\n{4}{B}: Exile Sheoldred, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery and only if an opponent has eight or more cards in their graveyard.",
+    "is_commander": true,
+    "brawl_commander": true,
+    "rarities": ["mythic"],
+    "layout": "transform",
+    "face_index": 0,
+    "scryfall_oracle_id": "97652492-7906-4d79-983c-fa1dc1239eba",
+    "keywords": ["Menace"],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "the true scriptures": {
+    "name": "The True Scriptures",
+    "mana_cost": {"type": "NoCost"},
+    "card_type": {"supertypes": [], "core_types": ["Enchantment"], "subtypes": ["Saga"]},
+    "oracle_text": "(As this Saga enters and after your draw step, add a lore counter.)\nI — For each opponent, destroy up to one target creature or planeswalker that player controls.\nII — Each opponent discards three cards, then mills three cards.\nIII — Put all creature cards from all graveyards onto the battlefield under your control. Exile this Saga, then return it to the battlefield (front face up).",
+    "rarities": ["mythic"],
+    "layout": "transform",
+    "face_index": 1,
+    "scryfall_oracle_id": "97652492-7906-4d79-983c-fa1dc1239eba",
+    "keywords": [],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "jace beleren": {
+    "name": "Jace Beleren",
+    "mana_cost": {"type": "Cost", "shards": ["Blue", "Blue"], "generic": 1},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Planeswalker"], "subtypes": ["Jace"]},
+    "oracle_text": "[+2]: Each player draws a card.\n[−1]: Target player draws a card.\n[−10]: Target player mills twenty cards.",
+    "brawl_commander": true,
+    "is_oathbreaker": true,
+    "rarities": ["rare", "mythic"],
+    "keywords": [],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "esika's chariot": {
+    "name": "Esika's Chariot",
+    "mana_cost": {"type": "Cost", "shards": ["Green"], "generic": 3},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Artifact"], "subtypes": ["Vehicle"]},
+    "oracle_text": "When Esika's Chariot enters, create two 2/2 green Cat creature tokens.\nWhenever Esika's Chariot attacks, create a token that's a copy of target token you control.\nCrew 4",
+    "is_commander": true,
+    "rarities": ["rare"],
+    "keywords": [{"Crew": {"power": 4, "once_per_turn": null}}],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "relentless rats": {
+    "name": "Relentless Rats",
+    "mana_cost": {"type": "Cost", "shards": ["Black", "Black"], "generic": 1},
+    "card_type": {"supertypes": [], "core_types": ["Creature"], "subtypes": ["Rat"]},
+    "oracle_text": "This creature gets +1/+1 for each other creature on the battlefield named Relentless Rats.\nA deck can have any number of cards named Relentless Rats.",
+    "rarities": ["common", "uncommon", "rare", "special"],
+    "keywords": [],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "the one ring": {
+    "name": "The One Ring",
+    "mana_cost": {"type": "Cost", "shards": [], "generic": 4},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Artifact"], "subtypes": []},
+    "oracle_text": "Indestructible\nWhen The One Ring enters, if you cast it, you gain protection from everything until your next turn.\nAt the beginning of your upkeep, you lose 1 life for each burden counter on The One Ring.\n{T}: Put a burden counter on The One Ring, then draw a card for each burden counter on The One Ring.",
+    "rarities": ["mythic"],
+    "keywords": ["Indestructible"],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "snow-covered wastes": {
+    "name": "Snow-Covered Wastes",
+    "mana_cost": {"type": "NoCost"},
+    "card_type": {"supertypes": ["Basic", "Snow"], "core_types": ["Land"], "subtypes": []},
+    "oracle_text": "{T}: Add {C}.",
+    "keywords": [],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "cid, timeless artificer": {
+    "name": "Cid, Timeless Artificer",
+    "mana_cost": {"type": "Cost", "shards": ["White", "Blue"], "generic": 2},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Human", "Artificer"]},
+    "oracle_text": "Artifact creatures and Heroes you control get +1/+1 for each Artificer you control and each Artificer card in your graveyard.\nA deck can have any number of cards named Cid, Timeless Artificer.\nCycling {W}{U} ({W}{U}, Discard this card: Draw a card.)",
+    "deck_copy_limit": {"type": "Unlimited"},
+    "keywords": [],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "seven dwarves": {
+    "name": "Seven Dwarves",
+    "mana_cost": {"type": "Cost", "shards": ["Red"], "generic": 1},
+    "card_type": {"supertypes": [], "core_types": ["Creature"], "subtypes": ["Dwarf"]},
+    "oracle_text": "This creature gets +1/+1 for each other creature named Seven Dwarves you control.\nA deck can have up to seven cards named Seven Dwarves.",
+    "deck_copy_limit": {"type": "UpTo", "data": 7},
+    "keywords": [],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  },
+  "plains": {
+    "name": "Plains",
+    "legalities": {"commander": "legal"},
+    "mana_cost": {"type": "NoCost"},
+    "card_type": {"supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Plains"]},
+    "oracle_text": "({T}: Add {W}.)",
+    "rarities": ["common", "rare"],
+    "keywords": [],
+    "abilities": [],
+    "triggers": [],
+    "static_abilities": [],
+    "replacements": []
+  }
+}
+    "#).unwrap()
+}
+
+fn picker_request<const N: usize>(format: GameFormat, main: [&str; N]) -> DeckCompatibilityRequest {
+    DeckCompatibilityRequest {
+        selected_format: Some(SelectedFormat::Tag(format)),
+        main_deck: main.map(str::to_owned).into(),
+        ..DeckCompatibilityRequest::default()
+    }
+}
+
+#[test]
+fn commander_candidates_constructed_offers_swaps() {
+    let db = picker_db();
+    let mut request = picker_request(GameFormat::Commander, [ISAMARU, YARGLE, RING, "Unknown"]);
+    request.sideboard = vec![ROGRAKH.into()];
+    request.commander = vec![ISAMARU.into()];
+    assert_eq!(
+        commander_candidates(&db, &request, CommandersOutside),
+        [YARGLE]
+    );
+    assert!(!can_pair_commanders(&db, ISAMARU, YARGLE, None));
+    request.commander.push(ROGRAKH.into());
+    assert_eq!(
+        commander_candidates(&db, &request, CommandersOutside),
+        [YARGLE]
+    );
+    request.commander.clear();
+    assert_eq!(
+        commander_candidates(&db, &request, CommandersOutside),
+        [ISAMARU, YARGLE]
+    );
+}
+
+#[test]
+fn commander_candidates_counts_draft_occurrences_by_declared_composition() {
+    let db = picker_db();
+    for format in [GameFormat::CommanderDraft, GameFormat::Commander] {
+        for codes in [vec![], vec!["CMM".into()]] {
+            let mut request = picker_request(format, [ROGRAKH, ROGRAKH]);
+            request.draft_set_codes = codes;
+            request.commander = vec![ROGRAKH.into()];
+            assert_eq!(
+                commander_candidates(&db, &request, CommandersInside),
+                [ROGRAKH]
+            );
+            assert!(commander_candidates(&db, &request, CommandersOutside).is_empty());
+            request.main_deck.pop();
+            assert!(commander_candidates(&db, &request, CommandersInside).is_empty());
+            request.main_deck.push(ROGRAKH.into());
+            request.commander.push(ROGRAKH.into());
+            assert!(commander_candidates(&db, &request, CommandersInside).is_empty());
+            request.commander.clear();
+            assert_eq!(
+                commander_candidates(&db, &request, CommandersInside),
+                [ROGRAKH]
+            );
+            assert_eq!(
+                commander_candidates(&db, &request, CommandersOutside),
+                [ROGRAKH]
+            );
+        }
+    }
+}
+
+#[test]
+fn commander_candidates_keeps_first_eligible_request_spelling() {
+    let db = picker_db();
+    for spelling in [SHEOLDRED, SHEOLDRED_COMPOSITE] {
+        assert_eq!(db.get_face_by_name(spelling).unwrap().name, SHEOLDRED);
+    }
+    let mut request = picker_request(
+        GameFormat::CommanderDraft,
+        [SHEOLDRED_COMPOSITE, SHEOLDRED, YARGLE],
+    );
+    request.commander = vec![SHEOLDRED.into()];
+    assert_eq!(
+        commander_candidates(&db, &request, CommandersInside),
+        [SHEOLDRED_COMPOSITE, YARGLE]
+    );
+    request.main_deck.remove(1);
+    assert_eq!(
+        commander_candidates(&db, &request, CommandersInside),
+        [YARGLE]
+    );
+    request.main_deck.insert(0, SHEOLDRED.into());
+    assert_eq!(
+        commander_candidates(&db, &request, CommandersInside),
+        [SHEOLDRED, YARGLE]
+    );
+    assert_eq!(
+        commander_candidates(&db, &request, CommandersOutside),
+        [YARGLE]
+    );
+    request.commander.clear();
+    for first in [SHEOLDRED, SHEOLDRED_COMPOSITE] {
+        assert_eq!(
+            commander_candidates(&db, &request, CommandersOutside),
+            [first, YARGLE]
+        );
+        assert_eq!(
+            commander_candidates(&db, &request, CommandersInside),
+            [first, YARGLE]
+        );
+        request.main_deck.swap(0, 1);
+    }
+}
+
+#[test]
+fn commander_picker_dispatch_covers_every_game_format() {
+    use GameFormat::*;
+    let db = picker_db();
+    let fixtures = [
+        ISAMARU,
+        "Jace Beleren",
+        RING,
+        "Esika's Chariot",
+        "Relentless Rats",
+        "Plains",
+    ];
+    let verdicts = |format| {
+        fixtures.map(|name| {
+            is_card_commander_eligible_for_format(db.get_face_by_name(name).unwrap(), format)
+        })
+    };
+    let ordinary = [true, false, false, true, false, false];
+    let brawl = [true, true, false, false, false, false];
+    for format in [
+        Commander,
+        DuelCommander,
+        TwoHeadedGiantCommander,
+        ArchenemyCommander,
+        PauperCommander,
+        CommanderDraft,
+        Horde,
+        PlanechaseCommander,
+    ] {
+        assert_eq!(verdicts(format), ordinary, "{format:?}");
+    }
+    // Esika's Chariot pins the moved predicate's current verdict for each Brawl tag.
+    assert_eq!(verdicts(Brawl), brawl);
+    assert_eq!(verdicts(HistoricBrawl), brawl);
+    assert_eq!(
+        verdicts(TinyLeaders),
+        [true, true, false, true, false, false]
+    );
+    assert_eq!(
+        verdicts(Oathbreaker),
+        [false, true, false, false, false, false]
+    );
+    assert_eq!(
+        verdicts(FreeformCommander),
+        [true, true, true, true, true, false]
+    );
+
+    let custom =
+        CustomFormatDef::from_lobby_config("House Commander".into(), &FormatConfig::commander())
+            .unwrap();
+    let custom_config = FormatConfig::for_custom_rules(&custom.rules);
+    assert!(custom_config.command_zone);
+    let custom_format = custom_config.format;
+    assert_eq!(
+        commander_candidates(
+            &db,
+            &picker_request(Commander, [ISAMARU]),
+            CommandersOutside
+        ),
+        [ISAMARU]
+    );
+    for format in [
+        Standard,
+        Pioneer,
+        Modern,
+        Premodern,
+        Legacy,
+        Vintage,
+        Historic,
+        Timeless,
+        Pauper,
+        Momir,
+        Planechase,
+        Archenemy,
+        FreeForAll,
+        TwoHeadedGiant,
+        Limited,
+        Freeform,
+        Dandan,
+        custom_format,
+    ] {
+        assert_eq!(verdicts(format), [false; 6], "{format:?}");
+        assert!(
+            commander_candidates(&db, &picker_request(format, [ISAMARU]), CommandersOutside)
+                .is_empty(),
+            "{format:?}"
+        );
+    }
+    let mut request = picker_request(custom_format, [ISAMARU]);
+    request.selected_format = Some(SelectedFormat::Resolved(Box::new(custom_config)));
+    assert!(commander_candidates(&db, &request, CommandersOutside).is_empty());
+}
+
+#[test]
+fn commander_candidates_horde_uses_resolved_rules_before_challenge() {
+    let db = picker_db();
+    let mut request = picker_request(GameFormat::Horde, [ISAMARU, RING]);
+    let commander = ChallengeDeck::SauronHorde;
+    let constructed = ChallengeDeck::DndHorde;
+    assert_eq!(
+        commander.default_ruleset().survivor_deck_format,
+        SurvivorDeckFormat::Commander
+    );
+    assert_eq!(
+        constructed.default_ruleset().survivor_deck_format,
+        SurvivorDeckFormat::Constructed
+    );
+    for selected in [None, Some(SelectedFormat::Tag(GameFormat::Horde))] {
+        request.selected_format = selected;
+        request.selected_challenge_deck = None;
+        assert!(commander_candidates(&db, &request, CommandersOutside).is_empty());
+        request.selected_challenge_deck = Some(commander);
+        assert_eq!(
+            commander_candidates(&db, &request, CommandersOutside),
+            [ISAMARU]
+        );
+        request.selected_challenge_deck = Some(constructed);
+        assert!(commander_candidates(&db, &request, CommandersOutside).is_empty());
+    }
+    request.selected_challenge_deck = Some(constructed);
+    request.selected_format = Some(SelectedFormat::Resolved(Box::new(FormatConfig::horde(
+        commander.default_ruleset(),
+    ))));
+    assert_eq!(
+        commander_candidates(&db, &request, CommandersOutside),
+        [ISAMARU]
+    );
+    request.selected_challenge_deck = Some(commander);
+    request.selected_format = Some(SelectedFormat::Resolved(Box::new(FormatConfig::horde(
+        constructed.default_ruleset(),
+    ))));
+    assert!(commander_candidates(&db, &request, CommandersOutside).is_empty());
+    request.selected_format = Some(SelectedFormat::Tag(GameFormat::Standard));
+    assert!(commander_candidates(&db, &request, CommandersOutside).is_empty());
+}
+
+fn inference_rows(rows: &[(&str, u64)]) -> Vec<CommanderInferenceRow> {
+    rows.iter()
+        .map(|&(name, count)| CommanderInferenceRow {
+            name: name.into(),
+            count,
+        })
+        .collect()
+}
+
+fn infer_from_rows(db: &CardDatabase, rows: &[(&str, u64)]) -> Option<String> {
+    infer_commander(db, &inference_rows(rows), None)
+}
+
+fn inference_black_deck_db() -> CardDatabase {
+    // Printed faces from the card export. Only metadata used by deck
+    // validation is needed here, including both faces of the Adventure.
+    CardDatabase::from_json_str(r#"
+{
+  "gollum, silent slinker": {
+    "name": "Gollum, Silent Slinker",
+    "mana_cost": {"type": "Cost", "shards": ["Black"], "generic": 3},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Halfling", "Horror"]},
+    "oracle_text": "Menace (This creature can't be blocked except by two or more creatures.)",
+    "rarities": ["common"], "legalities": {"commander": "legal", "paupercommander": "legal"},
+    "is_commander": true, "color_identity": ["Black"], "layout": "adventure", "face_index": 0,
+    "scryfall_oracle_id": "0296d57e-e5b9-456f-bb21-eb584adefb4c", "keywords": ["Menace"],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  },
+  "meager meal": {
+    "name": "Meager Meal",
+    "mana_cost": {"type": "Cost", "shards": ["Black"], "generic": 0},
+    "card_type": {"supertypes": [], "core_types": ["Sorcery"], "subtypes": ["Adventure"]},
+    "oracle_text": "Put a +1/+1 counter on up to one target creature. Target player gains 2 life. (Then exile this card. You may cast the creature later from exile.)",
+    "rarities": ["common"], "legalities": {"commander": "legal", "paupercommander": "legal"},
+    "color_identity": ["Black"], "layout": "adventure", "face_index": 1,
+    "scryfall_oracle_id": "0296d57e-e5b9-456f-bb21-eb584adefb4c", "keywords": [],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  },
+  "sengir vampire": {
+    "name": "Sengir Vampire",
+    "mana_cost": {"type": "Cost", "shards": ["Black", "Black"], "generic": 3},
+    "card_type": {"supertypes": [], "core_types": ["Creature"], "subtypes": ["Vampire"]},
+    "oracle_text": "Flying (This creature can't be blocked except by creatures with flying or reach.)\nWhenever a creature dealt damage by this creature this turn dies, put a +1/+1 counter on this creature.",
+    "rarities": ["uncommon", "rare"], "legalities": {"commander": "legal", "paupercommander": "legal"},
+    "color_identity": ["Black"], "keywords": ["Flying"],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  },
+  "relentless rats": {
+    "name": "Relentless Rats",
+    "mana_cost": {"type": "Cost", "shards": ["Black", "Black"], "generic": 1},
+    "card_type": {"supertypes": [], "core_types": ["Creature"], "subtypes": ["Rat"]},
+    "oracle_text": "This creature gets +1/+1 for each other creature on the battlefield named Relentless Rats.\nA deck can have any number of cards named Relentless Rats.",
+    "rarities": ["common", "uncommon", "rare", "special"], "legalities": {"commander": "legal", "paupercommander": "legal"},
+    "color_identity": ["Black"], "deck_copy_limit": {"type": "Unlimited"}, "keywords": [],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  },
+  "swamp": {
+    "name": "Swamp",
+    "mana_cost": {"type": "NoCost"},
+    "card_type": {"supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Swamp"]},
+    "oracle_text": "({T}: Add {B}.)",
+    "rarities": ["common", "rare"], "legalities": {"commander": "legal", "paupercommander": "legal"},
+    "color_identity": ["Black"], "keywords": [],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  },
+  "agent of the shadow thieves": {
+    "name": "Agent of the Shadow Thieves",
+    "mana_cost": {"type": "Cost", "shards": ["Black"], "generic": 1},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Enchantment"], "subtypes": ["Background"]},
+    "oracle_text": "Commander creatures you own have \"Whenever this creature attacks a player, if no opponent has more life than that player, put a +1/+1 counter on this creature. It gains deathtouch and indestructible until end of turn.\"",
+    "rarities": ["uncommon"], "legalities": {"commander": "legal"},
+    "is_commander": true, "color_identity": ["Black"], "keywords": [],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  },
+  "sarevok, deathbringer": {
+    "name": "Sarevok, Deathbringer",
+    "mana_cost": {"type": "Cost", "shards": ["Black"], "generic": 3},
+    "card_type": {"supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Human", "Knight"]},
+    "oracle_text": "At the beginning of each player's end step, if no permanents left the battlefield this turn, that player loses X life, where X is Sarevok's power.\nChoose a Background (You can have a Background as a second commander.)",
+    "rarities": ["uncommon"], "legalities": {"commander": "legal"},
+    "is_commander": true, "color_identity": ["Black"], "keywords": [{"Partner": {"type": "ChooseABackground"}}],
+    "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+  }
+}
+    "#).unwrap()
+}
+
+#[test]
+fn inference_uses_the_selected_pauper_commander_validator_role() {
+    use GameFormat::{Commander, PauperCommander, Standard};
+
+    let db = inference_black_deck_db();
+    let gollum = "Gollum, Silent Slinker";
+    let sengir = "Sengir Vampire";
+    let rats = "Relentless Rats";
+    let rows = inference_rows(&[(gollum, 1), (sengir, 1), (rats, 58), ("Swamp", 40)]);
+    for format in [None, Some(Commander)] {
+        assert_eq!(infer_commander(&db, &rows, format).as_deref(), Some(gollum));
+    }
+    assert_eq!(infer_commander(&db, &rows, Some(Standard)), None);
+
+    let chosen = infer_commander(&db, &rows, Some(PauperCommander)).unwrap();
+    assert_eq!(chosen, sengir);
+    let mut request = DeckCompatibilityRequest {
+        main_deck: [
+            vec![gollum.into()],
+            vec![rats.into(); 58],
+            vec!["Swamp".into(); 40],
+        ]
+        .concat(),
+        commander: vec![chosen],
+        selected_format: Some(SelectedFormat::Tag(PauperCommander)),
+        ..Default::default()
+    };
+    assert_eq!(validate_deck_for_format(&db, &request), Ok(()));
+    request.main_deck[0] = sengir.into();
+    request.commander[0] = gollum.into();
+    assert!(validate_deck_for_format(&db, &request)
+        .unwrap_err()
+        .iter()
+        .any(|reason| reason.contains("must be an uncommon creature")));
+
+    let no_candidate = inference_rows(&[(gollum, 1), (rats, 58), ("Swamp", 41)]);
+    assert_eq!(
+        infer_commander(&db, &no_candidate, Some(PauperCommander)),
+        None
+    );
+}
+
+#[test]
+fn inference_skips_a_lone_background_without_changing_pair_eligibility() {
+    let db = inference_black_deck_db();
+    let agent = "Agent of the Shadow Thieves";
+    let sarevok = "Sarevok, Deathbringer";
+    let rats = "Relentless Rats";
+    assert!(is_card_commander_eligible_for_format(
+        db.get_face_by_name(agent).unwrap(),
+        GameFormat::Commander,
+    ));
+    assert!(can_pair_commanders(&db, sarevok, agent, None));
+    let rows = [(agent, 1), (sarevok, 1), (rats, 58), ("Swamp", 40)];
+    assert_eq!(infer_from_rows(&db, &rows).as_deref(), Some(sarevok));
+    assert_eq!(
+        infer_from_rows(&db, &[(agent, 1), (rats, 58), ("Swamp", 41)]),
+        None
+    );
+}
+
+#[test]
+fn inference_requires_exact_size_and_handles_oversized_counts() {
+    let db = picker_db();
+    assert_eq!(infer_from_rows(&db, &[]), None);
+    for count in [98, 100, (1 << 32) + 99, u64::MAX] {
+        assert_eq!(
+            infer_from_rows(&db, &[(ISAMARU, 1), ("Plains", count)]),
+            None,
+            "{count} Plains"
+        );
+    }
+    assert_eq!(
+        infer_from_rows(&db, &[("Plains", 9_007_199_254_740_994)]),
+        None
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), ("Plains", 99)]).as_deref(),
+        Some(ISAMARU)
+    );
+    let rows = inference_rows(&[(ISAMARU, 1), ("Plains", 99)]);
+    assert!(is_card_commander_eligible_for_format(
+        db.get_face_by_name(ISAMARU).unwrap(),
+        GameFormat::Brawl,
+    ));
+    assert_eq!(infer_commander(&db, &rows, Some(GameFormat::Brawl)), None);
+}
+
+#[test]
+fn inference_aggregates_printing_rows_and_respects_basic_and_printed_exemptions() {
+    let db = picker_db();
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), (RING, 1), (RING, 1), ("Plains", 97)]),
+        None
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), (RING, 1), ("Plains", 98)]).as_deref(),
+        Some(ISAMARU)
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), ("Plains", 50), ("Plains", 49)]).as_deref(),
+        Some(ISAMARU)
+    );
+    for name in ["Snow-Covered Wastes", "Relentless Rats"] {
+        assert_eq!(
+            infer_from_rows(&db, &[(ISAMARU, 1), (name, 2), ("Plains", 97)]).as_deref(),
+            Some(ISAMARU),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn inference_ignores_zero_count_rows_in_tally_and_selection() {
+    let db = picker_db();
+    assert_eq!(
+        infer_from_rows(
+            &db,
+            &[(YARGLE, 0), (ISAMARU, 1), (YARGLE, 1), ("Plains", 98)]
+        )
+        .as_deref(),
+        Some(ISAMARU)
+    );
+    assert_eq!(
+        infer_from_rows(
+            &db,
+            &[(YARGLE, 1), (ISAMARU, 1), (YARGLE, 0), ("Plains", 98)]
+        )
+        .as_deref(),
+        Some(YARGLE)
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), ("Plains", 99), (RING, 0)]).as_deref(),
+        Some(ISAMARU)
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), ("Plains", 97), (RING, 2)]),
+        None
+    );
+}
+
+#[test]
+fn inference_requires_exactly_one_copy_of_an_unlimited_legend() {
+    let db = picker_db();
+    let cid = "Cid, Timeless Artificer";
+    assert_eq!(
+        infer_from_rows(&db, &[(cid, 2), (ISAMARU, 1), ("Plains", 97)]).as_deref(),
+        Some(ISAMARU)
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(cid, 1), (ISAMARU, 1), ("Plains", 98)]).as_deref(),
+        Some(cid)
+    );
+}
+
+#[test]
+fn inference_enforces_finite_printed_copy_limits() {
+    let db = picker_db();
+    let dwarves = "Seven Dwarves";
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), (dwarves, 7), ("Plains", 92)]).as_deref(),
+        Some(ISAMARU)
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(ISAMARU, 1), (dwarves, 8), ("Plains", 91)]),
+        None
+    );
+}
+
+#[test]
+fn inference_counts_resolved_identity_and_returns_request_spelling() {
+    let db = picker_db();
+    for spelling in [SHEOLDRED, SHEOLDRED_COMPOSITE] {
+        assert_eq!(
+            infer_from_rows(&db, &[(spelling, 1), ("Plains", 99)]).as_deref(),
+            Some(spelling)
+        );
+    }
+    assert_eq!(
+        infer_from_rows(
+            &db,
+            &[
+                (SHEOLDRED, 1),
+                (SHEOLDRED_COMPOSITE, 1),
+                (ISAMARU, 1),
+                ("Plains", 97)
+            ]
+        ),
+        None
+    );
+}
+
+#[test]
+fn inference_selects_the_first_eligible_occurrence_in_request_order() {
+    let db = picker_db();
+    for (first, second) in [(ISAMARU, YARGLE), (YARGLE, ISAMARU)] {
+        assert_eq!(
+            infer_from_rows(&db, &[(RING, 1), (first, 1), (second, 1), ("Plains", 97)]).as_deref(),
+            Some(first)
+        );
+    }
+    assert_eq!(
+        infer_from_rows(&db, &[(RING, 1), ("Jace Beleren", 1), ("Plains", 98)]),
+        None
+    );
+    assert_eq!(
+        infer_from_rows(&db, &[(RING, 1), (ISAMARU, 1), ("Plains", 98)]).as_deref(),
+        Some(ISAMARU)
+    );
+}
+
+#[test]
+fn inference_skips_unknown_singletons_and_rejects_unknown_duplicates() {
+    let db = picker_db();
+    let missing = "Unknown Card";
+    assert_eq!(infer_from_rows(&db, &[(missing, 1), ("Plains", 99)]), None);
+    assert_eq!(
+        infer_from_rows(&db, &[(missing, 1), (ISAMARU, 1), ("Plains", 98)]).as_deref(),
+        Some(ISAMARU)
+    );
+    assert_eq!(
+        infer_from_rows(
+            &db,
+            &[(missing, 1), (ISAMARU, 1), (missing, 1), ("Plains", 97)]
+        ),
+        None
+    );
+}
+
+#[test]
+fn selected_commander_warnings_distinguish_constructed_from_draft() {
+    let db = picker_db();
+    let singleton = format!("Singleton violations: {YARGLE} (2 copies)");
+    let identity = format!("Cards outside commander's color identity: {YARGLE}");
+    // CR 903.4 / CR 903.5b / CR 903.5c: constructed checks both copies and color.
+    // CR 903.13f(2): Draft keeps the color check and allows duplicate pool cards.
+    for (format, mut main, mut reasons) in [
+        (
+            GameFormat::Commander,
+            vec!["Plains".to_owned(); 97],
+            vec![singleton, identity.clone()],
+        ),
+        (
+            GameFormat::CommanderDraft,
+            [vec![ISAMARU.into()], vec!["Plains".into(); 57]].concat(),
+            vec![identity],
+        ),
+    ] {
+        main.extend([YARGLE.into(), YARGLE.into()]);
+        let mut request = DeckCompatibilityRequest {
+            main_deck: main,
+            commander: vec![ISAMARU.into()],
+            selected_format: Some(SelectedFormat::Tag(format)),
+            summary_only: false,
+            ..Default::default()
+        };
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false), "{format:?}");
+        let mut actual = result.selected_format_reasons;
+        actual.sort();
+        reasons.sort();
+        assert_eq!(actual, reasons, "{format:?}");
+
+        request
+            .main_deck
+            .iter_mut()
+            .filter(|name| name.as_str() == YARGLE)
+            .for_each(|name| *name = "Plains".into());
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(true), "{format:?}");
+        assert!(result.selected_format_reasons.is_empty());
+    }
 }

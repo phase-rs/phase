@@ -320,17 +320,28 @@ At the beginning of each of your postcombat main phases, add {R} for each 1 life
 
     let mut triggered = false;
     for _ in 0..60 {
-        let state = runner.state();
-        if state.phase == Phase::PostCombatMain && !state.stack.is_empty() {
+        let (phase, stack_empty, waiting) = {
+            let state = runner.state();
+            (
+                state.phase,
+                state.stack.is_empty(),
+                state.waiting_for.clone(),
+            )
+        };
+        if phase == Phase::PostCombatMain && !stack_empty {
             triggered = true;
         }
-        if triggered
-            && state.stack.is_empty()
-            && matches!(state.waiting_for, WaitingFor::Priority { .. })
-        {
+        if triggered && stack_empty && matches!(waiting, WaitingFor::Priority { .. }) {
             break;
         }
-        let action = match state.waiting_for.clone() {
+        // CR 805.5b: the holding team passes together on every Priority
+        // window — only the holder's pass never advances a shared team, and
+        // an empty stack still needs the team's passes to leave the window.
+        if matches!(waiting, WaitingFor::Priority { .. }) {
+            let _ = runner.pass_holding_team();
+            continue;
+        }
+        let action = match waiting {
             WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
                 attacks: vec![],
                 bands: vec![],
@@ -778,17 +789,28 @@ fn belbe_counts_an_opponent_who_lost_life_and_then_the_game() {
 
     let mut triggered = false;
     for _ in 0..60 {
-        let state = runner.state();
-        if state.phase == Phase::PostCombatMain && !state.stack.is_empty() {
+        let (phase, stack_empty, waiting) = {
+            let state = runner.state();
+            (
+                state.phase,
+                state.stack.is_empty(),
+                state.waiting_for.clone(),
+            )
+        };
+        if phase == Phase::PostCombatMain && !stack_empty {
             triggered = true;
         }
-        if triggered
-            && state.stack.is_empty()
-            && matches!(state.waiting_for, WaitingFor::Priority { .. })
-        {
+        if triggered && stack_empty && matches!(waiting, WaitingFor::Priority { .. }) {
             break;
         }
-        let action = match state.waiting_for.clone() {
+        // CR 805.5b: the holding team passes together on every Priority
+        // window — only the holder's pass never advances a shared team, and
+        // an empty stack still needs the team's passes to leave the window.
+        if matches!(waiting, WaitingFor::Priority { .. }) {
+            let _ = runner.pass_holding_team();
+            continue;
+        }
+        let action = match waiting {
             WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
                 attacks: vec![],
                 bands: vec![],
@@ -999,17 +1021,28 @@ fn team_game_life_history_case(trigger: &str, change: &str, who: engine::types::
 
     let mut triggered = false;
     for _ in 0..60 {
-        let state = runner.state();
-        if state.phase == Phase::PostCombatMain && !state.stack.is_empty() {
+        let (phase, stack_empty, waiting) = {
+            let state = runner.state();
+            (
+                state.phase,
+                state.stack.is_empty(),
+                state.waiting_for.clone(),
+            )
+        };
+        if phase == Phase::PostCombatMain && !stack_empty {
             triggered = true;
         }
-        if triggered
-            && state.stack.is_empty()
-            && matches!(state.waiting_for, WaitingFor::Priority { .. })
-        {
+        if triggered && stack_empty && matches!(waiting, WaitingFor::Priority { .. }) {
             break;
         }
-        let action = match state.waiting_for.clone() {
+        // CR 805.5b: the holding team passes together on every Priority
+        // window — only the holder's pass never advances a shared team, and
+        // an empty stack still needs the team's passes to leave the window.
+        if matches!(waiting, WaitingFor::Priority { .. }) {
+            let _ = runner.pass_holding_team();
+            continue;
+        }
+        let action = match waiting {
             WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
                 attacks: vec![],
                 bands: vec![],

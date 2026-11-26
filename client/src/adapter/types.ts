@@ -3437,6 +3437,8 @@ export type WaitingFor =
       target_player: PlayerId;
       eligible: ObjectId[];
       required_count: number;
+      // Fewest to keep; absent means exactly required_count (an "up to" keeper sends 0).
+      minimum_count?: number | null;
       // CR 608.2c + CR 122.1: the printed keeper mark, already resolved (CR 608.2h).
       keeper_counter?: [CounterType, number] | null;
       choose_filter?: TargetFilter;
@@ -4016,13 +4018,13 @@ export type GameEvent =
   | { type: "PhaseChanged"; data: { phase: Phase } }
   | { type: "PhaseChangedFor"; data: { phase: Phase; player: PlayerId } }
   | { type: "PriorityPassed"; data: { player_id: PlayerId } }
-  | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId; cast_mana_value?: number } }
+  | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId; cast_mana_value?: number; cast_mana_spent?: number; cast_incarnation?: number } }
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
   // `kind` is the engine's activated-ability kind (CR 605.1a / 606.1); it is
   // omitted by legacy payloads, which mean "Normal". `departed_source_lki`,
   // `trigger_state`, `stack_entry` and `activation_cost` are engine-internal
   // trigger authority the UI never renders.
-  | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; kind?: ActivatedAbilityKind } }
+  | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; kind?: ActivatedAbilityKind; loyalty_counters_removed?: number } }
   | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
   // `from` is null for an object that enters from no zone (a created token).
   | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone | null; to: Zone } }
@@ -4667,10 +4669,31 @@ export interface UnlessDrawCostView {
   stage: UnlessDrawPaymentStage;
 }
 
+/**
+ * CR 723.5 + CR 805.8: one pending decision's semantic owner paired with the
+ * seat authorized to submit it. Mirrors
+ * `engine::game::turn_control::DecisionBinding` (serde snake_case keys).
+ */
+export interface DecisionBinding {
+  semantic_owner: PlayerId;
+  authorized_actor: PlayerId;
+}
+
 export interface DerivedViews {
   /** Chooser-private printed creature types, ranked by deck frequency. */
   named_choice_suggestions?: string[];
   unique_authorized_submitter?: PlayerId;
+  /**
+   * CR 805.5a + CR 723.5: each living seat entitled to answer the live
+   * priority window that has not passed it yet — the parked representative
+   * plus unpassed teammates on a shared-team window — paired with its
+   * authorized actor. Absent on non-priority windows, when the owners would
+   * name only the holder (always so for individual seats), and on wire
+   * paths without derived views; consumers then fall back to
+   * `priority_player`. Mirrors
+   * `engine::game::derived_views::DerivedViews::priority_decision_bindings`.
+   */
+  priority_decision_bindings?: DecisionBinding[];
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
   scry_prompt_id?: InteractionId;
   /** Opaque engine-issued identity of this viewer's prompt, excluding display-only data. */
@@ -4957,6 +4980,19 @@ export interface DerivedViews {
    * or battle. Mirrors `engine::game::derived_views::DerivedViews::attack_targets`.
    */
   attack_targets?: Record<string, AttackTarget>;
+  /**
+   * The engine's lethal-first default for the open AssignCombatDamage prompt,
+   * derived from live combat state. Advisory only and absent outside that prompt.
+   * Mirrors `engine::game::derived_views::DerivedViews::combat_damage_suggestion`.
+   */
+  combat_damage_suggestion?: CombatDamageSplit;
+}
+
+/** Mirrors `engine::types::game_state::CombatDamageSplit`. */
+export interface CombatDamageSplit {
+  assignments: [ObjectId, number][];
+  trample_damage: number;
+  controller_damage: number;
 }
 
 /** Mirrors `engine::game::derived_views::UnblockedAttackPreview`. */

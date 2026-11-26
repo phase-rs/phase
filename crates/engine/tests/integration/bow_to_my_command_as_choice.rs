@@ -46,6 +46,10 @@ fn scheme_face(name: &str, oracle: &str) -> CardFace {
     face.card_type.core_types.push(CoreType::Scheme);
     face.card_type.supertypes.push(Supertype::Ongoing);
     synthesize_archenemy(&mut face);
+    // CR 904.9: the "as" choice resolves through the archenemy scan hook, so
+    // the parsed face carries no trigger gap.
+    let gaps = engine::game::coverage::card_face_gaps(&face);
+    assert!(gaps.is_empty(), "{name}: gaps: {gaps:?}");
     face
 }
 

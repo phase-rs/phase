@@ -8079,6 +8079,7 @@ fn replacement_condition_from_static(
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -9594,6 +9595,7 @@ fn parse_graveyard_redirect_replacement(
         // judgement as `stated_clause_expiry` and `expiry_from_duration`.
         Some(Duration::UntilNextTurnOf { .. })
         | Some(Duration::UntilEndOfNextTurnOf { .. })
+        | Some(Duration::UntilEndOfGrantedTurn { .. })
         | Some(Duration::UntilNextStepOf { .. }) => return None,
         // CR 604.2 + CR 611.2b: these end on an event or a condition rather
         // than a turn window, so `expiry: None` is the CORRECT answer, not an
@@ -11736,6 +11738,31 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
         .or_else(|| parse_damage_source_filter_passive(norm_lower))
 }
 
+/// CR 614.1a: fail-closed reader for the chain-position damage-modification
+/// lift (`try_parse_global_damage_modification_replacement`). Reports whether
+/// the antecedent's damage-source subject is printed but unreadable
+/// (`DamageSourceScope::Unrecognized` — e.g. Jeska, Thrice Reborn's anaphoric
+/// "that creature"), so the lift can decline and record the honest gap
+/// instead of emitting an unscoped replacement that would triple/double every
+/// source's damage. Mirrors the `WhileAntecedent::Unparsed` fail-closed arm in
+/// `parse_damage_modification_replacement`. Genuinely unscoped subjects ("a
+/// source" — Rankle and Torbran, Approach My Molten Realm) read `AnySource`
+/// and pass; the passive-voice fallback ("...would be dealt ... by
+/// <subject>") rescues clauses whose active subject is empty but whose "by"
+/// subject parses.
+pub(crate) fn damage_source_subject_unrecognized(norm_lower: &str) -> bool {
+    let Ok((_, (subject, _))) = nom_primitives::split_once_on(norm_lower, "would deal") else {
+        return false;
+    };
+    if !matches!(
+        damage_source_subject_scope(subject),
+        DamageSourceScope::Unrecognized
+    ) {
+        return false;
+    }
+    parse_damage_source_filter_passive(norm_lower).is_none()
+}
+
 /// CR 301.5 + CR 702.6: "equipped creature" (Equipment) and "enchanted
 /// creature" (Aura) both name the host object the permanent is attached to,
 /// which the runtime resolves via `TargetFilter::AttachedTo`. Mirrors the
@@ -13672,13 +13699,13 @@ fn parse_copy_count_replacement(lower: &str, original_text: &str) -> Option<Repl
 
 /// CR 614.1a + CR 608.2d: "If you would create one or more tokens, you may
 /// instead create that many <token A> or that many <token B>" (Jinnie Fay).
+/// Scoped to the controller's own token creations (`token_owner_scope`), like every 'you would create' sibling.
 fn parse_optional_token_substitution_choice(
     lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    use nom::combinator::{map, peek, success};
+    use nom::combinator::{map, peek};
     use nom::multi::separated_list1;
-    use nom::sequence::preceded;
 
     fn parse_jinnie_token_branch_segment(input: &str) -> OracleResult<'_, &str> {
         alt((
@@ -13689,10 +13716,13 @@ fn parse_optional_token_substitution_choice(
         .parse(input)
     }
 
-    let (segments, remainder) = nom_on_lower(original_text, lower, |input| {
-        let (input, ()) = preceded(
-            tag("if you would create one or more tokens, "),
-            preceded(tag("you may instead "), success(())),
+    let ((owner_scope, segments), remainder) = nom_on_lower(original_text, lower, |input| {
+        let (input, owner_scope) = terminated(
+            value(
+                ControllerRef::You,
+                tag("if you would create one or more tokens, "),
+            ),
+            tag("you may instead "),
         )
         .parse(input)?;
         let (input, _) = tag("create ").parse(input)?;
@@ -13701,10 +13731,13 @@ fn parse_optional_token_substitution_choice(
                 .parse(input)?;
         Ok((
             input,
-            segments
-                .into_iter()
-                .map(|segment| segment.to_string())
-                .collect::<Vec<_>>(),
+            (
+                owner_scope,
+                segments
+                    .into_iter()
+                    .map(|segment| segment.to_string())
+                    .collect::<Vec<_>>(),
+            ),
         ))
     })?;
 
@@ -13733,6 +13766,8 @@ fn parse_optional_token_substitution_choice(
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            // CR 109.5 + CR 111.2: "If you would create" — "you" is this object's controller and the creator of a token is its owner, so the substitution reaches only its controller's token creations (the "you would create" tag maps to ControllerRef::You, as in every sibling).
+            .token_owner_scope(owner_scope)
             .mode(ReplacementMode::Optional { decline: None })
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -14572,6 +14607,8 @@ fn token_description_to_spec(
         // Replacement-created tokens ("instead, create a token") are not the
         // "attached to" Aura/Role class; that path flows through `Effect::Token`.
         attach_to: crate::types::token_spec::TokenHostRequest::NotRequested,
+        // Replacement-created tokens carry no blocking rider either.
+        blocking_attacker: None,
     })
 }
 
@@ -15809,6 +15846,7 @@ fn stated_clause_expiry(clause_lower: &str, window_anchor: &str) -> StatedClause
         // silently shorten the card's stated duration.
         Some(Duration::UntilNextTurnOf { .. })
         | Some(Duration::UntilEndOfNextTurnOf { .. })
+        | Some(Duration::UntilEndOfGrantedTurn { .. })
         | Some(Duration::UntilNextStepOf { .. }) => StatedClauseExpiry::Unsupported,
         // Not turn windows: these end on an event or a condition, so `None` is the
         // CORRECT answer, not an unmapped one — the battlefield-exit prune in
@@ -17476,7 +17514,7 @@ fn parse_opponent_put_land_sacrifice_replacement(
             // of this class with a different permanent noun stays consistent. For
             // Land Equilibrium this is byte-identical to `TypedFilter::land()`.
             target: inject_controller(sacrifice_type_filter, ControllerRef::ScopedPlayer),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -18235,6 +18273,39 @@ mod tests {
         ] {
             assert_eq!(parse_damage_source_scope_passive(text), None, "{text}");
         }
+    }
+
+    /// CR 614.1a: the chain-position damage-modification lift's fail-closed
+    /// gate. An anaphoric active-voice subject ("that creature" — Jeska,
+    /// Thrice Reborn's duration-stripped `[0]` clause) reads unrecognized so
+    /// the lift declines and records the honest gap, instead of emitting an
+    /// unscoped replacement that would triple every source's damage. The
+    /// positive legs pin the corpus subjects that must keep lifting.
+    #[test]
+    fn damage_source_subject_unrecognized_gate() {
+        // Positive reach-guards: genuinely unscoped "a source" (Rankle and
+        // Torbran, Approach My Molten Realm) and scoped "a source you
+        // control" (I Call for Slaughter) both lift.
+        for text in [
+            "if a source would deal damage, it deals double that damage instead",
+            "if a source you control would deal damage this turn, it deals that much damage plus 1 instead",
+        ] {
+            assert!(!damage_source_subject_unrecognized(text), "{text}");
+        }
+        // The anaphoric subject declines: no filter expresses "that creature".
+        assert!(damage_source_subject_unrecognized(
+            "if that creature would deal combat damage to one of your opponents, it deals triple that damage to that player instead"
+        ));
+        // No "would deal" anchor (passive-only shield): nothing to read, no veto.
+        assert!(!damage_source_subject_unrecognized(
+            "prevent all damage that would be dealt to you by sources you don't control"
+        ));
+        // Synthetic rescue: an unrecognized active subject with a parseable
+        // passive "by" subject does not veto (mirrors the `or_else` chain in
+        // `parse_damage_source_filter`).
+        assert!(!damage_source_subject_unrecognized(
+            "if that creature would deal damage. prevent all damage that would be dealt to you by red sources"
+        ));
     }
 
     /// Corpus regression, found via PR #7615's card-data.json parse-diff:
@@ -29452,6 +29523,28 @@ mod tests {
         assert_eq!(
             def.quantity_modification,
             Some(QuantityModification::DOUBLE)
+        );
+        assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
+    }
+
+    /// CR 109.5 + CR 111.2: the optional token substitution scopes to its controller's tokens.
+    #[test]
+    fn optional_token_substitution_choice_scopes_to_controller() {
+        let def = parse_replacement_line(
+            "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.",
+            "Jinnie Fay, Jetmir's Second",
+        )
+        .expect("Jinnie Fay's optional token substitution must lower to a replacement");
+        // Reach guards: the optional-substitution-choice constructor built `def`.
+        assert_eq!(def.event, ReplacementEvent::CreateToken);
+        assert_eq!(def.mode, ReplacementMode::Optional { decline: None });
+        let Some(execute) = def.execute.as_deref() else {
+            panic!("expected an execute ability, got {:?}", def.execute);
+        };
+        assert!(
+            matches!(&*execute.effect, Effect::ChooseOneOf { branches, .. } if branches.len() == 2),
+            "expected a two-branch ChooseOneOf, got {:?}",
+            execute.effect
         );
         assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
     }

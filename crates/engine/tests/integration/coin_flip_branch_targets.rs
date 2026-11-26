@@ -1671,7 +1671,7 @@ fn empty_coin_binding_scenario(
         },
         EmptyCoinRider::Sacrifice => Effect::Sacrifice {
             target: TargetFilter::ParentTarget,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     };

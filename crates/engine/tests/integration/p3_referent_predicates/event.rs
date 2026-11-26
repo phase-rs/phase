@@ -318,7 +318,7 @@ fn prismari_cast_trigger(r: &GameRunner, apprentice: ObjectId, cast: ObjectId) -
     prismari_trigger(r, apprentice, |event| {
         matches!(
             event,
-            GameEvent::SpellCast { card_id: _, controller: P0, object_id, cast_mana_value: _ }
+            GameEvent::SpellCast { card_id: _, controller: P0, object_id, .. }
                 if *object_id == cast
         )
     })

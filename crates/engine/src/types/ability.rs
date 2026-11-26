@@ -8,12 +8,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::card::PrintedCardRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
+use super::events::ManaTapState;
 use super::game_state::{
     CastOccurrence, CyclingOccurrence, LKISnapshot, MayTriggerOrigin, TriggerSourceContext,
 };
 use super::game_state_kinds::{DistributionUnit, TargetSelectionConstraint};
 use super::identifiers::{
-    CardId, EpicEffectId, ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION,
+    CardId, DamageDeliveryOwnerId, EpicEffectId, ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION,
 };
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost, ManaType};
@@ -875,6 +876,9 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         // CR 701.33b: abandoning moves command-zone→scheme-deck, never a
         // battlefield departure.
         | Effect::AbandonScheme
+        // CR 701.32b: re-firing a face-up scheme's abilities moves nothing off
+        // the battlefield.
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -1958,6 +1962,78 @@ pub struct SplitDamagePortion {
     pub applied: Vec<AppliedReplacementKey>,
 }
 
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
+/// CR 608.2c: Whether a paused damage instruction has dealt damage to zero,
+/// one, or multiple distinct objects so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AwaitedDamageRecipient {
+    /// No object has been dealt damage by this instruction so far.
+    #[default]
+    None,
+    /// Exactly one object incarnation has been dealt damage so far.
+    Single { recipient: ObjectIncarnationRef },
+    /// Two or more distinct objects have been dealt damage, so there is no
+    /// single damaged object referent.
+    Multiple,
+}
+
+impl AwaitedDamageRecipient {
+    /// Record one object incarnation dealt damage by this instruction.
+    pub fn record_object(&mut self, pin: ObjectIncarnationRef) {
+        match *self {
+            Self::None => *self = Self::Single { recipient: pin },
+            Self::Single { recipient } if recipient == pin => {}
+            Self::Single { .. } | Self::Multiple => *self = Self::Multiple,
+        }
+    }
+
+    /// The unique damaged object incarnation, if exactly one was damaged.
+    pub fn single(self) -> Option<ObjectIncarnationRef> {
+        match self {
+            Self::Single { recipient } => Some(recipient),
+            Self::None | Self::Multiple => None,
+        }
+    }
+}
+
+/// CR 608.2c + CR 614.9: what a damage instruction did, as its direct child
+/// reads it (`SpellContext::direct_damage_result`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DamageInstructionResult {
+    /// The instruction has dealt its damage. `recipient` is the single object
+    /// it was actually dealt to, after any redirection; `None` when it reached
+    /// only players, was fully prevented, or reached several objects.
+    Dealt {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recipient: Option<ObjectIncarnationRef>,
+    },
+    /// CR 616.1 + CR 608.2c: The instruction paused before all of its damage
+    /// settled, and this child awaits completion. Accumulates the instruction's
+    /// dealt damage across pauses until this child begins to resolve.
+    AwaitingDelivery {
+        #[serde(default, skip_serializing_if = "is_zero_i32")]
+        amount: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        excess: Option<i32>,
+        #[serde(default)]
+        recipient: AwaitedDamageRecipient,
+        /// CR 701.14a + CR 120.10: When the awaiting parent was `Effect::Fight`,
+        /// its scalar/excess channel tracks only excess dealt to this fought
+        /// creature (`FightExcessOnFoughtCreature`), never the fighting subject.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fight_fought_creature: Option<ObjectId>,
+    },
+    /// Marker on a remaining-recipient continuation node (`build_remaining_damage_node`)
+    /// so `resolve_chain_body` folds its dealt damage into the awaiting rider
+    /// rather than treating it as an independent damage instruction.
+    ContinuationPortion,
+}
+
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -2085,6 +2161,25 @@ pub struct SpellContext {
     /// the copy uses that same information").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_removed_counter_amount: Option<u32>,
+    /// CR 606.4 + CR 602.2b: loyalty counters actually removed for this
+    /// activation's cost, separate from the all-counter result above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loyalty_counters_removed: Option<u32>,
+    /// CR 106.12 + CR 106.12b: the tap state of the activated mana ability whose
+    /// inline sub-chain this chain is. A "tapped for mana" replacement modifies a
+    /// production made "while such an ability is resolving and producing mana", so
+    /// the productions of the sub-chain's links deposit as tapped for mana (Urza's
+    /// Mine's "add {C}{C} instead"). Written only by
+    /// `mana_abilities::resolve_mana_ability_sub_chain` on the sub-chain root;
+    /// every link inherits it through the chain hand-off
+    /// (`effects::apply_parent_chain_context`). An inline carrier that starts its
+    /// branch from a fresh context (a die roll's result row, a coin flip's
+    /// outcome) does not carry it. Cleared by
+    /// `effects::build_reflexive_pending_trigger`, which builds every "when you
+    /// do" reflexive triggered ability, because such an ability is a separate
+    /// ability (CR 603.12). `NotFromTap` everywhere else.
+    #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
+    pub mana_tap_state: ManaTapState,
     /// CR 701.9a + CR 608.2c: The result of the immediately preceding discard
     /// instruction. `apply_parent_chain_context` copies this only to that
     /// discard's direct child and clears it on every other hand-off.
@@ -2093,6 +2188,17 @@ pub struct SpellContext {
     /// frame, so inline it widened every recursive frame by its size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_discard_result: Option<Box<DiscardedCardResult>>,
+    /// CR 608.2c + CR 614.9: The result of the immediately preceding damage
+    /// instruction — what a slotless "if a [type] is dealt damage this way"
+    /// rider reads. Stamped only by a damage instruction;
+    /// `apply_parent_chain_context` copies it only to that instruction's direct
+    /// child and clears it on every other hand-off, so an earlier instruction's
+    /// incidental object (a land tapped for a mana payment) never reaches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_damage_result: Option<DamageInstructionResult>,
+    /// The damage instruction that owns this suspended result or delivery node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_delivery_owner: Option<DamageDeliveryOwnerId>,
     /// CR 701.20e + CR 608.2c: Exact parent-produced cards forwarded to one
     /// immediate "for each" child. The child uses this snapshot as its
     /// iteration universe instead of an unqualified battlefield census.
@@ -2144,6 +2250,8 @@ pub struct SpellContext {
     /// leaves or loses the ability during casting. `None` for every other cast.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graveyard_permission_latch: Option<crate::types::game_state::GraveyardPermissionLatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_of_library_cast_latch: Option<Box<crate::types::game_state::TopOfLibraryCastLatch>>,
     /// CR 601.2b/f/h: Number of non-kicker additional-cost payments declared
     /// while casting this spell. Used by keyword abilities such as Squad
     /// (CR 702.157a), whose repeatable payment count is not a kicker count.
@@ -4685,6 +4793,7 @@ impl ResolvedAbility {
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -6525,6 +6634,28 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 608.2c + CR 614.9: Stamp a damage instruction's result onto this node,
+    /// its next instruction, and onto the base clause of an unswapped "instead"
+    /// override, which is that same next instruction.
+    pub(crate) fn set_direct_damage_result(
+        &mut self,
+        result: Option<DamageInstructionResult>,
+        owner: Option<DamageDeliveryOwnerId>,
+    ) {
+        if self
+            .condition
+            .as_ref()
+            .is_some_and(|condition| condition.is_instead_override())
+        {
+            if let Some(base) = self.else_ability.as_deref_mut() {
+                base.context.direct_damage_result = result;
+                base.context.damage_delivery_owner = owner;
+            }
+        }
+        self.context.direct_damage_result = result;
+        self.context.damage_delivery_owner = owner;
+    }
+
     /// CR 608.2c: Stamp one completed effect result onto exactly the deferred
     /// direct child. Descendants and alternate branches are cleared so the
     /// result cannot leak beyond its typed completion node.
@@ -6835,6 +6966,31 @@ impl ResolvedAbility {
     /// replacement chain carries its own object's `source_id`.
     pub fn shares_resolution_owner(&self, other: &ResolvedAbility) -> bool {
         self.source_id == other.source_id && self.ability_index == other.ability_index
+    }
+
+    /// CR 608.2c: a sub-ability is part of the same printed ability instance
+    /// as its parent, so it is "this ability" for an
+    /// `AbilityUseCountThisTurn` gate. Takes `parent_index` unless this node
+    /// already carries its own index, which is never clobbered.
+    pub fn inherit_ability_index(&mut self, parent_index: Option<usize>) {
+        if self.ability_index.is_none() {
+            self.ability_index = parent_index;
+        }
+    }
+
+    /// CR 608.2c: [`Self::inherit_ability_index`] applied down every
+    /// `sub_ability` / `else_ability` link. The runtime applies the one-hop
+    /// rule at each hand-off (`effects::apply_parent_chain_context`); a reader
+    /// that walks a chain without resolving it applies it to the whole tree.
+    pub fn inherit_ability_index_recursive(&mut self, parent_index: Option<usize>) {
+        self.inherit_ability_index(parent_index);
+        let index = self.ability_index;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.inherit_ability_index_recursive(index);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.inherit_ability_index_recursive(index);
+        }
     }
 
     pub fn set_context_recursive(&mut self, context: SpellContext) {
@@ -7256,6 +7412,32 @@ mod tests {
                 .expect("a payload without the key deserializes")
                 .prior_player_choices,
             Vec::<PlayerId>::new()
+        );
+    }
+
+    /// CR 106.12b: the sub-chain tap state is an additive, default-skipped
+    /// field: `FromTap` round-trips under its own key, `NotFromTap` is not
+    /// serialized, and a payload without the key reads as `NotFromTap`.
+    #[test]
+    fn spell_context_mana_tap_state_round_trip_and_default_skip() {
+        let tapped = SpellContext {
+            mana_tap_state: ManaTapState::FromTap,
+            ..SpellContext::default()
+        };
+        let wire = serde_json::to_value(&tapped).expect("context serializes");
+        assert_eq!(wire["mana_tap_state"], serde_json::json!("FromTap"));
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(wire).expect("context deserializes"),
+            tapped
+        );
+
+        let absent = serde_json::to_value(SpellContext::default()).expect("context serializes");
+        assert!(absent.get("mana_tap_state").is_none());
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(absent)
+                .expect("a payload without the key deserializes")
+                .mana_tap_state,
+            ManaTapState::NotFromTap
         );
     }
 

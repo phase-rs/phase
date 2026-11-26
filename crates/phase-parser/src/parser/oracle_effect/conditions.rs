@@ -11,10 +11,10 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition as nom_condition;
 use super::super::oracle_nom::condition::{
-    inject_controller_you, parse_cast_using_teamwork_phrase, parse_pair_attack_predicate,
-    parse_scoped_player_opponent_and_has_condition, parse_spell_target_superlative_suffix,
-    parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
-    DamagedThisWayRecipient,
+    inject_controller, inject_controller_you, parse_cast_using_teamwork_phrase,
+    parse_pair_attack_predicate, parse_scoped_player_opponent_and_has_condition,
+    parse_spell_target_superlative_suffix, parse_you_put_onto_battlefield_this_way_clause,
+    parse_zone_changed_this_way_clause, DamagedThisWayRecipient,
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -769,15 +769,11 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         }
     }
 
-    if let Some((_, rest)) = nom_on_lower(text, &lower, |i| {
-        value((), tag("if the gift wasn't promised, ")).parse(i)
-    }) {
-        return (
-            Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::additional_cost_paid_any()),
-            }),
-            rest.to_string(),
-        );
+    let gift = nom_on_lower(text, &lower, |input| {
+        terminated(preceded(tag("if "), parse_gift_promise), tag(", ")).parse(input)
+    });
+    if let Some((true, rest)) = gift {
+        return (Some(gift_promise_condition(true)), rest.to_string());
     }
 
     if alt((tag::<_, _, OracleError<'_>>("if "), tag("then if ")))
@@ -829,13 +825,14 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
 
     let mut alternative_mana_cost_conditional = false;
 
-    let body = if let Some(((), rest)) = nom_on_lower(text, &lower, |input| {
+    let body = if let Some((false, rest)) = gift {
+        Some(rest.to_string())
+    } else if let Some(((), rest)) = nom_on_lower(text, &lower, |input| {
         value(
             (),
             alt((
                 tag("if this spell's additional cost was paid, "),
                 tag("if evidence was collected, "),
-                tag("if the gift was promised, "),
             )),
         )
         .parse(input)
@@ -1021,6 +1018,8 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
                     (stripped, AbilityCondition::AdditionalCostPaidInstead)
                 } else if alternative_mana_cost_conditional {
                     (body, AbilityCondition::AlternativeManaCostPaid)
+                } else if gift.is_some() {
+                    (body, gift_promise_condition(false))
                 } else {
                     (body, AbilityCondition::additional_cost_paid_any())
                 }
@@ -1412,6 +1411,20 @@ pub(super) fn strip_if_you_do_conditional_with_context(
             remainder,
         },
     }
+}
+
+/// CR 608.2c + CR 118.12a: whether a reflexive-strip condition is a BARE
+/// outcome gate — exactly the affirmative `effect_performed` ("If they do",
+/// "If that player does") or its negation ("If they don't", "If that player
+/// doesn't"). Composed from the two existing `AbilityCondition` predicates;
+/// nothing is re-matched.
+///
+/// The unless-payer seeding rung admits only this pair: a `WhenYouDo` marker,
+/// a deferred guard, a zone-change head, a reveal gate, or an `And`-wrapped
+/// composition is a different conditional family whose body anaphor (if any)
+/// resolves through its own scope.
+pub(super) fn is_bare_reflexive_outcome_gate(condition: &AbilityCondition) -> bool {
+    condition.is_optional_effect_performed() || condition.is_not_optional_effect_performed()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2502,7 +2515,8 @@ fn type_filter_can_occur_on_permanent(tf: &TypeFilter) -> bool {
         | TypeFilter::Non(_)
         | TypeFilter::Any => true,
         TypeFilter::AnyOf(inners) => inners.iter().any(type_filter_can_occur_on_permanent),
-        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card => false,
+        // CR 314.2: schemes remain in the command zone — never permanents.
+        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card | TypeFilter::Scheme => false,
     }
 }
 
@@ -5756,27 +5770,46 @@ fn parse_additional_cost_paid_gate_condition_text(text: &str) -> Option<AbilityC
     })
 }
 
-/// CR 601.2b + CR 702.33b (kicker) + CR 702.174b (gift): A plain conditional
-/// gate ("[effect] if <additional cost was paid>") — as opposed to the
-/// replacement "instead" fold — that all resolve to the shared
-/// `additional_cost_paid_any()` runtime check. Covers kicked, the gift-promised
-/// phrasing (Longstalk Brawl / Coiling Rebirth), and the generic
-/// "additional cost was paid" wording (used inside `And` gates).
-fn parse_additional_cost_paid_gate_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
-    let (rest, _) = alt((
-        value(
-            (),
-            (
-                alt((tag("it"), tag("that spell"), tag("this spell"))),
-                tag(" was kicked"),
-            ),
+/// CR 702.174k: The promised predicate refers to paying this spell's Gift cost.
+fn parse_gift_promise(input: &str) -> OracleResult<'_, bool> {
+    preceded(
+        tag("the gift "),
+        terminated(
+            alt((value(true, tag("wasn't")), value(false, tag("was")))),
+            tag(" promised"),
         ),
-        value((), tag("the gift was promised")),
-        value((), tag("this spell's additional cost was paid")),
-        value((), tag("its additional cost was paid")),
+    )
+    .parse(input)
+}
+
+fn gift_promise_condition(negated: bool) -> AbilityCondition {
+    maybe_negate(
+        AbilityCondition::additional_cost_paid_origin(AdditionalCostOrigin::Gift),
+        negated,
+    )
+}
+
+/// CR 601.2b + CR 702.33b + CR 702.174k: Plain additional-cost predicates,
+/// including the Gift predicate used inside conjunctions (Coiling Rebirth).
+fn parse_additional_cost_paid_gate_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
+    alt((
+        map(parse_gift_promise, gift_promise_condition),
+        map(
+            alt((
+                value(
+                    (),
+                    (
+                        alt((tag("it"), tag("that spell"), tag("this spell"))),
+                        tag(" was kicked"),
+                    ),
+                ),
+                value((), tag("this spell's additional cost was paid")),
+                value((), tag("its additional cost was paid")),
+            )),
+            |()| AbilityCondition::additional_cost_paid_any(),
+        ),
     ))
-    .parse(input)?;
-    Ok((rest, AbilityCondition::additional_cost_paid_any()))
+    .parse(input)
 }
 
 /// CR 601.2f + CR 608.2c: "<effect> if (this spell was | it was | it's) cast
@@ -6870,6 +6903,7 @@ pub(crate) fn lower_instead_condition(
         .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
         .or_else(|| parse_condition_text_in(cond_text, ctx))
         .or_else(|| parse_control_count_as_ability_condition(cond_text))
+        .or_else(|| parse_they_control_fewer_count_as_ability_condition(cond_text))
 }
 
 /// Shared assembly: build an `AbilityDefinition` for an instead override.
@@ -7269,6 +7303,40 @@ fn parse_control_count_as_ability_condition(text: &str) -> Option<AbilityConditi
     })
 }
 
+/// CR 608.2c + CR 107.1: "they control fewer than N [types]" — a fixed
+/// control-count threshold over the opponents' collective board (My Wealth
+/// Will Bury You: "If they control fewer than four artifacts and
+/// enchantments, ..."). "They" is the nearest plural player antecedent
+/// ("your opponents" in the preceding sentence), so the count is
+/// opponent-scoped — NOT the `ScopedPlayer` of the per-player punishment
+/// arms (`parse_they_control_count_ge`), which needs a relative-player slot
+/// this trigger body never establishes. The only corpus member is the scheme
+/// above; a future per-player "they control fewer than" would extend this
+/// arm with a scope check rather than rebind it.
+fn parse_they_control_fewer_count_as_ability_condition(text: &str) -> Option<AbilityCondition> {
+    let text = text.trim();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("they control ")
+        .parse(text)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("fewer than ")
+        .parse(rest)
+        .ok()?;
+    let (rest, n) = nom_primitives::parse_number(rest).ok()?;
+    let rest = rest.trim_start();
+    let (filter, leftover) = parse_type_phrase_folding(rest);
+    if filter == TargetFilter::Any || !leftover.trim().trim_end_matches('.').is_empty() {
+        return None;
+    }
+    let filter = inject_controller(filter, ControllerRef::Opponent);
+    Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::LT,
+        rhs: QuantityExpr::Fixed { value: n as i32 },
+    })
+}
+
 /// CR 122.1 + CR 608.2c: Build an `AbilityCondition` from a counter-threshold
 /// `(minimum, maximum)` pair against a counter-quantity expression. Shared by
 /// the typed (`CountersOnSelf`) and any-type (`AnyCountersOnSelf`) arms of
@@ -7549,6 +7617,11 @@ pub(crate) fn static_condition_to_ability_condition(
             player: PlayerScope::Controller,
         } => Some(AbilityCondition::IsMonarch),
         StaticCondition::IsMonarch { .. } => None,
+        // CR 508.5: no `AbilityCondition` defending-player variant exists —
+        // "if you're the defending player" is printed only as a trigger
+        // intervening-if (Nature Shields Its Own), which bridges to
+        // `TriggerCondition::IsDefendingPlayer` instead.
+        StaticCondition::IsDefendingPlayer { .. } => None,
         // Digital-only Alchemy (no CR entry): no `AbilityCondition` boon
         // variant exists — "if you have a boon" is printed only as a
         // trigger intervening-if (Underbridge Warlock), which bridges to
@@ -7952,6 +8025,7 @@ fn static_condition_to_delayed_ability_condition(
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
@@ -10934,6 +11008,51 @@ mod tests {
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::player::PlayerCounterKind;
+
+    /// CR 608.2c + CR 118.12a: the unless-payer seeding gate admits exactly the
+    /// bare affirmative/negated outcome pair — every other reflexive-strip
+    /// output (markers, guards, heads, compositions) is excluded.
+    #[test]
+    fn bare_reflexive_outcome_gate_admits_only_the_affirmative_negated_pair() {
+        // Admitted: the bare pair.
+        assert!(is_bare_reflexive_outcome_gate(
+            &AbilityCondition::effect_performed()
+        ));
+        assert!(is_bare_reflexive_outcome_gate(&AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        }));
+        // Excluded: every other reflexive-strip family.
+        let excluded = [
+            // "When you do" creation marker, bare and guard-composed (the
+            // deferred-marker shape).
+            AbilityCondition::WhenYouDo,
+            AbilityCondition::when_you_do_with_guard(AbilityCondition::IsYourTurn),
+            // The reveal-until creation gate (its own guard family).
+            super::super::reveal_this_way_gate_condition(),
+            // A negated DIFFERENT signal is not the negated outcome.
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::current_scope_succeeded()),
+            },
+            // Zone-change "this way" heads.
+            AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::ParentTarget,
+                destination: None,
+            },
+            // `And` compositions, even ones CONTAINING the outcome signal.
+            AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::effect_performed(),
+                    AbilityCondition::IsYourTurn,
+                ],
+            },
+        ];
+        for condition in &excluded {
+            assert!(
+                !is_bare_reflexive_outcome_gate(condition),
+                "excluded: {condition:?}"
+            );
+        }
+    }
 
     #[test]
     fn player_counter_absence_requires_a_proven_event_antecedent() {
@@ -17058,6 +17177,67 @@ mod tests {
         };
         assert!(tf.type_filters.contains(&TypeFilter::Artifact));
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    }
+
+    #[test]
+    fn they_control_fewer_count_instead_condition_parses() {
+        // CR 608.2c + CR 107.1: My Wealth Will Bury You's floor gate — "they"
+        // is the opponents collective, compared strictly against four.
+        let cond = lower_instead_condition(
+            "they control fewer than four artifacts and enchantments",
+            &mut ParseContext::default(),
+        )
+        .expect("the fewer-than control count must lower");
+        let AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        } = &cond
+        else {
+            panic!("expected QuantityCheck, got {cond:?}");
+        };
+        assert_eq!(*comparator, Comparator::LT);
+        assert_eq!(*rhs, QuantityExpr::Fixed { value: 4 });
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = lhs
+        else {
+            panic!("expected an object-count lhs, got {lhs:?}");
+        };
+        fn typed_leaves<'f>(
+            filter: &'f TargetFilter,
+            out: &mut Vec<&'f crate::types::ability::TypedFilter>,
+        ) {
+            match filter {
+                TargetFilter::Typed(typed) => out.push(typed),
+                TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                    for inner in filters {
+                        typed_leaves(inner, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut leaves = Vec::new();
+        typed_leaves(filter, &mut leaves);
+        assert!(!leaves.is_empty(), "expected typed leaves, got: {filter:?}");
+        assert!(
+            leaves
+                .iter()
+                .all(|typed| typed.controller
+                    == Some(crate::types::ability::ControllerRef::Opponent)),
+            "the count must be opponent-scoped, got: {filter:?}"
+        );
+        let names = |wanted: crate::types::ability::TypeFilter| {
+            leaves
+                .iter()
+                .any(|typed| typed.type_filters.contains(&wanted))
+        };
+        assert!(
+            names(crate::types::ability::TypeFilter::Artifact)
+                && names(crate::types::ability::TypeFilter::Enchantment),
+            "the count must cover both types, got: {filter:?}"
+        );
     }
 
     // ---- reflexive-if-rider recognizer (S01) ----

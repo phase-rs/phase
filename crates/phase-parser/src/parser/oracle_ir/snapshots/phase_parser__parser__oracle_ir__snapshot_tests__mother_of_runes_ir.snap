@@ -122,7 +122,6 @@ expression: "&ir"
             },
             "description": "{T}: Target creature you control gains protection from the color of your choice until end of turn.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
