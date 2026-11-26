@@ -2560,6 +2560,7 @@
     "cost": {
       "card": "card",
       "cards": "cards",
+      "countAnyNumber": "any number",
       "filteredCard": "{{types}} card",
       "filteredCards": "{{types}} cards",
       "nonType": "non{{type}}",

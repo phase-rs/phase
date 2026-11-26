@@ -370,6 +370,74 @@ fn mixed_same_zone_exile_legs_refuse_activation_fail_closed() {
     );
 }
 
+/// Back-to-back activations bind each `-X/-X` to its own payment set:
+/// the second activation exiling one card shrinks its target by one even
+/// though the first activation exiled two (concrete-id binding via
+/// `PublishExileTrackedSet`, never a global "last exiled" read).
+#[test]
+fn painbringer_back_to_back_activations_read_only_their_own_sets() {
+    let mut scenario = GameScenario::new();
+    let painbringer = scenario
+        .add_creature_from_oracle(P0, "Painbringer", 2, 2, PAINBRINGER)
+        .id();
+    let target_one = scenario.add_creature(P1, "Target Bear One", 3, 3).id();
+    let target_two = scenario.add_creature(P1, "Target Bear Two", 3, 3).id();
+    let mut runner = scenario.build();
+    let gy: Vec<ObjectId> = (0..3)
+        .map(|i| {
+            create_object(
+                runner.state_mut(),
+                CardId(500 + i),
+                P0,
+                format!("Gy Filler {i}"),
+                Zone::Graveyard,
+            )
+        })
+        .collect();
+
+    // First activation exiles two → -2/-2.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: painbringer,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Painbringer activates");
+    drive(&mut runner, target_one, &gy[..2]);
+    let state = runner.state();
+    assert_eq!(state.objects[&target_one].power, Some(1));
+    assert_eq!(state.objects[&target_one].toughness, Some(1));
+
+    // Untap for the second activation (test-harness upkeep, not game flow).
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&painbringer)
+        .expect("painbringer")
+        .tapped = false;
+
+    // Second activation exiles the last one → -1/-1, reading only its
+    // own set: a stale read of the first set would give -2/-2 (or worse).
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: painbringer,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Painbringer activates again");
+    drive(&mut runner, target_two, &gy[2..]);
+    let state = runner.state();
+    assert_eq!(state.objects[&target_two].power, Some(2));
+    assert_eq!(state.objects[&target_two].toughness, Some(2));
+    assert_eq!(state.objects[&target_one].power, Some(1));
+    assert_eq!(state.objects[&target_one].toughness, Some(1));
+    for id in &gy {
+        assert_eq!(state.objects[id].zone, Zone::Exile);
+    }
+    assert!(state.objects[&painbringer].tapped);
+    assert!(runner.state().stack.is_empty());
+}
+
 /// Exiling all three gives -3/-3, killing the 3/3 — the readback counts
 /// the whole paid set, not a stale or partial one.
 #[test]

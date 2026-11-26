@@ -19707,6 +19707,63 @@ pub const EXILE_COST_X: u32 = u32::MAX;
 /// parser/data clarity (mirrors [`REMOVE_COUNTER_COST_ANY_NUMBER`]).
 pub const EXILE_COST_ANY_NUMBER: u32 = u32::MAX - 1;
 
+/// Serde adapter for `AbilityCost::Exile.count`.
+///
+/// CR 107.1c: "any number" admits zero. CR 601.2b: the count is announced
+/// while the spell is cast or the ability activated.
+///
+/// The engine is the authority on what the count means; the wire carries
+/// engine-interpreted tags so display layers never compare against the
+/// compact numeric sentinels: [`EXILE_COST_X`] serializes as `"X"`,
+/// [`EXILE_COST_ANY_NUMBER`] as `"any-number"`, every other count as its
+/// number. Deserialization accepts the two tags plus any number (legacy
+/// `card-data.json` still carries the raw sentinels); anything else is a
+/// hard error.
+pub mod exile_cost_count {
+    use serde::de::{self, Visitor};
+    use serde::{Deserializer, Serializer};
+
+    use super::{EXILE_COST_ANY_NUMBER, EXILE_COST_X};
+
+    pub fn serialize<S: Serializer>(count: &u32, serializer: S) -> Result<S::Ok, S::Error> {
+        if *count == EXILE_COST_X {
+            serializer.serialize_str("X")
+        } else if *count == EXILE_COST_ANY_NUMBER {
+            serializer.serialize_str("any-number")
+        } else {
+            serializer.serialize_u32(*count)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+        deserializer.deserialize_any(CountVisitor)
+    }
+
+    struct CountVisitor;
+
+    impl<'de> Visitor<'de> for CountVisitor {
+        type Value = u32;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an exile-cost count: a number, \"X\", or \"any-number\"")
+        }
+
+        fn visit_u64<E: de::Error>(self, value: u64) -> Result<u32, E> {
+            u32::try_from(value).map_err(|_| {
+                de::Error::custom(format!("exile-cost count {value} exceeds u32::MAX"))
+            })
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<u32, E> {
+            match value {
+                "X" => Ok(EXILE_COST_X),
+                "any-number" => Ok(EXILE_COST_ANY_NUMBER),
+                _ => Err(de::Error::unknown_variant(value, &["X", "any-number"])),
+            }
+        }
+    }
+}
+
 pub fn is_chosen_remove_counter_cost_count(count: u32) -> bool {
     matches!(
         count,
@@ -20181,6 +20238,7 @@ pub enum AbilityCost {
         self_scope: DiscardSelfScope,
     },
     Exile {
+        #[serde(with = "exile_cost_count")]
         count: u32,
         #[serde(default)]
         zone: Option<Zone>,
@@ -45868,6 +45926,120 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    /// F1-T4: the exile-cost count wire contract — sentinels serialize as
+    /// engine-interpreted tags, fixed counts stay numeric.
+    #[test]
+    fn exile_cost_count_serializes_sentinels_as_tags() {
+        let any_number = AbilityCost::Exile {
+            count: EXILE_COST_ANY_NUMBER,
+            zone: Some(Zone::Hand),
+            filter: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&any_number).unwrap()["count"],
+            serde_json::json!("any-number")
+        );
+        let x = AbilityCost::Exile {
+            count: EXILE_COST_X,
+            zone: Some(Zone::Graveyard),
+            filter: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&x).unwrap()["count"],
+            serde_json::json!("X")
+        );
+        let fixed = AbilityCost::Exile {
+            count: 2,
+            zone: Some(Zone::Hand),
+            filter: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&fixed).unwrap()["count"],
+            serde_json::json!(2)
+        );
+    }
+
+    /// F1-T4: deserialization accepts the two tags plus any number (legacy
+    /// `card-data.json` still carries the raw sentinels).
+    #[test]
+    fn exile_cost_count_deserializes_tags_and_legacy_numerals() {
+        for (wire, expected) in [
+            (serde_json::json!("any-number"), EXILE_COST_ANY_NUMBER),
+            (serde_json::json!("X"), EXILE_COST_X),
+            (serde_json::json!(2), 2),
+            // Legacy card-data.json carries the raw sentinels.
+            (serde_json::json!(4294967294u32), EXILE_COST_ANY_NUMBER),
+            (serde_json::json!(4294967295u32), EXILE_COST_X),
+        ] {
+            let cost: AbilityCost = serde_json::from_value(serde_json::json!({
+                "type": "Exile",
+                "count": wire,
+                "zone": "Graveyard",
+                "filter": null,
+            }))
+            .unwrap();
+            assert!(
+                matches!(cost, AbilityCost::Exile { count, .. } if count == expected),
+                "wire {wire} must decode to {expected}, got {cost:?}"
+            );
+        }
+    }
+
+    /// F1-T4: verbatim Harvest Pyre `additional_cost` fragment from
+    /// card-data.json (B2 reach-guard pairing: the client feeds this
+    /// record's post-serde projection to `formatQuantity`).
+    #[test]
+    fn exile_cost_count_round_trips_verbatim_harvest_pyre_export() {
+        let legacy: AdditionalCost = serde_json::from_value(serde_json::json!({
+            "type": "Required",
+            "data": {
+                "type": "Exile",
+                "count": 4294967295u32,
+                "zone": "Graveyard",
+                "filter": null,
+            },
+        }))
+        .unwrap();
+        assert!(
+            matches!(
+                &legacy,
+                AdditionalCost::Required(AbilityCost::Exile { count, .. })
+                    if *count == EXILE_COST_X
+            ),
+            "legacy numeral must decode to EXILE_COST_X, got {legacy:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap()["data"]["count"],
+            serde_json::json!("X")
+        );
+    }
+
+    /// F1-T4 hostile: unknown strings and non-integer JSON are hard
+    /// errors, never a silent zero or a defaulted count.
+    #[test]
+    fn exile_cost_count_rejects_unknown_strings_and_non_integers() {
+        for wire in [
+            serde_json::json!("lots"),
+            serde_json::json!(""),
+            serde_json::json!(-1),
+            serde_json::json!(2.5),
+            serde_json::json!(4294967296u64),
+            serde_json::json!(null),
+            serde_json::json!(true),
+        ] {
+            let result: Result<AbilityCost, _> = serde_json::from_value(serde_json::json!({
+                "type": "Exile",
+                "count": wire,
+                "zone": "Graveyard",
+                "filter": null,
+            }));
+            assert!(
+                result.is_err(),
+                "wire {wire} must be a hard error, got {result:?}"
+            );
+        }
+    }
 
     #[test]
     fn phase_out_context_union_extracts_no_new_target() {

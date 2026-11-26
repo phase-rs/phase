@@ -9,7 +9,7 @@
 //! it must read like. Fixture names contain no keyword and no Oracle word.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{AbilityCost, AdditionalCost, TargetRef};
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::casting_costs::ReductionProvenance;
 use engine::types::events::GameEvent;
@@ -227,6 +227,42 @@ fn drive(runner: &mut GameRunner, source: ObjectId, first: GameAction, answers: 
         })
         .count();
     out
+}
+
+/// Cast `spell` with X = `x`, answering the X announcement — plus the
+/// prompts `cast_printed` also declines by default (a Normal
+/// alternative-cast election, a declined splice) — until the Optional
+/// offer stops the flow. Returns the offer prompt for wire-shape
+/// assertions. Anything else is a panic: the path to the offer is the
+/// reach-guard.
+fn cast_until_optional(runner: &mut GameRunner, spell: ObjectId, x: u32) -> WaitingFor {
+    runner.act(cast_action(runner, spell)).expect("cast begins");
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseXValue { .. } => {
+                runner
+                    .act(GameAction::ChooseX { value: x })
+                    .expect("choose X");
+            }
+            WaitingFor::AlternativeCastChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseAlternativeCast {
+                        choice: AlternativeCastDecision::Normal,
+                    })
+                    .expect("elect normal cast");
+            }
+            WaitingFor::SpliceOffer { .. } => {
+                runner
+                    .act(GameAction::RespondToSpliceOffer { card: None })
+                    .expect("decline splice");
+            }
+            WaitingFor::OptionalCostChoice { .. } => {
+                return runner.state().waiting_for.clone();
+            }
+            other => panic!("expected the Optional offer, got {other:?}"),
+        }
+    }
+    panic!("the Optional offer never surfaced");
 }
 
 fn zone(runner: &GameRunner, id: ObjectId) -> Zone {
@@ -812,6 +848,304 @@ fn march_of_otherworldly_light_unprompted_completion_reads_prompted_cost() {
 }
 
 #[test]
+fn march_optional_offer_serializes_any_number_tag() {
+    // F1-T1: the March offer prompt must carry the engine-interpreted
+    // "any-number" tag, never the raw 4294967294 sentinel.
+    let mut board = printed_board(
+        "March of Otherworldly Light",
+        MARCH_OF_OTHERWORLDLY_LIGHT,
+        cost(vec![ManaCostShard::X, ManaCostShard::White], 0),
+        true,
+        vec![],
+        1,
+    );
+    let waiting = cast_until_optional(&mut board.runner, board.spell, 1);
+    let offered = match &waiting {
+        WaitingFor::OptionalCostChoice { cost, .. } => cost.clone(),
+        other => panic!("expected the Optional offer, got {other:?}"),
+    };
+    assert!(
+        matches!(offered, AdditionalCost::Optional { .. }),
+        "the stopped prompt must be the Optional any-number offer, got {offered:?}"
+    );
+    let wire = serde_json::to_value(&waiting).expect("prompt serializes");
+    // Both `WaitingFor` and `AdditionalCost` are adjacently tagged
+    // (`type`/`data`), so the count sits two `data` hops down.
+    assert_eq!(
+        wire["data"]["cost"]["data"]["cost"]["count"],
+        serde_json::json!("any-number"),
+        "offer count must be the tag, got {}",
+        wire["data"]["cost"]["data"]["cost"]["count"]
+    );
+    assert!(
+        !wire.to_string().contains("4294967294"),
+        "no raw sentinel may leak into the prompt"
+    );
+    // Full-drive reach-guard (existing pattern): exactly one offer, and the
+    // cast completes to the stack.
+    let ((automatic, automatic_cast), _) = printed_pair(
+        "March of Otherworldly Light",
+        MARCH_OF_OTHERWORLDLY_LIGHT,
+        cost(vec![ManaCostShard::X, ManaCostShard::White], 0),
+        true,
+        vec![],
+    );
+    assert_eq!(automatic_cast.optional_offers, 1);
+    assert_eq!(zone(&automatic.runner, automatic.spell), Zone::Stack);
+}
+
+#[test]
+fn march_offer_with_no_white_cards_is_offered_with_max_zero() {
+    // F1-T1 hostile (N6 resolved): `printed_board`'s hand holds no white
+    // cards, yet the offer still appears — any-number admits zero
+    // (CR 107.1c), so the engine offers with max 0 instead of skipping.
+    // One victim: the target declaration is automatic, so the stopped
+    // flow is X → offer → payment → mana → stack with no target prompt
+    // interleaved (a prompted declaration would precede the offer).
+    let mut board = printed_board(
+        "March of Otherworldly Light",
+        MARCH_OF_OTHERWORLDLY_LIGHT,
+        cost(vec![ManaCostShard::X, ManaCostShard::White], 0),
+        true,
+        vec![],
+        1,
+    );
+    let spell = board.spell;
+    // Pin the premise: nothing in hand but the spell being cast is white.
+    for id in board.runner.state().players[0].hand.clone() {
+        if id == spell {
+            continue;
+        }
+        assert!(
+            !board.runner.state().objects[&id]
+                .color
+                .contains(&ManaColor::White),
+            "premise: no white cards in hand"
+        );
+    }
+    let waiting = cast_until_optional(&mut board.runner, spell, 1);
+    let wire = serde_json::to_value(&waiting).expect("prompt serializes");
+    assert_eq!(
+        wire["data"]["cost"]["data"]["cost"]["count"],
+        serde_json::json!("any-number")
+    );
+    // Accepting the empty offer surfaces the (0, 0) payment, which
+    // completes with no cards exiled while the cast continues to the
+    // stack at the full {1}{W} (2 mana, no reduction).
+    board
+        .runner
+        .act(GameAction::DecideOptionalCost { index: 0 })
+        .expect("accept the offer");
+    match &board.runner.state().waiting_for {
+        WaitingFor::PayCost {
+            count: 0,
+            min_count: 0,
+            choices,
+            ..
+        } => {
+            assert!(choices.is_empty(), "no eligible cards, got {choices:?}");
+        }
+        other => panic!("expected the empty any-number payment, got {other:?}"),
+    }
+    board
+        .runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("zero exiled is legal");
+    for _ in 0..4 {
+        match board.runner.state().waiting_for.clone() {
+            WaitingFor::ManaPayment { .. } => {
+                board
+                    .runner
+                    .act(GameAction::PassPriority)
+                    .expect("mana pays");
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(zone(&board.runner, spell), Zone::Stack);
+    assert_eq!(pool(&board.runner), 28);
+}
+
+/// F2-T2 board: `marches` Marches of Otherworldly Light in hand beside
+/// `whites` white filler spells, `victims` MV-1 opponent creatures, and a
+/// funded pool.
+struct MarchBoard {
+    runner: GameRunner,
+    spells: Vec<ObjectId>,
+    whites: Vec<ObjectId>,
+}
+
+fn march_board(marches: usize, whites: usize, victims: usize) -> MarchBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for color in [
+        ManaColor::Black,
+        ManaColor::Red,
+        ManaColor::Blue,
+        ManaColor::White,
+        ManaColor::Green,
+    ] {
+        scenario.add_basic_land(P0, color);
+    }
+    let mut white_ids = Vec::with_capacity(whites);
+    for i in 0..whites {
+        let mut filler =
+            scenario.add_spell_to_hand_from_oracle(P0, &format!("White Filler {i}"), true, "");
+        filler.with_mana_cost(cost(vec![ManaCostShard::White], 0));
+        white_ids.push(filler.id());
+    }
+    for i in 0..victims {
+        scenario
+            .add_creature(P1, &format!("Mark {i}"), 1, 1)
+            .with_color(vec![ManaColor::Red, ManaColor::Blue])
+            .with_mana_cost(ManaCost::generic(1));
+    }
+    let mut spells = Vec::with_capacity(marches);
+    for i in 0..marches {
+        let mut spell = scenario.add_spell_to_hand_from_oracle(
+            P0,
+            &format!("March of Otherworldly Light {i}"),
+            true,
+            MARCH_OF_OTHERWORLDLY_LIGHT,
+        );
+        spell.with_mana_cost(cost(vec![ManaCostShard::X, ManaCostShard::White], 0));
+        spells.push(spell.id());
+    }
+    let mut mana = Vec::new();
+    for mana_type in [
+        ManaType::White,
+        ManaType::Blue,
+        ManaType::Black,
+        ManaType::Red,
+        ManaType::Green,
+        ManaType::Colorless,
+    ] {
+        mana.extend(units(mana_type, 5));
+    }
+    scenario.with_mana_pool(P0, mana);
+    MarchBoard {
+        runner: scenario.build(),
+        spells,
+        whites: white_ids,
+    }
+}
+
+/// Cast `spell` with X = `x`, accept the any-number offer, exile exactly
+/// `exiled`, pick the first legal target, and pay. Panics on any prompt
+/// outside the March cast flow.
+fn cast_march_exiling(board: &mut MarchBoard, spell: ObjectId, x: u32, exiled: &[ObjectId]) {
+    board
+        .runner
+        .act(cast_action(&board.runner, spell))
+        .expect("cast begins");
+    for _ in 0..16 {
+        match board.runner.state().waiting_for.clone() {
+            WaitingFor::ChooseXValue { .. } => {
+                board
+                    .runner
+                    .act(GameAction::ChooseX { value: x })
+                    .expect("choose X");
+            }
+            WaitingFor::OptionalCostChoice { .. } => {
+                board
+                    .runner
+                    .act(GameAction::DecideOptionalCost { index: 0 })
+                    .expect("accept the offer");
+            }
+            WaitingFor::PayCost { .. } => {
+                board
+                    .runner
+                    .act(GameAction::SelectCards {
+                        cards: exiled.to_vec(),
+                    })
+                    .expect("exile selection");
+            }
+            WaitingFor::TargetSelection { selection, .. } => {
+                board
+                    .runner
+                    .act(GameAction::ChooseTarget {
+                        target: selection.current_legal_targets.first().cloned(),
+                    })
+                    .expect("choose target");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                board
+                    .runner
+                    .act(GameAction::PassPriority)
+                    .expect("mana pays");
+            }
+            WaitingFor::OrderCostReductions { reductions, .. } => {
+                board
+                    .runner
+                    .act(GameAction::OrderCostReductions {
+                        order: (0..reductions.len()).collect(),
+                        hybrid_announcement: vec![],
+                    })
+                    .expect("order reductions");
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(
+        zone(&board.runner, spell),
+        Zone::Stack,
+        "the cast must reach the stack"
+    );
+}
+
+#[test]
+fn march_any_number_zero_exile_pays_full_cost_after_prior_payment() {
+    // F2-T2 zero: the first March exiles two (establishing a prior
+    // non-empty Exiled set with its own reduction); the second exiles
+    // zero and must pay the FULL cost off its fresh empty set — a stale
+    // read of the first set would undercharge it to the {W} floor.
+    let mut board = march_board(2, 2, 2);
+    assert_eq!(pool(&board.runner), 30);
+    // First cast, X=1, exile two: {1}{W} minus {4} floors at {W} (1 mana).
+    let first = board.spells[0];
+    let both = board.whites.clone();
+    cast_march_exiling(&mut board, first, 1, &both);
+    assert_eq!(pool(&board.runner), 29);
+    for id in &board.whites {
+        assert_eq!(zone(&board.runner, *id), Zone::Exile);
+    }
+    // Second cast, X=1, exile zero: full {1}{W} (2 mana), nothing moves.
+    let pool_before_second = pool(&board.runner);
+    let second = board.spells[1];
+    cast_march_exiling(&mut board, second, 1, &[]);
+    assert_eq!(pool(&board.runner), pool_before_second - 2);
+    assert_eq!(zone(&board.runner, second), Zone::Stack);
+}
+
+#[test]
+fn march_any_number_partial_exile_reduces_by_two_per_card() {
+    // F2-T2 partial: X=3, exile one of three: {3}{W} minus {2} pays
+    // {1}{W} (2 mana), and only the chosen card leaves the hand.
+    let mut board = march_board(1, 3, 1);
+    let spell = board.spells[0];
+    let one = board.whites[..1].to_vec();
+    cast_march_exiling(&mut board, spell, 3, &one);
+    assert_eq!(pool(&board.runner), 28);
+    assert_eq!(zone(&board.runner, board.whites[0]), Zone::Exile);
+    assert_eq!(zone(&board.runner, board.whites[1]), Zone::Hand);
+    assert_eq!(zone(&board.runner, board.whites[2]), Zone::Hand);
+}
+
+#[test]
+fn march_any_number_overpay_floors_at_colored_cost() {
+    // F2-T2 over-pay (ruling-derived): X=1, exile three: {1}{W} minus
+    // {6} cannot reduce below {W} (1 mana).
+    let mut board = march_board(1, 3, 1);
+    let spell = board.spells[0];
+    let all = board.whites.clone();
+    cast_march_exiling(&mut board, spell, 1, &all);
+    assert_eq!(pool(&board.runner), 29);
+    for id in &board.whites {
+        assert_eq!(zone(&board.runner, *id), Zone::Exile);
+    }
+}
+
+#[test]
 fn march_of_swirling_mist_x0_unprompted_completion_reads_prompted_cost() {
     let (empty, empty_cast) = cast_printed(
         "March of Swirling Mist",
@@ -854,6 +1188,62 @@ fn sickening_shoal_unprompted_completion_reads_prompted_cost() {
     assert_eq!(pool(&automatic.runner), 30);
     assert_eq!(pool(&automatic.runner), pool(&prompted.runner));
     assert_eq!(zone(&prompted.runner, prompted.black_card), Zone::Exile);
+}
+
+#[test]
+fn sickening_shoal_pitch_offer_serializes_numeric_count() {
+    // F1-T2 engine half: reach-guards first (mirroring the flow test
+    // above), then the numeric wire type on the stopped pitch prompt.
+    let ((automatic, automatic_cast), (prompted, _)) = printed_pair(
+        "Sickening Shoal",
+        SICKENING_SHOAL,
+        cost(
+            vec![ManaCostShard::X, ManaCostShard::Black, ManaCostShard::Black],
+            0,
+        ),
+        true,
+        vec!["Arcane"],
+    );
+    // CR 118.9: the alternative cost exiles the black card instead of mana.
+    assert_eq!(automatic_cast.optional_offers, 1);
+    assert_eq!(zone(&automatic.runner, automatic.black_card), Zone::Exile);
+    assert_eq!(pool(&automatic.runner), 30);
+    assert_eq!(pool(&automatic.runner), pool(&prompted.runner));
+    assert_eq!(zone(&prompted.runner, prompted.black_card), Zone::Exile);
+
+    let mut board = printed_board(
+        "Sickening Shoal",
+        SICKENING_SHOAL,
+        cost(
+            vec![ManaCostShard::X, ManaCostShard::Black, ManaCostShard::Black],
+            0,
+        ),
+        true,
+        vec!["Arcane"],
+        1,
+    );
+    let waiting = cast_until_optional(&mut board.runner, board.spell, 1);
+    // "…rather than pay this spell's mana cost" is a Choice between the
+    // pitch and the mana cost, offered through the Optional prompt.
+    let offered = match &waiting {
+        WaitingFor::OptionalCostChoice { cost, .. } => cost.clone(),
+        other => panic!("expected the pitch offer, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            &offered,
+            AdditionalCost::Choice(costs)
+                if matches!(costs.first(), Some(AbilityCost::Exile { count: 1, .. }))
+        ),
+        "the stopped prompt must be the pitch-vs-mana choice, got {offered:?}"
+    );
+    let wire = serde_json::to_value(&waiting).expect("prompt serializes");
+    let count = &wire["data"]["cost"]["data"][0]["count"];
+    assert!(
+        count.is_number(),
+        "fixed-count pitch must stay a JSON number, got {count}"
+    );
+    assert_eq!(count, &serde_json::json!(1));
 }
 
 #[test]

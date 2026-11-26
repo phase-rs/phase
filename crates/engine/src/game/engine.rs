@@ -14115,26 +14115,6 @@ fn apply_non_priority_pass_action(
                         &chosen,
                         &mut events,
                     )?,
-                    // CR 601.2h: An "exile any number" cost — typed or legacy
-                    // ChangeZone shape — carries the optional any-number exile
-                    // selection and its cast-time reduction.
-                    PayCostKind::ExileFromZone { zone }
-                        if paid_cost.as_ref().is_some_and(|payment| {
-                            casting_costs::is_exile_any_number_cost(payment.cost)
-                        }) =>
-                    {
-                        casting_costs::handle_exile_any_number_for_cost(
-                            state,
-                            *player,
-                            *zone,
-                            *pending_cast.clone(),
-                            *count,
-                            choices,
-                            &chosen,
-                            paid_cost.as_ref().map(|payment| payment.cost),
-                            &mut events,
-                        )?
-                    }
                     PayCostKind::ExileFromZone { zone } => engine_casting::handle_exile_for_cost(
                         state,
                         *player,
