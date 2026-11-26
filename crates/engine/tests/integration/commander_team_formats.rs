@@ -271,6 +271,75 @@ fn thgc_turns_alternate_between_teams() {
     }
 }
 
+/// Discord report (Vesperbat): Archenemy Commander "doesn't fire" below four
+/// seats and — worse — can come up as a normal Commander game with no
+/// archenemy and no scheme deck. Two seats never validate: Archenemy uses
+/// the Team vs. Team multiplayer variant (CR 904.2) and a multiplayer game
+/// begins with more than two players (CR 800.1), so 1v1 is degenerate.
+#[test]
+fn archc_rejects_two_seats() {
+    let config = FormatConfig::archenemy_commander();
+    assert_eq!(config.min_players, 3);
+    assert!(
+        config.validate_for_player_count(2).is_err(),
+        "1v1 Archenemy Commander must not validate"
+    );
+}
+
+/// The engine half of the setup report must hold at every legal seat count
+/// (3-6): the archenemy is designated, life splits 60-to-shared-60, and the
+/// archenemy seat's scheme slot loads as the shared scheme deck.
+#[test]
+fn archc_setup_holds_at_three_and_six_seats() {
+    for player_count in [3u8, 6u8] {
+        let config = FormatConfig::archenemy_commander();
+        config
+            .validate_for_player_count(player_count)
+            .expect("registry seat count must validate");
+        let mut state = GameState::new(config, player_count, 7);
+
+        assert_eq!(
+            state.format_config.archenemy_player(),
+            Some(ARCHENEMY),
+            "{player_count}p: the archenemy is designated at game creation"
+        );
+        assert_eq!(life_of(&state, ARCHENEMY), 60);
+        let heroes: Vec<PlayerId> = (1..player_count).map(PlayerId).collect();
+        assert_eq!(team_life(&state, &heroes), 60);
+        assert_eq!(
+            state.active_player, ARCHENEMY,
+            "{player_count}p: the archenemy takes the first turn (CR 904.6)"
+        );
+
+        let mut archenemy_seat = edh_seat("Villain");
+        archenemy_seat.scheme_deck = vec![card_entry("Scheme of Ruin", 10)];
+        let hero_seats: Vec<PlayerDeckPayload> = heroes
+            .iter()
+            .enumerate()
+            .map(|(i, _)| edh_seat(&format!("Hero {i}")))
+            .collect();
+        let payload = DeckPayload {
+            player: archenemy_seat,
+            opponent: hero_seats[0].clone(),
+            ai_decks: hero_seats[1..].to_vec(),
+            ai_difficulties: Vec::new(),
+            booster_pack_pool: None,
+        };
+        load_deck_into_state(&mut state, &payload);
+
+        assert_eq!(
+            state.archenemy,
+            Some(ARCHENEMY),
+            "{player_count}p: loading decks designates the archenemy"
+        );
+        assert_eq!(
+            state.scheme_deck.len(),
+            10,
+            "{player_count}p: the archenemy's scheme slot loads as the shared scheme deck"
+        );
+    }
+}
+
 /// CR 904.9 in a Commander game: the archenemy's precombat main sets the top
 /// scheme of the loaded scheme deck in motion.
 #[test]

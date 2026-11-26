@@ -696,6 +696,7 @@ fn type_filter_characteristic_reads(tf: &TypeFilter) -> CharacteristicKinds {
         | TypeFilter::Kindred
         | TypeFilter::Permanent
         | TypeFilter::Card
+        | TypeFilter::Scheme
         | TypeFilter::Any => CharacteristicKinds::CARD_TYPES,
     }
 }
@@ -4663,7 +4664,11 @@ pub(crate) fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> boo
             TypeFilter::AnyOf(inners) => {
                 !inners.is_empty() && inners.iter().all(type_implies_battlefield)
             }
-            TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card | TypeFilter::Any => false,
+            TypeFilter::Instant
+            | TypeFilter::Sorcery
+            | TypeFilter::Card
+            | TypeFilter::Scheme
+            | TypeFilter::Any => false,
         }
     }
     // CR 109.2: Descriptions that include the word "card" do not denote
@@ -5424,6 +5429,8 @@ pub fn matches_type_filter_against_face(face: &CardFace, filter: &TypeFilter) ->
         TypeFilter::Battle => face.card_type.core_types.contains(&CoreType::Battle),
         // CR 308.1: Kindred card-type check.
         TypeFilter::Kindred => face.card_type.core_types.contains(&CoreType::Kindred),
+        // CR 314.1: Scheme card-type check.
+        TypeFilter::Scheme => face.card_type.core_types.contains(&CoreType::Scheme),
         TypeFilter::Permanent => face
             .card_type
             .core_types
@@ -9086,6 +9093,7 @@ pub fn type_filter_matches(
             | TypeFilter::Planeswalker
             | TypeFilter::Battle
             | TypeFilter::Kindred
+            | TypeFilter::Scheme
             | TypeFilter::Permanent
             | TypeFilter::Subtype(_) => false,
         };
@@ -9105,6 +9113,8 @@ pub fn type_filter_matches(
         TypeFilter::Battle => obj.card_types.core_types.contains(&CoreType::Battle),
         // CR 308.1: Kindred type check.
         TypeFilter::Kindred => obj.card_types.core_types.contains(&CoreType::Kindred),
+        // CR 314.1: Scheme type check.
+        TypeFilter::Scheme => obj.card_types.core_types.contains(&CoreType::Scheme),
         // CR 403.3: Permanents exist only on the battlefield — creatures, artifacts, enchantments, lands, planeswalkers, battles.
         TypeFilter::Permanent => {
             obj.card_types.core_types.contains(&CoreType::Creature)
@@ -9151,6 +9161,8 @@ fn zone_change_record_matches_type_filter(
         TypeFilter::Battle => record.core_types.contains(&CoreType::Battle),
         // CR 308.1: Kindred type check.
         TypeFilter::Kindred => record.core_types.contains(&CoreType::Kindred),
+        // CR 314.1: Scheme type check.
+        TypeFilter::Scheme => record.core_types.contains(&CoreType::Scheme),
         TypeFilter::Permanent => {
             record.core_types.contains(&CoreType::Creature)
                 || record.core_types.contains(&CoreType::Artifact)
@@ -10121,6 +10133,8 @@ fn spell_record_matches_type_filter(
         TypeFilter::Battle => record.core_types.contains(&CoreType::Battle),
         // CR 308.1: Kindred type check.
         TypeFilter::Kindred => record.core_types.contains(&CoreType::Kindred),
+        // CR 314.1: Scheme type check.
+        TypeFilter::Scheme => record.core_types.contains(&CoreType::Scheme),
         TypeFilter::Permanent => {
             record.core_types.contains(&CoreType::Creature)
                 || record.core_types.contains(&CoreType::Artifact)
@@ -12588,35 +12602,31 @@ fn stack_entry_counted_targets(
     state: &GameState,
     entry: &crate::types::game_state::StackEntry,
 ) -> Vec<Option<TargetRef>> {
-    match &entry.kind {
-        // CR 115.1e + CR 702.6a: equip targets a creature on the battlefield;
-        // the payload carries no pin, so only the target's zone is checked.
-        StackEntryKind::KeywordAction { action } => action
-            .targets()
-            .into_iter()
-            .map(|target| {
-                matches!(target, TargetRef::Object(id)
-                    if state.objects.get(&id).is_some_and(|o| o.zone == Zone::Battlefield))
-                .then_some(target)
-            })
-            .collect(),
+    let declared = match &entry.kind {
+        // CR 115.1e + CR 702.6a: a keyword action carries no `ResolvedAbility`;
+        // its payload holds its declared target, pinned when it was chosen
+        // (CR 601.2c + CR 400.7).
+        StackEntryKind::KeywordAction { action } => action.declared_target_entries(),
         StackEntryKind::Spell { .. }
         | StackEntryKind::ActivatedAbility { .. }
         | StackEntryKind::TriggeredAbility { .. }
         | StackEntryKind::CombatDamage { .. } => entry
             .ability()
             .map(crate::game::ability_utils::declared_target_entries_in_chain)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|entry| {
-                let counted = match &entry.target {
-                    TargetRef::Object(_) => entry.pin.is_none_or(|pin| pin.is_current(state)),
-                    TargetRef::Player(pid) => crate::game::players::is_alive(state, *pid),
-                };
-                counted.then_some(entry.target)
-            })
-            .collect(),
-    }
+            .unwrap_or_default(),
+    };
+    declared
+        .into_iter()
+        .map(|entry| {
+            // CR 115.9b + CR 400.7: an object target counts only while its pin
+            // names the live incarnation; a player only while still in the game.
+            let counted = match &entry.target {
+                TargetRef::Object(_) => entry.pin.is_none_or(|pin| pin.is_current(state)),
+                TargetRef::Player(pid) => crate::game::players::is_alive(state, *pid),
+            };
+            counted.then_some(entry.target)
+        })
+        .collect()
 }
 
 pub(crate) fn object_has_no_abilities(obj: &GameObject) -> bool {
@@ -17665,10 +17675,10 @@ mod tests {
                     ability: draw(),
                 },
                 Fixture::KeywordEquip => StackEntryKind::KeywordAction {
-                    action: KeywordAction::Equip {
-                        equipment_id: source,
-                        target_creature_id: equipped,
-                    },
+                    action: KeywordAction::equip(
+                        &state.objects[&source],
+                        &state.objects[&equipped],
+                    ),
                 },
             };
             state.stack.push_back(StackEntry {
@@ -17756,6 +17766,88 @@ mod tests {
             kind: None,
         };
         assert!(!matches_stack_target_filter(&state, equip, &tagged, &ctx));
+    }
+
+    /// CR 115.9b + CR 400.7: an equip payload decoded from the legacy bare id
+    /// carries `LEGACY_INCARNATION`, which names no live object, so no "that
+    /// targets" reader counts its target (fail-closed). The same creature
+    /// pinned through `KeywordAction::equip` counts.
+    #[test]
+    fn keyword_equip_legacy_pin_is_not_a_counted_target() {
+        use crate::types::ability::KeywordAction;
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        use crate::types::identifiers::LEGACY_INCARNATION;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Equipment".into(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Creature".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let push_equip = |state: &mut GameState, action: KeywordAction| -> ObjectId {
+            let entry_id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            state.stack.push_back(StackEntry {
+                id: entry_id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::KeywordAction { action },
+            });
+            entry_id
+        };
+        let legacy_entry = push_equip(
+            &mut state,
+            KeywordAction::Equip {
+                equipment: ObjectIncarnationRef::of(source, LEGACY_INCARNATION),
+                target_creature: ObjectIncarnationRef::of(creature, LEGACY_INCARNATION),
+            },
+        );
+        let pinned_action =
+            KeywordAction::equip(&state.objects[&source], &state.objects[&creature]);
+        let pinned_entry = push_equip(&mut state, pinned_action);
+
+        let creature_filter = TargetFilter::Typed(TypedFilter::creature());
+        // Positive reach-guard: the creature is on the battlefield and the
+        // filter matches it through a current pin.
+        assert!(
+            stack_entry_targets_satisfy(
+                &state,
+                pinned_entry,
+                source,
+                Some(PlayerId(0)),
+                &creature_filter,
+                false,
+            ),
+            "the pinned equip targets a creature"
+        );
+        assert!(
+            !stack_entry_targets_satisfy(
+                &state,
+                legacy_entry,
+                source,
+                Some(PlayerId(0)),
+                &creature_filter,
+                false,
+            ),
+            "a legacy pin names no live object, so its target is ignored"
+        );
     }
 
     #[test]
@@ -18434,7 +18526,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],
@@ -18548,7 +18640,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],

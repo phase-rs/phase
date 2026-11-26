@@ -1630,6 +1630,7 @@ fn apply_action_boundary_core(
     // The reducer fills a fresh `ActionResult`, so its events begin at index 0.
     let parked_combat_damage_answer =
         super::combat_damage::ParkedCombatDamageAnswer::begin(state, 0);
+    super::visibility::begin_foreign_library_look_boundary(state, semantic_owner, &action);
     let mut result = match if payment_transaction::owns_action(state, &action) {
         // All staged-payment actions enter through this admission point. The
         // authenticated actor is recorded for deterministic replay; the
@@ -1733,6 +1734,7 @@ fn apply_action_boundary_core(
         let reversal = result.waiting_for.clone();
         *state = boundary_snapshot.as_ref().clone();
         state.waiting_for = reversal;
+        super::visibility::finish_foreign_library_look_boundary(state, &result);
         return Ok(RawActionApplication {
             result,
             journal_start,
@@ -1943,6 +1945,7 @@ fn apply_action_boundary_core(
         token_clause_at_start,
         &result.events,
     );
+    super::visibility::finish_foreign_library_look_boundary(state, &result);
     // Do not carry the core's window into finalization: that pass owns its own
     // scope over convergence, auto-pass, and re-convergence.
     state.ingress_life_window = None;
@@ -3125,6 +3128,7 @@ fn finish_action_boundary_with_lifecycle(
         carry_answer_receipts(&boundary_snapshot, state);
     }
     result.waiting_for = state.waiting_for.clone();
+    super::visibility::finish_foreign_library_look_boundary(state, &result);
     if matches!(mode, PublicFinalizeMode::Immediate) {
         finalize_display_state(state);
     }
@@ -13389,6 +13393,19 @@ fn apply_non_priority_pass_action(
             let resolution_permission = casting::current_resolution_cast_permission_index(
                 state, *player, *object_id, *card_id,
             );
+            if resolution_permission.is_none()
+                && casting::library_spell_face_choice(state, *object_id)
+                && !casting::library_spell_face_is_castable(
+                    state,
+                    *player,
+                    *object_id,
+                    casting::ModalCardFace::from_back_face(back_face),
+                )
+            {
+                return Err(EngineError::InvalidAction(
+                    "That face cannot be cast from the library now".to_string(),
+                ));
+            }
             // Validate the exact indexed paid-cleanup root before changing the
             // visible face or its election flags. A forged receipt must leave
             // the prompt, object, permissions, triggers, journal, and events
@@ -15042,9 +15059,10 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => mana_abilities::resume_mana_ability_root(
+        ) => mana_abilities::cancel_mana_ability_activation(
             state,
             pending_mana_ability.player,
+            pending_mana_ability.source_id,
             pending_mana_ability.resume.clone(),
             &mut events,
         )?,
@@ -16542,7 +16560,7 @@ fn apply_non_priority_pass_action(
             WaitingFor::EquipTarget {
                 player,
                 equipment_id,
-                valid_targets,
+                ..
             },
             GameAction::Equip {
                 equipment_id: eq_id,
@@ -16554,22 +16572,16 @@ fn apply_non_priority_pass_action(
                     "Equipment ID mismatch".to_string(),
                 ));
             }
-            if !valid_targets.contains(&target_id) {
+            let p = *player;
+            // A saved offer or an intervening concession can name a target
+            // that is now illegal. Bind both objects only on a legal pick.
+            if !equip_activation_targets(state, p, eq_id)?.contains(&target_id) {
                 return Err(EngineError::InvalidAction(
                     "Invalid equip target".to_string(),
                 ));
             }
-            let p = *player;
-            push_keyword_action(
-                state,
-                p,
-                eq_id,
-                KeywordAction::Equip {
-                    equipment_id: eq_id,
-                    target_creature_id: target_id,
-                },
-                &mut events,
-            )
+            let action = KeywordAction::equip(&state.objects[&eq_id], &state.objects[&target_id]);
+            push_keyword_action(state, p, eq_id, action, &mut events)
         }
         // CR 602.2b + CR 601.2c/601.2h: no cost is paid until the equip
         // announcement, so backing out before target selection is complete
@@ -19227,7 +19239,7 @@ fn record_exile_play_permission(
 /// CR 116.2a) — not a spell cast — so CR 601.2a does not apply here; CR 401.5
 /// governs top-of-library visibility during the special action. Receives the
 /// pre-captured `(src_id, frequency)` that was resolved BEFORE the zone change
-/// — `top_of_library_permission_source` reads `library.front()`, which no
+/// — `top_of_library_grant_for_object` reads `library.front()`, which no
 /// longer points to the played land after the land is delivered to the
 /// battlefield. `Unlimited` permissions (Future Sight, Bolas's Citadel) do not
 /// spend a slot.
@@ -19674,33 +19686,19 @@ fn handle_play_land(
     // Bolas's Citadel, Magus of the Future, The Fourth Doctor).
     //
     // IMPORTANT: capture (src_id, frequency) HERE — before the zone change.
-    // `top_of_library_permission_source` reads `library.front()`, which will
+    // `top_of_library_grant_for_object` reads `library.front()`, which will
     // point to the next card once the land is delivered to the battlefield.
     // Recording in the post-delivery epilogue would always see the wrong top
     // card and silently skip the once-per-turn slot, allowing a OncePerTurn
     // permission to be reused indefinitely. CR 305.1 + CR 116.2a + CR 401.5:
     // land play is a special action, not a spell cast (CR 601.2a does not apply).
-    let library_permission_src: Option<(ObjectId, crate::types::statics::CastFrequency)> =
-        super::casting::top_of_library_permission_source(
-            state,
-            player,
-            Some(crate::types::ability::CardPlayMode::Play),
-        )
-        .and_then(|(top_id, src_id, frequency, _)| {
-            if top_id != object_id {
-                return None;
-            }
-            // CR 305.1: only land cards qualify for the Play-permission path.
-            let obj = state.objects.get(&top_id)?;
-            if !obj
-                .card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Land)
-            {
-                return None;
-            }
-            Some((src_id, frequency))
-        });
+    let library_permission_src = super::casting::top_of_library_grant_for_object(
+        state,
+        player,
+        object_id,
+        crate::types::ability::CardPlayMode::Play,
+    )
+    .map(|grant| (grant.source, grant.frequency));
     let in_library_with_permission = library_permission_src.is_some();
     // CR 116.2a: a land is put onto the battlefield "from the zone it was in", so
     // the play authority is elected by ZONE ELIGIBILITY, not by the exile zone
@@ -20410,12 +20408,12 @@ fn mana_unit_eligible_for_cost(
     })
 }
 
-fn handle_equip_activation(
-    state: &mut GameState,
+/// Legal choices for this player's equip announcement on the current board.
+fn equip_activation_targets(
+    state: &GameState,
     player: PlayerId,
     equipment_id: ObjectId,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
+) -> Result<Vec<ObjectId>, EngineError> {
     // Validate sorcery-speed timing: main phase, empty stack, active player
     match state.phase {
         Phase::PreCombatMain | Phase::PostCombatMain => {}
@@ -20442,9 +20440,9 @@ fn handle_equip_activation(
         .ok_or_else(|| EngineError::InvalidAction("Equipment not found".to_string()))?;
 
     // Validate it's an equipment on the battlefield controlled by player
-    if obj.zone != Zone::Battlefield {
+    if !obj.is_phased_in_permanent() {
         return Err(EngineError::InvalidAction(
-            "Equipment is not on the battlefield".to_string(),
+            "Equipment is not a phased-in permanent".to_string(),
         ));
     }
     if obj.controller != player {
@@ -20463,25 +20461,53 @@ fn handle_equip_activation(
         ));
     }
 
-    // Find valid targets: creatures controlled by the equipping player on battlefield
-    let valid_targets: Vec<ObjectId> = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .map(|o| {
-                    o.controller == player
-                        && o.card_types
-                            .core_types
-                            .contains(&crate::types::card_type::CoreType::Creature)
-                })
-                .unwrap_or(false)
-        })
-        .collect();
+    // CR 702.6a + CR 115.2 + CR 601.2c: equip targets "creature you control";
+    // the targeting authority also excludes a creature the Equipment's ability
+    // can't target (shroud, CR 702.18a; protection, CR 702.16b) or one that
+    // phased out (CR 702.26b). The resolution recheck
+    // (`stack::resolve_keyword_action`) reads the same authority with the same
+    // filter (CR 608.2b).
+    Ok(super::targeting::find_legal_targets(
+        state,
+        &TargetFilter::equip_target(),
+        player,
+        equipment_id,
+    )
+    .into_iter()
+    .filter_map(|target| match target {
+        TargetRef::Object(id) => Some(id),
+        TargetRef::Player(_) => None,
+    })
+    .collect())
+}
 
+/// A concession can change the available targets while the controller is
+/// choosing. Keep the pending offer current without picking on their behalf;
+/// even an empty offer can be canceled before anything has been paid.
+pub(super) fn refresh_equip_target_offer(state: &mut GameState) {
+    if let WaitingFor::EquipTarget {
+        player,
+        equipment_id,
+        ..
+    } = state.waiting_for
+    {
+        let valid_targets =
+            equip_activation_targets(state, player, equipment_id).unwrap_or_default();
+        state.waiting_for = WaitingFor::EquipTarget {
+            player,
+            equipment_id,
+            valid_targets,
+        };
+    }
+}
+
+fn handle_equip_activation(
+    state: &mut GameState,
+    player: PlayerId,
+    equipment_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let valid_targets = equip_activation_targets(state, player, equipment_id)?;
     if valid_targets.is_empty() {
         return Err(EngineError::ActionNotAllowed(
             "No valid creatures to equip".to_string(),
@@ -20492,14 +20518,14 @@ fn handle_equip_activation(
     // + priority window; we skip only the target-selection UI.
     if valid_targets.len() == 1 {
         let target_id = valid_targets[0];
+        // CR 601.2c + CR 400.7: the target is pinned as it is chosen.
+        let action =
+            KeywordAction::equip(&state.objects[&equipment_id], &state.objects[&target_id]);
         return Ok(push_keyword_action(
             state,
             player,
             equipment_id,
-            KeywordAction::Equip {
-                equipment_id,
-                target_creature_id: target_id,
-            },
+            action,
             events,
         ));
     }
@@ -24868,6 +24894,7 @@ mod stage2_injector_tests {
             let mut a = shape_b(
                 src,
                 Effect::Token {
+                    enters_blocking: None,
                     name: "Cursed Role".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),

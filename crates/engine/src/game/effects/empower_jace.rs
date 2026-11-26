@@ -124,6 +124,7 @@ fn jace_token_spec(controller: PlayerId, source_id: ObjectId) -> TokenSpec {
         sacrifice_at: None,
         source_id,
         controller,
+        blocking_attacker: None,
     }
 }
 

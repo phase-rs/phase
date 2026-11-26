@@ -1966,7 +1966,7 @@ pub(crate) mod finding {
     pub(crate) fn sacrifice_effect() -> Effect {
         Effect::Sacrifice {
             target: TargetFilter::Any,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         }
     }

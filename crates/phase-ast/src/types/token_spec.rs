@@ -88,6 +88,11 @@ pub struct TokenSpec {
     /// re-reading `ability.targets`.
     #[serde(default, skip_serializing_if = "TokenHostRequest::is_not_requested")]
     pub attach_to: TokenHostRequest,
+    /// CR 509.1h + CR 506.3e: The token instruction's "blocking …" clause,
+    /// resolved once at propose time to the attacker each created token
+    /// enters blocking (`None` = no blocking rider).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_attacker: Option<ObjectId>,
 }
 
 /// CR 508.4 + CR 608.2h: a token instruction's named destination, resolved

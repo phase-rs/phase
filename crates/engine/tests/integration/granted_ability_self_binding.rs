@@ -4674,6 +4674,7 @@ mod granter_stamp {
     /// A creature token named `name` with power and toughness `pt`.
     fn creature_token(name: &str, pt: PtValue) -> Effect {
         Effect::Token {
+            enters_blocking: None,
             name: name.to_string(),
             power: pt.clone(),
             toughness: pt,

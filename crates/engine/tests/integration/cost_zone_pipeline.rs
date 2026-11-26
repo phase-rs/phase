@@ -14218,7 +14218,7 @@ fn targeted_sacrifice_reparks_replacement_before_terminal_effect_resolved() {
     let ability = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::Any,
-            count: QuantityExpr::Fixed { value: 2 },
+            count: QuantityExpr::Fixed { value: 2 }.into(),
             min_count: 0,
         },
         vec![TargetRef::Object(first), TargetRef::Object(second)],
@@ -14318,7 +14318,7 @@ fn mandatory_all_sacrifice_completes_synchronously() {
     let ability = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::Typed(TypedFilter::creature()),
-            count: QuantityExpr::Fixed { value: 2 },
+            count: QuantityExpr::Fixed { value: 2 }.into(),
             min_count: 0,
         },
         vec![],
@@ -14372,7 +14372,7 @@ fn effect_zone_sacrifice_replacement_preserves_tracked_set_and_tail() {
     let ability = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::Typed(TypedFilter::creature()),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
         vec![],

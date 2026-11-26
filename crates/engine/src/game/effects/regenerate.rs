@@ -661,7 +661,7 @@ mod tests {
         let sac_ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![crate::types::ability::TargetRef::Object(bear_id)],

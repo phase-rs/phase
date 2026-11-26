@@ -3866,6 +3866,7 @@ fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Opti
         | StaticMode::Indestructible
         | StaticMode::CantBeDestroyed
         | StaticMode::CantBeRegenerated
+        | StaticMode::CantSetSchemeInMotion
         | StaticMode::FlashBack
         | StaticMode::Shroud
         | StaticMode::Hexproof
@@ -3886,7 +3887,7 @@ fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Opti
         | StaticMode::CantCrew
         | StaticMode::CantPhaseIn
         | StaticMode::CrewContribution { .. }
-        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtTopOfLibrary { .. }
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
         | StaticMode::MayChooseNotToUntap
@@ -7976,6 +7977,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::Indestructible
         | StaticMode::CantBeDestroyed
         | StaticMode::CantBeRegenerated
+        | StaticMode::CantSetSchemeInMotion
         | StaticMode::FlashBack
         | StaticMode::Shroud
         | StaticMode::Hexproof
@@ -7996,7 +7998,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::CantCrew
         | StaticMode::CantPhaseIn
         | StaticMode::CrewContribution { .. }
-        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtTopOfLibrary { .. }
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
         | StaticMode::MayChooseNotToUntap
@@ -9165,6 +9167,7 @@ fn project_out_player_consumables(p: &mut Player) {
         sticker_sheets: _,
         has_drawn_this_turn: _,
         has_no_life_total: _,
+        probe_held_cards: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
         spells_cast_last_turn,
@@ -9784,6 +9787,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         sticker_sheets: _,
         has_drawn_this_turn: _,
         has_no_life_total: _,
+        probe_held_cards: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
         spells_cast_last_turn: _,
@@ -9848,6 +9852,7 @@ fn projected_player_maps(
         sticker_sheets: _,
         has_drawn_this_turn: _,
         has_no_life_total: _,
+        probe_held_cards: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
         spells_cast_last_turn: _,
@@ -10897,7 +10902,7 @@ mod tests {
             },
             PinCarrier::RegisteredSacrifice | PinCarrier::FiredSacrifice => Effect::Sacrifice {
                 target: TargetFilter::EventTarget,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             PinCarrier::AnnouncedSpellTarget => Effect::Destroy {
@@ -17232,7 +17237,7 @@ mod tests {
             let runtime_body = ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
                 vec![],
@@ -19142,7 +19147,7 @@ mod tests {
                 Box::new(ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::ParentTarget,
-                        count: QuantityExpr::Fixed { value: 1 },
+                        count: QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![TargetRef::Object(ObjectId(705))],

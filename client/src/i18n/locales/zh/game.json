@@ -1766,7 +1766,10 @@
       },
       "players": "牌手",
       "startingLife": "起始生命",
-      "whoGoesFirst": "谁先手"
+      "whoGoesFirst": "谁先手",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "你",
+      "archenemyOpponent": "对手{{number}}"
     },
     "deckNotLegal": "套牌在{{format}}中不合法。",
     "deckPreview": {

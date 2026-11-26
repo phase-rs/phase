@@ -1313,6 +1313,7 @@ pub(crate) fn activate_mana_source_option_with_output(
         // CR 305.6 + CR 605.3: tapping a basic land for mana activates its
         // intrinsic mana ability; observe its triggers at that boundary. Its
         // activation cost is the intrinsic "{T}" (CR 305.6).
+        mana_abilities::retire_mana_activation_look(state, player, option.object_id, &resume);
         let activation_event = super::casting_targets::emit_ability_activated(
             state,
             player,
@@ -1687,6 +1688,41 @@ pub(crate) fn player_mana_ability_reach(state: &GameState, player: PlayerId) -> 
         }
     }
     reach
+}
+
+/// CR 605.1a + CR 118.3: the hand and graveyard cards the costs of `player`'s
+/// battlefield mana abilities could consume (Rubble Rouser's graveyard exile,
+/// Skirge Familiar's discard), for holding cards for another leg of a cost.
+/// Whether an ability can be activated now isn't asked: a larger set only costs
+/// the caller more probes.
+pub(crate) fn mana_ability_card_fodder(
+    state: &GameState,
+    player: PlayerId,
+) -> std::collections::HashSet<ObjectId> {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.controller == player)
+        .flat_map(|obj| {
+            obj.abilities
+                .iter()
+                .filter(|ability| {
+                    ability.kind == AbilityKind::Activated
+                        && mana_abilities::is_mana_ability(ability)
+                })
+                .filter_map(|ability| ability.cost.as_ref())
+                .flat_map(|cost| {
+                    super::cost_payability::object_cost_candidates(state, player, obj.id, cost)
+                })
+        })
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|card| matches!(card.zone, Zone::Hand | Zone::Graveyard))
+        })
+        .collect()
 }
 
 /// CR 118.3: whether paying this cost sacrifices, exiles or returns an object

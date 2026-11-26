@@ -9179,7 +9179,9 @@ fn top_of_library_peek_routes_to_static_parser() {
     assert_eq!(r.statics.len(), 1);
     assert_eq!(
         r.statics[0].mode,
-        crate::types::statics::StaticMode::MayLookAtTopOfLibrary
+        crate::types::statics::StaticMode::MayLookAtTopOfLibrary {
+            library: crate::types::ability::ControllerRef::You
+        }
     );
 }
 
@@ -10275,6 +10277,47 @@ You may pay {0} rather than pay the equip cost of the first equip ability you ac
         )
     });
     assert_eq!(alt.condition, None, "\"each turn\" carries no turn gate");
+}
+
+// CR 101.1 + CR 611.3a + CR 702.6a: Forge Anew lifts equip timing only while
+// its turn window holds. Leonin Shikari's permission has no turn window.
+#[test]
+fn printed_equip_timing_permissions_preserve_their_turn_scope() {
+    let forge = parse(
+        "When this enchantment enters, return target Equipment card from your graveyard to the battlefield.\nDuring your turn, you may activate equip abilities any time you could cast an instant.\nYou may pay {0} rather than pay the equip cost of the first equip ability you activate during each of your turns.",
+        "Forge Anew",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    let shikari = parse(
+        "You may activate equip abilities any time you could cast an instant.",
+        "Leonin Shikari",
+        &[],
+        &["Creature"],
+        &["Cat", "Soldier"],
+    );
+
+    for (parsed, expected_condition) in [
+        (forge, Some(StaticCondition::DuringYourTurn)),
+        (shikari, None),
+    ] {
+        assert!(parsed.abilities.iter().all(|def| !has_unimplemented(def)));
+        let permission = parsed
+            .statics
+            .iter()
+            .find(|def| {
+                matches!(
+                    def.mode,
+                    StaticMode::ActivateAsInstant {
+                        keyword: Some(crate::types::ability::AbilityTag::Equip),
+                        ..
+                    }
+                )
+            })
+            .expect("the printed equip timing permission should parse");
+        assert_eq!(permission.condition, expected_condition);
+    }
 }
 
 // CR 118.9 + CR 702.6a: Forge Anew — "during each of your turns" is a your-turn
@@ -19240,7 +19283,11 @@ fn parse_for_each_one_life_changed_full_cards() {
         &[],
     );
     let sac = execute_effect(&lichs_tomb, &|e| matches!(e, Effect::Sacrifice { .. }));
-    let Effect::Sacrifice { count, .. } = sac else {
+    let Effect::Sacrifice {
+        count: crate::types::ability::SacrificeSelection::Count(count),
+        ..
+    } = sac
+    else {
         unreachable!()
     };
     assert_eq!(
@@ -26372,7 +26419,11 @@ fn pox_plague_full_parse() {
     // as count, and the same Typed filter lifted into target.
     let sacrifice = discard.sub_ability.as_ref().expect("sacrifice sub_ability");
     match &*sacrifice.effect {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert!(!count.is_up_to(), "expected non-UpTo sacrifice count");
             match count {
                 QuantityExpr::DivideRounded {
@@ -31606,7 +31657,9 @@ fn depletion_land_rider_sacrifice_binds_self_ref() {
             rider.effect.as_ref(),
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
+                    value: 1
+                }),
                 ..
             }
         ),
@@ -31693,7 +31746,9 @@ fn typed_trigger_source_counter_rider_binds_self_ref_not_triggering_source() {
             rider.effect.as_ref(),
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
+                    value: 1
+                }),
                 ..
             }
         ),
@@ -34074,6 +34129,7 @@ fn render_net_reaches_every_nested_description_carrier() {
         attach_to: None,
         enters_attacking: false,
         attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![token_static],
         enter_with_counters: vec![],

@@ -12,7 +12,7 @@ import type {
 } from "../../adapter/types";
 import { U8_MAX } from "../../adapter/types";
 import { AI_DIFFICULTIES, isAiDifficulty } from "../../constants/ai";
-import { FORMAT_REGISTRY, formatSuppliesDeck, isPlanechaseFamilyFormat } from "../../data/formatRegistry";
+import { FORMAT_REGISTRY, formatSuppliesDeck, isArchenemyFamilyFormat, isPlanechaseFamilyFormat } from "../../data/formatRegistry";
 import {
   directoryLobbySources,
   FORMAT_DEFAULTS,
@@ -789,6 +789,12 @@ export function HostSetup({
     }
     // Remove AI seats that exceed the new count (seat 0 is always the host)
     setAiSeats((prev) => prev.filter((s) => s.seatIndex < count));
+    // A picked archenemy seat strands when the table shrinks below it. Clamp
+    // to the last seat (a guest seat), preserving the "someone else is the
+    // archenemy" intent rather than silently handing the role to the host.
+    if (isArchenemyFamilyFormat(formatConfig.format) && (formatConfig.archenemy_player ?? 0) >= count) {
+      setLocalFormatConfig((prev) => ({ ...prev, archenemy_player: count - 1 }));
+    }
   };
 
   // A format whose MINIMUM exceeds the P2P ceiling cannot be clamped into
@@ -903,7 +909,15 @@ export function HostSetup({
     setIsSubmitting(true);
     try {
       // The submission uses the chosen count; persistence keeps the format ceiling.
-      const finalConfig = { ...formatConfig, max_players: playerCount };
+      let finalConfig = { ...formatConfig, max_players: playerCount };
+      // Belt-and-braces: a stranded archenemy seat (a click beating the
+      // clamp to the commit boundary) must not submit past the table edge.
+      if (
+        isArchenemyFamilyFormat(finalConfig.format) &&
+        (finalConfig.archenemy_player ?? 0) >= playerCount
+      ) {
+        finalConfig = { ...finalConfig, archenemy_player: playerCount - 1 };
+      }
       // Resolve Random locally: the server uses a different starter-deck pool.
       // The batch captures one art authority, while remembered seats stay selections.
       const submittedAiSeats: AiSeatConfig[] = suppliesDeck
@@ -1207,6 +1221,26 @@ export function HostSetup({
                   ).map((count) => (
                     <button type="button" key={count} onClick={() => handlePlayerCountChange(count)} className={seg(playerCount === count)}>
                       {count}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+            )}
+
+            {/* Archenemy seat (Archenemy family only). Seat numbers are 1-based
+                to match the seat panel below and the lobby's `Player N` names;
+                seat 0 is always the host. */}
+            {isArchenemyFamilyFormat(formatConfig.format) && (
+              <Field label={t("hostSetup.archenemySeat")}>
+                <div className={segWrap}>
+                  {Array.from({ length: playerCount }, (_, seat) => (
+                    <button
+                      type="button"
+                      key={seat}
+                      onClick={() => setLocalFormatConfig((prev) => ({ ...prev, archenemy_player: seat }))}
+                      className={seg((formatConfig.archenemy_player ?? 0) === seat)}
+                    >
+                      {seat === 0 ? t("hostSetup.youHost") : t("hostSetup.seat", { number: seat + 1 })}
                     </button>
                   ))}
                 </div>
