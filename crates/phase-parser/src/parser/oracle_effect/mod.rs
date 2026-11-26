@@ -18495,6 +18495,51 @@ fn parse_blight_with_player(tp: TextPair) -> Option<(TargetFilter, u32, String)>
         .map(|(count, rest_orig)| (filter, count, rest_orig.to_string()))
 }
 
+fn parse_owner_library_shuffle_verb(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("shuffle "), tag("shuffles "))).parse(input)
+}
+
+fn parse_singular_owner_library_shuffle<'a, O>(
+    input: &'a str,
+    operand: impl Parser<&'a str, Output = O, Error = OracleError<'a>>,
+) -> OracleResult<'a, (&'a str, &'a str)> {
+    let (input, (verb, _, _, library)) = (
+        parse_owner_library_shuffle_verb,
+        operand,
+        tag(" into "),
+        alt((tag("their library"), tag("its owner's library"))),
+    )
+        .parse(input)?;
+    Ok((input, (verb, library)))
+}
+
+/// CR 608.2k + CR 701.24a: the trigger has established the source as the
+/// antecedent of the whole bare-owner instruction.
+pub(super) fn try_parse_trigger_source_owner_shuffle(body: &str) -> Option<ParsedEffectClause> {
+    let lower = body.to_lowercase();
+    all_consuming(delimited(
+        tag("its owner "),
+        verify(
+            |input| parse_singular_owner_library_shuffle(input, tag("it")),
+            |(verb, library)| *verb == "shuffles " && *library == "their library",
+        ),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .ok()?;
+    let mut clause = imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
+        target: TargetFilter::SelfRef,
+        owner_library: true,
+    });
+    let Effect::ChangeZone { actor, .. } = &mut clause.effect else {
+        return None;
+    };
+    *actor = crate::types::ability::LibraryInstructionActor::Player {
+        player: TargetFilter::Owner,
+    };
+    Some(clause)
+}
+
 /// CR 701.24a + CR 400.3: Parse "the owner of target [filter] shuffles it into their library".
 ///
 /// Handles both subject forms:
@@ -18511,8 +18556,9 @@ fn try_parse_owner_of_target_shuffle(
     // CR 608.2c: this shortcut owns only the shuffle instruction, never an
     // earlier action followed by a shuffle elsewhere in the clause.
     let predicate_start = subject::find_predicate_start(tp.original)?;
-    let (object_text, _) = alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles ")))
-        .parse(&tp.lower[predicate_start..])
+    let predicate = &tp.lower[predicate_start..];
+    peek(parse_owner_library_shuffle_verb)
+        .parse(predicate)
         .ok()?;
     let subject_text = tp.original[..predicate_start].trim();
     // CR 108.3 + CR 400.7e + CR 115.10a: the SOURCE's owner as the possessive
@@ -18533,21 +18579,24 @@ fn try_parse_owner_of_target_shuffle(
     if matches!(owner_subject, Some(subject::OwnerSubject::Source)) {
         // CR 201.5: source-name references still name this particular object
         // even when an earlier instruction declared a different target.
-        let (_, (_, _, _, draw_tail)) = all_consuming((
-            alt((
-                verify(nom_target::parse_self_reference, |target: &TargetFilter| {
-                    matches!(target, TargetFilter::SelfRef)
-                }),
-                value(
-                    TargetFilter::SelfRef,
-                    nom_primitives::parse_object_recipient_pronoun,
-                ),
-            )),
-            tag(" into "),
-            alt((tag("their library"), tag("its owner's library"))),
+        let (_, draw_tail) = all_consuming(preceded(
+            |input| {
+                parse_singular_owner_library_shuffle(
+                    input,
+                    alt((
+                        verify(nom_target::parse_self_reference, |target: &TargetFilter| {
+                            matches!(target, TargetFilter::SelfRef)
+                        }),
+                        value(
+                            TargetFilter::SelfRef,
+                            nom_primitives::parse_object_recipient_pronoun,
+                        ),
+                    )),
+                )
+            },
             opt(preceded(tag(" and "), rest)),
         ))
-        .parse(object_text)
+        .parse(predicate)
         .ok()?;
         let draw = if let Some(tail) = draw_tail {
             // Reuse the numeric grammar's whole-count/noun guard after the
@@ -18576,12 +18625,9 @@ fn try_parse_owner_of_target_shuffle(
         *ctx = subject_ctx;
         return Some(movement);
     }
-    all_consuming((
-        tag::<_, _, OracleError<'_>>("it into "),
-        alt((tag("their library"), tag("its owner's library"))),
-    ))
-    .parse(object_text)
-    .ok()?;
+    all_consuming(|input| parse_singular_owner_library_shuffle(input, tag("it")))
+        .parse(predicate)
+        .ok()?;
     // The owner actor was classified once above; dispatch on that typed result
     // instead of splitting and parsing the subject again.
     let target = match owner_subject {

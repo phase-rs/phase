@@ -37,7 +37,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{DelayedTriggerCondition, Effect, EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, PlayerActionKind};
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor, ManaType, ManaUnit};
@@ -1018,4 +1018,259 @@ fn watery_grasp_activation_shuffles_enchanted_creature_into_owners_library() {
     ));
     assert!(runner.state().stack.is_empty());
     assert!(runner.state().resolution_stack.is_empty());
+}
+
+const LEMBAS: &str = "When this artifact enters, scry 1, then draw a card.\n{2}, {T}, Sacrifice this artifact: You gain 3 life.\nWhen this artifact is put into a graveyard from the battlefield, its owner shuffles it into their library.";
+const INFERNO_HELLION: &str = "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)\nAt the beginning of each end step, if this creature attacked or blocked this turn, its owner shuffles it into their library.";
+
+fn finish_owner_shuffle(runner: &mut GameRunner, source: ObjectId, owner: PlayerId) {
+    let mut events = Vec::new();
+    for _ in 0..16 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority")
+                .events,
+        );
+    }
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(events.iter().any(|event| matches!(event,
+        GameEvent::EffectResolved { kind: EffectKind::Shuffle, source_id, .. } if *source_id == source
+    )));
+    let shufflers: std::collections::BTreeSet<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    // CR 701.24a: the instruction names the source's owner as the shuffler.
+    assert_eq!(shufflers, [owner].into());
+}
+
+#[test]
+fn lembas_departure_shuffles_by_owner_after_controller_sacrifices() {
+    use engine::types::game_state::CastPaymentMode;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let lembas = scenario
+        .add_artifact_from_oracle(P0, "Lembas", LEMBAS)
+        .controlled_by(P1)
+        .id();
+    let island = scenario.add_card_to_library_top(P0, "Island");
+    let forest = scenario.add_card_to_library_top(P1, "Forest");
+    scenario.with_mana_pool(
+        P1,
+        vec![ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]); 2],
+    );
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("give P1 priority");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    let life_before = runner.state().players[1].life;
+    let events = runner
+        .act(GameAction::ActivateAbility {
+            source_id: lembas,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P1 pays Lembas's activation costs")
+        .events;
+    // CR 701.21a: P1 sacrifices the Lembas they control as a cost.
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, GameEvent::ZoneChanged {
+        object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, record,
+    } if *object_id == lembas && record.controller == P1)));
+    assert!(runner.state().players[0].graveyard.contains(&lembas));
+    // CR 603.3a + CR 603.6c + CR 603.10a: the departure looks back to P1's control.
+    assert_eq!(runner.state().stack.len(), 2);
+    let departure = &runner.state().stack[1];
+    assert_eq!(departure.source_id, lembas);
+    assert!(matches!(
+        departure.kind,
+        StackEntryKind::TriggeredAbility { .. }
+    ));
+    assert_eq!(departure.controller, P1);
+
+    finish_owner_shuffle(&mut runner, lembas, P0);
+    assert_eq!(runner.state().players[1].life, life_before + 3);
+    // CR 400.7e + CR 400.3: the exact graveyard successor goes to P0's library.
+    assert!(runner.state().players[0].library.contains(&lembas));
+    assert!(runner.state().players[0].library.contains(&island));
+    assert_eq!(
+        runner.state().players[1]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [forest]
+    );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HellionCombat {
+    Attacks,
+    Blocks,
+    SitsOut,
+}
+
+#[test]
+fn inferno_hellion_end_step_shuffles_by_owner_after_its_own_combat() {
+    for (combat, bounce) in [
+        (HellionCombat::Attacks, false),
+        (HellionCombat::Blocks, false),
+        (HellionCombat::Attacks, true),
+        (HellionCombat::SitsOut, false),
+    ] {
+        let active_player = if combat == HellionCombat::Blocks {
+            P1
+        } else {
+            P0
+        };
+        let defender = if active_player == P0 { P1 } else { P0 };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(if combat == HellionCombat::Blocks {
+            Phase::PostCombatMain
+        } else {
+            Phase::PreCombatMain
+        });
+        let hellion = scenario
+            .add_creature_from_oracle(P1, "Inferno Hellion", 7, 3, INFERNO_HELLION)
+            .controlled_by(P0)
+            .id();
+        let other = scenario
+            .add_creature(active_player, "Other Attacker", 1, 1)
+            .id();
+        if active_player == P0 {
+            scenario.add_creature(P1, "Available Blocker", 0, 8);
+        }
+        let island = scenario.add_card_to_library_top(P0, "Island");
+        let forest = scenario.add_card_to_library_top(P1, "Forest");
+        if active_player == P1 {
+            scenario.add_card_to_library_top(P1, "Plains");
+        }
+        let unsummon = if bounce {
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Unsummon",
+                    true,
+                    "Return target creature to its owner's hand.",
+                )
+                .with_mana_cost(parse_mtgjson_mana_cost("{U}"))
+                .id();
+            scenario.add_basic_land(P0, ManaColor::Blue);
+            Some(spell)
+        } else {
+            None
+        };
+        let mut runner = scenario.build();
+        drive_until(&mut runner, |state| {
+            state.active_player == active_player && state.phase == Phase::PreCombatMain
+        });
+        runner.advance_to_combat();
+        let attacker = if combat == HellionCombat::Attacks {
+            hellion
+        } else {
+            other
+        };
+        // CR 508.1a + CR 509.1a: record participation through public declarations.
+        runner
+            .declare_attackers(&[(attacker, AttackTarget::Player(defender))])
+            .expect("declare attacker");
+        drive_until(&mut runner, |state| {
+            matches!(state.waiting_for, WaitingFor::DeclareBlockers { .. })
+        });
+        let blocks = [(hellion, attacker)];
+        runner
+            .declare_blockers(if combat == HellionCombat::Blocks {
+                &blocks
+            } else {
+                &[]
+            })
+            .expect("declare blockers");
+        drive_until(&mut runner, |state| state.phase == Phase::End);
+
+        // CR 513.1 + CR 603.4: only the Hellion that participated queues a trigger.
+        if combat == HellionCombat::SitsOut {
+            assert!(runner.state().creatures_attacked_this_turn.contains(&other));
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(runner.state().objects[&hellion].zone, Zone::Battlefield);
+            continue;
+        }
+        assert_eq!(runner.state().stack.len(), 1, "{combat:?}");
+        let trigger = runner.state().stack[0].clone();
+        assert_eq!(trigger.source_id, hellion);
+        assert!(matches!(
+            trigger.kind,
+            StackEntryKind::TriggeredAbility { .. }
+        ));
+        assert_eq!(trigger.controller, P0);
+        let incarnation = runner.state().objects[&hellion].incarnation;
+
+        if let Some(unsummon) = unsummon {
+            let mut cast = runner.cast(unsummon).target_object(hellion).commit();
+            assert_eq!(cast.state().stack.len(), 2);
+            let mut events = Vec::new();
+            for _ in 0..8 {
+                if cast.state().stack.len() == 1 {
+                    break;
+                }
+                events.extend(
+                    cast.act(GameAction::PassPriority)
+                        .expect("resolve Unsummon")
+                        .events,
+                );
+            }
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ZoneChanged {
+                object_id, from: Some(Zone::Battlefield), to: Zone::Hand, ..
+            } if *object_id == hellion)));
+            assert_eq!(cast.state().stack.len(), 1);
+            assert_eq!(cast.state().stack[0].id, trigger.id);
+            assert_eq!(cast.state().stack[0].controller, P0);
+            assert!(cast.state().players[1].hand.contains(&hellion));
+            assert_ne!(cast.state().objects[&hellion].incarnation, incarnation);
+        }
+        let before_resolution = runner.state().objects[&hellion].incarnation;
+        finish_owner_shuffle(&mut runner, hellion, P1);
+        // CR 400.7 + CR 701.24c: the bounced incarnation stays in hand, and
+        // the owner still shuffles. The original incarnation can move otherwise.
+        if bounce {
+            assert_eq!(
+                runner.state().objects[&hellion].incarnation,
+                before_resolution
+            );
+            assert!(runner.state().players[1].hand.contains(&hellion));
+        } else {
+            assert!(runner.state().players[1].library.contains(&hellion));
+        }
+        assert!(runner.state().players[0].library.contains(&island));
+        assert!(runner.state().players[1].library.contains(&forest));
+        assert!(!runner.state().players[0].library.contains(&hellion));
+    }
 }
