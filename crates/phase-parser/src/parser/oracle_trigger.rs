@@ -23041,17 +23041,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             def.mode = TriggerMode::SpellCast;
 
             // Determine the caster filter
-            if all_consuming(preceded(
-                parse_trigger_keyword_prefix,
-                tag("the chosen player"),
-            ))
-            .parse(who)
-            .is_ok()
-            {
-                // CR 607.2d: The caster must be the player chosen by the
-                // source's linked ability.
-                def.valid_target = Some(TargetFilter::SourceChosenPlayer);
-            } else if scan_contains(who, "opponent") {
+            if scan_contains(who, "opponent") {
                 def.valid_target = Some(TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::Opponent),
                 ));
@@ -23095,10 +23085,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             if let Some(constraint) = turn_constraint {
                 def.constraint = Some(constraint);
             }
-            // The ownership qualifier is enforced on `valid_card`; it must not
-            // replace an actor filter parsed above ("the chosen player",
-            // "an opponent", "enchanted player").
-            if spell_not_owned_by_caster && def.valid_target.is_none() {
+            if spell_not_owned_by_caster {
                 def.valid_target = Some(TargetFilter::TriggeringPlayer);
             }
             // CR 601.2a: pre-extract the "from <zone>" cast-origin tail (see
@@ -27582,8 +27569,8 @@ mod modal_spell_cast_trigger_tests {
 mod prepared_spell_cast_trigger_tests {
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        AbilityDefinition, CopyRetargetPermission, Effect, FilterProp, QuantityExpr, TargetFilter,
-        TypeFilter, TypedFilter,
+        AbilityDefinition, CopyRetargetPermission, Effect, FilterProp, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::TriggerDefinition;
     use crate::types::TriggerMode;
@@ -27597,53 +27584,6 @@ mod prepared_spell_cast_trigger_tests {
             .into_iter()
             .find(|t| matches!(t.mode, TriggerMode::SpellCast))
             .expect("must parse a SpellCast trigger")
-    }
-
-    /// Sewer Nemesis is the printed card; the creature-spell shape is a
-    /// composition check that the actor arm keeps the spell-quality parse.
-    #[test]
-    fn chosen_player_cast_spell_filters_caster_and_mills_them() {
-        for (spell, expected_type) in [
-            ("a spell", None),
-            ("a creature spell", Some(TypeFilter::Creature)),
-        ] {
-            let text = format!(
-                "As this creature enters, choose a player.\nWhenever the chosen player casts {spell}, that player mills a card."
-            );
-            let trigger = spell_cast_trigger(&text, "Test Creature");
-            assert_eq!(trigger.valid_target, Some(TargetFilter::SourceChosenPlayer));
-            assert_eq!(
-                trigger.valid_card,
-                expected_type.map(|kind| TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![kind],
-                    ..TypedFilter::default()
-                }))
-            );
-            let effect = trigger.execute.expect("mill effect");
-            assert!(
-                matches!(
-                    effect.effect.as_ref(),
-                    Effect::Mill {
-                        count: QuantityExpr::Fixed { value: 1 },
-                        target: TargetFilter::TriggeringPlayer,
-                        ..
-                    }
-                ),
-                "{effect:?}"
-            );
-        }
-    }
-
-    /// The "they don't own" qualifier composes with an actor filter instead of
-    /// replacing it, so the chosen-player restriction still applies.
-    #[test]
-    fn chosen_player_cast_keeps_caster_filter_with_ownership_qualifier() {
-        let trigger = spell_cast_trigger(
-            "As this creature enters, choose a player.\nWhenever the chosen player casts a spell they don't own, that player mills a card.",
-            "Test Creature",
-        );
-        assert_eq!(trigger.valid_target, Some(TargetFilter::SourceChosenPlayer));
-        assert!(trigger.valid_card.is_some(), "{:?}", trigger.valid_card);
     }
 
     fn chain_has_unimplemented(def: &AbilityDefinition) -> bool {
