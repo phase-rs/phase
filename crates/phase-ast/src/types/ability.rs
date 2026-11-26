@@ -19717,8 +19717,9 @@ pub const EXILE_COST_ANY_NUMBER: u32 = u32::MAX - 1;
 /// compact numeric sentinels: [`EXILE_COST_X`] serializes as `"X"`,
 /// [`EXILE_COST_ANY_NUMBER`] as `"any-number"`, every other count as its
 /// number. Deserialization accepts the two tags plus any number (legacy
-/// `card-data.json` still carries the raw sentinels); anything else is a
-/// hard error.
+/// `card-data.json` still carries the raw sentinels), via either integer
+/// dispatch (`u64`/`i64`) — serde-wasm-bindgen routes safe JS integers
+/// through `visit_i64`; anything else is a hard error.
 pub mod exile_cost_count {
     use serde::de::{self, Visitor};
     use serde::{Deserializer, Serializer};
@@ -19751,6 +19752,12 @@ pub mod exile_cost_count {
         fn visit_u64<E: de::Error>(self, value: u64) -> Result<u32, E> {
             u32::try_from(value).map_err(|_| {
                 de::Error::custom(format!("exile-cost count {value} exceeds u32::MAX"))
+            })
+        }
+
+        fn visit_i64<E: de::Error>(self, value: i64) -> Result<u32, E> {
+            u32::try_from(value).map_err(|_| {
+                de::Error::custom(format!("exile-cost count {value} exceeds u32 range"))
             })
         }
 
@@ -46038,6 +46045,64 @@ mod tests {
                 result.is_err(),
                 "wire {wire} must be a hard error, got {result:?}"
             );
+        }
+    }
+
+    /// R2-F1 (PR #11352): the locked serde-wasm-bindgen 0.6.5
+    /// `deserialize_any` dispatches safe JS integers to `visit_i64` and
+    /// strings to `visit_string` — the exact arms a fixed-count exile cost
+    /// crosses on `GameEvent::AbilityActivated` through
+    /// `get_viewer_transition_snapshot_js`. The stub below models those two
+    /// arms so the production dispatch executes natively.
+    #[test]
+    fn exile_cost_count_accepts_wasm_integer_dispatch() {
+        use serde::de::{self, Visitor};
+        use serde::Deserializer;
+
+        enum WasmValue {
+            I64(i64),
+            Str(&'static str),
+        }
+
+        struct WasmStub(WasmValue);
+
+        impl<'de> Deserializer<'de> for WasmStub {
+            type Error = de::value::Error;
+
+            fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+                match self.0 {
+                    WasmValue::I64(n) => visitor.visit_i64(n),
+                    WasmValue::Str(s) => visitor.visit_string(s.to_owned()),
+                }
+            }
+
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+                bytes byte_buf option unit unit_struct newtype_struct seq tuple
+                tuple_struct map struct enum identifier ignored_any
+            }
+        }
+
+        // Positive reach-guards: Psychatog's fixed count 2, CR 107.1c's
+        // admitted zero, and the two tags via the WASM string arm (locks
+        // `visit_string` → `visit_str` forwarding).
+        for (wire, expected) in [
+            (WasmValue::I64(2), 2),
+            (WasmValue::I64(0), 0),
+            (WasmValue::Str("X"), EXILE_COST_X),
+            (WasmValue::Str("any-number"), EXILE_COST_ANY_NUMBER),
+        ] {
+            let decoded = exile_cost_count::deserialize(WasmStub(wire)).unwrap();
+            assert_eq!(decoded, expected);
+        }
+
+        // Hostile: negatives and overflows stay rejected.
+        for hostile in [
+            WasmValue::I64(-1),
+            WasmValue::I64(i64::from(u32::MAX) + 1),
+            WasmValue::I64(i64::MAX),
+        ] {
+            assert!(exile_cost_count::deserialize(WasmStub(hostile)).is_err());
         }
     }
 

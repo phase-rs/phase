@@ -2693,6 +2693,31 @@ mod tests {
     }
 
     #[test]
+    fn ability_activated_fixed_count_exile_cost_round_trips() {
+        // R2-F1 (PR #11352) guard: a production-shaped activation event
+        // carrying a fixed-count exile cost (Psychatog's "Exile two cards
+        // from your graveyard") round-trips through the wire shape.
+        let original = GameEvent::AbilityActivated {
+            player_id: PlayerId(1),
+            source_id: ObjectId(9),
+            kind: ActivatedAbilityKind::Mana,
+            departed_source_lki: None,
+            trigger_state: ActivationTriggerState::Pending,
+            stack_entry: None,
+            activation_cost: BoundActivationCost::Cost(Box::new(AbilityCost::Exile {
+                count: 2,
+                zone: Some(Zone::Graveyard),
+                filter: None,
+            })),
+            loyalty_counters_removed: None,
+        };
+        let json = serde_json::to_value(&original).unwrap();
+        assert_eq!(json["data"]["activation_cost"]["Cost"]["count"], 2);
+        let back: GameEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back, original);
+    }
+
+    #[test]
     fn bound_activation_cost_of_definition_distinguishes_unknown_costless_and_cost() {
         // CR 602.1a: no binding is `Unknown`; a bound definition without a cost
         // is `Costless`, never confused with `Unknown`; otherwise its cost.
