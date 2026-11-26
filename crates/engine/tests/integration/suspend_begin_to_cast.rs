@@ -1,6 +1,6 @@
-//! CR 702.62a + CR 702.62c: a card can be suspended from hand exactly when its cast could begin.
-//! `assert_suspend` reads the offer, the enforcement and the restriction alone; the last one leaves
-//! out the gates on activated abilities. Every card has its full printed text.
+//! CR 702.62a + CR 702.62c: suspend's hand restriction checks whether the cast could begin.
+//! `assert_suspend` checks the offer, enforcement and the restriction alone. Pithing Needle can
+//! still block the synthesized activated ability at offer and enforcement.
 
 use engine::ai_support::{activation_block_reasons, legal_actions};
 use engine::game::casting::can_cast_object_now;
@@ -359,6 +359,60 @@ fn l7_own_turn_only() {
     assert_suspend(&r, sentence, false);
 }
 
+/// CR 805.4a + CR 805.5a: Dosan permits the active team's nonrepresentative to suspend.
+#[test]
+fn l7_dosan_shared_team_turn() {
+    let opponent = PlayerId(2);
+    for (actor, dosan, expected) in [
+        (P1, false, true),
+        (opponent, false, true),
+        (opponent, true, false),
+        (P1, true, true),
+    ] {
+        let mut s = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+        s.at_phase(Phase::PreCombatMain);
+        if dosan {
+            s.add_creature(P0, "Dosan the Falling Leaf", 2, 2)
+                .as_legendary()
+                .from_oracle_text("Players can cast spells only during their own turns.");
+        }
+        leyline(&mut s, actor);
+        s.add_basic_land(actor, ManaColor::Red);
+        let card = creature_card(
+            &mut s,
+            actor,
+            "Greater Gargadon",
+            (9, 7),
+            "{9}{R}",
+            GREATER_GARGADON,
+        );
+        let mut r = s.build();
+        evaluate_layers(r.state_mut());
+        if actor == opponent {
+            r.pass_holding_team().unwrap();
+        }
+        assert_eq!(r.state().active_player, P0);
+        let holder = if actor == opponent { opponent } else { P0 };
+        assert!(
+            matches!(r.state().waiting_for, WaitingFor::Priority { player } if player == holder)
+        );
+        let action = suspend_action(&r, card);
+        let offered = engine::ai_support::legal_actions_for_viewer(r.state(), actor)
+            .0
+            .contains(&action);
+        let result = engine::game::engine::apply(r.state_mut(), actor, action);
+        assert_eq!(
+            (offered, result.is_ok()),
+            (expected, expected),
+            "actor {actor:?}, Dosan {dosan}, result {result:?}"
+        );
+        assert_eq!(
+            r.state().objects[&card].zone,
+            if expected { Zone::Exile } else { Zone::Hand }
+        );
+    }
+}
+
 /// CR 702.61a: in P1's main phase, P0 responds to Sudden Shock (refused) or Giant Growth.
 #[test]
 fn l8_split_second() {
@@ -396,7 +450,7 @@ fn l8_split_second() {
     }
 }
 
-/// CR 601.3b: "you" on Leyline of Anticipation is its controller.
+/// CR 109.5: "you" on Leyline of Anticipation is its controller.
 #[test]
 fn t1_as_though_it_had_flash() {
     for (controller, expected) in [(Some(P0), true), (Some(P1), false), (None, false)] {
@@ -424,7 +478,7 @@ fn t2_granted_flash() {
     assert_suspend(&r, rift_bolt, false);
 }
 
-/// CR 601.3b: only casting a sorcery uses Quicken's permission up.
+/// CR 116.2f: suspending is a special action and leaves Quicken's permission available.
 #[test]
 fn t3_next_spell() {
     let (mut r, (quicken, gargadon, rift_bolt)) = board(|s| {
@@ -489,7 +543,7 @@ fn t5_sneak_window() {
     }
 }
 
-/// CR 805.4a: the step is "yours" for both members of the active team, and for no opponent.
+/// CR 805.4 + CR 805.4a: the step is "yours" for both members of the active team, and for no opponent.
 #[test]
 fn t5_sneak_window_on_a_shared_team_turn() {
     for (player, expected) in [(P1, true), (PlayerId(2), false)] {
@@ -531,8 +585,7 @@ fn t6_timing_query_reads_flash_routes_and_no_prohibitions() {
     assert!(!spell_confined_to_sorcery_timing(r.state(), P0, ith));
 }
 
-/// CR 118.6: a missing mana cost, an unaffordable one and a missing target don't stop a cast from
-/// beginning.
+/// CR 601.2 + CR 118.6: choosing targets and paying costs come after a cast begins.
 #[test]
 fn c1_completing_the_cast_is_irrelevant() {
     let (mut r, (mountain, vision, sentence, gargadon)) = board(|s| {
@@ -552,7 +605,7 @@ fn c1_completing_the_cast_is_irrelevant() {
     assert_suspend(&r, gargadon, true);
 }
 
-/// CR 602.5: a prohibited suspend isn't shown as merely unaffordable.
+/// CR 702.62c: a prohibited suspend isn't shown as merely unaffordable.
 #[test]
 fn d1_block_reasons() {
     for golem in [false, true] {

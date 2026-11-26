@@ -1512,9 +1512,9 @@ fn activation_restriction_applies(
                 && state.pending_cast.is_none()
         }
         // CR 702.62a + CR 702.62c: "If you could begin to cast this card by putting it onto the
-        // stack from your hand": its timing, and every effect that would prohibit the cast. The
-        // window is tested first, so the flash scans run only outside it. A missing source
-        // can't be activated.
+        // stack from your hand": its timing, split second, and the prohibitions checked by the cast
+        // proposal. The window is tested first, so the flash scans run only outside it. A missing
+        // source can't be activated.
         ActivationRestriction::MatchesCardCastTiming => {
             (is_sorcery_speed_window(state, player)
                 || !restriction_confines_to_sorcery_timing(

@@ -9212,8 +9212,8 @@ fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u
     *counter_type == CounterType::Plus1Plus1 && *count == amplify_counter_quantity(expected_n)
 }
 
-/// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
-/// carrying `Keyword::Suspend { count, cost }`:
+/// CR 702.62a: Each face carrying `Keyword::Suspend { count, cost }` gets two exile triggers.
+/// A fixed count also gets a hand ability.
 ///
 ///   1. **Hand-activated alt-cost** (not for Suspend X)
 ///      ("Rather than cast this card from your hand,
@@ -9222,10 +9222,9 @@ fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u
 ///      `activation_zone = Hand` and `ActivationRestriction::MatchesCardCastTiming`
 ///      (CR 702.62a "if you could begin to cast this card by putting it onto the
 ///      stack from your hand"). Cost is composite (mana + exile self from hand);
-///      effect is a Time-counter `PutCounter` on the now-exiled SelfRef. The
-///      synthesized activation does land on the stack as an activated ability,
-///      which is a controlled approximation of the rule's "doesn't use the stack"
-///      — no card today interacts with that distinction.
+///      effect is a Time-counter `PutCounter` on the now-exiled SelfRef. Stifle
+///      can counter the synthesized activation on the stack. Under CR 116.2f and
+///      CR 702.62a, suspending is a special action that skips the stack.
 ///
 ///   2. **Upkeep counter-removal trigger** ("At the beginning of your upkeep,
 ///      if this card is suspended, remove a time counter from it.") fires from

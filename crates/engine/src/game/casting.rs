@@ -38474,21 +38474,27 @@ fn evaluate_casting_prohibition_condition(
 ) -> bool {
     match when {
         // CR 109.5: "during your turn" — bound to the static's source controller.
-        CastingProhibitionCondition::DuringYourTurn => state.active_player == source_controller,
+        CastingProhibitionCondition::DuringYourTurn => {
+            super::players::is_turn_player(state, source_controller)
+        }
         // CR 506.1: "during combat" — any combat phase, game-wide.
         CastingProhibitionCondition::DuringCombat => state.phase.is_combat(),
         // CR 109.5 + CR 117.1a + CR 604.1: "only during your turn" — blocked
         // when it is NOT the source-controller's turn (Fires of Invention's
         // "your turn"). Differs from `NotDuringAffectedPlayersTurn`: this
         // binds to the static source's controller per CR 109.5.
-        CastingProhibitionCondition::NotDuringYourTurn => state.active_player != source_controller,
+        CastingProhibitionCondition::NotDuringYourTurn => {
+            !super::players::is_turn_player(state, source_controller)
+        }
         // CR 102.1 + CR 117.1a + CR 604.1: "only during their own turn" —
         // distributive per-affected-player binding (Dosan / City of Solitude).
         // Blocked when it is NOT the *caster's* turn. The pronoun "their own"
         // is not governed by CR 109.5 (which binds "you/your"); the
         // distributive reading follows from CR 102.1 + the template structure
         // of "[every player] can [action] only during their own [time]".
-        CastingProhibitionCondition::NotDuringAffectedPlayersTurn => state.active_player != caster,
+        CastingProhibitionCondition::NotDuringAffectedPlayersTurn => {
+            !super::players::is_turn_player(state, caster)
+        }
         // CR 117.1a + CR 117.1b: "only any time they could cast a sorcery"
         // — blocked when not at sorcery speed. `restrictions` owns the
         // sorcery-speed timing predicate (CR 307.1); never re-derive it.
