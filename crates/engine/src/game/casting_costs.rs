@@ -2121,21 +2121,23 @@ fn spell_alternative_cost_is_payable(
     };
     let object_legs =
         super::cost_payability::reservable_battlefield_legs(state, player, object_id, legs);
-    match mana {
-        Some(mana) if object_legs.is_empty() => {
-            super::casting::cast_mana_affordable(state, player, object_id, &mana, &pricing)
-        }
-        mana => {
-            reserved_alternative_verdict(
-                state,
-                player,
-                object_id,
-                &mana.unwrap_or_else(ManaCost::zero),
-                &pricing,
-                &object_legs,
-            ) != ReservationVerdict::Rejected
-        }
+    // A mana-only alternative can use the same mana abilities as a printed
+    // cost. A composite price with an unreserved non-mana leg must still
+    // exclude manual activations that could spend that leg's resources.
+    if let Some(base) = mana
+        .as_ref()
+        .filter(|_| !legs.is_empty() && object_legs.is_empty())
+    {
+        return super::casting::cast_mana_affordable(state, player, object_id, base, &pricing);
     }
+    reserved_alternative_verdict(
+        state,
+        player,
+        object_id,
+        &mana.unwrap_or_else(ManaCost::zero),
+        &pricing,
+        &object_legs,
+    ) != ReservationVerdict::Rejected
 }
 
 /// CR 601.2g-h: how the reservation search judged an alternative's mana beside
@@ -2179,7 +2181,6 @@ fn reserved_alternative_verdict(
     pricing: &super::casting::CastPricing<'_>,
     legs: &[super::cost_payability::ReservableLeg],
 ) -> ReservationVerdict {
-    let reach = super::mana_sources::player_mana_ability_reach(state, player);
     let totals = super::casting::cast_mana_totals(
         state,
         player,
@@ -2205,6 +2206,7 @@ fn reserved_alternative_verdict(
     if legs.is_empty() {
         return ReservationVerdict::Witness;
     }
+    let reach = super::mana_sources::player_mana_ability_reach(state, player);
     let mana_sources: HashSet<ObjectId> = if reach.other_objects
         != super::mana_sources::OtherObjectUse::None
         || reach.production == super::mana_sources::ProductionAmount::BoardDependent
