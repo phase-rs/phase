@@ -1920,9 +1920,15 @@ describe("DraftPodPage exits", () => {
       expect(rejections).toEqual([]);
     });
 
-    it("goes home once from two Leave presses on a host still tearing down", async () => {
+    it("goes home once from two Leave presses on a host still tearing down", async ({ onTestFinished }) => {
       const running = await openRunningHost();
       useDraftPodStore.setState({ joinCode: "ABCDE" });
+      // Both presses' leaves settle on one termination, so their navigations
+      // would land in one render; each exit that goes home resets the pod first.
+      const reset = useDraftPodStore.getState().reset;
+      const podResets = vi.fn(reset);
+      useDraftPodStore.setState({ reset: podResets });
+      onTestFinished(() => { useDraftPodStore.setState({ reset }); });
       renderApp(["/", "/draft-pod"]);
       await settle(30);
       const termination = deferred();
@@ -1935,12 +1941,15 @@ describe("DraftPodPage exits", () => {
       // Reach: both leaves wait for the host's one termination.
       expect(running.terminateDraft).toHaveBeenCalledOnce();
       expect(pathname).toBe("/draft-pod");
+      expect(podResets).not.toHaveBeenCalled();
 
       mocks.terminateGate = null;
       await act(async () => { termination.resolve(); });
       await settle(100);
 
       expect(pathname).toBe("/");
+      // One exit went home, not one per press.
+      expect(podResets).toHaveBeenCalledOnce();
       expect(useDraftPodStore.getState().joinCode).toBe("");
       expect(rejections).toEqual([]);
     });

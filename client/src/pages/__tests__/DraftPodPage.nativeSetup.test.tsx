@@ -429,7 +429,9 @@ describe("DraftPodPage native setup route", () => {
       native.state.nextJoin.push(() => {});
       renderApp(["/", admittedEntry()]);
       await openJoinForm();
-      expect(screen.queryByPlaceholderText("Pod password")).toBeNull();
+      act(() => {
+        useDraftPodStore.setState({ listing: { ...useDraftPodStore.getState().listing, password: "secret" } });
+      });
 
       await userEvent.setup().click(screen.getByRole("button", { name: "Join Pod" }));
       await waitFor(() => expect(native.state.instances[0]?.joinCalls).toEqual([["PROT12", "Alice", undefined]]));

@@ -844,7 +844,7 @@ let ownerReplaced = new AbortController();
  */
 let draftOwnerGeneration = 0;
 
-/** The current {@link draftOwnerGeneration}, which a pod-page exit reads before and after its leave. */
+/** The current {@link draftOwnerGeneration}, which a pod-page exit reads once its leave has begun and again once that leave has settled. */
 export function currentDraftOwnerGeneration(): number {
   return draftOwnerGeneration;
 }
