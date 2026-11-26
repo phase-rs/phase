@@ -300,7 +300,12 @@ vi.mock("../../adapter/draftPodHostAdapter", () => ({
   }),
 }));
 
-import { currentDraftOwnerGeneration, useMultiplayerDraftStore } from "../multiplayerDraftStore";
+import {
+  currentDraftOwnerGeneration,
+  DRAFT_RECOVERY_CONNECTION_ERROR,
+  DRAFT_RECOVERY_SAVE_ERROR,
+  useMultiplayerDraftStore,
+} from "../multiplayerDraftStore";
 import { useMultiplayerStore } from "../multiplayerStore";
 import { useConnectivityStore } from "../connectivityStore";
 import { Draft27IncompatibilityError } from "../../adapter/draft-compatibility";
@@ -882,7 +887,7 @@ describe("the native draft owner", () => {
         case "the refresh write failing":
           storage.failSave = true;
           outcome = await store().resumeNativeDraft();
-          expect(outcome).toEqual({ status: "failed", error: "Could not save draft recovery details" });
+          expect(outcome).toEqual({ status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR });
           break;
         case "the record read failing":
           storage.failLoad = true;
@@ -921,12 +926,148 @@ describe("the native draft owner", () => {
     // Sibling: its private write failing is its own failure too.
     storage.failSave = true;
     await expect(store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings }))
-      .resolves.toEqual({ status: "failed", error: "Could not save draft recovery details" });
+      .resolves.toEqual({ status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR });
     expect(native.instances).toHaveLength(2);
-    expect(store()).toMatchObject({ role: null, transport: null });
+    expect(store()).toMatchObject({ role: null, transport: null, error: DRAFT_RECOVERY_SAVE_ERROR });
     expect(native.instances[1]!.disposeCount).toBe(1);
     expect(storedPointer()).toBeNull();
     await expect(storedRecord(storage.lastSavedId!)).resolves.toBeUndefined();
+  });
+
+  it.each(["create", "join"] as const)("a native %s answered with no seat fails with the connection key", async (kind) => {
+    const answerWithoutSeat: NativeScript = (_double, settle) => {
+      settle.resolve(kind === "join" ? native.state.lobbyView : undefined);
+    };
+    let opening: Promise<unknown>;
+    if (kind === "create") {
+      native.nextCreate.push(answerWithoutSeat);
+      opening = store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings });
+    } else {
+      native.nextJoin.push(answerWithoutSeat);
+      opening = store().joinNativeDraft({ endpoint: ENDPOINT, draftCode: "NAT001", displayName: "Bo" });
+    }
+
+    await expect(opening).resolves.toEqual({ status: "failed", error: DRAFT_RECOVERY_CONNECTION_ERROR });
+    // Reach: the server answered, and only then was the adapter ended.
+    expect(native.log).toEqual([`${kind}:resolved:0`, "dispose:0"]);
+    expect(store()).toMatchObject({ role: null, transport: null, error: DRAFT_RECOVERY_CONNECTION_ERROR });
+    expect(storage.log).not.toContain("privateSave:enter");
+    expect(storedPointer()).toBeNull();
+  });
+
+  it.each(["create", "join", "create while offline"] as const)(
+    "an already-cancelled native %s changes nothing",
+    async (call) => {
+      await joinP2PGuest();
+      const open = (signal?: AbortSignal) => call === "join"
+        ? store().joinNativeDraft({ endpoint: ENDPOINT, draftCode: "NAT001", displayName: "Bo", signal })
+        : store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings, signal });
+      if (call === "create while offline") useConnectivityStore.setState({ forcedOffline: true });
+      const before = snapshot();
+      const generation = currentDraftOwnerGeneration();
+      const cancelled = new AbortController();
+      cancelled.abort();
+
+      await expect(open(cancelled.signal)).resolves.toEqual({ status: "superseded" });
+      expect(native.instances).toHaveLength(0);
+      expect(guests.instances[0]!.dispose).not.toHaveBeenCalled();
+      expect(snapshot()).toStrictEqual(before);
+      expect(currentDraftOwnerGeneration()).toBe(generation);
+
+      // Reach: online, the same call with no signal builds its adapter and retires the guest.
+      useConnectivityStore.setState({ forcedOffline: false });
+      await expect(open()).resolves.toEqual({ status: "opened" });
+      expect(native.instances).toHaveLength(1);
+      expect(guests.instances[0]!.dispose).toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["create", "record write"],
+    ["join", "record write"],
+    ["create", "server's answer"],
+    ["join", "server's answer"],
+  ] as const)("a reset during a native %s's %s ends it", async (kind, during) => {
+    let entered = () => storage.log.includes("privateSave:enter");
+    let release: () => void;
+    if (during === "record write") {
+      const write = held();
+      storage.saveGate = write.promise;
+      release = () => write.resolve();
+    } else {
+      let pending: { double: NativeDoubleShape; settle: Settle; args: unknown[] } | null = null;
+      const hold: NativeScript = (double, settle, args) => {
+        pending = { double, settle, args };
+      };
+      if (kind === "create") native.nextCreate.push(hold);
+      else native.nextJoin.push(hold);
+      entered = () => pending !== null;
+      release = () => {
+        const { double, settle, args } = pending!;
+        if (kind === "create") native.NativeDouble.answerCreate(double, settle, args);
+        else native.NativeDouble.answerJoin(double, settle, args);
+      };
+    }
+    const opening = kind === "create"
+      ? store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings })
+      : store().joinNativeDraft({ endpoint: ENDPOINT, draftCode: "NAT001", displayName: "Bo" });
+    // Reach: the open installed its native owner and waits where this leg holds it.
+    await vi.waitFor(() => expect(entered()).toBe(true));
+    expect(store().transport).toBe("native");
+
+    store().reset();
+    release();
+    await expect(opening).resolves.toEqual({ status: "superseded" });
+    expect(storage.log.filter((entry) => entry.startsWith("pointerWrite:"))).toEqual([]);
+    expect(storedPointer()).toBeNull();
+    if (during === "record write") {
+      await expect(storedRecord(storage.lastSavedId!)).resolves.toBeUndefined();
+    } else {
+      expect(storage.log).not.toContain("privateSave:enter");
+    }
+    expect(native.instances).toHaveLength(1);
+    expect(native.instances[0]!.disposeCount).toBe(1);
+    expect(store()).toMatchObject({ role: null, transport: null, phase: "idle", view: null });
+  });
+
+  it("a native resume superseded during its refresh write reports no failure when that write fails", async () => {
+    await storeNativePair();
+    const write = held();
+    storage.saveGate = write.promise;
+    const resuming = store().resumeNativeDraft();
+    // Reach: the refresh write was entered after the reconnect.
+    await vi.waitFor(() => expect(storage.log).toContain("privateSave:enter"));
+    expect(native.log).toEqual(["reconnect:resolved:0"]);
+
+    await expect(store().joinNativeDraft({ endpoint: ENDPOINT, draftCode: "NAT002", displayName: "Bo" }))
+      .resolves.toEqual({ status: "opened" });
+    const joined = snapshot();
+    storage.failSave = true;
+    write.resolve();
+
+    await expect(resuming).resolves.toEqual({ status: "superseded" });
+    expect(snapshot()).toStrictEqual(joined);
+    expect(native.instances).toHaveLength(2);
+    expect(native.instances[0]!.disposeCount).toBe(1);
+    expect(native.instances[1]!.disposeCount).toBe(0);
+  });
+
+  it("a native resume whose refresh write fails while offline reports offline", async () => {
+    const { pointerText } = await storeNativePair();
+    const write = held();
+    storage.saveGate = write.promise;
+    const resuming = store().resumeNativeDraft();
+    // Reach: the refresh write was entered.
+    await vi.waitFor(() => expect(storage.log).toContain("privateSave:enter"));
+
+    useConnectivityStore.setState({ forcedOffline: true });
+    storage.failSave = true;
+    write.resolve();
+
+    await expect(resuming).resolves.toEqual({ status: "offline" });
+    expect(native.instances).toHaveLength(1);
+    expect(native.instances[0]!.disposeCount).toBe(1);
+    expect(localStorage.getItem(POINTER_KEY)).toBe(pointerText);
   });
 
   describe("a waiting leave", () => {

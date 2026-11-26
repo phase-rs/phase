@@ -7,6 +7,8 @@ import { MemoryRouter, Route, Routes, useLocation, useNavigate, type InitialEntr
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { draftProcedureFixture } from "../../adapter/__tests__/draftProcedureFixture";
 import { Draft27IncompatibilityError } from "../../adapter/draft-compatibility";
+import i18n from "i18next";
+import { resources, SUPPORTED_LNGS } from "../../i18n/resources";
 
 /*
  * The pod page's native setup route, on the real page, pod store, lifecycle
@@ -23,6 +25,8 @@ import { Draft27IncompatibilityError } from "../../adapter/draft-compatibility";
  *   create's reach.
  * - `draftPersistence.loadNativeDraftCapability`: answers `readFailure` while
  *   `storage.failLoad` is set, else the real record.
+ * - `draftPersistence.saveNativeDraftCapability`: fails once while
+ *   `mocks.failSave` is set, else writes the real record.
  * - `SetSelector`: one button, labelled by `startLabel`, that starts with three
  *   TST packs.
  * - The page chrome: `ScreenChrome` as "Chrome Back", `MenuShell` as its
@@ -142,6 +146,7 @@ const mocks = vi.hoisted(() => ({
   hostRoom: vi.fn(() => new Promise(() => {})),
   joinRoom: vi.fn(() => new Promise(() => {})),
   failLoad: false,
+  failSave: false,
 }));
 
 vi.mock("../../adapter/server-draft-adapter", async (importOriginal) => ({
@@ -169,6 +174,13 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
     loadNativeDraftCapability: async (...args: Parameters<typeof actual.loadNativeDraftCapability>) => {
       if (mocks.failLoad) return { type: "readFailure", error: new Error("IndexedDB read failed") } as const;
       return actual.loadNativeDraftCapability(...args);
+    },
+    saveNativeDraftCapability: async (...args: Parameters<typeof actual.saveNativeDraftCapability>) => {
+      if (mocks.failSave) {
+        mocks.failSave = false;
+        throw new Error("IndexedDB write failed");
+      }
+      return actual.saveNativeDraftCapability(...args);
     },
   };
 });
@@ -207,6 +219,7 @@ const SAVED_SEAT: NativeCredential = { draftCode: "NAT001", playerToken: "tok-gu
 const LOBBY_TEXT = "Waiting for host to start the draft...";
 const INCOMPATIBLE_TEXT = "This draft is incompatible with your protocol version.";
 const CONNECTION_TEXT = "Connection Error";
+const SAVE_TEXT = "Could not save draft recovery details";
 
 function view(fields: Record<string, unknown>): unknown {
   return {
@@ -301,6 +314,7 @@ describe("DraftPodPage native setup route", () => {
     native.state.nextJoin.length = 0;
     native.state.nextReconnect.length = 0;
     mocks.failLoad = false;
+    mocks.failSave = false;
     mocks.draftProcedure.mockReset().mockResolvedValue(draftProcedureFixture());
     vi.stubGlobal("fetch", fetchDouble);
     localStorage.clear();
@@ -540,6 +554,12 @@ describe("DraftPodPage native setup route", () => {
       });
     };
 
+    afterEach(async () => {
+      await act(async () => {
+        await i18n.changeLanguage("en");
+      });
+    });
+
     it.each(["an admitted setup", "no history state", "a token the store does not hold"] as const)(
       "shows on the choice screen with %s, and never on the forms",
       async (entry) => {
@@ -582,6 +602,34 @@ describe("DraftPodPage native setup route", () => {
       expect(native.state.instances).toHaveLength(0);
       expect(localStorage.getItem(POINTER_KEY)).toBe(pointerText);
     });
+
+    it.each(SUPPORTED_LNGS.filter((lng) => lng !== "en"))(
+      "renders a native entry's failed record refresh in %s",
+      async (lng) => {
+        await storeNativeSeat();
+        mocks.failSave = true;
+        renderApp(["/", "/draft-pod?entry=native"]);
+        // Reach: the entry's reconnect was sent once, and its failed refresh shows in English first.
+        await waitFor(() => expect(native.state.instances[0]?.reconnectCalls).toHaveLength(1));
+        expect(await screen.findByText(SAVE_TEXT)).toBeInTheDocument();
+
+        const bundle = resources[lng] as {
+          draft: { podError: { recoverySave: string }; podSetup: { hostCardTitle: string } };
+        };
+        await act(async () => {
+          i18n.addResourceBundle(lng, "draft", bundle.draft, true, true);
+          await i18n.changeLanguage(lng);
+        });
+        // Reach: the choice screen now renders in the locale.
+        const hostTitle = new RegExp(bundle.draft.podSetup.hostCardTitle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+        expect(await screen.findByRole("button", { name: hostTitle })).toBeInTheDocument();
+
+        expect(bundle.draft.podError.recoverySave).not.toBe(SAVE_TEXT);
+        expect(await screen.findByText(bundle.draft.podError.recoverySave)).toBeInTheDocument();
+        expect(screen.queryByText(SAVE_TEXT)).toBeNull();
+        expect(screen.queryByText("podError.recoverySave")).toBeNull();
+      },
+    );
 
     it("is not shown on a later plain /draft-pod mount", async () => {
       await storeNativeSeat();

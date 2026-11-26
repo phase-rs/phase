@@ -9,22 +9,26 @@ import { draftProcedureFixture } from "../../adapter/__tests__/draftProcedureFix
  * the real pod store, lifecycle store and storage (fake-indexeddb). The
  * doubles, each stated here:
  * - `ServerDraftAdapter`: the constructor records its URL; `createDraft` and
- *   `joinDraft` record their arguments and never settle; `onEvent` returns a
- *   no-op removal; `credential` is `null`; `dispose` counts a call.
+ *   `joinDraft` record their arguments and their settlers in `settles`, and
+ *   settle only when a test settles them; `onEvent` returns a no-op removal;
+ *   `credential` is `null`; `dispose` counts a call.
  * - `DraftAdapter.draftProcedure`: resolves `draftProcedureFixture()`.
  * - `network/connection`'s `hostRoom` and `joinRoom`: never settle.
  * - `fetch`: never settles.
  */
+type NativeSettle = { resolve: (value?: unknown) => void; reject: (error: Error) => void };
 const doubles = vi.hoisted(() => {
   const instances: Array<{
     readonly url: string;
     readonly createCalls: unknown[];
     readonly joinCalls: unknown[][];
+    readonly settles: NativeSettle[];
     disposeCount: number;
   }> = [];
   class NativeDouble {
     readonly createCalls: unknown[] = [];
     readonly joinCalls: unknown[][] = [];
+    readonly settles: NativeSettle[] = [];
     disposeCount = 0;
     readonly credential = null;
     constructor(readonly url: string) {
@@ -35,11 +39,15 @@ const doubles = vi.hoisted(() => {
     }
     createDraft(settings: unknown): Promise<void> {
       this.createCalls.push(settings);
-      return new Promise(() => {});
+      return new Promise((resolve, reject) => {
+        this.settles.push({ resolve: () => resolve(), reject });
+      });
     }
     joinDraft(...args: unknown[]): Promise<unknown> {
       this.joinCalls.push(args);
-      return new Promise(() => {});
+      return new Promise((resolve, reject) => {
+        this.settles.push({ resolve, reject });
+      });
     }
     dispose(): void {
       this.disposeCount += 1;
@@ -73,7 +81,7 @@ vi.mock("../../network/connection", async (importOriginal) => ({
 }));
 
 import { useDraftPodStore, type NativeDraftSetup } from "../draftPodStore";
-import { useMultiplayerDraftStore } from "../multiplayerDraftStore";
+import { DRAFT_OFFLINE_ERROR, useMultiplayerDraftStore } from "../multiplayerDraftStore";
 import { useConnectivityStore } from "../connectivityStore";
 import { canonicalNativeDraftEndpoint, getDraftStore } from "../../services/draftPersistence";
 
@@ -87,6 +95,17 @@ function admit(endpoint: string): NativeDraftSetup {
   const setup = pod().nativeSetup;
   expect(setup).not.toBeNull();
   return setup!;
+}
+
+/** A promise the test settles. */
+function held<T = void>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 /** Lets every pending continuation run. */
@@ -221,5 +240,69 @@ describe("admitting a native draft setup", () => {
       // A later explicit action supersedes the entry recovery's failure.
       expect(pod().nativeRecoveryFailure).toBeNull();
     });
+
+    it.each(["create", "join"] as const)("a %s that fails after its setup was replaced writes nothing into the new one", async (start) => {
+      seedForm();
+      const operate = (setup: NativeDraftSetup) => start === "create" ? pod().createPod(setup) : pod().joinPod(setup);
+      const opened = async (count: number) => {
+        await vi.waitFor(() => expect(doubles.instances).toHaveLength(count));
+        const double = doubles.instances[count - 1]!;
+        await vi.waitFor(() => expect(double.settles).toHaveLength(1));
+        return double;
+      };
+
+      // Positive: the setup still held receives its own failure.
+      const first = operate(admit("ws://a:9374/ws"));
+      (await opened(1)).settles[0]!.reject(new Error("Draft is full"));
+      await first;
+      expect(pod().configError).toBe("Draft is full");
+
+      useDraftPodStore.setState({ configError: null });
+      const replaced = admit("ws://a:9374/ws");
+      const second = operate(replaced);
+      const double = await opened(2);
+      // Reach: the second operation built its adapter on the replaced setup's server.
+      expect(double.url).toBe("ws://a:9374/ws");
+      const current = admit("ws://b:9374/ws");
+      double.settles[0]!.reject(new Error("Draft is full"));
+      await second;
+
+      expect(pod().nativeSetup).toBe(current);
+      expect(pod().configError).toBeNull();
+    });
+
+    it.each(["its procedure read fails", "it is offline when its procedure arrives"] as const)(
+      "a create whose setup was replaced while %s writes nothing into the new one",
+      async (leg) => {
+        seedForm();
+        const run = async (setup: NativeDraftSetup, replace: boolean) => {
+          const read = held<unknown>();
+          doubles.draftProcedure.mockImplementationOnce(() => read.promise);
+          const calls = doubles.draftProcedure.mock.calls.length;
+          const creating = pod().createPod(setup);
+          // Reach: the create is reading its procedure.
+          await vi.waitFor(() => expect(doubles.draftProcedure).toHaveBeenCalledTimes(calls + 1));
+          if (replace) admit("ws://b:9374/ws");
+          if (leg === "its procedure read fails") {
+            read.reject(new Error("Procedure unavailable"));
+          } else {
+            useConnectivityStore.setState({ forcedOffline: true });
+            read.resolve(draftProcedureFixture());
+          }
+          await creating;
+          useConnectivityStore.setState({ forcedOffline: false });
+        };
+        const expected = leg === "its procedure read fails" ? "Procedure unavailable" : DRAFT_OFFLINE_ERROR;
+
+        // Positive: with no re-admission the create records its own failure.
+        await run(admit("ws://a:9374/ws"), false);
+        expect(pod().configError).toBe(expected);
+
+        useDraftPodStore.setState({ configError: null });
+        await run(admit("ws://a:9374/ws"), true);
+        expect(pod().configError).toBeNull();
+        expect(doubles.instances).toHaveLength(0);
+      },
+    );
   });
 });

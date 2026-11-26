@@ -113,6 +113,7 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => ({
 import { useMultiplayerDraftStore } from "../multiplayerDraftStore";
 import { DraftPodGuestAdapter } from "../../adapter/draftPodGuestAdapter";
 import { useConnectivityStore } from "../connectivityStore";
+import { inspectActiveDraftPod } from "../../services/draftPersistence";
 
 function joinResult(code: string): JoinResult {
   return {
@@ -840,5 +841,76 @@ describe("session-open outcome of a superseded attempt", () => {
     await expect(resuming).resolves.toBe("resumed");
     expect(guests.instances).toHaveLength(1);
     expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", phase: "lobby" });
+  });
+
+  it.each(["hostDraft", "joinDraft", "hostDraft while offline", "joinDraft while offline"] as const)(
+    "an already-cancelled %s changes nothing",
+    async (call) => {
+      await expect(useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "OWN", displayName: "A" }))
+        .resolves.toEqual({ status: "opened" });
+      // Reach: a guest is seated before the cancelled call.
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", transport: "p2p", phase: "lobby" });
+      if (call.endsWith("while offline")) useConnectivityStore.setState({ forcedOffline: true });
+      const published = () => {
+        const state = useMultiplayerDraftStore.getState();
+        return { role: state.role, transport: state.transport, phase: state.phase, error: state.error };
+      };
+      const before = published();
+      const cancelled = new AbortController();
+      cancelled.abort();
+
+      const outcome = call.startsWith("hostDraft")
+        ? await useMultiplayerDraftStore.getState()
+          .hostDraft({ ...hostConfig, persistenceId: "K-POD", signal: cancelled.signal })
+        : await useMultiplayerDraftStore.getState()
+          .joinDraft({ kind: "new", roomCode: "NEXT", displayName: "B", signal: cancelled.signal });
+      expect(outcome).toEqual({ status: "superseded" });
+      expect(guests.instances[0]!.dispose).not.toHaveBeenCalled();
+      expect(hosts.instances).toHaveLength(0);
+      expect(guests.instances).toHaveLength(1);
+      expect(published()).toEqual(before);
+    },
+  );
+
+  it("a reset during a host start's initialization ends it before it saves its pod", async () => {
+    localStorage.clear();
+    const initialize = held();
+    let initializing = false;
+    hosts.nextInitialize.push(async () => {
+      initializing = true;
+      await initialize.promise;
+    });
+    const hosting = useMultiplayerDraftStore.getState().hostDraft({ ...hostConfig, persistenceId: "R-POD" });
+    try {
+      // Reach: the host's initialize was entered while it is the published host.
+      await vi.waitFor(() => expect(initializing).toBe(true));
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", phase: "connecting" });
+
+      useMultiplayerDraftStore.getState().reset();
+    } finally {
+      initialize.resolve();
+    }
+    await expect(hosting).resolves.toEqual({ status: "superseded" });
+    expect(inspectActiveDraftPod()).toEqual({ type: "absent" });
+    expect(hosts.instances[0]!.dispose).toHaveBeenCalledTimes(1);
+    expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
+  });
+
+  it("a reset during a guest join's room join ends it", async () => {
+    const room = gateNextJoin();
+    const joining = useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "RESET", displayName: "A" });
+    try {
+      // Reach: the room join was entered while it is the published guest.
+      await vi.waitFor(() => expect(net.joinRoom).toHaveBeenCalledTimes(1));
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", phase: "connecting" });
+
+      useMultiplayerDraftStore.getState().reset();
+    } finally {
+      room.release();
+    }
+    await expect(joining).resolves.toEqual({ status: "superseded" });
+    expect(guests.instances).toHaveLength(1);
+    expect(guests.instances[0]!.dispose).toHaveBeenCalled();
+    expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
   });
 });

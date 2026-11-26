@@ -75,6 +75,7 @@ import {
   DRAFT_OFFLINE_ERROR,
   DRAFT_RECOVERY_CONNECTION_ERROR,
   DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+  DRAFT_RECOVERY_SAVE_ERROR,
   DRAFT_RECOVERY_UNREADABLE_ERROR,
   intergamePromptKey,
   isDraftPodWorkspacePhase,
@@ -127,10 +128,10 @@ function subscribePickInteraction(listener: () => void): () => void {
 /** Any entry of this length fits the lobby's byte bound for a password. */
 const POD_PASSWORD_MAX_LENGTH = 32;
 
-/** The offline key `DRAFT_OFFLINE_ERROR` and the host recovery keys
- *  `DRAFT_RECOVERY_INCOMPATIBLE_ERROR`, `DRAFT_RECOVERY_CONNECTION_ERROR` and
- *  `DRAFT_RECOVERY_UNREADABLE_ERROR` are translation keys and are translated;
- *  any other message is shown as written. */
+/** The offline key `DRAFT_OFFLINE_ERROR` and the recovery keys
+ *  `DRAFT_RECOVERY_INCOMPATIBLE_ERROR`, `DRAFT_RECOVERY_CONNECTION_ERROR`,
+ *  `DRAFT_RECOVERY_UNREADABLE_ERROR` and `DRAFT_RECOVERY_SAVE_ERROR` are
+ *  translation keys and are translated; any other message is shown as written. */
 function usePodErrorMessage(error: string | null): string | null {
   const { t } = useTranslation("draft");
   return error === DRAFT_OFFLINE_ERROR
@@ -141,7 +142,9 @@ function usePodErrorMessage(error: string | null): string | null {
         ? t("podError.connection")
         : error === DRAFT_RECOVERY_UNREADABLE_ERROR
           ? t("podError.unreadable")
-          : error;
+          : error === DRAFT_RECOVERY_SAVE_ERROR
+            ? t("podError.recoverySave")
+            : error;
 }
 
 /** Awaits the leave an exit has just called; true when no owner was installed, left or reset while it waited. */

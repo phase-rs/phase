@@ -112,8 +112,8 @@ export function nativeDraftSetupRouteGeneration(state: unknown): number | null {
 
 /**
  * What a failed native start or recovery stores: the incompatible key for a
- * compatibility refusal, else its own error (an offline sentinel or the
- * server's text), else the connection key. `usePodErrorMessage` maps the keys.
+ * compatibility refusal, else its own error (an error key `usePodErrorMessage`
+ * maps, or the server's text), else the connection key. `usePodErrorMessage` maps the keys.
  */
 function nativeFailureError(outcome: { readonly error: string | null; readonly code?: unknown }): string {
   if (outcome.code !== undefined) return DRAFT_RECOVERY_INCOMPATIBLE_ERROR;
@@ -1031,6 +1031,9 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         kind: config.kind,
         tournamentFormat: config.tournamentFormat,
       };
+      // A native create's outcome belongs only to the setup it was started for,
+      // the one the store still holds.
+      const ownsSetup = () => native === null || get().nativeSetup === native;
       try {
         const procedure = await loadProcedure(target.kind, target.tournamentFormat);
         if (
@@ -1039,7 +1042,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           || get().config !== config
         ) return;
         if (getEffectiveOffline()) {
-          set({ configError: DRAFT_OFFLINE_ERROR });
+          if (ownsSetup()) set({ configError: DRAFT_OFFLINE_ERROR });
           return;
         }
         // Native setup offers sets only.
@@ -1056,6 +1059,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           !isCurrentPodOrchestration(procedureRequest)
           || !procedureTargetMatchesConfig(target, get().config)
           || get().config !== config
+          || !ownsSetup()
         ) return;
         if (getEffectiveOffline()) {
           set({ configError: DRAFT_OFFLINE_ERROR, loadingPool: false });
@@ -1095,7 +1099,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           endpoint: native.endpoint,
           settings,
         });
-        if (!isCurrentPodOrchestration(procedureRequest) || get().config !== config) return;
+        if (!isCurrentPodOrchestration(procedureRequest) || get().config !== config || !ownsSetup()) return;
         if (outcome.status === "failed") set({ configError: nativeFailureError(outcome) });
         return;
       }
@@ -1577,7 +1581,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           draftCode: joinCode.trim(),
           displayName: guestDisplayName.trim(),
         });
-        if (!isCurrentPodOrchestration(nativeRequest)) return;
+        if (!isCurrentPodOrchestration(nativeRequest) || get().nativeSetup !== native) return;
         if (joined.status === "failed") set({ configError: nativeFailureError(joined) });
         return;
       }

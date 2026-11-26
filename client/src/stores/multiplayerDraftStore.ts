@@ -145,6 +145,8 @@ export const DRAFT_RECOVERY_INCOMPATIBLE_ERROR = "podError.incompatible";
 export const DRAFT_RECOVERY_CONNECTION_ERROR = "podError.connection";
 /** The pod store's error key for a saved pod the draft engine cannot read. */
 export const DRAFT_RECOVERY_UNREADABLE_ERROR = "podError.unreadable";
+/** The pod store's error key for a native seat whose private record could not be written. */
+export const DRAFT_RECOVERY_SAVE_ERROR = "podError.recoverySave";
 
 export type GuestDraftResumeOutcome = "resumed" | "absent" | "invalid" | "failed" | "offline" | "superseded";
 
@@ -206,9 +208,6 @@ export type DraftJoinFailureReport = "store" | "caller";
 export type NativeDraftResumeOutcome =
   | { readonly status: "resumed" | "absent" | "invalid" | "offline" | "superseded" }
   | { readonly status: "failed"; readonly error: string | null; readonly code?: Draft27CompatibilityError["code"] };
-
-/** The P2P guest's text for the same failure: a seat's private record could not be written. */
-const NATIVE_RECOVERY_SAVE_ERROR = "Could not save draft recovery details";
 
 /**
  * The pod SESSION's phase.
@@ -2140,7 +2139,8 @@ async function openNativeOwner(
   start: NativeDraftStart,
   signal: AbortSignal | undefined,
 ): Promise<DraftSessionOpenOutcome> {
-  // A refused endpoint registers, retires, builds and writes nothing.
+  // A call already cancelled, or a refused endpoint, registers, retires, builds and writes nothing.
+  if (signal?.aborted) return { status: "superseded" };
   const endpoint = canonicalNativeDraftEndpoint(start.endpoint);
   if (endpoint === null) return { status: "failed", error: null };
   if (getEffectiveOffline()) {
@@ -2174,7 +2174,10 @@ async function openNativeOwner(
   const participant: DraftRole = start.kind === "create" ? "host" : "guest";
   const adapter = new ServerDraftAdapter(endpoint);
   const owner = installDraftOwner(set, { role: "native", adapter, participant, capability: null }, signal);
-  const isCurrentOwner = () => installedDraftOwner === owner && epoch === draftAdapterEpoch;
+  // A reset ends the owner's lifecycle without detaching it.
+  const isCurrentOwner = () => installedDraftOwner === owner
+    && epoch === draftAdapterEpoch
+    && owner.lifetime.generation === lifecycleGeneration;
   let written: NativeDraftCapabilityHold | null = null;
   try {
     if (start.kind === "create") {
@@ -2189,7 +2192,7 @@ async function openNativeOwner(
       return { status: "superseded" };
     }
     const credential = adapter.credential;
-    if (!credential) throw new Error("The draft server issued no seat");
+    if (!credential) throw new Error(DRAFT_RECOVERY_CONNECTION_ERROR);
     set({ draftCode: credential.draftCode, seatIndex: credential.seatIndex });
     const hold: NativeDraftCapabilityHold = {
       capabilityId: crypto.randomUUID(),
@@ -2209,7 +2212,7 @@ async function openNativeOwner(
         participant,
       });
     } catch {
-      throw new Error(NATIVE_RECOVERY_SAVE_ERROR);
+      throw new Error(DRAFT_RECOVERY_SAVE_ERROR);
     }
     if (!isCurrentOwner()) {
       // Ended while its private record was being written: that record is
@@ -2518,6 +2521,8 @@ export const useMultiplayerDraftStore = create<
   },
 
   hostDraft: async (config) => {
+    // A call already cancelled retires and writes nothing.
+    if (config.signal?.aborted) return { status: "superseded" };
     if (getEffectiveOffline()) {
       set({ error: DRAFT_OFFLINE_ERROR });
       return { status: "failed", error: DRAFT_OFFLINE_ERROR };
@@ -2562,12 +2567,15 @@ export const useMultiplayerDraftStore = create<
       config.signal,
     );
     const { controller, generation } = owner.lifetime;
+    const isCurrentOwner = () => installedDraftOwner === owner
+      && epoch === draftAdapterEpoch
+      && generation === lifecycleGeneration;
 
     let initialized = false;
     try {
       await adapter.initialize({ ...config, signal: lifecycleSignal(controller) });
       initialized = true;
-      if (installedDraftOwner !== owner || epoch !== draftAdapterEpoch) return { status: "superseded" };
+      if (!isCurrentOwner()) return { status: "superseded" };
       if (config.persistenceId) {
         const view = get().view;
         const phase = view ? activePhaseForDraftView(view) ?? "lobby" : "lobby";
@@ -2589,7 +2597,7 @@ export const useMultiplayerDraftStore = create<
       // The adapter reports the error while it is current. A late failure is
       // deliberately silent: its event gate was detached by the new owner.
     } finally {
-      if (installedDraftOwner !== owner || epoch !== draftAdapterEpoch) {
+      if (!isCurrentOwner()) {
         owner.lifetime.route?.signal.removeEventListener("abort", owner.lifetime.route.listener);
         await disposeHostAdapter(adapter, true);
       } else if (!initialized || adapter.status === "error") {
@@ -2605,6 +2613,8 @@ export const useMultiplayerDraftStore = create<
   },
 
   joinDraft: async (config, { failureReport = "store" } = {}) => {
+    // A call already cancelled retires and writes nothing.
+    if (config.signal?.aborted) return { status: "superseded" };
     if (getEffectiveOffline()) {
       if (failureReport === "store") set({ error: DRAFT_OFFLINE_ERROR });
       return { status: "failed", error: DRAFT_OFFLINE_ERROR };
@@ -2654,16 +2664,19 @@ export const useMultiplayerDraftStore = create<
     const adapter = new DraftPodGuestAdapter();
     const owner = installDraftOwner(set, { role: "guest", adapter }, config.signal);
     const { controller, generation } = owner.lifetime;
+    const isCurrentOwner = () => installedDraftOwner === owner
+      && epoch === draftAdapterEpoch
+      && generation === lifecycleGeneration;
 
     let initialized = false;
     try {
       await adapter.initialize({ ...config, signal: lifecycleSignal(controller) });
       initialized = true;
-      if (installedDraftOwner === owner && epoch === draftAdapterEpoch) return { status: "opened" };
+      if (isCurrentOwner()) return { status: "opened" };
     } catch {
       // See hostDraft: only the current owner is allowed to project errors.
     } finally {
-      if (installedDraftOwner !== owner || epoch !== draftAdapterEpoch) {
+      if (!isCurrentOwner()) {
         owner.lifetime.route?.signal.removeEventListener("abort", owner.lifetime.route.listener);
         await disposeGuestAdapter(adapter);
       } else if (!initialized || adapter.status === "error") {
@@ -2898,8 +2911,11 @@ export const useMultiplayerDraftStore = create<
           participant: record.participant,
         });
       } catch {
+        // A later attempt that superseded this one owns what the page shows.
         abandon();
-        return { status: "failed", error: NATIVE_RECOVERY_SAVE_ERROR };
+        if (!isCurrentResume()) return { status: "superseded" };
+        if (getEffectiveOffline()) return { status: "offline" };
+        return { status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR };
       }
       if (!isCurrentResume()) {
         abandon();
