@@ -64176,7 +64176,7 @@ fn thundermane_static_route_rider_is_not_claimed() {
         parsed
             .statics
             .iter()
-            .any(|stat| matches!(stat.mode, StaticMode::MayLookAtTopOfLibrary)),
+            .any(|stat| matches!(stat.mode, StaticMode::MayLookAtTopOfLibrary { .. })),
         "the look-at-top static must remain"
     );
     assert!(

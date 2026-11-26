@@ -246,7 +246,12 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     );
     // CR 702.122d: CantCrew — creature can't be tapped to pay a crew cost.
     registry.insert(StaticMode::CantCrew, handle_rule_mod);
-    registry.insert(StaticMode::MayLookAtTopOfLibrary, handle_rule_mod);
+    registry.insert(
+        StaticMode::MayLookAtTopOfLibrary {
+            library: crate::types::ability::ControllerRef::You,
+        },
+        handle_rule_mod,
+    );
     // CR 104.3b: CantLoseTheGame — player can't lose the game (Platinum Angel).
     // Runtime enforcement is in sba.rs::player_has_cant_lose().
     registry.insert(StaticMode::CantLoseTheGame, handle_rule_mod);
@@ -1068,55 +1073,112 @@ pub fn check_static_ability_sources(
         .collect()
 }
 
-/// CR 611.1 + CR 611.3: Scan `state.transient_continuous_effects` for an effect
-/// bound to `player_id` (via `TargetFilter::SpecificPlayer { id }`) whose
-/// modifications include `AddStaticMode { mode }`, or `AddKeyword` of the
-/// keyword `mode` corresponds to (`StaticMode::as_keyword`).
-/// Honors `ForAsLongAs` duration conditions and explicit `condition` gates.
-///
-/// This is the canonical query for player-scoped spell-applied restrictions
-/// (e.g., Everybody Lives! fans out to per-player `SpecificPlayer` TCEs in
-/// `effect.rs`). Callers (player_has_cant_win, player_has_cant_gain_life,
-/// player_has_cant_lose_life) use this alongside `check_static_ability` so
-/// both permanent-sourced and spell-sourced protection are covered.
+/// CR 611.2b: Return player-scoped effects whose duration and conditions hold.
+fn active_player_transient_effects(
+    state: &GameState,
+    player: PlayerId,
+) -> impl Iterator<Item = &crate::types::game_state::TransientContinuousEffect> {
+    state
+        .transient_continuous_effects
+        .iter()
+        .filter(move |tce| {
+            matches!(tce.affected, TargetFilter::SpecificPlayer { id } if id == player)
+                && crate::game::layers::transient_gate_conditions(tce).all(|condition| {
+                    evaluate_condition(state, condition, tce.controller, tce.source_id)
+                })
+                // CR 611.2a + CR 500.7: a granted-turn window holds only during
+                // its bound turn.
+                && crate::game::layers::granted_turn_duration_window_holds(state, &tce.duration)
+        })
+}
+
+pub(crate) fn player_transient_static_modes(
+    state: &GameState,
+    player: PlayerId,
+) -> impl Iterator<Item = (ObjectId, &StaticMode)> {
+    active_player_transient_effects(state, player).flat_map(|tce| {
+        tce.modifications.iter().filter_map(|modification| {
+            if let ContinuousModification::AddStaticMode { mode } = modification {
+                Some((tce.source_id, mode))
+            } else {
+                None
+            }
+        })
+    })
+}
+
 pub(crate) fn transient_grants_static_mode_to_player(
     state: &GameState,
     player_id: PlayerId,
     mode: &StaticMode,
 ) -> bool {
-    for tce in &state.transient_continuous_effects {
-        let TargetFilter::SpecificPlayer { id: affected_id } = tce.affected else {
-            continue;
-        };
-        if affected_id != player_id {
-            continue;
-        }
-        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
-        // hold for it to apply; `transient_gate_conditions` is the authority over
-        // which those are.
-        if !crate::game::layers::transient_gate_conditions(tce)
-            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
-        {
-            continue;
-        }
-        // CR 611.2a + CR 500.7: a granted-turn window holds only during its
-        // bound turn.
-        if !crate::game::layers::granted_turn_duration_window_holds(state, &tce.duration) {
-            continue;
-        }
-        // CR 702.11c + CR 702.18a: a resolved "you gain hexproof/shroud" is a keyword grant on the player.
-        let grants_mode = tce.modifications.iter().any(|m| match m {
-            ContinuousModification::AddStaticMode { mode: m_mode } => m_mode == mode,
-            ContinuousModification::AddKeyword { keyword } => {
-                mode.as_keyword().as_ref() == Some(keyword)
+    let keyword = mode.as_keyword();
+    active_player_transient_effects(state, player_id).any(|tce| {
+        tce.modifications.iter().any(|m| match m {
+            ContinuousModification::AddStaticMode { mode: granted } => granted == mode,
+            ContinuousModification::AddKeyword { keyword: granted } => {
+                keyword.as_ref() == Some(granted)
             }
             _ => false,
-        });
-        if grants_mode {
-            return true;
-        }
+        })
+    })
+}
+
+/// CR 109.5: Printed "your library" follows the controller. A grant created
+/// at resolution already names a concrete player.
+pub(crate) fn concrete_library_owner(
+    library: &ControllerRef,
+    controller: Option<PlayerId>,
+) -> Option<PlayerId> {
+    match library {
+        ControllerRef::You => controller,
+        ControllerRef::SpecificPlayer { id } => Some(*id),
+        ControllerRef::Opponent
+        | ControllerRef::ScopedPlayer
+        | ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::ChosenPlayer { .. }
+        | ControllerRef::DeclaredPlayer { .. }
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer => None,
     }
-    false
+}
+
+/// CR 701.20e: The libraries whose tops this player may see privately.
+pub(crate) fn top_of_library_look_owners(
+    state: &GameState,
+    player: PlayerId,
+) -> impl Iterator<Item = PlayerId> + '_ {
+    let context = StaticCheckContext {
+        player_id: Some(player),
+        ..Default::default()
+    };
+    let printed = static_kind_present(state, StaticModeKind::MayLookAtTopOfLibrary)
+        .then(|| {
+            game_functioning_statics(state).filter_map(move |(source, definition)| {
+                let StaticMode::MayLookAtTopOfLibrary { library } = &definition.mode else {
+                    return None;
+                };
+                static_ability_match_applies(state, &definition.mode, &context, source, definition)
+                    .then(|| concrete_library_owner(library, Some(player)))
+                    .flatten()
+            })
+        })
+        .into_iter()
+        .flatten();
+    let transient = player_transient_static_modes(state, player).filter_map(|(_, mode)| {
+        let StaticMode::MayLookAtTopOfLibrary { library } = mode else {
+            return None;
+        };
+        concrete_library_owner(library, None)
+    });
+    printed.chain(transient)
 }
 
 /// CR 611.1 + CR 611.3: Object-scoped counterpart to

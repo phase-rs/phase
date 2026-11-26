@@ -216,6 +216,7 @@ mod jaws_of_defeat;
 mod jeskai_ascendancy_pump_untap_anaphora_6857;
 mod jev_nine_cards;
 mod jill_shiva_cold_snap_return_prompt_pollution;
+mod jolly_balloon_man_copy_token_714;
 mod json_smoke_test;
 mod judgment_bolt_where_x_damage_runtime;
 mod kaho_minamo_historian_linked_exile;

@@ -11229,6 +11229,8 @@ fn once_per_turn_library_land_play_consumes_slot_and_blocks_second_play() {
     );
     {
         let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode: crate::types::ability::CardPlayMode::Play,
             frequency: CastFrequency::OncePerTurn,
             alt_cost: None,
