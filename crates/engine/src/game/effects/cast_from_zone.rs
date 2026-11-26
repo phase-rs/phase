@@ -152,8 +152,7 @@ fn tracked_set_cast_candidates(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -2292,8 +2291,7 @@ pub(crate) fn freeze_resolution_cast_filter(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }

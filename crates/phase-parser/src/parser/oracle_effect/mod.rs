@@ -122,6 +122,7 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     effect_has_stack_target_declaration, effect_owns_resolution_zone_choice,
@@ -12626,8 +12627,7 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -16991,7 +16991,9 @@ fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEf
     if let Some((target, after_verb_orig)) = nom_on_lower(tp.original, tp.lower, |input| {
         alt((
             value(
-                TargetFilter::DefendingPlayer,
+                TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
                 tag("defending player skips "),
             ),
             value(TargetFilter::TriggeringPlayer, tag("that player skips ")),
@@ -20803,8 +20805,7 @@ fn that_player_keeper_scope(ctx: &ParseContext) -> Option<PlayerFilter> {
         | ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
-        | ControllerRef::DefendingPlayer
-        | ControllerRef::AttackedPlayer
+        | ControllerRef::DefendingPlayer { .. }
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::DeclaredPlayer { .. }
         | ControllerRef::SourceChosenPlayer
@@ -28142,7 +28143,9 @@ fn parse_static_compound_second_subject(lower: &str) -> OracleResult<'_, TargetF
         // CR 508.5: the defending player of the source's attack (Cait, Cage
         // Brawler; The River Warlock). Resolved from combat state.
         value(
-            TargetFilter::DefendingPlayer,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             (opt(tag("the ")), tag("defending player each ")),
         ),
         // CR 508.6: "those players" of an attack head — the players the event's
@@ -28362,8 +28365,7 @@ fn try_parse_physical_contest(text: &str, ctx: &mut ParseContext) -> Option<Pars
         TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::ScopedPlayer
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer => true,
+        | TargetFilter::DefendingPlayer { .. } => true,
         other => other.denotes_player_target() && application.target.is_some(),
     };
     if !names_one_bound_player || application.multi_target.is_some() {
@@ -32503,8 +32505,7 @@ fn filter_names_only_players(filter: &TargetFilter) -> bool {
                         | TargetFilter::SourceChosenPlayer
                         | TargetFilter::PostReplacementSourceController
                         | TargetFilter::PostReplacementDamageTargetOwner
-                        | TargetFilter::DefendingPlayer
-                        | TargetFilter::AttackedPlayer
+                        | TargetFilter::DefendingPlayer { .. }
                         | TargetFilter::Neighbor { .. }
                         | TargetFilter::PlayerWhoChoseLabel { .. }
                 )
@@ -33778,9 +33779,7 @@ fn clause_player_reference(effect: &Effect) -> Option<TargetFilter> {
     each_target_filter_mut(&mut effect.clone(), &mut |filter| {
         if matches!(
             filter,
-            TargetFilter::DefendingPlayer
-                | TargetFilter::AttackedPlayer
-                | TargetFilter::ScopedPlayer
+            TargetFilter::DefendingPlayer { .. } | TargetFilter::ScopedPlayer
         ) {
             match &found {
                 Some(seen) if seen != filter => ambiguous = true,
@@ -35089,8 +35088,7 @@ fn lower_subject_predicate_ast_body(
                         | TargetFilter::TriggeringPlayer
                         | TargetFilter::TriggeringSpellController
                         | TargetFilter::TriggeringSpellOwner
-                        | TargetFilter::DefendingPlayer
-                        | TargetFilter::AttackedPlayer
+                        | TargetFilter::DefendingPlayer { .. }
                         | TargetFilter::PostReplacementSourceController
                         | TargetFilter::PostReplacementDamageTarget
                         | TargetFilter::PostReplacementDamageTargetOwner
@@ -35465,10 +35463,14 @@ fn coordinated_player_member(second: &TargetFilter, ctx: &ParseContext) -> Optio
                 ControllerRef::ChosenPlayer { index } => {
                     Some(PlayerFilter::ChosenPlayer { index: *index })
                 }
-                ControllerRef::DefendingPlayer => Some(PlayerFilter::DefendingPlayer),
+                ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                } => Some(PlayerFilter::DefendingPlayer),
                 // No `PlayerFilter` as-declared (CR 508.7a) leaf exists, and no
                 // attack-trigger card reaches this mapping, so decline.
-                ControllerRef::AttackedPlayer => None,
+                ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::AsDeclared,
+                } => None,
                 ControllerRef::TargetPlayer => Some(PlayerFilter::TargetPlayer),
                 ControllerRef::ParentTargetController => {
                     Some(PlayerFilter::ParentObjectTargetController)
@@ -35487,16 +35489,20 @@ fn coordinated_player_member(second: &TargetFilter, ctx: &ParseContext) -> Optio
             }
         }
         TargetFilter::TriggeringPlayer => Some(PlayerFilter::TriggeringPlayer),
-        TargetFilter::DefendingPlayer => Some(PlayerFilter::DefendingPlayer),
+        TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        } => Some(PlayerFilter::DefendingPlayer),
         // No `PlayerFilter` as-declared (CR 508.7a) leaf exists, and no
         // attack-trigger card reaches this mapping, so decline.
-        TargetFilter::AttackedPlayer => None,
+        TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::AsDeclared,
+        } => None,
         // CR 508.6: "those players" names the attacked players only inside an
-        // attack trigger — the head's `DefendingPlayer`/`AttackedPlayer`
+        // attack trigger — the head's `DefendingPlayer { .. }` (either reading)
         // antecedent.
         TargetFilter::PlayerMatching { player } => matches!(
             ctx.relative_player_scope,
-            Some(ControllerRef::DefendingPlayer | ControllerRef::AttackedPlayer)
+            Some(ControllerRef::DefendingPlayer { .. })
         )
         .then(|| player.as_ref().clone()),
         possessive => player_scope_from_parent_target_subject(possessive),
@@ -35906,9 +35912,10 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
         // Sacrifice injection arm stamp the filter's `controller` and
         // `resolve_sacrifice_scope` route the sacrifice to the defending player
         // (resolved from combat state, no target slot) at resolution time.
-        TargetFilter::DefendingPlayer => Some(ControllerRef::DefendingPlayer),
-        // CR 508.7a: the player the triggering attack declared.
-        TargetFilter::AttackedPlayer => Some(ControllerRef::AttackedPlayer),
+        // CR 508.5 / CR 508.7a: the attack-relation reading carries over unchanged.
+        TargetFilter::DefendingPlayer { reading } => {
+            Some(ControllerRef::DefendingPlayer { reading: *reading })
+        }
         _ => None,
     }
 }
@@ -36353,8 +36360,7 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::DeclaredPlayer { .. } => true,
@@ -42444,7 +42450,9 @@ fn try_parse_guess_clause(text: &str, ctx: &ParseContext) -> Option<ParsedEffect
             tag::<_, _, OracleError<'_>>("an opponent guesses "),
         ),
         value(
-            ControllerRef::DefendingPlayer,
+            ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             tag("defending player guesses "),
         ),
     ))
@@ -43917,9 +43925,10 @@ pub(super) fn hand_reveal_target_to_controller_ref(target: &TargetFilter) -> Opt
         TargetFilter::Controller => Some(ControllerRef::You),
         TargetFilter::Player => Some(ControllerRef::TargetPlayer),
         TargetFilter::TriggeringPlayer => Some(ControllerRef::TriggeringPlayer),
-        TargetFilter::DefendingPlayer => Some(ControllerRef::DefendingPlayer),
-        // CR 508.7a: the player the triggering attack declared.
-        TargetFilter::AttackedPlayer => Some(ControllerRef::AttackedPlayer),
+        // CR 508.5 / CR 508.7a: the attack-relation reading carries over unchanged.
+        TargetFilter::DefendingPlayer { reading } => {
+            Some(ControllerRef::DefendingPlayer { reading: *reading })
+        }
         TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::Opponent) => {
             Some(ControllerRef::Opponent)
         }
@@ -46043,7 +46052,7 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
 /// player" text produces either position, so in both `DefendingPlayer` is always
 /// the placeholder. The trigger layer calls this only when the head introduces
 /// the attacked player (`relative_player_scope_for_condition` returned
-/// `AttackedPlayer`/`EnchantedPlayer`): a creature whose attack is reselected
+/// `DefendingPlayer { reading: AsDeclared }`/`EnchantedPlayer`): a creature whose attack is reselected
 /// (CR 508.7) is still considered to have attacked the player as declared, so
 /// "that player" keeps naming that player.
 ///
@@ -46056,10 +46065,17 @@ pub(crate) fn rebind_attack_anaphor_placeholders_to_attacked_player(def: &mut Ab
             TargetFilter::Typed(tf) => {
                 for prop in &mut tf.properties {
                     if let FilterProp::Attacking {
-                        defender: Some(defender @ ControllerRef::DefendingPlayer),
+                        defender:
+                            Some(
+                                defender @ ControllerRef::DefendingPlayer {
+                                    reading: AttackRelationReading::Current,
+                                },
+                            ),
                     } = prop
                     {
-                        *defender = ControllerRef::AttackedPlayer;
+                        *defender = ControllerRef::DefendingPlayer {
+                            reading: AttackRelationReading::AsDeclared,
+                        };
                     }
                 }
             }
@@ -46078,11 +46094,16 @@ pub(crate) fn rebind_attack_anaphor_placeholders_to_attacked_player(def: &mut Ab
     } = &mut *def.effect
     {
         if let TokenAttackDestination::Player {
-            player: player @ ControllerRef::DefendingPlayer,
+            player:
+                player @ ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
             ..
         } = attack_destination
         {
-            *player = ControllerRef::AttackedPlayer;
+            *player = ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            };
         }
     }
     each_target_filter_mut(&mut def.effect, &mut rebind_filter);
@@ -57288,7 +57309,10 @@ fn rebind_iteration_destination(effect: &mut Effect, qty: &QuantityExpr) {
     } = effect
     {
         if let TokenAttackDestination::Player {
-            player: ControllerRef::DefendingPlayer,
+            player:
+                ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
             scope,
         } = attack_destination
         {
@@ -57326,7 +57350,9 @@ pub(super) fn release_iteration_destination(effect: &mut Effect, qty: &QuantityE
         if matches!(
             attack_destination,
             TokenAttackDestination::Player {
-                player: ControllerRef::DefendingPlayer,
+                player: ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                },
                 ..
             }
         ) {
@@ -62864,7 +62890,9 @@ mod exile_graveyard_origin_shape {
             panic!("class retained")
         };
         assert!(tf.properties.contains(&FilterProp::Owned {
-            controller: ControllerRef::DefendingPlayer
+            controller: ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }
         }));
         let base = "target creature card with lesser power from their graveyard";
         let rem = " with lesser power from their graveyard";
@@ -64362,7 +64390,9 @@ mod iteration_destination_rebinding_tests {
 
     fn defending_player() -> TokenAttackDestination {
         TokenAttackDestination::Player {
-            player: ControllerRef::DefendingPlayer,
+            player: ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             scope: NamedDefenderScope::Player,
         }
     }
@@ -64490,8 +64520,15 @@ mod attack_anaphor_placeholder_rebind_tests {
 
     #[test]
     fn a_placeholder_token_destination_becomes_the_attacked_player() {
-        let def = rebound(token_naming(named(ControllerRef::DefendingPlayer)));
-        assert_eq!(destination(&def), &named(ControllerRef::AttackedPlayer));
+        let def = rebound(token_naming(named(ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        })));
+        assert_eq!(
+            destination(&def),
+            &named(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared
+            })
+        );
     }
 
     #[test]
@@ -64511,12 +64548,16 @@ mod attack_anaphor_placeholder_rebind_tests {
     #[test]
     fn a_placeholder_attacking_defender_in_a_target_becomes_the_attacked_player() {
         let def = rebound(Effect::TargetOnly {
-            target: attacking(Some(ControllerRef::DefendingPlayer)),
+            target: attacking(Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            })),
         });
         assert_eq!(
             *def.effect,
             Effect::TargetOnly {
-                target: attacking(Some(ControllerRef::AttackedPlayer)),
+                target: attacking(Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::AsDeclared
+                })),
             }
         );
     }
@@ -64535,14 +64576,18 @@ mod attack_anaphor_placeholder_rebind_tests {
             },
             // A target controller is not a placeholder position.
             Effect::TargetOnly {
-                target: TargetFilter::Typed(
-                    TypedFilter::creature().controller(ControllerRef::DefendingPlayer),
-                ),
+                target: TargetFilter::Typed(TypedFilter::creature().controller(
+                    ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current,
+                    },
+                )),
             },
             // Nor is a player recipient.
             Effect::LoseLife {
                 amount: QuantityExpr::Fixed { value: 2 },
-                target: Some(TargetFilter::DefendingPlayer),
+                target: Some(TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                }),
             },
         ] {
             let def = rebound(unchanged.clone());
@@ -64569,8 +64614,15 @@ mod attack_anaphor_placeholder_rebind_tests {
             toughness: PtValue::Fixed(0),
             target: population(defender),
         };
-        let def = rebound(pump(ControllerRef::DefendingPlayer));
-        assert_eq!(*def.effect, pump(ControllerRef::AttackedPlayer));
+        let def = rebound(pump(ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        }));
+        assert_eq!(
+            *def.effect,
+            pump(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared
+            })
+        );
     }
 
     #[test]
@@ -64578,24 +64630,37 @@ mod attack_anaphor_placeholder_rebind_tests {
         let mut def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::TargetOnly {
-                target: attacking(Some(ControllerRef::DefendingPlayer)),
+                target: attacking(Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                })),
             },
         )
         .sub_ability(AbilityDefinition::new(
             AbilityKind::Spell,
-            token_naming(named(ControllerRef::DefendingPlayer)),
+            token_naming(named(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            })),
         ))
         .with_else_ability(AbilityDefinition::new(
             AbilityKind::Spell,
-            token_naming(named(ControllerRef::DefendingPlayer)),
+            token_naming(named(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            })),
         ));
         rebind_attack_anaphor_placeholders_to_attacked_player(&mut def);
         let sub = def.sub_ability.as_deref().expect("sub ability");
-        assert_eq!(destination(sub), &named(ControllerRef::AttackedPlayer));
+        assert_eq!(
+            destination(sub),
+            &named(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared
+            })
+        );
         let else_branch = def.else_ability.as_deref().expect("else ability");
         assert_eq!(
             destination(else_branch),
-            &named(ControllerRef::AttackedPlayer)
+            &named(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared
+            })
         );
     }
 }

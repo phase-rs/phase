@@ -15,6 +15,7 @@ use super::bridge::nom_on_lower;
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::{parse_color, parse_number, scan_preceded};
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     Comparator, ControllerRef, FilterProp, StackAbilityKind, TargetFilter, TypeFilter, TypedFilter,
 };
@@ -299,7 +300,9 @@ fn singular_controller_subject(input: &str) -> OracleResult<'_, ControllerSubjec
         // attacking, resolved per attacker by
         // `combat::defending_player_for_attacker`.
         value(
-            ControllerSubject::Direct(ControllerRef::DefendingPlayer),
+            ControllerSubject::Direct(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            }),
             tag("defending player"),
         ),
         // CR 303.4b + CR 702.5a: the player the source Aura is attached to
@@ -516,8 +519,7 @@ pub(crate) fn admits_type_phrase_controller(controller: &ControllerRef) -> bool 
         | ControllerRef::Opponent
         | ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
-        | ControllerRef::DefendingPlayer
-        | ControllerRef::AttackedPlayer
+        | ControllerRef::DefendingPlayer { .. }
         | ControllerRef::EnchantedPlayer
         | ControllerRef::ActivePlayer => true,
         // The chosen player is excluded from the SHARED set: the folding
@@ -834,7 +836,13 @@ pub fn parse_attacking_player_event_ref(input: &str) -> OracleResult<'_, TargetF
 /// CR 506.3d + CR 508.1: "that opponent" inside an attack trigger's effect —
 /// the opponent being attacked in the triggering event.
 pub fn parse_attacked_opponent_event_ref(input: &str) -> OracleResult<'_, TargetFilter> {
-    value(TargetFilter::DefendingPlayer, tag("that opponent")).parse(input)
+    value(
+        TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        },
+        tag("that opponent"),
+    )
+    .parse(input)
 }
 
 /// CR 506.3 + CR 115.10a: "the player or planeswalker it's attacking" and its
@@ -895,8 +903,18 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
         parse_attacked_opponent_event_ref,
         value(TargetFilter::TriggeringPlayer, tag("that player")),
         // CR 506.3d: "defending player" / "the defending player"
-        value(TargetFilter::DefendingPlayer, tag("the defending player")),
-        value(TargetFilter::DefendingPlayer, tag("defending player")),
+        value(
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            tag("the defending player"),
+        ),
+        value(
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            tag("defending player"),
+        ),
         // CR 506.2 + CR 109.4: "the attacking player" on a DamageReceived
         // trigger — the controller of the creature that dealt combat damage
         // (Contested Game Ball). Distinct from "that attacking player" (an
@@ -1778,12 +1796,16 @@ mod tests {
             ("you don't control", ControllerRef::Opponent, ""),
             (
                 "defending player controls",
-                ControllerRef::DefendingPlayer,
+                ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
                 "",
             ),
             (
                 "defending player controls and ",
-                ControllerRef::DefendingPlayer,
+                ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
                 " and ",
             ),
             (
@@ -1868,7 +1890,13 @@ mod tests {
             ),
             (
                 "defending player controls",
-                direct(ControllerRef::DefendingPlayer, Singular, Present),
+                direct(
+                    ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current,
+                    },
+                    Singular,
+                    Present,
+                ),
             ),
             (
                 "enchanted player controls",
@@ -2172,7 +2200,12 @@ mod tests {
 
         let (rest3, f3) = parse_event_context_ref("defending player").unwrap();
         assert_eq!(rest3, "");
-        assert_eq!(f3, TargetFilter::DefendingPlayer);
+        assert_eq!(
+            f3,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }
+        );
 
         let (rest4, f4) = parse_event_context_ref("that spell is countered").unwrap();
         assert_eq!(rest4, " is countered");
@@ -2187,7 +2220,12 @@ mod tests {
         // "the defending player" still wins over "the player" (longest-match).
         let (rest6, f6) = parse_event_context_ref("the defending player gains").unwrap();
         assert_eq!(rest6, " gains");
-        assert_eq!(f6, TargetFilter::DefendingPlayer);
+        assert_eq!(
+            f6,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }
+        );
 
         // CR 506.2: attack-trigger actor anaphor (Ellie, Breena).
         let (rest7, f7) = parse_event_context_ref("that attacking player creates").unwrap();
@@ -2197,7 +2235,12 @@ mod tests {
         // CR 506.3d: attacked opponent anaphor in token-enter-attacking clauses.
         let (rest8, f8) = parse_event_context_ref("that opponent.").unwrap();
         assert_eq!(rest8, ".");
-        assert_eq!(f8, TargetFilter::DefendingPlayer);
+        assert_eq!(
+            f8,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }
+        );
 
         let (rest9, f9) = parse_event_context_ref("that permanent").unwrap();
         assert_eq!(rest9, "");

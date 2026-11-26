@@ -12,6 +12,7 @@ use nom::Parser;
 
 use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_nom::error::OracleResult;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     ContinuousModification, ControllerRef, Effect, FilterProp, NamedDefenderScope, ObjectScope,
     PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, ThisWayCause,
@@ -955,7 +956,7 @@ fn parse_token_description_with_context(
 /// the clause.
 ///
 /// The `DefendingPlayer` is the context-free "that player" placeholder; an
-/// attack-declaration head rebinds it to `AttackedPlayer`
+/// attack-declaration head rebinds it to `DefendingPlayer { reading: AsDeclared }`
 /// (`oracle_effect::rebind_attack_anaphor_placeholders_to_attacked_player`).
 pub(super) fn parse_token_attack_destination(
     input: &str,
@@ -973,7 +974,9 @@ pub(super) fn parse_token_attack_destination(
     Ok((
         rest,
         TokenAttackDestination::Player {
-            player: ControllerRef::DefendingPlayer,
+            player: ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             scope,
         },
     ))
@@ -2641,7 +2644,7 @@ mod tests {
                     qty: QuantityRef::ObjectCount {
                         filter: TargetFilter::Typed(filter),
                     },
-                } if filter.controller == Some(ControllerRef::DefendingPlayer)
+                } if filter.controller == Some(ControllerRef::DefendingPlayer { reading: AttackRelationReading::Current })
                     && filter.type_filters.contains(&TypeFilter::Creature)
             ),
             "where-X must count creatures defending player controls, got {count:?}"
@@ -4219,7 +4222,9 @@ mod tests {
         assert_eq!(
             attack_destination,
             TokenAttackDestination::Player {
-                player: ControllerRef::DefendingPlayer,
+                player: ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                },
                 scope: NamedDefenderScope::PlayerOrPlaneswalker,
             },
             "the trailing defender phrase names the destination"
@@ -4232,7 +4237,9 @@ mod tests {
     #[test]
     fn token_attack_destination_phrase_ends_the_clause() {
         let player = |scope| TokenAttackDestination::Player {
-            player: ControllerRef::DefendingPlayer,
+            player: ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             scope,
         };
         for (input, scope) in [

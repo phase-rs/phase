@@ -1,3 +1,4 @@
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     CardSelectionMode, ControllerRef, Effect, EffectScope, LibraryPosition, ManaContribution,
     ManaProduction, PtValue, QuantityExpr, TapStateChange, TargetFilter, TypedFilter,
@@ -140,7 +141,9 @@ fn resolve_defined(params: &ForgeParams) -> TargetFilter {
         Some("TriggeredCardController") | Some("TriggeredPlayer") => TargetFilter::TriggeringPlayer,
         Some("Enchanted") | Some("EnchantedController") => TargetFilter::AttachedTo,
         Some("ParentTarget") => TargetFilter::ParentTarget,
-        Some("DefendingPlayer") => TargetFilter::DefendingPlayer,
+        Some("DefendingPlayer") => TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        },
         Some(_) => TargetFilter::Controller, // Unknown → default to controller
     }
 }

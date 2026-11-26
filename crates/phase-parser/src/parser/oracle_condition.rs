@@ -465,7 +465,7 @@ fn static_condition_to_restriction_condition(
         // `layers::evaluate_condition` on the self-spell cost path, not at a
         // cast/activation gate; there is no `ParsedCondition` counterpart.
         //
-        // Anchored (`AttackedPlayer`) scope: a cast/activation gate is evaluated
+        // Anchored (`DefendingPlayer { reading: AsDeclared }`) scope: a cast/activation gate is evaluated
         // OUTSIDE combat declaration entirely — no `declared_attack` is bound and
         // the caster need not be an attacking creature — so the anchor can never
         // resolve at this boundary. Approximating it with the existential form

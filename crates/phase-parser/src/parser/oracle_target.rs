@@ -8,6 +8,7 @@ use nom::multi::{many0, many_till};
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, AttachmentReferent, BlockPairDirection, CardTypeSetSource,
     ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
@@ -506,7 +507,12 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
             // CR 508.5 / CR 508.5a: "defending player" — the player (or the
             // protector of the battle / controller of the planeswalker) that the
             // attacking creature is attacking.
-            value(TargetFilter::DefendingPlayer, tag("defending player")),
+            value(
+                TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
+                tag("defending player"),
+            ),
         ))
         .parse(input)
     })
@@ -7254,8 +7260,7 @@ fn admits_past_direct_controller(controller: &ControllerRef) -> bool {
         | ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
-        | ControllerRef::DefendingPlayer
-        | ControllerRef::AttackedPlayer
+        | ControllerRef::DefendingPlayer { .. }
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::TriggeringPlayer
@@ -8023,7 +8028,7 @@ fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterPr
 /// object-filter position ("other creatures you control attacking that player",
 /// "target creature that's attacking that player"). Lowers to
 /// `ControllerRef::DefendingPlayer` and resolves at runtime through
-/// `combat::defending_player_cr508_5`.
+/// `combat::attack_defender_cr508`.
 ///
 /// # Which rule supplies the referent depends on the enclosing trigger
 ///
@@ -8103,7 +8108,7 @@ fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterPr
 /// here would add zero coverage.
 ///
 /// The `DefendingPlayer` is the context-free "that player" placeholder; an
-/// attack-declaration head rebinds it to `AttackedPlayer`
+/// attack-declaration head rebinds it to `DefendingPlayer { reading: AsDeclared }`
 /// (`oracle_effect::rebind_attack_anaphor_placeholders_to_attacked_player`).
 fn parse_attacking_defender_anaphor(input: &str) -> OracleResult<'_, FilterProp> {
     let (rest, _) = (tag("attacking"), space1, tag("that player")).parse(input)?;
@@ -8111,7 +8116,9 @@ fn parse_attacking_defender_anaphor(input: &str) -> OracleResult<'_, FilterProp>
     Ok((
         rest,
         FilterProp::Attacking {
-            defender: Some(ControllerRef::DefendingPlayer),
+            defender: Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            }),
         },
     ))
 }
@@ -11479,8 +11486,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -12717,7 +12723,9 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
         value(ZoneQual::Owner(ControllerRef::ScopedPlayer), tag("their ")),
         // CR 508.5a: "defending player's" binds one specific defending player.
         value(
-            ZoneQual::Owner(ControllerRef::DefendingPlayer),
+            ZoneQual::Owner(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            }),
             tag("defending player's "),
         ),
         value(
@@ -18615,7 +18623,12 @@ mod tests {
     #[test]
     fn parse_event_context_defending_player() {
         let (filter, rem) = parse_event_context_ref("defending player").unwrap();
-        assert_eq!(filter, TargetFilter::DefendingPlayer);
+        assert_eq!(
+            filter,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }
+        );
         assert_eq!(rem, "");
     }
 
@@ -18623,7 +18636,12 @@ mod tests {
     fn parse_event_context_defending_player_prefix() {
         let (filter, rem) =
             parse_event_context_ref("defending player reveals the top card").unwrap();
-        assert_eq!(filter, TargetFilter::DefendingPlayer);
+        assert_eq!(
+            filter,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }
+        );
         assert_eq!(rem, " reveals the top card");
     }
 
@@ -19749,7 +19767,12 @@ mod tests {
         let ctx = ParseContext::default();
         let (ctrl, len) = parse_controller_suffix("defending player controls", &ctx)
             .expect("defending player controls should resolve a controller scope");
-        assert_eq!(ctrl, ControllerRef::DefendingPlayer);
+        assert_eq!(
+            ctrl,
+            ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }
+        );
         assert_eq!(len, "defending player controls".len());
 
         // Leading whitespace is included in the consumed length (the type-phrase
@@ -19757,7 +19780,12 @@ mod tests {
         // space).
         let (ctrl_ws, len_ws) = parse_controller_suffix(" defending player controls", &ctx)
             .expect("leading-space variant should resolve");
-        assert_eq!(ctrl_ws, ControllerRef::DefendingPlayer);
+        assert_eq!(
+            ctrl_ws,
+            ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }
+        );
         assert_eq!(len_ws, " defending player controls".len());
     }
 
@@ -19873,7 +19901,11 @@ mod tests {
         let (f, rest) = parse_target("target creature defending player controls");
         assert_eq!(
             f,
-            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::DefendingPlayer))
+            TargetFilter::Typed(TypedFilter::creature().controller(
+                ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                }
+            ))
         );
         assert_eq!(rest.trim(), "");
     }
@@ -19892,7 +19924,9 @@ mod tests {
                     match leg {
                         TargetFilter::Typed(tf) => assert_eq!(
                             tf.controller,
-                            Some(ControllerRef::DefendingPlayer),
+                            Some(ControllerRef::DefendingPlayer {
+                                reading: AttackRelationReading::Current
+                            }),
                             "leg {i} must inherit the defending-player scope"
                         ),
                         other => panic!("leg {i} expected Typed, got {other:?}"),
@@ -27594,7 +27628,9 @@ mod exile_graveyard_source_shape {
             // CR 508.5a: one specific defending player owns the named graveyard.
             (
                 "from defending player's graveyard",
-                ControllerRef::DefendingPlayer,
+                ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
             ),
         ] {
             let (public, ctrl, count) = parse_zone_suffix(phrase).unwrap();
@@ -27641,7 +27677,9 @@ mod exile_graveyard_source_shape {
     #[test]
     fn defending_player_zone_qualifier_binds_the_defending_owner() {
         let owner = FilterProp::Owned {
-            controller: ControllerRef::DefendingPlayer,
+            controller: ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
         };
         for (phrase, zone) in [
             ("from defending player's graveyard", Zone::Graveyard),

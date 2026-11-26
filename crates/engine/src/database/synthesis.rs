@@ -8,6 +8,7 @@ use crate::parser::oracle::{
 };
 use crate::parser::oracle_keyword::{keyword_display_name, parse_granted_keyword_fragment};
 use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, BracketMode};
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, AdditionalCostOrigin, AdditionalCostPaymentSource,
@@ -5098,7 +5099,7 @@ fn is_annihilator_attack_trigger(t: &TriggerDefinition) -> bool {
     matches!(
         target,
         TargetFilter::Typed(tf)
-            if tf.controller == Some(ControllerRef::DefendingPlayer)
+            if tf.controller == Some(ControllerRef::DefendingPlayer { reading: AttackRelationReading::Current })
     )
 }
 
@@ -5120,7 +5121,7 @@ fn is_myriad_attack_trigger(t: &TriggerDefinition) -> bool {
 /// Idempotency-shape predicate for `synthesize_dethrone`. True iff `trigger`
 /// is the synthesized Dethrone attack-trigger shape (`TriggerMode::Attacks`
 /// + `valid_card = SelfRef` + execute = PutCounter(P1P1) on SelfRef
-/// + condition = AttackedPlayer life >= AllPlayers max life).
+/// + condition = as-declared `DefendingPlayer` life >= AllPlayers max life).
 fn is_dethrone_attack_trigger(t: &TriggerDefinition) -> bool {
     if !matches!(t.mode, TriggerMode::Attacks)
         || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
@@ -5388,9 +5389,11 @@ fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
     // `DefendingPlayer` routes to `defending_player_for_attacker(state,
     // source_id)` at resolution.
     let sacrifice_effect = Effect::Sacrifice {
-        target: TargetFilter::Typed(
-            TypedFilter::permanent().controller(ControllerRef::DefendingPlayer),
-        ),
+        target: TargetFilter::Typed(TypedFilter::permanent().controller(
+            ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+        )),
         count: QuantityExpr::Fixed { value: n as i32 },
         min_count: 0,
     };
@@ -5441,7 +5444,11 @@ fn is_provoke_attack_trigger(t: &TriggerDefinition) -> bool {
     else {
         return false;
     };
-    if tf.controller != Some(ControllerRef::DefendingPlayer) {
+    if tf.controller
+        != Some(ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        })
+    {
         return false;
     }
     // CR 702.39a + CR 509.1c: the chained sub-body force-blocks that same
@@ -5573,8 +5580,11 @@ fn build_provoke_trigger() -> TriggerDefinition {
     // CR 702.39a: "target creature defending player controls". `DefendingPlayer`
     // routes to `defending_player_for_attacker(state, source_id)` at
     // target-selection time (CR 508.5 / 508.5a).
-    let untap_target =
-        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::DefendingPlayer));
+    let untap_target = TargetFilter::Typed(TypedFilter::creature().controller(
+        ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        },
+    ));
 
     // CR 702.39a + CR 509.1c: chained continuation forcing the untapped target
     // to block this attacker. Reuses the existing source-referential ForceBlock
@@ -6057,7 +6067,9 @@ fn build_afflict_trigger(n: u32) -> TriggerDefinition {
     // CR 702.130a: "defending player loses N life."
     let lose_life = Effect::LoseLife {
         amount: QuantityExpr::Fixed { value: n as i32 },
-        target: Some(TargetFilter::DefendingPlayer),
+        target: Some(TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        }),
     };
     let execute = AbilityDefinition::new(AbilityKind::Spell, lose_life).description(format!(
         "CR 702.130a: Afflict {n} — defending player loses {n} life"
@@ -6083,7 +6095,7 @@ fn is_afflict_trigger(t: &TriggerDefinition, n: u32) -> bool {
             t.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::LoseLife {
                 amount: QuantityExpr::Fixed { value },
-                target: Some(TargetFilter::DefendingPlayer),
+                target: Some(TargetFilter::DefendingPlayer { reading: AttackRelationReading::Current }),
             }) if *value == n as i32
         )
 }
@@ -6492,7 +6504,9 @@ fn build_dethrone_trigger() -> TriggerDefinition {
     let condition = TriggerCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::LifeTotal {
-                player: PlayerScope::AttackedPlayer,
+                player: PlayerScope::DefendingPlayer {
+                    reading: AttackRelationReading::AsDeclared,
+                },
             },
         },
         comparator: Comparator::GE,
@@ -14326,7 +14340,9 @@ mod annihilator_synthesis_tests {
         };
         assert_eq!(
             tf.controller,
-            Some(ControllerRef::DefendingPlayer),
+            Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }),
             "sacrifice scope must be the defending player (CR 508.5)"
         );
         // CR 701.21a: Annihilator sacrifices permanents, not just creatures.
@@ -14499,7 +14515,9 @@ mod provoke_synthesis_tests {
         };
         assert_eq!(
             tf.controller,
-            Some(ControllerRef::DefendingPlayer),
+            Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }),
             "untap target must be a creature the defending player controls (CR 702.39a / CR 508.5)"
         );
         assert!(
@@ -14563,9 +14581,11 @@ mod provoke_synthesis_tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::SetTapState {
-                    target: TargetFilter::Typed(
-                        TypedFilter::creature().controller(ControllerRef::DefendingPlayer),
-                    ),
+                    target: TargetFilter::Typed(TypedFilter::creature().controller(
+                        ControllerRef::DefendingPlayer {
+                            reading: AttackRelationReading::Current,
+                        },
+                    )),
                     scope: EffectScope::Single,
                     state: TapStateChange::Untap,
                 },
@@ -16360,7 +16380,9 @@ mod dethrone_tests {
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::LifeTotal {
-                        player: PlayerScope::AttackedPlayer,
+                        player: PlayerScope::DefendingPlayer {
+                            reading: AttackRelationReading::AsDeclared
+                        },
                     },
                 },
                 comparator: Comparator::GE,
@@ -25545,7 +25567,12 @@ mod afflict_training_poisonous_synthesis_tests {
         };
         assert!(matches!(amount, QuantityExpr::Fixed { value: 3 }));
         assert!(
-            matches!(target, Some(TargetFilter::DefendingPlayer)),
+            matches!(
+                target,
+                Some(TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                })
+            ),
             "CR 702.130a: the defending player loses the life"
         );
     }

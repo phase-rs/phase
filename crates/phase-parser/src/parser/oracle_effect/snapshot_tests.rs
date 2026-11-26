@@ -1,5 +1,6 @@
 use super::*;
 use crate::parser::oracle_util::normalize_card_name_refs;
+use crate::types::ability::AttackRelationReading;
 use insta::assert_json_snapshot;
 
 // Full current MTGJSON Oracle text, shared only by the SHAPE tests in this module.
@@ -3363,7 +3364,7 @@ fn event_player_anaphor_continuation_keeps_its_own_reference() {
             "Flying\nWhenever this creature becomes blocked, defending player discards all the cards in their hand, then draws that many cards.",
             &["Flying"][..],
             &["Creature"][..],
-            TargetFilter::DefendingPlayer,
+            TargetFilter::DefendingPlayer { reading: AttackRelationReading::Current },
         ),
     ] {
         let parsed = parse_card(oracle, name, keywords, types);
@@ -3419,11 +3420,18 @@ fn a_different_anaphor_subject_does_not_take_the_declared_player() {
     assert!(effects.iter().any(|e| matches!(
         e,
         Effect::Discard {
-            target: TargetFilter::DefendingPlayer,
+            target: TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            },
             ..
         }
     )));
-    assert_eq!(last_draw(&effects), &TargetFilter::DefendingPlayer);
+    assert_eq!(
+        last_draw(&effects),
+        &TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::Current
+        }
+    );
 }
 
 /// CR 608.2c: a continuation after an instead-body keeps the `ParentTarget` the Declared

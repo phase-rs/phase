@@ -2807,8 +2807,7 @@ pub(crate) fn static_filter_matches(
                         // unresolvable here. Fail closed, as above.
                         crate::types::ability::ControllerRef::EventTargetController => false,
                         crate::types::ability::ControllerRef::ParentTargetOwner => false,
-                        crate::types::ability::ControllerRef::DefendingPlayer
-                        | crate::types::ability::ControllerRef::AttackedPlayer => false,
+                        crate::types::ability::ControllerRef::DefendingPlayer { .. } => false,
                         // CR 613.1: chosen-player scope has no static context here.
                         crate::types::ability::ControllerRef::SourceChosenPlayer => false,
                         // CR 109.4: Chosen-player scope has no static context.

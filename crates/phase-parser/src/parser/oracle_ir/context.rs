@@ -1579,6 +1579,7 @@ impl ParseContext {
 mod tests {
     use super::*;
     use crate::parser::oracle_nom::target::{ControllerForm, ControllerTense};
+    use crate::types::ability::AttackRelationReading;
     use crate::types::ability::TypedFilter;
 
     fn fallback(text: &str) -> OracleDiagnostic {
@@ -1902,10 +1903,14 @@ mod tests {
             assert_eq!(
                 bind(
                     ctx,
-                    ControllerSubject::Direct(ControllerRef::DefendingPlayer),
+                    ControllerSubject::Direct(ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    }),
                     ControllerTense::Past
                 ),
-                Some(ControllerRef::DefendingPlayer)
+                Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                })
             );
         }
 

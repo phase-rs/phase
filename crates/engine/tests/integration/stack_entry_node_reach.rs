@@ -5,6 +5,7 @@ use engine::game::combat::AttackTarget;
 use engine::game::effects::stack_reach::stack_entry_node_reach;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
+use engine::types::ability::AttackRelationReading;
 use engine::types::ability::{
     AbilityCost, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
     TargetFilter, TargetRef, TriggerCondition,
@@ -1276,7 +1277,9 @@ fn leeching_sliver_life_loss_acts_on_the_player_another_sliver_attacks() {
         matches!(
             nodes[0].0,
             Effect::LoseLife {
-                target: Some(TargetFilter::DefendingPlayer),
+                target: Some(TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                }),
                 ..
             }
         ),

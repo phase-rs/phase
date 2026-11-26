@@ -9,6 +9,7 @@ use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
 use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::parser::test_support::assert_no_unimplemented;
 use crate::types::ability::filter_contains_filter_prop;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AggregateFunction, AttackSubject, BounceSelection, CardSelectionMode,
@@ -402,7 +403,9 @@ fn lower_trigger_ir_binds_that_many_after_attack_anaphor_rebind() {
 
     let defending_hand = QuantityExpr::Ref {
         qty: QuantityRef::HandSize {
-            player: PlayerScope::AttackedPlayer,
+            player: PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
         },
     };
     // Reach-guard: the attack anaphor rebind ran and rewrote the gate.
@@ -3584,15 +3587,16 @@ fn nonself_etb_source_zone_shorthand_is_not_misbound_to_source() {
 
 // CR 603.4 + CR 702.105a (phase-rs/phase#5449 review, second finding):
 // Scourge of the Throne's "if it's attacking the player with the most life or
-// tied for most life" must map to the SAME typed QuantityComparison condition
-// Dethrone's own synthesized trigger uses (build_dethrone_trigger,
-// database/synthesis.rs) — not the wrong bare SourceIsAttacking (dropping the
+// tied for most life" must map to the same life-total comparison shape as
+// Dethrone, but read live (CR 508.5) rather than as declared (CR 508.7a)
+// (build_dethrone_trigger, database/synthesis.rs) — not the wrong bare
+// SourceIsAttacking (dropping the
 // life-total qualifier, the original regression) and not an unconditional
 // None (which would make UntapAll + the extra combat phase fire regardless of
 // who's being attacked — strictly worse than the original bug, since the
 // ability would then work "too well" under the wrong conditions).
 #[test]
-fn trigger_attacking_highest_life_player_condition_maps_to_dethrone_shape() {
+fn trigger_attacking_highest_life_player_condition_maps_to_live_life_total_comparison() {
     let def = parse_trigger_line(
         "Whenever this creature attacks for the first time each turn, if it's \
              attacking the player with the most life or tied for most life, untap \
@@ -3604,7 +3608,9 @@ fn trigger_attacking_highest_life_player_condition_maps_to_dethrone_shape() {
         Some(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::LifeTotal {
-                    player: PlayerScope::DefendingPlayer,
+                    player: PlayerScope::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    },
                 },
             },
             comparator: Comparator::GE,
@@ -3617,8 +3623,9 @@ fn trigger_attacking_highest_life_player_condition_maps_to_dethrone_shape() {
                 },
             },
         }),
-        "must map to the same typed life-total comparison Dethrone uses, not \
-         a bare SourceIsAttacking and not an unconditional None"
+        "must map to the same life-total comparison shape as Dethrone, but read \
+         live (CR 508.5) rather than as declared (CR 508.7a), not a bare \
+         SourceIsAttacking and not an unconditional None"
     );
     let Some(execute) = &def.execute else {
         panic!("expected an UntapAll execute ability, got None");
@@ -3643,7 +3650,7 @@ fn trigger_attacking_highest_life_player_condition_maps_to_dethrone_shape() {
 // dropped LEADING intervening-if emits no warning at all, PLAN-v3 §0.2) and
 // its execute body must be an INTACT `GiveControl`, not corrupted by the
 // intervening-if extraction. Modelled on
-// `trigger_attacking_highest_life_player_condition_maps_to_dethrone_shape`.
+// `trigger_attacking_highest_life_player_condition_maps_to_live_life_total_comparison`.
 #[test]
 fn trigger_ghazban_ogre_maps_to_unique_leader_condition_and_give_control() {
     let def = parse_trigger_line(
@@ -7563,7 +7570,7 @@ fn trigger_attacks_the_monarch_scopes_to_monarch_filter() {
     );
     // The destroy target is a tapped nonland permanent controlled by the
     // attacked (monarch) player as declared — resolved via
-    // `ControllerRef::AttackedPlayer` (CR 508.7a).
+    // `ControllerRef::DefendingPlayer { reading: AsDeclared }` (CR 508.7a).
     let effect = def
         .execute
         .as_ref()
@@ -7577,8 +7584,8 @@ fn trigger_attacks_the_monarch_scopes_to_monarch_filter() {
         Effect::Destroy { target, .. } => {
             let json = format!("{target:?}");
             assert!(
-                json.contains("controller: Some(AttackedPlayer)"),
-                "destroy target must be controlled by AttackedPlayer, got {target:?}"
+                json.contains("controller: Some(DefendingPlayer { reading: AsDeclared })"),
+                "destroy target must be controlled by the as-declared attacked player, got {target:?}"
             );
         }
         other => panic!("expected Effect::Destroy, got {other:?}"),
@@ -19651,7 +19658,9 @@ fn squall_attack_batch_chosen_number_condition() {
         matches!(
             execute.effect.as_ref(),
             Effect::DealDamage {
-                target: TargetFilter::DefendingPlayer,
+                target: TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                },
                 ..
             }
         ),
@@ -31777,10 +31786,14 @@ fn bridge_monarch() {
 fn bridge_monarch_carries_a_non_controller_subject_scope() {
     assert_eq!(
         static_condition_to_trigger_condition(&StaticCondition::IsMonarch {
-            player: PlayerScope::DefendingPlayer
+            player: PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }
         }),
         Some(TriggerCondition::IsMonarch {
-            player: PlayerScope::DefendingPlayer
+            player: PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }
         }),
     );
     assert_eq!(
@@ -31795,12 +31808,16 @@ fn bridge_monarch_carries_a_non_controller_subject_scope() {
     assert_eq!(
         static_condition_to_trigger_condition(&StaticCondition::Not {
             condition: Box::new(StaticCondition::IsMonarch {
-                player: PlayerScope::DefendingPlayer
+                player: PlayerScope::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                }
             }),
         }),
         Some(TriggerCondition::Not {
             condition: Box::new(TriggerCondition::IsMonarch {
-                player: PlayerScope::DefendingPlayer
+                player: PlayerScope::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                }
             }),
         }),
     );
@@ -31828,7 +31845,9 @@ fn ability_condition_lowering_refuses_a_scoped_monarch_gate() {
     assert_eq!(
         static_condition_to_ability_condition(
             &StaticCondition::IsMonarch {
-                player: PlayerScope::DefendingPlayer
+                player: PlayerScope::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                }
             },
             &mut ParseContext::default()
         ),
@@ -35893,7 +35912,7 @@ fn mangara_attack_batch_intervening_if_counts_attacking_you_or_planeswalkers() {
 
 /// CR 109.4 + CR 115.1 + CR 508.7a: Karazikar's first trigger introduces
 /// the attacked player in the condition; "that player controls" inside the
-/// effect must resolve to `ControllerRef::AttackedPlayer` so the runtime
+/// effect must resolve to `ControllerRef::DefendingPlayer { reading: AsDeclared }` so the runtime
 /// reads the player the attack was declared against, not a TargetPlayer
 /// target slot. Regression test for #1667.
 #[test]
@@ -35914,8 +35933,10 @@ fn karazikar_attack_a_player_uses_attacked_player_controller() {
         } => match target {
             TargetFilter::Typed(t) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::AttackedPlayer),
-                "tap target should reference the attacked player via AttackedPlayer",
+                Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::AsDeclared
+                }),
+                "tap target should reference the as-declared attacked player",
             ),
             other => panic!("expected Typed filter, got {other:?}"),
         },
@@ -35928,7 +35949,7 @@ fn karazikar_attack_a_player_uses_attacked_player_controller() {
 /// becomes a Coward" introduces the attacked player through a relative-
 /// clause subject ("Warriors you control") rather than a bare actor. The
 /// effect's "that player controls" must resolve to
-/// `ControllerRef::AttackedPlayer` so the runtime reads the player the attack
+/// `ControllerRef::DefendingPlayer { reading: AsDeclared }` so the runtime reads the player the attack
 /// was declared against, not a TargetPlayer target slot. Regression test for
 /// #1667.
 #[test]
@@ -35945,8 +35966,10 @@ fn gornog_one_or_more_warriors_attack_uses_attacked_player_controller() {
         Effect::GenericEffect { target, .. } => match target {
             Some(TargetFilter::Typed(t)) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::AttackedPlayer),
-                "GenericEffect target should reference the attacked player via AttackedPlayer",
+                Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::AsDeclared
+                }),
+                "GenericEffect target should reference the as-declared attacked player",
             ),
             other => panic!("expected Some(Typed) target filter, got {other:?}"),
         },
@@ -36016,7 +36039,7 @@ fn fangorn_tree_shepherd_attack_trigger_adds_multiplied_event_context_green() {
 
 /// CR 508.1a + CR 508.7a + CR 608.2c: "attack an opponent" introduces the
 /// attacked player just like "attack a player"; the effect's "that player"
-/// anaphor must still bind to `AttackedPlayer`.
+/// anaphor must still bind to `DefendingPlayer { reading: AsDeclared }`.
 #[test]
 fn attack_an_opponent_uses_attacked_player_controller() {
     let def = parse_trigger_line(
@@ -36032,8 +36055,10 @@ fn attack_an_opponent_uses_attacked_player_controller() {
         } => match target {
             TargetFilter::Typed(t) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::AttackedPlayer),
-                "tap target should reference the attacked player via AttackedPlayer",
+                Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::AsDeclared
+                }),
+                "tap target should reference the as-declared attacked player",
             ),
             other => panic!("expected Typed filter, got {other:?}"),
         },
@@ -36058,8 +36083,10 @@ fn attack_one_or_more_opponents_uses_attacked_player_controller() {
         } => match target {
             TargetFilter::Typed(t) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::AttackedPlayer),
-                "tap target should reference the attacked player via AttackedPlayer",
+                Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::AsDeclared
+                }),
+                "tap target should reference the as-declared attacked player",
             ),
             other => panic!("expected Typed filter, got {other:?}"),
         },
@@ -36093,7 +36120,9 @@ fn attack_trigger_destroy_or_target_defending_player_controls() {
                     match leg {
                         TargetFilter::Typed(t) => assert_eq!(
                             t.controller,
-                            Some(ControllerRef::DefendingPlayer),
+                            Some(ControllerRef::DefendingPlayer {
+                                reading: AttackRelationReading::Current
+                            }),
                             "leg {i} must scope to the defending player, not null",
                         ),
                         other => panic!("leg {i} expected Typed, got {other:?}"),
@@ -36123,7 +36152,9 @@ fn attack_trigger_fight_defending_player_controls() {
         Effect::Fight { target, .. } => match target {
             TargetFilter::Typed(t) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::DefendingPlayer),
+                Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                }),
                 "fight target should scope to the defending player, not null",
             ),
             other => panic!("expected Typed target, got {other:?}"),
@@ -36160,7 +36191,9 @@ fn attack_trigger_fight_up_to_one_defending_player_controls() {
         Effect::Fight { target, .. } => match target {
             TargetFilter::Typed(t) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::DefendingPlayer),
+                Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                }),
                 "fight target must scope to the defending player, not null",
             ),
             other => panic!("expected Typed target, got {other:?}"),
@@ -36196,7 +36229,9 @@ fn attack_trigger_fight_up_to_one_or_target_defending_player_controls() {
                     match leg {
                         TargetFilter::Typed(t) => assert_eq!(
                             t.controller,
-                            Some(ControllerRef::DefendingPlayer),
+                            Some(ControllerRef::DefendingPlayer {
+                                reading: AttackRelationReading::Current
+                            }),
                             "or-leg {i} must scope to the defending player, not null",
                         ),
                         other => panic!("or-leg {i} expected Typed, got {other:?}"),
@@ -39249,7 +39284,9 @@ fn smart_ass_they_may_reveal_hand_binds_to_defending_player() {
         Effect::RevealHand { target, .. } => {
             assert_eq!(
                 target,
-                &TargetFilter::DefendingPlayer,
+                &TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                },
                 "\"they\" reveal must bind to the combat-relative defending player"
             );
         }
@@ -39311,7 +39348,9 @@ fn septic_rats_defending_player_poisoned_gates_the_pump() {
     assert_eq!(
         def.condition,
         Some(TriggerCondition::IsPoisoned {
-            player: PlayerScope::DefendingPlayer,
+            player: PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            },
         }),
         "the guard must hoist as a defending-player poison intervening-if, got {:?}",
         def.condition
@@ -39360,7 +39399,9 @@ fn siege_dragon_that_player_controls_binds_to_defending_player() {
             TargetFilter::Typed(tf) => {
                 assert_eq!(
                     tf.controller,
-                    Some(ControllerRef::DefendingPlayer),
+                    Some(ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    }),
                     "\"that player controls\" must bind to the defending player named by \
                      the if-condition, not the attacker (ControllerRef::You)"
                 );
@@ -39375,19 +39416,23 @@ fn siege_dragon_that_player_controls_binds_to_defending_player() {
 /// status, not the declaration (Master of Cruelties ruling: it triggers in the
 /// declare blockers step after blockers are declared), so its "that player"
 /// stays the live defending player (CR 508.5) rather than the as-declared
-/// `AttackedPlayer` (CR 508.7a) an attack-declaration head introduces. Paired
+/// `DefendingPlayer { reading: AsDeclared }` (CR 508.7a) an attack-declaration head introduces. Paired
 /// positive: the same head without "and isn't blocked" introduces
-/// `AttackedPlayer`.
+/// `DefendingPlayer { reading: AsDeclared }`.
 #[test]
 fn unblocked_attack_head_keeps_that_player_as_the_live_defending_player() {
     let scope = crate::parser::oracle_trigger::relative_player_scope_for_condition;
     assert_eq!(
         scope("whenever this creature attacks a player and isn't blocked"),
-        Some(ControllerRef::DefendingPlayer)
+        Some(ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current
+        })
     );
     assert_eq!(
         scope("whenever this creature attacks a player"),
-        Some(ControllerRef::AttackedPlayer),
+        Some(ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::AsDeclared
+        }),
         "reach guard: the declaration head introduces the as-declared player"
     );
 
@@ -39406,7 +39451,7 @@ fn unblocked_attack_head_keeps_that_player_as_the_live_defending_player() {
         .unwrap_or_else(|| panic!("Master of Cruelties has an unblocked trigger: {parsed:#?}"));
     let rendered = format!("{:?}", trigger.execute);
     assert!(
-        rendered.contains("DefendingPlayer") && !rendered.contains("AttackedPlayer"),
+        rendered.contains("DefendingPlayer") && !rendered.contains("AsDeclared"),
         "that player's life total reads the live defending player: {trigger:#?}"
     );
 }
@@ -39414,7 +39459,7 @@ fn unblocked_attack_head_keeps_that_player_as_the_live_defending_player() {
 /// P6 — a literal "defending player" antecedent stays the live CR 508.5 read
 /// (Signpost ruling: "defending player" changes with a reselection), so
 /// Midnight Crusader Shuttle's "defending player faces a villainous choice —
-/// That player ..." never becomes the as-declared `AttackedPlayer`.
+/// That player ..." never becomes the as-declared `DefendingPlayer`.
 #[test]
 fn literal_defending_player_antecedent_never_becomes_attacked_player() {
     // Verbatim Oracle text (MTGJSON).
@@ -39436,7 +39481,7 @@ fn literal_defending_player_antecedent_never_becomes_attacked_player() {
         "reach guard: the body names the defending player: {trigger:#?}"
     );
     assert!(
-        !rendered.contains("AttackedPlayer"),
+        !rendered.contains("AsDeclared"),
         "a literal defending-player antecedent stays live: {trigger:#?}"
     );
 }
@@ -39452,7 +39497,7 @@ fn literal_defending_player_antecedent_never_becomes_attacked_player() {
 /// `condition_introduces_defending_player` check
 /// (`relative_player_scope_for_condition`) already recognized and stamped as
 /// `ControllerRef::DefendingPlayer` before this fix (now
-/// `ControllerRef::AttackedPlayer`, CR 508.7a). What was still broken:
+/// `ControllerRef::DefendingPlayer { reading: AsDeclared }`, CR 508.7a). What was still broken:
 /// `resolve_they_pronoun` had no arm reading that scope at all, so "they" in
 /// "they draw that many cards" fell through to the generic `ParentTarget`
 /// default regardless of which mechanism set the scope. This test locks in
@@ -39482,7 +39527,7 @@ fn elder_brain_they_draw_binds_to_attacked_player() {
         Effect::Draw { target, count } => {
             assert_eq!(
                 target,
-                &TargetFilter::AttackedPlayer,
+                &TargetFilter::DefendingPlayer { reading: AttackRelationReading::AsDeclared },
                 "\"they draw\" must bind to the player the attack was declared against,                  not ParentTarget"
             );
             assert_eq!(
@@ -39558,7 +39603,9 @@ fn archnemesis_you_attack_enchanted_player_drains_enchanted_player() {
     // CR 508.7a: the enchanted player the attack was declared against.
     assert_eq!(
         target.as_ref(),
-        Some(&TargetFilter::AttackedPlayer),
+        Some(&TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::AsDeclared
+        }),
         "'that player' must drain the player the attack was declared against, not the attacker"
     );
 
@@ -39616,7 +39663,9 @@ fn attack_enchanted_player_binds_damage_to_them_to_declared_defender() {
     // CR 508.7a: the enchanted player the attack was declared against.
     assert_eq!(
         *target,
-        TargetFilter::AttackedPlayer,
+        TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::AsDeclared
+        },
         "'them' must bind to the player the attack was declared against, not the attacker"
     );
 }
@@ -41370,7 +41419,9 @@ fn unless_defending_player_subject_names_its_own_payer() {
             .unwrap_or_else(|| panic!("{clause:?} must parse"));
         assert_eq!(
             parsed.payer,
-            Some(TargetFilter::DefendingPlayer),
+            Some(TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }),
             "{clause:?} must name the defending player as payer (CR 508.5)"
         );
         let matched = matches!(
@@ -41396,7 +41447,12 @@ fn unless_defending_player_subject_survives_or_disjunction() {
         "defending player sacrifices a creature of their choice or discards a card",
     )
     .expect("disjunctive defending-player clause must parse");
-    assert_eq!(parsed.payer, Some(TargetFilter::DefendingPlayer));
+    assert_eq!(
+        parsed.payer,
+        Some(TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::Current
+        })
+    );
     match &parsed.cost {
         AbilityCost::OneOf { costs } => assert_eq!(
             costs.len(),
@@ -41446,7 +41502,9 @@ fn ogre_marauder_attack_trigger_carries_defending_player_unless_sacrifice() {
         .expect("the attack trigger must carry an unless-cost, not a parser gap");
     assert_eq!(
         unless.payer,
-        TargetFilter::DefendingPlayer,
+        TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::Current
+        },
         "CR 508.5: the defending player pays, not the triggering player"
     );
     assert!(
@@ -44566,7 +44624,9 @@ fn token_attack_fields(
 /// the attack was declared against.
 fn names_that_player() -> crate::types::ability::TokenAttackDestination {
     crate::types::ability::TokenAttackDestination::Player {
-        player: ControllerRef::AttackedPlayer,
+        player: ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::AsDeclared,
+        },
         scope: crate::types::ability::NamedDefenderScope::Player,
     }
 }
@@ -44635,7 +44695,7 @@ fn copy_token_continuation_sentence_names_that_player_as_its_attack_destination(
             target,
             TargetFilter::Typed(typed) if typed.properties.iter().any(|prop| matches!(
                 prop,
-                FilterProp::Attacking { defender: Some(ControllerRef::AttackedPlayer) }
+                FilterProp::Attacking { defender: Some(ControllerRef::DefendingPlayer { reading: AttackRelationReading::AsDeclared }) }
             ))
         ),
         "the choose clause reads the player the attack was declared against: {target:?}"

@@ -100,6 +100,8 @@
 // calls `ability_rw_profile` / `trigger_condition_rw_profile` / `profiles_conflict`
 // on the legacy same-event and departure-batch ordering paths (CR 603.3b).
 
+#[cfg(test)]
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AttachCardinality, AttachSelection, AttachmentReferent,
@@ -1560,8 +1562,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         // CR 506.3: a damage/effect recipient the combat authority names at
         // resolution (a player or a planeswalker): external to the source, with
         // no chain root to inherit.
@@ -2515,8 +2516,7 @@ fn legacy_controller_ref(x: &ControllerRef) -> bool {
         // `TargetRef::Player`); not a frozen event-context tag.
         | ControllerRef::TargetOpponent
         | ControllerRef::DeclaredPlayer { .. }
-        | ControllerRef::DefendingPlayer
-        | ControllerRef::AttackedPlayer
+        | ControllerRef::DefendingPlayer { .. }
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
         // CR 102.1: the active player is a game-defined role read live, not a
@@ -2611,8 +2611,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         // tags — it is concretized to `SpecificObject` at resolution (mirrors
         // `SpecificObject`, its concretized form).
         | TargetFilter::OriginalSource
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         // Not one of the 12 frozen event-context tags: a combat-state referent
         // read from the member's own source and bound event.
         | TargetFilter::AttackedPlayerOrPlaneswalker
@@ -2897,8 +2896,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::PlayerMatching { .. }
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         // CR 108.3: owner-partition-commutative among identical members — same
@@ -2942,8 +2940,7 @@ fn member_bound_controller_ref(x: &ControllerRef) -> bool {
         // CR 109.4 + CR 611.2: a frozen player id is a plain literal read, not
         // an event-context tag.
         | ControllerRef::SpecificPlayer { .. }
-        | ControllerRef::DefendingPlayer
-        | ControllerRef::AttackedPlayer => false,
+        | ControllerRef::DefendingPlayer { .. } => false,
     }
 }
 
@@ -4676,8 +4673,7 @@ fn target_recipient(f: &TargetFilter) -> (bool, bool) {
         | TargetFilter::Controller
         | TargetFilter::Owner
         | TargetFilter::AllPlayers
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::SourceChosenPlayer
@@ -8098,8 +8094,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         // CR 201.5a: `OriginalSource` is a read-free object selector (concretized
         // to `SpecificObject` at resolution).
         | TargetFilter::OriginalSource
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -8249,8 +8244,7 @@ fn rw_player_scope(x: &PlayerScope) -> RwProfile {
         // CR 611.2 + CR 514.2: duration-timing-only, like `AnyTurn` — never reached
         // from a value/quantity/player-selection position.
         | PlayerScope::SpecificPlayer { .. }
-        | PlayerScope::DefendingPlayer
-        | PlayerScope::AttackedPlayer => RwProfile::empty(),
+        | PlayerScope::DefendingPlayer { .. } => RwProfile::empty(),
     }
 }
 
@@ -8306,8 +8300,7 @@ fn rw_controller_ref(x: &ControllerRef) -> RwProfile {
         // no sibling-mutable state).
         | ControllerRef::TargetOpponent
         | ControllerRef::DeclaredPlayer { .. }
-        | ControllerRef::DefendingPlayer
-        | ControllerRef::AttackedPlayer
+        | ControllerRef::DefendingPlayer { .. }
         // CR 102.1: a live read of `state.active_player` — no sibling-mutable
         // state, empty RW profile (mirrors `DefendingPlayer`).
         | ControllerRef::ActivePlayer
@@ -9021,7 +9014,9 @@ mod tests {
         ] {
             let profile = |player| ability_rw_profile(&ra(build(player)));
             assert_eq!(
-                profile(Some(ControllerRef::DefendingPlayer)),
+                profile(Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                })),
                 profile(None),
                 "{label}: the defending player adds nothing to the profile"
             );
@@ -9391,7 +9386,9 @@ mod tests {
             TargetFilter::Owner,
             TargetFilter::ScopedPlayer,
             TargetFilter::LastRevealed,
-            TargetFilter::DefendingPlayer,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             typed_ctrl(ControllerRef::You),
             // The delegation is the referent's own verdict, not a blanket TRUE
             // for the prop: a controller-relative attachment referent stays
@@ -11499,7 +11496,12 @@ mod attacked_referent_classification_tests {
         assert!(profile.writes_external.set_membership);
         assert!(!profile.legacy_batch_prompt());
 
-        for target in [TargetFilter::DefendingPlayer, TargetFilter::SelfRef] {
+        for target in [
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            TargetFilter::SelfRef,
+        ] {
             let profile = damage_writes(&target);
             assert!(!profile.reads_event_live);
             assert!(!profile.reads_board.set_membership);
@@ -11517,7 +11519,9 @@ mod attacked_referent_classification_tests {
             "symbolic referent takes true"
         );
         assert!(
-            !member_bound_target_filter(&TargetFilter::DefendingPlayer),
+            !member_bound_target_filter(&TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }),
             "DefendingPlayer is member-invariant: the contrast"
         );
         assert!(!legacy_target_filter(&f), "not one of the frozen 12 tags");
@@ -11526,7 +11530,9 @@ mod attacked_referent_classification_tests {
         // Recipient: player AND object, unlike DefendingPlayer's player-only.
         assert_eq!(target_recipient(&f), (true, true));
         assert_eq!(
-            target_recipient(&TargetFilter::DefendingPlayer),
+            target_recipient(&TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }),
             (true, false)
         );
         let writes = damage_writes(&f);
@@ -11603,8 +11609,12 @@ mod poison_condition_rw_tests {
         for player in [
             PlayerScope::Controller,
             PlayerScope::ScopedPlayer,
-            PlayerScope::DefendingPlayer,
-            PlayerScope::AttackedPlayer,
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
             PlayerScope::Opponent {
                 aggregate: AggregateFunction::Max,
             },

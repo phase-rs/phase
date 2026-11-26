@@ -437,8 +437,7 @@ pub(super) fn collect_object_targets(
                         | TargetFilter::PostReplacementDamageSource
                         | TargetFilter::PostReplacementDamageTarget
                         | TargetFilter::PostReplacementDamageTargetOwner
-                        | TargetFilter::DefendingPlayer
-                        | TargetFilter::AttackedPlayer
+                        | TargetFilter::DefendingPlayer { .. }
                         | TargetFilter::HasChosenName
                         | TargetFilter::ChosenDamageSource { .. }
                         | TargetFilter::Named { .. }

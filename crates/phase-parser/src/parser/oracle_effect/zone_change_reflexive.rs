@@ -147,8 +147,7 @@ fn target_names_one_object(target: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }

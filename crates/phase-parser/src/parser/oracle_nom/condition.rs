@@ -30,6 +30,7 @@ use crate::parser::oracle_target::{
     parse_zone_suffix, parse_zone_word, peek_zone_boundary, superlative_property_filter_prop,
 };
 use crate::parser::oracle_util::parse_subtype;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     is_any_target_filter, AbilityCondition, AggregateFunction, AttachmentReferent,
@@ -2003,7 +2004,7 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
 /// player"/"that opponent" is the anaphoric event-scoped player; this
 /// combinator cannot see the owning trigger, so it emits the generic
 /// [`PlayerScope::ScopedPlayer`] anchor, which an attack trigger rebinds to
-/// [`PlayerScope::AttackedPlayer`] when its clause supplies a more specific
+/// [`PlayerScope::DefendingPlayer`] (`AsDeclared` reading) when its clause supplies a more specific
 /// antecedent (CR 508.7a — see
 /// `oracle_trigger::rebind_attack_anaphor_to_attacked_player`).
 ///
@@ -2062,7 +2063,12 @@ fn parse_player_poisoned_condition(input: &str) -> OracleResult<'_, StaticCondit
             PlayerScope::ScopedPlayer,
             alt((tag("that player "), tag("that opponent "))),
         ),
-        value(PlayerScope::DefendingPlayer, tag("defending player ")),
+        value(
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            tag("defending player "),
+        ),
     ))
     .parse(input)?;
     let (rest, _) = alt((tag("are poisoned"), tag("is poisoned"))).parse(rest)?;
@@ -5096,8 +5102,7 @@ fn typed_slot_type_axis_matches(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::HasChosenName
         | TargetFilter::Owner
         | TargetFilter::AllPlayers => false,
@@ -5952,7 +5957,9 @@ fn parse_control_scope_prefix(input: &str) -> OracleResult<'_, ControllerRef> {
         // Ayesha Tanaka, Armorer, "…can't be blocked as long as defending
         // player controls three or more artifacts".
         value(
-            ControllerRef::DefendingPlayer,
+            ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             tag("defending player controls "),
         ),
     ))
@@ -11700,8 +11707,18 @@ fn parse_attack_player_more_life_than_another_opponent(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
     let (rest, player) = alt((
-        value(PlayerScope::AttackedPlayer, tag("that opponent ")),
-        value(PlayerScope::DefendingPlayer, tag("defending player ")),
+        value(
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
+            tag("that opponent "),
+        ),
+        value(
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            tag("defending player "),
+        ),
     ))
     .parse(input)?;
     let (rest, _) = tag("has more life than another of your opponents").parse(rest)?;
@@ -11731,7 +11748,9 @@ fn parse_defending_player_comparison_conditions(input: &str) -> OracleResult<'_,
     let (filter, _) = parse_type_phrase_folding(type_text.trim());
     let defending_filter = match filter {
         TargetFilter::Typed(tf) => {
-            TargetFilter::Typed(tf.controller(ControllerRef::DefendingPlayer))
+            TargetFilter::Typed(tf.controller(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            }))
         }
         other => other,
     };
@@ -11767,8 +11786,18 @@ fn parse_no_opponent_comparison_conditions(input: &str) -> OracleResult<'_, Stat
     let (rest, _) = tag("no opponent ").parse(input)?;
     let (rest, _) = tag("has more life than ").parse(rest)?;
     let (rest, player) = alt((
-        value(PlayerScope::AttackedPlayer, tag("that player")),
-        value(PlayerScope::DefendingPlayer, tag("defending player")),
+        value(
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
+            tag("that player"),
+        ),
+        value(
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            tag("defending player"),
+        ),
     ))
     .parse(rest)?;
     Ok((
@@ -14322,7 +14351,9 @@ mod tests {
         assert_eq!(tf.type_filters, vec![TypeFilter::Artifact]);
         assert_eq!(
             tf.controller,
-            Some(ControllerRef::DefendingPlayer),
+            Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            }),
             "the count must be scoped to the defending player, not the source's \
              controller"
         );
@@ -14360,7 +14391,12 @@ mod tests {
         assert_eq!(quality, SharedQuality::CreatureType);
         assert_eq!(aggregate, AggregateFunction::Max);
         assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
-        assert_eq!(tf.controller, Some(ControllerRef::DefendingPlayer));
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            })
+        );
     }
 
     /// CR 205.3m + CR 603.4 + CR 601.2f: "you control <threshold> creatures
@@ -21114,7 +21150,12 @@ mod tests {
                 let TargetFilter::Typed(lhs) = lhs else {
                     panic!("expected typed lhs filter");
                 };
-                assert_eq!(lhs.controller, Some(ControllerRef::DefendingPlayer));
+                assert_eq!(
+                    lhs.controller,
+                    Some(ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    })
+                );
                 let TargetFilter::Typed(rhs) = rhs else {
                     panic!("expected typed rhs filter");
                 };
@@ -21575,7 +21616,10 @@ mod tests {
                     QuantityExpr::Ref {
                         qty:
                             QuantityRef::LifeTotal {
-                                player: PlayerScope::AttackedPlayer,
+                                player:
+                                    PlayerScope::DefendingPlayer {
+                                        reading: AttackRelationReading::AsDeclared,
+                                    },
                             },
                     },
                 comparator: Comparator::GT,
@@ -21618,7 +21662,10 @@ mod tests {
                     QuantityExpr::Ref {
                         qty:
                             QuantityRef::LifeTotal {
-                                player: PlayerScope::AttackedPlayer,
+                                player:
+                                    PlayerScope::DefendingPlayer {
+                                        reading: AttackRelationReading::AsDeclared,
+                                    },
                             },
                     },
             } => {}
@@ -28026,8 +28073,7 @@ mod tests {
             | TargetFilter::PostReplacementDamageSource
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
-            | TargetFilter::DefendingPlayer
-            | TargetFilter::AttackedPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }

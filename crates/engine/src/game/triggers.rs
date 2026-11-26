@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::game_object::ObjectIncarnationRefExt;
+#[cfg(test)]
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
@@ -17086,8 +17088,7 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -17116,8 +17117,7 @@ fn latched_controller_clause_is_judged(
             | ControllerRef::ParentTargetController
             | ControllerRef::EventTargetController
             | ControllerRef::ParentTargetOwner
-            | ControllerRef::DefendingPlayer
-            | ControllerRef::AttackedPlayer
+            | ControllerRef::DefendingPlayer { .. }
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::DeclaredPlayer { .. }
             | ControllerRef::SourceChosenPlayer
@@ -17149,8 +17149,7 @@ fn latched_controller_clause_matches(
             | ControllerRef::ParentTargetController
             | ControllerRef::EventTargetController
             | ControllerRef::ParentTargetOwner
-            | ControllerRef::DefendingPlayer
-            | ControllerRef::AttackedPlayer
+            | ControllerRef::DefendingPlayer { .. }
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::DeclaredPlayer { .. }
             | ControllerRef::SourceChosenPlayer
@@ -18968,9 +18967,9 @@ fn player_scope_unbound(scope: &PlayerScope, reader: BindingReader) -> bool {
             .is_some_and(|scope| player_scope_unbound(scope, reader)),
         // CR 508.5: the defending player. CR 508.7a: the attacked player (as
         // declared), read through the same bound attack event.
-        PlayerScope::DefendingPlayer | PlayerScope::AttackedPlayer => match reader {
+        PlayerScope::DefendingPlayer { .. } => match reader {
             // The fire-time reader binds the attacker through the matched event
-            // (`combat::defending_player_cr508_5` / `attacked_player_cr508_7a`),
+            // (`combat::attack_defender_cr508`),
             // as the resolution does.
             BindingReader::DelayedTriggerFireTime => false,
             // CR 106.7 + CR 508.5: `resolve_defending_player` falls back to the
@@ -19498,13 +19497,12 @@ pub(crate) fn filter_binding_diverges(filter: &TargetFilter, reader: BindingRead
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::EventTarget
-        | TargetFilter::DefendingPlayer
-        // CR 508.7a: the same event-bound authority, as-declared reading.
-        | TargetFilter::AttackedPlayer => match reader {
+        // CR 508.5 / CR 508.7a: the same event-bound authority, either reading.
+        | TargetFilter::DefendingPlayer { .. } => match reader {
             // The fire-time leg publishes that event through
             // `DETECTION_TRIGGER_EVENT`, and every reader here
             // (`triggering_event_player` / `_target_object` / `_source_object`,
-            // `combat::defending_player_cr508_5`) takes the resolution-time
+            // `combat::attack_defender_cr508`) takes the resolution-time
             // `current_trigger_event` OR that thread-local — the same dual path
             // `ObjectScope::EventSource` / `EventTarget` and
             // `PlayerScope::DefendingPlayer` are adjudicated under.
@@ -19645,8 +19643,7 @@ fn controller_ref_binding_diverges(controller: &ControllerRef, reader: BindingRe
         },
         // CR 603.2 + CR 508.5: event-derived players.
         ControllerRef::TriggeringPlayer
-        | ControllerRef::DefendingPlayer
-        | ControllerRef::AttackedPlayer => match reader {
+        | ControllerRef::DefendingPlayer { .. } => match reader {
             // Resolved through the same resolution-or-detection dual path as the
             // event-scoped filters.
             BindingReader::DelayedTriggerFireTime => false,
@@ -35537,23 +35534,29 @@ pub mod tests {
             ),
             // CR 508.5: the defending player reaches the trigger event.
             (
-                "PlayerScope::DefendingPlayer",
+                "PlayerScope::DefendingPlayer { reading: AttackRelationReading::Current }",
                 quantity(QuantityRef::LifeTotal {
-                    player: PlayerScope::DefendingPlayer,
+                    player: PlayerScope::DefendingPlayer {
+                        reading: AttackRelationReading::Current,
+                    },
                 }),
                 (false, true, true),
             ),
             // CR 508.7a: the attacked player reaches the same trigger event.
             (
-                "PlayerScope::AttackedPlayer",
+                "PlayerScope::DefendingPlayer { reading: AttackRelationReading::AsDeclared }",
                 quantity(QuantityRef::LifeTotal {
-                    player: PlayerScope::AttackedPlayer,
+                    player: PlayerScope::DefendingPlayer {
+                        reading: AttackRelationReading::AsDeclared,
+                    },
                 }),
                 (false, true, true),
             ),
             (
-                "ControllerRef::DefendingPlayer",
-                count(controlled_by(ControllerRef::DefendingPlayer)),
+                "ControllerRef::DefendingPlayer { reading: AttackRelationReading::Current }",
+                count(controlled_by(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                })),
                 (false, true, true),
             ),
             (
@@ -35562,8 +35565,10 @@ pub mod tests {
                 (false, true, true),
             ),
             (
-                "TargetFilter::DefendingPlayer",
-                count(TargetFilter::DefendingPlayer),
+                "TargetFilter::DefendingPlayer { reading: AttackRelationReading::Current }",
+                count(TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                }),
                 (false, true, true),
             ),
             // A reference position reads the event even where the same filter
@@ -43478,11 +43483,18 @@ pub mod tests {
     /// `eval_is_monarch(state, controller)` answers `false` for the positive
     /// case (P0 is not the monarch) and `true` for the negative one.
     ///
-    /// CR 508.7a: with no reselection the as-declared `AttackedPlayer` subject
+    /// CR 508.7a: with no reselection the as-declared `DefendingPlayer` subject
     /// names the same player, so both scopes are driven through the same rows.
     #[test]
     fn is_monarch_defending_player_subject_reads_the_attacked_player_cr_508_5() {
-        for scope in [PlayerScope::DefendingPlayer, PlayerScope::AttackedPlayer] {
+        for scope in [
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
+        ] {
             is_monarch_attack_subject_reads_the_attacked_player(scope);
         }
     }
@@ -43534,17 +43546,21 @@ pub mod tests {
         state.monarch = Some(PlayerId(2));
 
         for scope in [
-            PlayerScope::DefendingPlayer,
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             // CR 508.7a: fails closed with no attack in scope — it never falls
             // back to live combat.
-            PlayerScope::AttackedPlayer,
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
             PlayerScope::Target,
             // CR 611.2a: serde-reachable duration-timing-only scope; must fail
             // closed rather than hit `resolve_single_player_scope`'s panic.
             PlayerScope::AnyTurn,
             // CR 603.4: the scope `parse_monarch_identity_subject` actually
             // EMITS for "that player is the monarch". Every anchor that the
-            // attack-trigger rebind does not convert to `AttackedPlayer`
+            // attack-trigger rebind does not convert to `DefendingPlayer { reading: AsDeclared }`
             // arrives here as `ScopedPlayer`, so this is the one row that must
             // not inherit `resolve_single_player_scope`'s value-context
             // `unwrap_or(controller)` fallback.
@@ -43686,7 +43702,9 @@ pub mod tests {
         let disjunction = TriggerCondition::Or {
             conditions: vec![
                 TriggerCondition::IsMonarch {
-                    player: PlayerScope::DefendingPlayer,
+                    player: PlayerScope::DefendingPlayer {
+                        reading: AttackRelationReading::Current,
+                    },
                 },
                 true_operand,
             ],
@@ -43787,7 +43805,7 @@ pub mod tests {
     /// specifies. That is a real gap on Siege Dragon / Spectral Force /
     /// Spectral Bears / Fear of the Dark, but it is an all-defenders
     /// QUANTIFIER bug, not an anchor-resolution bug: it shares no code with the
-    /// three `defending_player_cr508_5` doors and fixing it would change those
+    /// three `attack_defender_cr508` doors and fixing it would change those
     /// four cards' firing behaviour.
     ///
     /// This test pins TODAY's behaviour so a later change that routes the arm
@@ -43863,7 +43881,7 @@ pub mod tests {
                 Some(&attackers_declared(attacker_a, PlayerId(1))),
             ),
             "pins the all-defenders quantifier; if this now passes, the arm was \
-             routed through combat::defending_player_cr508_5 — re-derive Siege \
+             routed through combat::attack_defender_cr508 — re-derive Siege \
              Dragon, Spectral Force, Spectral Bears and Fear of the Dark \
              explicitly rather than letting their firing behaviour change silently"
         );
@@ -51261,7 +51279,9 @@ pub mod tests {
                 comparator: Comparator::LE,
                 rhs: QuantityExpr::Ref {
                     qty: QuantityRef::LifeTotal {
-                        player: PlayerScope::DefendingPlayer,
+                        player: PlayerScope::DefendingPlayer {
+                            reading: AttackRelationReading::Current,
+                        },
                     },
                 },
             })
@@ -66048,7 +66068,9 @@ mod attacked_referent_binding_tests {
         ));
         assert!(
             !filter_binding_diverges(
-                &TargetFilter::DefendingPlayer,
+                &TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                },
                 BindingReader::DelayedTriggerFireTime
             ),
             "contrast: the event binding alone is non-divergent"

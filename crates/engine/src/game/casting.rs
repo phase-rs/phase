@@ -3518,8 +3518,7 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -14054,8 +14053,7 @@ fn cost_filter_reads_targets(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -35275,8 +35273,7 @@ fn player_scope_reads_chosen_target(player: &PlayerScope, read: TargetRead) -> b
         | PlayerScope::ScopedPlayer
         | PlayerScope::Opponent { .. }
         | PlayerScope::RecipientController
-        | PlayerScope::DefendingPlayer
-        | PlayerScope::AttackedPlayer
+        | PlayerScope::DefendingPlayer { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => false,
@@ -35294,8 +35291,7 @@ fn controller_ref_reads_chosen_target(controller: &ControllerRef, read: TargetRe
         | ControllerRef::Opponent
         | ControllerRef::ScopedPlayer
         | ControllerRef::EventTargetController
-        | ControllerRef::DefendingPlayer
-        | ControllerRef::AttackedPlayer
+        | ControllerRef::DefendingPlayer { .. }
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::TriggeringPlayer
@@ -35460,8 +35456,7 @@ fn target_filter_reads_chosen_target(filter: &TargetFilter, read: TargetRead) ->
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -39860,6 +39855,7 @@ mod sacrifice_cost_context_identity_tests {
     use crate::game::sba;
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::zones::move_to_zone;
+    use crate::types::ability::AttackRelationReading;
     use crate::types::ability::{
         AbilityCost, AttachmentKind, ChosenAttribute, Comparator, ControllerRef, CountScope,
         Effect, FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
@@ -40634,7 +40630,9 @@ mod sacrifice_cost_context_identity_tests {
         runner.state_mut().combat = Some(combat);
         // CR 508.5: The attacking source designates P1 independently of cost payer.
         let defender: TargetFilter = TypedFilter::creature()
-            .controller(ControllerRef::DefendingPlayer)
+            .controller(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            })
             .into();
         assert_eq!(
             find_eligible_sacrifice_targets(runner.state(), P1, source, None, &defender),

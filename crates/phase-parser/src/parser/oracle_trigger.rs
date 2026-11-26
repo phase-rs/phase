@@ -77,6 +77,7 @@ use super::oracle_util::{
     strip_after, strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::ManaProduction;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
@@ -1278,7 +1279,7 @@ fn parse_referenced_player_phrase(input: &str) -> OracleResult<'_, ()> {
         // CR 508.1a + CR 725.1: "attacks the monarch ... that player controls" —
         // the monarch is the attacked player chosen at attack declaration, so
         // the trailing "that player" anaphor binds to
-        // `ControllerRef::AttackedPlayer` (CR 508.7a; The Spear of Bashenga:
+        // `ControllerRef::DefendingPlayer { reading: AsDeclared }` (CR 508.7a; The Spear of Bashenga:
         // "destroy target tapped nonland permanent that player controls").
         value((), tag("the monarch")),
     ))
@@ -1289,7 +1290,7 @@ fn parse_referenced_player_phrase(input: &str) -> OracleResult<'_, ()> {
 /// ("one or more players", Zurzoth, Chaos Rider) and the superlative player
 /// (Seraphic Greatsword) to the single referents of
 /// `parse_referenced_player_phrase`. Attack heads only: a damage head's
-/// damaged players are not an `AttackedPlayer` antecedent.
+/// damaged players are not an as-declared `DefendingPlayer` antecedent.
 fn parse_attacked_player_phrase(input: &str) -> OracleResult<'_, ()> {
     alt((
         parse_referenced_player_phrase,
@@ -1525,7 +1526,7 @@ fn parse_batch_creature_attack_subject(input: &str) -> OracleResult<'_, ()> {
 /// CR 303.4b + CR 508.1a: "[actor] attack[s] enchanted player" names
 /// the Aura's attached player as the trigger's referenced defender, so a later
 /// bare "that player"/"the player" anaphor in the effect body binds to the
-/// player the attack was declared against (`TargetFilter::AttackedPlayer`,
+/// player the attack was declared against (`TargetFilter::DefendingPlayer { reading: AsDeclared }`,
 /// CR 508.7a). Sibling of `condition_introduces_defending_player`;
 /// `AttachedTo` remains the trigger-time match constraint while the body uses
 /// the as-declared attacked player. The actor
@@ -1828,7 +1829,7 @@ pub(crate) fn relative_player_scope_for_condition(cond_lower: &str) -> Option<Co
     } else if condition_introduces_enchanted_player(cond_lower) {
         // CR 508.7a: "That player" after "attack enchanted player" is the
         // enchanted player the attack was declared against, resolved via
-        // `TargetFilter::AttackedPlayer` (subject.rs). This remains distinct from
+        // `TargetFilter::DefendingPlayer { reading: AsDeclared }` (subject.rs). This remains distinct from
         // `AttachedTo`, which is used only to decide whether the Aura's trigger
         // fires.
         Some(ControllerRef::EnchantedPlayer)
@@ -1837,13 +1838,17 @@ pub(crate) fn relative_player_scope_for_condition(cond_lower: &str) -> Option<Co
             // CR 509.3g: an "attacks … and isn't blocked" event is the unblocked
             // status, not the declaration (Master of Cruelties ruling), so its
             // "that player" is the live defending player.
-            Some(ControllerRef::DefendingPlayer)
+            Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            })
         } else {
             // CR 508.7a + CR 608.2c: after an attack-declaration head, "that
             // player"/"that opponent" is the player the attack was declared
             // against; a reselection does not change it. Not TargetPlayer
             // (which requires a player target to be bound at runtime).
-            Some(ControllerRef::AttackedPlayer)
+            Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            })
         }
     } else if condition_introduces_attacking_player(cond_lower) {
         // CR 508.1 + CR 603.2c: the attacking player is the triggering-event
@@ -2131,7 +2136,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // (Smart Ass). Carry that scope through so a "they"/"that player"
         // anaphor in the same body resolves to the combat-relative defending
         // player instead of the generic `ParentTarget` fallback.
-        effect_ctx.relative_player_scope = Some(ControllerRef::DefendingPlayer);
+        effect_ctx.relative_player_scope = Some(ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        });
     }
     // CR 701.22a + CR 603.2: The completed-scry predicate establishes the
     // provenance for its "that many" effect body. Keep this as a pure match on
@@ -3120,7 +3127,11 @@ pub(crate) fn lower_trigger_ir_with_provenance(
     // against (token destinations, "attacking that player" filters).
     if matches!(
         modifiers.relative_player_scope,
-        Some(ControllerRef::AttackedPlayer | ControllerRef::EnchantedPlayer)
+        Some(
+            ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared
+            } | ControllerRef::EnchantedPlayer
+        )
     ) {
         if let Some(ability) = execute.as_deref_mut() {
             crate::parser::oracle_effect::rebind_attack_anaphor_placeholders_to_attacked_player(
@@ -6862,7 +6873,9 @@ fn parse_unless_payer_subject(input: &str) -> OracleResult<'_, Option<TargetFilt
     alt((
         // CR 508.5: named role — the subject IS the payer.
         value(
-            Some(TargetFilter::DefendingPlayer),
+            Some(TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            }),
             alt((
                 tag("the defending player "),
                 tag::<_, _, OracleError<'_>>("defending player "),
@@ -7574,7 +7587,7 @@ fn remap_self_cast_scope_in_quantity(expr: &mut QuantityExpr) {
 ///   [`attack_clause_names_attacked_player`], which owns that question.
 ///
 /// When the attacked-player noun is the controller ("attacks you"), the attacked
-/// player IS the controller, so `AttackedPlayer` and the controller name the
+/// player IS the controller, so `DefendingPlayer { reading: AsDeclared }` and the controller name the
 /// same player and the rebind cannot diverge.
 // pub(crate) so the `AttackTargetFilter` variant matrix in `oracle_tests.rs`
 // can drive the production gate directly rather than a hand-built proxy.
@@ -7634,7 +7647,7 @@ fn attack_clause_names_attacked_player(def: &TriggerDefinition) -> bool {
 }
 
 /// CR 508.7a + CR 603.2: Rebind [`PlayerScope::ScopedPlayer`] to
-/// [`PlayerScope::AttackedPlayer`] throughout an attack trigger's
+/// [`PlayerScope::DefendingPlayer`] (`AsDeclared` reading) throughout an attack trigger's
 /// intervening-if. "That player" names the player the attack declared; a
 /// creature whose attack is reselected "is still considered to have attacked
 /// the player or permanent chosen as it was declared" (CR 508.7a), so the
@@ -7658,7 +7671,11 @@ fn rebind_attack_anaphor_to_attacked_player(cond: &mut TriggerCondition) {
     match cond {
         TriggerCondition::IsMonarch {
             player: player @ PlayerScope::ScopedPlayer,
-        } => *player = PlayerScope::AttackedPlayer,
+        } => {
+            *player = PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            }
+        }
         TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
             rebind_attack_anaphor_in_quantity(lhs);
             rebind_attack_anaphor_in_quantity(rhs);
@@ -7692,7 +7709,9 @@ fn rebind_attack_anaphor_in_quantity(expr: &mut QuantityExpr) {
     match expr {
         QuantityExpr::Ref { qty } => {
             if let Some(player @ PlayerScope::ScopedPlayer) = qty.player_scope_mut() {
-                *player = PlayerScope::AttackedPlayer;
+                *player = PlayerScope::DefendingPlayer {
+                    reading: AttackRelationReading::AsDeclared,
+                };
             }
         }
         QuantityExpr::Fixed { .. } => {}
@@ -8042,7 +8061,7 @@ pub fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Tri
         // continuous-static predicate (Avenge); the intervening-if vocabulary has
         // no existential turn-history member to lower onto.
         //
-        // Anchored (`AttackedPlayer`) scope: an intervening-if is checked at
+        // Anchored (`DefendingPlayer { reading: AsDeclared }`) scope: an intervening-if is checked at
         // trigger time and again on resolution (CR 603.4), and NEITHER checkpoint
         // carries an attack anchor — `TriggerCondition` has no `declared_attack`
         // and no per-attacker binding. Lowering it would produce a condition that
@@ -9125,12 +9144,12 @@ fn extract_if_condition_with_card_name(
     }
 
     // CR 603.4 + CR 702.105a: "if it's/is attacking the player with the most
-    // life or tied for most life" — the same defending-player-life-total
-    // predicate Dethrone's own synthesized trigger uses (`build_dethrone_trigger`,
-    // database/synthesis.rs), reused here so a card phrasing the identical CR
-    // 702.105a idiom as a plain intervening-if (Scourge of the Throne: "if
+    // life or tied for most life" — the same life-total comparison shape as
+    // Dethrone, but read live (CR 508.5) rather than as declared (CR 508.7a)
+    // (`build_dethrone_trigger`, database/synthesis.rs), so a card phrasing the
+    // CR 702.105a idiom as a plain intervening-if (Scourge of the Throne: "if
     // it's attacking the player with the most life or tied for most life,
-    // untap all attacking creatures") gets the SAME typed condition instead of
+    // untap all attacking creatures") gets that typed condition instead of
     // either the wrong bare `SourceIsAttacking` (dropping the life-total
     // qualifier entirely — the phase-rs/phase#5449 review's second finding) or
     // an unconditional `None` (which would make the ability fire regardless of
@@ -9152,7 +9171,9 @@ fn extract_if_condition_with_card_name(
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::LifeTotal {
-                        player: PlayerScope::DefendingPlayer,
+                        player: PlayerScope::DefendingPlayer {
+                            reading: AttackRelationReading::Current,
+                        },
                     },
                 },
                 comparator: Comparator::GE,
@@ -9703,7 +9724,10 @@ fn extract_if_condition_with_card_name(
             let should_accept = if let Some(_scope) = attack_scope {
                 match condition.as_ref() {
                     TriggerCondition::IsPoisoned { player } => {
-                        *player == PlayerScope::DefendingPlayer
+                        *player
+                            == PlayerScope::DefendingPlayer {
+                                reading: AttackRelationReading::Current,
+                            }
                     }
                     _ => true,
                 }
@@ -20589,8 +20613,7 @@ fn subject_attack_scope(subject_scope: Option<&ControllerRef>) -> Option<Subject
             | ControllerRef::ParentTargetController
             | ControllerRef::EventTargetController
             | ControllerRef::ParentTargetOwner
-            | ControllerRef::DefendingPlayer
-            | ControllerRef::AttackedPlayer
+            | ControllerRef::DefendingPlayer { .. }
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::SourceChosenPlayer
             | ControllerRef::TriggeringPlayer

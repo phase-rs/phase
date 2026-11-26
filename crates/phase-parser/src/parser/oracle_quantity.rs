@@ -4251,6 +4251,7 @@ fn with_target_controller(filter: TargetFilter, controller: ControllerRef) -> Op
 mod tests {
     use super::*;
     use crate::parser::oracle_ir::context::{ChainPriorPublishers, ChosenColorQualifierScope};
+    use crate::types::ability::AttackRelationReading;
     use crate::types::ability::ChoiceType;
     use crate::types::ability::{
         CardTypeSetSource, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope,
@@ -6595,7 +6596,9 @@ mod tests {
     #[test]
     fn cda_quantity_uses_relative_player_scope_for_they_control() {
         let mut ctx = ParseContext {
-            relative_player_scope: Some(ControllerRef::DefendingPlayer),
+            relative_player_scope: Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            }),
             ..Default::default()
         };
         let qty = parse_cda_quantity_with_context("the number of artifacts they control", &mut ctx)
@@ -6607,7 +6610,10 @@ mod tests {
                     QuantityRef::ObjectCount {
                         filter:
                             TargetFilter::Typed(TypedFilter {
-                                controller: Some(ControllerRef::DefendingPlayer),
+                                controller:
+                                    Some(ControllerRef::DefendingPlayer {
+                                        reading: AttackRelationReading::Current,
+                                    }),
                                 type_filters,
                                 ..
                             }),
@@ -7477,7 +7483,9 @@ mod tests {
                 exprs: vec![
                     QuantityExpr::Ref {
                         qty: QuantityRef::HandSize {
-                            player: PlayerScope::DefendingPlayer,
+                            player: PlayerScope::DefendingPlayer {
+                                reading: AttackRelationReading::Current
+                            },
                         },
                     },
                     // CR 402: "the number of cards in your hand" inside
@@ -10688,16 +10696,20 @@ mod tests {
     fn number_of_counters_on_creatures_they_control_binds_the_context_player() {
         let text = "the number of +1/+1 counters on creatures they control";
         let mut defending = ParseContext {
-            relative_player_scope: Some(ControllerRef::DefendingPlayer),
+            relative_player_scope: Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            }),
             ..Default::default()
         };
         assert_eq!(
             parse_quantity_ref_with_context(text, &mut defending),
             Some(QuantityRef::CountersOnObjects {
                 counter_type: Some(CounterType::Plus1Plus1),
-                filter: TargetFilter::Typed(
-                    TypedFilter::creature().controller(ControllerRef::DefendingPlayer)
-                ),
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(
+                    ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    }
+                )),
             })
         );
         assert_eq!(
@@ -10710,14 +10722,18 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(parse_quantity_ref_with_context(text, &mut acting), None);
-        acting.relative_player_scope = Some(ControllerRef::DefendingPlayer);
+        acting.relative_player_scope = Some(ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        });
         assert_eq!(
             parse_quantity_ref_with_context(text, &mut acting),
             Some(QuantityRef::CountersOnObjects {
                 counter_type: Some(CounterType::Plus1Plus1),
-                filter: TargetFilter::Typed(
-                    TypedFilter::creature().controller(ControllerRef::DefendingPlayer)
-                ),
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(
+                    ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    }
+                )),
             })
         );
         // "the total number of" heads the same census.
@@ -10725,15 +10741,19 @@ mod tests {
             parse_quantity_ref_with_context(
                 "the total number of +1/+1 counters on creatures they control",
                 &mut ParseContext {
-                    relative_player_scope: Some(ControllerRef::DefendingPlayer),
+                    relative_player_scope: Some(ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    }),
                     ..Default::default()
                 },
             ),
             Some(QuantityRef::CountersOnObjects {
                 counter_type: Some(CounterType::Plus1Plus1),
-                filter: TargetFilter::Typed(
-                    TypedFilter::creature().controller(ControllerRef::DefendingPlayer)
-                ),
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(
+                    ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    }
+                )),
             })
         );
     }

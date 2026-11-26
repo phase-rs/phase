@@ -17,6 +17,7 @@ use super::lower::BOUNDED_TARGET_CARDINALITIES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::DeclaredSlotRegistry;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenSubtypeKind, ColorChangeMode,
     ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient, Duration,
@@ -3014,7 +3015,7 @@ fn parse_block_grant_duration(input: &str) -> OracleResult<'_, Option<Duration>>
 /// (`relative_player_scope_for_condition`, oracle_trigger.rs) — resolves a bare
 /// player anaphor ("that player" / "them" / "they") in the effect body to the
 /// enchanted player the attack was declared against, via
-/// `TargetFilter::AttackedPlayer` (CR 508.7a: a reselection does not change it).
+/// `TargetFilter::DefendingPlayer { reading: AsDeclared }` (CR 508.7a: a reselection does not change it).
 ///
 /// Single authority for the scope→filter binding, consulted by all three parallel
 /// "that player"/"them" anaphor resolvers — `parse_subject_application` (this
@@ -3029,7 +3030,9 @@ pub(super) fn enchanted_player_anaphor_filter(
 ) -> Option<TargetFilter> {
     // CR 303.4b + CR 508.7a: "that player" is the enchanted player the attack
     // named as declared.
-    matches!(scope, Some(ControllerRef::EnchantedPlayer)).then_some(TargetFilter::AttackedPlayer)
+    matches!(scope, Some(ControllerRef::EnchantedPlayer)).then_some(TargetFilter::DefendingPlayer {
+        reading: AttackRelationReading::AsDeclared,
+    })
 }
 
 /// CR 608.2c + CR 109.4: single authority for "the player a `Choose(Player)`
@@ -3087,8 +3090,7 @@ pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<Co
             | ControllerRef::ParentTargetController
             | ControllerRef::EventTargetController
             | ControllerRef::ParentTargetOwner
-            | ControllerRef::DefendingPlayer
-            | ControllerRef::AttackedPlayer
+            | ControllerRef::DefendingPlayer { .. }
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::DeclaredPlayer { .. }
             | ControllerRef::SourceChosenPlayer
@@ -4151,8 +4153,7 @@ fn parse_subject_application_for(
         if matches!(
             ctx_filter,
             TargetFilter::TriggeringPlayer
-                | TargetFilter::DefendingPlayer
-                | TargetFilter::AttackedPlayer
+                | TargetFilter::DefendingPlayer { .. }
                 | TargetFilter::TriggeringSourceController
                 | TargetFilter::EventTargetController
         ) {
@@ -4194,11 +4195,7 @@ fn parse_subject_application_for(
                 TargetFilter::ParentTargetOwner
             } else if matches!(
                 ctx.relative_player_scope,
-                Some(
-                    ControllerRef::TriggeringPlayer
-                        | ControllerRef::DefendingPlayer
-                        | ControllerRef::AttackedPlayer
-                )
+                Some(ControllerRef::TriggeringPlayer | ControllerRef::DefendingPlayer { .. })
             ) {
                 // CR 608.2c + CR 106.12a: An explicit triggering/defending player
                 // scope established by `relative_player_scope_for_condition`
@@ -4217,7 +4214,7 @@ fn parse_subject_application_for(
                 // A bare "that player"/"the player" anaphor in an effect body whose
                 // trigger condition names "attack enchanted player" refers to the
                 // player the attack was declared against (CR 508.7a), resolved via
-                // `AttackedPlayer` (the shared
+                // `DefendingPlayer { reading: AsDeclared }` (the shared
                 // `enchanted_player_anaphor_filter` binding). The explicit "that/the
                 // attacking player" phrases name the attacker instead, so the
                 // `PlayerSubjectAnaphor::AttackingPlayer` discriminant excludes them
@@ -4356,7 +4353,9 @@ fn parse_subject_application_for(
     // CR 506.3d: "defending player" as subject — resolves from combat state.
     if lower == "defending player" {
         return Some(SubjectApplication {
-            affected: TargetFilter::DefendingPlayer,
+            affected: TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             target: None,
             multi_target: None,
             inherits_parent: false,
@@ -5301,11 +5300,12 @@ fn relative_player_scope_anaphor_filter(ctx: &ParseContext) -> Option<TargetFilt
         // CR 506.2 + CR 508.5: an attack trigger's player is the DEFENDING player
         // — the player (or the attacked planeswalker's controller) the source is
         // attacking — not the attacking player carried by the attack event.
-        ControllerRef::DefendingPlayer => Some(TargetFilter::DefendingPlayer),
         // CR 508.7a: after an attack-declaration head ("Whenever you attack a
         // player, ... that player ..."), the player the attack was declared
         // against; a reselection does not change it.
-        ControllerRef::AttackedPlayer => Some(TargetFilter::AttackedPlayer),
+        ControllerRef::DefendingPlayer { reading } => {
+            Some(TargetFilter::DefendingPlayer { reading: *reading })
+        }
         // CR 120.3: the damaged / acting player the trigger event
         // carries ("deals [combat] damage to a player", Unstoppable Slasher).
         ControllerRef::TargetPlayer | ControllerRef::TriggeringPlayer => {
@@ -8127,8 +8127,7 @@ fn build_restriction_clause(
             | TargetFilter::PostReplacementDamageSource
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
-            | TargetFilter::DefendingPlayer
-            | TargetFilter::AttackedPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
@@ -10649,10 +10648,21 @@ mod tests {
                 TargetFilter::ParentTargetOwner,
             ),
             (
-                ControllerRef::DefendingPlayer,
-                TargetFilter::DefendingPlayer,
+                ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
+                TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
             ),
-            (ControllerRef::AttackedPlayer, TargetFilter::AttackedPlayer),
+            (
+                ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::AsDeclared,
+                },
+                TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::AsDeclared,
+                },
+            ),
             (
                 ControllerRef::TriggeringPlayer,
                 TargetFilter::TriggeringPlayer,
@@ -10724,12 +10734,16 @@ mod tests {
         );
         assert_eq!(
             they(
-                Some(ControllerRef::DefendingPlayer),
+                Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current
+                }),
                 None,
                 false,
                 Some(population.clone())
             ),
-            TargetFilter::DefendingPlayer,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            },
             "combat scope still wins over the population"
         );
         assert_eq!(
@@ -13185,14 +13199,18 @@ mod tests {
     fn parse_subject_that_player_life_total_binds_attack_defender() {
         let mut ctx = ParseContext {
             subject: Some(TargetFilter::SelfRef),
-            relative_player_scope: Some(ControllerRef::DefendingPlayer),
+            relative_player_scope: Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            }),
             ..ParseContext::default()
         };
         let application = parse_subject_application("that player's life total", &mut ctx)
             .expect("the possessive life-total subject must parse");
         assert_eq!(
             application.affected,
-            TargetFilter::DefendingPlayer,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            },
             "the attacked player's life total, not the trigger event's attacker"
         );
     }
@@ -13228,7 +13246,9 @@ mod tests {
         // event's declaring player (CR 506.2).
         let mut ctx = ParseContext {
             subject: Some(TargetFilter::Player),
-            relative_player_scope: Some(ControllerRef::DefendingPlayer),
+            relative_player_scope: Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            }),
             card_name: Some("Ellie, Brick Master".to_string()),
             ..ParseContext::default()
         };
@@ -13248,7 +13268,9 @@ mod tests {
 
         let mut ctx = ParseContext {
             subject: Some(TargetFilter::Player),
-            relative_player_scope: Some(ControllerRef::DefendingPlayer),
+            relative_player_scope: Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            }),
             card_name: Some("Ellie, Brick Master".to_string()),
             ..ParseContext::default()
         };

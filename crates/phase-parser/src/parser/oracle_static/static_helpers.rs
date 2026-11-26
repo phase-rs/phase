@@ -525,9 +525,7 @@ pub(crate) fn try_parse_impose_additional_cost(
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
-            Some(ControllerRef::DefendingPlayer | ControllerRef::AttackedPlayer) => {
-                TargetFilter::Typed(TypedFilter::card())
-            }
+            Some(ControllerRef::DefendingPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::SourceChosenPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ChosenPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::TriggeringPlayer) => TargetFilter::Typed(TypedFilter::card()),
@@ -987,9 +985,7 @@ pub(crate) fn try_parse_cost_modification(
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
-            Some(ControllerRef::DefendingPlayer | ControllerRef::AttackedPlayer) => {
-                TargetFilter::Typed(TypedFilter::card())
-            }
+            Some(ControllerRef::DefendingPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             // CR 613.1: chosen-player scope is not emitted for cost statics.
             Some(ControllerRef::SourceChosenPlayer) => TargetFilter::Typed(TypedFilter::card()),
             // CR 109.4: Chosen-player scope is not emitted for cost statics.

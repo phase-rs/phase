@@ -11,7 +11,7 @@
 //! grammar (`Attacks` mode, `valid_source = Controller`,
 //! `valid_target = AttachedTo`, `attack_target_filter = Player`) and binds the
 //! "that player" anaphor to the enchanted player the attack was declared
-//! against via `TargetFilter::AttackedPlayer` (CR 508.7a).
+//! against via `TargetFilter::DefendingPlayer { reading: AsDeclared }` (CR 508.7a).
 //!
 //! These tests drive the real combat pipeline (declare attackers → attack
 //! trigger onto the stack → resolve). Combat damage is isolated out by clearing

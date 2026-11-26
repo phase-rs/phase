@@ -1,5 +1,6 @@
 use super::*;
 use crate::game::zones::create_object;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, Effect, ModalChoice, QuantityExpr,
     ResolvedAbility, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
@@ -2844,7 +2845,9 @@ fn defending_player_life_quantity_reads_attack_event_player_target() {
         comparator: Comparator::LE,
         rhs: QuantityExpr::Ref {
             qty: QuantityRef::LifeTotal {
-                player: PlayerScope::DefendingPlayer,
+                player: PlayerScope::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
             },
         },
     };

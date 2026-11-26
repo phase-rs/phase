@@ -32,6 +32,8 @@ use crate::game::quantity::{
     quantity_expr_characteristic_reads_at, QuantityContext,
 };
 use crate::game::speed::{effective_speed, has_max_speed};
+#[cfg(test)]
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     quantity_expr_uses_recipient, AbilityCost, AbilityDefinition, AbilityKind,
     ActivationRestriction, AttachmentReferent, AttackedYouScope, BasicLandType, CardTypeSetSource,
@@ -638,8 +640,7 @@ fn permission_scope_is_keyable(scope: &PlayerScope) -> bool {
         | PlayerScope::Opponent { .. }
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::RecipientController
-        | PlayerScope::DefendingPlayer
-        | PlayerScope::AttackedPlayer
+        | PlayerScope::DefendingPlayer { .. }
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer => false,
     }
@@ -673,8 +674,7 @@ fn permission_scope_selects(
         | PlayerScope::Opponent { .. }
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::RecipientController
-        | PlayerScope::DefendingPlayer
-        | PlayerScope::AttackedPlayer
+        | PlayerScope::DefendingPlayer { .. }
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer => false,
     }
@@ -1556,7 +1556,7 @@ impl ConditionContext {
             PlayerScope::Controller => true,
             PlayerScope::RecipientController => self.recipient.is_some(),
             // No static designation resolver currently binds these subjects.
-            PlayerScope::DefendingPlayer | PlayerScope::AttackedPlayer => false,
+            PlayerScope::DefendingPlayer { .. } => false,
             // Engine limitation, not CR-mandated: no binding authority for
             // these scopes is carried by this layer evaluation context.
             PlayerScope::ScopedPlayer
@@ -1664,8 +1664,7 @@ fn designation_player(
             .recipient
             .and_then(|id| state.objects.get(&id))
             .map(|object| object.controller),
-        PlayerScope::DefendingPlayer
-        | PlayerScope::AttackedPlayer
+        PlayerScope::DefendingPlayer { .. }
         | PlayerScope::ScopedPlayer
         | PlayerScope::Target
         | PlayerScope::Opponent { .. }
@@ -5745,8 +5744,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -27779,14 +27777,18 @@ mod tests {
             (
                 "affirmative",
                 StaticCondition::IsMonarch {
-                    player: PlayerScope::DefendingPlayer,
+                    player: PlayerScope::DefendingPlayer {
+                        reading: AttackRelationReading::Current,
+                    },
                 },
             ),
             (
                 "negated",
                 StaticCondition::Not {
                     condition: Box::new(StaticCondition::IsMonarch {
-                        player: PlayerScope::DefendingPlayer,
+                        player: PlayerScope::DefendingPlayer {
+                            reading: AttackRelationReading::Current,
+                        },
                     }),
                 },
             ),
@@ -31412,7 +31414,12 @@ mod tests {
         let TargetFilter::Typed(filter) = target else {
             panic!("annihilator target must be a typed permanent filter");
         };
-        assert_eq!(filter.controller, Some(ControllerRef::DefendingPlayer));
+        assert_eq!(
+            filter.controller,
+            Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current
+            })
+        );
         assert!(filter
             .type_filters
             .iter()
@@ -31462,7 +31469,7 @@ mod tests {
                         target: TargetFilter::Typed(filter),
                         count: QuantityExpr::Fixed { value: 1 },
                         ..
-                    }) if filter.controller == Some(ControllerRef::DefendingPlayer)
+                    }) if filter.controller == Some(ControllerRef::DefendingPlayer { reading: AttackRelationReading::Current })
                 )
             })
             .count();
@@ -31504,7 +31511,7 @@ mod tests {
                         target: TargetFilter::Typed(filter),
                         count: QuantityExpr::Fixed { value: 3 },
                         ..
-                    }) if filter.controller == Some(ControllerRef::DefendingPlayer)
+                    }) if filter.controller == Some(ControllerRef::DefendingPlayer { reading: AttackRelationReading::Current })
                 )
             })
             .expect("dynamic Annihilator 3 should install a sacrifice trigger");

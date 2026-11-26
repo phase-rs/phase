@@ -1,5 +1,6 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{decrease_speed, increase_speed, set_speed};
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     Effect, EffectError, PlayerFilter, PlayerRelation, ResolvedAbility, SpeedDelta, TargetFilter,
 };
@@ -25,7 +26,9 @@ pub(crate) fn players_for_filter(
         PlayerFilter::DefendingPlayer => {
             crate::game::targeting::resolve_event_context_target_for_event_or_state(
                 state,
-                &crate::types::ability::TargetFilter::DefendingPlayer,
+                &crate::types::ability::TargetFilter::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                },
                 source_id,
                 state.current_trigger_event.as_ref(),
             )

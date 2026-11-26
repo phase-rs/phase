@@ -8,6 +8,7 @@ use super::*;
 use crate::parser::oracle_keyword::{
     classify_cant_be_targeted, is_source_qualified_cant_be_targeted, CantBeTargetedScope,
 };
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
@@ -11172,7 +11173,9 @@ fn cant_untap_gate_rejects_every_unenforceable_leaf_at_any_depth() {
             player: PlayerScope::ScopedPlayer,
         },
         StaticCondition::IsMonarch {
-            player: PlayerScope::DefendingPlayer,
+            player: PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
         },
         // Nested Boolean forms — the specific escape route flagged in round 5.
         StaticCondition::And {
@@ -33039,7 +33042,10 @@ fn parse_commander_creatures_you_own_grant_attack_trigger() {
                         QuantityExpr::Ref {
                             qty:
                                 QuantityRef::LifeTotal {
-                                    player: PlayerScope::AttackedPlayer,
+                                    player:
+                                        PlayerScope::DefendingPlayer {
+                                            reading: AttackRelationReading::AsDeclared,
+                                        },
                                 },
                         },
                     ..
@@ -44516,11 +44522,12 @@ fn static_gaeas_liege_complementary_forest_setters() {
         },
         StaticCondition::SourceIsAttacking,
     ];
-    for ((def, gate), controller) in defs
-        .iter()
-        .zip(gates)
-        .zip([ControllerRef::You, ControllerRef::DefendingPlayer])
-    {
+    for ((def, gate), controller) in defs.iter().zip(gates).zip([
+        ControllerRef::You,
+        ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        },
+    ]) {
         let value = QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount {
                 filter: TargetFilter::Typed(

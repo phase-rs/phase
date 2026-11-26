@@ -1,7 +1,7 @@
 //! Namor, Atlantean King — the attacked-player predicate and the
 //! "attacking that player" attacked-player anaphor (CR 508.7a: the player the
 //! attack was declared against, `FilterProp::Attacking { defender:
-//! AttackedPlayer }`).
+//! DefendingPlayer { reading: AsDeclared } }`).
 //!
 //! Verbatim Oracle text (Scryfall oracle id
 //! `171a0a09-4aee-466c-aebd-3b0d4c1f51b4`):
@@ -138,7 +138,7 @@ fn power_toughness(runner: &GameRunner, id: ObjectId) -> (Option<i32>, Option<i3
 ///      `Pump { target: TargetFilter::Any }` sentinel — `other_lane` (and
 ///      Namor, and every other permanent) gets +2/+0.
 ///   2. Emit `Attacking { defender: None }` instead of
-///      `Some(AttackedPlayer)` and `other_lane` — attacking the OTHER
+///      `Some(DefendingPlayer { reading: AsDeclared })` and `other_lane` — attacking the OTHER
 ///      defender in the same declaration — is pumped.
 ///   3. Drop `FilterProp::Another` and Namor pumps itself.
 ///
@@ -191,7 +191,7 @@ fn namor_pumps_only_co_attackers_of_the_same_defender_cr_508_5a() {
 ///
 /// The latecomer is built to MATCH the pump filter in full — `CoreType::Creature`
 /// for the `type_filters`, controlled by P0, registered as an attacker against
-/// the SAME defending player for `Attacking { defender: AttackedPlayer }`, and
+/// the SAME defending player for `Attacking { defender: DefendingPlayer { reading: AsDeclared } }`, and
 /// distinct from Namor for `FilterProp::Another`. That is what makes the row
 /// discriminating: a latecomer that failed the filter anyway (no card types, not
 /// in `combat.attackers`) would assert the same `(2, 2)` under LIVE
@@ -252,7 +252,7 @@ fn namor_pump_is_a_resolution_snapshot_cr_611_2c() {
         object.base_toughness = Some(2);
     }
     // CR 508.1a: register it as an attacker against the SAME defender Namor is
-    // attacking, so `FilterProp::Attacking { defender: AttackedPlayer }` is
+    // attacking, so `FilterProp::Attacking { defender: DefendingPlayer { reading: AsDeclared } }` is
     // satisfied for it too.
     runner
         .state_mut()
@@ -431,7 +431,7 @@ fn namor_does_not_fire_on_equal_life_totals_gt_not_ge() {
 /// **The row that proves the enumeration-door fix.** CR 603.3d: before
 /// `filter_needs_trigger_source`, the slot-build door
 /// (`targeting::find_legal_targets`) built a `FilterContext` with
-/// `trigger_source: None`, so `combat::defending_player_cr508_5` fell through to
+/// `trigger_source: None`, so `combat::attack_defender_cr508` fell through to
 /// its live-combat tail, whose `AttackersDeclared` arm is gated on
 /// `attacker_ids.len() == 1`. On this TWO-attacker board that yields `None`,
 /// every candidate fails `attacking_defender_matches`, the slot is EMPTY, and

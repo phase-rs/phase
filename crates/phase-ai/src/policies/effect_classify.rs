@@ -310,8 +310,7 @@ fn population_side(filter: &TargetFilter, actor: BoonTargetSide) -> Option<BoonT
         Some(
             ControllerRef::Opponent
             | ControllerRef::TargetOpponent
-            | ControllerRef::DefendingPlayer
-            | ControllerRef::AttackedPlayer,
+            | ControllerRef::DefendingPlayer { .. },
         ) => Some(BoonTargetSide::Enemy),
         _ => None,
     }
@@ -1159,8 +1158,7 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::Owner
         | TargetFilter::AllPlayers => FilterDomain::SOME_PLAYER,
 
@@ -2102,9 +2100,7 @@ fn boon_filter_side(filter: &TargetFilter) -> BoonTargetSide {
         | TargetFilter::ParentTarget => BoonTargetSide::Holder,
         // CR 506.2: the defending player is always an opponent of the attacker,
         // as is the player an attack was declared against (CR 508.7a).
-        TargetFilter::Opponent | TargetFilter::DefendingPlayer | TargetFilter::AttackedPlayer => {
-            BoonTargetSide::Enemy
-        }
+        TargetFilter::Opponent | TargetFilter::DefendingPlayer { .. } => BoonTargetSide::Enemy,
         TargetFilter::Player | TargetFilter::Any => BoonTargetSide::Chosen,
         TargetFilter::Typed(typed) => match typed.controller {
             // Unrestricted "target creature" — the holder aims it.
@@ -2113,8 +2109,7 @@ fn boon_filter_side(filter: &TargetFilter) -> BoonTargetSide {
             Some(
                 ControllerRef::Opponent
                 | ControllerRef::TargetOpponent
-                | ControllerRef::DefendingPlayer
-                | ControllerRef::AttackedPlayer,
+                | ControllerRef::DefendingPlayer { .. },
             ) => BoonTargetSide::Enemy,
             // The holder targets the player first, then aims within.
             Some(ControllerRef::TargetPlayer) => BoonTargetSide::Chosen,

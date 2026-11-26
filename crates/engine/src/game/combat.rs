@@ -9,8 +9,8 @@ use crate::game::filter::{matches_target_filter, type_filter_matches, FilterCont
 use crate::game::functioning_abilities::static_kind_present;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
-    AttackerBlockStatus, ContinuousModification, ControllerRef, StaticCondition, StaticDefinition,
-    TargetFilter, TargetRef,
+    AttackRelationReading, AttackerBlockStatus, ContinuousModification, ControllerRef,
+    StaticCondition, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
@@ -2793,8 +2793,7 @@ fn matches_relative_blocker(
                     | ControllerRef::ParentTargetController
                     | ControllerRef::EventTargetController
                     | ControllerRef::ParentTargetOwner
-                    | ControllerRef::DefendingPlayer
-                    | ControllerRef::AttackedPlayer
+                    | ControllerRef::DefendingPlayer { .. }
                     | ControllerRef::ChosenPlayer { .. }
                     | ControllerRef::DeclaredPlayer { .. }
                     | ControllerRef::SourceChosenPlayer
@@ -9321,15 +9320,16 @@ fn single_event_defender(
     defenders.all(|defender| defender == first).then_some(first)
 }
 
-/// CR 508.5 (+ CR 508.5a / CR 802.2a in multiplayer): THE authority that decides
-/// which attack answers a "defending player" reference.
+/// CR 508.5 (+ CR 508.5a / CR 802.2a in multiplayer) + CR 508.7a: THE authority
+/// that decides which attack answers a `DefendingPlayer { reading }` reference;
+/// `reading` selects the attack relation (see "Readings" below).
 ///
 /// Every door — the `PlayerScope::DefendingPlayer` quantity door
 /// (`quantity::defending_player_for_quantity_context`), the quantity-context
 /// controller-ref door (`quantity::source_defending_player_for_context`), and
 /// the `TargetFilter` controller-ref door (`filter::source_defending_player`) —
-/// calls THIS FUNCTION WITH THESE THREE ARGUMENTS AND NOTHING ELSE, so one
-/// anaphor can never bind two different players.
+/// calls THIS FUNCTION WITH THESE ARGUMENTS AND NOTHING ELSE (the reading is
+/// the leaf's own), so one anaphor can never bind two different players.
 ///
 /// # The one binding rule (implemented in `with_bound_attack_event`)
 ///
@@ -9437,60 +9437,24 @@ fn single_event_defender(
 /// of Seizing), while the record keeps the defending player recorded with the
 /// relation (CR 506.2 in a two-player game). A reference with no trigger source
 /// never consults the sub-step and is unchanged.
-pub(crate) fn defending_player_cr508_5(
-    state: &GameState,
-    asker_id: ObjectId,
-    trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
-) -> Option<PlayerId> {
-    attack_defender_cr508(
-        state,
-        asker_id,
-        trigger_source,
-        AttackRelationReading::Current,
-    )
-}
-
-/// CR 508.7a + CR 603.2: the player the triggering attack DECLARED the referent
-/// attacking creature as attacking — "that player"/"that opponent" after an
-/// attack-declaration trigger head ("Whenever a creature attacks one of your
-/// opponents, if that player is the monarch, …"). A creature whose attack was
-/// reselected (CR 508.7) "is still considered to have attacked the player or
-/// permanent as declared", so, unlike [`defending_player_cr508_5`] (CR 508.5,
-/// live), a reselection does not change this answer.
 ///
-/// Same precedence as [`defending_player_cr508_5`] with every live record
-/// removed: the referent's own entry in the bound attack event, else the single
-/// defending player of the event's attackers, else the latch, else the event's
-/// declared global defending player. It fails closed (`None`) with no bound
-/// event and no latch — it never falls back to live combat, which would read
-/// the reselected player.
-pub(crate) fn attacked_player_cr508_7a(
-    state: &GameState,
-    asker_id: ObjectId,
-    trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
-) -> Option<PlayerId> {
-    attack_defender_cr508(
-        state,
-        asker_id,
-        trigger_source,
-        AttackRelationReading::AsDeclared,
-    )
-}
-
-/// Which attack relation a player reference after an attack event reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AttackRelationReading {
-    /// CR 508.5: the defending player the creature IS attacking (live; a
-    /// reselection changes it), or had when it was removed from combat.
-    Current,
-    /// CR 508.7a: the player the creature was declared as attacking. A
-    /// reselection never changes it.
-    AsDeclared,
-}
-
-/// The shared CR 508 resolver behind [`defending_player_cr508_5`] and
-/// [`attacked_player_cr508_7a`]; `reading` selects the attack relation.
-fn attack_defender_cr508(
+/// # Readings
+///
+/// - [`AttackRelationReading::Current`] (CR 508.5) is the precedence above.
+/// - [`AttackRelationReading::AsDeclared`] (CR 508.7a + CR 603.2) is the player
+///   the triggering attack DECLARED the referent attacking creature as
+///   attacking — "that player"/"that opponent" after an attack-declaration
+///   trigger head ("Whenever a creature attacks one of your opponents, if that
+///   player is the monarch, …"). A creature whose attack was reselected
+///   (CR 508.7) "is still considered to have attacked the player or permanent
+///   chosen as it was declared", so a reselection does not change this answer.
+///   It is the same precedence with every live record removed: the referent's
+///   own entry in the bound attack event, else the single defending player of
+///   the event's attackers, else the latch, else the event's declared global
+///   defending player. It fails closed (`None`) with no bound event and no
+///   latch — it never falls back to live combat, which would read the
+///   reselected player.
+pub(crate) fn attack_defender_cr508(
     state: &GameState,
     asker_id: ObjectId,
     trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
@@ -9703,7 +9667,7 @@ fn attack_target_referent(
 /// attacking" (and "... that creature is attacking"), the sole door for the
 /// DealDamage recipient binding and `targeting::resolved_targets`.
 ///
-/// Kind-preserving, unlike [`defending_player_cr508_5`]'s CR 508.5 collapse: an
+/// Kind-preserving, unlike [`attack_defender_cr508`]'s CR 508.5 collapse: an
 /// attacked player is `TargetRef::Player`; an attacked planeswalker is that
 /// permanent (`TargetRef::Object`) while it is still a phased-in planeswalker on the
 /// battlefield (CR 506.4c, CR 510.1b: otherwise nothing is attacked); an attacked
@@ -10140,7 +10104,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // CR 508.5 defending-player anchor — `defending_player_cr508_5`
+    // CR 508.5 defending-player anchor — `attack_defender_cr508`
     // ---------------------------------------------------------------------
 
     /// Three-player state with a battlefield source. `source` is the asker.
@@ -10226,7 +10190,7 @@ mod tests {
         ));
 
         assert_eq!(
-            defending_player_cr508_5(&state, source, Some(&ctx)),
+            attack_defender_cr508(&state, source, Some(&ctx), AttackRelationReading::Current),
             Some(PlayerId(2)),
             "the referred-to attacker's defender wins over the source's own latch"
         );
@@ -10248,7 +10212,7 @@ mod tests {
         ));
 
         assert_eq!(
-            defending_player_cr508_5(&state, source, Some(&ctx)),
+            attack_defender_cr508(&state, source, Some(&ctx), AttackRelationReading::Current),
             Some(PlayerId(1))
         );
     }
@@ -10285,7 +10249,7 @@ mod tests {
             PlayerId(1),
         ));
         assert_eq!(
-            defending_player_cr508_5(&state, source, Some(&ctx)),
+            attack_defender_cr508(&state, source, Some(&ctx), AttackRelationReading::Current),
             Some(PlayerId(2)),
             "CR 508.5: the planeswalker's CONTROLLER is the defending player"
         );
@@ -10313,7 +10277,7 @@ mod tests {
             PlayerId(1),
         ));
         assert_eq!(
-            defending_player_cr508_5(&state, source, Some(&ctx)),
+            attack_defender_cr508(&state, source, Some(&ctx), AttackRelationReading::Current),
             Some(PlayerId(2)),
             "CR 310.9d: a battle's PROTECTOR is the defending player, not its controller"
         );
@@ -10353,7 +10317,7 @@ mod tests {
         });
 
         assert_eq!(
-            defending_player_cr508_5(&state, source, Some(&ctx)),
+            attack_defender_cr508(&state, source, Some(&ctx), AttackRelationReading::Current),
             Some(PlayerId(2)),
             "every attacker the event names is attacking P2, so P2 answers ahead of the asker's own latch"
         );
@@ -10383,7 +10347,7 @@ mod tests {
         });
 
         assert_eq!(
-            defending_player_cr508_5(&state, source, Some(&ctx)),
+            attack_defender_cr508(&state, source, Some(&ctx), AttackRelationReading::Current),
             Some(PlayerId(1)),
             "the asker's own CR 608.2h combat snapshot answers a batch it is not in"
         );
@@ -11213,7 +11177,7 @@ mod tests {
         state.current_trigger_event = None;
 
         assert_eq!(
-            defending_player_cr508_5(&state, source, Some(&ctx)),
+            attack_defender_cr508(&state, source, Some(&ctx), AttackRelationReading::Current),
             Some(PlayerId(2))
         );
     }
@@ -11236,7 +11200,7 @@ mod tests {
 
         // The asker is not in combat at all → genuinely unanswerable.
         assert_eq!(
-            defending_player_cr508_5(&state, source, None),
+            attack_defender_cr508(&state, source, None, AttackRelationReading::Current),
             None,
             "an unrelated combat must not answer a reference bound to nothing"
         );
@@ -11244,7 +11208,7 @@ mod tests {
         // Reach-guard: once the asker IS a live attacker, step 5 answers.
         declare_combat(&mut state, &[(source, PlayerId(1))]);
         assert_eq!(
-            defending_player_cr508_5(&state, source, None),
+            attack_defender_cr508(&state, source, None, AttackRelationReading::Current),
             Some(PlayerId(1))
         );
     }
@@ -11393,11 +11357,16 @@ mod tests {
         event: &GameEvent,
     ) -> [Option<PlayerId>; 4] {
         state.current_trigger_event = Some(event.clone());
-        let own = defending_player_cr508_5(state, source, Some(ctx));
+        let own = attack_defender_cr508(state, source, Some(ctx), AttackRelationReading::Current);
 
         let observer = spawn(state, 70, "Observer");
         let observer_ctx = latch_context(state, observer);
-        let observed = defending_player_cr508_5(state, observer, Some(&observer_ctx));
+        let observed = attack_defender_cr508(
+            state,
+            observer,
+            Some(&observer_ctx),
+            AttackRelationReading::Current,
+        );
 
         let a = spawn(state, 71, "Raw batch A");
         let b = spawn(state, 72, "Raw batch B");
@@ -11410,10 +11379,12 @@ mod tests {
             ],
             declaration_records: Vec::new(),
         });
-        let raw_batch = defending_player_cr508_5(state, source, Some(ctx));
+        let raw_batch =
+            attack_defender_cr508(state, source, Some(ctx), AttackRelationReading::Current);
 
         state.current_trigger_event = None;
-        let unbound = defending_player_cr508_5(state, source, Some(ctx));
+        let unbound =
+            attack_defender_cr508(state, source, Some(ctx), AttackRelationReading::Current);
         [own, observed, raw_batch, unbound]
     }
 
@@ -11580,7 +11551,7 @@ mod tests {
             "reach guard: the live board lists the rewritten attacker"
         );
         assert_eq!(
-            defending_player_cr508_5(&state, source, None),
+            attack_defender_cr508(&state, source, None, AttackRelationReading::Current),
             resolve_defending_player(&state, source),
             "no trigger source, live"
         );
@@ -11599,7 +11570,7 @@ mod tests {
             "reach guard: today's tier 5 answers nothing for an unlisted asker"
         );
         assert_eq!(
-            defending_player_cr508_5(&state, source, None),
+            attack_defender_cr508(&state, source, None, AttackRelationReading::Current),
             resolve_defending_player(&state, source),
             "no trigger source, removed in place: the gate keeps base's answer"
         );
@@ -11618,7 +11589,7 @@ mod tests {
             p2
         );
         assert_eq!(
-            defending_player_cr508_5(&state, source, None),
+            attack_defender_cr508(&state, source, None, AttackRelationReading::Current),
             resolve_defending_player(&state, source),
             "no trigger source, departed"
         );
@@ -11692,7 +11663,7 @@ mod tests {
             let info = state.combat.as_ref().unwrap().attackers[0].clone();
             assert!(active_attack_target(&state, &info).is_some());
             assert_eq!(
-                defending_player_cr508_5(&state, source, Some(&ctx)),
+                attack_defender_cr508(&state, source, Some(&ctx), AttackRelationReading::Current),
                 Some(PlayerId(1))
             );
             let pin = state.combat.as_ref().unwrap().attacked_permanents[&source];
@@ -11707,7 +11678,7 @@ mod tests {
         let (mut state, source, walker, ctx, _) = retired_board(PlayerId(1));
         state.objects.get_mut(&walker).unwrap().controller = PlayerId(0);
         assert_eq!(
-            defending_player_cr508_5(&state, source, Some(&ctx)),
+            attack_defender_cr508(&state, source, Some(&ctx), AttackRelationReading::Current),
             Some(PlayerId(1)),
             "D1: the recorded defender, not the walker's new controller"
         );
@@ -11725,13 +11696,13 @@ mod tests {
             Some(PlayerId(1))
         );
         assert_eq!(
-            defending_player_cr508_5(&state, source, Some(&ctx)),
+            attack_defender_cr508(&state, source, Some(&ctx), AttackRelationReading::Current),
             Some(PlayerId(1)),
             "D3: the departure row's recorded defender"
         );
         state.current_trigger_event = None;
         assert_eq!(
-            defending_player_cr508_5(&state, source, Some(&ctx)),
+            attack_defender_cr508(&state, source, Some(&ctx), AttackRelationReading::Current),
             Some(PlayerId(1)),
             "D3 unbound"
         );
@@ -11740,7 +11711,7 @@ mod tests {
         let (mut state, source, walker, ctx, _) = retired_board(PlayerId(0));
         crate::game::zones::move_to_zone(&mut state, walker, Zone::Graveyard, &mut Vec::new());
         assert_eq!(
-            defending_player_cr508_5(&state, source, Some(&ctx)),
+            attack_defender_cr508(&state, source, Some(&ctx), AttackRelationReading::Current),
             Some(PlayerId(1)),
             "D2: the recorded defender, not the departed walker's owner"
         );
@@ -14714,7 +14685,7 @@ mod tests {
     /// on this exact shape, and asserting it at the CONSUMER is what stops them from
     /// silently passing against a hand-made static if the parse ever regresses.
     ///
-    /// Reverting the classifier, the normalization, the `AttackedPlayer` anchoring
+    /// Reverting the classifier, the normalization, the `DefendingPlayer { reading: AsDeclared }` anchoring
     /// map, or production (b)'s widened scan each fires a named assertion here.
     #[test]
     fn weathered_sentinels_line_parses_to_anchored_can_attack_with_defender() {

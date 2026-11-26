@@ -54,6 +54,7 @@ use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_may_look_at_face_down_filter,
     parse_quoted_ability_modifications,
 };
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{
     is_oneshot_target_source_prevent_shape, AbilityCondition, AbilityCost, AbilityDefinition,
     AbilityKind, AttachCardinality, AttachSelection, AttachmentReferent, BounceSelection,
@@ -3046,8 +3047,7 @@ pub(crate) fn return_all_to_zone_effect(
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -5236,7 +5236,9 @@ fn parse_hand_possessive_target(input: &str) -> nom::IResult<&str, TargetFilter,
         value(TargetFilter::TriggeringPlayer, tag("that player's hand")),
         value(TargetFilter::TriggeringPlayer, tag("their hand")),
         value(
-            TargetFilter::DefendingPlayer,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             tag("defending player's hand"),
         ),
     ))
@@ -15141,8 +15143,7 @@ fn is_player_axis_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayer
+        | TargetFilter::DefendingPlayer { .. }
         // CR 508.1b + CR 601.2c: "the attacked player or planeswalker" can name
         // a player, so it is not a plain object host filter — fail closed here
         // rather than admitting it through the object default.
@@ -32635,7 +32636,9 @@ mod tests {
             };
             assert!(
                 target.properties.contains(&FilterProp::Owned {
-                    controller: ControllerRef::DefendingPlayer,
+                    controller: ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current
+                    },
                 }),
                 "{name}: target must be owned by the defending player: {target:?}"
             );
@@ -34462,8 +34465,12 @@ mod loyalty_symbol_effect_tests {
             TargetFilter::EventTargetController,
             TargetFilter::ParentTargetController,
             TargetFilter::ParentTargetOwner,
-            TargetFilter::DefendingPlayer,
-            TargetFilter::AttackedPlayer,
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            TargetFilter::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
             TargetFilter::Owner,
             TargetFilter::AllPlayers,
             TargetFilter::Not {

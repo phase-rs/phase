@@ -7,6 +7,7 @@ use crate::parser::oracle_ir::doc::{
 };
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, BlockPairDirection, ChooseOneOfKind,
@@ -24601,7 +24602,9 @@ fn mbaku_attack_trigger_keeps_monarch_intervening_if_bound_to_attacked_player() 
     assert_eq!(
         attack.condition,
         Some(TriggerCondition::IsMonarch {
-            player: PlayerScope::AttackedPlayer,
+            player: PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared
+            },
         }),
         "intervening-if must bind the attacked player (CR 508.7a), got {:?}",
         attack.condition
@@ -32685,22 +32688,22 @@ fn target_filter_has_attacking_defender(
 }
 
 /// The "attacking that player" anaphor in either form: the context-free
-/// `DefendingPlayer` placeholder, or the `AttackedPlayer` an attack-declaration
+/// `DefendingPlayer` placeholder, or the `DefendingPlayer { reading: AsDeclared }` an attack-declaration
 /// head rebinds it to (CR 508.7a). Matching both keeps the exclusion negatives
 /// discriminating for rebound and non-rebound heads alike.
 fn target_filter_has_defending_player_anaphor(filter: &TargetFilter) -> bool {
     target_filter_has_attacking_defender(filter, &|defender| {
-        matches!(
-            defender,
-            ControllerRef::DefendingPlayer | ControllerRef::AttackedPlayer
-        )
+        matches!(defender, ControllerRef::DefendingPlayer { .. })
     })
 }
 
 /// The anaphor as rebound by an attack-declaration head (CR 508.7a), exactly.
 fn target_filter_has_attacked_player_anaphor(filter: &TargetFilter) -> bool {
     target_filter_has_attacking_defender(filter, &|defender| {
-        *defender == ControllerRef::AttackedPlayer
+        *defender
+            == ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            }
     })
 }
 
@@ -32757,7 +32760,9 @@ fn namor_pump_scopes_to_other_attackers_of_the_attacked_player() {
     );
     assert!(
         typed.properties.contains(&FilterProp::Attacking {
-            defender: Some(ControllerRef::AttackedPlayer),
+            defender: Some(ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared
+            }),
         }),
         "pump filter must carry the CR 508.7a attacked-player anaphor, got {:?}",
         typed.properties

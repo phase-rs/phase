@@ -21,6 +21,7 @@ use crate::parser::oracle_ir::diagnostic::{
     ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan, SpanPrecision,
 };
 use crate::parser::oracle_util::normalize_card_name_refs;
+use crate::types::ability::AttackRelationReading;
 use crate::types::ability::{filter_contains_filter_prop, CombatDamageScope, TurnWindow};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
@@ -850,8 +851,12 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::EventTargetController => {
             "controller of the object targeted by the triggering event".into()
         }
-        TargetFilter::DefendingPlayer => "defending player".into(),
-        TargetFilter::AttackedPlayer => "the attacked player".into(),
+        TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        } => "defending player".into(),
+        TargetFilter::DefendingPlayer {
+            reading: AttackRelationReading::AsDeclared,
+        } => "the attacked player".into(),
         TargetFilter::AttackedPlayerOrPlaneswalker => {
             "the player or planeswalker it's attacking".into()
         }
@@ -956,13 +961,13 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 // below would name a DIFFERENT concept — `ControllerRef::
                 // ScopedPlayer` is the resolution-iteration player, not the
                 // player this creature is attacking.
-                Some(ControllerRef::DefendingPlayer) => {
-                    parts.push("attacking defending player".into())
-                }
+                Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                }) => parts.push("attacking defending player".into()),
                 // CR 508.7a: the player the triggering attack declared.
-                Some(ControllerRef::AttackedPlayer) => {
-                    parts.push("attacking the attacked player".into())
-                }
+                Some(ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::AsDeclared,
+                }) => parts.push("attacking the attacked player".into()),
                 Some(_) => parts.push("attacking scoped player".into()),
             },
             FilterProp::Blocking => parts.push("blocking".into()),
@@ -1203,8 +1208,12 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::ParentTargetController => "parent target's",
                     ControllerRef::EventTargetController => "the damaged object's controller's",
                     ControllerRef::ParentTargetOwner => "parent target owner's",
-                    ControllerRef::DefendingPlayer => "defending player's",
-                    ControllerRef::AttackedPlayer => "the attacked player's",
+                    ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::Current,
+                    } => "defending player's",
+                    ControllerRef::DefendingPlayer {
+                        reading: AttackRelationReading::AsDeclared,
+                    } => "the attacked player's",
                     ControllerRef::SourceChosenPlayer => "the chosen player's",
                     ControllerRef::ChosenPlayer { .. } => "chosen player's",
                     ControllerRef::TriggeringPlayer => "triggering player's",
@@ -1402,8 +1411,12 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     "controller of the object the triggering event targeted"
                 }
                 ControllerRef::ParentTargetOwner => "parent target's owner",
-                ControllerRef::DefendingPlayer => "defending player",
-                ControllerRef::AttackedPlayer => "the attacked player",
+                ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                } => "defending player",
+                ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::AsDeclared,
+                } => "the attacked player",
                 ControllerRef::SourceChosenPlayer => "the chosen player",
                 ControllerRef::ChosenPlayer { .. } => "chosen player",
                 ControllerRef::TriggeringPlayer => "triggering player",
@@ -1484,8 +1497,12 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
             "the controller of the object the triggering event targeted controls"
         }
         ControllerRef::ParentTargetOwner => "parent target's owner controls",
-        ControllerRef::DefendingPlayer => "defending player controls",
-        ControllerRef::AttackedPlayer => "the attacked player controls",
+        ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        } => "defending player controls",
+        ControllerRef::DefendingPlayer {
+            reading: AttackRelationReading::AsDeclared,
+        } => "the attacked player controls",
         ControllerRef::SourceChosenPlayer => "the chosen player controls",
         ControllerRef::ChosenPlayer { .. } => "chosen player controls",
         ControllerRef::TriggeringPlayer => "triggering player controls",
@@ -1628,8 +1645,12 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::ScopedPlayer => "scoped player".to_string(),
         PlayerScope::Target => "target player".to_string(),
         PlayerScope::RecipientController => "recipient's controller".to_string(),
-        PlayerScope::DefendingPlayer => "defending player".to_string(),
-        PlayerScope::AttackedPlayer => "the attacked player".to_string(),
+        PlayerScope::DefendingPlayer {
+            reading: AttackRelationReading::Current,
+        } => "defending player".to_string(),
+        PlayerScope::DefendingPlayer {
+            reading: AttackRelationReading::AsDeclared,
+        } => "the attacked player".to_string(),
         PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
         PlayerScope::AnyTurn => "any turn".to_string(),
         // CR 109.4 + CR 611.2: display label for a snapshotted duration scope.
@@ -1668,8 +1689,7 @@ fn fmt_player_is_poisoned(player: &PlayerScope) -> String {
             "that player is poisoned".into()
         }
         PlayerScope::Target
-        | PlayerScope::DefendingPlayer
-        | PlayerScope::AttackedPlayer
+        | PlayerScope::DefendingPlayer { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. }
@@ -5673,8 +5693,12 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
                 ControllerRef::ParentTargetController => "the parent target's controller",
                 ControllerRef::EventTargetController => "the event target's controller",
                 ControllerRef::ParentTargetOwner => "the parent target's owner",
-                ControllerRef::DefendingPlayer => "the defending player",
-                ControllerRef::AttackedPlayer => "the attacked player",
+                ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::Current,
+                } => "the defending player",
+                ControllerRef::DefendingPlayer {
+                    reading: AttackRelationReading::AsDeclared,
+                } => "the attacked player",
                 ControllerRef::ChosenPlayer { .. } => "the chosen player",
                 ControllerRef::DeclaredPlayer { .. } => "the declared player",
                 ControllerRef::SourceChosenPlayer => "the source-chosen player",
@@ -13454,8 +13478,7 @@ fn pt_cost_qualifier_covered(
             | TargetFilter::PostReplacementDamageSource
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
-            | TargetFilter::DefendingPlayer
-            | TargetFilter::AttackedPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }
@@ -18824,7 +18847,9 @@ mod tests {
         let unnamed = token_detail(&token(TokenAttackDestination::ControllerChooses));
         assert!(!unnamed.contains("attacking"), "{unnamed}");
         let named = token_detail(&token(TokenAttackDestination::Player {
-            player: ControllerRef::DefendingPlayer,
+            player: ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             scope: NamedDefenderScope::Player,
         }));
         assert!(named.contains("attacking Player"), "{named}");
@@ -18863,7 +18888,9 @@ mod tests {
             "{unnamed:?}"
         );
         let named = effect_details(&copy_token(TokenAttackDestination::Player {
-            player: ControllerRef::DefendingPlayer,
+            player: ControllerRef::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
             scope: NamedDefenderScope::Player,
         }));
         assert!(
@@ -28211,8 +28238,12 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         }
         for scope in [
             PlayerScope::ScopedPlayer,
-            PlayerScope::DefendingPlayer,
-            PlayerScope::AttackedPlayer,
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::Current,
+            },
+            PlayerScope::DefendingPlayer {
+                reading: AttackRelationReading::AsDeclared,
+            },
             PlayerScope::Target,
             PlayerScope::Opponent {
                 aggregate: AggregateFunction::Max,
