@@ -2221,6 +2221,8 @@ async function openNativeOwner(
     if (owner.role === "native") owner.capability = hold;
     // Publishing over a predecessor's native pointer removes the record it named.
     await publishActiveNativeDraft(pointer);
+    // A successor may have started while that removal was pending.
+    if (!isCurrentOwner()) return { status: "superseded" };
     return { status: "opened" };
   } catch (error) {
     if (!isCurrentOwner()) {
@@ -2909,7 +2911,8 @@ export const useMultiplayerDraftStore = create<
       }
 
       // The handoff: retire the installed owner, install this one, deliver
-      // what it buffered, publish its pointer. It contains no await.
+      // what it buffered, publish its pointer. It contains no await; after it,
+      // the resume awaits only the removal of the record the replaced pointer named.
       stopAbandonListeners();
       stopBuffering();
       settleProvisional(provisional);

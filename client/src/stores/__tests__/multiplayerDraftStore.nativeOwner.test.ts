@@ -155,6 +155,13 @@ const storage = vi.hoisted(() => ({
   loadGate: null as Promise<void> | null,
   failLoad: false,
   clearGate: null as Promise<void> | null,
+  /**
+   * One-shot: the next pointer write's record removal waits in IndexedDB until
+   * this settles, behind a read-write transaction opened just before it.
+   */
+  removalGate: null as Promise<void> | null,
+  /** The removal promise that gated pointer write returned. */
+  heldRemoval: null as Promise<void> | null,
   /** The capability name of the last save that entered. */
   lastSavedId: null as string | null,
 }));
@@ -179,7 +186,27 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
     },
     publishActiveNativeDraft: (...args: Parameters<typeof actual.publishActiveNativeDraft>) => {
       storage.log.push(`pointerWrite:${args[0].capabilityId}`);
-      return actual.publishActiveNativeDraft(...args);
+      const gate = storage.removalGate;
+      storage.removalGate = null;
+      if (!gate) return actual.publishActiveNativeDraft(...args);
+      let open = true;
+      void gate.then(() => {
+        open = false;
+      });
+      // Opened first, this transaction keeps itself alive with reads until the
+      // gate settles; the removal's read-write transaction runs only after it.
+      void actual.getDraftStore()("readwrite", (objects) => new Promise<void>((resolve) => {
+        const keepAlive = () => {
+          if (!open) {
+            resolve();
+            return;
+          }
+          objects.get("keep-alive").onsuccess = keepAlive;
+        };
+        keepAlive();
+      }));
+      storage.heldRemoval = actual.publishActiveNativeDraft(...args);
+      return storage.heldRemoval;
     },
     clearNativeDraftCapability: async (...args: Parameters<typeof actual.clearNativeDraftCapability>) => {
       storage.log.push("clear:enter");
@@ -477,6 +504,8 @@ async function resetHarness(): Promise<void> {
   storage.loadGate = null;
   storage.failLoad = false;
   storage.clearGate = null;
+  storage.removalGate = null;
+  storage.heldRemoval = null;
   storage.lastSavedId = null;
   guests.instances = [];
   guests.nextLeave = [];
@@ -1184,6 +1213,49 @@ describe("a native seat's private record once no pointer leads to it", () => {
     await expect(storedRecord(successor)).resolves.toMatchObject({ capabilityId: successor, playerToken: "tok-host" });
     await expect(storedRecord("cap-other")).resolves.toEqual(bystander);
   });
+
+  it.each(["overtaken by a successor", "not overtaken"] as const)(
+    "a native create settles \"opened\" only while its owner is installed once that removal settles: %s",
+    async (leg) => {
+      const predecessor = await joinNative();
+      const removalGate = held();
+      storage.removalGate = removalGate.promise;
+      const creating = store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings });
+      const created = track(creating);
+      await vi.waitFor(() => expect(storage.heldRemoval).not.toBeNull());
+      const removal = track(storage.heldRemoval!);
+      const capabilityId = storage.lastSavedId!;
+      await flush();
+      // Reach: the create's pointer is written, and the removal of the record the
+      // replaced pointer named is still pending, so the create has not settled.
+      expect(storedPointer()).toMatchObject({ transport: "native", capabilityId, participant: "host" });
+      expect(removal.state()).toBe("pending");
+      expect(created.state()).toBe("pending");
+
+      if (leg === "overtaken by a successor") {
+        const succeeding = store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings });
+        // Reach: the successor's first step retired the create's owner while that removal was pending.
+        expect(native.instances[1]!.disposeCount).toBe(1);
+        expect(removal.state()).toBe("pending");
+        removalGate.resolve();
+        await expect(creating).resolves.toEqual({ status: "superseded" });
+        await expect(succeeding).resolves.toEqual({ status: "opened" });
+        expect(native.instances).toHaveLength(3);
+        const successor = storedPointer()?.capabilityId as string;
+        expect(successor).not.toBe(capabilityId);
+        await expect(storedRecord(successor)).resolves.toMatchObject({ capabilityId: successor });
+      } else {
+        removalGate.resolve();
+        await expect(creating).resolves.toEqual({ status: "opened" });
+        expect(native.instances).toHaveLength(2);
+        expect(native.instances[1]!.disposeCount).toBe(0);
+        expect(storedPointer()).toMatchObject({ capabilityId });
+      }
+      expect(removal.state()).toBe("resolved");
+      expect(store()).toMatchObject({ role: "host", transport: "native", phase: "lobby" });
+      await expect(storedRecord(predecessor)).resolves.toBeUndefined();
+    },
+  );
 
   it("a P2P guest's committed pointer removes the native record the pointer it replaced named", async () => {
     const predecessor = await joinNative();
