@@ -24,6 +24,7 @@ pub fn finalize_rules_state(state: &mut GameState) {
     normalize_legacy_attach_waiting_for(state);
     sync_priority_player_from_waiting_for(state);
     flush_layers(state);
+    super::engine::refresh_equip_target_offer(state);
 }
 
 /// Finalize display-only cached state before exposing state to consumers.

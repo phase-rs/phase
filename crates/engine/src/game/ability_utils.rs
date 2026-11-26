@@ -13910,8 +13910,12 @@ mod tests {
                     source,
                     StackEntryKind::KeywordAction {
                         action: KeywordAction::Equip {
-                            equipment_id: source,
-                            target_creature_id: other,
+                            equipment: crate::types::identifiers::ObjectIncarnationRef::of(
+                                source, 0,
+                            ),
+                            target_creature: crate::types::identifiers::ObjectIncarnationRef::of(
+                                other, 0,
+                            ),
                         },
                     },
                 ),

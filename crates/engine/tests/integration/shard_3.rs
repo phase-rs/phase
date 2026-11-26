@@ -134,6 +134,7 @@ mod entering_transformed_is_not_a_transform;
 mod enters_tapped_this_turn;
 mod enters_with_dynamic_leading_amount_per_each;
 mod ephemerate_token_no_entry;
+mod equip_keyword_target_legality;
 mod equipment_attach_event_context;
 mod equipment_etb_attach_parent_target;
 mod erratic_explosion;

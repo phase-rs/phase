@@ -30811,6 +30811,11 @@ pub enum VoteVisibility {
 }
 
 impl TargetFilter {
+    /// CR 702.6a: the target of ordinary equip is a creature you control.
+    pub fn equip_target() -> Self {
+        Self::Typed(TypedFilter::creature().controller(ControllerRef::You))
+    }
+
     /// CR 702.62b: exile, suspend, and at least one time counter on this card.
     pub fn suspended_card(owner: Option<ControllerRef>) -> TargetFilter {
         let mut properties = vec![
