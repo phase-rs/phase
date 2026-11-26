@@ -499,7 +499,7 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     parse_token_description_with_context(text, &ParseContext::default())
 }
 
-/// CR 111.3/111.4: Parse one characteristic-only modal token bullet into
+/// CR 111.3: Parse one characteristic-only modal token bullet into
 /// the same typed token data used by ordinary create-token instructions. The
 /// modal header supplies the shared colors; the bullet supplies P/T and the
 /// remaining token characteristics.
@@ -594,6 +594,7 @@ fn parse_characteristic_only_token_mode(
         attach_to: None,
         static_abilities,
         enters_attacking: false,
+        enters_blocking: None,
         attack_destination: TokenAttackDestination::ControllerChooses,
     })
 }
