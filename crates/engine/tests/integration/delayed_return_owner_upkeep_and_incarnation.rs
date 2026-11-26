@@ -940,7 +940,7 @@ fn broodmoth_trigger_stays_on_stack_after_cremate_exiles_the_merged_host() {
     ));
     assert_eq!(zone(&runner, host), Zone::Exile);
 
-    // The merged-component return is tracked in #397.
+    // The merged-component return is tracked upstream in phase-rs/phase#11378.
 }
 
 #[test]

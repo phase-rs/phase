@@ -284,6 +284,7 @@ const END_BLAZE_EPIPHANY_WATCH: &str = concat!(
 
 fn exercise_watchers_with_existing_payload_gaps(live_card: Option<&str>) {
     use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::ability::CastingPermission;
     use engine::types::counter::CounterType;
     use engine::types::mana::{ManaCost, ManaCostShard};
 
@@ -319,7 +320,12 @@ fn exercise_watchers_with_existing_payload_gaps(live_card: Option<&str>) {
         let recipient = scenario.add_creature(P0, "Counter recipient", 2, 2).id();
         scenario.add_creature_to_graveyard(P0, "Caster's graveyard card", 1, 1);
         scenario.add_creature_to_graveyard(P1, "Owner's graveyard card", 1, 1);
-        scenario.add_card_to_library_top(P0, "Top card");
+        let top = scenario.add_card_to_library_top(P0, "Top card");
+        let unrelated_exile = (name == "End-Blaze Epiphany").then(|| {
+            scenario
+                .add_land_to_exile(P0, "Previously exiled land")
+                .id()
+        });
         let lesser = (name == "Printed search watcher").then(|| {
             let db = engine::database::card_db::CardDatabase::from_integration_fixture_typing_faces_on_read()
                 .expect("integration card fixture must load");
@@ -373,8 +379,9 @@ fn exercise_watchers_with_existing_payload_gaps(live_card: Option<&str>) {
         resolve_watched_death(&mut runner, removal, victim);
         assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
         if !late {
-            // Payload corrections are tracked in #401. Drive any choices that
-            // arise so the test can observe the watcher's stack entry resolving.
+            // Other payload gaps are tracked in confirmed-misparses.toml:
+            // "heroic sacrifice" / trigger_wrong, "reincarnation" / wrong_player,
+            // and "rushed rebirth" / wrong_object.
             if matches!(
                 runner.state().waiting_for,
                 WaitingFor::TriggerTargetSelection { .. }
@@ -391,22 +398,56 @@ fn exercise_watchers_with_existing_payload_gaps(live_card: Option<&str>) {
             assert_eq!(trigger.source_id, spell);
             let firing = trigger.id;
             let mut resolutions = 0;
+            let mut exiled = Vec::new();
+            let mut chose_exiled_card = false;
             for _ in 0..8 {
                 let action = match &runner.state().waiting_for {
                     WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
                     WaitingFor::Priority { .. } => GameAction::PassPriority,
-                    WaitingFor::SearchChoice { cards, .. } => GameAction::SelectCards {
-                        cards: lesser.filter(|id| cards.contains(id)).into_iter().collect(),
-                    },
+                    WaitingFor::SearchChoice { cards, .. } if unrelated_exile.is_none() => {
+                        GameAction::SelectCards {
+                            cards: lesser.filter(|id| cards.contains(id)).into_iter().collect(),
+                        }
+                    }
+                    WaitingFor::ChooseFromZoneChoice {
+                        player: P0, cards, ..
+                    } if unrelated_exile.is_some() => {
+                        assert!(!chose_exiled_card, "{name}: expected only one exile choice");
+                        // CR 608.2h: The creature's last known power includes its +1/+1 counter.
+                        assert_eq!(
+                            exiled.len(),
+                            3,
+                            "use the watched creature's departure power"
+                        );
+                        assert!(exiled.contains(&top));
+                        assert_eq!(cards.len(), exiled.len());
+                        assert!(exiled.iter().all(|id| cards.contains(id)));
+                        chose_exiled_card = true;
+                        GameAction::SelectCards { cards: vec![top] }
+                    }
                     WaitingFor::EffectZoneChoice { cards, .. }
-                    | WaitingFor::ChooseFromZoneChoice { cards, .. } => GameAction::SelectCards {
-                        cards: vec![*cards.first().expect("a legal payload choice")],
-                    },
+                    | WaitingFor::ChooseFromZoneChoice { cards, .. }
+                        if unrelated_exile.is_none() =>
+                    {
+                        GameAction::SelectCards {
+                            cards: vec![*cards.first().expect("a legal payload choice")],
+                        }
+                    }
                     other => panic!("{name}: unexpected watcher resolution prompt {other:?}"),
                 };
-                resolutions += runner
-                    .act(action)
-                    .expect("resolve watcher payload")
+                let result = runner.act(action).expect("resolve watcher payload");
+                if unrelated_exile.is_some() {
+                    exiled.extend(result.events.iter().filter_map(|event| match event {
+                        GameEvent::ZoneChanged {
+                            object_id,
+                            from: Some(Zone::Library),
+                            to: Zone::Exile,
+                            ..
+                        } => Some(*object_id),
+                        _ => None,
+                    }));
+                }
+                resolutions += result
                     .events
                     .iter()
                     .filter(|event| {
@@ -420,6 +461,27 @@ fn exercise_watchers_with_existing_payload_gaps(live_card: Option<&str>) {
                 resolutions, 1,
                 "{name}: watcher stack entry must resolve once"
             );
+            if let Some(unrelated_exile) = unrelated_exile {
+                assert!(chose_exiled_card, "{name}: expected P0's exile choice");
+                assert_eq!(
+                    exiled.len(),
+                    3,
+                    "{name}: expected exactly three cards exiled"
+                );
+                for id in exiled.into_iter().chain([unrelated_exile]) {
+                    let can_play =
+                        runner.state().objects[&id]
+                            .casting_permissions
+                            .iter()
+                            .any(|permission| {
+                                matches!(
+                                    permission,
+                                    CastingPermission::PlayFromExile { granted_to: P0, .. }
+                                )
+                            });
+                    assert_eq!(can_play, id == top, "{name}: play permission for {id:?}");
+                }
+            }
         }
         assert!(runner.state().stack.is_empty());
         assert!(matches!(
@@ -487,7 +549,8 @@ fn exercise_initiate_of_blood_watch(late: bool) {
     if late {
         assert!(!runner.state().objects[&source].flipped);
     } else {
-        // The delayed flip's source operand is tracked in #401.
+        // The delayed flip's source operand is tracked in
+        // confirmed-misparses.toml: "initiate of blood" / wrong_object.
         resolve_single_death_watcher(&mut runner, source);
     }
     assert!(runner.state().stack.is_empty());
@@ -641,7 +704,7 @@ fn burn_away_fires_its_death_watcher_this_turn() {
     ));
     resolve_watched_death(&mut runner, removal, victim);
     assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
-    // The graveyard exile payload is tracked in #401.
+    // The graveyard exile payload is tracked in confirmed-misparses.toml: "burn away" / wrong_object.
     resolve_single_death_watcher(&mut runner, spell);
     assert!(runner.state().stack.is_empty());
     assert!(matches!(
