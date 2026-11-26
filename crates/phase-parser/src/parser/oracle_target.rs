@@ -9,12 +9,12 @@ use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AggregateFunction, AttachmentKind, AttachmentReferent, BlockPairDirection, CardTypeSetSource,
-    ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
-    ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp,
-    LinkedExileReturn, NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource,
-    PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
-    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    AggregateFunction, AttachmentKind, AttachmentReferent, AttackDefenderMatch, BlockPairDirection,
+    CardTypeSetSource, ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject,
+    Comparator, ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter,
+    FilterProp, LinkedExileReturn, NameStickerSet, ObjectProperty, ObjectScope, Parity,
+    ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
     TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
@@ -3418,7 +3418,8 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, &'a str) {
-    let (mut filter, rest) = parse_type_phrase_folding_unbound(text, ctx);
+    let (mut filter, rest) =
+        parse_type_phrase_folding_unbound(text, ctx, AttackDefenderMatch::DefendingSide);
     exclude_parent_target_from_its_controllers_others(&mut filter);
     (filter, rest)
 }
@@ -3470,9 +3471,31 @@ fn rewrite_other_as_parent_target_exclusion(
     }
 }
 
+/// A targeted creature attacking the caster directly (CR 508.1b).
+pub(crate) fn parse_direct_attacker_target(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (phrase, _) = tag("target ").parse(input)?;
+    let (filter, rest) = parse_type_phrase_folding_unbound(
+        phrase,
+        &mut ParseContext::default(),
+        AttackDefenderMatch::DirectPlayer,
+    );
+    if matches!(&filter, TargetFilter::Typed(typed)
+    if typed.type_filters == [TypeFilter::Creature]
+        && typed.properties == [FilterProp::Attacking {
+            defender: Some(ControllerRef::You),
+            scope: AttackDefenderMatch::DirectPlayer,
+        }])
+    {
+        Ok((rest, filter))
+    } else {
+        Err(oracle_err(input))
+    }
+}
+
 fn parse_type_phrase_folding_unbound<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
+    attack_defender_scope: AttackDefenderMatch,
 ) -> (TargetFilter, &'a str) {
     let lower = text.to_lowercase();
     let mut pos = 0;
@@ -4750,7 +4773,9 @@ fn parse_type_phrase_folding_unbound<'a>(
         }
     }
 
-    if let Some((prop, consumed)) = parse_attacking_defender_suffix(&lower[pos..]) {
+    if let Some((prop, consumed)) =
+        parse_attacking_defender_suffix(&lower[pos..], attack_defender_scope)
+    {
         properties.push(prop);
         pos += consumed;
     }
@@ -7949,7 +7974,10 @@ fn parse_combat_relation_suffix(text: &str, ctx: &ParseContext) -> Option<(Filte
 /// postnominal "creature attacking your opponents"; both resolve to the same
 /// `Attacking { defender }` property, so the intro is stripped here rather than
 /// forking a second attacking grammar in the `that's`-clause path.
-fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
+fn parse_attacking_defender_suffix(
+    text: &str,
+    scope: AttackDefenderMatch,
+) -> Option<(FilterProp, usize)> {
     let trimmed_outer = text.trim_start();
     let trimmed = opt(alt((
         tag::<_, _, OracleError<'_>>("that's "),
@@ -7976,24 +8004,37 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
 
     // Each row is a printed defender head, then the controller phrase that must
     // follow it, if any (a marker: the row fixes the defender either way).
-    let rows: [(&str, Option<&'static [ControllerPhrase]>, ControllerRef); 6] = [
+    let rows: [(
+        &str,
+        Option<&'static [ControllerPhrase]>,
+        ControllerRef,
+        AttackDefenderMatch,
+    ); 6] = [
         (
             "attacking you or a planeswalker you control",
             None,
             ControllerRef::You,
+            AttackDefenderMatch::DefendingSide,
         ),
         (
             "attacking you and/or planeswalkers you control",
             None,
             ControllerRef::You,
+            AttackDefenderMatch::DefendingSide,
         ),
-        ("attacking you", None, ControllerRef::You),
+        ("attacking you", None, ControllerRef::You, scope),
         (
             "attacking your opponents and/or planeswalkers",
             Some(&[ControllerPhrase::THEY_CONTROL]),
             ControllerRef::Opponent,
+            AttackDefenderMatch::DefendingSide,
         ),
-        ("attacking your opponents", None, ControllerRef::Opponent),
+        (
+            "attacking your opponents",
+            None,
+            ControllerRef::Opponent,
+            scope,
+        ),
         // CR 508.1b: "attacking one of your opponents" — in a multiplayer
         // attack-multiple-players game each attacker is assigned one defending
         // player; "one of your opponents" scopes the defender to any of the
@@ -8004,9 +8045,10 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
             "attacking one of your opponents",
             None,
             ControllerRef::Opponent,
+            scope,
         ),
     ];
-    for (head, controller, defender) in rows {
+    for (head, controller, defender, scope) in rows {
         let matched = tag::<_, _, OracleError<'_>>(head)
             .parse(trimmed)
             .and_then(|(rest, _)| match controller {
@@ -8031,10 +8073,14 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
                 continue;
             }
             match rest.chars().next() {
-                None | Some('.') | Some(',') | Some(' ') if rest_trim.is_empty() => {
+                None | Some('.') | Some(',') | Some(' ')
+                    if rest_trim.is_empty()
+                        || (scope == AttackDefenderMatch::DirectPlayer
+                            && matches!(rest_trim.chars().next(), Some('.' | ','))) =>
+                {
                     return Some((
                         FilterProp::Attacking {
-                            scope: Default::default(),
+                            scope,
                             defender: Some(defender),
                         },
                         text.len() - rest.len(),
@@ -13194,7 +13240,7 @@ mod tests {
     fn attacking_defender_suffix_marker() {
         let text = "attacking your opponents and/or planeswalkers they control";
         assert_eq!(
-            parse_attacking_defender_suffix(text),
+            parse_attacking_defender_suffix(text, AttackDefenderMatch::DefendingSide),
             Some((
                 FilterProp::Attacking {
                     scope: Default::default(),
@@ -13210,9 +13256,10 @@ mod tests {
             "the chosen player controls",
         ] {
             assert_eq!(
-                parse_attacking_defender_suffix(&format!(
-                    "attacking your opponents and/or planeswalkers {declined}"
-                )),
+                parse_attacking_defender_suffix(
+                    &format!("attacking your opponents and/or planeswalkers {declined}"),
+                    AttackDefenderMatch::DefendingSide,
+                ),
                 None,
                 "{declined:?}"
             );

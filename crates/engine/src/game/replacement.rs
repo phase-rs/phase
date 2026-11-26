@@ -6706,7 +6706,7 @@ fn create_token_applier(
                 // the `sacrifice_at` rider rule in
                 // `keep_creating_instruction_entry`.
                 if spec.blocking_attacker.is_some() {
-                    substitute_spec.blocking_attacker = spec.blocking_attacker;
+                    substitute_spec.set_blocking_attacker_ref(spec.blocking_attacker_ref());
                 }
                 match copy.as_deref() {
                     Some(batch_copy) => {
@@ -6764,7 +6764,7 @@ fn create_token_applier(
             // alongside tapped. Pinned-incarnation id travels verbatim
             // (CR 400.7 + CR 608.2k) — no re-resolution.
             if spec.blocking_attacker.is_some() {
-                extra.blocking_attacker = spec.blocking_attacker;
+                extra.set_blocking_attacker_ref(spec.blocking_attacker_ref());
             }
             push_appended_token_batch(
                 &mut appended,
@@ -15118,7 +15118,7 @@ impl SubstituteEntryTarget for TokenSpec {
         self.attack_request = request;
     }
     fn set_blocking_attacker(&mut self, attacker: ObjectIncarnationRef) {
-        self.blocking_attacker = Some(attacker);
+        self.set_blocking_attacker_ref(Some(attacker));
     }
 
     fn set_sacrifice_at(&mut self, sacrifice_at: Option<Duration>) {
@@ -15162,7 +15162,7 @@ fn keep_creating_instruction_entry(orig: &TokenSpec, sub: &mut impl SubstituteEn
     if !orig.attack_request.is_unspecified() {
         sub.set_attack_request(orig.attack_request.clone());
     }
-    if let Some(attacker) = orig.blocking_attacker {
+    if let Some(attacker) = orig.blocking_attacker_ref() {
         sub.set_blocking_attacker(attacker);
     }
     if orig.sacrifice_at.is_some() {
@@ -15223,7 +15223,7 @@ fn substitute_token_batch(
             spec.tapped = copy.tapped;
             spec.enters_attacking = copy.enters_attacking;
             spec.attack_request = copy.attack_request.clone();
-            spec.blocking_attacker = copy.blocking_attacker;
+            spec.set_blocking_attacker_ref(copy.blocking_attacker);
             Ok(ProposedEvent::CreateToken {
                 owner,
                 spec: Box::new(spec),
@@ -25442,6 +25442,7 @@ mod tests {
 
             let spec = TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: TokenCharacteristics {
                     display_name: "Soldier".to_string(),
                     power: Some(1),
@@ -27541,6 +27542,7 @@ mod tests {
         use crate::types::proposed_event::TokenCharacteristics;
         TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Test Token".to_string(),
                 power: Some(1),
@@ -32162,6 +32164,7 @@ mod tests {
         let chatterfang = ObjectId(500);
         let squirrel_spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Squirrel".to_string(),
                 power: Some(1),
@@ -32192,6 +32195,7 @@ mod tests {
 
         let plant_spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Plant".to_string(),
                 power: Some(0),
@@ -32269,6 +32273,7 @@ mod tests {
             use crate::types::proposed_event::TokenCharacteristics;
             TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: TokenCharacteristics {
                     display_name: name.to_string(),
                     power: None,
@@ -32362,6 +32367,7 @@ mod tests {
         let creature = core == CoreType::Creature;
         TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: name.to_string(),
                 power: creature.then_some(1),
@@ -32594,6 +32600,7 @@ mod tests {
 
         let food_spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Food".to_string(),
                 power: None,
@@ -33128,6 +33135,7 @@ mod tests {
         use crate::types::proposed_event::TokenCharacteristics;
         TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: name.to_string(),
                 power: (core == CoreType::Creature).then_some(1),
@@ -33384,6 +33392,7 @@ mod tests {
 
         let soldier_spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Soldier".to_string(),
                 power: Some(1),
@@ -33921,6 +33930,7 @@ mod tests {
         fn artifact_spec(name: &str) -> TokenSpec {
             TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: TokenCharacteristics {
                     display_name: name.to_string(),
                     power: None,
@@ -34044,6 +34054,7 @@ mod tests {
         fn artifact_spec(name: &str) -> TokenSpec {
             TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: TokenCharacteristics {
                     display_name: name.to_string(),
                     power: None,
@@ -34230,6 +34241,7 @@ mod tests {
             owner: PlayerId(0),
             spec: Box::new(TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: crate::types::proposed_event::TokenCharacteristics {
                     display_name: "Token".to_string(),
                     power: None,

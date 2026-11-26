@@ -789,7 +789,7 @@ fn drain_copy_token_resolution_on_board(
         let mut spec = copy_entry_probe_spec(&batch.copy, &state.all_creature_types);
         spec.tapped = batch.copy.tapped;
         spec.enters_attacking = batch.copy.enters_attacking;
-        spec.blocking_attacker = batch.copy.blocking_attacker;
+        spec.set_blocking_attacker_ref(batch.copy.blocking_attacker);
         let enter_tapped = EtbTapState::from_seeded_tapped(batch.copy.tapped);
         let proposed = ProposedEvent::CreateToken {
             redirected_to: None,

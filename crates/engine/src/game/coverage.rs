@@ -18828,6 +18828,7 @@ mod tests {
 
         let spec = |attack_request: TokenAttackRequest| TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Goblin".to_string(),
                 power: Some(1),

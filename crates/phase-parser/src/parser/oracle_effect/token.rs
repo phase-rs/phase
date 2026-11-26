@@ -31,7 +31,7 @@ use super::super::oracle_static::{
     classify_quoted_inner, parse_static_line_multi, promote_nested_ability_quotes,
     strip_enclosing_sentence_comma,
 };
-use super::super::oracle_target::parse_target_with_ctx;
+use super::super::oracle_target::{parse_direct_attacker_target, parse_target_with_ctx};
 use super::super::oracle_util::{
     comma_short_self_name, granting_self_reference_count, normalize_card_name_refs_reporting,
     parse_count_expr, parse_count_head, parse_count_slot, parse_rounding_suffix_only,
@@ -707,17 +707,7 @@ fn parse_token_description_with_context(
                     .unwrap_or(TargetFilter::TriggeringSource),
                 tag("that creature"),
             ),
-            value(
-                TargetFilter::Typed(
-                    phase_ast::types::ability::TypedFilter::creature().properties(vec![
-                        phase_ast::types::ability::FilterProp::Attacking {
-                            defender: Some(ControllerRef::You),
-                            scope: phase_ast::types::ability::AttackDefenderMatch::DirectPlayer,
-                        },
-                    ]),
-                ),
-                tag("target creature attacking you"),
-            ),
+            parse_direct_attacker_target,
         ))
         .parse(i)?;
         let (i, _) = alt((

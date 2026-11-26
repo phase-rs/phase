@@ -713,6 +713,7 @@ pub fn apply_debug_action(
                 controller: owner,
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
             };
             let proposed = ProposedEvent::CreateToken {
                 redirected_to: None,

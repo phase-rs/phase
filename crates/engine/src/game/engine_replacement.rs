@@ -11058,6 +11058,7 @@ mod tests {
 
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Soldier".to_string(),
                 power: Some(2),
@@ -11192,6 +11193,7 @@ mod tests {
 
         let treasure_spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Treasure".to_string(),
                 power: None,
@@ -11358,6 +11360,7 @@ mod tests {
             owner: PlayerId(0),
             spec: Box::new(TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: TokenCharacteristics {
                     display_name: "Treasure".to_string(),
                     power: None,

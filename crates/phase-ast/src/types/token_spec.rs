@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::ability::{Duration, EntryAttackDestination, StaticDefinition};
 use super::card_type::{CoreType, Supertype};
 use super::counter::CounterType;
-use super::identifiers::{ObjectId, ObjectIncarnationRef};
+use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::keywords::Keyword;
 use super::mana::ManaColor;
 use super::player::PlayerId;
@@ -92,7 +92,29 @@ pub struct TokenSpec {
     /// resolved once at propose time to the attacker each created token
     /// enters blocking (`None` = no blocking rider).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocking_attacker: Option<ObjectIncarnationRef>,
+    pub blocking_attacker: Option<ObjectId>,
+    /// Incarnation pinned by new proposals. Main saves only the attacker ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_attacker_incarnation: Option<u64>,
+}
+
+impl TokenSpec {
+    pub fn blocking_attacker_ref(&self) -> Option<ObjectIncarnationRef> {
+        self.blocking_attacker.map(|id| {
+            ObjectIncarnationRef::of(
+                id,
+                self.blocking_attacker_incarnation
+                    .unwrap_or(LEGACY_INCARNATION),
+            )
+        })
+    }
+
+    pub fn set_blocking_attacker_ref(&mut self, attacker: Option<ObjectIncarnationRef>) {
+        self.blocking_attacker = attacker.map(|pin| pin.object_id);
+        self.blocking_attacker_incarnation = attacker
+            .map(|pin| pin.incarnation)
+            .filter(|&incarnation| incarnation != LEGACY_INCARNATION);
+    }
 }
 
 /// CR 508.4 + CR 608.2h: a token instruction's named destination, resolved

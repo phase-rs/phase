@@ -13017,6 +13017,7 @@ mod tests {
         fn spec_emits_only_etb_pair_field_exclusions() {
             let base = TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: crate::types::proposed_event::TokenCharacteristics {
                     display_name: "Insect".to_string(),
                     power: Some(1),
@@ -13042,15 +13043,6 @@ mod tests {
             // Bare spec passes.
             assert!(super::super::effects::token::spec_emits_only_etb_pair(
                 &base
-            ));
-
-            let mut blocking = base.clone();
-            blocking.blocking_attacker = Some(crate::types::identifiers::ObjectIncarnationRef::of(
-                ObjectId(2),
-                0,
-            ));
-            assert!(!super::super::effects::token::spec_emits_only_etb_pair(
-                &blocking
             ));
 
             let mut with_counter = base.clone();

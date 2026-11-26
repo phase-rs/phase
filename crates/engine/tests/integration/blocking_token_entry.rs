@@ -1,5 +1,6 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{ChosenAttribute, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -519,6 +520,131 @@ fn flash_foliage_keeps_its_attacker_when_a_copy_entry_pauses_and_restores() {
     assert_eq!(blockers, &[source_id]);
     assert!(state.objects[&blockers[0]].is_token);
     assert_eq!(state.objects[&blockers[0]].name, "Metallic Mimic");
+}
+
+#[test]
+fn moonlit_meditation_copies_enter_blocking_after_counters() {
+    moonlit_meditation_blocking_copy(false);
+}
+
+#[test]
+fn moonlit_meditation_copies_enter_blocking_after_counter_replacement_resumes() {
+    moonlit_meditation_blocking_copy(true);
+}
+
+fn moonlit_meditation_blocking_copy(pause_counters: bool) {
+    use engine::types::proposed_event::ProposedEvent;
+    use engine::types::zones::Zone;
+
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::BeginCombat);
+    scenario.with_library_top(P1, &["Drawn card"]);
+    let flash = scenario
+        .add_spell_to_hand_from_oracle(P1, "Flash Foliage", true, FLASH_FOLIAGE)
+        .id();
+    let attacker = scenario.add_creature(P0, "Attacker", 2, 2).id();
+    let donor = scenario.add_real_card(P1, "Iron Apprentice", Zone::Battlefield, db);
+    let meditation = scenario.add_real_card(P1, "Moonlit Meditation", Zone::Battlefield, db);
+    if pause_counters {
+        scenario.add_real_card(P1, "Hardened Scales", Zone::Battlefield, db);
+        scenario.add_real_card(P1, "Branching Evolution", Zone::Battlefield, db);
+    }
+    let mut runner = scenario.build();
+    runner.attach_as_bestowed_aura(meditation, donor);
+    declare(
+        &mut runner,
+        vec![(attacker, AttackTarget::Player(P1))],
+        vec![],
+    );
+    pass_to(
+        &mut runner,
+        |waiting| matches!(waiting, WaitingFor::Priority { player } if *player == P1),
+    );
+    runner.cast(flash).target_object(attacker).resolve();
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+        panic!("Moonlit Meditation must offer to substitute the token");
+    };
+    assert!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .is_optional
+    );
+    assert_eq!(candidates[0].source_id, meditation);
+
+    // CR 614.6: the substitute inherits the creating instruction's blocking rider.
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .unwrap();
+    let mut events = result.events;
+    if pause_counters {
+        let WaitingFor::ReplacementChoice { candidates, .. } = &result.waiting_for else {
+            panic!("the copy's entry counters must pause for replacement ordering");
+        };
+        assert_eq!(candidates.len(), 2);
+        let pending = runner.state().pending_replacement.as_ref().unwrap();
+        assert!(matches!(pending.proposed, ProposedEvent::AddCounter { .. }));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::TokenCreated { .. }
+                | GameEvent::AttackerBecameBlocked { .. }
+                | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+        )));
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap()
+                .events,
+        );
+    }
+
+    let state = runner.state();
+    let entrants: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| state.objects[id].is_token)
+        .collect();
+    let [entrant] = entrants.as_slice() else {
+        panic!("exactly one copy must enter, got {entrants:?}");
+    };
+    assert_eq!(state.objects[entrant].name, "Iron Apprentice");
+    let counters = state.objects[entrant].counters[&CounterType::Plus1Plus1];
+    if pause_counters {
+        assert!(matches!(counters, 3 | 4));
+    } else {
+        assert_eq!(counters, 1);
+    }
+    assert_eq!(
+        state
+            .combat
+            .as_ref()
+            .unwrap()
+            .blocker_assignments
+            .get(&attacker),
+        Some(&entrants),
+        "the substituted copy blocks the attacker"
+    );
+    let entry_index = events.iter().position(|event| matches!(
+        event,
+        GameEvent::ZoneChanged { object_id, to: Zone::Battlefield, .. } if object_id == entrant
+    )).expect("the copy publishes its battlefield entry");
+    // CR 509.4: each entrant is already blocking when entry is published.
+    let blocks: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            matches!(event, GameEvent::AttackerBecameBlockedByFilteredBlocker {
+            attacker: blocked, blocker
+        } if *blocked == attacker && blocker == entrant)
+            .then_some(index)
+        })
+        .collect();
+    assert_eq!(blocks.len(), 1);
+    assert!(blocks[0] < entry_index);
 }
 
 #[test]

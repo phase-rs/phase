@@ -14609,6 +14609,7 @@ fn token_description_to_spec(
         attach_to: crate::types::token_spec::TokenHostRequest::NotRequested,
         // Replacement-created tokens carry no blocking rider either.
         blocking_attacker: None,
+        blocking_attacker_incarnation: None,
     })
 }
 

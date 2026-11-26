@@ -50274,6 +50274,7 @@ mod tests {
     fn continue_token_event_delivery_serde_roundtrip() {
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: crate::types::proposed_event::TokenCharacteristics {
                 display_name: "Squirrel".to_string(),
                 power: Some(1),
