@@ -1834,12 +1834,16 @@ fn assert_commuting_soldier_entry(grumgully: bool) {
         WaitingFor::Priority { .. }
     ));
     assert!(runner.state().stack.is_empty());
-    let soldiers = tokens(&runner, "Soldier");
-    assert_eq!(soldiers.len(), 2);
+    assert_tapped_soldiers(&runner, 2, u32::from(grumgully));
+}
+
+fn assert_tapped_soldiers(runner: &GameRunner, count: usize, counters: u32) {
+    let soldiers = tokens(runner, "Soldier");
+    assert_eq!(soldiers.len(), count);
     for soldier in soldiers {
         assert_eq!(soldier.controller, P0);
         assert!(soldier.tapped);
-        assert_eq!(plus_counters(&runner, soldier.id), u32::from(grumgully));
+        assert_eq!(plus_counters(runner, soldier.id), counters);
     }
 }
 
@@ -1851,4 +1855,47 @@ fn commuting_soldier_entry_with_five_tap_effects() {
 #[test]
 fn commuting_soldier_entry_with_four_tap_effects_and_counters() {
     assert_commuting_soldier_entry(true);
+}
+
+fn assert_soldier_entry_orders_over_budget(tap_effects: usize, double_tokens: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    if double_tokens {
+        scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+    }
+    // Synthetic permanents provide distinct mandatory replacements with identical writes.
+    for number in 1..=tap_effects {
+        scenario.add_enchantment_from_oracle(
+            P1,
+            &format!("Test Tap Enchantment {number}"),
+            "Creatures your opponents control enter tapped.",
+        );
+    }
+    scenario.add_creature_from_oracle(P0, "Grumgully, the Generous", 3, 3, GRUMGULLY);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    settle(
+        &mut runner,
+        &[order(tap_effects + 1, "Grumgully, the Generous")],
+        Until::StackEmpty,
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_tapped_soldiers(&runner, if double_tokens { 4 } else { 2 }, 1);
+}
+
+#[test]
+fn soldier_entry_over_pass_budget_offers_grumgully_first() {
+    assert_soldier_entry_orders_over_budget(16, false);
+}
+
+#[test]
+fn soldier_entry_over_remaining_pass_budget_offers_grumgully_first() {
+    assert_soldier_entry_orders_over_budget(15, true);
 }

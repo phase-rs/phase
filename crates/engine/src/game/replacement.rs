@@ -14951,7 +14951,7 @@ fn owner_demands_choice(
     match subset {
         [] => false,
         [only] => replacement_is_optional(state, *only),
-        _ => token_replacement_ordering_is_material(state, subset, proposed, owner, registry),
+        _ => token_replacement_ordering_is_material(state, subset, proposed, owner, registry, 0),
     }
 }
 
@@ -15566,6 +15566,7 @@ fn token_replacement_ordering_is_material(
     proposed: &ProposedEvent,
     owner: PlayerId,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    depth: u16,
 ) -> bool {
     const MAX_PROBE_STEPS: usize = 128;
     const MAX_PROBE_CANDIDATES: usize = MAX_REPLACEMENT_DEPTH as usize;
@@ -15582,7 +15583,12 @@ fn token_replacement_ordering_is_material(
     let _probe = super::engine::SimulationProbeGuard::enter();
     let _recorder =
         ProposedEventRecorderGuard(PROPOSED_EVENT_RECORDER.with(|cell| cell.borrow_mut().take()));
-    let pruned = fixed_token_entry_prefix(state, proposed, owner, registry, &candidates);
+    // Each candidate still spends one live pass. Keep the full probe when
+    // the pipeline can stop before all of them apply.
+    let passes_left = replacement_depth_limit(proposed).saturating_sub(depth);
+    let pruned = (candidates.len() <= usize::from(passes_left))
+        .then(|| fixed_token_entry_prefix(state, proposed, owner, registry, &candidates))
+        .flatten();
     let (probe_state, proposed, interacting) = match &pruned {
         Some((scratch, event, interacting)) => (scratch, event, interacting.as_slice()),
         None => (state, proposed, candidates.as_slice()),
@@ -16083,7 +16089,7 @@ pub(crate) fn replacement_ordering_is_material(
         let views = proposed.clone().into_token_batch_views();
         return views.iter().any(|view| {
             let owner = view.affected_player(state);
-            token_replacement_ordering_is_material(state, candidates, proposed, owner, registry)
+            token_replacement_ordering_is_material(state, candidates, proposed, owner, registry, 0)
         });
     }
     let mut seen_writes: Vec<(EventField, CommuteClass)> = Vec::new();
@@ -18539,6 +18545,7 @@ fn pipeline_loop(
                     &proposed,
                     actor,
                     registry,
+                    depth,
                 )
             } else {
                 replacement_ordering_is_material(state, &candidates, &proposed)
