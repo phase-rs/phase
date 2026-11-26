@@ -336,7 +336,8 @@ impl From<DraftRequestId> for u64 {
     }
 }
 
-/// The FIFO policy a native create may ask for. The server derives the
+/// The FIFO policy a native create may ask for. While native FIFO is closed
+/// the wire guard refuses every `Some`; once it opens, the server derives the
 /// effective clock with `DraftClockPolicy::native(timer_seconds, review_seconds)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
