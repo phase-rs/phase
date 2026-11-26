@@ -26,10 +26,11 @@ use super::turns;
 
 /// Handle a priority pass from the current priority player (CR 117.4).
 ///
-/// Uses a BTreeSet (priority_passes) to track which players or shared-turn
-/// team representatives have passed consecutively. CR 117.4 + CR 117.6 +
-/// CR 805.5b: When all players/teams pass in succession, the top object on the
-/// stack resolves (or the phase advances if the stack is empty).
+/// Uses a BTreeSet (priority_passes) to track which individual seats have
+/// passed consecutively. CR 117.4 + CR 117.6 + CR 805.5b: when all players pass
+/// in succession — every living member of every team under shared team turns,
+/// since a team passes only when no player on it wishes to act — the top
+/// object on the stack resolves (or the phase advances if the stack is empty).
 /// Any non-pass action clears the set (handled by callers via `reset_priority`).
 /// `current_seat` is the player who *holds* priority (the semantic seat), which
 /// the caller must supply — it is NOT necessarily `state.priority_player`. Under
@@ -78,20 +79,28 @@ pub(crate) fn handle_priority_pass_with_limit(
     events: &mut Vec<GameEvent>,
     stack_resolution_limit: Option<u32>,
 ) -> PriorityPassOutcome {
-    let canonical_seat = super::topology::priority_pass_representative(state, current_seat);
+    // Record this seat's pass (CR 117.4). CR 117.6 + CR 805.5b: teams rather
+    // than individual players have priority, and a team passes only when no
+    // player on it wishes to act — so the tracked pass is the INDIVIDUAL
+    // seat, and the team advances only when every living member has passed.
+    state.priority_passes.insert(current_seat);
 
-    // Record this seat's pass (CR 117.4). CR 117.6 + CR 805.5b: In shared-team
-    // turn games, teams rather than individual players have priority, so the
-    // tracked pass seat is the team's representative.
-    state.priority_passes.insert(canonical_seat);
+    // Also maintain legacy counter for transition period. Saturating: under
+    // unanimous team pass a window legitimately accumulates one pass per
+    // living member per round, so a cumulative counter must never panic on a
+    // long game — it only tracks consecutiveness, and every all-passed event
+    // resets it via `clear_priority_passes`.
+    state.priority_pass_count = state.priority_pass_count.saturating_add(1);
 
-    // Also maintain legacy counter for transition period
-    state.priority_pass_count += 1;
+    // CR 805.5b: all teams pass in succession exactly when every living player
+    // has passed. For individual-turn formats this is the plain APNAP set, so
+    // the check below preserves the single-pass-per-seat behavior exactly.
+    let all_living = super::topology::all_living_players_in_team_order(state);
+    let all_passed = all_living
+        .iter()
+        .all(|player| state.priority_passes.contains(player));
 
-    let participants = super::topology::priority_pass_participants(state);
-    let living_count = participants.len();
-
-    if state.priority_passes.len() >= living_count {
+    if all_passed {
         // CR 117.4: All living players have passed consecutively.
         clear_priority_passes(state);
 
@@ -186,6 +195,10 @@ pub(crate) fn handle_priority_pass_with_limit(
             // After resolve_next: the stack shrank by `consumed` entries.
             // Update auto-pass baselines by the SAME amount so trigger-growth
             // detection stays accurate across apply() calls (§7.2 / R6).
+            // CR 805.5b: overlay entries are exactly the session
+            // representatives' own keys (self-membership). A teammate's own
+            // key keeps its trigger-growth baseline accurate across apply()
+            // calls even while the representative's session runs.
             let session_representative_auto_pass_keys = state
                 .stack_resolution_session
                 .as_ref()
@@ -194,11 +207,7 @@ pub(crate) fn handle_priority_pass_with_limit(
                         .auto_pass
                         .keys()
                         .copied()
-                        .filter(|player| {
-                            session.representatives.contains(
-                                &super::topology::priority_pass_representative(state, *player),
-                            )
-                        })
+                        .filter(|player| session.representatives.contains(player))
                         .collect::<std::collections::BTreeSet<_>>()
                 })
                 .unwrap_or_default();
@@ -234,13 +243,20 @@ pub(crate) fn handle_priority_pass_with_limit(
             }
         }
     } else {
-        // CR 117.3d + CR 117.6 + CR 805.5b: The player/team passed; priority
-        // moves to the next player/team in turn order. Advance from the
-        // semantic seat that just passed, canonicalized to its priority
-        // representative, not from `priority_player` — under CR 723
-        // turn-control the latter is the controller, which would mis-seat the
-        // cursor.
-        let next = next_priority_player(state, canonical_seat);
+        // CR 117.3d + CR 117.6 + CR 805.5b: the seat passed. When its team
+        // still has a living member who has not passed, the TEAM retains
+        // priority (parked on its representative — any teammate may still
+        // act). Otherwise priority moves to the next team in turn order.
+        // Advance from the semantic seat that just passed, canonicalized to
+        // its priority representative, not from `priority_player` — under
+        // CR 723 turn-control the latter is the controller, which would
+        // mis-seat the cursor.
+        let canonical_seat = super::topology::priority_pass_representative(state, current_seat);
+        let next = if super::topology::team_has_passed(state, canonical_seat) {
+            next_priority_player(state, canonical_seat)
+        } else {
+            canonical_seat
+        };
         state.priority_player = next;
 
         events.push(GameEvent::PriorityPassed { player_id: next });
@@ -271,7 +287,23 @@ pub(crate) fn handle_priority_pass_with_limit(
 /// `pass_priority_structurally_legal` below call this, so no fast path can drift
 /// from the reducer.
 pub fn pass_priority_legality(state: &GameState, player: PlayerId) -> Result<(), EngineError> {
-    if state.priority_player != turn_control::authorized_submitter_for_player(state, player) {
+    // CR 805.5a: any living teammate may pass when the team holds priority —
+    // the window parks on the representative, but the reducer records the
+    // acting member's pass individually. Without this, the guard rejects
+    // exactly the passes the reducer's teammate arm accepts. The holder
+    // itself is excluded so the CR 723.5 submitter-sync check below still
+    // fires for it on shared windows.
+    let strict_teammate_of_holder = match &state.waiting_for {
+        WaitingFor::Priority { player: holder }
+            if *holder != player && super::topology::side_takes_shared_turn(state, *holder) =>
+        {
+            super::topology::team_members(state, *holder).contains(&player)
+        }
+        _ => false,
+    };
+    if !strict_teammate_of_holder
+        && state.priority_player != turn_control::authorized_submitter_for_player(state, player)
+    {
         return Err(EngineError::NotYourPriority);
     }
     if precast_copy_shortcut::blocks_pass(state, player) {
@@ -734,7 +766,9 @@ fn collect_battlefield_departures<'a>(
 ///
 /// For non-team formats: next living player in seat order after `current`.
 /// For shared-team-turn formats: CR 117.6 + CR 805.5b make priority and pass
-/// bookkeeping team-level, ordered by each team's representative.
+/// bookkeeping team-level, ordered by each team's representative. A team is
+/// skipped only when every living member has passed — one teammate's pass
+/// never passes for the team.
 fn next_priority_player(state: &GameState, current: PlayerId) -> PlayerId {
     let canonical_current = super::topology::priority_pass_representative(state, current);
     // CR 101.4 + CR 117.3d: `participants` is APNAP order, which already honors
@@ -748,7 +782,7 @@ fn next_priority_player(state: &GameState, current: PlayerId) -> PlayerId {
     for offset in 1..=participants.len() {
         let idx = (current_idx + offset) % participants.len();
         let candidate = participants[idx];
-        if !state.priority_passes.contains(&candidate) {
+        if !super::topology::team_has_passed(state, candidate) {
             return candidate;
         }
     }
@@ -1076,11 +1110,22 @@ mod tests {
         state.priority_passes.clear();
         let mut events = Vec::new();
 
-        // P0 (active team member) passes
-        let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
+        // CR 805.5b: one teammate's pass never passes for the team — P0 passes,
+        // the active team retains priority parked on its representative.
+        let result = handle_priority_pass(PlayerId(0), &mut state, &mut events);
+        assert!(matches!(
+            result,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(state.priority_player, PlayerId(0));
+        assert!(state.priority_passes.contains(&PlayerId(0)));
+        assert!(!state.priority_passes.contains(&PlayerId(1)));
 
-        // CR 117.6 + CR 805.5b: priority is team-level in 2HG, so the active
-        // team pass moves directly to the opposing team's representative.
+        // P1 (teammate) passes — now the team passes to the opposing team's
+        // representative in APNAP order.
+        let result = handle_priority_pass(PlayerId(1), &mut state, &mut events);
         assert!(matches!(
             result,
             WaitingFor::Priority {
@@ -1088,8 +1133,6 @@ mod tests {
             }
         ));
         assert_eq!(state.priority_player, PlayerId(2));
-        assert!(state.priority_passes.contains(&PlayerId(0)));
-        assert!(!state.priority_passes.contains(&PlayerId(1)));
     }
 
     #[test]
@@ -1102,15 +1145,19 @@ mod tests {
         state.priority_passes.clear();
         let mut events = Vec::new();
 
-        handle_priority_pass(state.priority_player, &mut state, &mut events); // active team
-        let result = handle_priority_pass(state.priority_player, &mut state, &mut events); // opposing team
+        // CR 805.5b: all four living players pass — active team (P0, P1), then
+        // opposing team (P2, P3) — advancing the empty stack.
+        handle_priority_pass(PlayerId(0), &mut state, &mut events);
+        handle_priority_pass(PlayerId(1), &mut state, &mut events);
+        handle_priority_pass(PlayerId(2), &mut state, &mut events);
+        let result = handle_priority_pass(PlayerId(3), &mut state, &mut events);
 
         assert!(matches!(result, WaitingFor::Priority { .. }));
         assert!(state.priority_passes.is_empty());
     }
 
     #[test]
-    fn two_hg_stale_teammate_pass_canonicalizes_to_team_representative() {
+    fn two_hg_stale_teammate_pass_records_individually_and_stays_on_team() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         state.turn_number = 1;
         state.phase = crate::types::phase::Phase::PreCombatMain;
@@ -1119,16 +1166,18 @@ mod tests {
         state.priority_passes.clear();
         let mut events = Vec::new();
 
+        // A stale teammate seat's pass records that individual — not the
+        // representative — and the team retains priority on its rep.
         let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
 
         assert_eq!(
             result,
             WaitingFor::Priority {
-                player: PlayerId(2)
+                player: PlayerId(0)
             }
         );
-        assert!(state.priority_passes.contains(&PlayerId(0)));
-        assert!(!state.priority_passes.contains(&PlayerId(1)));
+        assert!(state.priority_passes.contains(&PlayerId(1)));
+        assert!(!state.priority_passes.contains(&PlayerId(0)));
     }
 
     // --- pass legality authority (CR 117.3d / CR 723.5 / CR 732.2c) ---
@@ -1165,6 +1214,41 @@ mod tests {
             message.contains("shortened shortcut"),
             "the reducer's exact message must be preserved by the extraction, got {message:?}"
         );
+    }
+
+    /// T1c. CR 805.5a: on a shared-team window the guard admits every living
+    /// teammate — the reducer records the acting member's pass individually —
+    /// while still refusing the opposing team.
+    #[test]
+    fn pass_priority_legality_admits_teammates_on_a_parked_window() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(pass_priority_legality(&state, PlayerId(0)).is_ok());
+        assert!(
+            pass_priority_legality(&state, PlayerId(1)).is_ok(),
+            "a teammate may pass on the team's parked window"
+        );
+        assert!(matches!(
+            pass_priority_legality(&state, PlayerId(2)),
+            Err(EngineError::NotYourPriority)
+        ));
+
+        // The holder itself still goes through the submitter-sync check: a
+        // desynced priority_player rejects even on a shared window.
+        let mut desynced = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        desynced.active_player = PlayerId(0);
+        desynced.priority_player = PlayerId(2);
+        desynced.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(matches!(
+            pass_priority_legality(&desynced, PlayerId(0)),
+            Err(EngineError::NotYourPriority)
+        ));
     }
 
     /// T1b. `pass_priority_structurally_legal` is the authority PLUS the
@@ -1733,7 +1817,7 @@ mod tests {
                 ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::SelfRef,
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![],
@@ -1754,7 +1838,7 @@ mod tests {
                     own_top(
                         Effect::Sacrifice {
                             target: TargetFilter::TriggeringSource,
-                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                             min_count: 0,
                         },
                         vec![],
@@ -1827,7 +1911,7 @@ mod tests {
                 ability.sub_ability = Some(Box::new(ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::ParentTarget,
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![],
@@ -1893,7 +1977,7 @@ mod tests {
                 let mut ability = ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::ParentTarget,
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![],
@@ -1988,7 +2072,7 @@ mod tests {
             let sacrifice_those = own_top(
                 Effect::Sacrifice {
                     target: TargetFilter::TrackedSet { id: concrete },
-                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
                 vec![],
@@ -2052,7 +2136,7 @@ mod tests {
                 let mut ability = ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: your_lands(),
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![],

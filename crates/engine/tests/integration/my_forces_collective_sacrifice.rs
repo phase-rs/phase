@@ -205,9 +205,8 @@ fn my_forces_shared_end_step_offers_no_target_and_sacrifices_nothing() {
         }
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } => {
-                // Four seats rotate priority; pass as whoever holds it.
-                let _ =
-                    engine::game::apply_as_current(runner.state_mut(), GameAction::PassPriority);
+                // CR 805.5b: the holding team passes together, in turn order.
+                let _ = runner.pass_holding_team();
             }
             WaitingFor::OrderTriggers { .. } => {
                 drain_order_triggers_with_identity(runner.state_mut());

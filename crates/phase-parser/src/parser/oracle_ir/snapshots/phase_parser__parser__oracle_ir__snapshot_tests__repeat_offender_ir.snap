@@ -187,7 +187,6 @@ expression: "&ir"
             },
             "description": "{2}{B}: If ~ is suspected, put a +1/+1 counter on it. Otherwise, suspect it.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

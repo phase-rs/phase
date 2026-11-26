@@ -1976,6 +1976,7 @@ mod tests {
 
         // Opponent (PlayerId(1)) proposes creating a Treasure token under their control.
         let token_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: crate::types::proposed_event::TokenCharacteristics {
                 display_name: "Treasure".to_string(),
                 power: None,
@@ -2074,6 +2075,7 @@ mod tests {
         // Opponent's Rabblemaster-style "create a 1/1 Goblin that's tapped
         // and attacking" — `enters_attacking: true`, `spec.controller: P1`.
         let token_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: crate::types::proposed_event::TokenCharacteristics {
                 display_name: "Goblin".to_string(),
                 power: Some(1),
@@ -2167,6 +2169,7 @@ mod tests {
 
         // Our own token creation — must not be intercepted.
         let token_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: crate::types::proposed_event::TokenCharacteristics {
                 display_name: "Saproling".to_string(),
                 power: Some(1),

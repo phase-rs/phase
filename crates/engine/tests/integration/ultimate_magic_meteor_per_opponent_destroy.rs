@@ -236,7 +236,8 @@ fn resolve_with_order(
                 between(runner, prompts.len());
             }
             WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
+                // CR 805.5b: the holding team passes together.
+                let _ = runner.pass_holding_team();
             }
             _ => break,
         }
@@ -251,7 +252,8 @@ fn advance_to_per_player_prompt(runner: &mut GameRunner) {
             WaitingFor::ChooseFromZoneOpponentChooser { .. }
             | WaitingFor::ChooseFromZoneChoice { .. } => return,
             WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
+                // CR 805.5b: the holding team passes together.
+                let _ = runner.pass_holding_team();
             }
             ref other => panic!("no per-player prompt was reached: {other:?}"),
         }
@@ -2660,7 +2662,8 @@ fn caster_leaving_under_a_repeated_choice_keeps_resolving() {
                 );
             }
             WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
-                runner.act(GameAction::PassPriority).expect("pass");
+                // CR 805.5b: the holding team passes together.
+                let _ = runner.pass_holding_team();
             }
             _ => break,
         }

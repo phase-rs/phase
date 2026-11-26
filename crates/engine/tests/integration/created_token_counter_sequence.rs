@@ -763,6 +763,7 @@ fn plus_one_counters(state: &GameState, id: ObjectId) -> u32 {
 
 fn creature_token(name: &str, size: i32) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         name: name.to_string(),
         power: PtValue::Fixed(size),

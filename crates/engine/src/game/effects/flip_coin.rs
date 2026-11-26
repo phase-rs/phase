@@ -970,6 +970,7 @@ mod tests {
         let win_effect = Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                enters_blocking: None,
                 name: "Coin Token".to_string(),
                 power: crate::types::ability::PtValue::Fixed(1),
                 toughness: crate::types::ability::PtValue::Fixed(1),

@@ -255,6 +255,7 @@
     "commanderDamage": "Blessures de commandant",
     "poisonCounters": "Marqueurs poison",
     "playerSeats": "Sièges des joueurs",
+    "archenemySeat": "Archenemy",
     "seat": "Siège {{number}}",
     "youHost": "Vous (Hôte)",
     "ai": "IA",

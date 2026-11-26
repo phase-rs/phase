@@ -14,6 +14,7 @@ import { submitParsedDeck, type SubmissionArtSnapshot, type SubmittedDeck } from
 import type { ComboDeclaration, CommanderBracket } from "../types/bracket";
 import { effectiveBracket, isCommanderFamilyFormat, sameComboDeclaration } from "../types/bracket";
 import { bracketToEngineTier, type CommanderBracketTier } from "../types/bracketEstimate";
+import { formatMetadata } from "../data/formatRegistry";
 import {
   DECKS_CHANGED_EVENT,
   FEED_DECK_ORIGINS_KEY,
@@ -147,12 +148,42 @@ async function resolveBracket(
   }
 }
 
+/**
+ * Whether a deck built for `known` is worth routing through the engine
+ * compatibility check for a `selected` game. The engine is the legality
+ * authority (ban lists included); this pre-filter only skips the WASM call
+ * for decks whose construction rules cannot match — a different size rule,
+ * singleton policy, or commander slot. Composed Commander formats
+ * (Archenemy, Two-Headed Giant, Planechase) share Commander's exact
+ * construction, so Commander-tagged decks must reach the engine instead of
+ * being dropped on the format string — dropping them emptied the AI pool
+ * and aborted Archenemy Commander setup with noLegalAiDecks.
+ */
+function sharesDeckConstruction(known: GameFormat, selected: GameFormat): boolean {
+  if (known === selected) return true;
+  const knownConfig = formatMetadata(known)?.default_config;
+  const selectedConfig = formatMetadata(selected)?.default_config;
+  if (!knownConfig || !selectedConfig) return false;
+  return (
+    knownConfig.singleton === selectedConfig.singleton &&
+    knownConfig.command_zone === selectedConfig.command_zone &&
+    knownConfig.uses_commander === selectedConfig.uses_commander &&
+    knownConfig.deck_size.type === selectedConfig.deck_size.type &&
+    knownConfig.deck_size.data === selectedConfig.deck_size.data
+  );
+}
+
 async function legalCandidate(
   candidate: AiDeckCandidate,
   options: AiDeckCatalogOptions,
 ): Promise<AiDeckCandidate | null> {
   const { knownFormat } = candidate;
-  if (knownFormat && options.selectedFormat && knownFormat !== options.selectedFormat) return null;
+  if (
+    knownFormat &&
+    options.selectedFormat &&
+    !sharesDeckConstruction(knownFormat, options.selectedFormat)
+  )
+    return null;
 
   // Precon decks MUST still pass the legality check (CR 903 + the Commander
   // Rules Committee ban list). WotC ships precons with cards that later get

@@ -60,7 +60,7 @@ fn crystal_skull_carries_historic_top_of_library_permission() {
     assert!(
         obj.static_definitions
             .iter_unchecked()
-            .any(|d| matches!(d.mode, StaticMode::MayLookAtTopOfLibrary)),
+            .any(|d| matches!(d.mode, StaticMode::MayLookAtTopOfLibrary { .. })),
         "Crystal Skull must grant MayLookAtTopOfLibrary"
     );
     let top_perm = obj

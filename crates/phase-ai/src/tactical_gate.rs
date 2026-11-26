@@ -1166,6 +1166,7 @@ fn type_filter_is_proven_disjoint_from_spell(
         TypeFilter::Planeswalker => lacks(CoreType::Planeswalker),
         TypeFilter::Battle => lacks(CoreType::Battle),
         TypeFilter::Kindred => lacks(CoreType::Kindred),
+        TypeFilter::Scheme => lacks(CoreType::Scheme),
         TypeFilter::Permanent => !spell.card_types.core_types.iter().any(|card_type| {
             matches!(
                 card_type,
@@ -10429,6 +10430,13 @@ mod tests {
         runner.act(target.unwrap()).unwrap();
         let mut paid = false;
         while !runner.state().stack.is_empty() {
+            // CR 805.5b: the holding team passes together. Passing only the
+            // representative stalls a shared-team window, so the stack would
+            // never empty here.
+            if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                let _ = runner.pass_holding_team();
+                continue;
+            }
             let state = runner.state();
             let action = match &state.waiting_for {
                 WaitingFor::UnlessPayment { player, .. } if *player == P0 => {

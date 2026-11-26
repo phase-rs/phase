@@ -1096,7 +1096,9 @@ fn fate_of_the_flammable_self_choice_deals_six_to_targeted_opponent() {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
-        runner.act(GameAction::PassPriority).unwrap();
+        runner
+            .pass_holding_team()
+            .expect("holding-team pass must succeed on a Priority window");
     }
 
     // THE chooser assertion (Fix G): the TARGETED opponent is prompted.
@@ -1221,7 +1223,9 @@ fn fate_of_the_flammable_others_choice_hits_other_opponents() {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
-        runner.act(GameAction::PassPriority).unwrap();
+        runner
+            .pass_holding_team()
+            .expect("holding-team pass must succeed on a Priority window");
     }
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
@@ -1334,7 +1338,9 @@ fn fate_of_the_flammable_recycled_scheme_follows_current_answer() {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
-        runner.act(GameAction::PassPriority).unwrap();
+        runner
+            .pass_holding_team()
+            .expect("holding-team pass must succeed on a Priority window");
     }
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
@@ -1387,7 +1393,9 @@ fn fate_of_the_flammable_recycled_scheme_follows_current_answer() {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
-        runner.act(GameAction::PassPriority).unwrap();
+        runner
+            .pass_holding_team()
+            .expect("holding-team pass must succeed on a Priority window");
     }
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
@@ -1502,7 +1510,9 @@ fn surrender_your_thoughts_others_choice_discards_other_opponents_only() {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
-        runner.act(GameAction::PassPriority).unwrap();
+        runner
+            .pass_holding_team()
+            .expect("holding-team pass must succeed on a Priority window");
     }
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),

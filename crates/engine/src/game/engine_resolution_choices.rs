@@ -2243,12 +2243,12 @@ fn finalize_standard_search_selection(
     }
     if has_delivery {
         let hidden_search_audiences = hidden_search_audiences_for_search(state, player);
-        state.pending_library_search_delivery = Some(
+        state.pending_library_search_delivery = Some(Box::new(
             crate::types::game_state::LibrarySearchDeliveryResume::Standard {
                 searcher: player,
                 hidden_search_audiences,
             },
-        );
+        ));
     } else {
         // CR 701.23a + CR 701.24a: no leading found-card movement belongs to
         // this protocol (fail-to-find or a leading Shuffle), so the zero-move
@@ -6679,9 +6679,26 @@ pub(super) fn handle_resolution_choice(
                     effects::chain_references_tracked_set(&cont.chain)
                         && !effects::resolution_choice_head_publishes_on_resume(&cont.chain)
                         && sticker_recipient.is_none()
+                        // CR 608.2c: when the continuation ALSO takes the pick
+                        // by target, its set reference names an earlier
+                        // population (Marionette's sweep reads the reveal
+                        // set), so the pick must not be fresh-published over
+                        // it — the pick travels by target regardless.
+                        && !effects::chain_takes_pick_by_target(&cont.chain)
                 });
             if continuation_consumes_tracked_set {
-                effects::publish_fresh_tracked_set(state, chosen.clone());
+                // CR 608.2d + CR 608.2c: stamp the pick with the choice cause
+                // so a cause-bound reader sees the chosen members and nothing
+                // a producing-head postlude unions into the chain set later
+                // (Stinging Study's drawn cards). Invisible to every existing
+                // consumer: `None` readers admit stamped members exactly as
+                // today, every `Some(C)` reader still excludes them, and only
+                // the commander gate's rewrite reads `Some(Chosen)`.
+                effects::publish_fresh_tracked_set_with_causes(
+                    state,
+                    chosen.clone(),
+                    Some(crate::types::ability::ThisWayCause::Chosen),
+                );
             }
             // CR 608.2c + CR 608.2d: A counter-kind choice first selects the
             // object whose counters define the legal kinds. Preserve that
@@ -6792,10 +6809,29 @@ pub(super) fn handle_resolution_choice(
                         // otherwise re-derive and cast the whole exiled set. The
                         // chosen copies still reach it by inheriting the head's
                         // `targets` (set to `chosen` above) down the chain.
+                        // CR 608.2c: a sub that reads a tracked set computes its
+                        // own population (Dance, Pathetic Marionette's sweep
+                        // reads the reveal set minus the pick via
+                        // `DistinctFrom`) — forcing the offered-pool
+                        // complement onto its targets would bind the wrong
+                        // population (a filtered pool's complement omits
+                        // un-offered members) AND clobber the pick
+                        // inheritance its exclusion reads. Skip the forward;
+                        // the sub keeps the inherited pick targets. A sub whose
+                        // own target IS the bare set ("exile the other" — Karn,
+                        // Scion of Urza) computes nothing: the complement is
+                        // exactly its referent, so it still takes the forward.
+                        let sub_computes_own_population =
+                            effects::ability_node_references_tracked_set(next_sub)
+                                && !matches!(
+                                    next_sub.effect.target_filter(),
+                                    Some(crate::types::ability::TargetFilter::TrackedSet { .. })
+                                );
                         if !matches!(
                             next_sub.effect,
                             crate::types::ability::Effect::CastCopyOfCard { .. }
-                        ) {
+                        ) && !sub_computes_own_population
+                        {
                             next_sub.set_unpinned_targets(
                                 unchosen.iter().map(|&id| TargetRef::Object(id)).collect(),
                             );
@@ -12544,7 +12580,9 @@ pub(crate) fn settle_pending_library_search_delivery(
     if let Some(resume) = state.pending_library_search_delivery.take() {
         let _ = run_batch_completion(
             state,
-            crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled { resume },
+            crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
+                resume: *resume,
+            },
             events,
         );
     }

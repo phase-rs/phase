@@ -569,6 +569,10 @@ fn redundancy_delta(
         // onto the bottom of its owner's scheme deck — no target and no
         // static redundancy signal.
         | Effect::AbandonScheme
+        // CR 701.32b: SetSchemeInMotion re-fires a face-up scheme's abilities —
+        // no static redundancy signal (whether it is redundant depends on the
+        // scheme's own text).
+        | Effect::SetSchemeInMotion { .. }
         // CR 119.7 + CR 119.8: RedistributeLifeTotals is a one-time interactive life
         // permutation — no target and no static redundancy signal.
         | Effect::RedistributeLifeTotals
@@ -1496,7 +1500,7 @@ fn quoted_static_mode_supports_redundancy(mode: &StaticMode) -> bool {
         | StaticMode::CantCrew
         | StaticMode::CantPhaseIn
         | StaticMode::CrewContribution { .. }
-        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtTopOfLibrary { .. }
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
         | StaticMode::MayChooseNotToUntap
@@ -1525,7 +1529,8 @@ fn quoted_static_mode_supports_redundancy(mode: &StaticMode) -> bool {
         | StaticMode::MaxUntapPerType { .. }
         | StaticMode::EntersWithAdditionalCounters { .. }
         | StaticMode::CountersCantBeRemoved { .. }
-        | StaticMode::CountsAsNamed { .. } => false,
+        | StaticMode::CountsAsNamed { .. }
+        | StaticMode::CantSetSchemeInMotion => false,
     }
 }
 

@@ -700,12 +700,26 @@ fn semantic_slots(state: &GameState) -> Vec<(PlayerId, InteractionSlotKind)> {
                     .collect()
             })
             .unwrap_or_default(),
-        _ => state
-            .waiting_for
-            .acting_players()
-            .into_iter()
-            .map(|player| (player, slot_kind))
-            .collect(),
+        // CR 805.5a: A player may cast a spell, activate an ability, or take a
+        // special action when their team has priority. The priority window is
+        // parked on the team's representative, but every living member needs
+        // their own interaction slot so each teammate can submit.
+        _ => {
+            if let WaitingFor::Priority { player } = &state.waiting_for {
+                if super::topology::side_takes_shared_turn(state, *player) {
+                    return super::topology::team_members(state, *player)
+                        .into_iter()
+                        .map(|member| (member, slot_kind))
+                        .collect();
+                }
+            }
+            state
+                .waiting_for
+                .acting_players()
+                .into_iter()
+                .map(|player| (player, slot_kind))
+                .collect()
+        }
     }
 }
 
