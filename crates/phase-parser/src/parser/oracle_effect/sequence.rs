@@ -1591,10 +1591,9 @@ fn keeps_delayed_player_damage_look(before: TextPair<'_>, after: &str) -> bool {
         DelayedPlayerDamageAdmission::Admitted(DelayedPlayerDamage::FlyingPerPlayer, _)
             | DelayedPlayerDamageAdmission::Unsupported
     ) && super::imperative::parse_possessive_hand_look(&look.to_lowercase()).is_ok()
-        && matches!(
-            super::delayed_player_damage_draw(&after),
-            Ok(_) | Err(nom::Err::Failure(_))
-        )
+        && tag::<_, _, OracleError<'_>>("draw ")
+            .parse(after.trim())
+            .is_ok()
 }
 
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {

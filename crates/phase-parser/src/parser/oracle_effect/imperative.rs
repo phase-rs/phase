@@ -1032,6 +1032,52 @@ pub(super) fn is_life_noun(noun: &str) -> bool {
     is_noun
 }
 
+type CountedInstruction<T> = (T, Option<QuantityExpr>);
+
+fn counted_card_instruction<'a>(
+    input: &'a str,
+    ctx: &mut ParseContext,
+) -> OracleResult<'a, crate::parser::oracle_util::CountSlot<'a>> {
+    let input = input.trim_start();
+    let body = crate::parser::oracle_util::normalize_count_slot_text(input);
+    let slot = super::parse_verb_count_slot(input, ctx).ok_or_else(|| oracle_err(input))?;
+    // The shared count parser ignores replacement markers and punctuation.
+    // Leave that suffix for the instruction's caller to consume.
+    Ok((&input[body.len()..], slot))
+}
+
+pub(super) fn parse_draw_instruction<'a>(
+    rest: &'a str,
+    ctx: &mut ParseContext,
+) -> OracleResult<'a, CountedInstruction<NumericImperativeAst>> {
+    // CR 608.2d + CR 121.1: "draw up to N cards" — opt-choice draw,
+    // mirrors the up_to pattern on Discard / Sacrifice. Strip the prefix
+    // before count parsing so "up to two cards" → count=Fixed{2}, up_to=true.
+    let (rest, up_to) = match nom_on_lower(rest, &rest.to_ascii_lowercase(), |i| {
+        value((), tag("up to ")).parse(i)
+    }) {
+        Some((_, after)) => (after, true),
+        None => (rest, false),
+    };
+    // CR 121.1 + CR 121.2: the draw count is the shared count position; an
+    // unparsed count or an unconsumed tail fails closed (`None` →
+    // `Effect::Unimplemented` upstream), never a literal.
+    let (remainder, slot) = counted_card_instruction(rest, ctx)?;
+    if !is_draw_noun(slot.noun) {
+        return Err(oracle_err(slot.noun));
+    }
+    Ok((
+        remainder,
+        (
+            NumericImperativeAst::Draw {
+                count: slot.count,
+                up_to,
+            },
+            slot.where_x,
+        ),
+    ))
+}
+
 fn parse_numeric_imperative_ast_with_context(
     text: &str,
     lower: &str,
@@ -1064,24 +1110,9 @@ fn parse_numeric_imperative_ast_with_bare_card_source(
             })
         })
     {
-        // CR 608.2d + CR 121.1: "draw up to N cards" — opt-choice draw,
-        // mirrors the up_to pattern on Discard / Sacrifice. Strip the prefix
-        // before count parsing so "up to two cards" → count=Fixed{2}, up_to=true.
-        let (rest, up_to) = match nom_on_lower(rest, &rest.to_ascii_lowercase(), |i| {
-            value((), tag("up to ")).parse(i)
-        }) {
-            Some((_, after)) => (after, true),
-            None => (rest, false),
-        };
-        // CR 121.1 + CR 121.2: the draw count is the shared count position; an
-        // unparsed count or an unconsumed tail fails closed (`None` →
-        // `Effect::Unimplemented` upstream), never a literal.
-        let slot =
-            super::parse_verb_count_slot(rest, ctx).filter(|slot| is_draw_noun(slot.noun))?;
-        return Some(NumericImperativeAst::Draw {
-            count: slot.count,
-            up_to,
-        });
+        return parse_draw_instruction(rest, ctx)
+            .ok()
+            .map(|(_, (ast, _))| ast);
     }
 
     if let Some(after_gain) = parse_life_verb_remainder(text, lower, "gain", "gains") {
@@ -1941,6 +1972,82 @@ pub(super) fn starts_with_countless_plural_sacrifice(lower: &str) -> bool {
         .is_ok()
 }
 
+pub(super) fn discard_is_random(after_discard: &str) -> bool {
+    // CR 701.9b: a trailing "at random" makes the discard random. Read on the
+    // count position's normalized text, so a trailing period or " instead"
+    // does not hide it.
+    all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" at random"),
+        tag(" at random"),
+    ))
+    .parse(crate::parser::oracle_util::normalize_count_slot_text(
+        after_discard,
+    ))
+    .is_ok()
+}
+
+pub(super) fn parse_counted_discard<'a>(
+    input: &'a str,
+    lower: &str,
+    random: bool,
+    up_to: bool,
+    ctx: &mut ParseContext,
+) -> OracleResult<'a, CountedInstruction<TargetedImperativeAst>> {
+    // CR 608.2c: Strip "unless you discard a [type] card" suffix before count parsing.
+    let (after_discard, unless_filter) = parse_discard_unless_filter(lower, input);
+    // Re-derive original_after for the narrowed (unless-stripped) text.
+    let original_after = &input[..after_discard.len()];
+    // CR 701.9a: the discard count is the shared count position ("two cards",
+    // "a number of cards equal to …", "a card for each …"). An unparsed count
+    // or noun fails closed (`None` → Unimplemented upstream).
+    let (remainder, slot) = counted_card_instruction(original_after, ctx)?;
+    let remainder = if remainder.is_empty() && unless_filter.is_some() {
+        &input[input.len()..]
+    } else {
+        &input[original_after.len() - remainder.len()..]
+    };
+    let count = match slot.count {
+        // CR 608.2c + CR 608.2h: "If you do, discard that many cards"
+        // anaphorizes the count from the preceding draw (Hordewing Skaab).
+        // EventContextAmount incorrectly prefers the combat-damage
+        // trigger's match count and can discard the entire hand (issue #3296).
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        } => QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: crate::types::ability::DamageChannel::Total,
+                aggregate: crate::types::ability::AggregateFunction::Sum,
+            },
+        },
+        count => count,
+    };
+    // CR 701.9a + CR 608.2c: the noun is "card(s)" or a typed card phrase
+    // ("a creature card"), optionally followed by "at random". A typed phrase
+    // carries the same filter data as `AbilityCost::Discard.filter` (Dokuchi
+    // Silencer's "you may discard a creature card").
+    let noun_lower = slot.noun.to_lowercase();
+    let noun = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" at random"),
+        tag(" at random"),
+    ))
+    .parse(noun_lower.as_str())
+    .map_or(slot.noun, |(_, body)| &slot.noun[..body.len()]);
+    let filter = parse_discard_noun_filter(noun).ok_or_else(|| oracle_err(noun))?;
+    Ok((
+        remainder,
+        (
+            TargetedImperativeAst::Discard {
+                count,
+                random,
+                up_to,
+                unless_filter,
+                filter,
+            },
+            slot.where_x,
+        ),
+    ))
+}
+
 pub(super) fn parse_targeted_action_ast(
     text: &str,
     lower: &str,
@@ -2258,17 +2365,7 @@ pub(super) fn parse_targeted_action_ast(
                 target: TargetFilter::ParentTarget,
             });
         }
-        // CR 701.9b: a trailing "at random" makes the discard random. Read on the
-        // count position's normalized text, so a trailing period or " instead"
-        // does not hide it.
-        let random = all_consuming(terminated(
-            take_until::<_, _, OracleError<'_>>(" at random"),
-            tag(" at random"),
-        ))
-        .parse(crate::parser::oracle_util::normalize_count_slot_text(
-            after_discard,
-        ))
-        .is_ok();
+        let random = discard_is_random(after_discard);
         // CR 701.9b: Detect "up to" prefix for optional partial discard.
         let (after_discard, up_to) =
             match tag::<_, _, OracleError<'_>>("up to ").parse(after_discard) {
@@ -2388,51 +2485,10 @@ pub(super) fn parse_targeted_action_ast(
                 filter,
             });
         }
-        // CR 608.2c: Strip "unless you discard a [type] card" suffix before count parsing.
-        // Compute original-case offset before the unless strip narrows the slice.
         let original_after = &text[text.len() - after_discard.len()..];
-        let (after_discard, unless_filter) =
-            parse_discard_unless_filter(after_discard, original_after);
-        // Re-derive original_after for the narrowed (unless-stripped) text.
-        let original_after = &original_after[..after_discard.len()];
-        // CR 701.9a: the discard count is the shared count position ("two cards",
-        // "a number of cards equal to …", "a card for each …"). An unparsed count
-        // or noun fails closed (`None` → Unimplemented upstream).
-        let slot = super::parse_verb_count_slot(original_after, ctx)?;
-        let count = match slot.count {
-            // CR 608.2c + CR 608.2h: "If you do, discard that many cards"
-            // anaphorizes the count from the preceding draw (Hordewing Skaab).
-            // EventContextAmount incorrectly prefers the combat-damage
-            // trigger's match count and can discard the entire hand (issue #3296).
-            QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
-            } => QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount {
-                    channel: crate::types::ability::DamageChannel::Total,
-                    aggregate: crate::types::ability::AggregateFunction::Sum,
-                },
-            },
-            count => count,
-        };
-        // CR 701.9a + CR 608.2c: the noun is "card(s)" or a typed card phrase
-        // ("a creature card"), optionally followed by "at random". A typed phrase
-        // carries the same filter data as `AbilityCost::Discard.filter` (Dokuchi
-        // Silencer's "you may discard a creature card").
-        let noun_lower = slot.noun.to_lowercase();
-        let noun = all_consuming(terminated(
-            take_until::<_, _, OracleError<'_>>(" at random"),
-            tag(" at random"),
-        ))
-        .parse(noun_lower.as_str())
-        .map_or(slot.noun, |(_, body)| &slot.noun[..body.len()]);
-        let filter = parse_discard_noun_filter(noun)?;
-        return Some(TargetedImperativeAst::Discard {
-            count,
-            random,
-            up_to,
-            unless_filter,
-            filter,
-        });
+        return parse_counted_discard(original_after, after_discard, random, up_to, ctx)
+            .ok()
+            .map(|(_, (ast, _))| ast);
     }
     // CR 601.2c + CR 608.2c: A chosen group is a named target antecedent,
     // not the battlefield population handled by the mass-return arm below.

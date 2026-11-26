@@ -109046,6 +109046,21 @@ fn unbound_life_loss_difference_in_an_emblem() {
 }
 
 #[test]
+fn delayed_draw_discard_rejects_unconsumed_replacement_markers() {
+    let family = DelayedPlayerDamage::PerPlayer;
+    assert!(complete_delayed_player_damage_body(
+        family,
+        "draw a card, then discard a card."
+    ));
+    for body in [
+        "draw a card instead, then discard a card.",
+        "draw a card, then discard a card instead.",
+    ] {
+        assert!(!complete_delayed_player_damage_body(family, body), "{body}");
+    }
+}
+
+#[test]
 fn delayed_player_damage_full_faces_commit_compound_payloads() {
     use crate::types::ability::DamageKindFilter;
     use std::ops::ControlFlow;

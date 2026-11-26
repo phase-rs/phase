@@ -2440,6 +2440,103 @@ fn ravens_warning_looks_before_drawing_for_each_damaged_player() {
     }
 }
 
+/// CR 510.4 + CR 603.2c + CR 700.1: player damage in separate
+/// combat damage steps produces a fresh occurrence for each step.
+#[test]
+fn forth_eorlingas_groups_different_recipients_in_separate_damage_steps() {
+    use engine::types::events::GameEvent;
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::{ManaCostShard, ManaType, ManaUnit};
+
+    let mut scenario = three_player_board();
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Red, ManaType::White]
+            .into_iter()
+            .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let forth = scenario
+        .add_spell_to_hand_from_oracle(P0, "Forth Eorlingas!", false, FORTH_EORLINGAS)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red, ManaCostShard::White],
+            generic: 0,
+        })
+        .id();
+    let first = scenario
+        .add_creature(P0, "First striker", 2, 2)
+        .with_keyword(Keyword::FirstStrike)
+        .id();
+    let regular = scenario.add_creature(P0, "Regular attacker", 3, 3).id();
+    let mut runner = scenario.build();
+    runner.state_mut().turn_number = 2;
+    runner.cast(forth).x(0).resolve();
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    assert_eq!(runner.state().delayed_triggers[0].controller, P0);
+    assert_eq!(runner.state().monarch, None);
+
+    let combat_turn = runner.state().turn_number;
+    let prior = [runner.life(P1), runner.life(P2)];
+    drive_until(&mut runner, |runner| {
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        )
+    });
+    runner
+        .declare_attackers(&[
+            (first, AttackTarget::Player(P1)),
+            (regular, AttackTarget::Player(P2)),
+        ])
+        .expect("declare both attackers");
+
+    for (player, source, amount, expected_life) in [
+        (P1, first, 2, [prior[0] - 2, prior[1]]),
+        (P2, regular, 3, [prior[0] - 2, prior[1] - 3]),
+    ] {
+        let life_before_step = runner.life(player);
+        drive_until(&mut runner, |runner| runner.life(player) < life_before_step);
+        assert_eq!(runner.state().turn_number, combat_turn);
+        assert_eq!(runner.state().phase, Phase::CombatDamage);
+        assert_eq!([runner.life(P1), runner.life(P2)], expected_life);
+        let entries: Vec<_> = runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == forth)
+            .collect();
+        let [item] = entries.as_slice() else {
+            panic!(
+                "{player:?}: expected one Forth firing, got {}",
+                entries.len()
+            );
+        };
+        assert!(!runner
+            .state()
+            .stack_trigger_event_batches
+            .contains_key(&item.id));
+        let context = primary_trigger_event(item);
+        assert!(
+            matches!(context, Some(GameEvent::CombatDamageDealtToPlayer {
+                player_id, source_amounts, total_damage, source_incarnations,
+            }) if *player_id == player
+                && *total_damage == amount
+                && source_amounts == &[(source, amount)]
+                && source_incarnations.len() == 1
+                && source_incarnations[0].object_id == source
+                && source_incarnations[0].incarnation == runner.state().objects[&source].incarnation),
+            "expected damage from {source:?} to {player:?}, got {context:?}"
+        );
+        resolve_top(&mut runner);
+        assert_eq!(runner.state().monarch, Some(P0));
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
 /// CR 510.4 + CR 603.2c + CR 805.10b: first-strike and regular damage
 /// are separate steps. A teammate's leg reaches the raw player aggregate,
 /// then the installed watcher keeps only damage from its controller's creatures.

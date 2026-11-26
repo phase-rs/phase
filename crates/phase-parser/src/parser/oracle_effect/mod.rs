@@ -85,7 +85,8 @@ use nom::character::complete::{
     alpha1, anychar, multispace0, multispace1, one_of, satisfy, space0, space1,
 };
 use nom::combinator::{
-    all_consuming, eof, fail, map, map_opt, not, opt, peek, recognize, rest, success, value, verify,
+    all_consuming, eof, fail, map, map_opt, map_parser, not, opt, peek, recognize, rest, success,
+    value, verify,
 };
 use nom::multi::{many0, many1, many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
@@ -3091,7 +3092,7 @@ enum DelayedPlayerDamage {
 enum DelayedPlayerDamageAdmission {
     OutsideFamily,
     Unsupported,
-    Admitted(DelayedPlayerDamage, TriggerDefinition),
+    Admitted(DelayedPlayerDamage, Box<TriggerDefinition>),
 }
 
 fn delayed_player_damage_admission(head: &str) -> DelayedPlayerDamageAdmission {
@@ -3139,50 +3140,51 @@ fn delayed_player_damage_admission(head: &str) -> DelayedPlayerDamageAdmission {
     trigger.valid_target = Some(TargetFilter::Player);
     trigger.damage_kind = head.damage_kind;
     trigger.batched = true;
-    Admission::Admitted(family, trigger)
+    Admission::Admitted(family, Box::new(trigger))
 }
 
-fn complete_delayed_single_card_count(
-    phrase: &str,
-    accepts_noun: impl FnOnce(&str) -> bool,
-) -> bool {
-    parse_verb_count_slot(phrase, &mut ParseContext::default()).is_some_and(|slot| {
-        slot.count == (QuantityExpr::Fixed { value: 1 })
-            && slot.where_x.is_none()
-            && accepts_noun(slot.noun)
-            && std::ptr::eq(
-                slot.noun.as_bytes().as_ptr_range().end,
-                phrase.as_bytes().as_ptr_range().end,
-            )
-    })
-}
-
-// A committed failure still identifies a draw instruction for the sequence
-// boundary. The enclosing installer then rejects its unconsumed body.
 fn delayed_player_damage_draw(input: &str) -> OracleResult<'_, ()> {
-    let input = input.trim();
-    let input = all_consuming(terminated(
-        take_until::<_, _, OracleError<'_>>("."),
-        tag("."),
-    ))
-    .parse(input)
-    .map_or(input, |(_, body)| body);
-    let (count_phrase, _) = tag("draw ").parse(input)?;
-    if !complete_delayed_single_card_count(count_phrase, imperative::is_draw_noun)
+    let (rest, _) = tag("draw ").parse(input)?;
+    let (remainder, (draw, where_x)) =
+        imperative::parse_draw_instruction(rest, &mut ParseContext::default())?;
+    if where_x.is_some()
         || !matches!(
-            imperative::parse_numeric_imperative_ast(input, input),
-            Some(NumericImperativeAst::Draw {
+            draw,
+            NumericImperativeAst::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 up_to: false,
-            })
+            }
         )
     {
-        return Err(nom::Err::Failure(OracleError {
-            input: count_phrase,
-            code: nom::error::ErrorKind::Verify,
-        }));
+        return Err(oracle_err(input));
     }
-    Ok(("", ()))
+    Ok((remainder, ()))
+}
+
+fn delayed_player_damage_discard(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = tag("discard ").parse(input)?;
+    let (remainder, (discard, where_x)) = imperative::parse_counted_discard(
+        rest,
+        rest,
+        imperative::discard_is_random(rest),
+        false,
+        &mut ParseContext::default(),
+    )?;
+    if where_x.is_some()
+        || !matches!(
+            discard,
+            TargetedImperativeAst::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                random: false,
+                up_to: false,
+                unless_filter: None,
+                filter: None,
+            }
+        )
+    {
+        return Err(oracle_err(input));
+    }
+    Ok((remainder, ()))
 }
 
 fn complete_delayed_player_damage_body(family: DelayedPlayerDamage, body: &str) -> bool {
@@ -3203,44 +3205,26 @@ fn complete_delayed_player_damage_body(family: DelayedPlayerDamage, body: &str) 
                 .parse(lower)
                 .is_ok()
         }
-        DelayedPlayerDamage::PerPlayer => {
-            let Ok((discard, draw)) = terminated(
-                take_until::<_, _, OracleError<'_>>(", then "),
+        DelayedPlayerDamage::PerPlayer => all_consuming((
+            terminated(
+                map_parser(
+                    take_until(", then "),
+                    all_consuming(terminated(delayed_player_damage_draw, multispace0)),
+                ),
                 tag(", then "),
-            )
-            .parse(lower) else {
-                return false;
-            };
-            let Ok((count_phrase, _)) = tag::<_, _, OracleError<'_>>("discard ").parse(discard)
-            else {
-                return false;
-            };
-            delayed_player_damage_draw(draw).is_ok()
-                && complete_delayed_single_card_count(count_phrase, |noun| {
-                    imperative::parse_discard_noun_filter(noun) == Some(None)
-                })
-                && matches!(
-                    imperative::parse_targeted_action_ast(discard, discard, &mut ctx),
-                    Some(TargetedImperativeAst::Discard {
-                        count: QuantityExpr::Fixed { value: 1 },
-                        random: false,
-                        up_to: false,
-                        unless_filter: None,
-                        filter: None,
-                    })
-                )
-        }
-        DelayedPlayerDamage::FlyingPerPlayer => {
-            let Ok((draw, (target, count, random))) =
-                terminated(imperative::parse_possessive_hand_look, tag(" and ")).parse(lower)
-            else {
-                return false;
-            };
-            target == TargetFilter::TriggeringPlayer
-                && count.is_none()
-                && !random
-                && delayed_player_damage_draw(draw).is_ok()
-        }
+            ),
+            delayed_player_damage_discard,
+        ))
+        .parse(lower)
+        .is_ok(),
+        DelayedPlayerDamage::FlyingPerPlayer => all_consuming((
+            terminated(imperative::parse_possessive_hand_look, tag(" and ")),
+            delayed_player_damage_draw,
+        ))
+        .parse(lower)
+        .is_ok_and(|(_, ((target, count, random), ()))| {
+            target == TargetFilter::TriggeringPlayer && count.is_none() && !random
+        }),
     }
 }
 
@@ -3441,7 +3425,7 @@ fn try_parse_whenever_this_turn_from(
                     body,
                 )));
             }
-            (Some(family), trigger, body)
+            (Some(family), *trigger, body)
         }
         Some((DelayedPlayerDamageAdmission::Unsupported, _)) => {
             return Some(parsed_clause(Effect::unimplemented(

@@ -4513,10 +4513,10 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                     if let Some(zone) = zone {
                         stamp_delayed_returns(&mut current.effect, zone);
                     } else if decline_inferred_return {
-                        current.effect = Box::new(Effect::unimplemented(
+                        *current.effect = Effect::unimplemented(
                             "unproved_optional_decline_return",
                             clause_ir.source.fragment().unwrap_or_default(),
-                        ));
+                        );
                     }
                 }
             }
