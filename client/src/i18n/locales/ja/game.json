@@ -2560,6 +2560,7 @@
     "cost": {
       "card": "カード",
       "cards": "カード",
+      "countAnyNumber": "任意の数の",
       "filteredCard": "{{types}}のカード",
       "filteredCards": "{{types}}のカード",
       "nonType": "非{{type}}",
