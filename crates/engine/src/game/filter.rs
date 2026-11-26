@@ -3884,6 +3884,7 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         | FilterProp::NameMatchesAnyPermanent { controller }
         | FilterProp::Attacking {
             defender: controller,
+            ..
         }
         | FilterProp::AttackedThisTurn {
             defender: controller,
@@ -11543,16 +11544,22 @@ fn matches_filter_prop(
         }),
         // CR 508.1b: Attacking creatures may be scoped by defending player
         // relation ("attacking", "attacking you", "attacking your opponents").
-        FilterProp::Attacking { defender } => state.combat.as_ref().is_some_and(|combat| {
-            combat.attackers.iter().any(|a| {
-                a.object_id == object_id
-                    && attacking_defender_matches(
-                        state,
-                        source,
-                        a.defending_player,
-                        defender.as_ref(),
-                    )
-            })
+        FilterProp::Attacking { defender, scope } => state.combat.as_ref().is_some_and(|combat| {
+            combat
+                .attackers
+                .iter()
+                .filter(|attacker| attacker.object_id == object_id)
+                .any(|attacker| {
+                    let defending_player = if scope.is_defending_side() {
+                        Some(attacker.defending_player)
+                    } else {
+                        combat::active_attack_target(state, attacker)
+                            .and_then(|(target, _)| combat::attacked_player_for_target(target))
+                    };
+                    defending_player.is_some_and(|player| {
+                        attacking_defender_matches(state, source, player, defender.as_ref())
+                    })
+                })
         }),
         // CR 509.1a: A creature is blocking if it was declared as a blocker.
         FilterProp::Blocking => state
@@ -12602,35 +12609,31 @@ fn stack_entry_counted_targets(
     state: &GameState,
     entry: &crate::types::game_state::StackEntry,
 ) -> Vec<Option<TargetRef>> {
-    match &entry.kind {
-        // CR 115.1e + CR 702.6a: equip targets a creature on the battlefield;
-        // the payload carries no pin, so only the target's zone is checked.
-        StackEntryKind::KeywordAction { action } => action
-            .targets()
-            .into_iter()
-            .map(|target| {
-                matches!(target, TargetRef::Object(id)
-                    if state.objects.get(&id).is_some_and(|o| o.zone == Zone::Battlefield))
-                .then_some(target)
-            })
-            .collect(),
+    let declared = match &entry.kind {
+        // CR 115.1e + CR 702.6a: a keyword action carries no `ResolvedAbility`;
+        // its payload holds its declared target, pinned when it was chosen
+        // (CR 601.2c + CR 400.7).
+        StackEntryKind::KeywordAction { action } => action.declared_target_entries(),
         StackEntryKind::Spell { .. }
         | StackEntryKind::ActivatedAbility { .. }
         | StackEntryKind::TriggeredAbility { .. }
         | StackEntryKind::CombatDamage { .. } => entry
             .ability()
             .map(crate::game::ability_utils::declared_target_entries_in_chain)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|entry| {
-                let counted = match &entry.target {
-                    TargetRef::Object(_) => entry.pin.is_none_or(|pin| pin.is_current(state)),
-                    TargetRef::Player(pid) => crate::game::players::is_alive(state, *pid),
-                };
-                counted.then_some(entry.target)
-            })
-            .collect(),
-    }
+            .unwrap_or_default(),
+    };
+    declared
+        .into_iter()
+        .map(|entry| {
+            // CR 115.9b + CR 400.7: an object target counts only while its pin
+            // names the live incarnation; a player only while still in the game.
+            let counted = match &entry.target {
+                TargetRef::Object(_) => entry.pin.is_none_or(|pin| pin.is_current(state)),
+                TargetRef::Player(pid) => crate::game::players::is_alive(state, *pid),
+            };
+            counted.then_some(entry.target)
+        })
+        .collect()
 }
 
 pub(crate) fn object_has_no_abilities(obj: &GameObject) -> bool {
@@ -12920,15 +12923,21 @@ fn zone_change_record_matches_property(
         // CR 508.1k / CR 509.1g / CR 509.1h: Combat state as of the zone change.
         // Live combat maps are cleared when an object leaves combat (CR 506.4),
         // so look-back filters must read the zone-change snapshot.
-        FilterProp::Attacking { defender } => {
+        FilterProp::Attacking { defender, scope } => {
+            let defending_player = if scope.is_defending_side() {
+                record.combat_status.defending_player
+            } else {
+                record
+                    .combat_status
+                    .attack_target
+                    .and_then(combat::attacked_player_for_target)
+            };
             record.combat_status.attacking
                 && match defender {
-                    None => true,
-                    Some(defender) => record.combat_status.defending_player.is_some_and(
-                        |defending_player| {
-                            attacking_defender_matches(state, source, defending_player, Some(defender))
-                        },
-                    ),
+                    None => scope.is_defending_side() || defending_player.is_some(),
+                    Some(defender) => defending_player.is_some_and(|player| {
+                        attacking_defender_matches(state, source, player, Some(defender))
+                    }),
                 }
         }
         FilterProp::Blocking => record.combat_status.blocking,
@@ -15941,6 +15950,7 @@ mod tests {
         );
         if let ProposedEvent::ZoneChange { enter_as_copy, .. } = &mut event {
             *enter_as_copy = Some(Box::new(crate::types::proposed_event::CopyTokenSpec {
+                blocking_attacker: None,
                 values: Box::new(values),
                 display: Default::default(),
                 extra_keywords: vec![],
@@ -17679,10 +17689,10 @@ mod tests {
                     ability: draw(),
                 },
                 Fixture::KeywordEquip => StackEntryKind::KeywordAction {
-                    action: KeywordAction::Equip {
-                        equipment_id: source,
-                        target_creature_id: equipped,
-                    },
+                    action: KeywordAction::equip(
+                        &state.objects[&source],
+                        &state.objects[&equipped],
+                    ),
                 },
             };
             state.stack.push_back(StackEntry {
@@ -17770,6 +17780,88 @@ mod tests {
             kind: None,
         };
         assert!(!matches_stack_target_filter(&state, equip, &tagged, &ctx));
+    }
+
+    /// CR 115.9b + CR 400.7: an equip payload decoded from the legacy bare id
+    /// carries `LEGACY_INCARNATION`, which names no live object, so no "that
+    /// targets" reader counts its target (fail-closed). The same creature
+    /// pinned through `KeywordAction::equip` counts.
+    #[test]
+    fn keyword_equip_legacy_pin_is_not_a_counted_target() {
+        use crate::types::ability::KeywordAction;
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        use crate::types::identifiers::LEGACY_INCARNATION;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Equipment".into(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Creature".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let push_equip = |state: &mut GameState, action: KeywordAction| -> ObjectId {
+            let entry_id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            state.stack.push_back(StackEntry {
+                id: entry_id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::KeywordAction { action },
+            });
+            entry_id
+        };
+        let legacy_entry = push_equip(
+            &mut state,
+            KeywordAction::Equip {
+                equipment: ObjectIncarnationRef::of(source, LEGACY_INCARNATION),
+                target_creature: ObjectIncarnationRef::of(creature, LEGACY_INCARNATION),
+            },
+        );
+        let pinned_action =
+            KeywordAction::equip(&state.objects[&source], &state.objects[&creature]);
+        let pinned_entry = push_equip(&mut state, pinned_action);
+
+        let creature_filter = TargetFilter::Typed(TypedFilter::creature());
+        // Positive reach-guard: the creature is on the battlefield and the
+        // filter matches it through a current pin.
+        assert!(
+            stack_entry_targets_satisfy(
+                &state,
+                pinned_entry,
+                source,
+                Some(PlayerId(0)),
+                &creature_filter,
+                false,
+            ),
+            "the pinned equip targets a creature"
+        );
+        assert!(
+            !stack_entry_targets_satisfy(
+                &state,
+                legacy_entry,
+                source,
+                Some(PlayerId(0)),
+                &creature_filter,
+                false,
+            ),
+            "a legacy pin names no live object, so its target is ignored"
+        );
     }
 
     #[test]
@@ -19974,9 +20066,13 @@ mod tests {
             ..CombatState::default()
         });
 
-        let filter = TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
-        );
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None,
+                }]),
+            );
 
         assert!(matches_target_filter(&state, attacker, &filter, attacker));
         assert!(!matches_target_filter(&state, bystander, &filter, attacker));
@@ -27240,7 +27336,10 @@ mod tests {
         };
 
         assert!(zone_change_record_matches_property(
-            &FilterProp::Attacking { defender: None },
+            &FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            },
             &state,
             &attacking_record,
             &source_ctx,
@@ -27255,6 +27354,7 @@ mod tests {
         ));
         assert!(zone_change_record_matches_property(
             &FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You)
             },
             &state,
@@ -28726,6 +28826,7 @@ mod tests {
         } = &mut event
         {
             *enter_as_copy = Some(Box::new(CopyTokenSpec {
+                blocking_attacker: None,
                 values: Box::new(values),
                 display: crate::game::game_object::DisplayIdentity {
                     display_source: crate::game::game_object::DisplaySource::Token,
@@ -29311,6 +29412,7 @@ mod characteristic_read_classification_tests {
                 caster: ControllerRef::You,
             },
             FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You),
             },
             FilterProp::ProtectorMatches {
@@ -29478,6 +29580,7 @@ mod declared_group_binder_tests {
     fn carriers(with: ControllerRef) -> Vec<FilterProp> {
         vec![
             FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(with.clone()),
             },
             FilterProp::ProtectorMatches {

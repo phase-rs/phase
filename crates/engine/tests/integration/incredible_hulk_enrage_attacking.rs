@@ -282,7 +282,10 @@ fn enrage_chain_gates_untap_and_extra_combat_on_attacking() {
         untap.condition,
         Some(AbilityCondition::SourceMatchesFilter {
             filter: TargetFilter::Typed(TypedFilter {
-                properties: vec![FilterProp::Attacking { defender: None }],
+                properties: vec![FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }],
                 ..Default::default()
             }),
         }),

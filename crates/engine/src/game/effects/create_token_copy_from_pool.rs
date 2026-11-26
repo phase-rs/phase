@@ -147,6 +147,7 @@ pub fn resolve(
         owner: token_owner,
         count,
         copy: Box::new(CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(values),
             display: DisplayIdentity {
                 display_source: DisplaySource::Card,

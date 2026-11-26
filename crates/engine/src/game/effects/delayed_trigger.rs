@@ -81,6 +81,66 @@ fn payload_names_tracked_set(effect: &Effect) -> bool {
         .is_some_and(super::filter_references_tracked_set)
 }
 
+fn declared_death_watch_slot(condition: &DelayedTriggerCondition) -> Option<usize> {
+    use crate::types::ability::{TriggerDefinition, WheneverEventExpiry};
+    use crate::types::triggers::TriggerMode;
+    let DelayedTriggerCondition::WheneverEvent {
+        trigger,
+        expiry: WheneverEventExpiry::EndOfTurn,
+    } = condition
+    else {
+        return None;
+    };
+    let Some(TargetFilter::ParentTargetSlot { index }) = trigger.valid_card else {
+        return None;
+    };
+    let expected = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .origin(Zone::Battlefield)
+        .destination(Zone::Graveyard)
+        .valid_card(TargetFilter::ParentTargetSlot { index });
+    (**trigger == expected).then_some(index)
+}
+
+fn bind_death_return_to_arrival(effect: &mut Effect) {
+    // CR 400.7e + CR 603.7c: A direct return finds the object the death put
+    // in the graveyard. Both spellings use the event-subject currency check.
+    match effect {
+        Effect::ChangeZone {
+            origin,
+            destination: Zone::Battlefield | Zone::Hand,
+            target: target @ TargetFilter::ParentTarget,
+            ..
+        } => {
+            *origin = Some(Zone::Graveyard);
+            *target = TargetFilter::TriggeringSource;
+        }
+        Effect::Bounce {
+            target: TargetFilter::ParentTarget,
+            destination,
+            selection: crate::types::ability::BounceSelection::Targeted,
+        } => {
+            *effect = Effect::ChangeZone {
+                actor: Default::default(),
+                origin: Some(Zone::Graveyard),
+                destination: destination.unwrap_or(Zone::Hand),
+                target: TargetFilter::TriggeringSource,
+                owner_library: false,
+                library_shuffle: Default::default(),
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: Default::default(),
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                enters_modified_if: None,
+            };
+        }
+        _ => {}
+    }
+}
+
 /// CR 603.7: Create a delayed triggered ability during resolution.
 pub fn resolve(
     state: &mut GameState,
@@ -137,6 +197,32 @@ pub fn resolve(
     // CR 603.7a: the origin is the parsed condition and effect, before any binder rewrites them,
     // so each resolution of one creating ability makes the same delayed ability.
     let parsed_origin = (condition.clone(), (*effect_def.effect).clone());
+    let delayed_watch_incarnation = if let Some(index) = declared_death_watch_slot(&condition) {
+        // CR 400.7 + CR 603.7c: The ID-level read can succeed for an inherited
+        // operand after a blink. Check this exact declaration's pin as well.
+        let pin =
+            crate::game::targeting::resolve_live_parent_slot_entry_from_root(state, ability, index)
+                .and_then(|entry| match (entry.target, entry.pin) {
+                    (TargetRef::Object(id), Some(pin))
+                        if pin.object_id == id && pin.is_current(state) =>
+                    {
+                        Some(pin)
+                    }
+                    _ => None,
+                });
+        let Some(pin) = pin else {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::CreateDelayedTrigger,
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        };
+        bind_death_return_to_arrival(&mut effect_def.effect);
+        Some(pin)
+    } else {
+        None
+    };
 
     // CR 603.7 + CR 608.2c: Resolve the most-recent tracked set once, up front,
     // so the tracked-set CONDITION rewrite runs BEFORE the single-target
@@ -965,6 +1051,7 @@ pub fn resolve(
     // CR 603.7b: Most delayed triggers fire once and are removed.
     // WheneverEvent triggers fire each time and persist until end-of-turn cleanup.
     // `one_shot` was computed once above (single source of truth) and is reused here.
+    delayed_ability.context.delayed_watch_incarnation = delayed_watch_incarnation;
     crate::game::triggers::install_delayed_trigger(
         state,
         DelayedTrigger {

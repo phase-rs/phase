@@ -559,6 +559,8 @@ pub enum ConditionObjectAntecedent {
 /// Callers set only the fields they need; all fields are Default-able (D-02).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParseContext {
+    /// CR 509.3b: the trigger condition binds the attacker in a block pair.
+    pub blocking_rider_antecedent: Option<TargetFilter>,
     /// The current subject (resolved target — "it", "that creature").
     pub subject: Option<TargetFilter>,
     /// Card name for self-reference (~) normalization.

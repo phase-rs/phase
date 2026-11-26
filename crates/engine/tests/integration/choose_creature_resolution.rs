@@ -1298,8 +1298,11 @@ fn wraith_board_at_payment_prompt(own_land_colors: &[ManaColor], good_day: bool)
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let day = good_day.then(|| {
-        let db = load_db().expect("the committed card-data fixture carries A Good Day to Die");
-        scenario.add_real_card(P0, "A Good Day to Die", Zone::Hand, db)
+        let db =
+            engine::database::card_db::CardDatabase::from_integration_fixture_typing_faces_on_read(
+            )
+            .expect("the committed card-data fixture carries A Good Day to Die");
+        scenario.add_real_card(P0, "A Good Day to Die", Zone::Hand, &db)
     });
     let wraith = scenario
         .add_creature_from_oracle(P0, "Canoptek Wraith", 2, 1, CANOPTEK_WRAITH_ORACLE)
@@ -1344,7 +1347,19 @@ fn wraith_board_at_payment_prompt(own_land_colors: &[ManaColor], good_day: bool)
         assert!(
             runner.state().delayed_triggers.iter().any(|trigger| {
                 trigger.source_id == day
-                    && matches!(&trigger.condition, DelayedTriggerCondition::WhenDies { .. })
+                    && matches!(&trigger.condition,
+                        DelayedTriggerCondition::WheneverEvent {
+                            trigger: head,
+                            expiry: engine::types::ability::WheneverEventExpiry::EndOfTurn,
+                        } if head.destination == Some(Zone::Graveyard))
+                    && trigger
+                        .ability
+                        .context
+                        .delayed_watch_incarnation
+                        .is_some_and(|pin| {
+                            pin.object_id == wraith
+                                && pin.incarnation == runner.state().objects[&wraith].incarnation
+                        })
             }),
             "reach guard: A Good Day to Die installed its delayed death trigger"
         );

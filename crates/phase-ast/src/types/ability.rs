@@ -7393,6 +7393,11 @@ pub enum FilterProp {
     Attacking {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         defender: Option<ControllerRef>,
+        #[serde(
+            default,
+            skip_serializing_if = "AttackDefenderMatch::is_defending_side"
+        )]
+        scope: AttackDefenderMatch,
     },
     /// CR 509.1a: Matches creatures that are blocking.
     Blocking,
@@ -12098,8 +12103,8 @@ pub fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
 ///    Asinine Antics' "for each opponent creature, create a Cursed Role attached
 ///    to that creature" rebinds through this hidden `ParentTarget` slot. The
 ///    arm also surfaces a *context-ref* `enters_blocking` (Nature Shields Its
-///    Own's "blocking that creature" rider). `target_filter()` never surfaces
-///    `enters_blocking` at all, so that slot can never double-count.
+///    Own's "blocking that creature" rider). Only a targetable blocking rider
+///    is surfaced by `target_filter()`.
 ///  * `Effect::Attach` surfaces `target` but hides `attachment`; the arm fires
 ///    only when `attachment.is_context_ref()`, mirroring the guards above (a
 ///    non-context-ref `attachment` can never be a parent-ref, so excluding it
@@ -23433,6 +23438,20 @@ impl TokenAttackDestination {
     }
 }
 
+/// CR 508.1b and 508.5: distinguish the actual player attacked from the defending side.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttackDefenderMatch {
+    #[default]
+    DefendingSide,
+    DirectPlayer,
+}
+
+impl AttackDefenderMatch {
+    pub fn is_defending_side(&self) -> bool {
+        *self == Self::DefendingSide
+    }
+}
+
 /// CR 508.4: what a named player offers as the destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NamedDefenderScope {
@@ -30811,6 +30830,11 @@ pub enum VoteVisibility {
 }
 
 impl TargetFilter {
+    /// CR 702.6a: the target of ordinary equip is a creature you control.
+    pub fn equip_target() -> Self {
+        Self::Typed(TypedFilter::creature().controller(ControllerRef::You))
+    }
+
     /// CR 702.62b: exile, suspend, and at least one time counter on this card.
     pub fn suspended_card(owner: Option<ControllerRef>) -> TargetFilter {
         let mut properties = vec![
@@ -33008,10 +33032,11 @@ impl Effect {
             // surface their token-creation target as the `owner` filter — the
             // player who creates the token is its owner. The default
             // `TargetFilter::Controller` preserves "you create ..." semantics.
-            Effect::Token { owner, attach_to, .. } => match attach_to {
-                Some(f) if !f.is_context_ref() => Some(f),
-                _ => Some(owner),
-            },
+            Effect::Token { owner, attach_to, enters_blocking, .. } => enters_blocking
+                .as_ref()
+                .filter(|f| !f.is_context_ref())
+                .or(attach_to.as_ref().filter(|f| !f.is_context_ref()))
+                .or(Some(owner)),
 
             // GenericEffect and LoseLife have Option<TargetFilter>
             //
@@ -33598,11 +33623,15 @@ impl Effect {
             }
 
             Effect::Token {
-                owner, attach_to, ..
-            } => match attach_to {
-                Some(f) if !f.is_context_ref() => Some(f),
-                _ => Some(owner),
-            },
+                owner,
+                attach_to,
+                enters_blocking,
+                ..
+            } => enters_blocking
+                .as_mut()
+                .filter(|f| !f.is_context_ref())
+                .or(attach_to.as_mut().filter(|f| !f.is_context_ref()))
+                .or(Some(owner)),
 
             Effect::GenericEffect { target, .. }
             | Effect::LoseLife { target, .. }
@@ -46372,15 +46401,11 @@ mod tests {
         );
 
         // Non-context-ref variants surface exactly once via the seed (guard):
-        // a targetable attach_to IS the seed, a non-context enters_blocking
-        // is excluded and the owner seed stands alone.
+        // Either targetable rider can provide the announced target seed.
         let targeted_attach = token_with(Some(targeted.clone()), None);
         assert_eq!(effect_parent_ref_slots(&targeted_attach), vec![&targeted]);
         let targeted_blocking = token_with(None, Some(targeted.clone()));
-        assert_eq!(
-            effect_parent_ref_slots(&targeted_blocking),
-            vec![&controller]
-        );
+        assert_eq!(effect_parent_ref_slots(&targeted_blocking), vec![&targeted]);
     }
 
     /// A token effect that names no defender is byte-identical on the wire to
@@ -51642,11 +51667,16 @@ mod tests {
         let props = vec![
             FilterProp::Token,
             FilterProp::RepresentedByCard,
-            FilterProp::Attacking { defender: None },
             FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+            FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You),
             },
             FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::Opponent),
             },
             FilterProp::AttackedThisTurn { defender: None },

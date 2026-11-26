@@ -3913,7 +3913,10 @@ mod structural_marker_tests {
                 filter: TargetFilter::Typed(
                     TypedFilter::creature()
                         .controller(controller)
-                        .properties(vec![FilterProp::Attacking { defender: None }]),
+                        .properties(vec![FilterProp::Attacking {
+                            scope: Default::default(),
+                            defender: None,
+                        }]),
                 ),
             },
         };

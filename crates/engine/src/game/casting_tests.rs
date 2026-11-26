@@ -54877,7 +54877,10 @@ fn cosmic_cube_dynamic_mv_ceiling_enforced_at_finalize() {
                         filter: TargetFilter::Typed(TypedFilter {
                             type_filters: vec![TypeFilter::Creature],
                             controller: Some(ControllerRef::You),
-                            properties: vec![FilterProp::Attacking { defender: None }],
+                            properties: vec![FilterProp::Attacking {
+                                scope: Default::default(),
+                                defender: None,
+                            }],
                         }),
                     },
                 )

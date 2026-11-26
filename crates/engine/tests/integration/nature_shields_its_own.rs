@@ -1207,3 +1207,64 @@ fn visitation_and_chatterfang_compound_blocks_with_both_batches() {
         "settled at priority"
     );
 }
+
+#[test]
+fn main_saved_token_proposal_resumes_blocking() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::game_state::TrustedGameStateEnvelope;
+    use engine::types::proposed_event::ProposedEvent;
+
+    let (mut scenario, raiders) = archenemy_scenario(1);
+    // Two doublers commute, so use a printed optional replacement to park the proposal.
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let donor = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let meditation = scenario.add_real_card(P0, "Moonlit Meditation", Zone::Battlefield, db);
+    let mut runner = build_with_scheme(scenario);
+    runner.attach_as_bestowed_aura(meditation, donor);
+    drive_to_p1_combat(&mut runner);
+    let attacker = raiders[0];
+    attack_unblocked(&mut runner, &[(attacker, AttackTarget::Player(P0))]);
+    stack_unblocked_triggers(&mut runner, 1);
+    runner.resolve_top();
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+        panic!("the Plant proposal must pause for Moonlit Meditation's choice");
+    };
+    assert_eq!(candidates[0].source_id, meditation);
+    let decline = candidates
+        .iter()
+        .position(|candidate| candidate.description == "Decline")
+        .unwrap();
+    let proposed = &runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .unwrap()
+        .proposed;
+    let ProposedEvent::CreateToken { spec, .. } = proposed else {
+        panic!("the save must contain the pending Plant proposal");
+    };
+    assert_eq!(spec.blocking_attacker, Some(attacker));
+    let mut saved =
+        serde_json::to_value(TrustedGameStateEnvelope::capture(runner.state().clone())).unwrap();
+    let wire_spec = saved["state"]["pending_replacement"]["proposed"]["CreateToken"]["spec"]
+        .as_object_mut()
+        .expect("serialized pending Plant spec");
+    assert_eq!(wire_spec["blocking_attacker"], serde_json::json!(attacker));
+    assert_eq!(
+        wire_spec.remove("blocking_attacker_incarnation"),
+        Some(serde_json::json!(
+            runner.state().objects[&attacker].incarnation
+        ))
+    );
+    // Main writes the numeric attacker ID with no incarnation sibling.
+    let restored: TrustedGameStateEnvelope = serde_json::from_value(saved).unwrap();
+    let mut resumed = GameRunner::from_state(restored.into_game_state());
+    resumed
+        .act(GameAction::ChooseReplacement { index: decline })
+        .unwrap();
+    drain_triggers(&mut resumed);
+    let plants = tokens_of_subtype(&resumed, "Plant");
+    assert_eq!(plants.len(), 1);
+    let blockers = &resumed.state().combat.as_ref().unwrap().blocker_assignments;
+    assert_eq!(blockers.get(&attacker), Some(&plants));
+}

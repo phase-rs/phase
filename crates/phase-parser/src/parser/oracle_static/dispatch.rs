@@ -1755,6 +1755,7 @@ pub(crate) fn parse_static_line_inner(
         let filter =
             TargetFilter::Typed(
                 TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                    scope: Default::default(),
                     defender: Some(defender),
                 }]),
             );

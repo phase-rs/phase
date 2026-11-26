@@ -6618,6 +6618,7 @@ fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
         match prop {
             FilterProp::Attacking {
                 defender: Some(ControllerRef::DefendingPlayer),
+                ..
             }
             | FilterProp::AttackedThisTurn {
                 defender: Some(ControllerRef::DefendingPlayer),
@@ -12553,7 +12554,8 @@ fn filter_needs_trigger_source_for_retarget(filter: &TargetFilter) -> bool {
         matches!(
             prop,
             FilterProp::Attacking {
-                defender: Some(ControllerRef::DefendingPlayer)
+                defender: Some(ControllerRef::DefendingPlayer),
+                ..
             } | FilterProp::AttackedThisTurn {
                 defender: Some(ControllerRef::DefendingPlayer)
             }
@@ -13910,8 +13912,12 @@ mod tests {
                     source,
                     StackEntryKind::KeywordAction {
                         action: KeywordAction::Equip {
-                            equipment_id: source,
-                            target_creature_id: other,
+                            equipment: crate::types::identifiers::ObjectIncarnationRef::of(
+                                source, 0,
+                            ),
+                            target_creature: crate::types::identifiers::ObjectIncarnationRef::of(
+                                other, 0,
+                            ),
                         },
                     },
                 ),
@@ -15145,6 +15151,7 @@ mod tests {
 
     fn attacking(defender: ControllerRef) -> FilterProp {
         FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(defender),
         }
     }
@@ -15200,7 +15207,10 @@ mod tests {
         // Negative: every `Attacking`/`AttackedThisTurn` value that exists in the
         // corpus today must stay on the bare door, unchanged.
         for prop in [
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
             attacking(ControllerRef::You),
             attacking(ControllerRef::Opponent),
             attacking(ControllerRef::SourceChosenPlayer),
