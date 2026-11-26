@@ -6182,16 +6182,6 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
     if condition.is_some() {
         return None;
     }
-    // CR 509.4: entering blockers publish combat events as well as entry.
-    if matches!(
-        &ability.effect,
-        Effect::Token {
-            enters_blocking: Some(_),
-            ..
-        }
-    ) {
-        return None;
-    }
     // Token trigger membership is determined by the handler-owned read-only
     // profile, while semantic equality below keeps every non-identity field.
     // A clone proof resolves every member through the canonical path, so a
@@ -12991,25 +12981,6 @@ mod tests {
                 Some(3),
                 "source-relative tokens must keep a per-source boundary"
             );
-        }
-
-        #[test]
-        fn blocking_token_effect_is_excluded_from_batching() {
-            let mut state = setup();
-            let src = add_scute_source(&mut state);
-            let mut effect = insect_token_effect();
-            push_token_triggers(&mut state, src, effect.clone(), None, 2);
-            assert_eq!(batch_run_len(&state), Some(2));
-
-            let Effect::Token {
-                enters_blocking, ..
-            } = &mut effect
-            else {
-                panic!("expected a token effect");
-            };
-            *enters_blocking = Some(TargetFilter::ParentTarget);
-            push_token_triggers(&mut state, src, effect, None, 2);
-            assert_eq!(batch_run_len(&state), None);
         }
 
         // §2.2a companion field exclusions.
