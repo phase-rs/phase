@@ -42054,7 +42054,7 @@ fn bello_verbatim_line_retains_each_compound_subject_owner() {
 
 /// V5 — HOSTILE / lying-green: an unenforceable recursed static (Elvish
 /// Refueler's remainder parses to `Continuous` with ZERO modifications) is
-/// REFUSED by `is_enforceable_continuous_static`, so the card stays an honest
+/// REFUSED by `can_compose_leading_turn_scope`, so the card stays an honest
 /// `Effect::Unimplemented` rather than becoming a silent no-op that reports as
 /// supported.
 ///
@@ -42167,7 +42167,7 @@ fn during_your_turn_composes_with_remainder_condition() {
     // assumed).
     //
     // The always-true `StaticCondition::Unrecognized` shape is NOT what this
-    // assertion guards: `is_enforceable_continuous_static` now refuses it
+    // assertion guards: `can_compose_leading_turn_scope` now refuses it
     // upstream via `contains_unrecognized`, so such a line never reaches a
     // composed `And` at all — see
     // `during_your_turn_unrecognized_condition_remainder_stays_unsupported`,

@@ -10277,6 +10277,47 @@ You may pay {0} rather than pay the equip cost of the first equip ability you ac
     assert_eq!(alt.condition, None, "\"each turn\" carries no turn gate");
 }
 
+// CR 101.1 + CR 611.3a + CR 702.6a: Forge Anew lifts equip timing only while
+// its turn window holds. Leonin Shikari's permission has no turn window.
+#[test]
+fn printed_equip_timing_permissions_preserve_their_turn_scope() {
+    let forge = parse(
+        "When this enchantment enters, return target Equipment card from your graveyard to the battlefield.\nDuring your turn, you may activate equip abilities any time you could cast an instant.\nYou may pay {0} rather than pay the equip cost of the first equip ability you activate during each of your turns.",
+        "Forge Anew",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    let shikari = parse(
+        "You may activate equip abilities any time you could cast an instant.",
+        "Leonin Shikari",
+        &[],
+        &["Creature"],
+        &["Cat", "Soldier"],
+    );
+
+    for (parsed, expected_condition) in [
+        (forge, Some(StaticCondition::DuringYourTurn)),
+        (shikari, None),
+    ] {
+        assert!(parsed.abilities.iter().all(|def| !has_unimplemented(def)));
+        let permission = parsed
+            .statics
+            .iter()
+            .find(|def| {
+                matches!(
+                    def.mode,
+                    StaticMode::ActivateAsInstant {
+                        keyword: Some(crate::types::ability::AbilityTag::Equip),
+                        ..
+                    }
+                )
+            })
+            .expect("the printed equip timing permission should parse");
+        assert_eq!(permission.condition, expected_condition);
+    }
+}
+
 // CR 118.9 + CR 702.6a: Forge Anew — "during each of your turns" is a your-turn
 // gate on the once-per-turn grant, not a droppable tail.
 #[test]
