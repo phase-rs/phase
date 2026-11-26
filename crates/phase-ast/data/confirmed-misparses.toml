@@ -2038,7 +2038,6 @@ face = [
   { key = "serra inquisitors", class = "dropped_qualifier", clauses = ["Whenever this creature blocks or becomes blocked by one or more black creatures, this creature gets +2/+0 until end of turn."] },
   { key = "serra's hymn", class = "wrong_count", clauses = ["Sacrifice this enchantment: Prevent the next X damage that would be dealt this turn to any number of targets, divided as you choose, where X is the number of verse counters on this enchantment."] },
   { key = "seton's desire", class = "missing_effect", clauses = ["Threshold — As long as there are seven or more cards in your graveyard, all creatures able to block enchanted creature do so."] },
-  { key = "sewer nemesis", class = "trigger_wrong", clauses = ["Whenever the chosen player casts a spell, that player mills a card."] },
   { key = "sewers of estark", class = "wrong_object", clauses = ["If it's blocking, prevent all combat damage that would be dealt this combat by it and each creature it's blocking."] },
   { key = "shadow kin", class = "dropped_qualifier", clauses = ["You may exile a creature card from among the cards milled this way."] },
   { key = "shadow of the enemy", class = "target_wrong", clauses = ["Exile all creature cards from target player's graveyard.", "You may cast spells from among those cards for as long as they remain exiled,"] },

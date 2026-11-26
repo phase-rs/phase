@@ -22663,7 +22663,17 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             def.mode = TriggerMode::SpellCast;
 
             // Determine the caster filter
-            if scan_contains(who, "opponent") {
+            if all_consuming(preceded(
+                parse_trigger_keyword_prefix,
+                tag("the chosen player"),
+            ))
+            .parse(who)
+            .is_ok()
+            {
+                // CR 607.2d: The caster must be the player chosen by the
+                // source's linked ability.
+                def.valid_target = Some(TargetFilter::SourceChosenPlayer);
+            } else if scan_contains(who, "opponent") {
                 def.valid_target = Some(TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::Opponent),
                 ));
@@ -27181,8 +27191,8 @@ mod modal_spell_cast_trigger_tests {
 mod prepared_spell_cast_trigger_tests {
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        AbilityDefinition, CopyRetargetPermission, Effect, FilterProp, TargetFilter, TypeFilter,
-        TypedFilter,
+        AbilityDefinition, CopyRetargetPermission, Effect, FilterProp, QuantityExpr, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     use crate::types::TriggerDefinition;
     use crate::types::TriggerMode;
@@ -27196,6 +27206,39 @@ mod prepared_spell_cast_trigger_tests {
             .into_iter()
             .find(|t| matches!(t.mode, TriggerMode::SpellCast))
             .expect("must parse a SpellCast trigger")
+    }
+
+    #[test]
+    fn chosen_player_cast_spell_filters_caster_and_mills_them() {
+        for (spell, expected_type) in [
+            ("a spell", None),
+            ("a creature spell", Some(TypeFilter::Creature)),
+        ] {
+            let text = format!(
+                "As this creature enters, choose a player.\nWhenever the chosen player casts {spell}, that player mills a card."
+            );
+            let trigger = spell_cast_trigger(&text, "Test Creature");
+            assert_eq!(trigger.valid_target, Some(TargetFilter::SourceChosenPlayer));
+            assert_eq!(
+                trigger.valid_card,
+                expected_type.map(|kind| TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![kind],
+                    ..TypedFilter::default()
+                }))
+            );
+            let effect = trigger.execute.expect("mill effect");
+            assert!(
+                matches!(
+                    effect.effect.as_ref(),
+                    Effect::Mill {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::TriggeringPlayer,
+                        ..
+                    }
+                ),
+                "{effect:?}"
+            );
+        }
     }
 
     fn chain_has_unimplemented(def: &AbilityDefinition) -> bool {
