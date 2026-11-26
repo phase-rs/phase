@@ -341,6 +341,7 @@ mod tomb_sandfall_cell_life_loss_runtime;
 mod tomb_tyrant_graveyard_count_activation;
 mod tomb_veils_of_fear_life_loss_runtime;
 mod tombstone_stairwell_per_player_tokens;
+mod tomik_mangara_player_led_attack;
 mod top_manifold_key_incarnation;
 mod top_of_library_foreign_permission;
 mod top_of_library_mixed_permission;

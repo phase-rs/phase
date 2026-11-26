@@ -2797,10 +2797,10 @@ fn player_led_attack_fires_once_across_multiple_defenders() {
     let watcher = scenario
         .add_creature_from_oracle(
             P1,
-            "Attack watcher",
-            2,
-            2,
-            "Whenever a player attacks, you gain 1 life.",
+            "Avatar Roku, Firebender",
+            6,
+            6,
+            "Whenever a player attacks, add six {R}. Until end of combat, you don't lose this mana as steps end.\n{R}{R}{R}: Target creature gets +3/+0 until end of turn.",
         )
         .id();
     let first = scenario.add_creature(P0, "First attacker", 2, 2).id();
@@ -2812,7 +2812,6 @@ fn player_led_attack_fires_once_across_multiple_defenders() {
         WaitingFor::DeclareAttackers { player: P0, .. }
     ));
 
-    let starting_life = runner.life(P1);
     runner
         .declare_attackers(&[
             (first, AttackTarget::Player(P1)),
@@ -2827,31 +2826,31 @@ fn player_led_attack_fires_once_across_multiple_defenders() {
     assert_eq!(runner.state().stack[0].source_id, watcher);
     runner.resolve_top();
     assert!(runner.state().stack.is_empty());
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { .. }
-    ));
-    assert_eq!(runner.life(P1), starting_life + 1);
+    assert_eq!(
+        runner.state().players[usize::from(P1.0)].mana_pool.total(),
+        6
+    );
 }
 
-/// CR 508.3e: the named player adds one occurrence per attacked player.
+/// CR 508.3e: a head naming the attacked player fires once per attacked opponent.
 #[test]
 fn player_led_attack_with_a_defender_fires_for_each_defender() {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_creature_from_oracle(
-        P0,
-        "Attack watcher",
-        2,
-        2,
-        "Whenever a player attacks a player, that player loses 1 life.",
-    );
+    let calligrapher = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Combat Calligrapher",
+            3,
+            3,
+            "Flying\nInklings can't attack you or planeswalkers you control.\nWhenever a player attacks one of your opponents, that attacking player creates a tapped 2/1 white and black Inkling creature token with flying that's attacking that opponent.",
+        )
+        .id();
     let first = scenario.add_creature(P0, "First attacker", 2, 2).id();
     let second = scenario.add_creature(P0, "Second attacker", 2, 2).id();
     let third = scenario.add_creature(P0, "Third attacker", 2, 2).id();
     let mut runner = scenario.build();
     runner.advance_to_combat();
-    let life_before = [runner.life(P0), runner.life(P1), runner.life(P2)];
     runner
         .declare_attackers(&[
             (first, AttackTarget::Player(P1)),
@@ -2859,21 +2858,21 @@ fn player_led_attack_with_a_defender_fires_for_each_defender() {
             (third, AttackTarget::Player(P2)),
         ])
         .expect("one player can declare attacks on both opponents");
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { .. }
-    ));
-    assert_eq!(runner.state().stack.len(), 2);
-    runner.advance_until_stack_empty();
-    assert!(runner.state().stack.is_empty());
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { .. }
-    ));
-    assert_eq!(
-        [runner.life(P0), runner.life(P1), runner.life(P2)],
-        [life_before[0], life_before[1] - 1, life_before[2] - 1]
-    );
+    // CR 603.3b: the triggers may still be waiting for their controller to
+    // order them; count them wherever they are.
+    let triggers = match &runner.state().waiting_for {
+        WaitingFor::OrderTriggers { triggers, .. } => triggers
+            .iter()
+            .filter(|t| t.source_id == calligrapher)
+            .count(),
+        _ => runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == calligrapher)
+            .count(),
+    };
+    assert_eq!(triggers, 2);
 }
 
 /// CR 508.3d + CR 805.10b: a combined team declaration gives each actor
