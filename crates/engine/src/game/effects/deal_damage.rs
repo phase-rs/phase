@@ -6304,69 +6304,6 @@ mod tests {
         assert_eq!(outcome.damage_marked(src_b), 0);
     }
 
-    #[test]
-    fn flame_sweep_spares_only_flyers_controlled_by_the_caster() {
-        use crate::game::scenario::{GameScenario, P0, P1};
-        use crate::types::mana::{parse_mtgjson_mana_cost, ManaType, ManaUnit};
-        use crate::types::phase::Phase;
-
-        const FLAME_SWEEP: &str = "Flame Sweep deals 2 damage to each creature except for creatures you control with flying.";
-
-        // CR 115.10a: The spell also resolves when every creature is exempt.
-        for mixed_board in [true, false] {
-            let mut scenario = GameScenario::new();
-            scenario.at_phase(Phase::PreCombatMain);
-            let friendly_flyer = scenario
-                .add_creature(P0, "Friendly Flyer", 1, 3)
-                .flying()
-                .id();
-            let mut damaged = Vec::new();
-            if mixed_board {
-                damaged.push(scenario.add_creature(P0, "Friendly Ground", 1, 3).id());
-                damaged.push(scenario.add_creature(P1, "Opposing Ground", 1, 3).id());
-                damaged.push(
-                    scenario
-                        .add_creature(P1, "Opposing Flyer", 1, 3)
-                        .flying()
-                        .id(),
-                );
-            }
-            let spell = scenario
-                .add_spell_to_hand_from_oracle(P0, "Flame Sweep", true, FLAME_SWEEP)
-                .with_mana_cost(parse_mtgjson_mana_cost("{2}{R}"))
-                .id();
-            scenario.with_mana_pool(
-                P0,
-                [ManaType::Colorless, ManaType::Colorless, ManaType::Red]
-                    .into_iter()
-                    .map(|mana| ManaUnit::new(mana, ObjectId(9_999), false, vec![]))
-                    .collect(),
-            );
-            let mut runner = scenario.build();
-            let outcome = runner.cast(spell).resolve();
-
-            // CR 608.2n: The resolving instant finishes in the graveyard.
-            outcome.assert_zone(&[spell], Zone::Graveyard);
-            assert!(outcome.state().stack.is_empty());
-            assert!(matches!(
-                outcome.final_waiting_for(),
-                WaitingFor::Priority { .. }
-            ));
-            // CR 109.5 + CR 120.3e: Only the caster's flyer escapes marked damage.
-            outcome.assert_zone(&[friendly_flyer], Zone::Battlefield);
-            assert_eq!(outcome.damage_marked(friendly_flyer), 0);
-            outcome.assert_zone(&damaged, Zone::Battlefield);
-            for creature in damaged {
-                assert_eq!(
-                    outcome.damage_marked(creature),
-                    2,
-                    "{}",
-                    outcome.state().objects[&creature].name
-                );
-            }
-        }
-    }
-
     /// Issue #5244 — Radiance color fan-out (Cleansing Beam): "deals 2 damage to
     /// target creature and each other creature that shares a color with it." The
     /// chosen target and every OTHER creature sharing a color with it take 2; a

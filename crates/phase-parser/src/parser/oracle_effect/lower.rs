@@ -15357,6 +15357,8 @@ mod tests {
 
     #[test]
     fn each_damage_population_subtracts_after_folding_object_legs() {
+        // The measured corpus has no printed card with both object legs and a
+        // qualified exception. Underworld Fires is the closest object-leg example.
         // Grammar boundary: combine the object legs of Underworld Fires with
         // a qualified token exception and leave the next sentence untouched.
         let (target, remainder) = parse_each_damage_population(
