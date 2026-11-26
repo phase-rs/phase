@@ -8943,6 +8943,18 @@ fn single_event_defender(
     defenders.all(|defender| defender == first).then_some(first)
 }
 
+/// CR 508.5 + CR 508.5a: Resolve the defender identified by an already-bound
+/// attack event, including an observer firing whose source attacked elsewhere.
+pub(crate) fn defending_player_in_attack_event(
+    state: &GameState,
+    event: &GameEvent,
+    source_id: ObjectId,
+) -> Option<PlayerId> {
+    let (entries, global) = attack_entries(event)?;
+    entry_defender(state, entries, global, source_id)
+        .or_else(|| single_event_defender(state, entries, global))
+}
+
 /// CR 508.5 (+ CR 508.5a / CR 802.2a in multiplayer): THE authority that decides
 /// which attack answers a "defending player" reference.
 ///
@@ -9046,14 +9058,11 @@ pub(crate) fn defending_player_cr508_5(
     let entry_id = trigger_source.map_or(asker_id, |source| source.identity.reference.object_id);
 
     // The ONE binding rule, evaluated in the ONE place it may be evaluated.
-    with_bound_attack_event(state, trigger_source, |event| {
-        match event.and_then(attack_entries) {
-            Some((entries, global)) => entry_defender(state, entries, global, entry_id)
-                .or_else(|| single_event_defender(state, entries, global))
-                .or(latch)
-                .or(Some(global)),
-            None => latch,
-        }
+    with_bound_attack_event(state, trigger_source, |event| match event {
+        Some(event) => defending_player_in_attack_event(state, event, entry_id)
+            .or(latch)
+            .or_else(|| attack_entries(event).map(|(_, global)| global)),
+        None => latch,
     })
     .or_else(|| resolve_defending_player(state, asker_id))
 }

@@ -3337,23 +3337,20 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             // the trigger, not an intervening triggered ability above it.
             extract_source_from_event(event).map(TargetRef::Object)
         }
-        // CR 508.5 + CR 508.5a: "defending player" is the player the *attacking creature*
-        // is attacking, determined individually per attacker. resolve_defending_player
-        // tries the source as the attacker first (a creature's own attack trigger), then
-        // falls back to the attacker carried by the current triggering event (a separate
-        // permanent's attack trigger — Leeching Sliver watching another Sliver, or an
-        // Equipment). When combat state is no longer available, the triggering event's
-        // captured defender remains the resolution-time authority.
-        TargetFilter::DefendingPlayer => {
-            crate::game::combat::resolve_defending_player(state, source_id)
-                .or_else(|| match event? {
-                    GameEvent::AttackersDeclared {
-                        defending_player, ..
-                    } => Some(*defending_player),
-                    _ => None,
-                })
-                .map(TargetRef::Player)
-        }
+        // CR 508.5 + CR 508.5a: The attack named by the firing determines its
+        // defender, even when the ability's source attacked a different player.
+        TargetFilter::DefendingPlayer => event
+            .and_then(|event| {
+                crate::game::combat::defending_player_in_attack_event(state, event, source_id)
+            })
+            .or_else(|| crate::game::combat::resolve_defending_player(state, source_id))
+            .or_else(|| match event? {
+                GameEvent::AttackersDeclared {
+                    defending_player, ..
+                } => Some(*defending_player),
+                _ => None,
+            })
+            .map(TargetRef::Player),
         // CR 506.3 + CR 115.10a: "the player or planeswalker it's attacking" is read by
         // `combat::resolve_attacked_player_or_planeswalker`, which needs the ability's
         // trigger source (the latch) as well as the bound event. This event-and-state
