@@ -440,7 +440,7 @@ pub fn resolve(
             | TargetFilter::PostReplacementDamageSource
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
-            | TargetFilter::DefendingPlayer
+            | TargetFilter::DefendingPlayer { .. }
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }
