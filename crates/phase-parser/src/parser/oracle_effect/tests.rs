@@ -110453,3 +110453,264 @@ fn unbound_life_loss_difference_in_an_emblem() {
         }
     });
 }
+
+#[test]
+fn delayed_draw_discard_rejects_unconsumed_replacement_markers() {
+    let parse = |body| parse_delayed_player_damage_body(body, &mut ParseContext::default());
+    assert!(parse("draw a card, then discard a card.").is_some());
+    for body in [
+        "draw a card instead, then discard a card.",
+        "draw a card, then discard a card instead.",
+        "draw a card and discard a card at random.",
+        "draw a card and scry 1.",
+        "draw a card and and discard a card.",
+        "draw a card and discards a card.",
+    ] {
+        assert!(parse(body).is_none(), "{body}");
+    }
+}
+
+#[test]
+fn forth_eorlingas_exports_delayed_spell_ability_description() {
+    let delayed_sentence = "Whenever one or more creatures you control deal combat damage to one or more players this turn, you become the monarch.";
+    let oracle = format!(
+        "Create X 2/2 red Human Knight creature tokens with trample and haste.\n{delayed_sentence}"
+    );
+    let parsed = parse_oracle_text(&oracle, "Forth Eorlingas!", &[], &["Sorcery".into()], &[]);
+    let [_, delayed] = parsed.abilities.as_slice() else {
+        panic!("expected two spell abilities");
+    };
+    assert_eq!(delayed.kind, AbilityKind::Spell);
+    assert!(matches!(
+        delayed.effect.as_ref(),
+        Effect::CreateDelayedTrigger { .. }
+    ));
+    let exported = serde_json::to_value(delayed).expect("serialize delayed spell ability");
+    assert_eq!(exported["description"], delayed_sentence);
+}
+
+#[test]
+fn delayed_player_damage_full_faces_commit_compound_payloads() {
+    use crate::types::ability::DamageKindFilter;
+    use std::ops::ControlFlow;
+
+    const FORTH: &str = "Create X 2/2 red Human Knight creature tokens with trample and haste.\nWhenever one or more creatures you control deal combat damage to one or more players this turn, you become the monarch.";
+    const JACE: &str = "[+1]: Whenever one or more creatures you control deal combat damage to a player this turn, draw a card, then discard a card.\n[−2]: Create a 2/2 blue Illusion creature token with \"When this token becomes the target of a spell, sacrifice it.\"\n[−5]: Create two tokens that are copies of Jace, except they're not legendary.";
+    const RAVEN: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Create a 1/1 blue Bird creature token with flying. You gain 2 life.\nII — Whenever one or more creatures you control with flying deal combat damage to a player this turn, look at that player's hand and draw a card.\nIII — You may put a card you own from outside the game on top of your library.";
+
+    for (name, kind, subtypes, full, mutations, mode, expected) in [
+        (
+            "Forth Eorlingas!",
+            "Sorcery",
+            &[][..],
+            FORTH,
+            &[
+                ("the monarch.", "the monarch instead."),
+                ("the monarch.", "the monarch and scry 1."),
+                ("combat damage", "combat 3 or more damage"),
+                (
+                    "one or more players this turn",
+                    "one or more players with hexproof this turn",
+                ),
+            ][..],
+            TriggerMode::DamageDoneOnce,
+            &["monarch"][..],
+        ),
+        (
+            "Jace, Cunning Castaway",
+            "Planeswalker",
+            &["Jace"][..],
+            JACE,
+            &[
+                ("draw a card,", "draw a card instead,"),
+                ("combat damage", "combat 3 or more damage"),
+                ("a player this turn", "a player with hexproof this turn"),
+                ("discard a card.", "discard a card instead."),
+            ][..],
+            TriggerMode::DamageDone,
+            &["draw", "discard"][..],
+        ),
+        (
+            "The Raven's Warning",
+            "Enchantment",
+            &["Saga"][..],
+            RAVEN,
+            &[
+                ("and draw a card.", "and draw a card instead."),
+                (
+                    "with flying deal",
+                    "with flying and unknown qualifications deal",
+                ),
+            ][..],
+            TriggerMode::DamageDone,
+            &["look", "draw"][..],
+        ),
+    ] {
+        let parse = |text: &str| {
+            parse_oracle_text(
+                text,
+                name,
+                &[],
+                &[kind.to_owned()],
+                &subtypes.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            )
+        };
+        let inspect = |face: &crate::parser::oracle::ParsedAbilities| {
+            let mut installers = 0;
+            let mut strict = Vec::new();
+            let mut payloads = Vec::new();
+            let mut visit = |effect: &Effect| {
+                match effect {
+                    Effect::CreateDelayedTrigger {
+                        condition:
+                            DelayedTriggerCondition::WheneverEvent {
+                                trigger,
+                                expiry: WheneverEventExpiry::EndOfTurn,
+                            },
+                        effect,
+                        ..
+                    } => {
+                        installers += 1;
+                        assert_eq!(trigger.mode, mode);
+                        assert!(trigger.batched);
+                        assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+                        assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+                        let mut node = Some(effect.as_ref());
+                        while let Some(def) = node {
+                            payloads.push(match def.effect.as_ref() {
+                                Effect::BecomeMonarch {
+                                    target: TargetFilter::Controller,
+                                } => "monarch",
+                                Effect::Draw {
+                                    target: TargetFilter::Controller,
+                                    count: QuantityExpr::Fixed { value: 1 },
+                                } => "draw",
+                                Effect::Discard {
+                                    count: QuantityExpr::Fixed { value: 1 },
+                                    ..
+                                } => "discard",
+                                Effect::RevealHand {
+                                    target: TargetFilter::TriggeringPlayer,
+                                    reveal: false,
+                                    ..
+                                } => "look",
+                                Effect::RevealHand {
+                                    target: TargetFilter::Controller,
+                                    reveal: false,
+                                    ..
+                                } => "look-controller",
+                                other => panic!("{name}: unexpected watcher payload {other:?}"),
+                            });
+                            node = def.sub_ability.as_deref();
+                        }
+                    }
+                    Effect::Unimplemented { name, description }
+                        if name == "delayed_player_damage_body"
+                            || name == "delayed_player_damage_head" =>
+                    {
+                        strict.push(description.clone().expect("strict failure source text"));
+                    }
+                    _ => {}
+                }
+                ControlFlow::Continue(())
+            };
+            for ability in &face.abilities {
+                let _ = crate::types::ability_visit::visit_ability_def(ability, &mut visit);
+            }
+            for trigger in &face.triggers {
+                let _ = crate::types::ability_visit::visit_trigger(trigger, &mut visit);
+            }
+            let mut immediate = |effect: &Effect| {
+                assert!(
+                    !matches!(
+                        effect,
+                        Effect::BecomeMonarch { .. }
+                            | Effect::Draw { .. }
+                            | Effect::Discard { .. }
+                            | Effect::RevealHand { .. }
+                    ),
+                    "{name} detached a delayed instruction: {effect:?}"
+                );
+                ControlFlow::Continue(())
+            };
+            for ability in face.abilities.iter().chain(
+                face.triggers
+                    .iter()
+                    .filter_map(|trigger| trigger.execute.as_deref()),
+            ) {
+                let _ = crate::types::ability_visit::visit_ability_def_scoped(
+                    ability,
+                    crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+                    &mut immediate,
+                );
+            }
+            (installers, strict, payloads)
+        };
+        assert_eq!(
+            inspect(&parse(full)),
+            (1, Vec::new(), expected.to_vec()),
+            "{name}"
+        );
+        if full == RAVEN {
+            // Structural variation on The Raven's Warning II: the controller
+            // is both the viewer and the owner of the hand being inspected.
+            let modified = full.replace("that player's hand", "your hand");
+            assert_eq!(
+                inspect(&parse(&modified)),
+                (1, Vec::new(), vec!["look-controller", "draw"])
+            );
+        }
+        for (from, to) in mutations {
+            let mutated = full.replace(from, to);
+            let (installers, strict, payloads) = inspect(&parse(&mutated));
+            assert_eq!(installers, 0, "{name}: {to}");
+            assert!(payloads.is_empty(), "{name}: {to}");
+            let [fragment] = strict.as_slice() else {
+                panic!("{name}: {to}: expected exactly one strict failure, got {strict:?}");
+            };
+            let expected_span = to.trim_end_matches('.');
+            let expected_span = expected_span
+                .strip_suffix(" this turn")
+                .unwrap_or(expected_span);
+            assert!(fragment.contains(expected_span), "{name}: {fragment:?}");
+        }
+    }
+}
+
+#[test]
+fn delayed_player_damage_forth_head_accepts_an_independent_body() {
+    // Structural variation on Forth Eorlingas!, with a draw before the
+    // printed monarch instruction. Both belong to the same delayed ability.
+    let printed = "Whenever one or more creatures you control deal combat damage to one or more players this turn,";
+    let face = parse_named_face(
+        &format!("{printed} draw a card and you become the monarch."),
+        "Combat Draw and Monarch",
+        &["Sorcery"],
+    );
+    let Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::WheneverEvent { trigger, .. },
+        effect,
+        ..
+    } = face.abilities[0].effect.as_ref()
+    else {
+        panic!("expected a single installed watcher: {face:?}");
+    };
+    assert_eq!(trigger.mode, TriggerMode::DamageDoneOnce);
+    assert!(trigger.batched);
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    ));
+    let monarch = effect.sub_ability.as_deref().expect("monarch instruction");
+    assert!(matches!(
+        monarch.effect.as_ref(),
+        Effect::BecomeMonarch {
+            target: TargetFilter::Controller
+        }
+    ));
+    assert!(monarch.sub_ability.is_none());
+    assert!(face.abilities[0].sub_ability.is_none());
+}

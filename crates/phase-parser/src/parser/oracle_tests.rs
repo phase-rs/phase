@@ -20,6 +20,66 @@ use crate::types::keywords::{CompanionCondition, Keyword};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
+#[test]
+fn delayed_this_turn_head_requires_a_terminal_word_boundary_and_keeps_body_case() {
+    use crate::parser::oracle_effect::parse_delayed_this_turn_head;
+    use crate::parser::oracle_util::TextPair;
+
+    let original = "When that creature dies  this turn, Create a Wraith.";
+    assert_eq!(
+        parse_delayed_this_turn_head(TextPair::new(original, &original.to_ascii_lowercase())),
+        Some(("that creature dies", "Create a Wraith."))
+    );
+    for text in [
+        "when that creature dies this turn again, draw a card.",
+        "when that creature dies\tthis turn, draw a card.",
+    ] {
+        assert_eq!(
+            parse_delayed_this_turn_head(TextPair::new(text, text)),
+            None
+        );
+    }
+}
+
+#[test]
+fn declared_death_watcher_requires_a_unique_numbered_creature_and_exact_head() {
+    use crate::types::ability::{DelayedTriggerCondition, WheneverEventExpiry};
+
+    let exact = "When that creature dies this turn, you draw a card.";
+    for (prefix, head, slot) in [
+        ("Target creature gets +2/+0 until end of turn. ", exact, Some(0)),
+        ("Exile target artifact. Return that card to the battlefield under its owner's control. Target creature gets +2/+0 until end of turn. ", exact, Some(1)),
+        ("Target creature gets +2/+0 until end of turn. Target creature gets +1/+1 until end of turn. ", exact, None),
+        ("Draw a card. ", exact, None),
+        ("Target creature gets +2/+0 until end of turn. ", "When that creature you control dies this turn, you draw a card.", None),
+        ("Target creature gets +2/+0 until end of turn. ", "When that creature dies, you draw a card.", None),
+    ] {
+        let parsed = parse(&format!("{prefix}{head}"), "Watcher grammar", &[], &["Instant"], &[]);
+        let watcher = std::iter::successors(parsed.abilities.first(), |node| node.sub_ability.as_deref())
+            .find_map(|node| match node.effect.as_ref() {
+                Effect::CreateDelayedTrigger { condition, effect, uses_tracked_set } => {
+                    Some((condition, effect, uses_tracked_set))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected a delayed trigger for {prefix}{head}"));
+        assert!(matches!(watcher.1.effect.as_ref(), Effect::Draw { .. }));
+        if let Some(index) = slot {
+            let DelayedTriggerCondition::WheneverEvent { trigger, expiry } = watcher.0 else {
+                panic!("expected the declared death watcher for {prefix}{head}");
+            };
+            assert_eq!(*expiry, WheneverEventExpiry::EndOfTurn);
+            assert_eq!(trigger.origin, Some(Zone::Battlefield));
+            assert_eq!(trigger.destination, Some(Zone::Graveyard));
+            assert_eq!(trigger.valid_card, Some(TargetFilter::ParentTargetSlot { index }));
+            assert!(trigger.execute.is_none());
+            assert!(!watcher.2);
+        } else {
+            assert!(matches!(watcher.0, DelayedTriggerCondition::WhenDies { .. }));
+        }
+    }
+}
+
 // Printed Oracle text and metadata verified against MTGJSON AtomicCards.
 const DIAGNOSTIC_JULIUS: &str = "Dr. Julius Jumblemorph is every creature type (even if this card isn't on the battlefield).\nWhenever a host you control enters, you may search your library and/or graveyard for a card with augment and combine it with that host. If you search your library this way, shuffle.";
 const DIAGNOSTIC_JERMANE: &str = "{G}, {T}: Put two +1/+1 counters on target creature with four or more legs.\n{1}{G}{G}, {T}: Until end of turn, all creatures able to block target creature with four or more legs do so.";
@@ -15422,6 +15482,61 @@ fn damage_to_self_counter_instead_is_replacement_not_spell_ability() {
         .parse_warnings
         .iter()
         .all(|warning| warning.category_name() != "swallowed-clause"));
+}
+
+#[test]
+fn thunder_of_unity_chapters_keep_both_life_instructions_in_the_watcher_shape() {
+    use crate::types::ability::{DelayedTriggerCondition, WheneverEventExpiry};
+
+    let parsed = parse(
+        "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — You draw two cards and you lose 2 life.\nII, III — Whenever a creature you control enters this turn, each opponent loses 1 life and you gain 1 life.",
+        "Thunder of Unity",
+        &[],
+        &["Enchantment"],
+        &["Saga"],
+    );
+    assert_eq!(parsed.triggers.len(), 3);
+    for (index, chapter) in parsed.triggers.iter().enumerate() {
+        assert_eq!(
+            chapter.counter_filter.as_ref().unwrap().threshold,
+            Some(index as u32 + 1)
+        );
+        let root = chapter.execute.as_deref().expect("chapter effect");
+        if index == 0 {
+            assert!(matches!(root.effect.as_ref(), Effect::Draw { .. }));
+            assert!(matches!(
+                root.sub_ability.as_ref().unwrap().effect.as_ref(),
+                Effect::LoseLife { .. }
+            ));
+            continue;
+        }
+        let Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WheneverEvent { trigger, expiry },
+            effect,
+            ..
+        } = root.effect.as_ref()
+        else {
+            panic!("expected chapter watcher, got {:?}", root.effect);
+        };
+        assert_eq!(*expiry, WheneverEventExpiry::EndOfTurn);
+        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            trigger.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+        assert!(matches!(effect.effect.as_ref(), Effect::LoseLife { .. }));
+        assert!(matches!(
+            effect.sub_ability.as_ref().unwrap().effect.as_ref(),
+            Effect::GainLife { .. }
+        ));
+        assert!(
+            root.sub_ability.is_none(),
+            "gain belongs inside the watcher"
+        );
+    }
 }
 
 #[test]

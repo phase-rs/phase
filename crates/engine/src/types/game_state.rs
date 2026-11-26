@@ -62038,6 +62038,54 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         assert_eq!(twice.players[0].library, im::vector![b, a]);
     }
 
+    #[test]
+    fn normalize_for_loop_ranks_an_installed_death_watch_against_its_creature() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let source = scenario.add_enchantment_from_oracle(
+            P0,
+            "Printed return watcher",
+            "When this enchantment enters, support 2. (Put a +1/+1 counter on each of up to two target creatures.)\n{1}: Choose target creature with a counter on it. When that creature dies this turn, return that card to its owner's hand.",
+        ).id();
+        let watched = scenario.add_creature(P1, "Watched creature", 2, 2).id();
+        scenario.with_counter(watched, crate::types::counter::CounterType::Plus1Plus1, 1);
+        let mut runner = scenario.build();
+        runner.activate(source, 0).target_object(watched).resolve();
+        let current = runner.state();
+        let mut shifted = current.clone();
+        shifted.objects.get_mut(&watched).unwrap().incarnation += 100;
+        shifted.delayed_triggers[0]
+            .ability
+            .context
+            .delayed_watch_incarnation
+            .as_mut()
+            .expect("production activation installed a watch pin")
+            .incarnation += 100;
+        assert_ne!(current, &shifted);
+        assert!(normalized_equal(current, &shifted));
+
+        shifted.delayed_triggers[0]
+            .ability
+            .context
+            .delayed_watch_incarnation
+            .as_mut()
+            .unwrap()
+            .incarnation -= 1;
+        assert!(!normalized_equal(current, &shifted));
+    }
+
     /// CR 400.7 + CR 104.4b: every incarnation a zone-change record names is ranked,
     /// so a position minted later compares equal to the earlier one.
     #[test]

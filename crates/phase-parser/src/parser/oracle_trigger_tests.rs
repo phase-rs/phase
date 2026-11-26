@@ -48840,3 +48840,58 @@ fn trigger_observer_foreign_source_refinement_declines_to_unknown() {
     );
     assert_no_unimplemented(execute);
 }
+
+#[test]
+fn delayed_player_damage_head_preserves_recipient_and_remainder() {
+    use BatchedDamageRecipient as Recipient;
+    for (recipient, expected) in [
+        ("a player", Recipient::APlayer),
+        ("one or more players", Recipient::OneOrMorePlayers),
+        ("defending player", Recipient::DefendingPlayer),
+    ] {
+        let head = format!("one or more creatures you control deal combat damage to {recipient}");
+        let (rest, parsed) = parse_batched_damage_head(&head).unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(parsed.recipient, expected);
+        assert_eq!(
+            parsed.source,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+        );
+        assert_eq!(parsed.source_remainder, "");
+        let with_tail = format!("{head} with hexproof");
+        let (rest, parsed) = parse_batched_damage_head(&with_tail).unwrap();
+        assert_eq!(rest, " with hexproof");
+        assert_eq!(parsed.recipient, expected);
+    }
+    for recipient in ["a player", "one or more players"] {
+        let head = format!(
+            "one or more creatures you control deal combat 3 or more damage to {recipient}"
+        );
+        let (rest, parsed) = parse_batched_damage_head(&head).expect("shared threshold");
+        assert_eq!(rest, "");
+        assert_eq!(parsed.threshold.map(|(_, threshold)| threshold), Some(3));
+    }
+    let (_, printed) = try_parse_one_or_more_combat_damage_to_player(
+        "whenever one or more creatures you control deal combat 3 or more damage to a player",
+    )
+    .expect("printed wrapper accepts the consumed threshold");
+    assert_eq!(printed.mode, TriggerMode::DamageDoneOnceByController);
+    assert_eq!(printed.damage_amount, None);
+    let (rest, mixed) = parse_batched_damage_head(
+        "one or more creatures you control deal combat damage to a player or a battle",
+    )
+    .expect("mixed recipient");
+    assert_eq!(rest, "");
+    assert!(matches!(
+        mixed.recipient,
+        Recipient::Other(TargetFilter::Or { .. })
+    ));
+    let with_flying = "one or more creatures you control with flying and an unknown ability deal combat damage to a player";
+    let (_, parsed) = parse_batched_damage_head(with_flying).unwrap();
+    assert_eq!(parsed.recipient, Recipient::APlayer);
+    assert_eq!(parsed.source_remainder.trim(), "and an unknown ability");
+    assert!(try_parse_one_or_more_combat_damage_to_player(
+        "whenever one or more creatures you control deal combat damage to one or more players"
+    )
+    .is_none());
+}
