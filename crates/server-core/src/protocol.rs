@@ -303,6 +303,109 @@ pub struct TerminalBootstrapRequest {
     pub request_id: String,
 }
 
+/// Opaque identity of one native draft command, minted by the client and echoed
+/// on that command's result. It identifies the command only: the seat a command
+/// acts for is the draft token's, never this id's. Not an idempotency key either.
+/// Bounded to the integers a JavaScript number represents exactly.
+///
+/// The field is private; `#[serde(try_from = "u64")]` routes every wire value
+/// through [`DraftRequestId::try_from`], so an id outside
+/// `1..=MAX_DRAFT_JSON_INTEGER` fails typed decoding of the whole frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u64", into = "u64")]
+pub struct DraftRequestId(u64);
+
+impl TryFrom<u64> for DraftRequestId {
+    type Error = String;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if (1..=draft_core::types::MAX_DRAFT_JSON_INTEGER).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(format!(
+                "draft request id must be between 1 and {}, got {value}",
+                draft_core::types::MAX_DRAFT_JSON_INTEGER
+            ))
+        }
+    }
+}
+
+impl From<DraftRequestId> for u64 {
+    fn from(id: DraftRequestId) -> Self {
+        id.0
+    }
+}
+
+/// The FIFO policy a native create may ask for. The server derives the
+/// effective clock with `DraftClockPolicy::native(timer_seconds, review_seconds)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeFifoPolicyIntent {
+    pub selection: draft_core::types::DraftSelectionPolicy,
+    pub review_seconds: u32,
+}
+
+/// What an accepted native draft command produced, carried by
+/// [`ServerMessage::DraftCommandAccepted`] to the requesting socket only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum DraftCommandResult {
+    Created {
+        draft_code: String,
+        player_token: String,
+        seat_index: u8,
+    },
+    Joined {
+        draft_code: String,
+        player_token: String,
+        seat_index: u8,
+        view: draft_core::view::DraftPlayerView,
+    },
+    Reconnected {
+        view: draft_core::view::DraftPlayerView,
+    },
+    /// An accepted `DraftAction`: the actor's view at acceptance, and the
+    /// prompt the action answered (a `Select`'s; `None` for every other action).
+    Applied {
+        prompt_id: Option<draft_core::types::DraftPromptId>,
+        view: draft_core::view::DraftPlayerView,
+    },
+}
+
+/// Why a native draft command was refused, carried by
+/// [`ServerMessage::DraftCommandRefused`] to the requesting socket only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum DraftCommandRefusal {
+    /// The pod is protected and the join carried no password.
+    PasswordRequired,
+    /// Every other refusal, with the server's reason.
+    Rejected { reason: String },
+}
+
+/// The prompt an accepted draft action answered: a `Select`'s prompt, and
+/// `None` for every action that answers no prompt.
+pub fn answered_draft_prompt(
+    action: &draft_core::types::DraftAction,
+) -> Option<draft_core::types::DraftPromptId> {
+    use draft_core::types::DraftAction;
+    match action {
+        DraftAction::Select { prompt_id, .. } => Some(prompt_id.clone()),
+        DraftAction::StartDraft
+        | DraftAction::Control { .. }
+        | DraftAction::AdvanceClock
+        | DraftAction::Pick { .. }
+        | DraftAction::PickWithDraftEffect { .. }
+        | DraftAction::SubmitDeck { .. }
+        | DraftAction::GeneratePairings
+        | DraftAction::ReportMatchResult { .. }
+        | DraftAction::AdvanceRound
+        | DraftAction::ReplaceSeatWithBot { .. }
+        | DraftAction::SetSeatConnected { .. }
+        | DraftAction::SharedStackDecision { .. } => None,
+    }
+}
+
 // clippy::large_enum_variant: `CreateGameWithSettings` is the outlier. This
 // enum is a short-lived per-frame deserialize target that is matched and
 // destructured at once, never stored or queued, so boxing that variant's fields
@@ -556,19 +659,28 @@ pub enum ClientMessage {
         tournament_format: draft_core::types::TournamentFormat,
         pod_policy: draft_core::types::PodPolicy,
         pod_size: u8,
+        /// The FIFO policy the host asks for. Absent is the one spelling of
+        /// "no FIFO policy": while native FIFO is closed the wire guard refuses
+        /// every `Some`, explicit defaults included.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fifo_policy: Option<NativeFifoPolicyIntent>,
+        request_id: DraftRequestId,
     },
     JoinDraftWithPassword {
         draft_code: String,
         display_name: String,
         password: Option<String>,
+        request_id: DraftRequestId,
     },
     DraftAction {
         draft_code: String,
         action: draft_core::types::DraftAction,
+        request_id: DraftRequestId,
     },
     ReconnectDraft {
         draft_code: String,
         player_token: String,
+        request_id: DraftRequestId,
     },
     SpectateDraft {
         draft_code: String,
@@ -1107,17 +1219,23 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reservation_token: Option<String>,
     },
-    DraftCreated {
-        draft_code: String,
-        player_token: String,
-        seat_index: u8,
+    /// The accepted result of one native draft command, sent only to the
+    /// socket that sent it and carrying that command's own id.
+    DraftCommandAccepted {
+        request_id: DraftRequestId,
+        result: DraftCommandResult,
     },
-    DraftJoined {
-        draft_code: String,
-        player_token: String,
-        seat_index: u8,
-        view: draft_core::view::DraftPlayerView,
+    /// The refusal of one native draft command, sent only to the socket that
+    /// sent it and carrying that command's own id, whether the command was
+    /// refused before dispatch or in it.
+    DraftCommandRefused {
+        request_id: DraftRequestId,
+        refusal: DraftCommandRefusal,
     },
+    /// An unsolicited draft view: the pod's fan-out after a change, and the
+    /// view that follows a refused match attachment. It carries no request id
+    /// and never acknowledges a command; a command's outcome is only its
+    /// `DraftCommandAccepted` or `DraftCommandRefused`.
     DraftStateUpdate {
         view: draft_core::view::DraftPlayerView,
     },
@@ -1136,9 +1254,6 @@ pub enum ServerMessage {
     },
     DraftTimerSync {
         remaining_ms: u32,
-    },
-    DraftActionRejected {
-        reason: String,
     },
     DraftOver {
         standings: Vec<draft_core::view::StandingEntry>,
@@ -1239,6 +1354,22 @@ impl ServerMessage {
         Self::Error {
             message: message.into(),
             code: Some(code),
+        }
+    }
+
+    /// The accepted result of the native draft command `request_id` names.
+    pub fn draft_accepted(request_id: DraftRequestId, result: DraftCommandResult) -> Self {
+        Self::DraftCommandAccepted { request_id, result }
+    }
+
+    /// The refusal, with the server's reason, of the native draft command
+    /// `request_id` names.
+    pub fn draft_rejected(request_id: DraftRequestId, reason: impl Into<String>) -> Self {
+        Self::DraftCommandRefused {
+            request_id,
+            refusal: DraftCommandRefusal::Rejected {
+                reason: reason.into(),
+            },
         }
     }
 }
@@ -3005,6 +3136,10 @@ mod tests {
         }
     }
 
+    fn request_id(value: u64) -> DraftRequestId {
+        DraftRequestId::try_from(value).expect("a test request id is in range")
+    }
+
     fn create_draft_frame(set_codes: Vec<String>) -> ClientMessage {
         ClientMessage::CreateDraftWithSettings {
             display_name: "Alice".to_string(),
@@ -3017,6 +3152,8 @@ mod tests {
             tournament_format: draft_core::types::TournamentFormat::Swiss,
             pod_policy: draft_core::types::PodPolicy::Competitive,
             pod_size: 8,
+            fifo_policy: None,
+            request_id: request_id(1),
         }
     }
 
@@ -3109,7 +3246,7 @@ mod tests {
         let legacy = r#"{"type":"CreateDraftWithSettings","data":{
             "display_name":"Alice","set_code":"MKM","kind":"Sealed","public":true,
             "password":null,"timer_seconds":null,"tournament_format":"Swiss",
-            "pod_policy":"Competitive","pod_size":8}}"#;
+            "pod_policy":"Competitive","pod_size":8,"request_id":1}}"#;
         assert_eq!(parsed_set_codes(legacy), vec!["MKM".to_string()]);
     }
 
@@ -3118,7 +3255,7 @@ mod tests {
         let legacy = r#"{"type":"CreateDraftWithSettings","data":{
             "display_name":"Alice","set_codes":["ISD","DKA"],"kind":"Premier","public":true,
             "password":null,"timer_seconds":null,"tournament_format":"Swiss",
-            "pod_policy":"Competitive","pod_size":8}}"#;
+            "pod_policy":"Competitive","pod_size":8,"request_id":1}}"#;
         assert_eq!(
             parsed_set_codes(legacy),
             vec!["ISD".to_string(), "DKA".to_string()]
@@ -3156,6 +3293,8 @@ mod tests {
             tournament_format: draft_core::types::TournamentFormat::Swiss,
             pod_policy: draft_core::types::PodPolicy::Competitive,
             pod_size: 8,
+            fifo_policy: None,
+            request_id: request_id(1),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(
@@ -3171,6 +3310,7 @@ mod tests {
             draft_code: "ABCD12".to_string(),
             display_name: "Bob".to_string(),
             password: None,
+            request_id: request_id(7),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -3179,10 +3319,12 @@ mod tests {
                 draft_code,
                 display_name,
                 password,
+                request_id: id,
             } => {
                 assert_eq!(draft_code, "ABCD12");
                 assert_eq!(display_name, "Bob");
                 assert_eq!(password, None);
+                assert_eq!(id, request_id(7));
             }
             _ => panic!("wrong variant"),
         }
@@ -3196,6 +3338,7 @@ mod tests {
                 seat: 3,
                 card_instance_ids: vec!["card-001".to_string()],
             },
+            request_id: request_id(8),
         };
         let json = serde_json::to_string(&msg).unwrap();
         // Pin the wire KEY, not just the Rust round-trip: a round-trip alone
@@ -3209,7 +3352,11 @@ mod tests {
         );
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ClientMessage::DraftAction { draft_code, action } => {
+            ClientMessage::DraftAction {
+                draft_code,
+                action,
+                request_id: id,
+            } => {
                 assert_eq!(draft_code, "ABCD12");
                 assert_eq!(
                     action,
@@ -3218,6 +3365,7 @@ mod tests {
                         card_instance_ids: vec!["card-001".to_string()],
                     }
                 );
+                assert_eq!(id, request_id(8));
             }
             _ => panic!("wrong variant"),
         }
@@ -3228,6 +3376,7 @@ mod tests {
         let msg = ClientMessage::ReconnectDraft {
             draft_code: "ABCD12".to_string(),
             player_token: "tok123".to_string(),
+            request_id: request_id(9),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -3235,39 +3384,276 @@ mod tests {
             ClientMessage::ReconnectDraft {
                 draft_code,
                 player_token,
+                request_id: id,
             } => {
                 assert_eq!(draft_code, "ABCD12");
                 assert_eq!(player_token, "tok123");
+                assert_eq!(id, request_id(9));
             }
             _ => panic!("wrong variant"),
         }
     }
 
+    /// The JSON body of each native draft command, keyed by its tag, with its
+    /// request id spelled as `id` (a raw JSON token, so a test can write any
+    /// value there) or left out when `id` is `None`.
+    fn draft_command_frames(id: Option<&str>) -> Vec<(&'static str, String)> {
+        let id = id.map_or(String::new(), |id| format!(r#","request_id":{id}"#));
+        vec![
+            (
+                "CreateDraftWithSettings",
+                format!(
+                    r#"{{"type":"CreateDraftWithSettings","data":{{"display_name":"Alice","source":{{"type":"Uniform","data":{{"set_codes":["TST"]}}}},"kind":"Premier","public":true,"password":null,"timer_seconds":null,"tournament_format":"Swiss","pod_policy":"Competitive","pod_size":8{id}}}}}"#
+                ),
+            ),
+            (
+                "JoinDraftWithPassword",
+                format!(
+                    r#"{{"type":"JoinDraftWithPassword","data":{{"draft_code":"ABCD12","display_name":"Bob","password":null{id}}}}}"#
+                ),
+            ),
+            (
+                "DraftAction",
+                format!(
+                    r#"{{"type":"DraftAction","data":{{"draft_code":"ABCD12","action":{{"type":"StartDraft"}}{id}}}}}"#
+                ),
+            ),
+            (
+                "ReconnectDraft",
+                format!(
+                    r#"{{"type":"ReconnectDraft","data":{{"draft_code":"ABCD12","player_token":"tok"{id}}}}}"#
+                ),
+            ),
+        ]
+    }
+
+    fn decoded_request_id(message: &ClientMessage) -> u64 {
+        match message {
+            ClientMessage::CreateDraftWithSettings { request_id, .. }
+            | ClientMessage::JoinDraftWithPassword { request_id, .. }
+            | ClientMessage::DraftAction { request_id, .. }
+            | ClientMessage::ReconnectDraft { request_id, .. } => u64::from(*request_id),
+            other => panic!("not a draft command: {other:?}"),
+        }
+    }
+
     #[test]
-    fn server_message_draft_created_roundtrips() {
-        let msg = ServerMessage::DraftCreated {
-            draft_code: "ABCD12".to_string(),
-            player_token: "tok123".to_string(),
-            seat_index: 0,
+    fn draft_command_request_ids_are_bounded_and_required() {
+        for accepted in ["1", "9007199254740991"] {
+            for (tag, json) in draft_command_frames(Some(accepted)) {
+                let message: ClientMessage = serde_json::from_str(&json)
+                    .unwrap_or_else(|error| panic!("{tag} with id {accepted}: {error}"));
+                assert_eq!(
+                    decoded_request_id(&message),
+                    accepted.parse::<u64>().unwrap(),
+                    "{tag}"
+                );
+            }
+        }
+        for refused in [
+            Some("0"),
+            Some("9007199254740992"),
+            Some("-1"),
+            Some("1.5"),
+            Some(r#""1""#),
+            Some("null"),
+            None,
+        ] {
+            for (tag, json) in draft_command_frames(refused) {
+                assert!(
+                    serde_json::from_str::<ClientMessage>(&json).is_err(),
+                    "{tag} with id {refused:?} must fail typed decoding"
+                );
+            }
+        }
+        assert_eq!(DraftRequestId::try_from(0).ok(), None);
+        assert_eq!(
+            DraftRequestId::try_from(draft_core::types::MAX_DRAFT_JSON_INTEGER + 1).ok(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_create_carries_its_fifo_policy_intent_only_when_present() {
+        let absent = serde_json::to_string(&create_draft_frame(vec!["TST".to_string()])).unwrap();
+        assert!(!absent.contains("fifo_policy"), "{absent}");
+        assert!(absent.ends_with(r#","request_id":1}}"#), "{absent}");
+
+        let intent = NativeFifoPolicyIntent {
+            selection: draft_core::types::DraftSelectionPolicy {
+                burns_per_pick: 1,
+                discard_threshold: 0,
+            },
+            review_seconds: 30,
         };
-        let json = serde_json::to_string(&msg).unwrap();
-        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ServerMessage::DraftCreated {
-                draft_code,
-                player_token,
-                seat_index,
-            } => {
-                assert_eq!(draft_code, "ABCD12");
-                assert_eq!(player_token, "tok123");
-                assert_eq!(seat_index, 0);
+        let mut frame = create_draft_frame(vec!["TST".to_string()]);
+        if let ClientMessage::CreateDraftWithSettings { fifo_policy, .. } = &mut frame {
+            *fifo_policy = Some(intent);
+        }
+        let present = serde_json::to_string(&frame).unwrap();
+        assert!(
+            present.ends_with(
+                r#","fifo_policy":{"selection":{"burns_per_pick":1,"discard_threshold":0},"review_seconds":30},"request_id":1}}"#
+            ),
+            "{present}"
+        );
+        match serde_json::from_str::<ClientMessage>(&present).unwrap() {
+            ClientMessage::CreateDraftWithSettings { fifo_policy, .. } => {
+                assert_eq!(fifo_policy, Some(intent));
             }
-            _ => panic!("wrong variant"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let unknown = present.replace(
+            r#""review_seconds":30"#,
+            r#""review_seconds":30,"flow":"FifoAsync""#,
+        );
+        assert!(unknown.contains(r#""flow":"FifoAsync""#), "{unknown}");
+        assert!(serde_json::from_str::<ClientMessage>(&unknown).is_err());
+    }
+
+    #[test]
+    fn an_accepted_action_answers_with_the_prompt_it_answered() {
+        use draft_core::types::{DraftAction, DraftControl, DraftPromptId, DraftSessionId};
+
+        let prompt = DraftPromptId {
+            session_id: DraftSessionId("session".to_string()),
+            seat: 2,
+            generation: 7,
+        };
+        assert_eq!(
+            answered_draft_prompt(&DraftAction::Select {
+                seat: 2,
+                prompt_id: prompt.clone(),
+                picked_card_instance_ids: vec!["card".to_string()],
+                burned_card_instance_ids: Vec::new(),
+                effect_card_instance_ids: Vec::new(),
+            }),
+            Some(prompt)
+        );
+        for action in [
+            DraftAction::StartDraft,
+            DraftAction::Control {
+                control: DraftControl::Resume,
+            },
+            DraftAction::AdvanceClock,
+            DraftAction::Pick {
+                seat: 0,
+                card_instance_ids: vec!["card".to_string()],
+            },
+            DraftAction::GeneratePairings,
+            DraftAction::AdvanceRound,
+        ] {
+            assert_eq!(answered_draft_prompt(&action), None, "{action:?}");
         }
     }
 
     #[test]
-    fn server_message_draft_state_update_roundtrips() {
+    fn draft_command_results_have_exact_wire_shapes() {
+        use draft_core::types::{DraftPromptId, DraftSessionId};
+
+        let view = deckbuilding_draft_view();
+        let view_json = serde_json::to_string(&view).unwrap();
+        let prompt = DraftPromptId {
+            session_id: DraftSessionId("session".to_string()),
+            seat: 1,
+            generation: 4,
+        };
+        let cases = [
+            (
+                ServerMessage::draft_accepted(
+                    request_id(11),
+                    DraftCommandResult::Created {
+                        draft_code: "ABCD12".to_string(),
+                        player_token: "tok".to_string(),
+                        seat_index: 0,
+                    },
+                ),
+                r#"{"type":"DraftCommandAccepted","data":{"request_id":11,"result":{"type":"Created","data":{"draft_code":"ABCD12","player_token":"tok","seat_index":0}}}}"#.to_string(),
+            ),
+            (
+                ServerMessage::draft_accepted(
+                    request_id(12),
+                    DraftCommandResult::Joined {
+                        draft_code: "ABCD12".to_string(),
+                        player_token: "tok".to_string(),
+                        seat_index: 1,
+                        view: view.clone(),
+                    },
+                ),
+                format!(
+                    r#"{{"type":"DraftCommandAccepted","data":{{"request_id":12,"result":{{"type":"Joined","data":{{"draft_code":"ABCD12","player_token":"tok","seat_index":1,"view":{view_json}}}}}}}}}"#
+                ),
+            ),
+            (
+                ServerMessage::draft_accepted(
+                    request_id(13),
+                    DraftCommandResult::Reconnected { view: view.clone() },
+                ),
+                format!(
+                    r#"{{"type":"DraftCommandAccepted","data":{{"request_id":13,"result":{{"type":"Reconnected","data":{{"view":{view_json}}}}}}}}}"#
+                ),
+            ),
+            (
+                ServerMessage::draft_accepted(
+                    request_id(14),
+                    DraftCommandResult::Applied {
+                        prompt_id: None,
+                        view: view.clone(),
+                    },
+                ),
+                format!(
+                    r#"{{"type":"DraftCommandAccepted","data":{{"request_id":14,"result":{{"type":"Applied","data":{{"prompt_id":null,"view":{view_json}}}}}}}}}"#
+                ),
+            ),
+            (
+                ServerMessage::draft_accepted(
+                    request_id(15),
+                    DraftCommandResult::Applied {
+                        prompt_id: Some(prompt),
+                        view: view.clone(),
+                    },
+                ),
+                format!(
+                    r#"{{"type":"DraftCommandAccepted","data":{{"request_id":15,"result":{{"type":"Applied","data":{{"prompt_id":{{"session_id":"session","seat":1,"generation":4}},"view":{view_json}}}}}}}}}"#
+                ),
+            ),
+            (
+                ServerMessage::DraftCommandRefused {
+                    request_id: request_id(16),
+                    refusal: DraftCommandRefusal::PasswordRequired,
+                },
+                r#"{"type":"DraftCommandRefused","data":{"request_id":16,"refusal":{"type":"PasswordRequired"}}}"#.to_string(),
+            ),
+            (
+                ServerMessage::draft_rejected(request_id(17), "Wrong password"),
+                r#"{"type":"DraftCommandRefused","data":{"request_id":17,"refusal":{"type":"Rejected","data":{"reason":"Wrong password"}}}}"#.to_string(),
+            ),
+        ];
+        for (message, expected) in cases {
+            assert_eq!(serde_json::to_string(&message).unwrap(), expected);
+            let parsed: ServerMessage = serde_json::from_str(&expected)
+                .unwrap_or_else(|error| panic!("{expected}: {error}"));
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), expected);
+        }
+
+        for removed in [
+            r#"{"type":"DraftCreated","data":{"draft_code":"ABCD12","player_token":"tok","seat_index":0}}"#.to_string(),
+            format!(
+                r#"{{"type":"DraftJoined","data":{{"draft_code":"ABCD12","player_token":"tok","seat_index":1,"view":{view_json}}}}}"#
+            ),
+            r#"{"type":"DraftActionRejected","data":{"reason":"Not your turn"}}"#.to_string(),
+        ] {
+            assert!(
+                serde_json::from_str::<ServerMessage>(&removed).is_err(),
+                "a removed draft reply still decodes: {removed}"
+            );
+        }
+    }
+
+    /// A Deckbuilding Sealed seat's view over two cards, shared by the draft
+    /// view and draft result round trips.
+    fn deckbuilding_draft_view() -> draft_core::view::DraftPlayerView {
         use draft_core::types::*;
         use draft_core::view::{
             DraftLaunchCapability, DraftPlayerView, DraftPoolGroups, DraftSourceView, SetLayoutView,
@@ -3297,7 +3683,7 @@ mod tests {
         };
         let pool = vec![first_pull.clone(), second_pull.clone()];
         let pool_groups = DraftPoolGroups::from_pool(&pool, &DraftSource::single_set("TST"));
-        let view = DraftPlayerView {
+        DraftPlayerView {
             flow: draft_core::types::DraftFlow::LegacyBarrier,
             fifo: None,
             status: DraftStatus::Deckbuilding,
@@ -3354,7 +3740,15 @@ mod tests {
             // wire shape.
             shared_stack: None,
             play_first_chooser: None,
-        };
+        }
+    }
+
+    #[test]
+    fn server_message_draft_state_update_roundtrips() {
+        use draft_core::types::*;
+        use draft_core::view::DraftLaunchCapability;
+
+        let view = deckbuilding_draft_view();
         let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
         let json = serde_json::to_string(&msg).unwrap();
         let shape: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -3557,21 +3951,6 @@ mod tests {
         match parsed {
             ServerMessage::DraftTimerSync { remaining_ms } => {
                 assert_eq!(remaining_ms, 12345);
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn server_message_draft_action_rejected_roundtrips() {
-        let msg = ServerMessage::DraftActionRejected {
-            reason: "Not your turn".to_string(),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ServerMessage::DraftActionRejected { reason } => {
-                assert_eq!(reason, "Not your turn");
             }
             _ => panic!("wrong variant"),
         }

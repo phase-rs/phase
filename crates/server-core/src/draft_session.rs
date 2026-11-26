@@ -1245,13 +1245,17 @@ mod tests {
         let wire = serde_json::json!({
             "type": "DraftAction", "data": {
                 "draft_code": code,
-                "action": { "type": "SubmitDeck", "data": data }
+                "action": { "type": "SubmitDeck", "data": data },
+                "request_id": 1
             }
         });
         let message: ClientMessage =
             serde_json::from_str(&wire.to_string()).map_err(|error| error.to_string())?;
         guard_client_message_before_dispatch(&message, crate::protocol::ServerMode::Full)?;
-        let ClientMessage::DraftAction { draft_code, action } = message else {
+        let ClientMessage::DraftAction {
+            draft_code, action, ..
+        } = message
+        else {
             unreachable!()
         };
         mgr.handle_draft_action(&draft_code, token, action, None)
@@ -1373,12 +1377,12 @@ mod tests {
             r#"{"seat":0,"main_deck":["Plains"],"commanders":[],"printings":[{"section":"main_deck","name":"Plains","count":1,"printing":{"set_code":"lea","collector_number":"001"}}]}"#,
         ] {
             let expected = format!(
-                r#"{{"type":"DraftAction","data":{{"draft_code":"ABCD12","action":{{"type":"SubmitDeck","data":{data}}}}}}}"#
+                r#"{{"type":"DraftAction","data":{{"draft_code":"ABCD12","action":{{"type":"SubmitDeck","data":{data}}},"request_id":1}}}}"#
             );
             for wire in [
                 expected.clone(),
                 format!(
-                    r#"{{"data":{{"draft_code":"ABCD12","action":{{"data":{data},"type":"SubmitDeck"}}}},"type":"DraftAction"}}"#
+                    r#"{{"data":{{"request_id":1,"draft_code":"ABCD12","action":{{"data":{data},"type":"SubmitDeck"}}}},"type":"DraftAction"}}"#
                 ),
             ] {
                 let message: ClientMessage = serde_json::from_str(&wire).unwrap();

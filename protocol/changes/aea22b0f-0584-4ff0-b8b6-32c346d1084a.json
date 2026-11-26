@@ -1,0 +1,6 @@
+{
+  "surfaces": [
+    "full"
+  ],
+  "reason": "Native draft commands (CreateDraftWithSettings, JoinDraftWithPassword, ReconnectDraft, DraftAction) carry a required request_id between 1 and 2^53-1 and are answered only on the requesting socket by DraftCommandAccepted { request_id, result } or DraftCommandRefused { request_id, refusal }; a protected pod's join without a password is the PasswordRequired refusal. DraftCreated, DraftJoined and DraftActionRejected are removed and DraftStateUpdate is never an acknowledgement. CreateDraftWithSettings gains an optional fifo_policy intent the server refuses while native FIFO is closed, and an accepted action echoes the prompt it answered. An older peer would send unlabelled commands or wait for acknowledgements this server no longer sends, so Full pairing stays exact-match; wire, lobby, draft and directory are unchanged."
+}
