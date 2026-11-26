@@ -462,3 +462,159 @@ Whenever this creature deals combat damage to a player, if there are cards exile
         }
     }
 }
+
+/// CR 701.18b + CR 608.2g: a Play window's singular allowance is consumed by
+/// a successful land play as well as by a spell cast. A land-first choice must
+/// therefore finish Evercoat Ursine's resolution without re-offering the
+/// remaining linked spell.
+#[test]
+fn evercoat_ursine_playing_a_land_consumes_the_one_card_window() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    const EVERCOAT_URSINE: &str = "Trample
+Hideaway 3, hideaway 3 (When this creature enters, look at the top three cards of your library, exile one face down, then put the rest on the bottom in a random order. Then do it again.)
+Whenever this creature deals combat damage to a player, if there are cards exiled with it, you may play one of them without paying its mana cost.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ursine = scenario
+        .add_creature_to_hand(P0, "Evercoat Ursine", 4, 4)
+        .from_oracle_text(EVERCOAT_URSINE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Library, db);
+    let shock = scenario.add_real_card(P0, "Shock", Zone::Library, db);
+    for _ in 0..4 {
+        scenario.add_real_card(P0, "Forest", Zone::Library, db);
+        scenario.add_real_card(P1, "Forest", Zone::Library, db);
+    }
+
+    let mut runner = scenario.build();
+    // Seat one target in each Hideaway 3 window: the first three cards contain
+    // Forest, and the next three contain Shock. The remaining cards are only
+    // deterministic filler for the two reveal windows.
+    let filler = runner.state().players[P0.0 as usize]
+        .library
+        .iter()
+        .copied()
+        .filter(|id| *id != forest && *id != shock)
+        .collect::<Vec<_>>();
+    let mut ordered_library = vec![forest];
+    ordered_library.extend(filler.iter().take(2).copied());
+    ordered_library.push(shock);
+    ordered_library.extend(filler.iter().skip(2).copied());
+    runner.state_mut().players[P0.0 as usize].library = ordered_library.into();
+    runner.cast(ursine).commit();
+
+    let mut hidden = Vec::new();
+    for _ in 0..128 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order the Hideaway triggers");
+            }
+            WaitingFor::DigChoice { cards, .. } => {
+                let choice = [forest, shock]
+                    .into_iter()
+                    .find(|id| cards.contains(id))
+                    .expect("Hideaway must offer one of the planned cards");
+                hidden.push(choice);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![choice],
+                    })
+                    .expect("Hideaway selection accepted");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() && hidden.len() == 2 => {
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected Hideaway state: {other:?}"),
+        }
+    }
+    assert!(hidden.contains(&forest));
+    assert!(hidden.contains(&shock));
+
+    runner.advance_to_end_step();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(ursine, AttackTarget::Player(P1))])
+        .expect("Evercoat Ursine attacks P1");
+
+    let mut selected_land = false;
+    let mut reached_terminal_priority = false;
+    for step in 0..128 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareBlockers { .. } => {
+                runner.declare_blockers(&[]).expect("declare no blockers");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept Evercoat Ursine's play offer");
+            }
+            WaitingFor::CastOffer {
+                kind:
+                    CastOfferKind::FreeCastWindow {
+                        candidates,
+                        remaining_casts,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(remaining_casts, Some(1));
+                assert!(candidates.contains(&forest));
+                assert!(candidates.contains(&shock));
+                runner
+                    .act(GameAction::FreeCastWindowChoice {
+                        selection: Some(forest),
+                    })
+                    .expect("choose the hidden Forest");
+                selected_land = true;
+            }
+            WaitingFor::Priority { .. }
+                if runner.state().stack.is_empty()
+                    && matches!(
+                        runner.state().phase,
+                        Phase::EndCombat | Phase::PostCombatMain
+                    ) =>
+            {
+                reached_terminal_priority = true;
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected Evercoat state at step {step}: {other:?}"),
+        }
+    }
+
+    assert!(
+        selected_land,
+        "the play window must offer and choose the Forest"
+    );
+    assert!(
+        reached_terminal_priority,
+        "the bounded Play window must reach its terminal priority state"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(
+        runner.state().active_ability_continuation().is_none(),
+        "the Evercoat trigger continuation must be fully drained"
+    );
+    assert_eq!(runner.state().objects[&forest].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&shock].zone,
+        Zone::Exile,
+        "the unchosen linked spell must remain exiled after the one-play window ends"
+    );
+}

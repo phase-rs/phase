@@ -3,7 +3,7 @@ use crate::types::ability::{
     graveyard_destination_rider, is_graveyard_exile_rider_subability, AbilityCondition,
     AbilityCost, CastPermissionConstraint, CastingPermission, Duration, Effect, EffectError,
     EffectKind, QuantityExpr, ResolvedAbility, SpellStackToGraveyardReplacement, TargetFilter,
-    TargetRef,
+    TargetRef, ThisWayCause,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -202,23 +202,31 @@ fn resolution_window_linked_batch_candidates(
     state: &GameState,
     source_id: ObjectId,
 ) -> Option<Vec<ObjectId>> {
-    let members = state
-        .chain_tracked_set_id
-        .and_then(|id| state.tracked_object_sets.get(&id))?;
+    let set_id = state.chain_tracked_set_id?;
+    let members = state.tracked_object_sets.get(&set_id)?;
     let linked = crate::game::players::linked_exile_cards_for_source(state, source_id);
     let linked_ids: HashSet<ObjectId> = linked.iter().map(|link| link.exiled_id).collect();
-    // CR 608.2c: the active set is authoritative only when the whole
-    // published batch is linked to this source. A stale chain set can contain
-    // one of the source's cards alongside an unrelated producer's cards; using
-    // its filtered intersection would silently narrow a source-anchored pool.
-    // In that case, return `None` so the caller can use the durable linked
-    // ledger instead.
-    if members.iter().any(|id| !linked_ids.contains(id)) {
-        return None;
-    }
+    // CR 608.2c: a current-resolution batch can be extended by a later
+    // instruction that publishes a different population into the same chain
+    // set. The action stamp identifies the cards exiled by this resolution;
+    // cleanup cards (for example, Portent of Calamity's revealed cards put
+    // into a graveyard) are not part of that cast window even though they share
+    // the chain set. An unannotated mixed set remains ambiguous and must fall
+    // through to the durable source-linked binding below.
+    let batch = if members.iter().all(|id| linked_ids.contains(id)) {
+        members.clone()
+    } else {
+        let causes = state.tracked_set_member_causes.get(&set_id)?;
+        let exiled_members: Vec<ObjectId> = members
+            .iter()
+            .copied()
+            .filter(|id| causes.get(id) == Some(&ThisWayCause::Exiled) && linked_ids.contains(id))
+            .collect();
+        exiled_members
+    };
     let mut seen = HashSet::new();
     Some(
-        members
+        batch
             .iter()
             .copied()
             .filter(|id| {

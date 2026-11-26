@@ -11402,10 +11402,11 @@ impl FreeCastWindowResume {
     }
 }
 
-/// CR 305.2a + CR 608.2g + CR 614.12a: continue a Play window after one of its
-/// lands was played (or the play was ignored, CR 305.2b / CR 305.3, or the
-/// entry was prevented, CR 614.1). A land is never cast, so the window's cast
-/// count and mana-value budget are unchanged.
+/// CR 701.18b + CR 305.1 + CR 608.2g + CR 614.12a: continue a Play window
+/// after one of its lands was played (or the play was ignored, CR 305.2b /
+/// CR 305.3, or the entry was prevented, CR 614.1). A successful land play
+/// consumes one bounded Play opportunity even though it is not a cast; an
+/// ignored or prevented play leaves the bound unchanged.
 ///
 /// When the land's entry paused on a choice (an entry replacement, a delivery
 /// counter order, or an as-enters instruction), the window cannot be offered
@@ -11418,26 +11419,51 @@ impl FreeCastWindowResume {
 /// before the rest of the resolving ability runs.
 fn resume_free_cast_window_after_land_play(
     state: &mut GameState,
-    window: FreeCastWindowResume,
+    mut window: FreeCastWindowResume,
     commit: Option<super::engine::LandPlayCommit>,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     let controller = window.controller;
+    let land_play_committed = matches!(
+        &commit,
+        Some(
+            super::engine::LandPlayCommit::Entered
+                | super::engine::LandPlayCommit::AwaitingEntryChoice(_)
+        )
+    );
+    if land_play_committed {
+        if let Some(remaining_casts) = &mut window.remaining_casts {
+            *remaining_casts = remaining_casts.saturating_sub(1);
+        }
+    }
     match commit {
         Some(super::engine::LandPlayCommit::AwaitingEntryChoice(waiting_for)) => {
-            effects::prepend_to_pending_continuation(state, window.as_resolving_instruction());
+            if window.remaining_casts != Some(0) {
+                effects::prepend_to_pending_continuation(state, window.as_resolving_instruction());
+            }
             state.waiting_for = *waiting_for;
             state.waiting_for.clone()
         }
-        None
-        | Some(super::engine::LandPlayCommit::Entered)
-        | Some(super::engine::LandPlayCommit::Prevented) => match window.reoffer(state) {
+        None | Some(super::engine::LandPlayCommit::Prevented) => match window.reoffer(state) {
             Some(offer) => {
                 state.waiting_for = offer;
                 state.waiting_for.clone()
             }
             None => finish_with_continuation(state, controller, events),
         },
+        Some(super::engine::LandPlayCommit::Entered) => {
+            if window.remaining_casts == Some(0) {
+                finish_with_continuation(state, controller, events)
+            } else {
+                match window.reoffer(state) {
+                    Some(offer) => {
+                        state.waiting_for = offer;
+                        state.waiting_for.clone()
+                    }
+                    None => finish_with_continuation(state, controller, events),
+                }
+            }
+        }
     }
 }
 
