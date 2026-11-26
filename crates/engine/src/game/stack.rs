@@ -1773,7 +1773,7 @@ pub(crate) fn bind_triggered_resolution_scope(
     // CR 603.4: Intervening-if condition rechecked at resolution time.
     if let Some(scope) = &triggered {
         if let Some(condition) = scope.condition {
-            if !super::triggers::check_trigger_condition_with_source(
+            if !super::triggers::recheck_trigger_condition_with_source(
                 state,
                 condition,
                 scope.controller,

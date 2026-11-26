@@ -34872,6 +34872,65 @@ fn validate_restored_attack_authority(
     {
         return Err(ERROR.to_string());
     }
+    fn validate_departure(
+        state: &GameState,
+        row: &ZoneChangeRecord,
+        presence: &[bool],
+    ) -> Result<(), String> {
+        let status = row.combat_status;
+        let index = state
+            .zone_changes_this_turn
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, row))
+            .expect("selected row belongs to departure history");
+        if (!presence.get(index).copied().unwrap_or(false)
+            && (status.attacking || status.defending_player.is_some()))
+            || match (status.attack_target, status.attack_target_identity) {
+                (Some(AttackTarget::Planeswalker(id) | AttackTarget::Battle(id)), Some(pin)) => {
+                    pin.object_id != id
+                        || pin.incarnation == crate::types::identifiers::LEGACY_INCARNATION
+                }
+                (Some(AttackTarget::Planeswalker(_) | AttackTarget::Battle(_)), None) => true,
+                (Some(AttackTarget::Player(_)) | None, Some(_)) => true,
+                (Some(AttackTarget::Player(_)) | None, None) => false,
+            }
+        {
+            return Err(ERROR.to_string());
+        }
+        Ok(())
+    }
+
+    let check_condition = |condition: Option<&crate::types::ability::TriggerCondition>,
+                           event: Option<&GameEvent>| {
+        use crate::game::{combat, triggers};
+
+        if !condition.is_some_and(triggers::condition_reads_current_attack_destinations) {
+            return Ok(());
+        }
+        let identities = event
+            .and_then(triggers::attack_count_declaration_incarnations)
+            .ok_or_else(|| ERROR.to_string())?;
+        for identity in identities {
+            let identity = identity.ok_or_else(|| ERROR.to_string())?;
+            if combat::attack_destination_of_incarnation(state, identity).is_none() {
+                return Err(ERROR.to_string());
+            }
+            if let Some(row) = exact_battlefield_departure_row(state, identity) {
+                validate_departure(state, row, departure_targets_present)?;
+                if let Some(pin) = row.combat_status.attack_target_identity {
+                    let live = state.objects.get(&pin.object_id).is_some_and(|object| {
+                        object.zone == Zone::Battlefield
+                            && ObjectIncarnationRef::from_object(object) == pin
+                    });
+                    if !live && exact_battlefield_departure_row(state, pin).is_none() {
+                        return Err(ERROR.to_string());
+                    }
+                }
+            }
+        }
+        Ok(())
+    };
+
     fn ability(
         state: &GameState,
         node: &ResolvedAbility,
@@ -34915,31 +34974,7 @@ fn validate_restored_attack_authority(
                 return Err(ERROR.to_string());
             }
             if let Some(row) = row {
-                let status = row.combat_status;
-                let index = state
-                    .zone_changes_this_turn
-                    .iter()
-                    .position(|candidate| std::ptr::eq(candidate, row))
-                    .expect("selected row belongs to departure history");
-                if (!presence.get(index).copied().unwrap_or(false)
-                    && (status.attacking || status.defending_player.is_some()))
-                    || match (status.attack_target, status.attack_target_identity) {
-                        (
-                            Some(AttackTarget::Planeswalker(id) | AttackTarget::Battle(id)),
-                            Some(pin),
-                        ) => {
-                            pin.object_id != id
-                                || pin.incarnation == crate::types::identifiers::LEGACY_INCARNATION
-                        }
-                        (Some(AttackTarget::Planeswalker(_) | AttackTarget::Battle(_)), None) => {
-                            true
-                        }
-                        (Some(AttackTarget::Player(_)) | None, Some(_)) => true,
-                        (Some(AttackTarget::Player(_)) | None, None) => false,
-                    }
-                {
-                    return Err(ERROR.to_string());
-                }
+                validate_departure(state, row, presence)?;
             }
         }
         if let Some(sub) = node.sub_ability.as_deref() {
@@ -34954,6 +34989,7 @@ fn validate_restored_attack_authority(
         ability(state, node, event, events, departure_targets_present)
     };
     if let Some(pending) = state.pending_trigger.as_deref() {
+        check_condition(pending.condition.as_ref(), pending.trigger_event.as_ref())?;
         check(
             &pending.ability,
             pending.trigger_event.as_ref(),
@@ -34961,6 +34997,10 @@ fn validate_restored_attack_authority(
         )?;
     }
     for pending in &state.deferred_triggers {
+        check_condition(
+            pending.pending.condition.as_ref(),
+            pending.pending.trigger_event.as_ref(),
+        )?;
         check(
             &pending.pending.ability,
             pending.pending.trigger_event.as_ref(),
@@ -34970,12 +35010,36 @@ fn validate_restored_attack_authority(
     if let Some(order) = &state.pending_trigger_order {
         for group in &order.groups {
             for pending in &group.triggers {
+                check_condition(
+                    pending.pending.condition.as_ref(),
+                    pending.pending.trigger_event.as_ref(),
+                )?;
                 check(
                     &pending.pending.ability,
                     pending.pending.trigger_event.as_ref(),
                     &pending.trigger_events,
                 )?;
             }
+        }
+    }
+    if let Some(resume) = state.pending_triggered_mana_resume.as_deref() {
+        for context in resume
+            .collected_batches
+            .iter()
+            .flat_map(|batch| &batch.contexts)
+        {
+            let pending = &context.pending;
+            check_condition(pending.condition.as_ref(), pending.trigger_event.as_ref())?;
+        }
+    }
+    for entry in &state.stack {
+        if let StackEntryKind::TriggeredAbility {
+            condition,
+            trigger_event,
+            ..
+        } = &entry.kind
+        {
+            check_condition(condition.as_ref(), trigger_event.as_ref())?;
         }
     }
     for entry in state.stack.iter().chain(state.resolving_stack_entry.iter()) {
@@ -35005,6 +35069,14 @@ fn validate_restored_attack_authority(
         .chain(state.departed_activated_abilities.values())
         .chain(state.departed_triggered_abilities.values())
     {
+        if let StackEntryKind::TriggeredAbility {
+            condition,
+            trigger_event,
+            ..
+        } = &entry.kind
+        {
+            check_condition(condition.as_ref(), trigger_event.as_ref())?;
+        }
         if let Some(node) = entry.ability() {
             let event = match &entry.kind {
                 StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event.as_ref(),

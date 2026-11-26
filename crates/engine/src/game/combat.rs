@@ -9178,6 +9178,8 @@ pub(crate) fn attacked_referent_departure_row<'a>(
     }
 }
 
+pub(crate) type AttackDestination = (AttackTarget, Option<ObjectIncarnationRef>);
+
 /// CR 506.3: the attack target of the attacking creature `referent`, or none.
 ///
 /// * (a) Still the live creature (`live`) and attacking (an `AttackerInfo` that
@@ -9196,21 +9198,53 @@ fn attack_target_referent(
     is_asker: bool,
     live: bool,
     event: Option<&GameEvent>,
-) -> Option<(AttackTarget, Option<ObjectIncarnationRef>)> {
+) -> Option<AttackDestination> {
     if live {
-        return state.combat.as_ref().and_then(|combat| {
-            combat
-                .attackers
-                .iter()
-                .find(|info| info.object_id == referent)
-                .filter(|info| is_attacker_in_play(state, info.object_id))
-                .and_then(|info| active_attack_target(state, info))
-        });
+        return live_attack_destination(state, referent);
     }
-    let status = departed_attack_row(state, referent, asker, is_asker, event)?.combat_status;
+    departure_attack_destination(departed_attack_row(
+        state, referent, asker, is_asker, event,
+    )?)
+}
+
+fn live_attack_destination(state: &GameState, attacker: ObjectId) -> Option<AttackDestination> {
+    state
+        .combat
+        .as_ref()?
+        .attackers
+        .iter()
+        .find(|info| info.object_id == attacker)
+        .filter(|info| is_attacker_in_play(state, info.object_id))
+        .and_then(|info| active_attack_target(state, info))
+}
+
+fn departure_attack_destination(
+    row: &crate::types::game_state::ZoneChangeRecord,
+) -> Option<AttackDestination> {
+    let status = row.combat_status;
     status
         .attack_target
         .map(|target| (target, status.attack_target_identity))
+}
+
+/// CR 400.7 + CR 506.4 + CR 608.2h: distinguish an absent combat destination
+/// from missing evidence for the original creature.
+pub(crate) fn attack_destination_of_incarnation(
+    state: &GameState,
+    identity: ObjectIncarnationRef,
+) -> Option<Option<AttackDestination>> {
+    if state
+        .objects
+        .get(&identity.object_id)
+        .is_some_and(|object| {
+            object.zone == Zone::Battlefield
+                && ObjectIncarnationRef::from_object(object) == identity
+        })
+    {
+        return Some(live_attack_destination(state, identity.object_id));
+    }
+    let row = crate::types::game_state::exact_battlefield_departure_row(state, identity)?;
+    Some(departure_attack_destination(row))
 }
 
 /// CR 506.3 + CR 115.10a: THE authority for "the player or planeswalker it's

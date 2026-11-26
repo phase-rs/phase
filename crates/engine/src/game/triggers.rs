@@ -6,7 +6,7 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
-    CommanderOwnership, ControllerRef, CopyRetargetPermission, DamageAmountScope,
+    CommanderOwnership, Comparator, ControllerRef, CopyRetargetPermission, DamageAmountScope,
     DamageAmountThreshold, DamageReceivedGrouping, DelayedAbilityOrigin, DelayedTriggerCondition,
     DurationEvent, Effect, EffectOutcomeSignal, FilterProp, IndicatedActionLimit, ModalChoice,
     NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr,
@@ -22374,8 +22374,8 @@ fn spells_cast_last_turn_total(state: &GameState) -> u32 {
     })
 }
 
-/// Check whether an intervening-if condition is satisfied.
-/// Used both at fire-time and resolution-time.
+/// Check whether an intervening-if condition is satisfied at trigger time.
+/// The resolution check uses the same evaluator with its own timing.
 ///
 /// CR 603.4: An intervening-if condition is checked when the ability would
 /// trigger and again as it resolves. Invalid zone-change provenance fails the
@@ -22398,6 +22398,51 @@ pub(crate) fn check_trigger_condition_with_source(
     source_context: Option<&TriggerSourceContext>,
     trigger_definition: Option<&TriggerDefinitionRef>,
     trigger_event: Option<&GameEvent>,
+) -> bool {
+    check_trigger_condition_at(
+        state,
+        condition,
+        controller,
+        source_context,
+        trigger_definition,
+        trigger_event,
+        TriggerConditionTiming::Event,
+    )
+}
+
+pub(crate) fn recheck_trigger_condition_with_source(
+    state: &GameState,
+    condition: &TriggerCondition,
+    controller: PlayerId,
+    source_context: Option<&TriggerSourceContext>,
+    trigger_definition: Option<&TriggerDefinitionRef>,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    check_trigger_condition_at(
+        state,
+        condition,
+        controller,
+        source_context,
+        trigger_definition,
+        trigger_event,
+        TriggerConditionTiming::Resolution,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TriggerConditionTiming {
+    Event,
+    Resolution,
+}
+
+fn check_trigger_condition_at(
+    state: &GameState,
+    condition: &TriggerCondition,
+    controller: PlayerId,
+    source_context: Option<&TriggerSourceContext>,
+    trigger_definition: Option<&TriggerDefinitionRef>,
+    trigger_event: Option<&GameEvent>,
+    timing: TriggerConditionTiming,
 ) -> bool {
     if trigger_event.is_some_and(|event| !zone_changed_condition_provenance_is_coherent(event)) {
         return false;
@@ -22428,6 +22473,28 @@ pub(crate) fn check_trigger_condition_with_source(
         return false;
     }
 
+    // CR 603.4 + CR 506.4 + CR 608.2h: resolve the exact declared creatures'
+    // destinations once, before boolean operators can reinterpret missing evidence.
+    let current_destinations = if timing == TriggerConditionTiming::Resolution
+        && condition_reads_current_attack_destinations(condition)
+    {
+        let Some(destinations) = trigger_event
+            .and_then(attack_count_declaration_incarnations)
+            .and_then(|identities| {
+                identities
+                    .map(|identity| {
+                        super::combat::attack_destination_of_incarnation(state, identity?)
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+        else {
+            return false;
+        };
+        Some(destinations)
+    } else {
+        None
+    };
+
     evaluate_trigger_condition_with_source(
         state,
         condition,
@@ -22435,6 +22502,7 @@ pub(crate) fn check_trigger_condition_with_source(
         source_context,
         trigger_definition,
         trigger_event,
+        current_destinations.as_deref(),
     )
 }
 
@@ -22557,6 +22625,7 @@ fn evaluate_trigger_condition_with_source(
     source_context: Option<&TriggerSourceContext>,
     trigger_definition: Option<&TriggerDefinitionRef>,
     trigger_event: Option<&GameEvent>,
+    current_destinations: Option<&[Option<super::combat::AttackDestination>]>,
 ) -> bool {
     let source_id = source_context.map(|source| source.identity.reference.object_id);
     match condition {
@@ -22649,6 +22718,22 @@ fn evaluate_trigger_condition_with_source(
             })
         }
         // CR 508.1a + CR 508.1b + CR 603.4: Compare the scoped declaration count.
+        TriggerCondition::AttackersDeclaredCount {
+            subject,
+            comparator,
+            count,
+        } if let Some(destinations) = current_destinations
+            && let Some(attacked) = current_attack_count_scope(subject, *comparator) =>
+        {
+            let actual = destinations
+                .iter()
+                .flatten()
+                .filter(|&&(target, pin)| {
+                    attack_target_controller(state, target, pin, attacked) == Some(controller)
+                })
+                .count();
+            comparator.evaluate(actual as i32, *count as i32)
+        }
         TriggerCondition::AttackersDeclaredCount {
             subject,
             comparator,
@@ -23692,6 +23777,7 @@ fn evaluate_trigger_condition_with_source(
                 source_context,
                 trigger_definition,
                 trigger_event,
+                current_destinations,
             )
         }),
         TriggerCondition::Or { conditions } => conditions.iter().any(|c| {
@@ -23702,6 +23788,7 @@ fn evaluate_trigger_condition_with_source(
                 source_context,
                 trigger_definition,
                 trigger_event,
+                current_destinations,
             )
         }),
         // CR 603.4 + CR 608.2c: Logical negation — invert the wrapped condition's
@@ -23714,6 +23801,7 @@ fn evaluate_trigger_condition_with_source(
             source_context,
             trigger_definition,
             trigger_event,
+            current_destinations,
         ),
         // CR 508.1m + CR 603.4 / CR 603.8: an event-time gate ("while" gates, and
         // a state trigger's own condition) evaluates its wrapped condition when
@@ -23726,6 +23814,7 @@ fn evaluate_trigger_condition_with_source(
             source_context,
             trigger_definition,
             trigger_event,
+            None,
         ),
         // CR 309.7: True when the controller has completed a dungeon. `specific: None`
         // matches "any dungeon"; `specific: Some(d)` matches dungeon `d`. Negation
@@ -23958,6 +24047,67 @@ pub(crate) fn exploit_record_matches_dying_object(
     current_incarnation.checked_sub(later_moves + 1) == Some(recorded_incarnation)
 }
 
+// The present-tense minimum and the historical exclusion share an AST subject.
+// The grammar emits GE for "N or more ... are attacking", and EQ for "none ... attacked".
+// A filtered count (Squall) rechecks the attackers' characteristics within its bound group.
+fn current_attack_count_scope(
+    subject: &crate::types::ability::AttackersDeclaredCountSubject,
+    comparator: Comparator,
+) -> Option<&AttackTargetFilter> {
+    match (subject, comparator) {
+        (
+            crate::types::ability::AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked:
+                    attacked @ (AttackTargetFilter::Player
+                    | AttackTargetFilter::Planeswalker { subtype: None }
+                    | AttackTargetFilter::PlayerOrPlaneswalker),
+                filter: None,
+            },
+            Comparator::GE,
+        ) => Some(attacked),
+        _ => None,
+    }
+}
+
+pub(crate) fn condition_reads_current_attack_destinations(condition: &TriggerCondition) -> bool {
+    match condition {
+        TriggerCondition::AttackersDeclaredCount {
+            subject,
+            comparator,
+            ..
+        } => current_attack_count_scope(subject, *comparator).is_some(),
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => conditions
+            .iter()
+            .any(condition_reads_current_attack_destinations),
+        TriggerCondition::Not { condition } => {
+            condition_reads_current_attack_destinations(condition)
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn attack_count_declaration_incarnations(
+    event: &GameEvent,
+) -> Option<impl Iterator<Item = Option<ObjectIncarnationRef>> + '_> {
+    let GameEvent::AttackersDeclared {
+        attacker_ids,
+        declaration_records,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    Some(attacker_ids.iter().map(|&id| {
+        let record = declaration_records
+            .iter()
+            .find(|record| record.object_id == id)?;
+        let incarnation = record.incarnation?;
+        (incarnation != crate::types::identifiers::LEGACY_INCARNATION)
+            .then(|| ObjectIncarnationRef::of(id, incarnation))
+    }))
+}
+
 fn attackers_declared_count(
     state: &GameState,
     trigger_event: Option<&GameEvent>,
@@ -24152,33 +24302,56 @@ fn attack_target_matches_controller_scope(
     controller_ref: &ControllerRef,
     attacked: &AttackTargetFilter,
 ) -> bool {
-    let player_matches = |player_id: PlayerId| {
-        controller_ref_matches_player(player_id, trigger_controller, controller_ref)
-    };
+    attack_target_controller(state, target, None, attacked).is_some_and(|player| {
+        controller_ref_matches_player(player, trigger_controller, controller_ref)
+    })
+}
 
-    match (attacked, target) {
-        (AttackTargetFilter::Player, crate::game::combat::AttackTarget::Player(player_id))
-        | (
-            AttackTargetFilter::PlayerOrPlaneswalker,
-            crate::game::combat::AttackTarget::Player(player_id),
-        ) => player_matches(player_id),
+fn attack_target_controller(
+    state: &GameState,
+    target: crate::game::combat::AttackTarget,
+    pin: Option<ObjectIncarnationRef>,
+    attacked: &AttackTargetFilter,
+) -> Option<PlayerId> {
+    use super::combat::AttackTarget;
+
+    match (attacked, target, pin) {
         (
-            AttackTargetFilter::Planeswalker { subtype: None },
-            crate::game::combat::AttackTarget::Planeswalker(object_id),
-        )
-        | (
-            AttackTargetFilter::PlayerOrPlaneswalker,
-            crate::game::combat::AttackTarget::Planeswalker(object_id),
-        ) => state
-            .objects
-            .get(&object_id)
-            .is_some_and(|object| player_matches(object.controller)),
-        (AttackTargetFilter::Battle, crate::game::combat::AttackTarget::Battle(object_id)) => state
-            .objects
-            .get(&object_id)
-            .and_then(|object| object.protector())
-            .is_some_and(player_matches),
-        _ => false,
+            AttackTargetFilter::Player | AttackTargetFilter::PlayerOrPlaneswalker,
+            AttackTarget::Player(player),
+            None,
+        ) => Some(player),
+        (
+            AttackTargetFilter::Planeswalker { subtype: None }
+            | AttackTargetFilter::PlayerOrPlaneswalker,
+            AttackTarget::Planeswalker(id),
+            None,
+        ) => state.objects.get(&id).map(|object| object.controller),
+        (
+            AttackTargetFilter::Planeswalker { subtype: None }
+            | AttackTargetFilter::PlayerOrPlaneswalker,
+            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id),
+            Some(pin),
+        ) if pin.object_id == id => {
+            // CR 506.4e: a surviving attack relation can outlast a type change.
+            // The attacked object's current or last-known type answers the condition.
+            if let Some(object) = state.objects.get(&id).filter(|object| {
+                object.zone == Zone::Battlefield && ObjectIncarnationRef::from_object(object) == pin
+            }) {
+                return object
+                    .card_types
+                    .core_types
+                    .contains(&CoreType::Planeswalker)
+                    .then_some(object.controller);
+            }
+            crate::types::game_state::exact_battlefield_departure_row(state, pin)
+                .filter(|row| row.core_types.contains(&CoreType::Planeswalker))
+                .map(|row| row.controller)
+        }
+        (AttackTargetFilter::Battle, AttackTarget::Battle(id), None) => {
+            state.objects.get(&id).and_then(|object| object.protector())
+        }
+        _ => None,
     }
 }
 
@@ -24245,8 +24418,10 @@ fn condition_is_attack_event_only(
                 // fact about the creatures as they are, not about the
                 // declaration alone — it must survive onto the stack entry and
                 // be rechecked at resolution (Squall's chosen-number P/T
-                // existential). The filter-less intervening-if family keeps the
-                // pre-existing event-fact contract.
+                // existential). A filter-less count that duplicates a
+                // compatible trigger-head filter keeps the existing event-fact
+                // contract. Player-led triggers such as Mangara have no
+                // destination filter on the head, so their recheck is retained.
                 filter.is_none()
                     && trigger
                         .attack_target_filter

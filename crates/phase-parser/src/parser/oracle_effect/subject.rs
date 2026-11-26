@@ -4193,18 +4193,21 @@ fn parse_subject_application_for(
             ) {
                 // CR 608.2c: a plain demonstrative follows the player named by
                 // the head. Explicit attacking-player phrases keep their own ref.
-                match (&ctx.relative_player_scope, subject_anaphor, &ctx_filter) {
-                    (
-                        Some(ControllerRef::TriggeringPlayer),
-                        PlayerSubjectAnaphor::Player,
-                        TargetFilter::DefendingPlayer,
-                    ) => TargetFilter::TriggeringPlayer,
-                    (
-                        Some(ControllerRef::DefendingPlayer),
-                        PlayerSubjectAnaphor::Player,
-                        TargetFilter::TriggeringPlayer,
-                    ) => TargetFilter::DefendingPlayer,
-                    _ => ctx_filter,
+                match subject_anaphor {
+                    PlayerSubjectAnaphor::Player => {
+                        match (&ctx.relative_player_scope, &ctx_filter) {
+                            (
+                                Some(ControllerRef::TriggeringPlayer),
+                                TargetFilter::DefendingPlayer,
+                            ) => TargetFilter::TriggeringPlayer,
+                            (
+                                Some(ControllerRef::DefendingPlayer),
+                                TargetFilter::TriggeringPlayer,
+                            ) => TargetFilter::DefendingPlayer,
+                            _ => ctx_filter,
+                        }
+                    }
+                    PlayerSubjectAnaphor::AttackingPlayer => ctx_filter,
                 }
             } else if let Some(filter) =
                 enchanted_player_anaphor_filter(ctx.relative_player_scope.as_ref())
