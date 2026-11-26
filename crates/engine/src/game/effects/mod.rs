@@ -29216,7 +29216,7 @@ fn resolve_chain_body(
                             if should_propagate_parent_targets(ability, &sibling_resolved) {
                                 sibling_resolved.mirror_targets_from(ability);
                             }
-                            sibling_resolved.context = ability.context.clone();
+                            apply_parent_chain_context(&mut sibling_resolved, ability, None, state);
                             if ability.optional {
                                 sibling_resolved.context.optional_effect_performed = false;
                             }
