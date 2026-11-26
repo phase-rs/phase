@@ -706,6 +706,12 @@ fn exempt_from_hiding(
     crate::game::casting::cast_permissions_name_their_grantee(obj)
         && state.players.iter().any(|pl| {
             can_view_private_for_player(pl.id)
+                // CR 401.5: The cast-grant inference must respect the same
+                // stopped look window as the explicit top-of-library grant.
+                && !(obj.zone == Zone::Library
+                    && !foreign_library_top_visible_during_action(state, pl.id, obj.owner, obj.id)
+                    && state.players.iter().any(|seat| seat.id == obj.owner)
+                    && state.library_of(obj.owner).front() == Some(&obj.id))
                 && crate::game::casting::castable_from_current_zone(state, obj, pl.id, None)
         })
 }
@@ -912,22 +918,22 @@ pub(crate) fn identity_projection_for_viewer(
             HashSet::new()
         };
 
-    // CR 701.20e + CR 400.2: "looking at a card ... is shown only to the
-    // specified player." A player with a continuous "you may look at the top
-    // card of your library" permission (MayLookAtTopOfLibrary — Vizier of the
-    // Menagerie, Fblthp, Lost on the Range, etc.) privately sees their OWN
-    // library top. Engine-authoritative exposure (never client-side): the
-    // top-of-library object is the source/render target of cast-from-top
-    // (CR 601.2a) and plot-from-top (CR 702.170f) actions, so without this it
-    // would be redacted for the very player allowed to act on it. The derived
-    // `can_look_at_top_of_library` flag already encodes the static check;
-    // `can_view_private_for_player` extends the look to a player controlling
-    // this player's turn, mirroring the private-look / face-down look paths.
+    // CR 701.20e: A private look belongs to the grantee or the player
+    // controlling their turn. Public reveals follow their separate audience.
     let look_top_visible: HashSet<ObjectId> = state
         .players
         .iter()
-        .filter(|p| p.can_look_at_top_of_library && can_view_private_for_player(p.id))
-        .filter_map(|p| state.library_of(p.id).front().copied())
+        .filter(|p| can_view_private_for_player(p.id))
+        .flat_map(|p| {
+            p.can_look_at_top_of_library
+                .then_some(p.id)
+                .into_iter()
+                .chain(
+                    super::static_abilities::top_of_library_look_owners(state, p.id)
+                        .filter(move |&owner| owner != p.id),
+                )
+                .filter_map(move |owner| visible_library_top_for_look(state, p.id, owner))
+        })
         .collect();
     let all_library_ids: Vec<ObjectId> = state
         .players
@@ -955,8 +961,7 @@ pub(crate) fn identity_projection_for_viewer(
             // does NOT unhide a library object. Its identity is public, but its
             // library position is not, so the identity is published only through
             // the unindexed `DerivedViews::stack_revealed_cards`.
-            // CR 701.20e: own (or controlled-turn) library top under a
-            // MayLookAtTopOfLibrary permission — see `look_top_visible` above.
+            // CR 701.20e: Privately visible top under a look grant.
             || look_top_visible.contains(&obj_id);
         if !visible
             && !effect_zone_hand_cards.contains(&obj_id)
@@ -1443,6 +1448,309 @@ pub fn filter_state_for_unseated_viewer(state: &GameState) -> GameState {
     filter_state_for_scope(state, None)
 }
 
+/// CR 401.5: For a foreign-library look, only the top at the start of a
+/// pending play may be seen, and only while that object is still on top.
+fn visible_library_top_for_look(
+    state: &GameState,
+    grantee: PlayerId,
+    owner: PlayerId,
+) -> Option<ObjectId> {
+    if !state.players.iter().any(|seat| seat.id == owner) {
+        return None;
+    }
+    let live = *state.library_of(owner).front()?;
+    foreign_library_top_visible_during_action(state, grantee, owner, live).then_some(live)
+}
+
+fn foreign_library_top_visible_during_action(
+    state: &GameState,
+    grantee: PlayerId,
+    owner: PlayerId,
+    live: ObjectId,
+) -> bool {
+    owner == grantee
+        || state
+            .foreign_library_look_snapshot
+            .as_deref()
+            .is_none_or(|snapshot| snapshot.tops.contains(&(owner, live)))
+}
+
+pub(super) fn begin_foreign_library_look_boundary(
+    state: &mut GameState,
+    player: PlayerId,
+    action: &crate::types::actions::GameAction,
+) {
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::ForeignLibraryLookAction;
+
+    let kind = match action {
+        GameAction::CastSpell { .. }
+        | GameAction::CastSpellForFree { .. }
+        | GameAction::CastSpellAsMiracle { .. }
+        | GameAction::CastSpellAsMadness { .. }
+        | GameAction::CastSpellAsSneak { .. }
+        | GameAction::CastSpellAsWebSlinging { .. }
+        | GameAction::PlayFaceDown { .. }
+        | GameAction::CastPreparedCopy { .. }
+        | GameAction::CastParadigmCopy { .. } => ForeignLibraryLookAction::Cast,
+        GameAction::PlayLand { .. } => ForeignLibraryLookAction::PlayLand,
+        GameAction::ActivateAbility { .. }
+        | GameAction::ActivateManaSource { .. }
+        | GameAction::TapLandForMana { .. }
+        | GameAction::ActivateNinjutsu { .. }
+        | GameAction::Equip { .. }
+        | GameAction::CrewVehicle { .. }
+        | GameAction::ActivateStation { .. }
+        | GameAction::SaddleMount { .. } => {
+            let Some(source) = action.source_object() else {
+                return;
+            };
+            ForeignLibraryLookAction::Activate(source)
+        }
+        // CR 116.2: paid special actions open the boundary in their cost
+        // procedures. Plot and suspend enter through ActivateAbility.
+        GameAction::PassPriority
+        | GameAction::ChooseMeldPair { .. }
+        | GameAction::ChooseEntryAttackTarget { .. }
+        | GameAction::Foretell { .. }
+        | GameAction::DeclareAttackers { .. }
+        | GameAction::DeclareBlockers { .. }
+        | GameAction::ChooseUntap { .. }
+        | GameAction::ChooseExert { .. }
+        | GameAction::ChooseEnlist { .. }
+        | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseZoneOpponentChooser { .. }
+        | GameAction::ChoosePileOpponent { .. }
+        | GameAction::ChooseAnnouncingOpponent { .. }
+        | GameAction::ChooseGiftRecipient { .. }
+        | GameAction::ChooseAssistPlayer { .. }
+        | GameAction::CommitAssistPayment { .. }
+        | GameAction::MulliganDecision { .. }
+        | GameAction::ReorderHand { .. }
+        | GameAction::BackToManaPayment
+        | GameAction::UntapLandForMana { .. }
+        | GameAction::SpendPoolMana { .. }
+        | GameAction::UnspendPoolMana { .. }
+        | GameAction::SelectCards { .. }
+        | GameAction::ChooseRemoveCounterCostDistribution { .. }
+        | GameAction::SelectCoinFlips { .. }
+        | GameAction::SelectDieRolls { .. }
+        | GameAction::ChooseOutsideGameCards { .. }
+        | GameAction::SelectTargets { .. }
+        | GameAction::ChooseTarget { .. }
+        | GameAction::ChooseReplacement { .. }
+        | GameAction::ChooseReplacementAndRemember { .. }
+        | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::ChooseEntryController { .. }
+        | GameAction::OrderTriggers { .. }
+        | GameAction::OrderCostReductions { .. }
+        | GameAction::CancelCast
+        | GameAction::Transform { .. }
+        | GameAction::TurnFaceUp { .. }
+        | GameAction::SubmitSideboard { .. }
+        | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseStartingPlayer { .. }
+        | GameAction::ChooseOption { .. }
+        | GameAction::SubmitVoteCandidate { .. }
+        | GameAction::SubmitSpellbookDraft { .. }
+        | GameAction::SubmitPilePartition { .. }
+        | GameAction::ChoosePile { .. }
+        | GameAction::ChooseBranch { .. }
+        | GameAction::SubmitLifeRedistribution { .. }
+        | GameAction::ChooseDamageSource { .. }
+        | GameAction::SelectModes { .. }
+        | GameAction::DecideOptionalCost { .. }
+        | GameAction::ChooseAdventureFace { .. }
+        | GameAction::ChooseModalFace { .. }
+        | GameAction::ChooseAlternativeCast { .. }
+        | GameAction::ChooseCastingVariant { .. }
+        | GameAction::KeepAllCopyTargets
+        | GameAction::ChoosePermanentTypeSlot { .. }
+        | GameAction::DecideOptionalEffect { .. }
+        | GameAction::ChooseResolutionOptionalPaymentBranch { .. }
+        | GameAction::RespondToSpliceOffer { .. }
+        | GameAction::DecideOptionalEffectAndRemember { .. }
+        | GameAction::PayUnlessCost { .. }
+        | GameAction::ChooseUnlessCostBranch { .. }
+        | GameAction::ChooseActivationCostBranch { .. }
+        | GameAction::PayCombatTax { .. }
+        | GameAction::ChooseRingBearer { .. }
+        | GameAction::ChoosePair { .. }
+        | GameAction::ChooseDungeon { .. }
+        | GameAction::ChooseDungeonRoom { .. }
+        | GameAction::UnlockRoomDoor { .. }
+        | GameAction::RollPlanarDie
+        | GameAction::ChooseRoomDoor { .. }
+        | GameAction::TapForConvoke { .. }
+        | GameAction::HarmonizeTap { .. }
+        | GameAction::ChooseSecretAgendaNames { .. }
+        | GameAction::DeclareCompanion { .. }
+        | GameAction::CompanionToHand
+        | GameAction::DiscoverChoice { .. }
+        | GameAction::GraveyardPaidCastChoice { .. }
+        | GameAction::CascadeChoice { .. }
+        | GameAction::RippleChoice { .. }
+        | GameAction::FreeCastWindowChoice { .. }
+        | GameAction::ChooseTopOrBottom { .. }
+        | GameAction::ChooseMutateMergeSide { .. }
+        | GameAction::CipherEncode { .. }
+        | GameAction::ChooseLegend { .. }
+        | GameAction::ChooseBattleProtector { .. }
+        | GameAction::SetAutoPass { .. }
+        | GameAction::CancelAutoPass
+        | GameAction::SetPhaseStops { .. }
+        | GameAction::SetPriorityPassingMode { .. }
+        | GameAction::SetPriorityYield { .. }
+        | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::UnAction { .. }
+        | GameAction::SetTriggerOrderTemplate { .. }
+        | GameAction::AssignCombatDamage { .. }
+        | GameAction::AssignBlockerDamage { .. }
+        | GameAction::DistributeAmong { .. }
+        | GameAction::ChooseCounterMoveDistribution { .. }
+        | GameAction::ChooseCountersToRemove { .. }
+        | GameAction::SubmitPayAmount { .. }
+        | GameAction::RetargetSpell { .. }
+        | GameAction::LearnDecision { .. }
+        | GameAction::SelectCategoryPermanents { .. }
+        | GameAction::ChooseKeptCreatures { .. }
+        | GameAction::ChooseKeptPermanents { .. }
+        | GameAction::ChooseX { .. }
+        | GameAction::SubmitPhyrexianChoices { .. }
+        | GameAction::ChooseManaColor { .. }
+        | GameAction::PayManaAbilityMana { .. }
+        | GameAction::ChooseSpecializeColor { .. }
+        | GameAction::PassParadigmOffer
+        | GameAction::Debug(..)
+        | GameAction::GrantDebugPermission { .. }
+        | GameAction::RevokeDebugPermission { .. }
+        | GameAction::Concede { .. }
+        | GameAction::DeclareShortcut { .. }
+        | GameAction::RespondToShortcut { .. }
+        | GameAction::DeclineShortcut
+        | GameAction::PrecastCopyShortcut { .. }
+        | GameAction::EndContinuousEffect { .. }
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. } => return,
+    };
+    snapshot_foreign_library_tops(state, player, kind);
+}
+
+/// CR 401.5: Capture the foreign tops before the action can change them.
+/// Resolution can start a cast from an answer to a parent choice, so the
+/// spell announcement can also open the snapshot.
+pub(super) fn snapshot_foreign_library_tops(
+    state: &mut GameState,
+    player: PlayerId,
+    action: crate::types::game_state::ForeignLibraryLookAction,
+) {
+    use crate::types::game_state::ForeignLibraryLookSnapshot;
+
+    if state.foreign_library_look_snapshot.is_some() {
+        return;
+    }
+    if !state.players.iter().any(|viewer| {
+        super::static_abilities::top_of_library_look_owners(state, viewer.id)
+            .any(|owner| owner != viewer.id)
+    }) {
+        return;
+    }
+    let tops = state
+        .players
+        .iter()
+        .filter_map(|seat| Some((seat.id, *state.library_of(seat.id).front()?)))
+        .collect();
+    state.foreign_library_look_snapshot = Some(Box::new(ForeignLibraryLookSnapshot {
+        player,
+        action,
+        tops,
+    }));
+}
+
+/// CR 401.5 + CR 733.1: retire the snapshot for an announcement that
+/// completed or was cancelled. Callers must identify the owning action.
+pub(super) fn retire_foreign_library_look(
+    state: &mut GameState,
+    player: PlayerId,
+    action: crate::types::game_state::ForeignLibraryLookAction,
+) {
+    if state
+        .foreign_library_look_snapshot
+        .as_deref()
+        .is_some_and(|snapshot| snapshot.player == player && snapshot.action == action)
+    {
+        state.foreign_library_look_snapshot = None;
+    }
+}
+
+pub(super) fn finish_foreign_library_look_boundary(
+    state: &mut GameState,
+    result: &crate::types::game_state::ActionResult,
+) {
+    use crate::types::game_state::ForeignLibraryLookAction;
+    use crate::types::mana::SpecialAction;
+
+    let Some(snapshot) = state.foreign_library_look_snapshot.as_deref() else {
+        return;
+    };
+    let completed = matches!(
+        result.waiting_for,
+        WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
+    ) || result
+        .events
+        .iter()
+        .any(|event| match (&snapshot.action, event) {
+            (ForeignLibraryLookAction::Cast, GameEvent::SpellCast { controller, .. }) => {
+                *controller == snapshot.player
+            }
+            (ForeignLibraryLookAction::PlayLand, GameEvent::LandPlayed { player_id, .. }) => {
+                *player_id == snapshot.player
+            }
+            (
+                ForeignLibraryLookAction::Special(SpecialAction::TurnFaceUp),
+                GameEvent::TurnedFaceUp { .. },
+            ) => true,
+            (
+                ForeignLibraryLookAction::Special(SpecialAction::CompanionToHand),
+                GameEvent::CompanionMovedToHand { player, .. },
+            )
+            | (
+                ForeignLibraryLookAction::Special(SpecialAction::EndContinuousEffect),
+                GameEvent::ContinuousEffectEnded { player, .. },
+            )
+            | (
+                ForeignLibraryLookAction::Special(SpecialAction::Foretell),
+                GameEvent::Foretold {
+                    player_id: player, ..
+                },
+            )
+            | (
+                ForeignLibraryLookAction::Special(SpecialAction::UnlockDoor),
+                GameEvent::RoomDoorUnlocked {
+                    player_id: player, ..
+                },
+            )
+            | (
+                ForeignLibraryLookAction::Special(SpecialAction::RollPlanarDie),
+                GameEvent::PlanarDieRolled {
+                    player_id: player, ..
+                },
+            ) => *player == snapshot.player,
+            (
+                ForeignLibraryLookAction::Activate(source),
+                GameEvent::BecomesPlotted {
+                    player_id,
+                    object_id,
+                },
+            ) => *player_id == snapshot.player && source == object_id,
+            _ => false,
+        });
+    if completed {
+        state.foreign_library_look_snapshot = None;
+    }
+}
+
 fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameState {
     // CR 601.2h + CR 608.2c: only the actor entitled to answer the staged
     // prompt receives its materialized shadow. Other viewers retain the
@@ -1846,7 +2154,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     if let Some(crate::types::game_state::LibrarySearchDeliveryResume::Standard {
         hidden_search_audiences,
         ..
-    }) = filtered.pending_library_search_delivery.as_mut()
+    }) = filtered.pending_library_search_delivery.as_deref_mut()
     {
         hidden_search_audiences.clear();
     }
@@ -1905,6 +2213,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             }
         }
     }
+    filtered.foreign_library_look_snapshot = None;
 
     // CR 702.106c + CR 702.106f: an agenda's secretly chosen names — and how
     // many names it takes — belong to its controller until the turn-face-up
@@ -5089,7 +5398,7 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
     if let Some(crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
         after_scope: Some(after_scope),
         ..
-    }) = state.pending_library_search_delivery.as_mut()
+    }) = state.pending_library_search_delivery.as_deref_mut()
     {
         redact_ability_payment(after_scope, hidden_ids);
     }
@@ -8589,13 +8898,13 @@ mod tests {
                 2,
                 Box::new(|state: &mut GameState| {
                     state.pending_library_search_delivery =
-                        Some(LibrarySearchDeliveryResume::Scoped {
+                        Some(Box::new(LibrarySearchDeliveryResume::Scoped {
                             player: owner,
                             source_id: paid,
                             search_keys: vec![owner],
                             grants: Vec::new(),
                             after_scope: Some(effect()),
-                        });
+                        }));
                 }),
             ),
             (
@@ -9508,8 +9817,8 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::KeywordAction {
                 action: KeywordAction::Equip {
-                    equipment_id: ObjectId(72),
-                    target_creature_id: ObjectId(73),
+                    equipment: ObjectIncarnationRef::of(ObjectId(72), 0),
+                    target_creature: ObjectIncarnationRef::of(ObjectId(73), 0),
                 },
             },
         };
@@ -9588,6 +9897,7 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             crate::types::game_state::LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(
@@ -15944,13 +16254,15 @@ mod tests {
 
     use crate::game::game_object::GameObject;
 
-    /// CR 601.2a: `top_of_library_permission_source` requires a non-`None` `affected`
+    /// CR 601.2a: `top_of_library_grant_for_object` requires a non-`None` `affected`
     /// filter — the permission scopes WHICH top cards it names — so a bare
     /// `StaticDefinition::new` would make every row below vacuously refuse.
     fn top_of_library_static() -> crate::types::ability::StaticDefinition {
         use crate::types::ability::{CardPlayMode, StaticDefinition};
         use crate::types::statics::{CastFrequency, StaticMode};
         let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode: CardPlayMode::Cast,
             frequency: CastFrequency::Unlimited,
             alt_cost: None,

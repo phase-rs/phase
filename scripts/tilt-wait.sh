@@ -101,6 +101,9 @@ if [[ -n "$timeout" ]]; then
 fi
 
 repo_root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null || pwd)
+# Tilt reports native paths (backslashes on Windows) while git rev-parse uses
+# forward slashes; compare both sides in one form or every Windows run is "foreign".
+repo_root=${repo_root//\\//}
 start_ref="$(mktemp "${TMPDIR:-/tmp}/tilt-wait.XXXXXX")"
 trap 'rm -f "$start_ref"' EXIT
 warned=""
@@ -119,8 +122,12 @@ freshness() {
     return
   fi
 
+  # Native-Windows jq emits CRLF, and `read` keeps the CR (command
+  # substitution strips it, pipes do not) -- drop it or every path below
+  # carries a literal trailing \r into the find scan.
   while IFS= read -r p; do
-    [[ -n "$p" ]] && paths+=("$p")
+    p=${p%$'\r'}
+    [[ -n "$p" ]] && paths+=("${p//\\//}")
   done < <(jq -r '.spec.watchedPaths[]?' <<< "$fw")
 
   if ((${#paths[@]} == 0)); then
@@ -158,9 +165,10 @@ freshness() {
   # completed build still reports ok for the code as it was before the edit.
   touch -d "$start" "$start_ref"
   while IFS= read -r p; do
+    p=${p%$'\r'}
     [[ -z "$p" ]] && continue
     ((${#prune[@]})) && prune+=(-o)
-    prune+=(-path "$p")
+    prune+=(-path "${p//\\//}")
   done < <(jq -r '.spec.ignores[]? | select((.patterns // []) | length == 0) | .basePath' <<< "$fw")
 
   # Translate Tilt's ignore globs to `find` predicates -- but ONLY the shapes we can
@@ -174,6 +182,7 @@ freshness() {
   # visible symptom, so an untranslatable pattern must fail CLOSED, not guess.
   local base
   while IFS= read -r p; do
+    p=${p%$'\r'}
     [[ -z "$p" ]] && continue
     base="${p##*/}"
     # Reject a basename that is empty or only `*`s -- `target/**` reduces to `**`, and

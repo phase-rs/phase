@@ -1385,7 +1385,7 @@ fn r21_p2_f_cf_keeps_the_payload_return_bare() {
 /// "Exile all nonland permanents target player controls. Return the exiled cards to the battlefield under their owner's control at the beginning of the next end step."
 #[test]
 fn r22_p2_f_in_keeps_the_payload_return_bare() {
-    assert_fence_row("R22", R22_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: SetTapState, CDT{WhenDies}[Draw, ChangeZone{None,Battlefield,ParentTarget}]", 0);
+    assert_fence_row("R22", R22_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: SetTapState, CDT{WheneverEvent}[Draw, ChangeZone{None,Battlefield,ParentTarget}]", 0);
 }
 
 /// R23 — fence (face `p2:f mr`): a delayed-trigger payload keeps START's bare sentinel. CR 603.7c: the runtime binds every `TrackedSet(0)` sentinel in a delayed-trigger payload when the trigger is created, so the line walk never enters the payload edge and the sweep clears its mark.
@@ -1605,7 +1605,7 @@ fn r44_r3_b06_nextattack_foreach_pump_keeps_the_payload_return_bare() {
 /// "Exile all nonland permanents target player controls. Return the exiled cards to the battlefield under their owner's control at the beginning of the next end step."
 #[test]
 fn r45_r3_b09_inline_foreach_pump_keeps_the_payload_return_bare() {
-    assert_fence_row("R45", R45_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: SetTapState, CDT{WhenDies}[Pump, GenericEffect, Sacrifice, ChangeZone{None,Battlefield,ParentTarget}]", 0);
+    assert_fence_row("R45", R45_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: SetTapState, CDT{WheneverEvent}[Pump, GenericEffect, Sacrifice, ChangeZone{None,Battlefield,ParentTarget}]", 0);
 }
 
 /// R46 — fence (face `r3:b11 nextcast foreach pump`): a delayed-trigger payload keeps START's bare sentinel. CR 603.7c: the runtime binds every `TrackedSet(0)` sentinel in a delayed-trigger payload when the trigger is created, so the line walk never enters the payload edge and the sweep clears its mark.

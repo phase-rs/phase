@@ -5701,14 +5701,20 @@ fn collect_target_slots_inner(
                 &state.pending_trigger_event_batch,
                 ability.controller,
             );
-            if player_targets.is_empty() && !ability.optional_targeting {
+            // CR 115.6: the companion player slot inherits the node's "up to
+            // N" cardinality — "all cards from up to one target opponent's
+            // graveyard" (Into the Earthen Maw) may choose zero opponents.
+            // `targeting_is_optional` is the shared skip authority (also read
+            // by the slot-spec mirror and both assign paths below).
+            let companion_optional = ability.targeting_is_optional();
+            if player_targets.is_empty() && !companion_optional {
                 return Err(no_legal_target_slots());
             }
             acc.push(
                 &TargetFilter::Player,
                 TargetSelectionSlot {
                     legal_targets: player_targets,
-                    optional: ability.optional_targeting,
+                    optional: companion_optional,
                     chooser: None,
                     effect_kind: acc.current_effect_kind,
                     effect_detail: acc.current_effect_detail,
@@ -6612,6 +6618,7 @@ fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
         match prop {
             FilterProp::Attacking {
                 defender: Some(ControllerRef::DefendingPlayer),
+                ..
             }
             | FilterProp::AttackedThisTurn {
                 defender: Some(ControllerRef::DefendingPlayer),
@@ -7477,6 +7484,22 @@ pub(crate) fn collect_player_targets(
             })
             .map(|p| p.id)
             .collect(),
+        // CR 109.5 + CR 608.2c: a player-set predicate ("each opponent" as a
+        // population) expands through the single player-scope authority.
+        TargetFilter::PlayerMatching { player } => state
+            .players
+            .iter()
+            .filter(|p| {
+                crate::game::effects::matches_player_scope(
+                    state,
+                    p.id,
+                    player,
+                    ability.controller,
+                    ability.source_id,
+                )
+            })
+            .map(|p| p.id)
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -7822,7 +7845,9 @@ fn collect_target_slot_specs(
             *next_instance += 1;
             specs.push(TargetSlotSpec {
                 filter: TargetFilter::Player,
-                optional: ability.optional_targeting,
+                // CR 115.6: mirror the collect-side skip authority so
+                // recomputation agrees with the surfaced slot.
+                optional: ability.targeting_is_optional(),
                 instance: id,
                 group: ability.declares_chosen_group,
                 path: Vec::new(),
@@ -10890,13 +10915,15 @@ fn assign_targets_recursive(
     // selected player must be written onto THIS node's `targets` so the
     // filter's `TargetPlayer` resolution at runtime (filter.rs) finds it.
     // Slot order matches `collect_target_slots`: player slot before primary.
+    // CR 115.6: the skip authority mirrors the collect side, so a declined
+    // up-to companion slot commits cleanly instead of erroring.
     if ability.target_choice_timing == TargetChoiceTiming::Stack
         && ability_needs_companion_target_player_slot(ability)
     {
         if let Some(target) = targets.get(*next_target) {
             ability.push_chosen_target(target.clone());
             *next_target += 1;
-        } else if !ability.optional_targeting {
+        } else if !ability.targeting_is_optional() {
             return Err(EngineError::InvalidAction(
                 "Missing required target".to_string(),
             ));
@@ -11290,6 +11317,8 @@ fn assign_selected_slots_recursive(
     // CR 109.4 + CR 115.1: Mirror the companion-player slot pushed by
     // `collect_target_slots` for `ControllerRef::TargetPlayer` filters
     // (DamageAll, PutCounterAll, etc.). See `assign_targets_recursive`.
+    // CR 115.6: the skip authority mirrors the collect side, so a declined
+    // up-to companion slot commits cleanly instead of erroring.
     if ability.target_choice_timing == TargetChoiceTiming::Stack
         && ability_needs_companion_target_player_slot(ability)
     {
@@ -11300,7 +11329,7 @@ fn assign_selected_slots_recursive(
         };
         match selected_slot {
             Some(target) => ability.push_chosen_target(target.clone()),
-            None if ability.optional_targeting => {}
+            None if ability.targeting_is_optional() => {}
             None => {
                 return Err(EngineError::InvalidAction(
                     "Missing required target".to_string(),
@@ -12525,7 +12554,8 @@ fn filter_needs_trigger_source_for_retarget(filter: &TargetFilter) -> bool {
         matches!(
             prop,
             FilterProp::Attacking {
-                defender: Some(ControllerRef::DefendingPlayer)
+                defender: Some(ControllerRef::DefendingPlayer),
+                ..
             } | FilterProp::AttackedThisTurn {
                 defender: Some(ControllerRef::DefendingPlayer)
             }
@@ -13446,11 +13476,14 @@ fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usi
     // missed for exactly that reason. This conjunct is therefore a no-op today
     // and a correctness guarantee the moment those detectors learn to see
     // paired filters.
+    // CR 115.6: an up-to companion reserves nothing — counting it as required
+    // would over-reserve `remaining_minimum` and starve an upstream
+    // multi_target sibling of a target it is entitled to.
     let player_companion = if ability.target_choice_timing == TargetChoiceTiming::Stack
         && ability_needs_companion_target_player_slot(ability)
         && mana_multi_role(&ability.effect).is_none()
         && paired_subject_filters(&ability.effect).is_none()
-        && !ability.optional_targeting
+        && !ability.targeting_is_optional()
     {
         1
     } else {
@@ -13879,8 +13912,12 @@ mod tests {
                     source,
                     StackEntryKind::KeywordAction {
                         action: KeywordAction::Equip {
-                            equipment_id: source,
-                            target_creature_id: other,
+                            equipment: crate::types::identifiers::ObjectIncarnationRef::of(
+                                source, 0,
+                            ),
+                            target_creature: crate::types::identifiers::ObjectIncarnationRef::of(
+                                other, 0,
+                            ),
                         },
                     },
                 ),
@@ -15114,6 +15151,7 @@ mod tests {
 
     fn attacking(defender: ControllerRef) -> FilterProp {
         FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(defender),
         }
     }
@@ -15169,7 +15207,10 @@ mod tests {
         // Negative: every `Attacking`/`AttackedThisTurn` value that exists in the
         // corpus today must stay on the bare door, unchanged.
         for prop in [
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
             attacking(ControllerRef::You),
             attacking(ControllerRef::Opponent),
             attacking(ControllerRef::SourceChosenPlayer),
@@ -19338,6 +19379,7 @@ mod tests {
         let mode_token = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                enters_blocking: None,
                 name: "Treasure".to_string(),
                 power: crate::types::ability::PtValue::Fixed(0),
                 toughness: crate::types::ability::PtValue::Fixed(0),
@@ -20111,6 +20153,7 @@ mod tests {
         // target-slot construction must offer only legal opponent players.
         let ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Spirit".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -25793,6 +25836,7 @@ mod tests {
         // controller (no player slot from `owner`), while the count reads a
         // "target player controls" population — the count's slot must fire.
         let token_with_count = |count: QuantityExpr| Effect::Token {
+            enters_blocking: None,
             name: "Warrior".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

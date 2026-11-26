@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Delayed death watchers carry the watched incarnation in SpellContext, which older peers would drop and thereby admit a successor object's death."
+}

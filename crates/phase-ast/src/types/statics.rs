@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use strum::EnumCount;
 
 use super::ability::{
-    AbilityCost, AbilityTag, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter,
-    QuantityExpr, QuantityRef, TargetFilter,
+    AbilityCost, AbilityTag, CardPlayMode, CastTimingPermission, ControllerRef, CostCategory,
+    ManaSpendPermission, PlayerFilter, QuantityExpr, QuantityRef, TargetFilter,
 };
 use super::event_kinds::ActivatedAbilityKind;
 use super::identifiers::ObjectIncarnationRef;
@@ -1916,6 +1916,10 @@ pub enum StaticMode {
     /// class (`Effect::CastFromZone` → `CastingPermission::ExileWithAltCost`),
     /// which exiles the card before granting a permission.
     TopOfLibraryCastPermission {
+        #[serde(default = "super::ability::default_controller_ref_you")]
+        library: ControllerRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mana_spend_permission: Option<ManaSpendPermission>,
         /// CR 305.1: `Play` covers both lands (played as a land drop) and
         /// non-land spells (cast as a spell). `Cast` covers only spells.
         /// Realmwalker = `Cast`; Future Sight + Bolas's Citadel = `Play`.
@@ -2318,6 +2322,11 @@ pub enum StaticMode {
     /// regenerated." one-shot) — this is the standalone, until-end-of-turn form
     /// (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort).
     CantBeRegenerated,
+    /// CR 701.32a + CR 904.9: "Schemes can't be set in motion" (All in Good
+    /// Time). A rule-mod marker, not a layer modification; enforcement lives
+    /// in `archenemy.rs`'s set-in-motion gate. Always transient (the extra
+    /// turn), installed via `Effect::GenericEffect`.
+    CantSetSchemeInMotion,
     /// CR 702.34: Flashback — allows casting from graveyard, exiled after resolution.
     FlashBack,
     /// CR 702.18: Shroud — permanent cannot be the target of spells or abilities.
@@ -2432,7 +2441,11 @@ pub enum StaticMode {
         kind: CrewContributionKind,
         actions: Vec<CrewAction>,
     },
-    MayLookAtTopOfLibrary,
+    /// CR 401.5 + CR 701.20e: The grantee may privately look at the top card
+    /// of the library belonging to the player named by `library`.
+    MayLookAtTopOfLibrary {
+        library: ControllerRef,
+    },
     /// CR 708.5: Static permission to look at face-down permanents the
     /// controller would otherwise not be allowed to see. The default rule lets
     /// you look only at face-down permanents you control; this static lifts that
@@ -2815,6 +2828,7 @@ pub enum StaticModeKind {
     Indestructible,
     CantBeDestroyed,
     CantBeRegenerated,
+    CantSetSchemeInMotion,
     FlashBack,
     Shroud,
     Hexproof,
@@ -2987,6 +3001,7 @@ impl StaticMode {
             StaticMode::Indestructible => StaticModeKind::Indestructible,
             StaticMode::CantBeDestroyed => StaticModeKind::CantBeDestroyed,
             StaticMode::CantBeRegenerated => StaticModeKind::CantBeRegenerated,
+            StaticMode::CantSetSchemeInMotion => StaticModeKind::CantSetSchemeInMotion,
             StaticMode::FlashBack => StaticModeKind::FlashBack,
             StaticMode::Shroud => StaticModeKind::Shroud,
             StaticMode::Hexproof => StaticModeKind::Hexproof,
@@ -3007,7 +3022,7 @@ impl StaticMode {
             StaticMode::CantCrew => StaticModeKind::CantCrew,
             StaticMode::CantPhaseIn => StaticModeKind::CantPhaseIn,
             StaticMode::CrewContribution { .. } => StaticModeKind::CrewContribution,
-            StaticMode::MayLookAtTopOfLibrary => StaticModeKind::MayLookAtTopOfLibrary,
+            StaticMode::MayLookAtTopOfLibrary { .. } => StaticModeKind::MayLookAtTopOfLibrary,
             StaticMode::MayLookAtFaceDown => StaticModeKind::MayLookAtFaceDown,
             StaticMode::CantBeTurnedFaceUp => StaticModeKind::CantBeTurnedFaceUp,
             StaticMode::MayChooseNotToUntap => StaticModeKind::MayChooseNotToUntap,
@@ -3162,7 +3177,7 @@ impl StaticMode {
             | StaticMode::CantCrew
             | StaticMode::CantPhaseIn
             | StaticMode::CrewContribution { .. }
-            | StaticMode::MayLookAtTopOfLibrary
+            | StaticMode::MayLookAtTopOfLibrary { .. }
             | StaticMode::MayLookAtFaceDown
             | StaticMode::CantBeTurnedFaceUp
             | StaticMode::MayChooseNotToUntap
@@ -3196,6 +3211,7 @@ impl StaticMode {
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::DamageNotRemovedDuringCleanup
             | StaticMode::LethalDamageDeterminedByPower
+            | StaticMode::CantSetSchemeInMotion
             | StaticMode::Other(_) => None,
         }
     }
@@ -3547,7 +3563,7 @@ impl StaticMode {
             | StaticMode::CantCrew
             | StaticMode::CantPhaseIn
             | StaticMode::CrewContribution { .. }
-            | StaticMode::MayLookAtTopOfLibrary
+            | StaticMode::MayLookAtTopOfLibrary { .. }
             | StaticMode::MayLookAtFaceDown
             | StaticMode::CantBeTurnedFaceUp
             | StaticMode::MayChooseNotToUntap
@@ -3582,6 +3598,7 @@ impl StaticMode {
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::DamageNotRemovedDuringCleanup
             | StaticMode::LethalDamageDeterminedByPower
+            | StaticMode::CantSetSchemeInMotion
             | StaticMode::Other(_) => None,
         }
     }
@@ -3777,7 +3794,20 @@ impl fmt::Display for StaticMode {
                 play_mode,
                 frequency,
                 alt_cost,
+                library,
+                mana_spend_permission,
             } => {
+                if *library != ControllerRef::You || mana_spend_permission.is_some() {
+                    let payload = serde_json::to_string(&(
+                        play_mode,
+                        frequency,
+                        library,
+                        mana_spend_permission,
+                        alt_cost,
+                    ))
+                    .map_err(|_| fmt::Error)?;
+                    return write!(f, "TopOfLibraryCastPermission(data={payload})");
+                }
                 // CR 601.2a: `frequency` is appended as a tagged segment only
                 // when non-default (`OncePerTurn`) so the historical
                 // 1-/2-segment Unlimited forms keep parsing unchanged.
@@ -3930,6 +3960,7 @@ impl fmt::Display for StaticMode {
             StaticMode::Indestructible => write!(f, "Indestructible"),
             StaticMode::CantBeDestroyed => write!(f, "CantBeDestroyed"),
             StaticMode::CantBeRegenerated => write!(f, "CantBeRegenerated"),
+            StaticMode::CantSetSchemeInMotion => write!(f, "CantSetSchemeInMotion"),
             StaticMode::FlashBack => write!(f, "FlashBack"),
             StaticMode::Shroud => write!(f, "Shroud"),
             StaticMode::Hexproof => write!(f, "Hexproof"),
@@ -3981,7 +4012,15 @@ impl fmt::Display for StaticMode {
             StaticMode::CrewContribution { kind, actions } => {
                 write!(f, "CrewContribution({kind:?},{actions:?})")
             }
-            StaticMode::MayLookAtTopOfLibrary => write!(f, "MayLookAtTopOfLibrary"),
+            StaticMode::MayLookAtTopOfLibrary {
+                library: ControllerRef::You,
+            } => {
+                write!(f, "MayLookAtTopOfLibrary")
+            }
+            StaticMode::MayLookAtTopOfLibrary { library } => {
+                let payload = serde_json::to_string(library).map_err(|_| fmt::Error)?;
+                write!(f, "MayLookAtTopOfLibrary({payload})")
+            }
             StaticMode::MayLookAtFaceDown => write!(f, "MayLookAtFaceDown"),
             StaticMode::CantBeTurnedFaceUp => write!(f, "CantBeTurnedFaceUp"),
             // Tier 3
@@ -4343,6 +4382,8 @@ impl FromStr for StaticMode {
             // form omits the alt_cost payload (it's preserved through serde,
             // not the FromStr round-trip), so FromStr defaults alt_cost to None.
             "TopOfLibraryCastPermission" => StaticMode::TopOfLibraryCastPermission {
+                library: ControllerRef::You,
+                mana_spend_permission: None,
                 play_mode: CardPlayMode::Cast,
                 frequency: CastFrequency::Unlimited,
                 alt_cost: None,
@@ -4357,6 +4398,20 @@ impl FromStr for StaticMode {
                     .strip_prefix("TopOfLibraryCastPermission(")
                     .and_then(|s| s.strip_suffix(')'))
                     .unwrap_or("");
+                if let Some(payload) = inner.strip_prefix("data=") {
+                    return Ok(serde_json::from_str(payload).map_or_else(
+                        |_| StaticMode::Other(s.to_owned()),
+                        |(play_mode, frequency, library, mana_spend_permission, alt_cost)| {
+                            StaticMode::TopOfLibraryCastPermission {
+                                play_mode,
+                                frequency,
+                                library,
+                                mana_spend_permission,
+                                alt_cost,
+                            }
+                        },
+                    ));
+                }
                 let mut parts = inner.split(',');
                 let play_mode = parts
                     .next()
@@ -4368,6 +4423,8 @@ impl FromStr for StaticMode {
                     .and_then(|f| f.parse().ok())
                     .unwrap_or(CastFrequency::Unlimited);
                 StaticMode::TopOfLibraryCastPermission {
+                    library: ControllerRef::You,
+                    mana_spend_permission: None,
                     play_mode,
                     frequency,
                     // CR 118.9: the alt_cost payload is preserved through serde,
@@ -4491,6 +4548,8 @@ impl FromStr for StaticMode {
             "CantBeDestroyed" => StaticMode::CantBeDestroyed,
             // CR 701.19c: "[Permanent] can't be regenerated."
             "CantBeRegenerated" => StaticMode::CantBeRegenerated,
+            // CR 701.32a + CR 904.9: "Schemes can't be set in motion."
+            "CantSetSchemeInMotion" => StaticMode::CantSetSchemeInMotion,
             "FlashBack" => StaticMode::FlashBack,
             "Shroud" => StaticMode::Shroud,
             "Hexproof" => StaticMode::Hexproof,
@@ -4522,7 +4581,17 @@ impl FromStr for StaticMode {
                 requirement: CombatAloneRequirement::MustBeSole,
             },
             "CantCrew" => StaticMode::CantCrew,
-            "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary,
+            "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary {
+                library: ControllerRef::You,
+            },
+            s if s.starts_with("MayLookAtTopOfLibrary(") => s
+                .strip_prefix("MayLookAtTopOfLibrary(")
+                .and_then(|s| s.strip_suffix(')'))
+                .and_then(|payload| serde_json::from_str(payload).ok())
+                .map_or_else(
+                    || StaticMode::Other(s.to_owned()),
+                    |library| StaticMode::MayLookAtTopOfLibrary { library },
+                ),
             "MayLookAtFaceDown" => StaticMode::MayLookAtFaceDown,
             "CantBeTurnedFaceUp" => StaticMode::CantBeTurnedFaceUp,
             // Tier 3
@@ -4893,6 +4962,11 @@ where
             if let Some(mode) = deserialize_legacy_cost_modify_string(s) {
                 return Ok(mode);
             }
+            if s == "MayLookAtTopOfLibrary" {
+                return Ok(StaticMode::MayLookAtTopOfLibrary {
+                    library: ControllerRef::You,
+                });
+            }
             if s == "BlockRestriction" {
                 return Ok(StaticMode::BlockRestriction {
                     filter: block_only_creatures_with_flying_filter(),
@@ -5003,6 +5077,46 @@ fn deserialize_legacy_modify_cost_object(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn library_look_mode_loads_legacy_and_explicit_owner() {
+        #[derive(Deserialize)]
+        struct PersistedMode {
+            #[serde(deserialize_with = "deserialize_static_mode_fwd")]
+            mode: StaticMode,
+        }
+
+        let legacy: PersistedMode =
+            serde_json::from_str(r#"{"mode":"MayLookAtTopOfLibrary"}"#).unwrap();
+        assert_eq!(
+            legacy.mode,
+            StaticMode::MayLookAtTopOfLibrary {
+                library: ControllerRef::You
+            },
+        );
+        let explicit: PersistedMode = serde_json::from_str(
+            r#"{"mode":{"MayLookAtTopOfLibrary":{"library":{"SpecificPlayer":{"id":1}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            explicit.mode,
+            StaticMode::MayLookAtTopOfLibrary {
+                library: ControllerRef::SpecificPlayer { id: PlayerId(1) },
+            },
+        );
+        assert_eq!(
+            explicit.mode.to_string().parse::<StaticMode>().unwrap(),
+            explicit.mode
+        );
+        let play = StaticMode::TopOfLibraryCastPermission {
+            library: ControllerRef::SpecificPlayer { id: PlayerId(1) },
+            play_mode: CardPlayMode::Play,
+            frequency: CastFrequency::Unlimited,
+            alt_cost: None,
+            mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+        };
+        assert_eq!(play.to_string().parse::<StaticMode>().unwrap(), play);
+    }
+
     use super::*;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -5341,7 +5455,9 @@ mod tests {
             // Carnage chapter I).
             StaticMode::MustAttackAwayFromSource,
             StaticMode::CantCrew,
-            StaticMode::MayLookAtTopOfLibrary,
+            StaticMode::MayLookAtTopOfLibrary {
+                library: ControllerRef::You,
+            },
             // CR 702.170a grant + CR 702.170f permission — nullary plot-from-
             // library markers (Fblthp). Scope rides `StaticDefinition.affected`,
             // not the Display payload, so the bare markers round-trip cleanly.

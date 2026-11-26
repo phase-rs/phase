@@ -1427,7 +1427,7 @@ fn static_carries_optional_modification(s: &StaticDefinition) -> bool {
 fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
     matches!(
         mode,
-        StaticMode::MayLookAtTopOfLibrary
+        StaticMode::MayLookAtTopOfLibrary { .. }
             // CR 708.5: "you may look at face-down creatures [you don't control |
             // your opponents control] any time" — opt-in look permission.
             | StaticMode::MayLookAtFaceDown
@@ -12161,10 +12161,12 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             Some(ParsedCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::creature()
-                                .properties(vec![FilterProp::Attacking { defender: None }]),
-                        ),
+                        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                            FilterProp::Attacking {
+                                scope: Default::default(),
+                                defender: None
+                            }
+                        ]),),
                     },
                 },
                 comparator: Comparator::EQ,
@@ -12189,9 +12191,10 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         else {
             panic!("expected Destroy of a typed target, got {:?}", spell.effect);
         };
-        assert!(typed
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(typed.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(typed.properties.contains(&FilterProp::WithoutKeyword {
             value: Keyword::Flying
         }));

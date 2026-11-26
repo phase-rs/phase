@@ -28,7 +28,11 @@ expression: "&lowered"
   ],
   "statics": [
     {
-      "mode": "MayLookAtTopOfLibrary",
+      "mode": {
+        "MayLookAtTopOfLibrary": {
+          "library": "You"
+        }
+      },
       "affected": {
         "type": "Typed",
         "type_filters": [],
@@ -46,6 +50,7 @@ expression: "&lowered"
     {
       "mode": {
         "TopOfLibraryCastPermission": {
+          "library": "You",
           "play_mode": "Play",
           "frequency": "OncePerTurn",
           "alt_cost": null

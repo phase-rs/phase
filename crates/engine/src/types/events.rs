@@ -802,6 +802,7 @@ impl EventObjectSnapshot {
             | TypeFilter::Kindred
             | TypeFilter::Permanent
             | TypeFilter::Card
+            | TypeFilter::Scheme
             | TypeFilter::Any
             | TypeFilter::Subtype(_) => Supported,
             TypeFilter::Non(inner) => Self::classify_type_filter(inner).negate(),
@@ -2855,7 +2856,10 @@ mod tests {
             FilterProp::Token,
             FilterProp::Another,
             FilterProp::EnteredThisTurn,
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
             FilterProp::SaddledSource,
             FilterProp::HasNoAbilities,
         ] {

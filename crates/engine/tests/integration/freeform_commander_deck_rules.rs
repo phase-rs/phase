@@ -1684,7 +1684,9 @@ fn no_other_command_zone_format_s_rules_moved() {
             deck_size_subject: DeckSizeSubject::MainDeckAndCommanders,
             pool: CardPool::LegalityTable(LegalityFormat::Commander),
             deck_size: DeckSizeRule::Exactly(100),
-            min_players: 2,
+            // CR 904.2 + CR 800.1: multiplayer begins above two players, so
+            // Archenemy needs at least one archenemy plus two heroes.
+            min_players: 3,
             max_players: 6,
         },
         Expected {

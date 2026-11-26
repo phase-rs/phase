@@ -1671,6 +1671,7 @@ mod tests {
 
         let mut token = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Inkling".to_string(),
                 power: PtValue::Fixed(2),
                 toughness: PtValue::Fixed(1),

@@ -101,7 +101,7 @@ fn raubahn_full_oracle_text_parses_ward_and_attack_attachment() {
         attacker
             .properties
             .iter()
-            .any(|property| matches!(property, FilterProp::Attacking { defender: None })),
+            .any(|property| matches!(property, FilterProp::Attacking { defender: None, .. })),
         "host target must require an attacking creature: {attacker:?}"
     );
     assert_eq!(attacker.controller, None);

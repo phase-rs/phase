@@ -596,7 +596,7 @@ pub(crate) fn equip_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefi
         AbilityKind::Activated,
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
-            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            target: TargetFilter::equip_target(),
             // CR 702.6a: the keyword's "target" names the HOST (the equipped
             // creature); the attachment ("this permanent") is determined.
             selection: AttachSelection::AtResolution {
@@ -886,6 +886,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
         attach_to: None,
         enters_attacking: true,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -1046,6 +1047,7 @@ fn synthesize_etb_token_attach_keyword(
         attach_to: None,
         enters_attacking: false,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -3893,6 +3895,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
             attach_to: None,
             enters_attacking: false,
             attack_destination: TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -4533,6 +4536,7 @@ fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
         attach_to: None,
         enters_attacking: false,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -5524,10 +5528,12 @@ pub(crate) fn enlist_tap_target_filter() -> TargetFilter {
                     ]),
             ),
             TargetFilter::Not {
-                filter: Box::new(TargetFilter::Typed(
-                    TypedFilter::creature()
-                        .properties(vec![FilterProp::Attacking { defender: None }]),
-                )),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature().properties(
+                    vec![FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None,
+                    }],
+                ))),
             },
         ],
     }
@@ -5792,7 +5798,10 @@ fn is_frenzy_trigger(t: &TriggerDefinition, n: u32) -> bool {
 fn battlecry_target_filter() -> TypedFilter {
     let mut tf = TypedFilter::creature();
     tf.properties = vec![
-        FilterProp::Attacking { defender: None },
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        },
         FilterProp::Another,
     ];
     tf
@@ -5989,7 +5998,7 @@ fn is_mentor_trigger(t: &TriggerDefinition) -> bool {
                     counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(tf),
-                } if tf.properties.contains(&FilterProp::Attacking { defender: None })
+                } if tf.properties.contains(&FilterProp::Attacking { scope: Default::default(), defender: None })
                     && tf.properties.iter().any(|prop| matches!(
                         prop,
                         FilterProp::PtComparison {
@@ -6011,7 +6020,10 @@ fn build_mentor_trigger() -> TriggerDefinition {
     let mut target_filter = TypedFilter::creature();
     target_filter.properties = vec![
         // CR 702.134a: only attacking creatures are legal Mentor targets.
-        FilterProp::Attacking { defender: None },
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        },
         // CR 702.134a + CR 208.1: Mentor targets a creature with power
         // strictly less than the source creature's current power.
         FilterProp::PtComparison {
@@ -8834,6 +8846,7 @@ fn type_filter_noun(filter: &TypeFilter, plural: bool) -> String {
         TypeFilter::Planeswalker => "planeswalker",
         TypeFilter::Battle => "battle",
         TypeFilter::Kindred => "kindred",
+        TypeFilter::Scheme => "scheme",
         TypeFilter::Permanent => "permanent",
         TypeFilter::Card => "card",
         TypeFilter::Any => "permanent",
@@ -14920,8 +14933,10 @@ mod mentor_synthesis_tests {
             panic!("counter target must be a TypedFilter");
         };
         assert!(
-            tf.properties
-                .contains(&FilterProp::Attacking { defender: None }),
+            tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }),
             "target must be an attacking creature (CR 702.134a)"
         );
         // CR 702.134a + CR 208.1: power strictly less than this creature's power.
@@ -15343,7 +15358,10 @@ mod battlecry_synthesis_tests {
         assert_eq!(
             tf.properties,
             vec![
-                FilterProp::Attacking { defender: None },
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                },
                 FilterProp::Another
             ]
         );

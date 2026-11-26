@@ -131,9 +131,11 @@ pub(crate) fn lower_rule_static(
             }])
             .description(description.to_string()),
         RuleStaticPredicate::MayLookAtTopOfLibrary => {
-            StaticDefinition::new(StaticMode::MayLookAtTopOfLibrary)
-                .affected(affected)
-                .description(description.to_string())
+            StaticDefinition::new(StaticMode::MayLookAtTopOfLibrary {
+                library: crate::types::ability::ControllerRef::You,
+            })
+            .affected(affected)
+            .description(description.to_string())
         }
         RuleStaticPredicate::LoseAllAbilities => StaticDefinition::continuous()
             .affected(affected)

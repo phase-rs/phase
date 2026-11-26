@@ -21,7 +21,9 @@ use crate::parser::oracle_ir::diagnostic::{
     ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan, SpanPrecision,
 };
 use crate::parser::oracle_util::normalize_card_name_refs;
-use crate::types::ability::{filter_contains_filter_prop, CombatDamageScope, TurnWindow};
+use crate::types::ability::{
+    filter_contains_filter_prop, AttackDefenderMatch, CombatDamageScope, TurnWindow,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
@@ -118,6 +120,9 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
+            // CR 701.20e + CR 401.5: Owner-parameterized look in the shared
+            // identity projection (visibility.rs).
+            | StaticMode::MayLookAtTopOfLibrary { .. }
             // CR 702.170a grant + CR 702.170f permission: the two nullary
             // plot-from-library markers (Fblthp's L3 "has plot" grant and L4
             // "you may plot nonland cards" permission). The nonland scope is the
@@ -246,10 +251,8 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // and the registry uses exact-key lookup.
             | StaticMode::SkipStep { .. }
             // CR 400.2: RevealTopOfLibrary carries `all_players`; libraries
-            // are hidden zones unless revealed by an effect. Runtime permission
-            // is in casting.rs::top_of_library_permission_source(). Coverage
-            // support via is_data_carrying_static() because the variant is
-            // parameterized.
+            // are hidden zones unless revealed by an effect. Runtime
+            // visibility is derived from the active reveal statics.
             | StaticMode::RevealTopOfLibrary { .. }
             // CR 400.2 + CR 701.20a: RevealHand carries the affected player
             // scope (`opponents`, `all_players`, or `controller`). Runtime
@@ -946,20 +949,25 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::CastThisTurn { caster } => {
                 parts.push(format!("cast this turn ({})", fmt_controller(caster)))
             }
-            FilterProp::Attacking { defender } => match defender {
-                None => parts.push("attacking".into()),
-                Some(ControllerRef::You) => parts.push("attacking you".into()),
-                Some(ControllerRef::Opponent) => parts.push("attacking your opponents".into()),
-                // CR 508.5: the defending-player anaphor ("attacking that
-                // player"). Rendering it through the `scoped player` catch-all
-                // below would name a DIFFERENT concept — `ControllerRef::
-                // ScopedPlayer` is the resolution-iteration player, not the
-                // player this creature is attacking.
-                Some(ControllerRef::DefendingPlayer) => {
-                    parts.push("attacking defending player".into())
-                }
-                Some(_) => parts.push("attacking scoped player".into()),
-            },
+            FilterProp::Attacking { defender, scope } => {
+                let attacker = match defender {
+                    None => "attacking",
+                    Some(ControllerRef::You) => "attacking you",
+                    Some(ControllerRef::Opponent) => "attacking your opponents",
+                    // CR 508.5: the defending-player anaphor ("attacking that
+                    // player"). Rendering it through the `scoped player` catch-all
+                    // below would name a DIFFERENT concept — `ControllerRef::
+                    // ScopedPlayer` is the resolution-iteration player, not the
+                    // player this creature is attacking.
+                    Some(ControllerRef::DefendingPlayer) => "attacking defending player",
+                    Some(_) => "attacking scoped player",
+                };
+                // CR 508.1b + CR 508.5: a direct attack excludes the defending player's permanents.
+                parts.push(match scope {
+                    AttackDefenderMatch::DefendingSide => attacker.into(),
+                    AttackDefenderMatch::DirectPlayer => format!("{attacker} directly"),
+                });
+            }
             FilterProp::Blocking => parts.push("blocking".into()),
             FilterProp::BlockingSource => parts.push("blocking source".into()),
             FilterProp::CombatRelation { .. } => parts.push("combat related".into()),
@@ -1448,6 +1456,7 @@ fn fmt_type_filter(tf: &TypeFilter) -> String {
         TypeFilter::Planeswalker => "planeswalker",
         TypeFilter::Battle => "battle",
         TypeFilter::Kindred => "kindred",
+        TypeFilter::Scheme => "scheme",
         TypeFilter::Permanent => "permanent",
         TypeFilter::Card => "card",
         TypeFilter::Any => "any",
@@ -1556,6 +1565,7 @@ fn fmt_duration(d: &Duration) -> String {
         Duration::UntilEndOfNextTurnOf { player } => {
             format!("until end of next turn ({})", fmt_player_scope(player))
         }
+        Duration::UntilEndOfGrantedTurn { .. } => "until end of granted turn".to_string(),
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
         Duration::WhileHostOnBattlefield => "while it remains on the battlefield".to_string(),
         Duration::WhileControllingHost => "while its controller controls the source".to_string(),
@@ -2951,6 +2961,7 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
                         ThisWayCause::Bounced => "bounced",
                         ThisWayCause::PutIntoGraveyard => "put into a graveyard",
                         ThisWayCause::ControlGained => "gained control of",
+                        ThisWayCause::Chosen => "chosen",
                     };
                     format!("cards {verb} this way")
                 }
@@ -3210,6 +3221,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::CopySpell { target, .. }
         | Effect::CastCopyOfCard { target, .. }
         | Effect::BecomeCopy { target, .. }
+        // CR 701.32b: report the re-fired scheme (an event-context referent).
+        | Effect::SetSchemeInMotion { target, .. }
         // CR 113.1a + CR 611.2: report the donor whose activated abilities are gained.
         | Effect::GainActivatedAbilitiesOfTarget { target, .. }
         | Effect::Suspect { target, .. }
@@ -3391,6 +3404,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             tapped,
             attack_destination,
             attach_to,
+            enters_blocking,
             ..
         } => {
             let mut desc = String::new();
@@ -3430,6 +3444,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 desc.push_str(" attached");
             }
             d.push(("token".into(), desc));
+            if let Some(attacker) = enters_blocking {
+                d.push(("enters_blocking".into(), fmt_target(attacker)));
+            }
         }
         Effect::PutCounter {
             counter_type,
@@ -5347,6 +5364,11 @@ fn fmt_trigger_condition(
         } => "is monarch".into(),
         TC::IsMonarch { .. } => "that player is monarch".into(),
         TC::IsPoisoned { player } => fmt_player_is_poisoned(player),
+        // CR 508.5 + CR 109.5: mirrors the monarch pair above.
+        TC::IsDefendingPlayer {
+            player: PlayerScope::Controller,
+        } => "is the defending player".into(),
+        TC::IsDefendingPlayer { .. } => "that player is the defending player".into(),
         TC::HasBoon {
             player: PlayerScope::Controller,
         } => "has a boon".into(),
@@ -5635,6 +5657,11 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         } => "is monarch".into(),
         SC::IsMonarch { .. } => "that player is monarch".into(),
         SC::PlayerIsPoisoned { player } => fmt_player_is_poisoned(player),
+        // CR 508.5 + CR 109.5: mirrors the monarch pair above.
+        SC::IsDefendingPlayer {
+            player: PlayerScope::Controller,
+        } => "is the defending player".into(),
+        SC::IsDefendingPlayer { .. } => "that player is the defending player".into(),
         SC::HasBoon {
             player: PlayerScope::Controller,
         } => "has a boon".into(),
@@ -9101,15 +9128,23 @@ fn check_trigger(
 }
 
 /// Whether a printed (battlefield) trigger mode can fire: recognised, and either
-/// in the event-trigger registry or a CR 603.8 state trigger (handled by the
-/// priority pipeline's `collect_state_triggers`). Delayed triggers use the
-/// stricter `delayed_trigger_mode_is_supported`.
+/// in the event-trigger registry, a CR 603.8 state trigger (handled by the
+/// priority pipeline's `collect_state_triggers`), or a scheme "as" choice
+/// (CR 904.9; resolved by the
+/// `archenemy::resolve_pending_as_set_in_motion_choices` scan hook, never
+/// through event matching — `trigger_matcher` returns `None` for
+/// `AsSetInMotion` by design, since there is no event to match). Delayed
+/// triggers use the stricter `delayed_trigger_mode_is_supported`.
 fn trigger_mode_is_supported(
     mode: &TriggerMode,
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
 ) -> bool {
     !matches!(mode, TriggerMode::Unknown(_))
-        && (trigger_registry.contains_key(mode) || matches!(mode, TriggerMode::StateCondition))
+        && (trigger_registry.contains_key(mode)
+            || matches!(
+                mode,
+                TriggerMode::StateCondition | TriggerMode::AsSetInMotion
+            ))
 }
 
 /// CR 603.7 + CR 603.8: a delayed trigger fires only through an event matcher
@@ -11739,6 +11774,7 @@ fn extract_trigger_condition_features(
         | TriggerCondition::HasMaxSpeed
         | TriggerCondition::IsMonarch { .. }
         | TriggerCondition::IsPoisoned { .. }
+        | TriggerCondition::IsDefendingPlayer { .. }
         | TriggerCondition::HasBoon { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
@@ -12737,6 +12773,13 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
             player: PlayerScope::Controller | PlayerScope::RecipientController,
         } => ("PlayerIsPoisoned", Handled),
         StaticCondition::PlayerIsPoisoned { .. } => ("PlayerIsPoisonedUnboundScope", Unhandled),
+        // CR 508.5: same scope rule as the monarch — the layers subject
+        // resolver (`designation_player`) only binds these two; the anchor
+        // resolves like `DefendingPlayerControls`' (Handled).
+        StaticCondition::IsDefendingPlayer {
+            player: PlayerScope::Controller | PlayerScope::RecipientController,
+        } => ("IsDefendingPlayer", Handled),
+        StaticCondition::IsDefendingPlayer { .. } => ("IsDefendingPlayer", Unhandled),
         // Digital-only Alchemy (no CR entry): same scope rule as the monarch
         // arm above — the layer evaluator binds both subjects. The unbound
         // arm keeps a DISTINCT key: same-key insert would let sibling order
@@ -14118,6 +14161,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             },
             StaticMode::CantBeCountered => effective_lower.contains("can't be countered"),
             StaticMode::CantBeCopied => effective_lower.contains("can't be copied"),
+            // CR 701.32a + CR 904.9: "Schemes can't be set in motion"
+            // (All in Good Time).
+            StaticMode::CantSetSchemeInMotion => {
+                effective_lower.contains("can't be set in motion")
+                    || effective_lower.contains("cannot be set in motion")
+            }
             // CR 119.7: "can't gain life" or its compound form "life total can't change"
             // (Platinum Emperion / Teferi's Protection both emit CantGainLife from
             // the bidirectional life-lock phrase).
@@ -17748,6 +17797,33 @@ mod tests {
         }
     }
 
+    /// CR 904.9: a scheme "as you set this scheme in motion" choice resolves
+    /// through the `archenemy::resolve_pending_as_set_in_motion_choices` scan
+    /// hook, never through event matching — so the mode is supported despite
+    /// having no registry entry, exactly like `StateCondition`. Removing the
+    /// carve-out re-gaps Bow to My Command; adding a registry entry breaks the
+    /// guard (there is no event for it to match).
+    #[test]
+    fn as_set_in_motion_choice_is_supported_without_registry_entry() {
+        let trigger_registry = super::build_trigger_registry();
+        let static_registry = super::build_static_registry();
+        assert!(
+            !trigger_registry.contains_key(&TriggerMode::AsSetInMotion),
+            "guard: AsSetInMotion must stay out of the registry"
+        );
+        let choice = TriggerDefinition::new(TriggerMode::AsSetInMotion);
+        assert!(
+            super::build_trigger_item(
+                &choice,
+                &trigger_registry,
+                &static_registry,
+                super::TokenStaticTraversal::Include,
+            )
+            .supported,
+            "a scheme as-choice stays supported via the archenemy scan hook"
+        );
+    }
+
     /// An explicit Exile origin can retrieve the intended set when it is still
     /// the latest, but does not preserve that identity across a later publisher.
     #[test]
@@ -18751,6 +18827,8 @@ mod tests {
         };
 
         let spec = |attack_request: TokenAttackRequest| TokenSpec {
+            blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Goblin".to_string(),
                 power: Some(1),
@@ -18812,6 +18890,7 @@ mod tests {
         use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
 
         let token = |attack_destination| Effect::Token {
+            enters_blocking: None,
             name: "Glimmer".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -18888,6 +18967,46 @@ mod tests {
             "{named:?}"
         );
         assert_ne!(named, unnamed);
+    }
+
+    #[test]
+    fn blocking_token_attacker_reaches_parse_details() {
+        let mut face = make_face();
+        face.name = "Flash Foliage".into();
+        let oracle = "Create a 1/1 green Saproling creature token that's blocking target creature attacking you.";
+        face.oracle_text = Some(oracle.into());
+        face.abilities =
+            crate::parser::parse_oracle_text(oracle, &face.name, &[], &["Instant".into()], &[])
+                .abilities;
+
+        let assert_attacker = |face: &CardFace, expected| {
+            let items = build_parse_details_for_face(face);
+            let token = items.iter().find(|item| item.label == "Token").unwrap();
+            assert!(
+                token
+                    .details
+                    .iter()
+                    .any(|(key, value)| key == "enters_blocking" && value == expected),
+                "{token:?}"
+            );
+        };
+        assert_attacker(&face, "attacking you directly creature");
+
+        let Effect::Token {
+            enters_blocking: Some(attacker),
+            ..
+        } = face.abilities[0].effect.as_mut()
+        else {
+            panic!("expected a token with a blocking rider");
+        };
+        let TargetFilter::Typed(filter) = attacker else {
+            panic!("expected a typed attacker filter");
+        };
+        let [FilterProp::Attacking { scope, .. }] = filter.properties.as_mut_slice() else {
+            panic!("expected an attacking property");
+        };
+        *scope = AttackDefenderMatch::DefendingSide;
+        assert_attacker(&face, "attacking you creature");
     }
 
     #[test]
@@ -21008,6 +21127,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                enters_blocking: None,
                 name: "Coverage Token".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -26324,6 +26444,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: "Rat".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),
@@ -26367,6 +26488,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: "Fractal".to_string(),
                     power: PtValue::Fixed(0),
                     toughness: PtValue::Fixed(0),

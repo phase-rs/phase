@@ -1822,17 +1822,35 @@ pub(super) fn match_changes_zone_all(
 
 // CR 603.6d: DamageDone trigger fires on damage dealt events.
 
+// CR 603.2c + CR 510.2: the plural player-recipient watcher observes the
+// simultaneous combat damage step through its per-player aggregate records.
+pub(super) fn is_whole_step_player_combat_damage(trigger: &TriggerDefinition) -> bool {
+    trigger.mode == TriggerMode::DamageDoneOnce
+        && trigger.batched
+        && trigger.damage_kind == DamageKindFilter::CombatOnly
+        && trigger.valid_target == Some(TargetFilter::Player)
+        && trigger.damage_amount.is_none()
+        && matches!(
+            &trigger.valid_source,
+            Some(TargetFilter::Typed(source))
+                if source.type_filters == [crate::types::ability::TypeFilter::Creature]
+                    && source.controller == Some(ControllerRef::You)
+                    && source.properties.is_empty()
+        )
+}
+
 /// CR 510.2 + CR 603.2: Source-filtered observers whose source is not the
 /// trigger source itself listen on the aggregate `CombatDamageDealtToPlayer`
 /// event. Self/no-source creature triggers already fire on per-source
 /// `DamageDealt` events emitted during the combat damage step; matching them
 /// again on the aggregate event double-fires.
 pub(super) fn listens_on_aggregate_combat_damage_done(trigger: &TriggerDefinition) -> bool {
-    trigger.mode == TriggerMode::DamageDone
-        && matches!(
-            trigger.valid_source,
-            Some(ref filter) if !matches!(filter, TargetFilter::SelfRef)
-        )
+    is_whole_step_player_combat_damage(trigger)
+        || (trigger.mode == TriggerMode::DamageDone
+            && matches!(
+                trigger.valid_source,
+                Some(ref filter) if !matches!(filter, TargetFilter::SelfRef)
+            ))
 }
 
 fn matching_combat_damage_to_player_sources(
@@ -1917,6 +1935,16 @@ pub(super) fn match_damage_done(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
+    if is_whole_step_player_combat_damage(trigger) {
+        return matches!(event, GameEvent::CombatDamageDealtToPlayer { .. })
+            && matching_damage_done_once_by_controller_event(
+                event,
+                trigger,
+                source_context,
+                state,
+            )
+            .is_some();
+    }
     if let GameEvent::DamageDealt {
         source_id: dmg_source,
         source_incarnation,
@@ -2041,7 +2069,9 @@ pub(super) fn matching_damage_done_events(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> Vec<GameEvent> {
-    if !listens_on_aggregate_combat_damage_done(trigger) {
+    if !listens_on_aggregate_combat_damage_done(trigger)
+        || is_whole_step_player_combat_damage(trigger)
+    {
         return Vec::new();
     }
 
@@ -6132,6 +6162,13 @@ pub(super) fn match_planeswalked(
 /// CR 904.9 / CR 701.32b: "When you set this scheme in motion" — fires for the
 /// scheme set in motion; "you" resolves to the archenemy via the scheme's
 /// controller (stamped in `archenemy::set_in_motion`).
+///
+/// Watching form (My Laughter Echoes: "whenever you set a non-ongoing scheme
+/// in motion") — when `valid_card` is set (self-triggers never set it), the
+/// trigger fires for any set-in-motion event whose scheme passes the filter,
+/// mirroring `ChangesZone`: no source-identity check, so the filter alone
+/// decides self-inclusion (Laughter Echoes' own ongoing scheme fails its own
+/// `NotSupertype{Ongoing}` leg).
 pub(super) fn match_set_in_motion(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -6139,9 +6176,20 @@ pub(super) fn match_set_in_motion(
     state: &GameState,
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
-    matches!(event, GameEvent::SchemeSetInMotion { scheme_id, player_id }
-        if *scheme_id == source_id
-        && valid_player_matches(trigger, state, *player_id, source_context))
+    match event {
+        GameEvent::SchemeSetInMotion {
+            scheme_id,
+            player_id,
+        } if valid_player_matches(trigger, state, *player_id, source_context) => {
+            match &trigger.valid_card {
+                // Self form: the event names this scheme.
+                None => *scheme_id == source_id,
+                // Watching form: the event names a scheme passing the filter.
+                Some(_) => valid_card_matches(trigger, state, *scheme_id, source_context),
+            }
+        }
+        _ => false,
+    }
 }
 
 /// CR 701.33b: "When you abandon this scheme" — fires for the abandoned scheme.
@@ -11989,6 +12037,67 @@ mod tests {
             .len(),
             2
         );
+    }
+
+    #[test]
+    fn plural_player_combat_damage_aggregate_keeps_savanti_on_the_raw_route() {
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Combat watcher".into(),
+            Zone::Battlefield,
+        );
+        let ninja = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacking Ninja".into(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&ninja).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.card_types.subtypes.push("Ninja".into());
+        let pin = ObjectIncarnationRef::of(ninja, object.incarnation);
+        let aggregate = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(ninja, 3)],
+            total_damage: 3,
+            source_incarnations: vec![pin],
+        };
+        let context = test_trigger_source_context(&state, source);
+        let mut trigger = make_trigger(TriggerMode::DamageDoneOnce);
+        trigger.batched = true;
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        assert!(match_damage_done(&aggregate, &trigger, &context, &state));
+
+        // Savanti's injected Ninja/Opponent shape matches the individual leg.
+        trigger.valid_target = Some(TargetFilter::Opponent);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .subtype("Ninja".into()),
+        ));
+        assert!(!match_damage_done(&aggregate, &trigger, &context, &state));
+        let raw = matching_damage_done_events(
+            &aggregate,
+            &TriggerDefinition::new(TriggerMode::DamageDone).valid_source(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            &context,
+            &state,
+        );
+        let [leg] = raw.as_slice() else {
+            panic!("expected one raw Ninja combat leg");
+        };
+        assert!(match_damage_done(leg, &trigger, &context, &state));
     }
 
     #[test]

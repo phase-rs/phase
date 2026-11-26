@@ -9,12 +9,12 @@ use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AggregateFunction, AttachmentKind, AttachmentReferent, BlockPairDirection, CardTypeSetSource,
-    ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
-    ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp,
-    LinkedExileReturn, NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource,
-    PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
-    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    AggregateFunction, AttachmentKind, AttachmentReferent, AttackDefenderMatch, BlockPairDirection,
+    CardTypeSetSource, ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject,
+    Comparator, ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter,
+    FilterProp, LinkedExileReturn, NameStickerSet, ObjectProperty, ObjectScope, Parity,
+    ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
     TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
@@ -3418,7 +3418,8 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, &'a str) {
-    let (mut filter, rest) = parse_type_phrase_folding_unbound(text, ctx);
+    let (mut filter, rest) =
+        parse_type_phrase_folding_unbound(text, ctx, AttackDefenderMatch::DefendingSide);
     exclude_parent_target_from_its_controllers_others(&mut filter);
     (filter, rest)
 }
@@ -3457,13 +3458,44 @@ fn rewrite_other_as_parent_target_exclusion(
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter_mut()
             .for_each(|leg| rewrite_other_as_parent_target_exclusion(leg, applies)),
+        // CR 608.2c: the sweep's member filter nests inside the tracked-set
+        // wrapper ("all other cards revealed this way" — the Marionette
+        // sweep), so descend through it (and through negation) to reach the
+        // typed legs. The subject-led caller has no such nesting today, so it
+        // is unaffected; the contract ("every typed leg's other") reads the
+        // same from its side.
+        TargetFilter::TrackedSetFiltered { filter, .. } | TargetFilter::Not { filter } => {
+            rewrite_other_as_parent_target_exclusion(filter, applies)
+        }
         _ => {}
+    }
+}
+
+/// A targeted creature attacking the caster directly (CR 508.1b).
+pub(crate) fn parse_direct_attacker_target(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (phrase, _) = tag("target ").parse(input)?;
+    let (filter, rest) = parse_type_phrase_folding_unbound(
+        phrase,
+        &mut ParseContext::default(),
+        AttackDefenderMatch::DirectPlayer,
+    );
+    if matches!(&filter, TargetFilter::Typed(typed)
+    if typed.type_filters == [TypeFilter::Creature]
+        && typed.properties == [FilterProp::Attacking {
+            defender: Some(ControllerRef::You),
+            scope: AttackDefenderMatch::DirectPlayer,
+        }])
+    {
+        Ok((rest, filter))
+    } else {
+        Err(oracle_err(input))
     }
 }
 
 fn parse_type_phrase_folding_unbound<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
+    attack_defender_scope: AttackDefenderMatch,
 ) -> (TargetFilter, &'a str) {
     let lower = text.to_lowercase();
     let mut pos = 0;
@@ -4741,7 +4773,9 @@ fn parse_type_phrase_folding_unbound<'a>(
         }
     }
 
-    if let Some((prop, consumed)) = parse_attacking_defender_suffix(&lower[pos..]) {
+    if let Some((prop, consumed)) =
+        parse_attacking_defender_suffix(&lower[pos..], attack_defender_scope)
+    {
         properties.push(prop);
         pos += consumed;
     }
@@ -5426,6 +5460,28 @@ fn classify_negation(negated: &str) -> NegationResult {
         .is_ok_and(|(rest, _)| rest.is_empty())
     {
         return NegationResult::Prop(FilterProp::NotHistoric);
+    }
+    // CR 205.4a + CR 314.1: "non-ongoing scheme" (My Laughter Echoes).
+    // CR 903.3: "noncommander" (You Will Know True Suffering, Subjugate the
+    // Hobbits, Shield Broker, Become the Pilot) — commander is a
+    // deck-construction designation, not a subtype, so it must not fall
+    // through to the vacuous `Non(Subtype("Commander"))` below (no object
+    // carries that subtype, so the exclusion would match everything).
+    if let Ok((_, result)) = all_consuming(alt((
+        map(tag::<_, _, OracleError<'_>>("ongoing"), |_| {
+            NegationResult::Prop(FilterProp::NotSupertype {
+                value: Supertype::Ongoing,
+            })
+        }),
+        map(tag("commander"), |_| {
+            NegationResult::Prop(FilterProp::Not {
+                prop: Box::new(FilterProp::IsCommander),
+            })
+        }),
+    )))
+    .parse(negated)
+    {
+        return result;
     }
 
     match negated {
@@ -6266,7 +6322,7 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::IsSaddled
             | FilterProp::ProtectorMatches { .. }
             // CR 509.1h: combat-status prefixes "attacking/blocking/unblocked".
-            | FilterProp::Attacking { defender: None }
+            | FilterProp::Attacking { defender: None , .. }
             | FilterProp::Blocking
             | FilterProp::BlockStatus { .. }
             // CR 105.1 + CR 205.2: color / supertype adjectives.
@@ -6529,6 +6585,8 @@ fn type_filter_guarantees_creature(tf: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 314.1: Scheme pins a noncreature card type.
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -6560,7 +6618,9 @@ fn is_noncreature_core_type_pin(tf: &TypeFilter) -> bool {
         | TypeFilter::Instant
         | TypeFilter::Sorcery
         | TypeFilter::Planeswalker
-        | TypeFilter::Battle => true,
+        | TypeFilter::Battle
+        // CR 205.2a: "scheme" is in the quoted card-type list above.
+        | TypeFilter::Scheme => true,
         // CR 208.3 names "noncreature" directly: a NONCREATURE permanent has no
         // power or toughness. A `Non(Creature)` pin is exactly that subject.
         TypeFilter::Non(inner) => **inner == TypeFilter::Creature,
@@ -6685,6 +6745,8 @@ fn type_filter_anchors_creature(tf: &TypeFilter) -> bool {
         // `Permanent`/`Card`/`Any` are type-open quantifiers.
         TypeFilter::Non(_)
         | TypeFilter::Kindred
+        // CR 314.1: Scheme alone names no creature.
+        | TypeFilter::Scheme
         | TypeFilter::Land
         | TypeFilter::Artifact
         | TypeFilter::Enchantment
@@ -7912,7 +7974,10 @@ fn parse_combat_relation_suffix(text: &str, ctx: &ParseContext) -> Option<(Filte
 /// postnominal "creature attacking your opponents"; both resolve to the same
 /// `Attacking { defender }` property, so the intro is stripped here rather than
 /// forking a second attacking grammar in the `that's`-clause path.
-fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
+fn parse_attacking_defender_suffix(
+    text: &str,
+    scope: AttackDefenderMatch,
+) -> Option<(FilterProp, usize)> {
     let trimmed_outer = text.trim_start();
     let trimmed = opt(alt((
         tag::<_, _, OracleError<'_>>("that's "),
@@ -7939,24 +8004,37 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
 
     // Each row is a printed defender head, then the controller phrase that must
     // follow it, if any (a marker: the row fixes the defender either way).
-    let rows: [(&str, Option<&'static [ControllerPhrase]>, ControllerRef); 6] = [
+    let rows: [(
+        &str,
+        Option<&'static [ControllerPhrase]>,
+        ControllerRef,
+        AttackDefenderMatch,
+    ); 6] = [
         (
             "attacking you or a planeswalker you control",
             None,
             ControllerRef::You,
+            AttackDefenderMatch::DefendingSide,
         ),
         (
             "attacking you and/or planeswalkers you control",
             None,
             ControllerRef::You,
+            AttackDefenderMatch::DefendingSide,
         ),
-        ("attacking you", None, ControllerRef::You),
+        ("attacking you", None, ControllerRef::You, scope),
         (
             "attacking your opponents and/or planeswalkers",
             Some(&[ControllerPhrase::THEY_CONTROL]),
             ControllerRef::Opponent,
+            AttackDefenderMatch::DefendingSide,
         ),
-        ("attacking your opponents", None, ControllerRef::Opponent),
+        (
+            "attacking your opponents",
+            None,
+            ControllerRef::Opponent,
+            scope,
+        ),
         // CR 508.1b: "attacking one of your opponents" — in a multiplayer
         // attack-multiple-players game each attacker is assigned one defending
         // player; "one of your opponents" scopes the defender to any of the
@@ -7967,9 +8045,10 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
             "attacking one of your opponents",
             None,
             ControllerRef::Opponent,
+            scope,
         ),
     ];
-    for (head, controller, defender) in rows {
+    for (head, controller, defender, scope) in rows {
         let matched = tag::<_, _, OracleError<'_>>(head)
             .parse(trimmed)
             .and_then(|(rest, _)| match controller {
@@ -7994,9 +8073,14 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
                 continue;
             }
             match rest.chars().next() {
-                None | Some('.') | Some(',') | Some(' ') if rest_trim.is_empty() => {
+                None | Some('.') | Some(',') | Some(' ')
+                    if rest_trim.is_empty()
+                        || (scope == AttackDefenderMatch::DirectPlayer
+                            && matches!(rest_trim.chars().next(), Some('.' | ','))) =>
+                {
                     return Some((
                         FilterProp::Attacking {
+                            scope,
                             defender: Some(defender),
                         },
                         text.len() - rest.len(),
@@ -8106,6 +8190,7 @@ fn parse_attacking_defender_anaphor(input: &str) -> OracleResult<'_, FilterProp>
     Ok((
         rest,
         FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::DefendingPlayer),
         },
     ))
@@ -8395,6 +8480,8 @@ fn type_filter_includes_card(filter: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 109.2a: Scheme is a specific card type, not the generic `Card` leg.
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Any
         | TypeFilter::Subtype(_) => false,
@@ -12294,6 +12381,8 @@ pub(crate) fn scan_zone_phrase_span(
 /// - Your: "from your graveyard" → `InZone` + `ControllerRef::You`.
 /// - Target player's: "from target player's graveyard" → `[Owned{TargetPlayer}, InZone]`
 ///   so the card selection is constrained by the companion player target.
+/// - Target opponent's: "from target opponent's graveyard" → `[Owned{TargetOpponent}, InZone]`
+///   (Hypnox, Into the Earthen Maw) — same companion-target scoping, opponent-restricted.
 /// - "Their": "from their graveyard" → `[Owned{ScopedPlayer}, InZone]` so in an
 ///   each-player iteration the candidate set is scoped to the iterated player's
 ///   own graveyard (CR 110.1/108.3: membership is owner-keyed).
@@ -12411,7 +12500,9 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
         return None;
     }
     match qualifier {
-        ZoneQual::OtherPoss | ZoneQual::Owner(ControllerRef::TargetPlayer) => return None,
+        ZoneQual::OtherPoss
+        | ZoneQual::Owner(ControllerRef::TargetPlayer)
+        | ZoneQual::Owner(ControllerRef::TargetOpponent) => return None,
         ZoneQual::Plain => {
             // This adapter admits only the singular unowned object form. The
             // shared grammar still owns adjective/plural/selection spellings.
@@ -12707,6 +12798,12 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
         value(
             ZoneQual::Owner(ControllerRef::TargetPlayer),
             tag("target player's "),
+        ),
+        // CR 115.1: "target opponent's" declares a stack target slot, unlike the
+        // untargeted "an opponent's".
+        value(
+            ZoneQual::Owner(ControllerRef::TargetOpponent),
+            tag("target opponent's "),
         ),
         value(ZoneQual::Owner(ControllerRef::ScopedPlayer), tag("their ")),
         // CR 508.5a: "defending player's" binds one specific defending player.
@@ -13143,9 +13240,10 @@ mod tests {
     fn attacking_defender_suffix_marker() {
         let text = "attacking your opponents and/or planeswalkers they control";
         assert_eq!(
-            parse_attacking_defender_suffix(text),
+            parse_attacking_defender_suffix(text, AttackDefenderMatch::DefendingSide),
             Some((
                 FilterProp::Attacking {
+                    scope: Default::default(),
                     defender: Some(ControllerRef::Opponent),
                 },
                 text.len()
@@ -13158,9 +13256,10 @@ mod tests {
             "the chosen player controls",
         ] {
             assert_eq!(
-                parse_attacking_defender_suffix(&format!(
-                    "attacking your opponents and/or planeswalkers {declined}"
-                )),
+                parse_attacking_defender_suffix(
+                    &format!("attacking your opponents and/or planeswalkers {declined}"),
+                    AttackDefenderMatch::DefendingSide,
+                ),
                 None,
                 "{declined:?}"
             );
@@ -15242,9 +15341,10 @@ mod tests {
             panic!("expected typed filter");
         };
         assert!(tf.properties.contains(&FilterProp::Another));
-        assert!(tf
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(tf.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(tf.properties.iter().any(|p| matches!(
             p,
             FilterProp::SharesQuality {
@@ -15263,7 +15363,10 @@ mod tests {
             TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Attacking { defender: None }])
+                    .properties(vec![FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None
+                    }])
             )
         );
         assert_eq!(rest, "");
@@ -15280,6 +15383,7 @@ mod tests {
         };
         assert!(typed.type_filters.contains(&TypeFilter::Creature));
         assert!(typed.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::You),
         }));
     }
@@ -15323,6 +15427,7 @@ mod tests {
             panic!("expected typed filter, got {filter:?}");
         };
         assert!(!typed.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::You),
         }));
         assert_eq!(
@@ -15341,6 +15446,7 @@ mod tests {
         };
         assert!(typed.type_filters.contains(&TypeFilter::Creature));
         assert!(typed.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::Opponent),
         }));
     }
@@ -22704,7 +22810,13 @@ mod tests {
         let result2 = parse_combat_status_prefix("attacking creatures");
         assert_eq!(
             result2,
-            Some((FilterProp::Attacking { defender: None }, 10))
+            Some((
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                },
+                10
+            ))
         );
     }
 
@@ -22755,9 +22867,10 @@ mod tests {
             assert!(tf.properties.contains(&FilterProp::BlockStatus {
                 status: AttackerBlockStatus::Unblocked
             }));
-            assert!(tf
-                .properties
-                .contains(&FilterProp::Attacking { defender: None }));
+            assert!(tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }));
             assert_eq!(tf.controller, Some(ControllerRef::You));
         } else {
             panic!("Expected Typed filter, got {filter:?}");
@@ -22776,9 +22889,10 @@ mod tests {
         let second = typed_leg(&filters[1]).expect("second branch should be typed");
         assert!(first.type_filters.contains(&TypeFilter::Creature));
         assert!(second.type_filters.contains(&TypeFilter::Creature));
-        assert!(first
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(first.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(second.properties.contains(&FilterProp::Blocking));
     }
 
@@ -22792,8 +22906,20 @@ mod tests {
         };
         assert_eq!(filters.len(), 4);
         let expected = [
-            (FilterProp::Attacking { defender: None }, Keyword::Flying),
-            (FilterProp::Attacking { defender: None }, Keyword::Vigilance),
+            (
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None,
+                },
+                Keyword::Flying,
+            ),
+            (
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None,
+                },
+                Keyword::Vigilance,
+            ),
             (FilterProp::Blocking, Keyword::Flying),
             (FilterProp::Blocking, Keyword::Vigilance),
         ];
@@ -26001,7 +26127,7 @@ mod tests {
                 assert!(
                     tf.properties
                         .iter()
-                        .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                     "expected Attacking property, got {:?}",
                     tf.properties
                 );
@@ -26794,6 +26920,7 @@ mod tests {
         let tf = typed_leg(&filter).expect("typed filter");
         assert!(
             tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::Opponent),
             }),
             "must carry Attacking{{defender: Opponent}}, got {:?}",

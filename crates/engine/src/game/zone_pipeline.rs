@@ -71,6 +71,7 @@ pub(crate) fn propose_outside_game_card_entry(
     state.liminal_entries.insert(
         entry_ref,
         LiminalEntry {
+            blocking_attacker: None,
             name: card.name.clone(),
             object: LiminalEntrant::Card(card),
             source_id,
@@ -20742,6 +20743,7 @@ mod simultaneous_entry_tests {
             state.liminal_entries.insert(
                 b,
                 LiminalEntry {
+                    blocking_attacker: None,
                     copy_settlement: None,
                     object,
                     name: "Card 2".to_string(),

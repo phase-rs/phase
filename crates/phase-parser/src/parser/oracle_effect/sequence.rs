@@ -1114,6 +1114,101 @@ pub(super) fn patch_reveal_until_for_library_category_exile(def: &mut AbilityDef
     }
 }
 
+/// CR 701.20a + CR 608.2c: a reveal-until whose revealed set is immediately
+/// chosen from ("Choose one of the revealed creature cards", Dance, Pathetic
+/// Marionette) reveals in place — the choose reads the library-resident
+/// cards, and a later sweep ("Put all other cards revealed this way …")
+/// places the rest. Flip the construction defaults (`KeepEach` + into-hand +
+/// shuffled-into-library, which would phantom-move the kept match and shuffle
+/// the rest) to `RevealOnly` + Library/Library, mirroring the Sanar patch
+/// above.
+///
+/// Fires only on the untouched default tuple (`KeepEach`, kept Hand, rest
+/// Library, `Random` order): any printed placement differs in at least one
+/// slot — except a card printing exactly the default tuple, which is
+/// indistinguishable and accepted as the documented residual risk. A
+/// `Direct` zone scan does not read the revealed set, so only a `Legacy`-pool
+/// choose (the reveal-pool anaphor's lowering) triggers the flip.
+pub(super) fn patch_reveal_until_for_tracked_set_choose(def: &mut AbilityDefinition) {
+    if let Some(sub) = def.sub_ability.as_mut() {
+        patch_reveal_until_for_tracked_set_choose(sub);
+        if let (
+            Effect::RevealUntil {
+                matched_disposition,
+                kept_destination,
+                rest_destination,
+                rest_order,
+                ..
+            },
+            Effect::ChooseFromZone {
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                ..
+            },
+        ) = (&mut *def.effect, &*sub.effect)
+        {
+            let is_default_tuple = matches!(
+                (
+                    &*matched_disposition,
+                    &*kept_destination,
+                    &*rest_destination,
+                    &*rest_order
+                ),
+                (
+                    RevealUntilDisposition::KeepEach,
+                    Zone::Hand,
+                    Zone::Library,
+                    crate::types::ability::DigRestOrder::Random,
+                )
+            );
+            if is_default_tuple {
+                *matched_disposition = RevealUntilDisposition::RevealOnly;
+                *kept_destination = Zone::Library;
+                *rest_destination = Zone::Library;
+            }
+        }
+    }
+}
+
+/// CR 701.20a + CR 608.2c + CR 608.2d: "all OTHER cards revealed this way"
+/// after a choice FROM the revealed set ("Choose one of the revealed
+/// creature cards", Dance, Pathetic Marionette) excludes the PICK, not the
+/// ability's source. The target parser lowers "other" to `FilterProp::Another`
+/// (source exclusion — vacuous here, the source is never revealed), so
+/// rewrite it to `DistinctFrom{ParentTarget}` (the Radiance exclusion, which
+/// reads the resolving ability's targets) whenever a `Legacy`-pool choose —
+/// the reveal-pool anaphor's lowering — precedes the sweep in the chain.
+///
+/// `Legacy`-only on purpose: a `Direct` zone-scan pick is not a member of
+/// the reveal set, so excluding it would be wrong (and a no-choose sweep
+/// keeps its vacuous `Another`, byte-identical to today). Sweeps without an
+/// "other" carry no `Another` and pass through untouched.
+pub(super) fn rewrite_revealed_sweep_other_as_pick_exclusion(def: &mut AbilityDefinition) {
+    fn walk(node: &mut AbilityDefinition, seen_legacy_choose: bool) {
+        let mut seen = seen_legacy_choose;
+        if matches!(
+            &*node.effect,
+            Effect::ChooseFromZone {
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                ..
+            }
+        ) {
+            seen = true;
+        }
+        if seen {
+            if let Effect::ChangeZoneAll { target, .. } = &mut *node.effect {
+                crate::parser::oracle_target::exclude_parent_target_from_others(target);
+            }
+        }
+        if let Some(sub) = node.sub_ability.as_mut() {
+            walk(sub, seen);
+        }
+        if let Some(else_ability) = node.else_ability.as_mut() {
+            walk(else_ability, seen);
+        }
+    }
+    walk(def, false);
+}
+
 /// CR 608.2c + CR 205.2a: A bare "choose land or nonland" is an opaque
 /// labeled choice. It becomes a library-card-kind choice only when a later
 /// clause consumes "the chosen kind" through `MatchesLastChosenCardPredicate`.
@@ -1549,6 +1644,73 @@ fn parse_exile_n_of_them_face_down(lower: &str) -> Option<(u32, Vec<(CounterType
     }
 }
 
+// CR 603.7b + CR 608.2c: keep both life instructions in the creature-entry
+// watcher. The recursive body split sees no event head and splits them normally.
+fn keeps_delayed_entry_life_body(before: TextPair<'_>, after: &str) -> bool {
+    if terminated(
+        tag::<_, _, OracleError<'_>>("whenever"),
+        nom::character::complete::space1,
+    )
+    .parse(before.lower)
+    .is_err()
+    {
+        return false;
+    }
+    let Some((head, loss)) = super::parse_delayed_this_turn_head(before) else {
+        return false;
+    };
+    if !super::super::oracle_trigger::is_singular_controlled_creature_entry_head(head) {
+        return false;
+    }
+    let gain = take_until::<_, _, OracleError<'_>>(". ")
+        .parse(after)
+        .map_or(after, |(_, sentence)| sentence);
+    // allow-noncombinator: remove sentence punctuation after isolating the clause.
+    let gain = gain.strip_suffix('.').unwrap_or(gain);
+    let (scope, loss) = super::lower::strip_player_scope_subject(loss, false);
+    scope == Some(PlayerFilter::Opponent)
+        && all_consuming(preceded(
+            nom::bytes::complete::tag_no_case("lose "),
+            super::imperative::parse_fixed_life_amount,
+        ))
+        .parse(loss.trim())
+        .is_ok()
+        && all_consuming(preceded(
+            nom::bytes::complete::tag_no_case("you gain "),
+            super::imperative::parse_fixed_life_amount,
+        ))
+        .parse(gain.trim())
+        .is_ok()
+}
+
+// CR 603.7b + CR 608.2c: the installer owns the complete damage-trigger body,
+// including unsupported instructions that must prevent a partial installation.
+fn keeps_delayed_player_damage_body(text: TextPair<'_>) -> bool {
+    use super::{delayed_player_damage_admission, DelayedPlayerDamageAdmission};
+
+    super::parse_delayed_this_turn_head(text).is_some_and(|(head, _)| {
+        !matches!(
+            delayed_player_damage_admission(head),
+            DelayedPlayerDamageAdmission::OutsideFamily
+        )
+    })
+}
+
+pub(super) fn parse_delayed_body_separator(input: &str) -> OracleResult<'_, ClauseBoundary> {
+    alt((
+        value(
+            ClauseBoundary::Then,
+            preceded(opt(tag(",")), preceded(tag(" "), parse_then_connector)),
+        ),
+        value(
+            ClauseBoundary::Comma,
+            alt((tag(", and "), tag(", "), tag(" and "))),
+        ),
+        value(ClauseBoundary::Sentence, tag(". ")),
+    ))
+    .parse(input)
+}
+
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -1646,9 +1808,11 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 // each draw a card, then discard a card" — every named player does
                 // both), so it is not a clause boundary. Splitting would strand the
                 // trailing verb on the controller alone.
+                let lower = current.to_ascii_lowercase();
                 let comma_split =
                     split_comma_clause_boundary(&current, &remainder).filter(|(boundary, _)| {
                         !(compound_subject_each_sticky && matches!(boundary, ClauseBoundary::Then))
+                            && !keeps_delayed_player_damage_body(TextPair::new(&current, &lower))
                     });
                 if let Some((boundary, chars_to_skip)) = comma_split {
                     push_clause_chunk(&mut chunks, &current, Some(boundary));
@@ -2026,6 +2190,11 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
+                        || keeps_delayed_entry_life_body(
+                            TextPair::new(before_and, &before_lower),
+                            remainder_trimmed,
+                        )
+                        || keeps_delayed_player_damage_body(TextPair::new(before_and, &before_lower))
                         || targeted_compound_continuation
                         || prevent_then_put_continuation
                         || search_with_that_name
@@ -2804,15 +2973,15 @@ fn is_for_each_copy_token_continuation(
     )
 }
 
+fn parse_then_connector(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("then, "), tag("then "))).parse(input)
+}
+
 fn strip_sequence_connector_lower(input: &str) -> &str {
     let trimmed = input.trim();
-    alt((
-        tag::<_, _, OracleError<'_>>("then, "),
-        tag::<_, _, OracleError<'_>>("then "),
-    ))
-    .parse(trimmed)
-    .map(|(rest, _)| rest.trim_start())
-    .unwrap_or(trimmed)
+    parse_then_connector(trimmed)
+        .map(|(rest, _)| rest.trim_start())
+        .unwrap_or(trimmed)
 }
 
 /// CR 120.2b: True when the closing chunk text contains a `damage to `
@@ -3356,6 +3525,8 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("seek ")),
         value((), tag("connive")),
         value((), tag("they ")),
+        // CR 701.33a-b + CR 608.2c: "abandon ..." starts its own clause (', then abandon this scheme' tails on ongoing schemes). Placed in this 20-arm group to stay within nom's 21-tuple limit.
+        value((), tag("abandon ")),
     )))
     .parse(s)
     .is_ok()
@@ -9142,6 +9313,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -13803,6 +13975,7 @@ mod tests {
             attach_to: None,
             enters_attacking: false,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -13837,6 +14010,7 @@ mod tests {
             attach_to: None,
             enters_attacking: false,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -13869,6 +14043,7 @@ mod tests {
             attach_to: None,
             enters_attacking: false,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -16535,6 +16710,30 @@ mod tests {
         assert_eq!(
             chunks,
             vec!["each opponent discards a card", "you gain 3 life"]
+        );
+    }
+
+    #[test]
+    fn delayed_entry_life_body_shape_preserves_only_a_singular_complete_watcher() {
+        let admitted = "Whenever a creature you control enters this turn, each opponent loses 1 life and you gain 1 life.";
+        assert_eq!(split_clause_sequence(admitted).len(), 1);
+        assert_eq!(
+            split_clause_sequence("each opponent loses 1 life and you gain 1 life.").len(),
+            2
+        );
+        for refused in [
+            "Whenever one or more creatures you control enter this turn, each opponent loses 1 life and you gain 1 life.",
+            "Whenever a creature you control enters from your hand this turn, each opponent loses 1 life and you gain 1 life.",
+            "Whenever a creature you control enters this turn, each opponent loses 1 life instead and you gain 1 life.",
+            "Whenever a creature you control enters this turn, each opponent loses 1 life and you gain 1 life instead.",
+            "Whenever a creature you control enters this turn, each opponent loses 1 life and you gain 1 life for each player.",
+            "Whenever a Berserker attacks this turn, you draw a card and you lose 1 life.",
+        ] {
+            assert_eq!(split_clause_sequence(refused).len(), 2, "{refused}");
+        }
+        assert_eq!(
+            split_clause_sequence("Whenever a creature you control enters this turn, put a +1/+1 counter on it and it gains haste until end of turn.").len(),
+            2
         );
     }
 

@@ -44,27 +44,34 @@
 //! 3. Where a test's claim is that two branches differ, drive both and write the
 //!    ACCEPT branch first, as the test's own positive control.
 //!
-//! Every card here is built from VERBATIM Oracle text (`/card-test`), never a
-//! paraphrase and never `add_real_card` — none of these cards is in
-//! `integration_cards/` except Memory Vessel and Mondo Gecko, and expanding
-//! that fixture is not this PR's business.
+//! Duration scenarios use verbatim Oracle text. The library play regression
+//! also uses the card export to load the paired printed faces of an MDFC.
 
+use engine::ai_support::legal_actions;
 use engine::game::combat::{creature_cant_attack, AttackTarget};
 use engine::game::keywords::has_keyword;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::visibility::{filter_state_for_viewer, HIDDEN_CARD_NAME};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, CastingPermission, ContinuousModification, Duration, Effect,
-    GameRestriction, ManaSpendPermission, PlayerScope, ProhibitedActivity, StaticCondition,
-    SubAbilityLink, TargetFilter,
+    AbilityDefinition, CardPlayMode, CastingPermission, ContinuousModification, ControllerRef,
+    Duration, Effect, GameRestriction, ManaSpendPermission, PlayerScope, ProhibitedActivity,
+    StaticCondition, SubAbilityLink, TargetFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::{TransientContinuousEffect, WaitingFor};
+use engine::types::events::GameEvent;
+use engine::types::game_state::{
+    CastPaymentMode, GameState, ManaChoice, TransientContinuousEffect, TrustedGameStateEnvelope,
+    WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, ProtectionTarget};
+use engine::types::mana::ManaCostShard;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
@@ -166,63 +173,6 @@ fn gecko_grants(
         .iter()
         .filter(|e| matches!(e.affected, TargetFilter::SpecificObject { id } if id == obj))
         .collect()
-}
-
-/// The single installed `PlayFromExile` permission anywhere in the game, with its
-/// host — the runtime carrier `cast_from_zone::resolve` writes and
-/// `layers::prune_end_of_turn_casting_permissions` reads.
-fn find_play_permission(
-    state: &engine::types::game_state::GameState,
-) -> Option<(ObjectId, Duration)> {
-    state.objects.iter().find_map(|(id, o)| {
-        o.casting_permissions.iter().find_map(|p| match p {
-            CastingPermission::PlayFromExile { duration, .. } => Some((*id, duration.clone())),
-            _ => None,
-        })
-    })
-}
-
-/// Drive `turns` whole turns through the real turn machinery, ACCEPTING every
-/// optional ("you may") effect and taking the first legal target at any target
-/// window. §G1 rule 2: the policy is explicit, never defaulted — Xanathar's play
-/// permission hangs off an `optional: true` Dig as a `ContinuationStep`, so a
-/// declined optional would skip the link under test and the test would pass
-/// vacuously.
-fn run_turns_accepting_optionals(runner: &mut GameRunner, turns: u32) {
-    let start = runner.state().turn_number;
-    for _ in 0..600 {
-        if runner.state().turn_number >= start + turns
-            && runner.stack_names().is_empty()
-            && !matches!(runner.state().phase, Phase::Upkeep)
-        {
-            break;
-        }
-        let r = match runner.state().waiting_for {
-            WaitingFor::TargetSelection { .. } => runner.choose_first_legal_target(),
-            WaitingFor::OptionalEffectChoice { .. } => {
-                runner.act(GameAction::DecideOptionalEffect { accept: true })
-            }
-            WaitingFor::DeclareAttackers { .. } => runner.act(GameAction::DeclareAttackers {
-                attacks: vec![],
-                bands: vec![],
-            }),
-            WaitingFor::DeclareBlockers { .. } => runner.act(GameAction::DeclareBlockers {
-                assignments: vec![],
-            }),
-            _ => runner.act(GameAction::PassPriority),
-        };
-        if r.is_err() {
-            break;
-        }
-    }
-    // REACH GUARD: a stalled walk must not silently make a later assertion vacuous.
-    assert!(
-        runner.state().turn_number >= start + turns,
-        "turn walk stalled at turn {} (phase {:?}, waiting {:?})",
-        runner.state().turn_number,
-        runner.state().phase,
-        runner.state().waiting_for
-    );
 }
 
 /// Whether a live `GameRestriction` in `state.restrictions` prohibits `player`
@@ -347,18 +297,8 @@ fn object_has_static_mode(
 // carries the window for all four.
 // ===========================================================================
 
-/// **V-U1a — `[BASE]`, SHAPE.** CR 611.2a.
-///
-/// Xanathar's whole "Until end of turn, …" sentence is owned by
-/// `try_parse_cant_cast_spells_effect`, which peels the leading duration itself
-/// and builds its own `sub_ability` chain from the tail conjuncts. At BASE_SHA it
-/// wrote the duration into its `ParsedEffectClause` LITERAL, so the duration
-/// reached the HEAD ONLY: the `CastFromZone` play-permission and its trailing
-/// mana-spend `GenericEffect` were both emitted with `duration: None` — i.e. a
-/// permission that is NEVER pruned (CR 611.2a: "If no duration is stated, it lasts
-/// until the end of the game").
-///
-/// FAILS AT BASE_SHA: both of those links carry `None` there.
+/// SHAPE. CR 611.2a: the restriction and both standing permissions share
+/// the printed leading window. CR 609.4b: the mana concession modifies play.
 #[test]
 fn xanathar_leading_duration_reaches_governed_chain_links() {
     let parsed = parse_oracle_text(
@@ -368,98 +308,50 @@ fn xanathar_leading_duration_reaches_governed_chain_links() {
         &["Legendary".to_string(), "Creature".to_string()],
         &["Beholder".to_string()],
     );
-    assert_eq!(parsed.triggers.len(), 1, "one upkeep trigger");
+    assert_eq!(parsed.triggers.len(), 1);
     let links = chain(trigger_body(&parsed.triggers[0]));
-
-    // Positive reach guard: the clause parsed at all, and link 1 is the
-    // prohibition the recognizer under test produces.
     assert_no_unimplemented(&links, "Xanathar");
-    assert!(
-        links.iter().any(|d| matches!(
-            &*d.effect,
-            Effect::AddRestriction {
-                restriction: GameRestriction::ProhibitActivity {
-                    activity: ProhibitedActivity::CastSpells { .. },
-                    ..
-                },
-            }
-        )),
-        "the `can't cast spells` prohibition must be present: {links:#?}"
-    );
 
-    // THE REVERT-FAILING ASSERTIONS.
-    let cast_from_zone = links
-        .iter()
-        .find(|d| matches!(&*d.effect, Effect::CastFromZone { .. }))
-        .expect("the `you may play the top card of their library` permission");
-    assert_eq!(
-        cast_from_zone.duration,
-        Some(Duration::UntilEndOfTurn),
-        "CR 611.2a: the printed `Until end of turn` must reach the play permission; \
-         at BASE_SHA it is None and the permission is never pruned"
-    );
+    let [target, restriction, look, play] = links.as_slice() else {
+        panic!("expected target, restriction, look, play: {links:#?}");
+    };
+    assert!(matches!(&*target.effect, Effect::TargetOnly { .. }));
+    assert!(matches!(
+        &*restriction.effect,
+        Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                activity: ProhibitedActivity::CastSpells { .. },
+                ..
+            },
+        }
+    ));
+    for link in [restriction, look, play] {
+        assert_eq!(link.duration, Some(Duration::UntilEndOfTurn));
+        assert!(!link.optional);
+    }
 
-    // CR 609.4b: the trailing "you may spend mana as though it were mana of
-    // any color to cast spells this way" is a payment concession on the play
-    // permission, folded onto it as `mana_spend_permission` — so the
-    // permission IS the chain leaf, and the duration reaching it is the
-    // duration reaching the last governed link.
-    let trailing = links
-        .last()
-        .expect("the play permission carrying the mana concession is the chain leaf");
-    assert!(
-        matches!(
-            &*trailing.effect,
-            Effect::CastFromZone {
+    assert!(matches!(
+        statics_of(&look.effect)[0].modifications.as_slice(),
+        [ContinuousModification::AddStaticMode {
+            mode: StaticMode::MayLookAtTopOfLibrary {
+                library: ControllerRef::TargetPlayer,
+            },
+        }]
+    ));
+    assert!(matches!(
+        statics_of(&play.effect)[0].modifications.as_slice(),
+        [ContinuousModification::AddStaticMode {
+            mode: StaticMode::TopOfLibraryCastPermission {
+                library: ControllerRef::TargetPlayer,
+                play_mode: CardPlayMode::Play,
                 mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 ..
-            }
-        ),
-        "chain leaf is the play permission carrying the any-color concession, got {:?}",
-        trailing.effect
-    );
-    assert_eq!(
-        trailing.duration,
-        Some(Duration::UntilEndOfTurn),
-        "CR 611.2a: the duration must reach the LAST governed link too, not just the first"
-    );
-
-    // HOSTILE ROW: the intermediate `Dig` is a ONE-SHOT the duration does not
-    // govern (CR 611.2a governs continuous effects). It must stay unstamped —
-    // this is what `duration_governs`'s `matches!` is for, and it is the first
-    // branch a wrongly-unrestricted walk would blow through.
-    let dig = links
-        .iter()
-        .find(|d| matches!(&*d.effect, Effect::Dig { .. }))
-        .expect("the `look at the top card` Dig link");
-    assert_eq!(
-        dig.duration, None,
-        "a one-shot Dig must NOT be stamped — duration_governs excludes it"
-    );
+            },
+        }]
+    ));
 }
 
-/// **V5 — `[GUARD:unset-sentinel]`, SHAPE.** CR 611.2a.
-///
-/// **ANCHORED AGAINST NARROWING THE GUARD, NOT AGAINST BASE_SHA — it passes at
-/// BASE_SHA and is a POSITIVE REACH GUARD, not a discriminator.** The named removal
-/// that turns it red: narrowing `oracle_ir::ast::duration_is_unset_sentinel` so that
-/// `None` is no longer in the unset set. The link's embedded window then stays
-/// `None`, the leading "Until end of turn," never reaches it, and the play
-/// permission lasts for the rest of the game (CR 611.2a's second sentence) instead
-/// of being pruned at cleanup (CR 514.2).
-///
-/// Its value is that it drives a REAL CARD through the production parser, so it
-/// covers the one way this PR's guard could break the PR's own headline fix.
-/// **Not redundant** with `xanathar_leading_duration_reaches_governed_chain_links`,
-/// which binds an `&AbilityDefinition` and asserts the CARRIER; it never reads the
-/// embedded field.
-///
-/// The mixed-duration rows — a WRITTEN embedded window under a DIFFERING governing
-/// prefix — are unit rows in `oracle_ir::ast::duration_distribution_tests_7923`
-/// (`narrower_printed_window_survives_a_wider_outer_duration`, and links 4/5 of
-/// `chain_duration_walks_governed_links_and_yields_to_explicit`), constructed
-/// directly for the reason that file's `PreventDamage` row already gives. The PR
-/// body records which effect types a card can supply that shape for today.
+/// SHAPE. CR 611.2a: the embedded grant window also takes the printed duration.
 #[test]
 fn xanathar_unset_cast_window_still_takes_the_leading_duration() {
     let parsed = parse_oracle_text(
@@ -469,30 +361,36 @@ fn xanathar_unset_cast_window_still_takes_the_leading_duration() {
         &["Legendary".to_string(), "Creature".to_string()],
         &["Beholder".to_string()],
     );
-    assert_eq!(parsed.triggers.len(), 1, "one upkeep trigger");
     let links = chain(trigger_body(&parsed.triggers[0]));
-
-    // Positive reach guard: the clause parsed at all.
-    assert_no_unimplemented(&links, "Xanathar");
-
-    let cast_from_zone = links
-        .iter()
-        .find(|d| matches!(&*d.effect, Effect::CastFromZone { .. }))
-        .expect("the `you may play the top card of their library` permission");
-
-    // THE ASSERTION THE NAMED REMOVAL TURNS RED: this link reaches
-    // `duration_is_unset_sentinel` with its EMBEDDED field unset, so the leading
-    // "Until end of turn," must be written into it.
-    match &*cast_from_zone.effect {
-        Effect::CastFromZone { duration, .. } => assert_eq!(
-            duration.as_ref(),
-            Some(&Duration::UntilEndOfTurn),
-            "CR 611.2a: an unset embedded window takes the governing leading duration; \
-             narrowing `duration_is_unset_sentinel` to exclude `None` leaves it None and \
-             the play permission is never pruned"
-        ),
-        other => panic!("expected CastFromZone, got {other:?}"),
+    assert_eq!(links.len(), 4);
+    for link in &links[2..] {
+        assert!(matches!(
+            &*link.effect,
+            Effect::GenericEffect {
+                duration: Some(Duration::UntilEndOfTurn),
+                ..
+            }
+        ));
     }
+}
+
+#[test]
+fn precognition_keeps_its_one_shot_dig() {
+    let parsed = parse_oracle_text(
+        "At the beginning of your upkeep, you may look at the top card of target opponent's library. If you do, you may put that card on the bottom of that player's library.",
+        "Precognition",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let links = chain(trigger_body(&parsed.triggers[0]));
+    assert_no_unimplemented(&links, "Precognition");
+    let dig = links
+        .iter()
+        .find(|link| matches!(&*link.effect, Effect::Dig { .. }))
+        .expect("the one-shot look still parses as a Dig");
+    assert!(dig.optional);
+    assert_eq!(dig.duration, None);
 }
 
 /// **V6 — `[GUARD:no-injected-default]`, SHAPE.** CR 611.2a.
@@ -1615,67 +1513,786 @@ fn revenge_of_the_hunted_recovers_lure_conjunct() {
     );
 }
 
-/// **V-U1b — `[BASE]`, RUNTIME.** CR 611.2a + CR 514.2.
-///
-/// The permission actually EXPIRES. Xanathar's "you may play the top card of their
-/// library" lowers to `Effect::CastFromZone { mode: Play }`, and
-/// `cast_from_zone::resolve`'s install site computes the installed
-/// `CastingPermission::PlayFromExile.duration` as
-/// `effect.duration.unwrap_or_else(|| <Graveyard|Hand> ? UntilEndOfTurn : Permanent)`.
-/// The card is in EXILE by then, so at BASE_SHA — where U1's stamp never reached
-/// this link — the permission is installed as `Duration::Permanent`, which
-/// `layers::prune_end_of_turn_casting_permissions` explicitly RETAINS. The printed
-/// "Until end of turn" permission therefore lasted for the rest of the game.
-///
-/// FAILS AT BASE_SHA on both assertions: the permission is installed as
-/// `Permanent` and is still present after the turn boundary.
-///
-/// SCOPE NOTE, stated rather than papered over: Xanathar's `Dig`/`CastFromZone`
-/// links currently lower with `player: Controller` / `target: Any`, so the
-/// permission lands on the ACTIVATOR's own top card rather than the targeted
-/// opponent's. That mis-scoping is PRE-EXISTING and untouched by this PR (it is
-/// identical at BASE_SHA), so this test deliberately asserts on the permission's
-/// DURATION wherever it lands, and makes no claim about whose library it reads.
+fn xanathar_scenario(players: u8) -> (GameScenario, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(players, 42);
+    scenario.at_phase(Phase::Untap);
+    let xanathar = scenario
+        .add_creature_from_oracle(P0, "Xanathar, Guild Kingpin", 5, 6, XANATHAR)
+        .with_subtypes(vec!["Beholder"])
+        .id();
+    scenario.with_library_top(P0, &["Draw step", "Backup"]);
+    (scenario, xanathar)
+}
+
+// CR 603.3d: choose the opponent when the real upkeep trigger goes on the stack.
+fn announce_xanathar_trigger(runner: &mut GameRunner) {
+    for _ in 0..runner.state().players.len() {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("advance to upkeep");
+    }
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    let target = engine::types::ability::TargetRef::Player(P1);
+    if runner.state().players.len() > 2 {
+        let WaitingFor::TriggerTargetSelection {
+            player,
+            target_slots,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected the upkeep target prompt: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(target_slots.len(), 1);
+        assert!(target_slots[0].legal_targets.contains(&target));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(target.clone()),
+            })
+            .expect("target P1");
+    }
+    assert_eq!(runner.state().stack.len(), 1);
+    let ability = runner.state().stack.back().unwrap().ability().unwrap();
+    assert_eq!(ability.targets, vec![target]);
+}
+
+fn resolve_xanathar_trigger(runner: &mut GameRunner) {
+    for _ in 0..runner.state().players.len() {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve upkeep trigger");
+    }
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+}
+
+fn xanathar_grants(state: &GameState) -> Vec<&TransientContinuousEffect> {
+    state
+        .transient_continuous_effects
+        .iter()
+        .filter(|effect| {
+            effect.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::MayLookAtTopOfLibrary { .. }
+                            | StaticMode::TopOfLibraryCastPermission { .. },
+                    }
+                )
+            })
+        })
+        .collect()
+}
+
+fn xanathar_restricts_p1(state: &GameState) -> bool {
+    player_is_prohibited(state, P1, |activity| {
+        matches!(activity, ProhibitedActivity::CastSpells { .. })
+    })
+}
+
+fn land_action(state: &GameState, object_id: ObjectId) -> GameAction {
+    GameAction::PlayLand {
+        object_id,
+        card_id: state.objects[&object_id].card_id,
+    }
+}
+
+fn can_play_land(state: &GameState, id: ObjectId) -> bool {
+    legal_actions(state)
+        .iter()
+        .any(|action| matches!(action, GameAction::PlayLand { object_id, .. } if *object_id == id))
+}
+
+fn activate_grove(
+    runner: &mut GameRunner,
+    grove: ObjectId,
+) -> engine::types::game_state::ActionResult {
+    let choose_color = runner
+        .act(GameAction::ActivateAbility {
+            source_id: grove,
+            ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Grove");
+    assert!(matches!(
+        choose_color.waiting_for,
+        WaitingFor::ChooseManaColor { .. }
+    ));
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Green),
+            count: 1,
+        })
+        .expect("add green mana with Grove")
+}
+
 #[test]
-fn xanathar_play_permission_expires_at_cleanup() {
+fn xanathar_defers_a_new_foreign_top_during_manual_cast_payment() {
+    assert_xanathar_defers_a_new_foreign_top_during_manual_cast_payment(P0);
+}
+
+#[test]
+fn xanathar_defers_a_new_foreign_top_during_another_players_cast() {
+    assert_xanathar_defers_a_new_foreign_top_during_manual_cast_payment(PlayerId(2));
+}
+
+// CR 401.5: The foreign top stays hidden even when the viewer is not the caster.
+fn assert_xanathar_defers_a_new_foreign_top_during_manual_cast_payment(caster: PlayerId) {
+    let third = PlayerId(2);
+    let (mut scenario, _) = xanathar_scenario(3);
+    // CR 605.1a + CR 614.6: Grove qualifies as a mana ability. The external
+    // replacement makes its opponent life gain draw a card during payment.
+    let mut add_grove = || {
+        scenario
+            .add_land_from_oracle(
+                caster,
+                "Grove of the Burnwillows",
+                "{T}: Add {C}.\n{T}: Add {R} or {G}. Each opponent gains 1 life.",
+            )
+            .id()
+    };
+    let grove = add_grove();
+    let second_grove = add_grove();
+    scenario.add_enchantment_from_oracle(P1, "Nefarious Lich",
+        "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game."
+    );
+    let hand = scenario
+        .add_spell_to_hand_from_oracle(
+            caster,
+            "Fog",
+            true,
+            "Prevent all combat damage that would be dealt this turn.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        })
+        .id();
+    let later = scenario.add_land_to_library_top(P1, "Plains").id();
+    let next = scenario.add_spell_to_library_top(P1, "New top", true).id();
+    let before = scenario
+        .add_spell_to_library_top(P1, "Original top", true)
+        .id();
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+    resolve_xanathar_trigger(&mut runner);
+
+    let seen = |state: &GameState, viewer, object| {
+        filter_state_for_viewer(state, viewer).objects[&object].name != HIDDEN_CARD_NAME
+    };
+    assert!(seen(runner.state(), P0, before));
+    assert!(!seen(runner.state(), P0, next));
+    assert!(!seen(runner.state(), P1, before));
+    assert!(!seen(runner.state(), third, before));
+
+    while runner.state().priority_player != caster {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass to the caster");
+    }
+    let card_id = runner.state().objects[&hand].card_id;
+    let casting = runner
+        .act(GameAction::CastSpell {
+            object_id: hand,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("start the cast");
+    assert!(matches!(
+        casting.waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    let snapshot = |state: &GameState| {
+        serde_json::to_value(state).expect("serialize authoritative state")
+            ["foreign_library_look_snapshot"]
+            .clone()
+    };
+    let announced_snapshot = snapshot(runner.state());
+    let activation = activate_grove(&mut runner, grove);
+    assert!(activation
+        .events
+        .iter()
+        .any(|event| matches!(event, GameEvent::CardDrawn { player_id: P1, .. })));
+    assert!(matches!(
+        activation.waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    assert_eq!(runner.state().library_of(P1).front(), Some(&next));
+    assert_eq!(snapshot(runner.state()), announced_snapshot);
+    assert!(
+        !seen(runner.state(), P0, next),
+        "the newly drawn top stays hidden during payment"
+    );
+    assert!(
+        announced_snapshot["tops"]
+            .as_array()
+            .is_some_and(|tops| tops.contains(&serde_json::json!([P1, before]))),
+        "the cast must capture Xanathar's chosen opponent's top: {announced_snapshot}"
+    );
+
+    let viewer = serde_json::to_value(filter_state_for_viewer(runner.state(), P0))
+        .expect("serialize the grantee's projection");
+    assert!(viewer.get("foreign_library_look_snapshot").is_none());
+    assert!(!viewer
+        .to_string()
+        .contains(&runner.state().objects[&next].name));
+
+    let saved = serde_json::to_string(&TrustedGameStateEnvelope::capture(runner.state().clone()))
+        .expect("save the authoritative state during payment");
+    let restored: TrustedGameStateEnvelope =
+        serde_json::from_str(&saved).expect("restore the authoritative state during payment");
+    let mut runner = GameRunner::from_state(restored.into_game_state());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    assert_eq!(runner.state().library_of(P1).front(), Some(&next));
+    assert_eq!(snapshot(runner.state()), announced_snapshot);
+    assert!(!seen(runner.state(), P0, next));
+
+    let mut canceled = GameRunner::from_state(runner.state().clone());
+    let cancel = canceled
+        .act(GameAction::CancelCast)
+        .expect("cancel the cast");
+    assert!(matches!(
+        cancel.waiting_for,
+        WaitingFor::Priority { player } if player == caster
+    ));
+    assert_eq!(canceled.state().library_of(P1).front(), Some(&next));
+    assert!(seen(canceled.state(), P0, next));
+
+    let later_activation = activate_grove(&mut canceled, second_grove);
+    assert!(later_activation
+        .events
+        .iter()
+        .any(|event| matches!(event, GameEvent::CardDrawn { player_id: P1, .. })));
+    assert_eq!(canceled.state().library_of(P1).front(), Some(&later));
+    assert!(seen(canceled.state(), P0, later));
+
+    let committed = runner
+        .act(GameAction::PassPriority)
+        .expect("commit the payment");
+    assert!(committed.events.iter().any(
+        |event| matches!(event, GameEvent::SpellCast { controller, .. } if *controller == caster)
+    ));
+    assert!(seen(runner.state(), P0, next));
+    assert!(!seen(runner.state(), P1, next));
+    assert!(!seen(runner.state(), third, next));
+}
+
+#[test]
+fn xanathar_defers_foreign_top_through_same_source_mana_activation() {
+    let (mut scenario, _) = xanathar_scenario(2);
+    let monolith = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Grim Monolith",
+            "This artifact doesn't untap during your untap step.\n{T}: Add {C}{C}{C}.\n{4}: Untap this artifact.",
+        )
+        .id();
+    let grove = scenario
+        .add_land_from_oracle(
+            P0,
+            "Grove of the Burnwillows",
+            "{T}: Add {C}.\n{T}: Add {R} or {G}. Each opponent gains 1 life.",
+        )
+        .id();
+    scenario.add_enchantment_from_oracle(P1, "Nefarious Lich",
+        "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game."
+    );
+    let next = scenario.add_land_to_library_top(P1, "Forest").id();
+    let before = scenario.add_land_to_library_top(P1, "Island").id();
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+    resolve_xanathar_trigger(&mut runner);
+
+    let seen = |runner: &GameRunner, object| {
+        filter_state_for_viewer(runner.state(), P0).objects[&object].name != HIDDEN_CARD_NAME
+    };
+    assert!(seen(&runner, before));
+
+    let activate = |runner: &mut GameRunner, ability_index, payment_mode| {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: monolith,
+                ability_index,
+                payment_mode,
+            })
+            .expect("activate Grim Monolith")
+    };
+    let is_paying =
+        |waiting: &WaitingFor| matches!(waiting, WaitingFor::ManaPayment { player: P0, .. });
+    let outer = activate(&mut runner, 1, CastPaymentMode::Manual);
+    assert!(is_paying(&outer.waiting_for));
+    let inner = activate(&mut runner, 0, CastPaymentMode::Auto);
+    assert!(inner.events.iter().any(|event| {
+        matches!(event, GameEvent::AbilityActivated { source_id, stack_entry: None, .. } if *source_id == monolith)
+    }));
+    assert!(is_paying(&inner.waiting_for));
+
+    let grove = activate_grove(&mut runner, grove);
+    assert!(grove
+        .events
+        .iter()
+        .any(|event| { matches!(event, GameEvent::CardDrawn { player_id: P1, .. }) }));
+    assert!(is_paying(&grove.waiting_for));
+    assert_eq!(runner.state().library_of(P1).front(), Some(&next));
+    // CR 401.5: completing a mana activation within a cost leaves the
+    // enclosing activation's look boundary in force.
+    assert!(
+        !seen(&runner, next),
+        "outer activation still awaits payment"
+    );
+
+    let mut cancelled = GameRunner::from_state(runner.state().clone());
+    let cancellation = cancelled.act(GameAction::CancelCast).expect("cancel");
+    assert!(matches!(
+        cancellation.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(cancelled.state().stack.is_empty());
+    assert_eq!(cancelled.state().library_of(P1).front(), Some(&next));
+    assert!(seen(&cancelled, next));
+
+    let completion = runner.act(GameAction::PassPriority).expect("pay the cost");
+    assert!(completion.events.iter().any(|event| {
+        matches!(event, GameEvent::AbilityActivated { source_id, stack_entry: Some(_), .. } if *source_id == monolith)
+    }));
+    assert!(seen(&runner, next));
+}
+
+#[test]
+fn xanathar_foreign_land_requires_main_phase_and_uses_one_land_drop() {
+    let (mut scenario, _) = xanathar_scenario(2);
+    let second = scenario.add_land_to_library_top(P1, "Island").id();
+    let first = scenario.add_land_to_library_top(P1, "Swamp").id();
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+    resolve_xanathar_trigger(&mut runner);
+    assert_eq!(runner.state().library_of(P1).front(), Some(&first));
+    assert!(runner.state().exile.is_empty());
+
+    // CR 305.1: playing a land requires the main phase and an empty stack.
+    assert!(!can_play_land(runner.state(), first));
+    assert!(runner.act(land_action(runner.state(), first)).is_err());
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+    assert!(can_play_land(runner.state(), first));
+    let card_id = runner.state().objects[&first].card_id;
+    runner
+        .act(land_action(runner.state(), first))
+        .expect("play P1's top land");
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().battlefield.iter().any(|id| {
+        let land = &runner.state().objects[id];
+        land.card_id == card_id && land.owner == P1 && land.controller == P0
+    }));
+
+    // CR 305.2b: playing a land from another player's library spends your land play.
+    assert_eq!(runner.state().players[0].lands_played_this_turn, 1);
+    assert_eq!(runner.state().players[1].lands_played_this_turn, 0);
+    assert_eq!(runner.state().library_of(P1).front(), Some(&second));
+    assert!(!can_play_land(runner.state(), second));
+    assert!(runner.act(land_action(runner.state(), second)).is_err());
+}
+
+#[test]
+fn top_of_library_play_permission_admits_a_modal_land_face() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    for owner in [P0, P1] {
+        let mut scenario = if owner == P0 {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_real_card(P0, "Future Sight", Zone::Battlefield, db);
+            scenario
+        } else {
+            xanathar_scenario(2).0
+        };
+        let shelter = scenario.add_real_card(owner, "Sejiri Shelter", Zone::Library, db);
+        let mut runner = scenario.build();
+        if owner == P1 {
+            announce_xanathar_trigger(&mut runner);
+            resolve_xanathar_trigger(&mut runner);
+            runner.advance_to_phase(Phase::PreCombatMain);
+        }
+        assert_eq!(runner.state().library_of(owner).front(), Some(&shelter));
+        assert!(can_play_land(runner.state(), shelter));
+        let card_id = runner.state().objects[&shelter].card_id;
+        runner
+            .act(land_action(runner.state(), shelter))
+            .expect("play the modal land face directly from the library");
+        let glacier = runner
+            .state()
+            .battlefield
+            .iter()
+            .find_map(|id| {
+                let obj = &runner.state().objects[id];
+                (obj.card_id == card_id).then_some(obj)
+            })
+            .expect("land face entered");
+        assert_eq!(glacier.name, "Sejiri Glacier");
+        assert_eq!(glacier.owner, owner);
+        assert_eq!(glacier.controller, P0);
+        assert!(glacier.tapped);
+        assert_eq!(runner.state().players[0].lands_played_this_turn, 1);
+    }
+}
+
+#[test]
+fn top_of_library_cast_only_permission_does_not_admit_a_modal_land_face() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    scenario
-        .add_creature_from_oracle(P0, "Xanathar, Guild Kingpin", 5, 6, XANATHAR)
-        .with_subtypes(vec!["Beholder"]);
-    for i in 0..30 {
-        scenario.add_card_to_library_top(P0, &format!("MyLib{i}"));
-        scenario.add_card_to_library_top(P1, &format!("OppLib{i}"));
+    scenario.add_real_card(P0, "Mystic Forge", Zone::Battlefield, db);
+    let shelter = scenario.add_real_card(P0, "Sejiri Shelter", Zone::Library, db);
+    let mut runner = scenario.build();
+    assert!(!can_play_land(runner.state(), shelter));
+    assert!(runner.act(land_action(runner.state(), shelter)).is_err());
+    assert_eq!(runner.state().library_of(P0).front(), Some(&shelter));
+}
+
+fn add_test_mana(runner: &mut GameRunner, player: PlayerId, kind: ManaType, count: usize) {
+    for _ in 0..count {
+        runner
+            .state_mut()
+            .add_mana_to_pool(player, ManaUnit::new(kind, ObjectId(0), false, vec![]))
+            .expect("seed test mana");
     }
+}
+
+#[test]
+fn xanathar_repeatedly_casts_from_the_live_top_with_its_payment_concession() {
+    let (mut scenario, xanathar) = xanathar_scenario(2);
+    let colorless = scenario
+        .add_spell_to_library_top(P1, "Spatial Contortion", true)
+        .from_oracle_text(
+            "({C} represents colorless mana.)\nTarget creature gets +3/-3 until end of turn.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Colorless],
+            generic: 1,
+        })
+        .id();
+    let blue = scenario
+        .add_spell_to_library_top(P1, "Opt", true)
+        .from_oracle_text("Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        })
+        .id();
+    let land = scenario.add_land_to_library_top(P1, "Island").id();
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+    resolve_xanathar_trigger(&mut runner);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    runner
+        .act(land_action(runner.state(), land))
+        .expect("play the land above the spells");
+    assert_eq!(runner.state().library_of(P1).front(), Some(&blue));
+    assert_eq!(runner.state().objects[&blue].zone, Zone::Library);
+
+    add_test_mana(&mut runner, P0, ManaType::Red, 3);
+    assert!(legal_actions(runner.state()).iter().any(|action| {
+        matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == blue)
+    }));
+    // CR 609.4b: the concession changes how colored costs are paid.
+    let cast = runner
+        .cast(blue)
+        .try_resolve()
+        .expect("red mana pays the blue cost");
+    assert!(matches!(
+        cast.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(cast.events().iter().any(|event| matches!(
+        event,
+        engine::types::events::GameEvent::ZoneChanged {
+            from: Some(Zone::Library),
+            to: Zone::Stack,
+            ..
+        }
+    )));
+    assert_eq!(runner.state().library_of(P1).front(), Some(&colorless));
+    // CR 107.4c: The available mana covers the total, but neither unit can pay {C}.
+    let pool = &runner.state().players[0].mana_pool;
+    assert_eq!(pool.total(), 2);
+    assert_eq!(pool.count_color(ManaType::Red), 2);
+    assert!(
+        runner
+            .cast(colorless)
+            .target_objects(&[xanathar])
+            .try_resolve()
+            .is_err(),
+        "red mana cannot pay {{C}}"
+    );
+    add_test_mana(&mut runner, P0, ManaType::Colorless, 1);
+    let cast = runner
+        .cast(colorless)
+        .target_objects(&[xanathar])
+        .try_resolve()
+        .expect("real colorless mana pays {C}");
+    assert!(matches!(
+        cast.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().library_of(P1).is_empty());
+    assert!(runner.state().exile.is_empty());
+}
+
+#[test]
+fn xanathar_casts_tibalt_from_the_opponents_library() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let (mut scenario, _) = xanathar_scenario(2);
+    let valki = scenario.add_real_card(P1, "Valki, God of Lies", Zone::Library, db);
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+    resolve_xanathar_trigger(&mut runner);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    add_test_mana(&mut runner, P0, ManaType::Red, 7);
+    assert!(legal_actions(runner.state()).iter().any(|action| {
+        matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == valki)
+    }));
+
+    // CR 712.11b: The public cast pipeline must prompt for Tibalt's face.
+    let cast = runner.cast(valki).modal_back_face(true).commit();
+    let spell = cast.state().stack.back().expect("Tibalt on the stack");
+    assert_eq!(
+        cast.state().objects[&spell.source_id].name,
+        "Tibalt, Cosmic Impostor"
+    );
+    assert_eq!(cast.state().players[0].mana_pool.total(), 0);
+    assert!(matches!(
+        cast.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn xanathar_casts_the_adventure_from_the_opponents_library_during_upkeep() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let (mut scenario, _) = xanathar_scenario(2);
+    let giant = scenario.add_real_card(P1, "Bonecrusher Giant", Zone::Library, db);
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+    resolve_xanathar_trigger(&mut runner);
+    add_test_mana(&mut runner, P0, ManaType::Blue, 2);
+    assert!(legal_actions(runner.state()).iter().any(|action| {
+        matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == giant)
+    }));
+
+    // CR 715.3a: The instant is castable here even though its normal face isn't.
+    let cast = runner
+        .cast(giant)
+        .adventure_face(false)
+        .target_player(P1)
+        .commit();
+    let spell = cast.state().stack.back().expect("Stomp on the stack");
+    assert_eq!(cast.state().objects[&spell.source_id].name, "Stomp");
+    assert_eq!(cast.state().players[0].mana_pool.total(), 0);
+    let outcome = cast.resolve();
+    outcome.assert_life_delta(P1, -2);
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn xanathar_casts_fireblast_by_sacrificing_two_mountains() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let (mut scenario, _) = xanathar_scenario(2);
+    let fireblast = scenario.add_real_card(P1, "Fireblast", Zone::Library, db);
+    let first = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    let second = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+    resolve_xanathar_trigger(&mut runner);
+    assert!(legal_actions(runner.state()).iter().any(|action| {
+        matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == fireblast)
+    }));
+
+    // CR 118.9: The sacrifice replaces Fireblast's printed mana cost.
+    let outcome = runner
+        .cast(fireblast)
+        .accept_optional()
+        .sacrifice_with(&[first, second])
+        .target_player(P1)
+        .resolve();
+    outcome.assert_life_delta(P1, -4);
+    assert_eq!(outcome.state().graveyard_of(P0).len(), 2);
+    assert!(!outcome.state().battlefield.contains(&first));
+    assert!(!outcome.state().battlefield.contains(&second));
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn citadel_library_cast_cannot_take_fireblasts_printed_alternative_cost() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Bolas's Citadel", Zone::Battlefield, db);
+    let fireblast = scenario.add_real_card(P0, "Fireblast", Zone::Library, db);
+    let first = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    let second = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
     let mut runner = scenario.build();
 
-    // Cycle to the controller's NEXT upkeep so the printed trigger fires through
-    // the real turn machinery, and ACCEPT its optional links explicitly (§G1
-    // rule 2): the `you may look` Dig is `optional: true` and the play permission
-    // is its `ContinuationStep`, so a decline would skip the link under test
-    // entirely and this test would pass vacuously.
-    run_turns_accepting_optionals(&mut runner, 2);
+    // CR 118.9a: Citadel's life payment precludes the printed sacrifice alternative.
+    let outcome = runner
+        .cast(fireblast)
+        .accept_optional()
+        .sacrifice_with(&[first, second])
+        .target_player(P1)
+        .resolve();
+    outcome.assert_life_delta(P0, -6);
+    outcome.assert_life_delta(P1, -4);
+    outcome.assert_zone(&[first, second], Zone::Battlefield);
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
 
-    // POSITIVE REACH GUARD: the permission is actually INSTALLED, and installed
-    // with the printed window. Without this the "gone" assertion below would pass
-    // on a trigger that never resolved.
-    let (host, installed) = find_play_permission(runner.state())
-        .expect("the `you may play the top card` permission must be installed");
-    assert_eq!(
-        installed,
-        Duration::UntilEndOfTurn,
-        "CR 611.2a: the permission must be installed with the PRINTED window; at \
-         BASE_SHA `effect.duration` is None and the install site falls back to \
-         Duration::Permanent, which prune_end_of_turn_casting_permissions RETAINS"
-    );
-    let _ = host;
+#[test]
+fn xanathar_casts_opt_with_red_mana_when_future_sight_also_grants_the_cast() {
+    use engine::types::format::FormatConfig;
 
-    // THE REVERT-FAILING ASSERTION.
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 42);
+    scenario.at_phase(Phase::Untap);
+    scenario.add_creature_from_oracle(P0, "Xanathar, Guild Kingpin", 5, 6, XANATHAR);
+    scenario.add_real_card(P0, "Future Sight", Zone::Battlefield, db);
+    let opt = scenario.add_real_card(P0, "Opt", Zone::Library, db);
+    scenario.add_real_card(P0, "Island", Zone::Library, db);
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().library_of(P1).front(), Some(&opt));
+    announce_xanathar_trigger(&mut runner);
+    add_test_mana(&mut runner, P0, ManaType::Red, 1);
+    let opt_offered = |state: &GameState| {
+        legal_actions(state).iter().any(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == opt),
+        )
+    };
+    // CR 609.4b: Future Sight alone supplies no permission to spend red as blue.
+    assert!(!opt_offered(runner.state()));
+    resolve_xanathar_trigger(&mut runner);
+    assert!(opt_offered(runner.state()));
+    let outcome = runner.cast(opt).resolve();
+    outcome.assert_hand_drawn(P0, 1);
+    assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn xanathar_play_permission_expires_at_cleanup() {
+    let (mut scenario, xanathar) = xanathar_scenario(3);
+    let deeper = scenario.add_land_to_library_top(P1, "Island").id();
+    let top = scenario.add_land_to_library_top(P1, "Swamp").id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black; 2],
+            generic: 1,
+        })
+        .id();
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+    resolve_xanathar_trigger(&mut runner);
+
+    let seen = |state: &GameState, viewer, id| {
+        filter_state_for_viewer(state, viewer).objects[&id].name != HIDDEN_CARD_NAME
+    };
+    // CR 401.5: the permission covers the current top for its grantee.
+    assert!(seen(runner.state(), P0, top));
+    assert!(!seen(runner.state(), P0, deeper));
+    assert!(!seen(runner.state(), P1, top));
+    assert!(!seen(runner.state(), PlayerId(2), top));
+
+    let grants = xanathar_grants(runner.state());
+    assert_eq!(grants.len(), 2);
+    assert!(grants
+        .iter()
+        .all(|grant| grant.duration == Duration::UntilEndOfTurn));
+    assert!(xanathar_restricts_p1(runner.state()));
+    add_test_mana(&mut runner, P0, ManaType::Black, 3);
+    let removal = runner.cast(murder).target_objects(&[xanathar]).resolve();
+    assert!(matches!(
+        removal.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(!runner.state().battlefield.contains(&xanathar));
+    // CR 611.2a: both grants outlive the source and last until cleanup.
+    assert_eq!(xanathar_grants(runner.state()).len(), 2);
+    assert!(seen(runner.state(), P0, top));
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(can_play_land(runner.state(), top));
     cross_turn_boundary(&mut runner);
-    assert!(
-        find_play_permission(runner.state()).is_none(),
-        "CR 514.2: the play permission must be pruned at cleanup; at BASE_SHA it is \
-         installed as Duration::Permanent and survives the rest of the game"
+    // CR 514.2: the two grants and the restriction expire together.
+    assert!(xanathar_grants(runner.state()).is_empty());
+    assert!(!xanathar_restricts_p1(runner.state()));
+    assert_eq!(runner.state().library_of(P1).front(), Some(&top));
+    assert!(!seen(runner.state(), P0, top));
+}
+
+#[test]
+fn xanathar_illegal_target_installs_neither_permission_nor_restriction() {
+    let (mut scenario, _) = xanathar_scenario(2);
+    let top = scenario.add_land_to_library_top(P1, "Island").id();
+    let protection = scenario.add_spell_to_hand_from_oracle(
+        P1, "Surge of Salvation", true,
+        "You and permanents you control gain hexproof until end of turn. Prevent all damage that black and/or red sources would deal to creatures you control this turn.",
+    ).with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::White],
+        generic: 0,
+    }).id();
+    let mut runner = scenario.build();
+    announce_xanathar_trigger(&mut runner);
+
+    // CR 702.11c: the target gains hexproof in response to the upkeep trigger.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 receives priority");
+    add_test_mana(&mut runner, P1, ManaType::White, 1);
+    runner.cast(protection).commit();
+    assert_eq!(runner.state().stack.len(), 2);
+    for _ in 0..2 {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve protection");
+    }
+    assert_eq!(runner.state().stack.len(), 1);
+    assert!(engine::game::static_abilities::player_has_hexproof(
+        runner.state(),
+        P1
+    ));
+
+    // CR 608.2b: the ability fizzles when its sole target is illegal.
+    resolve_xanathar_trigger(&mut runner);
+    assert!(xanathar_grants(runner.state()).is_empty());
+    assert!(!xanathar_restricts_p1(runner.state()));
+    assert_eq!(runner.state().library_of(P1).front(), Some(&top));
+    assert_eq!(
+        filter_state_for_viewer(runner.state(), P0).objects[&top].name,
+        HIDDEN_CARD_NAME
     );
 }
 

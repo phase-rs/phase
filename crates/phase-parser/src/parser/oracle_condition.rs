@@ -427,6 +427,7 @@ fn static_condition_to_restriction_condition(
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsBlocking
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
@@ -987,7 +988,7 @@ mod tests {
             } => assert!(
                 matches!(&filter, TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::Attacking { defender: Some(ControllerRef::You) }
+                    FilterProp::Attacking { defender: Some(ControllerRef::You) , .. }
                 ))),
                 "filter should be a creature attacking you, got {filter:?}"
             ),
