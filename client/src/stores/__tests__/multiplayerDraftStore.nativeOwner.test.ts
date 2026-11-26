@@ -179,7 +179,7 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
     },
     publishActiveNativeDraft: (...args: Parameters<typeof actual.publishActiveNativeDraft>) => {
       storage.log.push(`pointerWrite:${args[0].capabilityId}`);
-      actual.publishActiveNativeDraft(...args);
+      return actual.publishActiveNativeDraft(...args);
     },
     clearNativeDraftCapability: async (...args: Parameters<typeof actual.clearNativeDraftCapability>) => {
       storage.log.push("clear:enter");
@@ -1110,6 +1110,113 @@ describe("the native draft owner", () => {
         return;
       }
     }
+  });
+});
+
+describe("a native seat's private record once no pointer leads to it", () => {
+  beforeEach(resetHarness);
+  afterEach(endHarness);
+
+  /** Another seat's live record, named by no pointer, that no clear here may touch. */
+  async function storeBystanderRecord(): Promise<unknown> {
+    await saveNativeDraftCapability({
+      capabilityId: "cap-other",
+      endpoint: ENDPOINT,
+      draftCode: "NAT002",
+      playerToken: "tok-other",
+      seatIndex: 1,
+      participant: "guest",
+    });
+    return storedRecord("cap-other");
+  }
+
+  it.each(["an expired pointer", "a mismatched record", "an expired record"] as const)(
+    "a resume that clears an unusable pointer removes the record it named: %s",
+    async (leg) => {
+      const { capabilityId, pointerText } = await storeNativePair();
+      const bystander = await storeBystanderRecord();
+      switch (leg) {
+        case "an expired pointer": {
+          const pointer = JSON.parse(pointerText) as Record<string, unknown>;
+          localStorage.setItem(POINTER_KEY, JSON.stringify({ ...pointer, timestamp: Date.now() - 5 * 60 * 60 * 1000 }));
+          break;
+        }
+        case "a mismatched record": {
+          const record = await storedRecord(capabilityId) as Record<string, unknown>;
+          await idbSet(nativeKey(capabilityId), { ...record, draftCode: "NAT999" }, getDraftStore());
+          break;
+        }
+        case "an expired record": {
+          const record = await storedRecord(capabilityId) as Record<string, unknown>;
+          await idbSet(nativeKey(capabilityId), { ...record, timestamp: Date.now() - 5 * 60 * 60 * 1000 }, getDraftStore());
+          break;
+        }
+      }
+      // Reach: the pointer still names the record, which is stored, before the resume.
+      expect(storedPointer()).toMatchObject({ transport: "native", capabilityId });
+      await expect(storedRecord(capabilityId)).resolves.toMatchObject({ capabilityId, playerToken: "tok-guest" });
+
+      await expect(store().resumeNativeDraft()).resolves.toEqual({ status: "invalid" });
+      // Reach: the expired pointer never reaches the record read; the other legs do.
+      expect(storage.log.includes("load:enter")).toBe(leg !== "an expired pointer");
+      expect(storedPointer()).toBeNull();
+      await expect(storedRecord(capabilityId)).resolves.toBeUndefined();
+      await expect(storedRecord("cap-other")).resolves.toEqual(bystander);
+      expect(native.instances).toHaveLength(0);
+    },
+  );
+
+  it("a native successor's pointer removes the record its predecessor's pointer named", async () => {
+    const predecessor = await joinNative();
+    // Reach: the predecessor's record and pointer are stored before the successor starts.
+    await expect(storedRecord(predecessor)).resolves.toMatchObject({ capabilityId: predecessor, playerToken: "tok-guest" });
+    expect(storedPointer()).toMatchObject({ capabilityId: predecessor });
+    const bystander = await storeBystanderRecord();
+
+    await expect(store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings }))
+      .resolves.toEqual({ status: "opened" });
+    const successor = storedPointer()?.capabilityId as string;
+    expect(successor).toEqual(expect.any(String));
+    expect(successor).not.toBe(predecessor);
+    expect(native.instances[0]!.disposeCount).toBe(1);
+    await expect(storedRecord(predecessor)).resolves.toBeUndefined();
+    // Sibling: the live record the current pointer names stays, as does a record no clear here names.
+    await expect(storedRecord(successor)).resolves.toMatchObject({ capabilityId: successor, playerToken: "tok-host" });
+    await expect(storedRecord("cap-other")).resolves.toEqual(bystander);
+  });
+
+  it("a P2P guest's committed pointer removes the native record the pointer it replaced named", async () => {
+    const predecessor = await joinNative();
+    await joinP2PGuest();
+    // Reach: the native owner is retired, and its pointer and record stay until the guest publishes.
+    expect(native.instances[0]!.disposeCount).toBe(1);
+    expect(storedPointer()).toMatchObject({ transport: "native", capabilityId: predecessor });
+    await expect(storedRecord(predecessor)).resolves.toMatchObject({ capabilityId: predecessor });
+
+    guests.instances[0]!.emit({
+      type: "recoveryCommitted",
+      pointer: { roomCode: "ABCDE", displayName: "A", hostPeerId: "phase2-OWN", capabilityId: "cap-guest" },
+    });
+    await flush();
+    expect(storedPointer()).toMatchObject({ hostPeerId: "phase2-OWN", capabilityId: "cap-guest" });
+    expect(storedPointer()).not.toHaveProperty("transport");
+    await expect(storedRecord(predecessor)).resolves.toBeUndefined();
+  });
+
+  it("a resume that republishes its own capability keeps that record", async () => {
+    const capabilityId = await joinNative();
+    native.instances[0]!.emit({ type: "disconnected" });
+    const before = await storedRecord(capabilityId) as { timestamp: number };
+    // Reach: the pointer this resume replaces names the record it keeps.
+    expect(storedPointer()?.capabilityId).toBe(capabilityId);
+
+    await expect(store().resumeNativeDraft()).resolves.toEqual({ status: "resumed" });
+    expect(native.instances).toHaveLength(2);
+    expect(native.instances[0]!.disposeCount).toBe(1);
+    expect(storedPointer()?.capabilityId).toBe(capabilityId);
+    const after = await storedRecord(capabilityId) as { capabilityId: string; timestamp: number };
+    expect(after.capabilityId).toBe(capabilityId);
+    expect(after.timestamp).toBeGreaterThanOrEqual(before.timestamp);
   });
 });
 

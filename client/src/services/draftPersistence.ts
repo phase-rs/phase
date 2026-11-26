@@ -445,14 +445,17 @@ export function clearActiveDraftPod(): void {
 /**
  * The room code and display name are enough to reconnect, but never confer a
  * seat. The opaque draft token stays in IndexedDB under the expected host id.
+ * Settles once a native seat's record this pointer replaces is dealt with.
  */
 export function saveActiveDraftGuest(
   meta: Omit<ActiveDraftGuestMeta, "timestamp" | "capabilityId"> & { capabilityId: string },
-): void {
+): Promise<void> {
   const roomCode = parseRoomCode(meta.roomCode);
   const displayName = meta.displayName.trim();
-  if (!roomCode || !displayName || !meta.hostPeerId.trim() || !isNonEmptyString(meta.capabilityId)) return;
-  localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, JSON.stringify({
+  if (!roomCode || !displayName || !meta.hostPeerId.trim() || !isNonEmptyString(meta.capabilityId)) {
+    return Promise.resolve();
+  }
+  return replaceActiveDraftPointer(JSON.stringify({
     roomCode,
     displayName,
     hostPeerId: meta.hostPeerId,
@@ -1018,10 +1021,61 @@ export async function saveNativeDraftCapability(
   };
 }
 
-/** Writes a native pointer; one that does not validate is not written. */
-export function publishActiveNativeDraft(pointer: ActiveNativeDraftPointer): void {
-  if (!isActiveNativeDraftPointer(pointer)) return;
-  localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, JSON.stringify({
+/**
+ * The capability a stored pointer's text names, read as a native pointer:
+ * null for any text that is not one or names none. A malformed or expired
+ * native pointer still names its capability.
+ */
+function nativePointerCapabilityId(raw: string | null): string | null {
+  if (raw === null) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  return isRecord(value) && value.transport === "native" && isNonEmptyString(value.capabilityId)
+    ? value.capabilityId
+    : null;
+}
+
+/**
+ * Removes a native seat's private record once no pointer leads to it. The
+ * stored pointer is read in the same step as the delete, so a pointer that
+ * names this capability again by then, its own resume's, keeps the record.
+ * Unavailable storage keeps it.
+ */
+async function removeUnnamedNativeDraftCapability(capabilityId: string): Promise<void> {
+  await removeDraftRecordIf(
+    NATIVE_DRAFT_CAPABILITY_PREFIX + capabilityId,
+    (value) => value !== undefined
+      && nativePointerCapabilityId(localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY)) !== capabilityId,
+  );
+}
+
+/**
+ * Writes the tab's one recovery pointer, throwing as the write does. A native
+ * pointer it replaces leaves its seat's private record with no route back, so
+ * the returned promise settles once that record is removed or kept.
+ */
+function replaceActiveDraftPointer(text: string): Promise<void> {
+  let replaced: string | null;
+  try {
+    replaced = nativePointerCapabilityId(localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY));
+  } catch {
+    replaced = null;
+  }
+  localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, text);
+  return replaced === null ? Promise.resolve() : removeUnnamedNativeDraftCapability(replaced);
+}
+
+/**
+ * Writes a native pointer; one that does not validate is not written. Settles
+ * once a native record the pointer replaces is dealt with.
+ */
+export function publishActiveNativeDraft(pointer: ActiveNativeDraftPointer): Promise<void> {
+  if (!isActiveNativeDraftPointer(pointer)) return Promise.resolve();
+  return replaceActiveDraftPointer(JSON.stringify({
     transport: "native",
     capabilityId: pointer.capabilityId,
     endpoint: pointer.endpoint,
@@ -1097,15 +1151,31 @@ export async function loadNativeDraftCapability(
   return { type: "present", record: value };
 }
 
-/** Removes the native pointer only when its stored text is still the captured text. */
-export function clearActiveNativeDraftIfCurrent(capture: NativeDraftPointerCapture): void {
+/**
+ * Removes the native pointer only when its stored text is still the captured
+ * text, and says whether it did.
+ */
+export function clearActiveNativeDraftIfCurrent(capture: NativeDraftPointerCapture): boolean {
   try {
-    if (localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY) === capture.raw) {
-      localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
-    }
+    if (localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY) !== capture.raw) return false;
+    localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
+    return true;
   } catch {
     // Unavailable storage is not evidence that this caller owns the pointer.
+    return false;
   }
+}
+
+/**
+ * Clears a native pointer a resume cannot use (expired, malformed, or leading
+ * to an absent, invalid or mismatched record) when its stored text is still
+ * the captured text, and then the private record it names, which no pointer
+ * leads to any more.
+ */
+export async function clearUnusableNativeDraft(capture: NativeDraftPointerCapture): Promise<void> {
+  if (!clearActiveNativeDraftIfCurrent(capture)) return;
+  const capabilityId = nativePointerCapabilityId(capture.raw);
+  if (capabilityId !== null) await removeUnnamedNativeDraftCapability(capabilityId);
 }
 
 /**

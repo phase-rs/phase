@@ -86,9 +86,9 @@ import {
   clearActiveDraftPodFor,
   clearActiveDraftGuest,
   clearActiveDraftGuestIfCurrent,
-  clearActiveNativeDraftIfCurrent,
   clearDraftSettlementOutbox,
   clearNativeDraftCapability,
+  clearUnusableNativeDraft,
   inspectActiveNativeDraft,
   loadDraftIntergameCommands,
   loadActiveDraftPod,
@@ -2219,7 +2219,8 @@ async function openNativeOwner(
       return { status: "superseded" };
     }
     if (owner.role === "native") owner.capability = hold;
-    publishActiveNativeDraft(pointer);
+    // Publishing over a predecessor's native pointer removes the record it named.
+    await publishActiveNativeDraft(pointer);
     return { status: "opened" };
   } catch (error) {
     if (!isCurrentOwner()) {
@@ -2795,7 +2796,7 @@ export const useMultiplayerDraftStore = create<
     const active = inspectActiveNativeDraft();
     if (active.type === "absent") return { status: "absent" };
     if (active.type === "invalid") {
-      clearActiveNativeDraftIfCurrent(active.capture);
+      await clearUnusableNativeDraft(active.capture);
       return { status: "invalid" };
     }
     const { pointer, capture } = active;
@@ -2822,7 +2823,7 @@ export const useMultiplayerDraftStore = create<
         case "absent":
         case "invalid":
         case "mismatch":
-          clearActiveNativeDraftIfCurrent(capture);
+          await clearUnusableNativeDraft(capture);
           return { status: "invalid" };
         default:
           return assertNever(loaded);
@@ -2927,10 +2928,12 @@ export const useMultiplayerDraftStore = create<
       }, signal);
       set({ seatIndex: record.seatIndex });
       for (const event of buffered) handleNativeEvent(event, set);
-      publishActiveNativeDraft(refreshed);
+      // Publishing over a predecessor's native pointer removes the record it named.
+      const replaced = publishActiveNativeDraft(refreshed);
       const previousTeardown = disposeDetachedOwner(previous, true);
       retainDraftSessionTeardown(detachedPersistenceId(previous), previousTeardown);
       void previousTeardown;
+      await replaced;
       return { status: "resumed" };
     } finally {
       settleProvisional(provisional);
@@ -4541,8 +4544,8 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
     case "recoveryCommitted":
       // This event reaches only the installed owner, so a superseded or ended
       // owner publishes nothing, and the write runs in the commit's own
-      // continuation.
-      saveActiveDraftGuest(event.pointer);
+      // continuation. A native pointer it replaces takes its record with it.
+      void saveActiveDraftGuest(event.pointer);
       break;
     case "workspaceRestored":
       restoredWorkspace = {
