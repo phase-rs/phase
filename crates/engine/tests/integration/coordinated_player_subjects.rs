@@ -624,8 +624,8 @@ fn sylvan_offering_caster_and_chosen_opponent_each_create_tokens() {
 
 /// P-Infernal, sentence 1. CR 701.21a: the caster and the chosen opponent each
 /// sacrifice a creature. CR 101.4: both choices are made, P0's then P1's, before
-/// either permanent is sacrificed. (The draw sentence is a pre-existing defect and
-/// is deliberately not asserted.)
+/// either permanent is sacrificed. CR 608.2c: each player who sacrificed a
+/// creature this way then draws two cards (P0's hand also loses the spell).
 #[test]
 fn infernal_offering_both_choose_then_both_sacrifice() {
     let mut scenario = game(2);
@@ -637,12 +637,18 @@ fn infernal_offering_both_choose_then_both_sacrifice() {
         .add_spell_to_hand_from_oracle(P0, "Infernal Offering", false, INFERNAL_OFFERING)
         .id();
     let mut runner = scenario.build();
+    let hands = zone_counts(&runner, 2, Zone::Hand);
     let _ = runner.cast(spell).commit();
     let (events, prompts) = settle(&mut runner, P1);
     assert_eq!(
         prompts,
         vec![(P0, 0), (P1, 0)],
         "P0 then P1 choose before anything is sacrificed"
+    );
+    assert_eq!(
+        deltas(&zone_counts(&runner, 2, Zone::Hand), &hands),
+        vec![-1 + 2, 2],
+        "each player who sacrificed a creature this way draws two cards"
     );
     let sacrificed: Vec<PlayerId> = events
         .iter()
@@ -653,6 +659,68 @@ fn infernal_offering_both_choose_then_both_sacrifice() {
         .collect();
     assert_eq!(sacrificed.len(), 2, "{sacrificed:?}");
     assert!(sacrificed.contains(&P0) && sacrificed.contains(&P1));
+}
+
+/// P-Infernal, ruling: "If you control no creatures, you won't sacrifice one and
+/// you won't draw two cards. The same is true for the chosen opponent."
+/// CR 608.2c: P1 controls no creature, so only P0 sacrificed one this way and
+/// only P0 draws two.
+#[test]
+fn infernal_offering_player_without_a_creature_draws_nothing() {
+    let mut scenario = game(2);
+    scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Infernal Offering", false, INFERNAL_OFFERING)
+        .id();
+    let mut runner = scenario.build();
+    let hands = zone_counts(&runner, 2, Zone::Hand);
+    let _ = runner.cast(spell).commit();
+    let (events, _) = settle(&mut runner, P1);
+    let sacrificed: Vec<PlayerId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PermanentSacrificed { player_id, .. } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sacrificed, vec![P0], "reach: only P0 sacrificed");
+    assert_eq!(
+        deltas(&zone_counts(&runner, 2, Zone::Hand), &hands),
+        vec![-1 + 2, 0]
+    );
+}
+
+/// P-Infernal, controller axis. CR 701.21a + CR 109.4 + CR 608.2h: P0's only
+/// creature is owned by P1, and P1 controls none. P0 sacrificed it (a player
+/// sacrifices what they control), so P0 draws two and P1, its owner, draws
+/// nothing. An owner-keyed scope would credit P1.
+#[test]
+fn infernal_offering_credits_the_sacrificing_controller_not_the_owner() {
+    let mut scenario = game(2);
+    let stolen = scenario
+        .add_creature(P1, "Stolen Bears", 2, 2)
+        .controlled_by(P0)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Infernal Offering", false, INFERNAL_OFFERING)
+        .id();
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().objects[&stolen].controller, P0);
+    let hands = zone_counts(&runner, 2, Zone::Hand);
+    let _ = runner.cast(spell).commit();
+    let (events, _) = settle(&mut runner, P1);
+    let sacrificed: Vec<PlayerId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PermanentSacrificed { player_id, .. } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sacrificed, vec![P0], "reach: P0 sacrificed P1's creature");
+    assert_eq!(
+        deltas(&zone_counts(&runner, 2, Zone::Hand), &hands),
+        vec![-1 + 2, 0]
+    );
 }
 
 /// P-Diviner. Diviner Spirit deals 2 combat damage, so the controller and the

@@ -22,10 +22,11 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_nom::target::parse_declared_target_prefix;
 use super::super::oracle_quantity::{
-    parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
-    parse_event_context_quantity_with_context, parse_for_each_clause, parse_for_each_clause_expr,
-    parse_for_each_clause_expr_with_context, parse_for_each_grouped_clause_expr,
-    parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
+    is_empty_typed_filter, parse_cda_quantity, parse_cda_quantity_with_context,
+    parse_event_context_quantity, parse_event_context_quantity_with_context, parse_for_each_clause,
+    parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
+    parse_for_each_grouped_clause_expr, parse_for_each_short_of_clause_expr,
+    parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_bare_was_dealt_damage_suffix, parse_block_history_clause,
@@ -51,10 +52,10 @@ use crate::types::ability::{
     CountBinding, DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect,
     EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
     NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PlayerRelation,
-    PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    RepeatForTiming, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TargetSelectionMode, TypeFilter, TypedFilter,
+    PossessionAxis, PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr,
+    QuantityRef, RepeatForTiming, RestrictionPlayerScope, RoundingMode,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -7011,6 +7012,21 @@ pub(super) fn strip_each_player_subject(
         return (Some(action_scope), deconjugated);
     }
 
+    // CR 608.2c: "each player who discarded/sacrificed a <filter> this way"
+    // restricts the set to the players who possessed a member of the preceding
+    // instruction's tracked set with that producer action — Mog, Moogle
+    // Warrior's "Each player who discarded a card this way draws a card",
+    // Infernal Offering's "Each player who sacrificed a creature this way draws
+    // two cards". Consumed and reflected in the scope like the clauses above.
+    if let Some((tracked_scope, after_clause)) =
+        strip_tracked_set_action_this_way_clause(&scope, rest)
+    {
+        return (
+            Some(tracked_scope),
+            subject::deconjugate_verb(&after_clause),
+        );
+    }
+
     // CR 508.6 + CR 104.3e: A "[source] attacked this turn" relative clause after
     // "each player" / "each opponent" restricts the affected set to the players
     // the ability source creature attacked this turn — Angel of Destiny: "each
@@ -7849,7 +7865,25 @@ fn strip_performed_action_this_way_clause(
     base: &PlayerFilter,
     rest: &str,
 ) -> Option<(PlayerFilter, String)> {
-    use crate::types::ability::PlayerRelation;
+    let relation = each_subject_player_relation(base)?;
+    let (remainder, action) =
+        crate::parser::oracle_quantity::parse_who_action_this_way(rest).ok()?;
+    let verb_phrase = remainder.trim_start();
+    if verb_phrase.is_empty() {
+        return None;
+    }
+    Some((
+        PlayerFilter::PerformedActionThisWay { relation, action },
+        verb_phrase.to_string(),
+    ))
+}
+
+/// CR 102.2 + CR 608.2c: The player relation an "each player" / "each
+/// opponent" subject base names, for the "who … this way" relative clauses
+/// that narrow it (`strip_performed_action_this_way_clause`,
+/// `strip_tracked_set_action_this_way_clause`). `None` for every other base:
+/// those relative clauses attach only to the two population subjects.
+fn each_subject_player_relation(base: &PlayerFilter) -> Option<PlayerRelation> {
     let relation = match base {
         PlayerFilter::Opponent => PlayerRelation::Opponent,
         PlayerFilter::All => PlayerRelation::All,
@@ -7881,16 +7915,68 @@ fn strip_performed_action_this_way_clause(
         | PlayerFilter::TargetPlayer
         | PlayerFilter::TrackedSetPossessor { .. } => return None,
     };
-    let (remainder, action) =
-        crate::parser::oracle_quantity::parse_who_action_this_way(rest).ok()?;
-    let verb_phrase = remainder.trim_start();
-    if verb_phrase.is_empty() {
-        return None;
-    }
-    Some((
-        PlayerFilter::PerformedActionThisWay { relation, action },
-        verb_phrase.to_string(),
-    ))
+    Some(relation)
+}
+
+/// CR 608.2c + CR 701.9a + CR 701.21a + CR 108.3 + CR 109.4: "each player who
+/// discarded/sacrificed a <filter> this way" — the players who possessed a
+/// member of the preceding instruction's tracked set with that producer
+/// action: the discarding player is the card's owner (a hand holds only its
+/// owner's cards, CR 400.3); the sacrificing player is the permanent's
+/// controller. Lowers to `PlayerFilter::TrackedSetPossessor` with
+/// `caused_by: Some(cause)`, the typed reading of the printed verb (Mog, Moogle
+/// Warrior; Infernal Offering; Azra Bladeseeker; Borderland Explorer;
+/// Vaevictis Asmadi, the Dire).
+///
+/// Only these two verbs are printed in this subject construction (the Class A
+/// census); an "exiled" / "milled" actor arm waits for a card. A clause without
+/// the "this way" terminator (Creeping Dread's "who discarded a card that
+/// shares a card type …"), a nested relation (Scythe Specter's "with the
+/// greatest mana value among cards discarded this way"), or an article-less
+/// object ("who discarded their hand this way") declines, as does an empty
+/// verb phrase. Returns the scope and the verb-phrase remainder.
+fn strip_tracked_set_action_this_way_clause(
+    base: &PlayerFilter,
+    rest: &str,
+) -> Option<(PlayerFilter, String)> {
+    let relation = each_subject_player_relation(base)?;
+    let lower = rest.to_lowercase();
+    nom_on_lower(rest, &lower, |i| {
+        let (i, _) = tag("who ").parse(i)?;
+        let (i, (possession, cause)) = alt((
+            value(
+                (PossessionAxis::Owner, ThisWayCause::Discarded),
+                tag("discarded "),
+            ),
+            value(
+                (PossessionAxis::Controller, ThisWayCause::Sacrificed),
+                tag("sacrificed "),
+            ),
+        ))
+        .parse(i)?;
+        let (i, _) = alt((tag("a "), tag("an "))).parse(i)?;
+        let (filter, i) = parse_type_phrase_folding(i);
+        if is_empty_typed_filter(&filter) {
+            return Err(oracle_err(i));
+        }
+        let (i, _) = preceded(multispace0, tag("this way")).parse(i)?;
+        let (i, _) = multispace1.parse(i)?;
+        if i.is_empty() {
+            return Err(oracle_err(i));
+        }
+        Ok((i, (possession, cause, filter)))
+    })
+    .map(|((possession, cause, filter), verb_phrase)| {
+        (
+            PlayerFilter::TrackedSetPossessor {
+                relation,
+                possession,
+                filter,
+                caused_by: Some(cause),
+            },
+            verb_phrase.to_string(),
+        )
+    })
 }
 
 /// CR 607.2a + CR 108.3: The linked-exile owner subject — "the exiled card's
