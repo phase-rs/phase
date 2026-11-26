@@ -103,7 +103,6 @@ pub fn resolve(
 /// token enters (`predefined_token_abilities("Jace")`).
 fn jace_token_spec(controller: PlayerId, source_id: ObjectId) -> TokenSpec {
     TokenSpec {
-        block_attacker: None,
         characteristics: TokenCharacteristics {
             display_name: "Jace".to_string(),
             power: None,
@@ -125,6 +124,7 @@ fn jace_token_spec(controller: PlayerId, source_id: ObjectId) -> TokenSpec {
         sacrifice_at: None,
         source_id,
         controller,
+        blocking_attacker: None,
     }
 }
 

@@ -1427,7 +1427,7 @@ fn static_carries_optional_modification(s: &StaticDefinition) -> bool {
 fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
     matches!(
         mode,
-        StaticMode::MayLookAtTopOfLibrary
+        StaticMode::MayLookAtTopOfLibrary { .. }
             // CR 708.5: "you may look at face-down creatures [you don't control |
             // your opponents control] any time" — opt-in look permission.
             | StaticMode::MayLookAtFaceDown
@@ -13573,7 +13573,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             AbilityKind::Spell,
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         )

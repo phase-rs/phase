@@ -3,10 +3,12 @@
 //! once for each attack- or enter-caused triggered occurrence, at its push or
 //! at its removal during placement (CR 603.3c, CR 603.3d).
 //!
-//! The observers are the D1 shapes of the printed cards (phase 1 of the
-//! Firebender Ascension class: the parser cannot produce them until phase 4).
-//! Each is built from its verbatim Oracle text; only the trigger condition the
-//! parser cannot yet produce is replaced, keeping today's parse of its effect.
+//! The observers are the D1 shapes of the printed cards: each is built from
+//! its verbatim Oracle text, then its trigger condition is replaced with the
+//! hand-built D1 shape (keeping the parsed effect), so these tests pin the
+//! engine's observer machinery independently of the live parser. (The parser
+//! produces the real shapes since #11338; the replacement is retained
+//! deliberately as an engine-level pin.)
 //!
 //! Oracle text (card data):
 //! - Firebender Ascension: "When this enchantment enters, create a 2/2 red
@@ -144,9 +146,9 @@ impl Observer {
 }
 
 /// Add the printed observer to `player`'s battlefield from its verbatim Oracle
-/// text, then replace the trigger condition the parser cannot yet produce
-/// (Ascension's `Unknown` line; Aboleth's and Proctor's misparsed `ChangesZone`
-/// line) with its D1 shape, keeping the parsed effect half.
+/// text, then replace the trigger condition with its D1 shape, keeping the
+/// parsed effect half. (The parser produces the real shapes since #11338;
+/// the replacement pins the engine-level D1 shape.)
 fn add_observer(scenario: &mut GameScenario, player: PlayerId, observer: Observer) -> ObjectId {
     let id = match observer {
         Observer::FirebenderAscension => scenario

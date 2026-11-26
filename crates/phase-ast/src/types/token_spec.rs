@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::ability::{Duration, EntryAttackDestination, StaticDefinition};
 use super::card_type::{CoreType, Supertype};
 use super::counter::CounterType;
-use super::identifiers::ObjectId;
+use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::keywords::Keyword;
 use super::mana::ManaColor;
 use super::player::PlayerId;
@@ -71,9 +71,6 @@ pub struct TokenSpec {
     /// CR 508.4: the batch's resolved destination.
     #[serde(default, skip_serializing_if = "TokenAttackRequest::is_unspecified")]
     pub attack_request: TokenAttackRequest,
-    /// CR 509.4: the bound attacker shared by all entrants of this instruction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub block_attacker: Option<super::ObjectIncarnationRef>,
     /// CR 603.7: When set, the token is sacrificed at the end of the given
     /// duration (e.g., Mobilize tokens sacrificed at end of combat).
     pub sacrifice_at: Option<Duration>,
@@ -91,6 +88,11 @@ pub struct TokenSpec {
     /// re-reading `ability.targets`.
     #[serde(default, skip_serializing_if = "TokenHostRequest::is_not_requested")]
     pub attach_to: TokenHostRequest,
+    /// CR 509.1h + CR 506.3e: The token instruction's "blocking …" clause,
+    /// resolved once at propose time to the attacker each created token
+    /// enters blocking (`None` = no blocking rider).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_attacker: Option<ObjectIncarnationRef>,
 }
 
 /// CR 508.4 + CR 608.2h: a token instruction's named destination, resolved

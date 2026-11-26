@@ -821,7 +821,7 @@ pub(crate) fn record_departed_stack_spell(state: &mut GameState, entry: &StackEn
 /// CR 701.6a + CR 113.3b + CR 608.2h: record a stack object removed without
 /// resolving (countered, or removed with its controller under CR 800.4a), as it last
 /// existed on the stack, for a trigger that still names it. The non-resolving-removal
-/// writer of both departed-stack tables, called only from
+/// writer of all three departed-stack tables, called only from
 /// `remove_nonresolving_stack_entry_at` (a departed spell is also recorded at its zone
 /// exit, `zones.rs::apply_zone_exit_cleanup`). A resolution pop records nothing: the
 /// object resolved. An end-the-turn exile
@@ -838,13 +838,20 @@ fn record_departed_stack_entry(state: &mut GameState, entry: &StackEntry) {
                 .departed_activated_abilities
                 .insert(entry.id, entry.clone());
         }
-        // No trigger event names these as "that spell or ability": a spell-cast event
-        // names a spell, an activation event names an activated ability's entry, a
-        // keyword-action entry is named by no activation event, and combat damage is
+        // CR 113.1c + CR 608.2h + CR 707.10: a triggered ability on the stack is
+        // likewise an object whose whole last-known state is its entry (ability,
+        // choices, targets), kept under the id the observer's trigger event
+        // names — an observer copying "that ability" after it was countered
+        // reads this record.
+        StackEntryKind::TriggeredAbility { .. } => {
+            state
+                .departed_triggered_abilities
+                .insert(entry.id, entry.clone());
+        }
+        // No trigger event names these as "that spell or ability": a
+        // keyword-action entry is named by no event, and combat damage is
         // not an ability.
-        StackEntryKind::TriggeredAbility { .. }
-        | StackEntryKind::KeywordAction { .. }
-        | StackEntryKind::CombatDamage { .. } => {}
+        StackEntryKind::KeywordAction { .. } | StackEntryKind::CombatDamage { .. } => {}
     }
 }
 
@@ -6175,21 +6182,21 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
     if condition.is_some() {
         return None;
     }
-    // Token trigger membership is determined by the handler-owned read-only
-    // profile, while semantic equality below keeps every non-identity field.
-    // A clone proof resolves every member through the canonical path, so a
-    // source-relative copy may join only when its exact sequential trace is
-    // still inert at every checkpoint.
-    // CR 509.4: rider-bearing token entries can publish combat events during resolution.
+    // CR 509.4: entering blockers publish combat events as well as entry.
     if matches!(
         &ability.effect,
         Effect::Token {
-            block_attacker: Some(_),
+            enters_blocking: Some(_),
             ..
         }
     ) {
         return None;
     }
+    // Token trigger membership is determined by the handler-owned read-only
+    // profile, while semantic equality below keeps every non-identity field.
+    // A clone proof resolves every member through the canonical path, so a
+    // source-relative copy may join only when its exact sequential trace is
+    // still inert at every checkpoint.
     let source_axis = if effects::supports_sequential_batch_proof(ability) {
         BatchSourceAxis::SourceIndependent
     } else {
@@ -6925,11 +6932,11 @@ mod tests {
     }
 
     /// S-1 (CR 701.6a + CR 113.7a + CR 608.2h): a non-resolving removal of an
-    /// activated ability records its entry whole under the entry's id; a
-    /// non-resolving removal of a triggered ability records nothing, and neither
-    /// does the CR 405.5 resolution pop of an activated ability.
+    /// activated or triggered ability records its entry whole under the entry's
+    /// id, each in its own departed table; other stack objects record nothing,
+    /// and neither does the CR 405.5 resolution pop of an activated ability.
     #[test]
-    fn a_nonresolving_removal_records_an_activated_ability_whole_and_no_trigger() {
+    fn a_nonresolving_removal_records_an_activated_ability_whole_and_its_trigger() {
         let mut state = setup();
         let source = create_object(
             &mut state,
@@ -6977,7 +6984,7 @@ mod tests {
             "the countered activated ability is recorded whole"
         );
 
-        // (2) A countered triggered ability is not recorded.
+        // (2) A countered triggered ability is recorded whole in its own table.
         let triggered = push_entry(
             &mut state,
             StackEntryKind::TriggeredAbility {
@@ -6998,13 +7005,44 @@ mod tests {
             super::super::lifecycle::DelayedTerminalDisposition::Countered,
         )
         .expect("reach guard: the triggered entry was removed");
+        assert_eq!(
+            state.departed_triggered_abilities.get(&triggered.id),
+            Some(&triggered),
+            "the countered triggered ability is recorded whole"
+        );
         assert!(
             !state
                 .departed_activated_abilities
                 .contains_key(&triggered.id),
-            "a triggered ability is never recorded"
+            "a triggered ability records in its own table, never the activation table"
         );
+        // Adjacent siblings at the rewritten seam still record nothing.
+        for kind in [
+            StackEntryKind::KeywordAction {
+                action: crate::types::ability::KeywordAction::Crew {
+                    vehicle_id: source,
+                    paid_creature_ids: vec![],
+                },
+            },
+            StackEntryKind::CombatDamage {
+                sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                assignments: vec![],
+            },
+        ] {
+            let sibling = push_entry(&mut state, kind);
+            remove_nonresolving_stack_entry_at(
+                &mut state,
+                0,
+                super::super::lifecycle::DelayedTerminalDisposition::Countered,
+            )
+            .expect("reach guard: the sibling entry was removed");
+            assert!(
+                !state.departed_triggered_abilities.contains_key(&sibling.id),
+                "a non-trigger stack object is never recorded as a trigger"
+            );
+        }
         assert_eq!(state.departed_activated_abilities.len(), 1);
+        assert_eq!(state.departed_triggered_abilities.len(), 1);
 
         // (3) The resolution pop of an activated ability records nothing.
         let resolving = push_entry(
@@ -7023,6 +7061,34 @@ mod tests {
             "a resolving ability is not departed"
         );
         assert_eq!(state.departed_activated_abilities.len(), 1);
+
+        // (4) The resolution pop of a triggered ability records nothing either.
+        let resolving_trigger = push_entry(
+            &mut state,
+            StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: ability(None),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        );
+        let popped = pop_top_stack_entry(&mut state).expect("reach guard: popped");
+        assert_eq!(
+            popped.entry.id, resolving_trigger.id,
+            "reach guard: that entry"
+        );
+        assert!(
+            !state
+                .departed_triggered_abilities
+                .contains_key(&resolving_trigger.id),
+            "a resolving trigger is not departed"
+        );
+        assert_eq!(state.departed_triggered_abilities.len(), 1);
     }
 
     /// CR 608.2b (typed composition, not printed Oracle): an unjudged
@@ -8117,7 +8183,7 @@ mod tests {
             },
             Effect::Sacrifice {
                 target: TargetFilter::Typed(TypedFilter::creature()),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         ] {
@@ -10737,7 +10803,7 @@ mod tests {
         /// A bare Insect Token effect: 1/1 green Insect, Fixed count.
         fn insect_token_effect() -> Effect {
             Effect::Token {
-                block_attacker: None,
+                enters_blocking: None,
                 name: "Insect".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -11726,7 +11792,7 @@ mod tests {
             state.pending_liminal_entry_resume = None;
 
             state.pending_token_battlefield_entry = Some(Box::new(PendingTokenBattlefieldEntry {
-                block_attacker: None,
+                blocking_attacker: None,
                 object_id: ObjectId(94),
                 name: "checkpoint token".to_string(),
                 source_id: ObjectId(95),
@@ -12935,10 +13001,13 @@ mod tests {
             push_token_triggers(&mut state, src, effect.clone(), None, 2);
             assert_eq!(batch_run_len(&state), Some(2));
 
-            let Effect::Token { block_attacker, .. } = &mut effect else {
+            let Effect::Token {
+                enters_blocking, ..
+            } = &mut effect
+            else {
                 panic!("expected a token effect");
             };
-            *block_attacker = Some(Box::new(TargetFilter::ParentTarget));
+            *enters_blocking = Some(TargetFilter::ParentTarget);
             push_token_triggers(&mut state, src, effect, None, 2);
             assert_eq!(batch_run_len(&state), None);
         }
@@ -12947,7 +13016,7 @@ mod tests {
         #[test]
         fn spec_emits_only_etb_pair_field_exclusions() {
             let base = TokenSpec {
-                block_attacker: None,
+                blocking_attacker: None,
                 characteristics: crate::types::proposed_event::TokenCharacteristics {
                     display_name: "Insect".to_string(),
                     power: Some(1),
@@ -12976,7 +13045,7 @@ mod tests {
             ));
 
             let mut blocking = base.clone();
-            blocking.block_attacker = Some(crate::types::identifiers::ObjectIncarnationRef::of(
+            blocking.blocking_attacker = Some(crate::types::identifiers::ObjectIncarnationRef::of(
                 ObjectId(2),
                 0,
             ));

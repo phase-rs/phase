@@ -319,10 +319,10 @@ fn translate_token(
         attach_to: None,
         enters_attacking: false,
         attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
-        block_attacker: None,
         supertypes: Vec::new(),
         static_abilities: Vec::new(),
         enter_with_counters: Vec::new(),
+        enters_blocking: None,
     })
 }
 
@@ -488,7 +488,7 @@ fn translate_sacrifice(params: &ForgeParams) -> Result<Effect, ForgeTranslateErr
         .unwrap_or(TargetFilter::Any);
     Ok(Effect::Sacrifice {
         target,
-        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
         min_count: 0,
     })
 }

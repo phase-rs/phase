@@ -876,6 +876,9 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         // CR 701.33b: abandoning moves command-zone→scheme-deck, never a
         // battlefield departure.
         | Effect::AbandonScheme
+        // CR 701.32b: re-firing a face-up scheme's abilities moves nothing off
+        // the battlefield.
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -2247,6 +2250,8 @@ pub struct SpellContext {
     /// leaves or loses the ability during casting. `None` for every other cast.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graveyard_permission_latch: Option<crate::types::game_state::GraveyardPermissionLatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_of_library_cast_latch: Option<Box<crate::types::game_state::TopOfLibraryCastLatch>>,
     /// CR 601.2b/f/h: Number of non-kicker additional-cost payments declared
     /// while casting this spell. Used by keyword abilities such as Squad
     /// (CR 702.157a), whose repeatable payment count is not a kicker count.
@@ -4733,6 +4738,7 @@ impl ResolvedAbility {
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals

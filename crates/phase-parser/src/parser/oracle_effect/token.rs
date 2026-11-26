@@ -183,7 +183,7 @@ pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Opti
         attach_to: token.attach_to,
         enters_attacking: token.enters_attacking,
         attack_destination: token.attack_destination,
-        block_attacker: token.block_attacker,
+        enters_blocking: token.enters_blocking,
         // CR 205.4a: Carry parsed supertypes (e.g. "legendary" for Marit Lage)
         // onto the token so the legend rule (CR 704.5j) applies.
         supertypes: token.supertypes,
@@ -620,16 +620,6 @@ fn parse_token_description_with_context(
         (Some(slot.count), slot.where_x, slot.noun)
     };
 
-    // CR 509.4: strip the named blocking rider before parsing token keywords.
-    let lower = text.to_ascii_lowercase();
-    let outside = nom_primitives::mask_double_quoted_spans_preserving_len(&lower);
-    let entry_block =
-        nom_primitives::scan_at_word_boundaries_with_offset(&outside, parse_token_block_attacker);
-    let (text, block_attacker) = match entry_block {
-        Some((offset, attacker, _)) => (text[..offset].trim_end(), Some(Box::new(attacker))),
-        None => (text, None),
-    };
-
     // CR 508.4 + CR 506.3a: Strip inline "that's tapped and attacking" /
     // "that is tapped and attacking" / "thats tapped and attacking" /
     // "that are tapped and attacking" / "that are attacking" suffix (singular
@@ -700,6 +690,49 @@ fn parse_token_description_with_context(
                 false,
                 TokenAttackDestination::ControllerChooses,
             ),
+        };
+    // CR 509.1h + CR 506.3e + CR 509.4: Read the blocking rider before token keywords.
+    // An attack trigger supplies its attacker; a qualified block trigger
+    // instead binds the attacker from the declared blocker/attacker pair.
+    let blocking_lower = text.to_ascii_lowercase();
+    let outside = nom_primitives::mask_double_quoted_spans_preserving_len(&blocking_lower);
+    let blocking_clause = |i| -> OracleResult<'_, TargetFilter> {
+        let (i, _) =
+            alt((tag("that's"), tag("that is"), tag("thats"), tag("that are"))).parse(i)?;
+        let (i, _) = tag(" blocking ").parse(i)?;
+        let (i, filter) = alt((
+            value(
+                ctx.blocking_rider_antecedent
+                    .clone()
+                    .unwrap_or(TargetFilter::TriggeringSource),
+                tag("that creature"),
+            ),
+            value(
+                TargetFilter::Typed(
+                    phase_ast::types::ability::TypedFilter::creature().properties(vec![
+                        phase_ast::types::ability::FilterProp::Attacking {
+                            defender: Some(ControllerRef::You),
+                            scope: phase_ast::types::ability::AttackDefenderMatch::DirectPlayer,
+                        },
+                    ]),
+                ),
+                tag("target creature attacking you"),
+            ),
+        ))
+        .parse(i)?;
+        let (i, _) = alt((
+            value((), nom::combinator::eof),
+            value((), tag(" ")),
+            value((), tag(",")),
+            value((), tag(".")),
+        ))
+        .parse(i)?;
+        Ok((i, filter))
+    };
+    let (text, enters_blocking) =
+        match nom_primitives::scan_at_word_boundaries_with_offset(&outside, blocking_clause) {
+            Some((offset, filter, _)) => (text[..offset].trim_end(), Some(filter)),
+            None => (text, None),
         };
     let (mut count, leading_name, mut rest) = match slot_count {
         Some(count) => (count, None, text),
@@ -957,34 +990,8 @@ fn parse_token_description_with_context(
         static_abilities,
         enters_attacking,
         attack_destination,
-        block_attacker,
+        enters_blocking,
     })
-}
-
-/// CR 509.4: a token entry instruction naming a particular attacking creature.
-fn parse_token_block_attacker(input: &str) -> OracleResult<'_, TargetFilter> {
-    let (input, _) = alt((tag("that's"), tag("that is"), tag("that are"))).parse(input)?;
-    let (input, _) = tag(" blocking ").parse(input)?;
-    let (input, attacker) = alt((
-        value(TargetFilter::ParentTarget, tag("that creature")),
-        value(
-            {
-                use phase_ast::types::ability::{AttackDefenderMatch, FilterProp};
-                TargetFilter::Typed(
-                    phase_ast::types::ability::TypedFilter::creature().properties(vec![
-                        FilterProp::Attacking {
-                            defender: Some(ControllerRef::You),
-                            scope: AttackDefenderMatch::DirectPlayer,
-                        },
-                    ]),
-                )
-            },
-            tag("target creature attacking you"),
-        ),
-    ))
-    .parse(input)?;
-    let (input, _) = nom::combinator::eof.parse(input.trim_end_matches('.').trim_end())?;
-    Ok((input, attacker))
 }
 
 /// CR 508.4: the defender a token instruction names after "attacking":

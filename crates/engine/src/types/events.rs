@@ -802,6 +802,7 @@ impl EventObjectSnapshot {
             | TypeFilter::Kindred
             | TypeFilter::Permanent
             | TypeFilter::Card
+            | TypeFilter::Scheme
             | TypeFilter::Any
             | TypeFilter::Subtype(_) => Supported,
             TypeFilter::Non(inner) => Self::classify_type_filter(inner).negate(),

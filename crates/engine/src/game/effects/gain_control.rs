@@ -1682,7 +1682,7 @@ mod tests {
         );
         let create_treasures = ResolvedAbility::new(
             Effect::Token {
-                block_attacker: None,
+                enters_blocking: None,
                 name: "Treasure".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),

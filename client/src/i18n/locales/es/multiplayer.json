@@ -255,6 +255,7 @@
     "commanderDamage": "Daño de comandante",
     "poisonCounters": "Contadores de veneno",
     "playerSeats": "Asientos de jugadores",
+    "archenemySeat": "Archenemy",
     "seat": "Asiento {{number}}",
     "youHost": "Tú (anfitrión)",
     "ai": "IA",

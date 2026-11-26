@@ -17,7 +17,6 @@ pub fn resolve(
     // Build a synthetic Token effect and resolve through the standard token pipeline.
     let clue_ability = ResolvedAbility::new(
         crate::types::ability::Effect::Token {
-            block_attacker: None,
             name: "Clue".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -30,6 +29,7 @@ pub fn resolve(
             attach_to: None,
             enters_attacking: false,
             attack_destination: TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],

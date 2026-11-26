@@ -463,17 +463,19 @@ fn flash_foliage_keeps_its_attacker_when_a_copy_entry_pauses_and_restores() {
         .contains_key(&attacker));
     let saved =
         serde_json::to_string(&TrustedGameStateEnvelope::capture(runner.state().clone())).unwrap();
-    let pin = engine::types::identifiers::ObjectIncarnationRef::of(
-        attacker,
-        runner.state().objects[&attacker].incarnation,
-    );
     let pending = runner
         .state()
         .pending_token_battlefield_entry
         .as_ref()
         .expect("copy entry publication must be parked");
     assert_eq!(pending.object_id, source_id);
-    assert_eq!(pending.block_attacker, Some(pin));
+    assert_eq!(
+        pending.blocking_attacker,
+        Some(engine::types::identifiers::ObjectIncarnationRef::of(
+            attacker,
+            runner.state().objects[&attacker].incarnation,
+        ))
+    );
     let entry_event = |event: &GameEvent| {
         matches!(
             event,
@@ -555,10 +557,13 @@ fn blocking_rider_wire_is_additive() {
     });
     let mut with_attacker: Effect = serde_json::from_value(legacy_effect.clone()).unwrap();
     assert_eq!(to_value(&with_attacker).unwrap(), legacy_effect);
-    let Effect::Token { block_attacker, .. } = &mut with_attacker else {
+    let Effect::Token {
+        enters_blocking, ..
+    } = &mut with_attacker
+    else {
         panic!("legacy token effect");
     };
-    *block_attacker = Some(Box::new(engine::types::ability::TargetFilter::ParentTarget));
+    *enters_blocking = Some(engine::types::ability::TargetFilter::ParentTarget);
     let encoded = to_value(&with_attacker).unwrap();
     assert_eq!(
         serde_json::from_value::<Effect>(encoded).unwrap(),
@@ -569,7 +574,7 @@ fn blocking_rider_wire_is_additive() {
     let mut pending: PendingTokenBattlefieldEntry =
         serde_json::from_value(legacy_pending.clone()).unwrap();
     assert_eq!(to_value(&pending).unwrap(), legacy_pending);
-    pending.block_attacker = Some(engine::types::identifiers::ObjectIncarnationRef::of(
+    pending.blocking_attacker = Some(engine::types::identifiers::ObjectIncarnationRef::of(
         ObjectId(9),
         4,
     ));

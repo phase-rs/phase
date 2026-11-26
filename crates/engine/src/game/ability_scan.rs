@@ -983,6 +983,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             count,
             owner,
             attach_to,
+            enters_blocking,
             static_abilities,
             enter_with_counters,
             // read-free: literal name/types/colors/supertypes and enter-state flags
@@ -993,7 +994,6 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             tapped: _,
             enters_attacking: _,
             attack_destination,
-            block_attacker,
             supertypes: _,
         } => match mode {
             ScanMode::Conservative => Axes::CONSERVATIVE,
@@ -1011,12 +1011,18 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
                     FilterReadContext::SnapshotOrEvent,
                     mode,
                 ));
-                for at in [attach_to.as_ref(), block_attacker.as_deref()]
-                    .into_iter()
-                    .flatten()
-                {
+                if let Some(at) = attach_to {
                     acc = acc.or(scan_target_filter(
                         at,
+                        FilterReadContext::SnapshotOrEvent,
+                        mode,
+                    ));
+                }
+                // CR 509.1h: the blocking rider resolves its attacker at
+                // creation — the same resolution-time object read as `attach_to`.
+                if let Some(blocking) = enters_blocking {
+                    acc = acc.or(scan_target_filter(
+                        blocking,
                         FilterReadContext::SnapshotOrEvent,
                         mode,
                     ));
@@ -1095,7 +1101,9 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
-            acc = acc.or(scan_quantity_expr(count, mode));
+            if let Some(count) = count.count_expr() {
+                acc = acc.or(scan_quantity_expr(count, mode));
+            }
             acc
         }
         Effect::DiscardCard { target, count: _ } => {
@@ -2301,6 +2309,15 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
         Effect::ArrangePlanarDeckTop { .. } => Axes::NONE,
         Effect::Planeswalk => Axes::NONE,
         Effect::AbandonScheme => Axes::NONE,
+        // CR 701.32b: re-firing reads only the event-context scheme referent
+        // (classified by `effect_target_ctx` below as `SnapshotOrEvent`) and
+        // mutates no tracked state itself — the emitted event's downstream
+        // triggers are that resolution's footprint, not this node's.
+        Effect::SetSchemeInMotion { target } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            acc
+        }
         Effect::OpenAttractions { count: _ } => Axes::NONE,
         Effect::RollToVisitAttractions => Axes::NONE,
         Effect::AssembleContraptions { count } => {
@@ -4126,7 +4143,10 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
         },
         QuantityRef::ColorsInCommandersColorIdentity => Axes::NONE,
         QuantityRef::CommanderCastFromCommandZoneCount => Axes::NONE,
-        QuantityRef::CommanderManaValue { owner, .. } => {
+        QuantityRef::CommanderManaValue { owner, zones: _ } => {
+            // CR 903.3d / CR 903.3e: the owner axis is the scanned
+            // `ControllerRef`; `zones` widens the census extent, not its axis
+            // kind, so it adds no scanned axis (`projected` stays false).
             let mut acc = Axes::NONE;
             acc = acc.or(scan_controller_ref(owner));
             acc
@@ -5347,6 +5367,7 @@ fn scan_trigger_definition(
         counter_filter: _,
         saga_chapter: _,
         batched: _,
+        damage_received_grouping: _,
         die_sides: _,
         gotcha_condition: _,
         expend_threshold: _,
@@ -5776,6 +5797,12 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             projected: true,
             ..Axes::NONE
         }),
+        // CR 508.5: the defending-player identity predicate reads no axis
+        // itself; BOTH scopes — the subject and the defending anchor —
+        // classify through the shared `PlayerScope` classifier.
+        TriggerCondition::IsDefendingPlayer { player } => {
+            scan_player_scope(player).or(scan_player_scope(&PlayerScope::DefendingPlayer))
+        }
         // Digital-only Alchemy (no CR entry): "if you have a boon" — the
         // subject scope classifies exactly like the monarch's.
         TriggerCondition::HasBoon { player } => scan_player_scope(player),
@@ -6152,6 +6179,9 @@ fn scan_duration(x: &Duration, mode: ScanMode) -> Axes<'_> {
             acc
         }
         Duration::UntilHostLeavesPlay => Axes::NONE,
+        // CR 611.2a + CR 500.7: a resolved turn identity, no filter or
+        // quantity read (follows the `AtBeginningOfGrantedTurn` precedent).
+        Duration::UntilEndOfGrantedTurn { turn: _ } => Axes::NONE,
         // CR 611.2b: payload-free, exactly like `UntilHostLeavesPlay` — the
         // controller it is measured against lives on the carrier.
         Duration::WhileControllingHost => Axes::NONE,
@@ -6271,6 +6301,11 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
         // CR 725.1: see the `TriggerCondition::IsMonarch` arm above — the
         // subject scope is classified through the shared `PlayerScope` walker.
         StaticCondition::IsMonarch { player } => scan_player_scope(player),
+        // CR 508.5: see the `TriggerCondition::IsDefendingPlayer` arm — both
+        // the subject and the defending anchor classify.
+        StaticCondition::IsDefendingPlayer { player } => {
+            scan_player_scope(player).or(scan_player_scope(&PlayerScope::DefendingPlayer))
+        }
         StaticCondition::HasBoon { player } => scan_player_scope(player),
         // CR 122.1f: the poison predicate reads the scoped player's poison
         // total, a projected player resource — same axes as the
@@ -7420,6 +7455,7 @@ pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -9055,9 +9091,10 @@ fn static_mode_axes(static_mode: &StaticMode, mode: ScanMode) -> Axes<'_> {
             ..
         } => cost_opt(extra_cost.as_ref().map(|extra| &extra.cost), mode)
             .or(scan_pending_enters(enters_modifications, mode)),
-        StaticMode::TopOfLibraryCastPermission { alt_cost, .. } => {
-            cost_opt(alt_cost.as_ref(), mode)
-        }
+        StaticMode::TopOfLibraryCastPermission {
+            library, alt_cost, ..
+        } => scan_controller_ref(library).or(cost_opt(alt_cost.as_ref(), mode)),
+        StaticMode::MayLookAtTopOfLibrary { library } => scan_controller_ref(library),
         StaticMode::ExileCastPermission { extra_cost, .. } => {
             cost_opt(extra_cost.as_ref().map(|extra| &extra.cost), mode)
         }
@@ -9111,6 +9148,7 @@ fn static_mode_axes(static_mode: &StaticMode, mode: ScanMode) -> Axes<'_> {
         | StaticMode::ActivateAsInstant { .. }
         | StaticMode::CantGainLife
         | StaticMode::CantLoseLife
+        | StaticMode::CantSetSchemeInMotion
         | StaticMode::MustAttack
         | StaticMode::MustBlock
         | StaticMode::MustBlockAttacker { .. }
@@ -9158,7 +9196,6 @@ fn static_mode_axes(static_mode: &StaticMode, mode: ScanMode) -> Axes<'_> {
         | StaticMode::CantCrew
         | StaticMode::CantPhaseIn
         | StaticMode::CrewContribution { .. }
-        | StaticMode::MayLookAtTopOfLibrary
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
         | StaticMode::MayChooseNotToUntap
@@ -9830,6 +9867,8 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        // CR 701.32b: "that scheme" is a single event object, not a census.
+        | Effect::SetSchemeInMotion { .. }
         // Susan Foreman reorders the PLANAR DECK top (Planechase),
         // not a battlefield population ⇒ not a live-board census (relax).
         | Effect::ArrangePlanarDeckTop { .. }
@@ -10258,6 +10297,8 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        // CR 701.32b: "that scheme" is a single event object, not a census.
+        | Effect::SetSchemeInMotion { .. }
         // Susan Foreman reorders the PLANAR DECK top (Planechase),
         // not a battlefield population ⇒ not a live-board census (relax).
         | Effect::ArrangePlanarDeckTop { .. }
@@ -11080,7 +11121,7 @@ mod tests {
         assert!(
             !reads(Effect::Sacrifice {
                 target: TargetFilter::EventTarget,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             }),
             "the sacrifice resolver reads the captured pin, never the journal"
@@ -11441,7 +11482,7 @@ mod tests {
         attack_destination: crate::types::ability::TokenAttackDestination,
     ) -> Effect {
         Effect::Token {
-            block_attacker: None,
+            enters_blocking: None,
             name: "Elf Warrior".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

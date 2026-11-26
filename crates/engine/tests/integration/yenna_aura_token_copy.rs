@@ -607,7 +607,7 @@ fn effect_specified_host_raises_no_prompt() {
     let maker = scenario
         .add_enchantment_from_oracle(P0, "Role Maker", "")
         .with_ability(Effect::Token {
-            block_attacker: None,
+            enters_blocking: None,
             name: "Wicked Role".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),

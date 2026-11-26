@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "Blocking token entry carries a bound attacker in card effects and pending entry state. Older peers can drop the rider and miss combat edges and events, so full-game and peer-to-peer execution require coordinated versions."
+  "reason": "FilterProp::Attacking gains an optional scope for direct-player attacks. Resolved blocking riders also carry an attacker incarnation through pending token entry. Older peers could offer illegal targets or lose the block when a parked entry resumes."
 }

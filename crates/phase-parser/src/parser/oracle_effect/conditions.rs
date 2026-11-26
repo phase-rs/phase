@@ -11,10 +11,10 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition as nom_condition;
 use super::super::oracle_nom::condition::{
-    inject_controller_you, parse_cast_using_teamwork_phrase, parse_pair_attack_predicate,
-    parse_scoped_player_opponent_and_has_condition, parse_spell_target_superlative_suffix,
-    parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
-    DamagedThisWayRecipient,
+    inject_controller, inject_controller_you, parse_cast_using_teamwork_phrase,
+    parse_pair_attack_predicate, parse_scoped_player_opponent_and_has_condition,
+    parse_spell_target_superlative_suffix, parse_you_put_onto_battlefield_this_way_clause,
+    parse_zone_changed_this_way_clause, DamagedThisWayRecipient,
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -2515,7 +2515,8 @@ fn type_filter_can_occur_on_permanent(tf: &TypeFilter) -> bool {
         | TypeFilter::Non(_)
         | TypeFilter::Any => true,
         TypeFilter::AnyOf(inners) => inners.iter().any(type_filter_can_occur_on_permanent),
-        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card => false,
+        // CR 314.2: schemes remain in the command zone — never permanents.
+        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card | TypeFilter::Scheme => false,
     }
 }
 
@@ -6908,6 +6909,7 @@ pub(crate) fn lower_instead_condition(
         .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
         .or_else(|| parse_condition_text_in(cond_text, ctx))
         .or_else(|| parse_control_count_as_ability_condition(cond_text))
+        .or_else(|| parse_they_control_fewer_count_as_ability_condition(cond_text))
 }
 
 /// Shared assembly: build an `AbilityDefinition` for an instead override.
@@ -7307,6 +7309,40 @@ fn parse_control_count_as_ability_condition(text: &str) -> Option<AbilityConditi
     })
 }
 
+/// CR 608.2c + CR 107.1: "they control fewer than N [types]" — a fixed
+/// control-count threshold over the opponents' collective board (My Wealth
+/// Will Bury You: "If they control fewer than four artifacts and
+/// enchantments, ..."). "They" is the nearest plural player antecedent
+/// ("your opponents" in the preceding sentence), so the count is
+/// opponent-scoped — NOT the `ScopedPlayer` of the per-player punishment
+/// arms (`parse_they_control_count_ge`), which needs a relative-player slot
+/// this trigger body never establishes. The only corpus member is the scheme
+/// above; a future per-player "they control fewer than" would extend this
+/// arm with a scope check rather than rebind it.
+fn parse_they_control_fewer_count_as_ability_condition(text: &str) -> Option<AbilityCondition> {
+    let text = text.trim();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("they control ")
+        .parse(text)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("fewer than ")
+        .parse(rest)
+        .ok()?;
+    let (rest, n) = nom_primitives::parse_number(rest).ok()?;
+    let rest = rest.trim_start();
+    let (filter, leftover) = parse_type_phrase_folding(rest);
+    if filter == TargetFilter::Any || !leftover.trim().trim_end_matches('.').is_empty() {
+        return None;
+    }
+    let filter = inject_controller(filter, ControllerRef::Opponent);
+    Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::LT,
+        rhs: QuantityExpr::Fixed { value: n as i32 },
+    })
+}
+
 /// CR 122.1 + CR 608.2c: Build an `AbilityCondition` from a counter-threshold
 /// `(minimum, maximum)` pair against a counter-quantity expression. Shared by
 /// the typed (`CountersOnSelf`) and any-type (`AnyCountersOnSelf`) arms of
@@ -7587,6 +7623,11 @@ pub(crate) fn static_condition_to_ability_condition(
             player: PlayerScope::Controller,
         } => Some(AbilityCondition::IsMonarch),
         StaticCondition::IsMonarch { .. } => None,
+        // CR 508.5: no `AbilityCondition` defending-player variant exists —
+        // "if you're the defending player" is printed only as a trigger
+        // intervening-if (Nature Shields Its Own), which bridges to
+        // `TriggerCondition::IsDefendingPlayer` instead.
+        StaticCondition::IsDefendingPlayer { .. } => None,
         // Digital-only Alchemy (no CR entry): no `AbilityCondition` boon
         // variant exists — "if you have a boon" is printed only as a
         // trigger intervening-if (Underbridge Warlock), which bridges to
@@ -7990,6 +8031,7 @@ fn static_condition_to_delayed_ability_condition(
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
@@ -17147,6 +17189,67 @@ mod tests {
         };
         assert!(tf.type_filters.contains(&TypeFilter::Artifact));
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    }
+
+    #[test]
+    fn they_control_fewer_count_instead_condition_parses() {
+        // CR 608.2c + CR 107.1: My Wealth Will Bury You's floor gate — "they"
+        // is the opponents collective, compared strictly against four.
+        let cond = lower_instead_condition(
+            "they control fewer than four artifacts and enchantments",
+            &mut ParseContext::default(),
+        )
+        .expect("the fewer-than control count must lower");
+        let AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        } = &cond
+        else {
+            panic!("expected QuantityCheck, got {cond:?}");
+        };
+        assert_eq!(*comparator, Comparator::LT);
+        assert_eq!(*rhs, QuantityExpr::Fixed { value: 4 });
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = lhs
+        else {
+            panic!("expected an object-count lhs, got {lhs:?}");
+        };
+        fn typed_leaves<'f>(
+            filter: &'f TargetFilter,
+            out: &mut Vec<&'f crate::types::ability::TypedFilter>,
+        ) {
+            match filter {
+                TargetFilter::Typed(typed) => out.push(typed),
+                TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                    for inner in filters {
+                        typed_leaves(inner, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut leaves = Vec::new();
+        typed_leaves(filter, &mut leaves);
+        assert!(!leaves.is_empty(), "expected typed leaves, got: {filter:?}");
+        assert!(
+            leaves
+                .iter()
+                .all(|typed| typed.controller
+                    == Some(crate::types::ability::ControllerRef::Opponent)),
+            "the count must be opponent-scoped, got: {filter:?}"
+        );
+        let names = |wanted: crate::types::ability::TypeFilter| {
+            leaves
+                .iter()
+                .any(|typed| typed.type_filters.contains(&wanted))
+        };
+        assert!(
+            names(crate::types::ability::TypeFilter::Artifact)
+                && names(crate::types::ability::TypeFilter::Enchantment),
+            "the count must cover both types, got: {filter:?}"
+        );
     }
 
     // ---- reflexive-if-rider recognizer (S01) ----

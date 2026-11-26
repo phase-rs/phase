@@ -1119,6 +1119,7 @@ where
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -1411,8 +1412,13 @@ pub fn node_fields(node: $Node<'_>, v: &mut impl FnMut(Symbol<'_>)) {
 
 fn effect(e: &$($mut_)? Effect, v: &mut impl FnMut(Symbol<'_>)) {
     match e {
-        Effect::Sacrifice { target, count, .. }
-        | Effect::PutCounter { target, count, .. }
+        Effect::Sacrifice { target, count, .. } => {
+            filter(target, v);
+            if let crate::types::ability::SacrificeSelection::Count(count) = count {
+                quantity(count, v);
+            }
+        }
+        Effect::PutCounter { target, count, .. }
         | Effect::RemoveCounter { target, count, .. } => {
             filter(target, v);
             quantity(count, v);
@@ -1433,12 +1439,9 @@ fn effect(e: &$($mut_)? Effect, v: &mut impl FnMut(Symbol<'_>)) {
             pt(toughness, v);
             filter(target, v);
         }
-        Effect::Token { power, toughness, block_attacker, .. } => {
+        Effect::Token { power, toughness, .. } => {
             pt(power, v);
             pt(toughness, v);
-            if let Some(attacker) = block_attacker {
-                filter(attacker, v);
-            }
         }
         Effect::Animate { power, toughness, .. } => {
             for p in [power, toughness].into_iter().flatten() {
@@ -1564,6 +1567,7 @@ pub(crate) fn static_condition(condition: &$($mut_)? StaticCondition, v: &mut im
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch

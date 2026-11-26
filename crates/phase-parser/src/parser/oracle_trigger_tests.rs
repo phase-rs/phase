@@ -27,14 +27,15 @@ use crate::types::ability::{
 use crate::types::ability::{
     IllegalTargetsDisposition, NumberQuality, Parity, SpentColor, StaticCondition, StaticDefinition,
 };
-use crate::types::card_type::Supertype;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::player::PlayerCounterKind;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{CastFrequency, StaticMode};
+use crate::types::statics::{CastFrequency, CausingObject, StaticMode, TriggerCause};
+use crate::types::triggers::CausedAbilitySource;
 use crate::types::zones::Zone;
 
 /// CR 608.2c: Karona's scoped upkeep player is the grammatical subject of the
@@ -547,8 +548,8 @@ fn count_gate_rebind_reaches_token_entry_counters_but_not_granted_statics() {
     let mut execute = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Token {
-            block_attacker: None,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             name: "Fractal".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -1041,7 +1042,7 @@ fn gut_attack_trigger_sacrifice_is_a_scoped_type_union() {
     assert_no_unimplemented(execute);
     let Effect::Sacrifice {
         target: TargetFilter::Or { filters },
-        count: QuantityExpr::Fixed { value: 1 },
+        count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 }),
         ..
     } = execute.effect.as_ref()
     else {
@@ -1131,7 +1132,7 @@ fn old_man_willow_token_rhs_remains_honestly_unsupported() {
     assert_no_unimplemented(sacrifice);
     let Effect::Sacrifice {
         target: TargetFilter::Or { filters },
-        count: QuantityExpr::Fixed { value: 1 },
+        count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 }),
         ..
     } = sacrifice.effect.as_ref()
     else {
@@ -1217,7 +1218,7 @@ fn attack_trigger_supports_complete_articleless_sacrifice_union() {
     assert_no_unimplemented(sacrifice);
     let Effect::Sacrifice {
         target: TargetFilter::Or { filters },
-        count: QuantityExpr::Fixed { value: 1 },
+        count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 }),
         ..
     } = sacrifice.effect.as_ref()
     else {
@@ -22947,7 +22948,11 @@ fn trigger_opponents_are_dealt_combat_damage_uses_valid_target() {
     );
     assert_eq!(def.mode, TriggerMode::DamageReceived);
     assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
-    assert!(def.batched);
+    assert!(!def.batched);
+    assert_eq!(
+        def.damage_received_grouping,
+        DamageReceivedGrouping::WholeBatch
+    );
     assert_eq!(def.valid_card, None);
     assert_eq!(
         def.valid_target,
@@ -26433,7 +26438,11 @@ fn grave_pact_scopes_sacrifice_to_other_players() {
 
     let execute = def.execute.as_deref().expect("execute ability");
     match &*execute.effect {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
             assert_eq!(
                 *target,
@@ -26453,7 +26462,11 @@ fn portal_to_phyrexia_etb_scopes_each_opponent_sacrifice_to_scoped_player() {
     let execute = def.execute.as_deref().expect("execute ability");
     assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
     match &*execute.effect {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
             assert_eq!(
                 *target,
@@ -28722,6 +28735,166 @@ fn trigger_one_of_your_opponents_is_attacked() {
 }
 
 #[test]
+fn trigger_chosen_player_attacked() {
+    // CR 508.1a + CR 607.2d: "the chosen player is attacked" — the linked
+    // choice as defending player (Imprison This Insolent Wretch).
+    let def = parse_trigger_line(
+        "When the chosen player is attacked, abandon this scheme.",
+        "Imprison This Insolent Wretch",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_target, Some(TargetFilter::SourceChosenPlayer));
+    // CR 508.3b: only fires when the player themselves is attacked.
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    let execute = def.execute.as_ref().expect("abandon effect");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AbandonScheme),
+        "expected AbandonScheme, got {:?}",
+        execute.effect
+    );
+}
+
+#[test]
+fn trigger_chosen_player_becomes_target() {
+    // CR 603.2e + CR 607.2d: "the chosen player becomes the target of a spell
+    // or ability" (Imprison This Insolent Wretch). Pure player subject: the
+    // filter rides in `valid_target` with no `valid_card`, which is what the
+    // matcher's player-target arm requires.
+    let def = parse_trigger_line(
+        "When the chosen player becomes the target of a spell or ability, abandon this scheme.",
+        "Imprison This Insolent Wretch",
+    );
+    assert_eq!(def.mode, TriggerMode::BecomesTarget);
+    assert_eq!(def.valid_target, Some(TargetFilter::SourceChosenPlayer));
+    assert_eq!(def.valid_card, None);
+    let execute = def.execute.as_ref().expect("abandon effect");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AbandonScheme),
+        "expected AbandonScheme, got {:?}",
+        execute.effect
+    );
+}
+
+#[test]
+fn trigger_chosen_player_casts_spell() {
+    // CR 607.2d building-block win: the chosen-player subject arm also binds
+    // "the chosen player casts a spell" (Sewer Nemesis), which previously
+    // parsed with no caster scope at all.
+    let def = parse_trigger_line(
+        "Whenever the chosen player casts a spell, that player mills a card.",
+        "Sewer Nemesis",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(def.valid_target, Some(TargetFilter::SourceChosenPlayer));
+    assert!(def.execute.is_some());
+}
+
+#[test]
+fn trigger_creature_put_onto_battlefield_with_scheme_dies() {
+    // CR 700.4 + CR 603.6c: "dies" is battlefield-to-graveyard, and the
+    // "put onto the battlefield with this scheme" subject qualifier is
+    // ability-placement provenance (CR 603.6a + CR 400.7), read from the
+    // departing incarnation's last known information at fire time (CR 608.2h).
+    // (My Undead Horde Awakens.)
+    let def = parse_trigger_line(
+        "When a creature put onto the battlefield with this scheme dies, abandon this scheme.",
+        "My Undead Horde Awakens",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(def.condition, Some(TriggerCondition::PlacedByAbilitySource));
+    let execute = def.execute.as_deref().expect("abandon effect");
+    assert_no_unimplemented(execute);
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AbandonScheme),
+        "expected AbandonScheme, got {:?}",
+        execute.effect
+    );
+}
+
+#[test]
+fn trigger_creature_put_onto_battlefield_with_enchantment_dies() {
+    // CR 700.4 + CR 603.6c: the same provenance qualifier on a "this
+    // enchantment" self-ref (Diabolic Servitude) — the self axis is the full
+    // self-reference vocabulary, not the scheme word.
+    let def = parse_trigger_line(
+        "When the creature put onto the battlefield with this enchantment dies, exile it and return this enchantment to its owner's hand.",
+        "Diabolic Servitude",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(def.condition, Some(TriggerCondition::PlacedByAbilitySource));
+    let execute = def.execute.as_deref().expect("exile-and-return body");
+    assert_no_unimplemented(execute);
+}
+
+#[test]
+fn trigger_creature_put_onto_battlefield_with_card_name_leaves() {
+    // CR 603.6c: the qualifier also scopes leaves-the-battlefield triggers,
+    // and a card-name self-ref binds through `~` normalization (Havengul
+    // Mystery).
+    let def = parse_trigger_line(
+        "When the creature put onto the battlefield with Havengul Mystery leaves the battlefield, transform Havengul Mystery.",
+        "Havengul Mystery",
+    );
+    assert_eq!(def.mode, TriggerMode::LeavesBattlefield);
+    assert_eq!(def.condition, Some(TriggerCondition::PlacedByAbilitySource));
+    let execute = def.execute.as_deref().expect("transform body");
+    assert_no_unimplemented(execute);
+}
+
+#[test]
+fn trigger_whenever_you_set_nonongoing_scheme_in_motion_watches() {
+    // CR 904.9 + CR 603.2: "whenever you set a non-ongoing scheme in
+    // motion" (My Laughter Echoes) watches ANOTHER scheme — the same
+    // SetInMotion mode as the self trigger, scoped by valid_card instead of
+    // source identity. CR 118.12: "you may abandon this scheme. If you do,
+    // set that scheme in motion again" is an optional instruction plus an
+    // effect-performed followup re-firing the triggering event's scheme.
+    let def = parse_trigger_line(
+        "Whenever you set a non-ongoing scheme in motion, you may abandon this scheme. If you do, set that scheme in motion again.",
+        "My Laughter Echoes",
+    );
+    assert_eq!(def.mode, TriggerMode::SetInMotion);
+    let TargetFilter::Typed(tf) = def.valid_card.as_ref().expect("scheme filter") else {
+        panic!("expected Typed valid_card, got {:?}", def.valid_card);
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Scheme),
+        "watch filter must name Scheme, got {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::NotSupertype {
+            value: Supertype::Ongoing
+        }),
+        "watch filter must exclude ongoing schemes, got {:?}",
+        tf.properties
+    );
+    let execute = def.execute.as_deref().expect("optional abandon");
+    assert!(execute.optional);
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AbandonScheme),
+        "expected optional AbandonScheme, got {:?}",
+        execute.effect
+    );
+    let followup = execute.sub_ability.as_deref().expect("If you do re-fire");
+    assert_eq!(
+        followup.condition,
+        Some(AbilityCondition::effect_performed())
+    );
+    assert_eq!(
+        followup.effect.as_ref(),
+        &Effect::SetSchemeInMotion {
+            target: TargetFilter::TriggeringSource
+        }
+    );
+    assert_no_unimplemented(execute);
+}
+
+#[test]
 fn karazikar_attack_trigger_scopes_both_opponents() {
     let def = parse_trigger_line(
         "Whenever an opponent attacks another one of your opponents, you and the attacking player each draw a card and lose 1 life.",
@@ -29174,6 +29347,47 @@ fn n_or_more_attacks_declines_uncountable_subject_scope() {
         def.mode,
         TriggerMode::Attacks,
         "exotic subject scope must route away from the YouAttack family: {def:?}"
+    );
+}
+
+/// Nearest printed card: Argent Dais — "Whenever two or more creatures
+/// attack, put an oil counter on this artifact." (verbatim Oracle). A numeral
+/// count is unprinted but routes through the same composed count grammar.
+#[test]
+fn n_or_more_attacks_accepts_numeral_count() {
+    let (mode, def) = try_parse_n_or_more_attacks("whenever 10 or more creatures attack")
+        .expect("numeral counts compose through parse_number");
+    assert_eq!(mode, TriggerMode::YouAttack);
+    assert!(def.batched);
+    assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                            FilterProp::Attacking {
+                                scope: Default::default(),
+                                defender: None
+                            }
+                        ])),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 10 },
+            }),
+        })
+    );
+}
+
+/// The composed count grammar still rejects a zero count: `verify(n >= 1)`
+/// is what refuses, on the same `parse_number` path the numeral test proves.
+#[test]
+fn n_or_more_attacks_rejects_zero_count() {
+    assert!(
+        try_parse_n_or_more_attacks("whenever 0 or more creatures attack").is_none(),
+        "0 or more must decline"
     );
 }
 
@@ -37294,7 +37508,11 @@ fn basalt_golem_delayed_sacrifice_names_the_blocker_and_its_controller() {
         "CR 603.7a: 'at end of combat' schedules a delayed triggered ability"
     );
     match effect.effect.as_ref() {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert_eq!(
                 *target,
                 TargetFilter::ParentTarget,
@@ -38143,7 +38361,12 @@ fn assert_reanimator_chain(oracle: &str, card_name: &str, expect_tapped: bool) {
         },
         "{card_name}: delayed leaves-battlefield condition on the Aura (SelfRef)",
     );
-    let Effect::Sacrifice { target, count, .. } = effect.effect.as_ref() else {
+    let Effect::Sacrifice {
+        target,
+        count: crate::types::ability::SacrificeSelection::Count(count),
+        ..
+    } = effect.effect.as_ref()
+    else {
         panic!("{card_name}: expected Sacrifice, got {:?}", effect.effect);
     };
     assert_eq!(
@@ -40559,34 +40782,33 @@ fn dealt_damage_axes_amount_exactly_is_whole_event() {
 
 #[test]
 fn dealt_damage_axes_plural_noncombat() {
-    // The plural voice parses, and the consumer arm does NOT set `batched` —
-    // that is the caller's `"one or more "` scan, pinned by the sibling test.
     let def = parse_trigger_line(
         "Whenever creatures you control are dealt noncombat damage, draw a card.",
         "Some Card",
     );
     assert_eq!(def.mode, TriggerMode::DamageReceived);
     assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
-    assert!(
-        !def.batched,
-        "no SimpleEvent arm may set `batched`; only the caller's \"one or more \" scan does"
+    assert!(!def.batched);
+    assert_eq!(
+        def.damage_received_grouping,
+        DamageReceivedGrouping::PerEvent
     );
 }
 
 #[test]
 fn dealt_damage_axes_plural_one_or_more_noncombat() {
-    // CR 603.2c: the caller stamps `batched` from the subject phrase. This shape
-    // is newly reachable via the parameterization, so its batching is pinned as
-    // known-and-accepted. It pins ONLY the flag — a `"that many"` resolution on a
-    // batched damage trigger would resolve to a subject headcount, which is a
-    // deferred, currently card-less hazard.
+    // CR 603.2c: The quantified recipient makes the batch one occurrence.
     let def = parse_trigger_line(
         "Whenever one or more creatures you control are dealt noncombat damage, draw a card.",
         "Some Card",
     );
     assert_eq!(def.mode, TriggerMode::DamageReceived);
     assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
-    assert!(def.batched);
+    assert!(!def.batched);
+    assert_eq!(
+        def.damage_received_grouping,
+        DamageReceivedGrouping::WholeBatch
+    );
 }
 
 #[test]
@@ -40787,6 +41009,11 @@ fn dealt_damage_lolth_emblem_quantified_source_parses() {
         "Lolth, Spider Queen",
     );
     assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert!(!def.batched);
+    assert_eq!(
+        def.damage_received_grouping,
+        DamageReceivedGrouping::PerPlayerRecipient
+    );
     assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
     assert_eq!(
         def.valid_source,
@@ -40795,6 +41022,35 @@ fn dealt_damage_lolth_emblem_quantified_source_parses() {
         )),
         "the emblem's quantified source must not be dropped"
     );
+}
+
+// Synthetic shape: no printed card is known to combine a collective recipient
+// with a source qualifier. The nearest printed cards are Master of Barbs and
+// Fblthp, Impossibly Lost (collective recipients) and Lolth, Spider Queen's
+// emblem (quantified source). The test checks precedence between those two
+// existing grammar axes.
+#[test]
+fn dealt_damage_collective_recipients_stay_grouped_with_a_qualified_source() {
+    for source in ["a creature", "one or more creatures"] {
+        let def = parse_trigger_line(
+            &format!(
+                "Whenever one or more opponents are dealt combat damage by {source} you control, you gain 1 life."
+            ),
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageReceived);
+        assert!(!def.batched);
+        assert_eq!(
+            def.damage_received_grouping,
+            DamageReceivedGrouping::WholeBatch
+        );
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You)
+            ))
+        );
+    }
 }
 
 #[test]
@@ -40904,15 +41160,8 @@ fn dealt_damage_single_source_tail_with_amount_is_per_source() {
 
 #[test]
 fn whole_event_trigger_is_not_subject_batched() {
-    // V14 / Guard 2 — CR 603.2c: whole-event damage aggregation must NOT set
-    // `batched`. That field additionally means "count subjects", and
-    // `subject_match_count` (a SUBJECT HEADCOUNT) outranks the triggering
-    // event's amount in the `EventContextAmount` cascade, so setting it here
-    // would fix the once-per-batch dedup and simultaneously corrupt "that much".
-    // Firing granularity is carried instead by `fires_once_per_batch` in
-    // `game/triggers.rs`, which reads the typed scope.
-    //
-    // Verbatim Oracle text (Innocent Bystander).
+    // CR 603.2c + CR 120.4b: The amount scope alone requests aggregation.
+    // This keeps the subject count empty so "that much" reads the summed damage.
     let def = parse_trigger_line(
         "Whenever this creature is dealt 3 or more damage, investigate.",
         "Innocent Bystander",
@@ -40921,20 +41170,19 @@ fn whole_event_trigger_is_not_subject_batched() {
         def.damage_amount.expect("threshold present").scope,
         DamageAmountScope::WholeEvent
     );
-    assert!(
-        !def.batched,
-        "whole-event damage aggregation must not set the subject-counting `batched` flag"
+    assert!(!def.batched);
+    assert_eq!(
+        def.damage_received_grouping,
+        DamageReceivedGrouping::PerEvent
     );
 
-    // Paired positive control: `batched` IS observable and CAN be true on this
-    // very grammar, so the negative above is not vacuous.
-    let batched = parse_trigger_line(
+    let quantified = parse_trigger_line(
         "Whenever one or more creatures you control are dealt noncombat damage, draw a card.",
         "Some Card",
     );
-    assert!(
-        batched.batched,
-        "control must prove `batched` is readable and reachable on this grammar"
+    assert_eq!(
+        quantified.damage_received_grouping,
+        DamageReceivedGrouping::WholeBatch
     );
 }
 
@@ -43075,8 +43323,14 @@ fn seraph_chain_keeps_its_lifted_sacrifice() {
     );
 }
 
+/// CR 110.2 + CR 608.2c: "an opponent gains control of" objects other than
+/// the source (Rohgahh of Kher Keep's tapped set) fails closed. The runtime
+/// binds the chosen opponent as recipient only for `SelfRef`
+/// (`gain_control_controller`); a `GainControl { ParentTarget }` here would
+/// hand the creatures to the ability's controller instead. Akroan Horse pins
+/// the surviving `SelfRef` shape.
 #[test]
-fn rohgahh_plural_control_transfer_preserves_parent_operand() {
+fn rohgahh_non_source_gain_control_fails_closed() {
     let parsed = parse_oracle_text(
         "At the beginning of your upkeep, you may pay {R}{R}{R}. If you don't, tap Rohgahh and all creatures named Kobolds of Kher Keep, then an opponent gains control of them.",
         "Rohgahh of Kher Keep",
@@ -43085,24 +43339,24 @@ fn rohgahh_plural_control_transfer_preserves_parent_operand() {
         &[],
     );
     assert_eq!(parsed.triggers.len(), 1);
-    let execute = parsed.triggers[0].execute.as_ref().expect("upkeep execute");
-    let mut pending = vec![execute.as_ref()];
-    let mut transfers = 0;
-    while let Some(ability) = pending.pop() {
-        if let Effect::GainControl { target } = ability.effect.as_ref() {
-            assert_eq!(target, &TargetFilter::ParentTarget);
-            transfers += 1;
-        }
-        if let Some(sub) = ability.sub_ability.as_deref() {
-            pending.push(sub);
-        }
-        if let Some(otherwise) = ability.else_ability.as_deref() {
-            pending.push(otherwise);
-        }
-    }
-    assert_eq!(
-        transfers, 1,
-        "printed plural control transfer must be reached"
+    let effects = trigger_chain_effects(&parsed.triggers[0]);
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Unimplemented {
+                name,
+                description: Some(description),
+                ..
+            } if name == "chosen_recipient_gain_control"
+                && description == "an opponent gains control of objects other than the source"
+        )),
+        "Rohgahh's non-source handoff must fail closed: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::GainControl { .. })),
+        "Rohgahh must not claim a GainControl the runtime would give to the wrong player: {effects:?}"
     );
 }
 
@@ -44834,6 +45088,135 @@ fn assert_copies_triggering_source(def: &TriggerDefinition, label: &str) {
         execute.effect
     );
     assert!(!has_unimplemented(execute), "{label}: {execute:?}");
+}
+
+/// CR 603.12 + CR 701.20a + CR 608.2c + CR 202.3: A Premonition of Your
+/// Demise, verbatim Oracle. Sentence 1 reveals the top two and puts them into
+/// hand; sentence 2 is a reflexive trigger over that reveal — a `WhenYouDo`
+/// creation marker guarded by "at least one revealed card is a nonland"
+/// (counted off the chain tracked set), dealing damage equal to the revealed
+/// set's total mana value to any target. Lands contribute MV 0 (CR 202.3a),
+/// so the unfiltered sum is exactly the nonlands' total.
+#[test]
+fn premonition_of_your_demise_full_oracle_parses_reveal_damage_reflexive() {
+    const TEXT: &str = "When you set this scheme in motion, reveal the top two cards of your library and put them into your hand. When you reveal one or more nonland cards this way, this scheme deals damage equal to their total mana value to any target.";
+    let parsed = parse_oracle_text(
+        TEXT,
+        "A Premonition of Your Demise",
+        &[],
+        &["Scheme".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::SetInMotion)
+        .expect("set-in-motion trigger must parse");
+    let execute = trigger
+        .execute
+        .as_ref()
+        .expect("trigger must carry its reveal/damage chain");
+    assert!(
+        !has_unimplemented(execute),
+        "Premonition must parse with no gaps, got {execute:?}"
+    );
+    // Sentence 1: reveal the top two.
+    let Effect::RevealTop { player, count } = execute.effect.as_ref() else {
+        panic!("sentence 1 must be RevealTop, got: {:?}", execute.effect);
+    };
+    assert_eq!(*player, TargetFilter::Controller);
+    assert_eq!(*count, 2);
+    // … and put them into hand.
+    let into_hand = execute.sub_ability.as_ref().expect("into-hand must chain");
+    let Effect::ChangeZone {
+        destination,
+        target,
+        ..
+    } = into_hand.effect.as_ref()
+    else {
+        panic!("into-hand must be ChangeZone, got: {:?}", into_hand.effect);
+    };
+    assert_eq!(*destination, Zone::Hand);
+    assert_eq!(*target, TargetFilter::ParentTarget);
+    // Sentence 2: the reflexive damage body.
+    let reflexive = into_hand
+        .sub_ability
+        .as_ref()
+        .expect("reflexive must chain");
+    let Effect::DealDamage { amount, target, .. } = reflexive.effect.as_ref() else {
+        panic!("reflexive must be DealDamage, got: {:?}", reflexive.effect);
+    };
+    assert_eq!(*target, TargetFilter::Any, "damage goes to any target");
+    let QuantityExpr::Ref {
+        qty: QuantityRef::PropertyAggregate(aggregate),
+    } = amount
+    else {
+        panic!("damage amount must be a property aggregate, got: {amount:?}");
+    };
+    assert_eq!(aggregate.function(), AggregateFunction::Sum);
+    assert_eq!(aggregate.property(), ObjectProperty::ManaValue);
+    assert!(
+        matches!(
+            aggregate.source(),
+            CardTypeSetSource::TrackedSet {
+                set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+                filter: None,
+            }
+        ),
+        "'their' must re-anchor to the revealed chain set, got {:?}",
+        aggregate.source()
+    );
+    // The creation gate: WhenYouDo plus at-least-one-nonland-revealed.
+    let condition = reflexive
+        .condition
+        .as_ref()
+        .expect("reflexive must carry its creation gate");
+    assert!(
+        condition.has_when_you_do_marker(),
+        "reflexive must carry the WhenYouDo marker, got {condition:?}"
+    );
+    let AbilityCondition::And { conditions } = condition else {
+        panic!("gate must be the marker plus its guard, got: {condition:?}");
+    };
+    let guard = conditions
+        .iter()
+        .find_map(|member| match member {
+            AbilityCondition::QuantityCheck {
+                lhs,
+                comparator,
+                rhs,
+            } => Some((lhs, comparator, rhs)),
+            _ => None,
+        })
+        .expect("gate must carry the nonland-count guard");
+    assert_eq!(*guard.1, Comparator::GE);
+    assert_eq!(
+        *guard.2,
+        QuantityExpr::Fixed { value: 1 },
+        "one or more means >= 1"
+    );
+    let QuantityExpr::Ref {
+        qty:
+            QuantityRef::FilteredTrackedSetSize {
+                filter,
+                caused_by: None,
+                destination: None,
+            },
+    } = guard.0
+    else {
+        panic!(
+            "guard must count the revealed chain set, got: {:?}",
+            guard.0
+        );
+    };
+    assert_eq!(
+        filter.as_ref(),
+        &TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(
+            TypeFilter::Land
+        )))),
+        "guard must count nonland cards"
+    );
 }
 
 /// CR 107.3a + CR 202.1 / CR 602.1a: one combinator recognizes both printed
@@ -46983,8 +47366,10 @@ fn fblthp_full_oracle_keeps_the_damage_received_trigger() {
                 parsed.triggers, parsed.parse_warnings
             )
         });
-    assert!(
-        trigger.batched,
+    assert!(!trigger.batched);
+    assert_eq!(
+        trigger.damage_received_grouping,
+        DamageReceivedGrouping::WholeBatch,
         "CR 603.2c: one or more opponents is one batched trigger"
     );
     assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
@@ -47051,9 +47436,10 @@ fn fblthp_impossibly_lost_head_is_batched_opponent_combat_damage_with_turn_windo
     assert_eq!(def.mode, TriggerMode::DamageReceived);
     assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
     assert_eq!(def.damage_amount, None);
-    assert!(
-        def.batched,
-        "CR 603.2c: \"one or more\" is one trigger event"
+    assert!(!def.batched);
+    assert_eq!(
+        def.damage_received_grouping,
+        DamageReceivedGrouping::WholeBatch
     );
     assert_eq!(
         def.valid_card, None,
@@ -47163,7 +47549,11 @@ fn received_damage_siblings_without_windows_keep_no_condition() {
     );
     assert_eq!(barbs.mode, TriggerMode::DamageReceived);
     assert_eq!(barbs.damage_kind, DamageKindFilter::NoncombatOnly);
-    assert!(barbs.batched);
+    assert!(!barbs.batched);
+    assert_eq!(
+        barbs.damage_received_grouping,
+        DamageReceivedGrouping::WholeBatch
+    );
     assert_eq!(barbs.condition, None);
 
     let galleon = parse_trigger_line(
@@ -47997,6 +48387,90 @@ fn proft_eidetic_memory_hoists_draw_gate_and_binds_counter_quantity() {
     );
 }
 
+/// CR 508.5 + CR 603.4: "if you're the defending player" (Nature Shields
+/// Its Own) is an intervening-if — the trigger only fires when its
+/// controller is the player the triggering creature is attacking.
+#[test]
+fn nature_shields_defending_player_guard_is_intervening_if() {
+    let def = parse_trigger_line(
+        "Whenever a creature attacks and isn't blocked, if you're the defending player, create a 0/1 green Plant creature token that's blocking that creature.",
+        "Nature Shields Its Own",
+    );
+    assert_eq!(def.mode, TriggerMode::YouAttackUnblocked);
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::IsDefendingPlayer {
+            player: PlayerScope::Controller
+        })
+    );
+    let execute = def.execute.as_deref().expect("token body");
+    match execute.effect.as_ref() {
+        Effect::Token {
+            enters_blocking, ..
+        } => {
+            assert_eq!(
+                *enters_blocking,
+                Some(TargetFilter::TriggeringSource),
+                "'that creature' binds the triggering attacker"
+            );
+        }
+        other => panic!("expected the Plant token body, got {other:?}"),
+    }
+    assert_no_unimplemented(execute);
+}
+
+/// CR 508.1 + CR 603.2c: "four or more creatures attack you" (Nature
+/// Shields Its Own) is a count-conditional attack trigger; "at end of
+/// combat" defers the abandon past combat damage.
+#[test]
+fn nature_shields_count_attack_head_defers_abandon_to_end_of_combat() {
+    use crate::types::ability::AttackersDeclaredCountSubject;
+    use crate::types::triggers::AttackTargetFilter;
+    let def = parse_trigger_line(
+        "When four or more creatures attack you, abandon this scheme at end of combat.",
+        "Nature Shields Its Own",
+    );
+    assert_eq!(def.mode, TriggerMode::YouAttack);
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert!(def.batched, "one firing per attack declaration");
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::AttackersDeclaredCount {
+                subject: AttackersDeclaredCountSubject::AttackTarget {
+                    controller: ControllerRef::You,
+                    attacked: AttackTargetFilter::Player,
+                    filter: None,
+                },
+                comparator: Comparator::GE,
+                count: 4,
+            }),
+        })
+    );
+    // CR 603.7a: "at end of combat" schedules a delayed trigger abandoning
+    // the scheme (Wall of Tears shape).
+    let execute = def.execute.as_deref().expect("abandon body");
+    match execute.effect.as_ref() {
+        Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } => {
+            assert_eq!(
+                *condition,
+                DelayedTriggerCondition::AtNextPhase {
+                    phase: crate::types::phase::Phase::EndCombat
+                }
+            );
+            assert!(
+                matches!(effect.effect.as_ref(), Effect::AbandonScheme),
+                "delayed body must abandon the scheme, got {:?}",
+                effect.effect
+            );
+        }
+        other => panic!("expected CreateDelayedTrigger, got {other:?}"),
+    }
+    assert_no_unimplemented(execute);
+}
+
 // CR 608.2c + CR 119.4 (issue #11294, SHAPE): Niv-Mizzet, Ghost Counsel's
 // "you may pay that much life" binds the payment to the triggering life-gain
 // amount; the "draw that many cards" continuation reads the same event amount.
@@ -48151,4 +48625,218 @@ fn raggadragga_seven_mana_spell_trigger_shape() {
         execute.sub_ability.is_some(),
         "the +7/+7 trample continuation must be attached past the untap"
     );
+}
+
+/// CR 603.2 + CR 603.3b (#11338): Firebender Ascension's observer condition
+/// lowers to `AbilityTriggered { CreatureAttacking, CausingObject }` with the
+/// cause subject as `valid_card`. Full verbatim Oracle ability.
+#[test]
+fn trigger_firebender_ascension_attacking_observer() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control attacking causes a triggered ability of that creature to trigger, put a quest counter on this enchantment. Then if it has four or more quest counters on it, you may copy that ability. You may choose new targets for the copy.",
+        "Firebender Ascension",
+    );
+    assert_eq!(
+        def.mode,
+        TriggerMode::AbilityTriggered {
+            cause: TriggerCause::CreatureAttacking,
+            source: CausedAbilitySource::CausingObject,
+        }
+    );
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+    assert_eq!(def.destination, None);
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::PutCounter { .. }),
+        "head effect is the quest counter, got {:?}",
+        execute.effect
+    );
+    let copy = execute.sub_ability.as_deref().expect("copy sub-ability");
+    assert!(
+        matches!(
+            copy.effect.as_ref(),
+            Effect::CopySpell {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "conditional copy follows, got {:?}",
+        copy.effect
+    );
+    assert!(
+        copy.condition.is_some(),
+        "copy gated on four quest counters"
+    );
+    assert!(copy.optional, "copy is optional");
+    assert_no_unimplemented(execute);
+}
+
+/// CR 603.2 + CR 603.3b (#11338): Aboleth Spawn's observer condition lowers
+/// to `AbilityTriggered { EntersBattlefield { [Creature], Any },
+/// CausingObject }`, with the "under an opponent's control" rider scoping
+/// `valid_card`. The "Probing Telepathy — " ability-word prefix is stripped
+/// upstream at priority 14, so the trigger text below starts at "Whenever".
+#[test]
+fn trigger_aboleth_spawn_entering_observer() {
+    let def = parse_trigger_line(
+        "Whenever a creature entering under an opponent's control causes a triggered ability of that creature to trigger, you may copy that ability. You may choose new targets for the copy.",
+        "Aboleth Spawn",
+    );
+    assert_eq!(
+        def.mode,
+        TriggerMode::AbilityTriggered {
+            cause: TriggerCause::EntersBattlefield {
+                core_types: vec![CoreType::Creature],
+                entrant: CausingObject::Any,
+            },
+            source: CausedAbilitySource::CausingObject,
+        }
+    );
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent)
+        ))
+    );
+    assert_eq!(def.destination, None);
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::CopySpell {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "copy effect, got {:?}",
+        execute.effect
+    );
+    assert!(execute.optional, "copy is optional");
+    assert_no_unimplemented(execute);
+}
+
+/// CR 603.2 + CR 603.3b (#11338): Strict Proctor's observer condition lowers
+/// to `AbilityTriggered { EntersBattlefield { [], Any }, Any }` — "permanent"
+/// names no core type and the bare "a triggered ability" observes any
+/// ability with an admitted cause subject. Full verbatim Oracle ability.
+#[test]
+fn trigger_strict_proctor_entering_observer() {
+    let def = parse_trigger_line(
+        "Whenever a permanent entering causes a triggered ability to trigger, counter that ability unless its controller pays {2}.",
+        "Strict Proctor",
+    );
+    assert_eq!(
+        def.mode,
+        TriggerMode::AbilityTriggered {
+            cause: TriggerCause::EntersBattlefield {
+                core_types: vec![],
+                entrant: CausingObject::Any,
+            },
+            source: CausedAbilitySource::Any,
+        }
+    );
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(TypedFilter::permanent()))
+    );
+    assert_eq!(def.destination, None);
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::Counter {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "counter effect, got {:?}",
+        execute.effect
+    );
+    assert!(def.unless_pay.is_some(), "unless-pays-{{2}} preserved");
+    assert_no_unimplemented(execute);
+}
+
+/// The observer accept-set declines unlisted causes: a life-gain cause
+/// classifies (see the `classify_trigger_cause` unit tests) but stays a
+/// flagged gap on the trigger path.
+/// Synthetic probe — no printed card has this form; nearest is Dr. Beverly
+/// Crusher (life-gain cause, doubler frame).
+#[test]
+fn trigger_unlisted_observer_cause_declines_to_unknown() {
+    let def = parse_trigger_line(
+        "Whenever you gaining life causes a triggered ability to trigger, draw a card.",
+        "Test Observer",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "unlisted cause declines, got {:?}",
+        def.mode
+    );
+    // Reach guard: the effect half parsed typed, proving event dispatch was
+    // reached rather than an upstream bail.
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Draw { .. }),
+        "effect parsed, got {:?}",
+        execute.effect
+    );
+    assert_no_unimplemented(execute);
+}
+
+/// Trailing text after the anchor declines: only the bare "to trigger" and
+/// the `of that <type>` refinement are modeled, so an unmodeled rider stays
+/// a flagged gap rather than parsing with dropped text.
+/// Synthetic probe — no printed card has this form; nearest is Firebender
+/// Ascension (attacking-cause observer).
+#[test]
+fn trigger_observer_trailing_text_declines_to_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control attacking causes a triggered ability to trigger twice, draw a card.",
+        "Test Observer",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "trailing rider declines, got {:?}",
+        def.mode
+    );
+    // Reach guard: the effect half parsed typed, proving event dispatch was
+    // reached rather than an upstream bail.
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Draw { .. }),
+        "effect parsed, got {:?}",
+        execute.effect
+    );
+    assert_no_unimplemented(execute);
+}
+
+/// The observer source refinement declines non-"that" anaphors: "of a Ninja
+/// ..." names no accepted source, so the line stays a flagged gap.
+/// Synthetic probe — no printed card has this form; nearest is Firebender
+/// Ascension (attacking-cause observer).
+#[test]
+fn trigger_observer_foreign_source_refinement_declines_to_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control attacking causes a triggered ability of a ninja creature you control to trigger, draw a card.",
+        "Test Observer",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "foreign refinement declines, got {:?}",
+        def.mode
+    );
+    // Reach guard: the effect half parsed typed, proving event dispatch was
+    // reached rather than an upstream bail.
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Draw { .. }),
+        "effect parsed, got {:?}",
+        execute.effect
+    );
+    assert_no_unimplemented(execute);
 }

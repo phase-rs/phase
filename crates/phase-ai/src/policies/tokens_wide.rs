@@ -237,7 +237,7 @@ mod tests {
         let card_id = CardId(id);
         let oid = create_object(state, card_id, AI, format!("Token Gen {id}"), Zone::Hand);
         let token_effect = Effect::Token {
-            block_attacker: None,
+            enters_blocking: None,
             name: "Saproling".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

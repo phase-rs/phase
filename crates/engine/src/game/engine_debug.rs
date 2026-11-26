@@ -701,7 +701,6 @@ pub fn apply_debug_action(
             // engine-driven token creation — debug spawns can give bodies the
             // counters they need to survive SBA without bypassing CR 614.
             let spec = crate::types::proposed_event::TokenSpec {
-                block_attacker: None,
                 script_name: characteristics.display_name.clone(),
                 characteristics,
                 static_abilities: Vec::new(),
@@ -713,6 +712,7 @@ pub fn apply_debug_action(
                 source_id: ObjectId(0),
                 controller: owner,
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
+                blocking_attacker: None,
             };
             let proposed = ProposedEvent::CreateToken {
                 redirected_to: None,
@@ -1262,7 +1262,7 @@ fn route_debug_token_to_battlefield(
         staged.base_defense,
     );
     let copy = CopyTokenSpec {
-        block_attacker: None,
+        blocking_attacker: None,
         values: Box::new(values.clone()),
         display: super::game_object::DisplayIdentity {
             token_art: None,
@@ -1301,7 +1301,7 @@ fn route_debug_token_to_battlefield(
     state.liminal_entries.insert(
         object_id,
         LiminalEntry {
-            block_attacker: None,
+            blocking_attacker: None,
             copy_settlement: None,
             object: crate::types::game_state::LiminalEntrant::Token(
                 crate::types::game_state::TokenProjection::materialize(token),

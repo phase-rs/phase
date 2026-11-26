@@ -52,7 +52,6 @@ pub fn resolve(
     let mut token_branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Token {
-            block_attacker: None,
             name: String::new(),
             power: PtValue::Fixed(amount as i32),
             toughness: PtValue::Fixed(amount as i32),
@@ -65,6 +64,7 @@ pub fn resolve(
             attach_to: None,
             enters_attacking: false,
             attack_destination: TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],

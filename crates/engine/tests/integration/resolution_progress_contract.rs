@@ -1439,7 +1439,7 @@ fn domain_result_survives_typed_progress_for_its_immediate_consumer_and_tail() {
         AbilityKind::Activated,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     )

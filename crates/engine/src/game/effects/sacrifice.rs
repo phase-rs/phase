@@ -207,16 +207,15 @@ pub fn resolve(
     // `QuantityExpr` (Fixed/Ref/DivideRounded/...) means a mandatory count;
     // wrapped in `UpTo` means the player may select 0..=count.
     let default_count = QuantityExpr::Fixed { value: 1 };
-    let (raw_filter, count_expr, up_to, min_count) = match &ability.effect {
-        Effect::Sacrifice {
-            target,
-            count,
-            min_count,
-        } => {
-            let (inner, up_to) = count.peel_up_to();
-            (target, inner, up_to, *min_count)
-        }
-        _ => (&TargetFilter::Any, &default_count, false, 0),
+    let (raw_filter, selection, min_count) = if let Effect::Sacrifice {
+        target,
+        count,
+        min_count,
+    } = &ability.effect
+    {
+        (target, count.count_expr(), *min_count)
+    } else {
+        (&TargetFilter::Any, Some(&default_count), 0)
     };
     // CR 608.2c + CR 510.2: Bind the parser's `TrackedSetId(0)` "most recent set"
     // sentinel to a concrete filter before deriving the eligible pool. This is
@@ -275,7 +274,11 @@ pub fn resolve(
     } else {
         ability
     };
-    let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize;
+    let counted = selection.map(|expression| {
+        let (count_expr, up_to) = expression.peel_up_to();
+        let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize;
+        (count, up_to)
+    });
 
     // CR 400.7 + CR 603.7c: a delayed sacrifice whose pinned referent became a
     // new object affects nothing. Return before the empty-pool fallback below,
@@ -360,7 +363,81 @@ pub fn resolve(
     };
 
     let live_targets = ability.live_object_targets(state);
-    let mut targeted_objects = if let Some(referent) = cost_paid_referent {
+    let mut targeted_objects = if selection.is_none() {
+        // CR 603.7c + CR 701.21a: LastCreated uses the installed snapshot.
+        // A tracked set uses the membership named by the bound filter.
+        let mut members = match filter {
+            TargetFilter::LastCreated => super::effect_object_targets(filter, &live_targets),
+            TargetFilter::TrackedSet { id } => state
+                .tracked_object_sets
+                .get(id)
+                .cloned()
+                .unwrap_or_default(),
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject { .. }
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Typed(..)
+            | TargetFilter::Not { .. }
+            | TargetFilter::Or { .. }
+            | TargetFilter::And { .. }
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::AttackedPlayerOrPlaneswalker
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::AffectedObjectOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => Vec::new(),
+        };
+        // CR 702.26b: Phased-out members are treated as though they don't exist.
+        members.retain(|id| crate::game::targeting::is_phased_in_battlefield_permanent(state, *id));
+        members
+    } else if let Some(referent) = cost_paid_referent {
         // CR 608.2k: the resolved back-reference IS the whole subject set;
         // never widen it with inherited targets.
         vec![referent]
@@ -474,7 +551,7 @@ pub fn resolve(
         });
     }
 
-    if targeted_objects.is_empty() {
+    if let Some((count, up_to)) = counted.filter(|_| targeted_objects.is_empty()) {
         // CR 701.21a: Derive the player(s) whose permanents are in scope from
         // the target filter's ControllerRef. Defaults to `[ability.controller]`
         // when no controller clause is present (historical "you sacrifice"
@@ -692,7 +769,7 @@ pub fn resolve(
 
         let player_id = obj.controller;
 
-        if sacrifice_cause_muzzled(state, ability, obj_id, player_id) {
+        if !can_sacrifice_for_ability(state, ability, obj_id, player_id) {
             continue;
         }
 
@@ -743,7 +820,7 @@ mod tests {
         ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![TargetRef::Object(target)],
@@ -761,7 +838,7 @@ mod tests {
         ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count,
+                count: count.into(),
                 min_count: 0,
             },
             vec![],
@@ -867,7 +944,8 @@ mod tests {
                 target: filter.clone(),
                 count: QuantityExpr::up_to(QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount { filter },
-                }),
+                })
+                .into(),
                 min_count: 0,
             },
             vec![],
@@ -938,7 +1016,7 @@ mod tests {
                 target: TargetFilter::Typed(
                     TypedFilter::creature().properties(vec![FilterProp::Another]),
                 ),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],
@@ -1091,7 +1169,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }),
+                count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }).into(),
                 min_count: 0,
             },
             vec![],
@@ -1171,7 +1249,7 @@ mod tests {
         ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Typed(typed),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             targets,
@@ -1360,7 +1438,7 @@ mod tests {
                     crate::types::ability::TypedFilter::land()
                         .controller(ControllerRef::ParentTargetController),
                 ),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![TargetRef::Object(parent)],
@@ -1550,7 +1628,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
-                count: QuantityExpr::Fixed { value: 2 },
+                count: QuantityExpr::Fixed { value: 2 }.into(),
                 min_count: 0,
             },
             vec![],
@@ -1627,7 +1705,9 @@ mod tests {
     fn assert_scapeshift_ast(effect: &Effect) {
         // Top-level: Sacrifice with UpTo(ObjectCount{Land}) and min_count 0.
         let Effect::Sacrifice {
-            count, min_count, ..
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            min_count,
+            ..
         } = effect
         else {
             panic!("expected Effect::Sacrifice, got {effect:?}");
@@ -1988,7 +2068,7 @@ mod tests {
             ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: soul_shatter_target.clone(),
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
                 vec![],
@@ -2101,7 +2181,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],
@@ -2153,7 +2233,7 @@ mod tests {
         // emits for Dark Depths' Marit Lage rider.
         let mut rider = ResolvedAbility::new(
             Effect::Token {
-                block_attacker: None,
+                enters_blocking: None,
                 name: "Test Token".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -2230,7 +2310,7 @@ mod tests {
             }
             let mut rider = ResolvedAbility::new(
                 Effect::Token {
-                    block_attacker: None,
+                    enters_blocking: None,
                     name: "Test Token".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),
@@ -2350,7 +2430,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::CostPaidObject,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             // CR 115.1: an inherited parent target, propagated onto this

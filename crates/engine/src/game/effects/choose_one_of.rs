@@ -710,7 +710,7 @@ mod tests {
         let food = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
-                block_attacker: None,
+                enters_blocking: None,
                 name: "Food".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -732,7 +732,7 @@ mod tests {
         let treasure = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
-                block_attacker: None,
+                enters_blocking: None,
                 name: "Treasure".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),

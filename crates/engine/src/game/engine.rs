@@ -1630,6 +1630,7 @@ fn apply_action_boundary_core(
     // The reducer fills a fresh `ActionResult`, so its events begin at index 0.
     let parked_combat_damage_answer =
         super::combat_damage::ParkedCombatDamageAnswer::begin(state, 0);
+    super::visibility::begin_foreign_library_look_boundary(state, semantic_owner, &action);
     let mut result = match if payment_transaction::owns_action(state, &action) {
         // All staged-payment actions enter through this admission point. The
         // authenticated actor is recorded for deterministic replay; the
@@ -1733,6 +1734,7 @@ fn apply_action_boundary_core(
         let reversal = result.waiting_for.clone();
         *state = boundary_snapshot.as_ref().clone();
         state.waiting_for = reversal;
+        super::visibility::finish_foreign_library_look_boundary(state, &result);
         return Ok(RawActionApplication {
             result,
             journal_start,
@@ -1943,6 +1945,7 @@ fn apply_action_boundary_core(
         token_clause_at_start,
         &result.events,
     );
+    super::visibility::finish_foreign_library_look_boundary(state, &result);
     // Do not carry the core's window into finalization: that pass owns its own
     // scope over convergence, auto-pass, and re-convergence.
     state.ingress_life_window = None;
@@ -3125,6 +3128,7 @@ fn finish_action_boundary_with_lifecycle(
         carry_answer_receipts(&boundary_snapshot, state);
     }
     result.waiting_for = state.waiting_for.clone();
+    super::visibility::finish_foreign_library_look_boundary(state, &result);
     if matches!(mode, PublicFinalizeMode::Immediate) {
         finalize_display_state(state);
     }
@@ -7801,7 +7805,7 @@ fn seed_representative_fodder(
         owner,
         count: 1,
         copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
-            block_attacker: None,
+            blocking_attacker: None,
             values: Box::new(profile.clone()),
             display: crate::game::game_object::DisplayIdentity {
                 display_source: crate::game::game_object::DisplaySource::Token,
@@ -13390,6 +13394,19 @@ fn apply_non_priority_pass_action(
             let resolution_permission = casting::current_resolution_cast_permission_index(
                 state, *player, *object_id, *card_id,
             );
+            if resolution_permission.is_none()
+                && casting::library_spell_face_choice(state, *object_id)
+                && !casting::library_spell_face_is_castable(
+                    state,
+                    *player,
+                    *object_id,
+                    casting::ModalCardFace::from_back_face(back_face),
+                )
+            {
+                return Err(EngineError::InvalidAction(
+                    "That face cannot be cast from the library now".to_string(),
+                ));
+            }
             // Validate the exact indexed paid-cleanup root before changing the
             // visible face or its election flags. A forged receipt must leave
             // the prompt, object, permissions, triggers, journal, and events
@@ -15043,9 +15060,10 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => mana_abilities::resume_mana_ability_root(
+        ) => mana_abilities::cancel_mana_ability_activation(
             state,
             pending_mana_ability.player,
+            pending_mana_ability.source_id,
             pending_mana_ability.resume.clone(),
             &mut events,
         )?,
@@ -19228,7 +19246,7 @@ fn record_exile_play_permission(
 /// CR 116.2a) — not a spell cast — so CR 601.2a does not apply here; CR 401.5
 /// governs top-of-library visibility during the special action. Receives the
 /// pre-captured `(src_id, frequency)` that was resolved BEFORE the zone change
-/// — `top_of_library_permission_source` reads `library.front()`, which no
+/// — `top_of_library_grant_for_object` reads `library.front()`, which no
 /// longer points to the played land after the land is delivered to the
 /// battlefield. `Unlimited` permissions (Future Sight, Bolas's Citadel) do not
 /// spend a slot.
@@ -19675,33 +19693,19 @@ fn handle_play_land(
     // Bolas's Citadel, Magus of the Future, The Fourth Doctor).
     //
     // IMPORTANT: capture (src_id, frequency) HERE — before the zone change.
-    // `top_of_library_permission_source` reads `library.front()`, which will
+    // `top_of_library_grant_for_object` reads `library.front()`, which will
     // point to the next card once the land is delivered to the battlefield.
     // Recording in the post-delivery epilogue would always see the wrong top
     // card and silently skip the once-per-turn slot, allowing a OncePerTurn
     // permission to be reused indefinitely. CR 305.1 + CR 116.2a + CR 401.5:
     // land play is a special action, not a spell cast (CR 601.2a does not apply).
-    let library_permission_src: Option<(ObjectId, crate::types::statics::CastFrequency)> =
-        super::casting::top_of_library_permission_source(
-            state,
-            player,
-            Some(crate::types::ability::CardPlayMode::Play),
-        )
-        .and_then(|(top_id, src_id, frequency, _)| {
-            if top_id != object_id {
-                return None;
-            }
-            // CR 305.1: only land cards qualify for the Play-permission path.
-            let obj = state.objects.get(&top_id)?;
-            if !obj
-                .card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Land)
-            {
-                return None;
-            }
-            Some((src_id, frequency))
-        });
+    let library_permission_src = super::casting::top_of_library_grant_for_object(
+        state,
+        player,
+        object_id,
+        crate::types::ability::CardPlayMode::Play,
+    )
+    .map(|grant| (grant.source, grant.frequency));
     let in_library_with_permission = library_permission_src.is_some();
     // CR 116.2a: a land is put onto the battlefield "from the zone it was in", so
     // the play authority is elected by ZONE ELIGIBILITY, not by the exile zone
@@ -24869,7 +24873,7 @@ mod stage2_injector_tests {
             let mut a = shape_b(
                 src,
                 Effect::Token {
-                    block_attacker: None,
+                    enters_blocking: None,
                     name: "Cursed Role".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),

@@ -1268,7 +1268,9 @@ fn parse_resolution_context_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_mana_spent_threshold,
         parse_combat_context_conditions,
         parse_put_onto_battlefield_this_way,
+        parse_passive_discarded_this_way_count,
         parse_exiled_this_way_count,
+        parse_created_this_way_count,
         parse_unless_pay_condition,
         parse_player_chooses_label_condition,
     ))
@@ -1345,6 +1347,38 @@ fn parse_put_onto_battlefield_this_way(input: &str) -> OracleResult<'_, StaticCo
     ))
 }
 
+/// CR 608.2c + CR 701.9a: "[fewer|more] than <N> <noun> were discarded this
+/// way" — the passive twin of `parse_put_onto_battlefield_this_way`: a
+/// resolution-context comparison gating a follow-up effect on how many cards
+/// the immediately preceding effect discarded (Your Nightmares Are Delicious'
+/// "Then if fewer than three cards were discarded this way, you draw three
+/// cards."; Skull Raid's "If fewer than two cards were discarded this way, …").
+/// "Discarded" is the only verb this passive construction prints; other
+/// producer verbs stay out until a card prints them.
+///
+/// Like its twin, the noun is parsed only to consume text —
+/// `QuantityRef::TrackedSetSize` counts whatever the preceding discard
+/// published (discards publish with `ThisWayCause::Discarded`, so the set is
+/// exactly the discarded cards), with no per-noun filter.
+fn parse_passive_discarded_this_way_count(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, comparator) = parse_strict_comparator_prefix(input)?;
+    let (rest, n) = parse_number(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    // CR 608.2c: "this way" scopes to cards discarded by this resolution.
+    let (rest, _) = take_until(" were discarded this way").parse(rest)?;
+    let (rest, _) = tag(" were discarded this way").parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
 /// CR 608.2c: "you exiled <N> or more/or fewer card[s] this way" — a
 /// resolution-context comparison over how many cards the immediately preceding
 /// per-card-type exile placed into the chain tracked set (Portent of Calamity:
@@ -1365,6 +1399,32 @@ fn parse_exiled_this_way_count(input: &str) -> OracleResult<'_, StaticCondition>
     // The shared comparator-aware threshold authority; its comparator is kept.
     let (rest, (n, comparator)) = parse_count_threshold(rest)?;
     let (rest, _) = alt((tag("cards this way"), tag("card this way"))).parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 608.2c + CR 701.7a: "you created fewer than/more than <N> token[s] this
+/// way" — a resolution-context comparison gating a follow-up effect on how
+/// many tokens the immediately preceding creation effect produced (Your Own
+/// Face Mocks You's "If you created fewer than two tokens this way, …"). Twin
+/// of `parse_put_onto_battlefield_this_way` with the creation verb; unlike
+/// that twin the noun is fixed to "token[s]" (creation only ever produces
+/// tokens — anything else fails closed) and there is no destination phrase.
+/// `QuantityRef::TrackedSetSize` counts whatever the preceding creation
+/// published, with no per-noun filter.
+fn parse_created_this_way_count(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you created ").parse(input)?;
+    let (rest, comparator) = parse_strict_comparator_prefix(rest)?;
+    let (rest, n) = parse_number(rest)?;
+    let (rest, _) = alt((tag(" tokens this way"), tag(" token this way"))).parse(rest)?;
     Ok((
         rest,
         StaticCondition::QuantityComparison {
@@ -1882,8 +1942,17 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // subject × predicate. The subject is one `alt()`; the predicate tag is
         // matched once. Do NOT enumerate (subject × predicate) full-phrase tags.
         map(
-            terminated(parse_monarch_identity_subject, tag("the monarch")),
+            terminated(parse_player_identity_subject, tag("the monarch")),
             |player| StaticCondition::IsMonarch { player },
+        ),
+        // CR 508.5 + CR 109.5: defending-player identity — the SAME subject
+        // parser as the monarch's, a different predicate tag. "you're the
+        // defending player" is `Controller`; "that player/opponent is the
+        // defending player" is `ScopedPlayer` (rebound to the attacked player
+        // on attack triggers by `rebind_attack_anaphor_to_defending_player`).
+        map(
+            terminated(parse_player_identity_subject, tag("the defending player")),
+            |player| StaticCondition::IsDefendingPlayer { player },
         ),
         // CR 725.1: "if an opponent is the monarch" — a monarch exists and it
         // is not the controller. Distinct from `Not(IsMonarch)` (also true when
@@ -2009,7 +2078,10 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
 ///
 /// Mirrors `parse_that_player_has_conditions` in this module, which already
 /// maps the same two anaphors to [`PlayerScope::ScopedPlayer`].
-fn parse_monarch_identity_subject(input: &str) -> OracleResult<'_, PlayerScope> {
+/// CR 109.5: the subject axis shared by player-identity predicates
+/// ("you are …" / "that player/opponent is …"). Nothing monarch-specific —
+/// the monarch and defending-player arms supply their own predicate tag.
+fn parse_player_identity_subject(input: &str) -> OracleResult<'_, PlayerScope> {
     alt((
         value(
             PlayerScope::Controller,
@@ -5145,6 +5217,8 @@ pub(crate) fn type_filter_to_core_type(type_filter: &TypeFilter) -> Option<CoreT
         TypeFilter::Battle => Some(CoreType::Battle),
         // CR 308.1: Kindred maps to its core type.
         TypeFilter::Kindred => Some(CoreType::Kindred),
+        // CR 314.1: scheme is a card type.
+        TypeFilter::Scheme => Some(CoreType::Scheme),
         TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -14782,6 +14856,26 @@ mod tests {
                 },
                 comparator: Comparator::LT,
                 rhs: QuantityExpr::Fixed { value: 2 },
+            },
+        );
+    }
+
+    #[test]
+    fn parse_inner_condition_fewer_than_n_were_discarded_this_way() {
+        // CR 608.2c + CR 701.9a: Your Nightmares Are Delicious' (and Skull
+        // Raid's) passive resolution-context comparison — gates a follow-up
+        // effect on how many cards the preceding effect discarded.
+        let (rest, c) =
+            parse_inner_condition("fewer than three cards were discarded this way").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+                comparator: Comparator::LT,
+                rhs: QuantityExpr::Fixed { value: 3 },
             },
         );
     }

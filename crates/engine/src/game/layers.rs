@@ -709,6 +709,9 @@ fn permission_duration_expires_at(
         // `prune_untap_step_casting_permissions`) and ended by the cleanup arm
         // above. It never expires directly, at any seam.
         Duration::UntilEndOfNextTurnOf { .. } => false,
+        // CR 611.2a: the granted-turn window is never a seam expiry; the
+        // bound turn's end and both skip sites retire it (`turns.rs`).
+        Duration::UntilEndOfGrantedTurn { .. } => false,
         Duration::UntilNextStepOf { step, player } => {
             PermissionSeam::for_step(*step) == Some(seam)
                 && permission_scope_selects(player, keyed, active_player)
@@ -809,6 +812,9 @@ pub(crate) fn casting_permission_duration_is_enforceable(
         // transient continuous effects only — no pass revokes a casting
         // permission when a spell becomes cast.
         Duration::UntilEvent { .. } => false,
+        // CR 611.2a: the granted-turn window is unrepresentable on a casting
+        // permission — refused, fail-closed.
+        Duration::UntilEndOfGrantedTurn { .. } => false,
     }
 }
 
@@ -1237,6 +1243,7 @@ pub(crate) fn prune_lapsed_host_bound_casting_permissions(state: &mut GameState)
                 | Duration::UntilEndOfCombat
                 | Duration::UntilNextTurnOf { .. }
                 | Duration::UntilEndOfNextTurnOf { .. }
+                | Duration::UntilEndOfGrantedTurn { .. }
                 | Duration::UntilNextStepOf { .. }
                 | Duration::ForAsLongAs { .. }
                 | Duration::UntilSourceExilesAnotherCard
@@ -2222,6 +2229,10 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         // creature this static applies to), not the source, so this condition is
         // recipient-relative regardless of what its filter reads.
         StaticCondition::DefendingPlayerControls { .. } => true,
+        // CR 508.5: the identity anchor resolves from the recipient attacker
+        // exactly like `DefendingPlayerControls`' — recipient-relative
+        // regardless of the subject scope.
+        StaticCondition::IsDefendingPlayer { .. } => true,
         // CR 303.4m + CR 611.3a: resolve a recipient-anchored monarch subject
         // for each affected object, not once against the source.
         StaticCondition::IsMonarch { player } => {
@@ -2345,6 +2356,8 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        // CR 508.5: combat-derived identity, never board-population-dependent.
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 122.1f: poison counters are player state, never a layer-writable
         // object characteristic or a board population.
@@ -2460,6 +2473,10 @@ fn static_condition_characteristic_reads_at(
         // CR 509.1a + CR 109.4: per-player board census over a live filter.
         StaticCondition::DefendingPlayerControls { filter } => CharacteristicKinds::CONTROLLER
             .union(target_filter_characteristic_reads_at(filter, depth)),
+        // CR 508.5: the identity anchor reads the attack target's controller
+        // (planeswalker/battle targets), like `DefendingPlayerControls`' —
+        // CONTROLLER, not EMPTY.
+        StaticCondition::IsDefendingPlayer { .. } => CharacteristicKinds::CONTROLLER,
         // CR 903.3 + CR 613.1b: commander designation is fixed at deck
         // construction; only the control scope is layer-writable.
         StaticCondition::ControlsCommander { .. }
@@ -2656,6 +2673,9 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        // CR 508.5: declared attacks fix the defending player — a battlefield
+        // entry cannot perturb the identity.
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 122.1f: poison counters are player state, never a layer-writable
         // object characteristic or a board population.
@@ -3295,6 +3315,21 @@ fn evaluate_condition_inner(
         StaticCondition::IsMonarch { player } => {
             designation_player(state, player, controller, source_id, context)
                 .is_some_and(|player| eval_is_monarch(state, player))
+        }
+        // CR 508.5 + CR 109.5: defending-player IDENTITY — true when the
+        // named scope resolves to the defending player. The subject resolves
+        // like `IsMonarch`'s; the anchor resolves like
+        // `DefendingPlayerControls`' (recipient-or-source attacker, declared
+        // attack authoritative during declaration). No anchor bindable =>
+        // false, and a `Not` wrapper inverting this is the printed "unless".
+        StaticCondition::IsDefendingPlayer { player } => {
+            let subject = designation_player(state, player, controller, source_id, context);
+            let attacking = context.recipient.unwrap_or(source_id);
+            let defending = match context.declared_attack {
+                Some(target) => crate::game::combat::defending_player_for_target(state, target),
+                None => crate::game::combat::defending_player_for_attacker(state, attacking),
+            };
+            matches!((subject, defending), (Some(a), Some(b)) if a == b)
         }
         // Digital-only Alchemy (no CR entry): "if you have a boon" — the
         // player axis resolves like `IsMonarch`'s; the leaf reads the held
@@ -5800,6 +5835,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 122.1f: poison counters are player state, never a layer-writable
         // object characteristic or a board population.
@@ -5945,6 +5981,7 @@ fn static_condition_reads_monarch(condition: &StaticCondition) -> bool {
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::PlayerAttackedPlayer { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
@@ -9894,6 +9931,7 @@ pub(crate) fn transient_effect_is_live(state: &GameState, tce: &TransientContinu
     transient_effect_passes_other_gates(state, tce)
         && transient_duration_holds(state, tce)
         && host_bound_duration_holds(state, &tce.duration, tce.source_id, tce.controller)
+        && granted_turn_duration_window_holds(state, &tce.duration)
 }
 
 fn transient_effect_passes_other_gates(state: &GameState, tce: &TransientContinuousEffect) -> bool {
@@ -10172,6 +10210,23 @@ pub(crate) fn transient_gate_conditions(
         .chain(tce.condition.as_ref())
 }
 
+/// CR 611.2a + CR 500.7: whether a granted-turn window still holds — the
+/// single authority for the `UntilEndOfGrantedTurn` reading, shared by
+/// liveness (`transient_effect_is_live`) and both
+/// `transient_grants_static_mode_to_*` queries. The window holds exactly
+/// while its bound turn is the turn in progress (mirrors the
+/// `AtBeginningOfGrantedTurn` firing gate in `triggers.rs`); an unbound
+/// anaphor never holds (fail-closed). Every other duration holds here —
+/// this predicate answers only the granted-turn window.
+pub(crate) fn granted_turn_duration_window_holds(state: &GameState, duration: &Duration) -> bool {
+    match duration {
+        Duration::UntilEndOfGrantedTurn { turn } => {
+            turn.is_some_and(|bound| state.current_extra_turn == Some(bound))
+        }
+        _ => true,
+    }
+}
+
 /// CR 611.2b: whether a host-bound STATE duration still holds — the single
 /// authority for both readings, shared by liveness, the settled-board prune
 /// (`prune_lapsed_host_bound_effects`) and the resolution-time start test
@@ -10211,6 +10266,7 @@ fn host_bound_duration_holds(
         | Duration::UntilEndOfCombat
         | Duration::UntilNextTurnOf { .. }
         | Duration::UntilEndOfNextTurnOf { .. }
+        | Duration::UntilEndOfGrantedTurn { .. }
         | Duration::UntilNextStepOf { .. }
         // CR 611.2b: `transient_duration_holds` owns this reading.
         | Duration::ForAsLongAs { .. }
@@ -11819,6 +11875,7 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
         | StaticMode::Indestructible
         | StaticMode::CantBeDestroyed
         | StaticMode::CantBeRegenerated
+        | StaticMode::CantSetSchemeInMotion
         | StaticMode::FlashBack
         | StaticMode::Shroud
         | StaticMode::Hexproof
@@ -11838,7 +11895,7 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
         | StaticMode::CantCrew
         | StaticMode::CantPhaseIn
         | StaticMode::CrewContribution { .. }
-        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtTopOfLibrary { .. }
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
         | StaticMode::MayChooseNotToUntap
@@ -31397,7 +31454,7 @@ mod tests {
             .expect("execute body required");
         let Effect::Sacrifice {
             target,
-            count,
+            count: crate::types::ability::SacrificeSelection::Count(count),
             min_count,
         } = &*execute.effect
         else {
@@ -31456,7 +31513,7 @@ mod tests {
                     trigger.definition.execute.as_deref().map(|ability| &*ability.effect),
                     Some(Effect::Sacrifice {
                         target: TargetFilter::Typed(filter),
-                        count: QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 }),
                         ..
                     }) if filter.controller == Some(ControllerRef::DefendingPlayer)
                 )
@@ -31498,7 +31555,7 @@ mod tests {
                     trigger.definition.execute.as_deref().map(|ability| &*ability.effect),
                     Some(Effect::Sacrifice {
                         target: TargetFilter::Typed(filter),
-                        count: QuantityExpr::Fixed { value: 3 },
+                        count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 3 }),
                         ..
                     }) if filter.controller == Some(ControllerRef::DefendingPlayer)
                 )

@@ -900,6 +900,38 @@ fn parse_number_of_cards_discarded_this_turn(input: &str) -> OracleResult<'_, Qu
     Ok((rest, QuantityRef::CardsDiscardedThisTurn { player }))
 }
 
+/// CR 608.2c + CR 701.9a + CR 109.5: "card[s] that player discarded" — the
+/// drawing seat's own discards from the ability's earlier instruction (Your
+/// Plans Mean Nothing's "cards equal to the number of cards that player
+/// discarded minus one"). Unlike the "discarded this turn" sibling, the bare
+/// past tense is ability-scoped per the card's ruling ("Players who didn't
+/// discard cards this way won't draw any cards"): the count reads the
+/// resolution's tracked set filtered to members the SEAT owns
+/// (`Owned{ScopedPlayer}` — each player discards their own hand) and stamped
+/// with the discard cause, so other seats' discards never count. Cards
+/// discarded through madness still count even though they are exiled
+/// (CR 702.35a). "that player" binds the live per-recipient seat, mirroring
+/// "that player has drawn this turn".
+fn parse_number_of_cards_that_player_discarded(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("card").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" that player discarded").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::FilteredTrackedSetSize {
+            filter: Box::new(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                controller: None,
+                properties: vec![FilterProp::Owned {
+                    controller: ControllerRef::ScopedPlayer,
+                }],
+            })),
+            caused_by: Some(ThisWayCause::Discarded),
+            destination: None,
+        },
+    ))
+}
+
 /// Parse an optional ", rounded up/down" / ", round up/down" suffix.
 ///
 /// CR 107.1a: Oracle text must specify rounding direction for fractional
@@ -1367,6 +1399,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_linked_exile_mana_value_ref,
             parse_greatest_commander_mana_value_ref,
             parse_commander_mana_value_ref,
+            parse_possessive_commander_mana_value_ref,
         )),
         // CR 110.4: "permanent type[s] among cards in <zone>" is a distinct head
         // (it lowers to `ObjectCountDistinct`, not `DistinctCardTypes`) and must
@@ -1403,6 +1436,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         alt((
             parse_number_of_cards_drawn_this_turn,
             parse_number_of_cards_discarded_this_turn,
+            parse_number_of_cards_that_player_discarded,
             parse_cards_in_zone_ref,
         )),
         // CR 208.3 / CR 306.5c: source-scoped power / toughness / loyalty
@@ -1832,6 +1866,25 @@ fn parse_greatest_commander_mana_value_ref(input: &str) -> OracleResult<'_, Quan
     ))
 }
 
+/// CR 903.3d / CR 903.3e: read the zones a commander population names off
+/// its `InAnyZone` prop. Total by construction at both call sites (the zone
+/// disjunction builds `InAnyZone` unconditionally; the possessive widener
+/// echoes the exact documented shape) — a missing prop is a logic bug, so the
+/// production fails closed with a named message, never a silent default.
+fn commander_population_zones(filter: &TargetFilter) -> Vec<Zone> {
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("commander population must be a typed filter");
+    };
+    typed
+        .properties
+        .iter()
+        .find_map(|prop| match prop {
+            FilterProp::InAnyZone { zones } => Some(zones.clone()),
+            _ => None,
+        })
+        .expect("commander population must carry its InAnyZone zones")
+}
+
 /// Parse "the mana value of a commander you own on the battlefield or in the command zone".
 ///
 /// CR 202.3: Mana value query without superlative.
@@ -1841,14 +1894,54 @@ fn parse_greatest_commander_mana_value_ref(input: &str) -> OracleResult<'_, Quan
 /// on the battlefield or in the command zone" (Stinging Study).
 ///
 /// Maps to `QuantityRef::CommanderManaValue` to select the first matching commander's mana value.
+/// The zone disjunction's zones are recorded on the variant, preserving the
+/// explicit battlefield-or-command limit.
 fn parse_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("the ").parse(input)?;
     let (rest, _) = parse_mana_value_phrase(rest)?;
     let (rest, _) = tag(" of a commander ").parse(rest)?;
     let (rest, owner) = parse_commander_owner_phrase(rest)?;
-    let (rest, _) = parse_commander_zone_disjunction(rest)?;
+    let (rest, zone_filter) = parse_commander_zone_disjunction(rest)?;
+    let zones = commander_population_zones(&zone_filter);
 
-    Ok((rest, QuantityRef::CommanderManaValue { owner }))
+    Ok((rest, QuantityRef::CommanderManaValue { owner, zones }))
+}
+
+/// Parse "your commander's mana value" (You Will Know True Suffering).
+///
+/// CR 202.3: Mana value query without superlative.
+/// CR 903.3e: possessive commander reads find the commander in every zone.
+///
+/// The possessive twin of `parse_commander_mana_value_ref` ("the mana value
+/// of a commander you own ..."): no zone disjunction is stated, so the
+/// population is widened through `your_commanders_in_every_zone` and its
+/// zones recorded explicitly. The singular possessive names the controller's
+/// commander, so the owner is `You` unconditionally — the only corpus member
+/// is the scheme above.
+fn parse_possessive_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("your commander's ").parse(input)?;
+    let (rest, _) = parse_mana_value_phrase(rest)?;
+
+    let population = TargetFilter::Typed(TypedFilter {
+        controller: None,
+        type_filters: vec![],
+        properties: vec![
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+            FilterProp::IsCommander,
+        ],
+    });
+    let widened = your_commanders_in_every_zone(population);
+    let zones = commander_population_zones(&widened);
+
+    Ok((
+        rest,
+        QuantityRef::CommanderManaValue {
+            owner: ControllerRef::You,
+            zones,
+        },
+    ))
 }
 
 /// CR 122.1 + CR 109.2 + CR 109.5: the counters of the named kind (every kind
@@ -2606,6 +2699,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         alt((
             parse_number_of_cards_drawn_this_turn,
             parse_number_of_cards_discarded_this_turn,
+            parse_number_of_cards_that_player_discarded,
         )),
         // CR 109.4: "<type> <controller> with <keyword>" — controller-scoped
         // count restricted to a keyword; must precede
@@ -3372,6 +3466,7 @@ fn type_filter_contains_any(filter: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Subtype(_) => false,
@@ -3393,6 +3488,8 @@ fn type_filter_is_non_card_core(filter: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 205.2a: Scheme is a core card type distinct from `Card`.
+        | TypeFilter::Scheme
         | TypeFilter::Permanent => true,
         TypeFilter::Card
         | TypeFilter::Any
@@ -16080,11 +16177,29 @@ mod tests {
         assert_eq!(rest, "", "phrase should be fully consumed");
 
         // Verify it produces CommanderManaValue
-        let QuantityRef::CommanderManaValue { owner } = q else {
+        let QuantityRef::CommanderManaValue { owner, zones } = q else {
             panic!("Expected CommanderManaValue, got {q:?}");
         };
 
         assert_eq!(owner, ControllerRef::You);
+        assert_eq!(zones, vec![Zone::Battlefield, Zone::Command]);
+    }
+
+    #[test]
+    fn test_parse_possessive_commander_mana_value_ref() {
+        // Test the possessive pattern (You Will Know True Suffering): no zone
+        // disjunction is stated, so the population is widened to every zone
+        // (CR 903.3e) and recorded explicitly.
+        let phrase = "your commander's mana value";
+        let (rest, q) = parse_quantity_ref(phrase).unwrap();
+        assert_eq!(rest, "", "phrase should be fully consumed");
+
+        let QuantityRef::CommanderManaValue { owner, zones } = q else {
+            panic!("Expected CommanderManaValue, got {q:?}");
+        };
+
+        assert_eq!(owner, ControllerRef::You);
+        assert_eq!(zones, Zone::ALL.to_vec());
     }
 
     /// Reads a fully consumed object aggregate as its function, property and

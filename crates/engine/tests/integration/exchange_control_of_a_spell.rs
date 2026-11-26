@@ -810,7 +810,7 @@ fn exchange_sole_target_turning_illegal_does_not_resolve_by_default() {
     ability.sub_ability = Some(Box::new(ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
         vec![],

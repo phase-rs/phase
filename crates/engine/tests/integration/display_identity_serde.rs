@@ -143,7 +143,7 @@ fn legacy_latched_snapshot_without_token_art_deserializes() {
 /// so stripping their keys reproduces the pre-bundle skip-serialized shape.
 fn printed_card_copy_token_spec() -> CopyTokenSpec {
     CopyTokenSpec {
-        block_attacker: None,
+        blocking_attacker: None,
         values: Box::new(sample_values()),
         display: DisplayIdentity {
             display_source: DisplaySource::Card,

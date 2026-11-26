@@ -1099,7 +1099,6 @@ fn reveal_library_token(
         keywords: obj.keywords.clone(),
     };
     let spec = TokenSpec {
-        block_attacker: None,
         characteristics,
         script_name: obj.name.clone(),
         static_abilities: Vec::new(),
@@ -1116,6 +1115,7 @@ fn reveal_library_token(
         source_id: card_id,
         controller: horde,
         attach_to: TokenHostRequest::NotRequested,
+        blocking_attacker: None,
     };
     let proposed = ProposedEvent::CreateToken {
         redirected_to: None,

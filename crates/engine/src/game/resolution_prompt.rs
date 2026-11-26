@@ -265,10 +265,10 @@ pub(crate) fn effect_offers_choice(e: &Effect) -> bool {
             attach_to: _,
             enters_attacking: _,
             attack_destination: _,
+            enters_blocking: _,
             supertypes: _,
             static_abilities: _,
             enter_with_counters: _,
-            block_attacker: _,
         } => {
             quantity_offers_up_to_choice(count)
         }
@@ -456,6 +456,7 @@ pub(crate) fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -1226,7 +1227,7 @@ mod tests {
 
     fn token_effect(count: QuantityExpr) -> Effect {
         Effect::Token {
-            block_attacker: None,
+            enters_blocking: None,
             name: "Servo".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -1901,7 +1902,7 @@ mod tests {
             },
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: fixed(1),
+                count: fixed(1).into(),
                 min_count: 0,
             },
             Effect::DiscardCard {

@@ -45,7 +45,14 @@ trap 'rm -f -- "$candidate"' EXIT
 # `card_faces[0].oracle_id` instead (issue #2031).
 #
 # Non-playable layouts (token, emblem, art_series, etc.) are excluded.
-NON_PLAYABLE='["token","double_faced_token","emblem","art_series","vanguard","scheme","planar","augment","host"]'
+# `scheme` is deliberately NOT excluded: schemes reprinted across ARCH, OARC
+# (API code oe01), and the DSC commander decks (collector numbers 328-367)
+# get the same multi-printing art choice as any other card.
+# `planar` is deliberately NOT excluded either: planes and phenomena (both
+# share Scryfall's `planar` layout) reprinted across HOP (API code ohop),
+# PC2 (opc2), the Planechase Anthology (opca), and commander decks such as
+# MOC get the same treatment for the Planechase panel's art choice.
+NON_PLAYABLE='["token","double_faced_token","emblem","art_series","vanguard","augment","host"]'
 
 jq -c --argjson exclude "$NON_PLAYABLE" '
   [.[] | . as $card |

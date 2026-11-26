@@ -118,7 +118,8 @@ pub fn resolve(
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed {
                     value: created.len() as i32,
-                },
+                }
+                .into(),
                 min_count: 0,
             },
             created.iter().copied().map(TargetRef::Object).collect(),

@@ -202,7 +202,7 @@ fn rewrite_sub_effect_target_to_parent(effect: &mut Effect) {
         // chosen pile. Keep the sub-effect canonical as "sacrifice this one
         // parent target"; the parsed "all" cardinality belongs to the pile loop.
         *target = TargetFilter::ParentTarget;
-        *count = QuantityExpr::Fixed { value: 1 };
+        *count = QuantityExpr::Fixed { value: 1 }.into();
     }
 }
 
