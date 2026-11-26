@@ -1166,6 +1166,7 @@ fn type_filter_is_proven_disjoint_from_spell(
         TypeFilter::Planeswalker => lacks(CoreType::Planeswalker),
         TypeFilter::Battle => lacks(CoreType::Battle),
         TypeFilter::Kindred => lacks(CoreType::Kindred),
+        TypeFilter::Scheme => lacks(CoreType::Scheme),
         TypeFilter::Permanent => !spell.card_types.core_types.iter().any(|card_type| {
             matches!(
                 card_type,

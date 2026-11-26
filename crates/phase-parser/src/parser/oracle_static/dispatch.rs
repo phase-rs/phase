@@ -844,23 +844,26 @@ fn parse_attacking_defender_scope<'a>(tp: &TextPair<'a>) -> Option<(&'a str, Con
 }
 
 /// CR 604.1 + CR 611.3a + CR 613.1: a recursed static may carry a composed
-/// leading timing window only when the layer system will actually honor it.
+/// leading timing window only when its runtime consult will actually honor it.
 ///
 /// `StaticMode::Continuous` is the mode whose `condition` is evaluated by
 /// `game::layers::gather_active_continuous_effects` → `evaluate_condition`, so
 /// it is the mode where a composed window is guaranteed to be enforced.
 ///
-/// This is CONSERVATIVE, not necessary, and the cost is measured rather than
-/// assumed: several non-`Continuous` enforcement points DO evaluate `condition`
-/// (`game::combat` for `CantBlock`/`CantAttack` via
-/// `layers::evaluate_condition_with_recipient`; `game::casting` for
-/// `CastWithKeyword` via `layers::evaluate_condition`). Measured today, the
-/// restriction costs ZERO corpus coverage — of the corpus lines this arm would
-/// otherwise reach, none parses to a non-`Continuous` mode — while off-corpus
-/// it declines the `MustAttack` / `CastWithKeyword` / `CantBlock` shapes, which
-/// therefore stay honestly `Effect::Unimplemented`. Widening is per-mode work:
-/// each admitted mode needs its own runtime discriminating test proving its
-/// enforcement point honors the window.
+/// This is CONSERVATIVE, not necessary: several non-`Continuous` enforcement
+/// points DO evaluate `condition` (`game::combat` for `CantBlock`/`CantAttack`
+/// via `layers::evaluate_condition_with_recipient`; `game::casting` for
+/// `CastWithKeyword` via `layers::evaluate_condition`). Widening is per-mode
+/// work: each admitted mode needs its own runtime discriminating test proving
+/// its enforcement point honors the window.
+///
+/// Admitted so far beyond `Continuous`: a tagged
+/// `StaticMode::ActivateAsInstant` permission (CR 602.5e + CR 702.6a, Forge
+/// Anew's "During your turn, you may activate equip abilities any time you
+/// could cast an instant"). Its consult, `game::restrictions`'
+/// `has_activate_as_instant_permission`, scans condition-filtered active
+/// statics, and `forge_anew_equip_timing` proves the window holds. The
+/// untagged loyalty form stays out: no printed card puts it behind a window.
 ///
 /// The non-empty check is the fail-closed half, and it is load-bearing:
 /// measured, Elvish Refueler's remainder parses to a `Continuous` static with an
@@ -868,20 +871,28 @@ fn parse_attacking_defender_scope<'a>(tp: &TextPair<'a>) -> Option<(&'a str, Con
 /// an honest `Effect::Unimplemented` with a silent no-op that reports as
 /// supported — a lying green. Mirrors the fail-closed acceptance bar on
 /// `parse_extra_blockers_static` below.
-/// The third conjunct closes the remaining half of the same hazard. A remainder
-/// can parse to a `Continuous` static that has modifications but whose condition
-/// tree carries `StaticCondition::Unrecognized` (an unparsed `as long as …`
-/// clause). `game::layers::evaluate_condition` maps `Unrecognized` to `true`, so
-/// composing the window onto it would apply the modification for the whole of
-/// the controller's turn while silently discarding the printed condition —
-/// wrong game behavior, not merely missing behavior. `contains_unrecognized`
+/// The last conjunct closes the remaining half of the same hazard. A remainder
+/// can parse to a static whose condition tree carries
+/// `StaticCondition::Unrecognized` (an unparsed `as long as …` clause).
+/// `game::layers::evaluate_condition` maps `Unrecognized` to `true`, so
+/// composing the window onto it would apply the static for the whole of the
+/// controller's turn while silently discarding the printed condition — wrong
+/// game behavior, not merely missing behavior. `contains_unrecognized`
 /// (`types/ability.rs`) is the single authority for that test and already
 /// recurses through `And`/`Or`/`Not`; `game::coverage` uses the same helper to
 /// keep such a static out of the supported set, so refusing here keeps the
 /// parser and the coverage report telling the same story.
-fn is_enforceable_continuous_static(def: &StaticDefinition) -> bool {
-    matches!(def.mode, StaticMode::Continuous)
-        && !def.modifications.is_empty()
+fn can_compose_leading_turn_scope(def: &StaticDefinition) -> bool {
+    // Reject empty continuous definitions and unread conditions so the turn
+    // window cannot turn an unsupported remainder into a supported static.
+    (matches!(def.mode, StaticMode::Continuous) && !def.modifications.is_empty()
+        || matches!(
+            def.mode,
+            StaticMode::ActivateAsInstant {
+                keyword: Some(_),
+                ..
+            }
+        ))
         && !def
             .condition
             .as_ref()
@@ -4151,7 +4162,7 @@ pub(crate) fn parse_static_line_inner(
         nom_on_lower(tp.original, tp.lower, super::parse_leading_turn_scope)
     {
         if let Some(mut def) = parse_static_line_inner(remainder.trim(), inverted) {
-            if is_enforceable_continuous_static(&def) {
+            if can_compose_leading_turn_scope(&def) {
                 // CR 611.3a: both gates survive.
                 def.condition = Some(match def.condition.take() {
                     Some(existing) => StaticCondition::And {

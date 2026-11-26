@@ -255,6 +255,7 @@
     "commanderDamage": "Obrażenia od dowódcy",
     "poisonCounters": "Znaczniki trucizny",
     "playerSeats": "Miejsca graczy",
+    "archenemySeat": "Archenemy",
     "seat": "Miejsce {{number}}",
     "youHost": "Ty (gospodarz)",
     "ai": "SI",

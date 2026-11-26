@@ -177,6 +177,7 @@ fn token_description_to_effect(token: TokenDescription) -> Effect {
         attach_to: token.attach_to,
         enters_attacking: token.enters_attacking,
         attack_destination: token.attack_destination,
+        enters_blocking: token.enters_blocking,
         // CR 205.4a: Carry parsed supertypes (e.g. "legendary" for Marit Lage)
         // onto the token so the legend rule (CR 704.5j) applies.
         supertypes: token.supertypes,
@@ -783,6 +784,35 @@ fn parse_token_description_with_context(
                 TokenAttackDestination::ControllerChooses,
             ),
         };
+    // CR 509.1h + CR 506.3e: Strip inline "that's blocking that creature" /
+    // "that is blocking that creature" / "thats blocking that creature" /
+    // "that are blocking that creature" (Nature Shields Its Own). The anaphor
+    // is the triggering attacker — `TriggeringSource` resolves to the
+    // singleton firing's lone attacker (`extract_source_from_event`). Only
+    // "that creature" binds; any other anaphor leaves the clause for the
+    // generic pipeline (honest gap, never a misbound blocker). Located by the
+    // shared `scan_preceded` word-boundary scanner (first match); the cut keeps
+    // this site's pre-existing equal-byte-length assumption on `text`.
+    let blocking_lower = text.to_lowercase();
+    let blocking_clause = |i| -> OracleResult<'_, TargetFilter> {
+        let (i, _) =
+            alt((tag("that's"), tag("that is"), tag("thats"), tag("that are"))).parse(i)?;
+        let (i, _) = tag(" blocking ").parse(i)?;
+        let (i, _) = tag("that creature").parse(i)?;
+        let (i, _) = alt((
+            value((), nom::combinator::eof),
+            value((), tag(" ")),
+            value((), tag(",")),
+            value((), tag(".")),
+        ))
+        .parse(i)?;
+        Ok((i, TargetFilter::TriggeringSource))
+    };
+    let (text, enters_blocking) =
+        match nom_primitives::scan_preceded(&blocking_lower, blocking_clause) {
+            Some((before, filter, _)) => (&text[..before.trim_end().len()], Some(filter)),
+            None => (text, None),
+        };
     let (mut count, leading_name, mut rest) = match slot_count {
         Some(count) => (count, None, text),
         None => {
@@ -1039,6 +1069,7 @@ fn parse_token_description_with_context(
         static_abilities,
         enters_attacking,
         attack_destination,
+        enters_blocking,
     })
 }
 

@@ -54,6 +54,7 @@ fn dies_create_goblin_trigger() -> TriggerDefinition {
     let create_goblin = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Token {
+            enters_blocking: None,
             name: "Goblin".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
