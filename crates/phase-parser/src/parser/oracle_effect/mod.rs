@@ -39068,6 +39068,7 @@ fn from_among_batch_bounds(rest: &str) -> Option<ResolutionCastWindow> {
         CastCapReading::Unrepresentable => return None,
     };
     Some(ResolutionCastWindow {
+        pool: crate::types::ability::ResolutionCastPool::CurrentResolution,
         max_casts,
         max_total_mv: parse_from_among_total_mv_budget(head),
     })
@@ -40273,6 +40274,12 @@ enum CastAnaphor {
     /// honestly; any other form keeps its pre-change lowering (see the
     /// stopgap note at the promotion site).
     OneOfBatch,
+    /// "one of them" — one card chosen from a source-linked plural
+    /// antecedent established by the enclosing trigger condition. This is
+    /// intentionally distinct from `OneOfBatch`: the latter names a set
+    /// published by the current resolution, while this form reads a durable
+    /// linked-exile pool.
+    OneOfLinked,
     /// Every other anaphor; keeps `TargetFilter::ParentTarget`.
     Other,
 }
@@ -40417,6 +40424,16 @@ fn match_one_of_batch_anaphor(input: &str) -> Option<(&str, CastAnaphor)> {
     ))
     .parse(input)
     .ok()
+}
+
+/// CR 607.2a: match the linked plural one-of anaphor without accepting an
+/// untyped fallback. The caller must prove the antecedent through the parse
+/// context before it can lower this as a cast target.
+fn match_one_of_linked_anaphor(input: &str) -> Option<(&str, CastAnaphor)> {
+    type E<'a> = OracleError<'a>;
+    value(CastAnaphor::OneOfLinked, tag::<_, _, E>("one of them"))
+        .parse(input)
+        .ok()
 }
 
 /// CR 611.2a (stated-duration half) + CR 608.2g (no-window half): pre-`YouMay`
@@ -40567,8 +40584,9 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // anaphor. The `OneOfBatch` arms live in the shared
     // `match_one_of_batch_anaphor` (tried first, same longer-first order);
     // every other arm is unchanged.
-    let anaphor_match: Option<(&str, CastAnaphor)> =
-        match_one_of_batch_anaphor(rest).or_else(|| {
+    let anaphor_match: Option<(&str, CastAnaphor)> = match_one_of_linked_anaphor(rest)
+        .or_else(|| match_one_of_batch_anaphor(rest))
+        .or_else(|| {
             alt((
                 value(
                     CastAnaphor::SingularExiledCard,
@@ -40586,6 +40604,16 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             .ok()
         });
     if let Some((after_anaphor, matched_anaphor)) = anaphor_match {
+        let linked_one_of_target = if matches!(matched_anaphor, CastAnaphor::OneOfLinked) {
+            match ctx.plural_object_pronoun_ref.as_ref() {
+                Some(TargetFilter::ExiledBySource) => Some(TargetFilter::ExiledBySource),
+                _ => {
+                    return Some(Effect::unimplemented("unbound_linked_one_of_anaphor", rest));
+                }
+            }
+        } else {
+            None
+        };
         let (_, dur) = strip_trailing_duration(lower);
         let duration = dur.or_else(|| {
             scan_contains_phrase(lower, "this turn").then_some(Duration::UntilEndOfTurn)
@@ -40657,7 +40685,9 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         let mode_resolves_now = match mode {
             CardPlayMode::Cast => true,
             CardPlayMode::Play => match matched_anaphor {
-                CastAnaphor::SingularExiledCard | CastAnaphor::Other => without_paying,
+                CastAnaphor::SingularExiledCard | CastAnaphor::Other | CastAnaphor::OneOfLinked => {
+                    without_paying
+                }
                 CastAnaphor::PluralCardsExiled | CastAnaphor::OneOfBatch => false,
             },
         };
@@ -40715,9 +40745,18 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
                 return Some(Effect::unimplemented("bounded_batch_cast", lower));
             }
         }
-        let driver = if one_cast_window && matches!(matched_anaphor, CastAnaphor::OneOfBatch) {
+        let driver = if one_cast_window
+            && matches!(
+                matched_anaphor,
+                CastAnaphor::OneOfBatch | CastAnaphor::OneOfLinked
+            ) {
             crate::types::ability::CastFromZoneDriver::ResolutionWindow {
                 bounds: crate::types::ability::ResolutionCastWindow {
+                    pool: if matches!(matched_anaphor, CastAnaphor::OneOfLinked) {
+                        crate::types::ability::ResolutionCastPool::SourceLinked
+                    } else {
+                        crate::types::ability::ResolutionCastPool::CurrentResolution
+                    },
                     max_casts: Some(1),
                     max_total_mv: None,
                 },
@@ -40755,12 +40794,15 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
                 parse_host_anchored_exiled_cards_tail(after_anaphor).is_ok()
             }
             CastAnaphor::OneOfBatch | CastAnaphor::Other => false,
+            CastAnaphor::OneOfLinked => true,
         };
         let target = if anchors_to_source_exile_ledger {
-            resolve_singular_exiled_card_target(
-                ctx.chain_prior_publishers,
-                TargetFilter::ParentTarget,
-            )
+            linked_one_of_target.unwrap_or_else(|| {
+                resolve_singular_exiled_card_target(
+                    ctx.chain_prior_publishers,
+                    TargetFilter::ParentTarget,
+                )
+            })
         } else {
             TargetFilter::ParentTarget
         };

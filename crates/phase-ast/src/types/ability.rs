@@ -2998,6 +2998,14 @@ pub enum CastFromZoneDriver {
 /// carries it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ResolutionCastWindow {
+    /// CR 607.2a + CR 608.2c: whether the window reads the current resolution's
+    /// published batch or the source's durable linked-exile pool when no
+    /// current batch is available.
+    #[serde(
+        default,
+        skip_serializing_if = "ResolutionCastPool::is_current_resolution"
+    )]
+    pub pool: ResolutionCastPool,
     /// CR 608.2c: Maximum number of spells castable this way, as printed; `None`
     /// is the "any number of spells" form (bounded in practice only by the batch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3008,12 +3016,30 @@ pub struct ResolutionCastWindow {
     pub max_total_mv: Option<u32>,
 }
 
+/// CR 607.2a + CR 608.2c: the population a resolution-scoped cast window may
+/// consume. The current-resolution form must never reopen an older source
+/// ledger; the source-linked form is used by printed anaphors such as "one of
+/// them" when the exile happened in an earlier resolution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ResolutionCastPool {
+    #[default]
+    CurrentResolution,
+    SourceLinked,
+}
+
+impl ResolutionCastPool {
+    fn is_current_resolution(&self) -> bool {
+        matches!(self, Self::CurrentResolution)
+    }
+}
+
 impl ResolutionCastWindow {
     /// The batch-wide bounds of a clause that prints NO cast cap and no
     /// running-total budget ("you may cast any number of spells from among
     /// them"). Every mechanism can represent this faithfully, because there is
     /// nothing to represent.
     pub const UNBOUNDED: Self = Self {
+        pool: ResolutionCastPool::CurrentResolution,
         max_casts: None,
         max_total_mv: None,
     };
@@ -3027,6 +3053,7 @@ impl ResolutionCastWindow {
         let Self {
             max_casts,
             max_total_mv,
+            ..
         } = self;
         max_casts.is_none() && max_total_mv.is_none()
     }
@@ -3038,6 +3065,7 @@ impl ResolutionCastWindow {
         let Self {
             max_casts,
             max_total_mv,
+            ..
         } = self;
         *max_casts == Some(1) && max_total_mv.is_none()
     }
