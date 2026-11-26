@@ -1114,6 +1114,7 @@ fn apply_pending_counter_post_action(
             name,
             enters_attacking,
             attack_destination,
+            blocking_attacker,
             source_id,
             controller,
         } => {
@@ -1144,6 +1145,7 @@ fn apply_pending_counter_post_action(
             // because `push_committed_token_entry_events` gates `TokenCreated` on the authority's
             // `None` verdict, so it never disagrees with the existence-guarded
             // `record_token_created` ledger write immediately above it.
+            super::token::place_token_blocking(state, object_id, blocking_attacker, events);
             super::token::push_committed_token_entry_events(
                 state, object_id, name, source_id, events,
             );
@@ -1198,6 +1200,7 @@ fn apply_pending_counter_post_action(
             name,
             enters_attacking,
             attack_destination,
+            blocking_attacker,
             source_id,
             controller,
             remaining_modifications,
@@ -1208,6 +1211,7 @@ fn apply_pending_counter_post_action(
             name,
             enters_attacking,
             attack_destination,
+            blocking_attacker,
             source_id,
             controller,
             remaining_modifications,
@@ -9849,6 +9853,7 @@ mod tests {
             );
             let liminal_entry =
                 |entry_events| PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+                    blocking_attacker: None,
                     object_id,
                     name: "Saproling".to_string(),
                     source_id,
@@ -9864,6 +9869,7 @@ mod tests {
                 };
             let action = match route {
                 Route::FinalizeCopyTokenEntry => PendingCounterPostAction::FinalizeCopyTokenEntry {
+                    blocking_attacker: None,
                     object_id,
                     name: "Saproling".to_string(),
                     enters_attacking: false,
@@ -9884,6 +9890,7 @@ mod tests {
                 // without needing an `, except` body.
                 Route::ApplyCopyTokenModificationsAndFinalize => {
                     PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                        blocking_attacker: None,
                         object_id,
                         name: "Saproling".to_string(),
                         enters_attacking: false,
@@ -10199,6 +10206,7 @@ mod tests {
             );
             let action = match route {
                 Route::FinalizeCopyTokenEntry => PendingCounterPostAction::FinalizeCopyTokenEntry {
+                    blocking_attacker: None,
                     object_id,
                     name: "Copy Token".to_string(),
                     enters_attacking: false,
@@ -10208,6 +10216,7 @@ mod tests {
                 },
                 Route::ApplyCopyTokenModificationsAndFinalize => {
                     PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                        blocking_attacker: None,
                         object_id,
                         name: "Copy Token".to_string(),
                         enters_attacking: false,

@@ -3055,7 +3055,7 @@ Trample";
                     assert!(
                         tf.properties
                             .iter()
-                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                         "expected Attacking filter, got {tf:?}"
                     );
                 } else {
@@ -3086,8 +3086,12 @@ Trample";
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount {
                         filter: TargetFilter::Typed(
-                            crate::types::ability::TypedFilter::creature()
-                                .properties(vec![FilterProp::Attacking { defender: None }]),
+                            crate::types::ability::TypedFilter::creature().properties(vec![
+                                FilterProp::Attacking {
+                                    scope: Default::default(),
+                                    defender: None
+                                }
+                            ]),
                         ),
                     },
                 },
@@ -3144,7 +3148,7 @@ Trample";
                     assert!(
                         tf.properties
                             .iter()
-                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                         "expected Attacking filter, got {tf:?}"
                     );
                 } else {
@@ -3203,7 +3207,7 @@ Trample";
                     assert!(
                         tf.properties
                             .iter()
-                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                         "expected Attacking filter, got {tf:?}"
                     );
                 } else {

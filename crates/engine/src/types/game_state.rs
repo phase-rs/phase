@@ -11553,6 +11553,9 @@ pub struct PendingTokenBattlefieldEntry {
     /// The `TokenCreated` display name (the token's OWN name, not the copied source's).
     pub name: String,
     pub source_id: ObjectId,
+    /// CR 509.4: the bound attacker to block at completed battlefield entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_attacker: Option<ObjectIncarnationRef>,
 }
 
 /// Synchronous access to the exact batch owner parked by a paused move.
@@ -11852,6 +11855,8 @@ pub enum PendingCounterPostAction {
             skip_serializing_if = "EntryAttackDestination::is_any_defender"
         )]
         attack_destination: EntryAttackDestination,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_attacker: Option<ObjectIncarnationRef>,
         source_id: ObjectId,
         controller: PlayerId,
     },
@@ -11872,6 +11877,8 @@ pub enum PendingCounterPostAction {
             skip_serializing_if = "EntryAttackDestination::is_any_defender"
         )]
         attack_destination: EntryAttackDestination,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_attacker: Option<ObjectIncarnationRef>,
         source_id: ObjectId,
         controller: PlayerId,
         remaining_modifications: Vec<ContinuousModification>,
@@ -11920,6 +11927,9 @@ pub enum PendingCounterPostAction {
             skip_serializing_if = "EntryAttackDestination::is_any_defender"
         )]
         attack_destination: EntryAttackDestination,
+        /// CR 509.4: the bound attacker to block at completed battlefield entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_attacker: Option<ObjectIncarnationRef>,
         attach_to: Option<AttachTarget>,
         sacrifice_at: Option<Duration>,
         created_ids: Vec<ObjectId>,
@@ -29011,6 +29021,9 @@ pub struct LiminalEntry {
         skip_serializing_if = "EntryAttackDestination::is_any_defender"
     )]
     pub attack_destination: EntryAttackDestination,
+    /// CR 509.4: the bound attacker to block at completed battlefield entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_attacker: Option<ObjectIncarnationRef>,
     pub attach_to: Option<AttachTarget>,
     pub sacrifice_at: Option<Duration>,
     pub remaining_count: u32,
@@ -30252,7 +30265,7 @@ declare_game_state! {
     /// of client round-trips; realized by the single authority
     /// `crate::game::effects::token::flush_pending_token_battlefield_entry`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_token_battlefield_entry: Option<PendingTokenBattlefieldEntry>,
+    pub pending_token_battlefield_entry: Option<Box<PendingTokenBattlefieldEntry>>,
 
     // Layer system
     // CONSERVATIVE: deserialized snapshots (e.g. the WASM-export repro) rebuild
@@ -50236,6 +50249,7 @@ mod tests {
         let projection = TokenProjection::materialize(state.objects[&object_id].clone());
         check(
             |attack_destination| LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: LiminalEntrant::Token(projection.clone()),
                 name: "Goblin".to_string(),
@@ -50257,6 +50271,7 @@ mod tests {
             |entry| entry.attack_destination.clone(),
         );
         let copy = Box::new(crate::types::proposed_event::CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
                 &state.objects[&object_id],
             )),
@@ -50289,6 +50304,7 @@ mod tests {
         );
         check(
             |attack_destination| PendingCounterPostAction::FinalizeCopyTokenEntry {
+                blocking_attacker: None,
                 object_id,
                 name: "Goblin".to_string(),
                 enters_attacking: true,
@@ -50311,6 +50327,7 @@ mod tests {
     fn continue_token_event_delivery_serde_roundtrip() {
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: crate::types::proposed_event::TokenCharacteristics {
                 display_name: "Squirrel".to_string(),
                 power: Some(1),
@@ -50580,6 +50597,7 @@ mod tests {
                     owner: PlayerId(0),
                     count: 1,
                     copy: Box::new(CopyTokenSpec {
+                        blocking_attacker: None,
                         values: Box::new(intrinsic_copiable_values(&source)),
                         display: Default::default(),
                         extra_keywords: vec![Keyword::Haste],
@@ -62036,6 +62054,54 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         let twice = once.normalize_for_loop();
         assert!(loop_states_equal(&once, &twice));
         assert_eq!(twice.players[0].library, im::vector![b, a]);
+    }
+
+    #[test]
+    fn normalize_for_loop_ranks_an_installed_death_watch_against_its_creature() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let source = scenario.add_enchantment_from_oracle(
+            P0,
+            "Printed return watcher",
+            "When this enchantment enters, support 2. (Put a +1/+1 counter on each of up to two target creatures.)\n{1}: Choose target creature with a counter on it. When that creature dies this turn, return that card to its owner's hand.",
+        ).id();
+        let watched = scenario.add_creature(P1, "Watched creature", 2, 2).id();
+        scenario.with_counter(watched, crate::types::counter::CounterType::Plus1Plus1, 1);
+        let mut runner = scenario.build();
+        runner.activate(source, 0).target_object(watched).resolve();
+        let current = runner.state();
+        let mut shifted = current.clone();
+        shifted.objects.get_mut(&watched).unwrap().incarnation += 100;
+        shifted.delayed_triggers[0]
+            .ability
+            .context
+            .delayed_watch_incarnation
+            .as_mut()
+            .expect("production activation installed a watch pin")
+            .incarnation += 100;
+        assert_ne!(current, &shifted);
+        assert!(normalized_equal(current, &shifted));
+
+        shifted.delayed_triggers[0]
+            .ability
+            .context
+            .delayed_watch_incarnation
+            .as_mut()
+            .unwrap()
+            .incarnation -= 1;
+        assert!(!normalized_equal(current, &shifted));
     }
 
     /// CR 400.7 + CR 104.4b: every incarnation a zone-change record names is ranked,

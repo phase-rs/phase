@@ -6638,7 +6638,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes<'_> {
         // `scan_controller_ref` outcome is projected:false, so these never lift the
         // projected axis; recursing keeps the classifier honest under future
         // ControllerRef changes.
-        FilterProp::Attacking { defender } => {
+        FilterProp::Attacking { defender , .. } => {
             defender.as_ref().map_or(Axes::NONE, scan_controller_ref)
         }
         FilterProp::ProtectorMatches { controller } => scan_controller_ref(controller),

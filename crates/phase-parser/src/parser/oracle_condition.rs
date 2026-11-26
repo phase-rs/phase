@@ -988,7 +988,7 @@ mod tests {
             } => assert!(
                 matches!(&filter, TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::Attacking { defender: Some(ControllerRef::You) }
+                    FilterProp::Attacking { defender: Some(ControllerRef::You) , .. }
                 ))),
                 "filter should be a creature attacking you, got {filter:?}"
             ),

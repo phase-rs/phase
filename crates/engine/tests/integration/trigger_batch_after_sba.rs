@@ -2218,7 +2218,13 @@ fn cleanup_loss_board(commander: bool, seed_older: bool) -> CleanupLossBoard {
             CounterType::Minus1Minus1,
             if commander { 2 } else { 1 },
         );
-    let delayed_source = sc.add_real_card(P0, "Together Forever", Zone::Battlefield, db);
+    // Structural control derived from Together Forever, the nearest printed precedent.
+    // Removing "this turn" keeps the legacy watcher installed across cleanup.
+    let delayed_source = sc.add_enchantment_from_oracle(
+        P0,
+        "Unwindowed cleanup watcher",
+        "{1}: Choose target creature with a counter on it. When that creature dies, return that card to its owner's hand.",
+    ).id();
     let seed_kill = seed_older.then(|| {
         (
             sc.add_real_card(P0, "Shock", Zone::Hand, db),
@@ -2305,7 +2311,7 @@ fn cleanup_loss_board(commander: bool, seed_older: bool) -> CleanupLossBoard {
             ability_index: 0,
             payment_mode: CastPaymentMode::Auto,
         })
-        .expect("activate Together Forever");
+        .expect("activate the cleanup watcher");
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::TargetSelection { player: P0, .. }
@@ -2314,16 +2320,16 @@ fn cleanup_loss_board(commander: bool, seed_older: bool) -> CleanupLossBoard {
         .act(GameAction::ChooseTarget {
             target: Some(TargetRef::Object(goblin)),
         })
-        .expect("Together Forever chooses the other Goblin with its marker");
+        .expect("the watcher chooses the other Goblin with its marker");
     if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
         runner
             .act(GameAction::PassPriority)
-            .expect("pay Together Forever's printed cost");
+            .expect("pay the watcher's cost");
     }
     pass_stack_to_choice(&mut runner);
     let delayed = &runner.state().delayed_triggers;
     let [watcher] = delayed.as_slice() else {
-        panic!("Together Forever must install exactly one live WhenDies watcher");
+        panic!("the cleanup control must install exactly one live WhenDies watcher");
     };
     assert_eq!(
         (watcher.source_id, watcher.controller),
@@ -2337,6 +2343,9 @@ fn cleanup_loss_board(commander: bool, seed_older: bool) -> CleanupLossBoard {
         ),
         "the installed watcher must name the selected Goblin"
     );
+    let saved_context =
+        serde_json::to_value(&watcher.ability.context).expect("serialize legacy watcher");
+    assert!(saved_context.get("delayed_watch_incarnation").is_none());
     assert_eq!(
         runner.state().objects[&goblin].incarnation,
         goblin_incarnation

@@ -14609,6 +14609,7 @@ fn token_description_to_spec(
         attach_to: crate::types::token_spec::TokenHostRequest::NotRequested,
         // Replacement-created tokens carry no blocking rider either.
         blocking_attacker: None,
+        blocking_attacker_incarnation: None,
     })
 }
 
@@ -22020,7 +22021,10 @@ mod tests {
                 TypedFilter::new(TypeFilter::Artifact)
                     .with_type(TypeFilter::Creature)
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Attacking { defender: None }])
+                    .properties(vec![FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None
+                    }])
             ))
         );
         assert!(def.damage_target_filter.is_none());

@@ -268,6 +268,7 @@ pub(crate) fn resolve_copy_token_specs(
         // CR 707.8a: read before `source.values` moves into the spec.
         let double_faced = copied_double_faces(state, &source);
         specs.push(CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(source.values),
             // Created copy-tokens derive their descriptor from their
             // own base at injection (copy exceptions included), so the
@@ -788,6 +789,7 @@ fn drain_copy_token_resolution_on_board(
         let mut spec = copy_entry_probe_spec(&batch.copy, &state.all_creature_types);
         spec.tapped = batch.copy.tapped;
         spec.enters_attacking = batch.copy.enters_attacking;
+        spec.set_blocking_attacker_ref(batch.copy.blocking_attacker);
         let enter_tapped = EtbTapState::from_seeded_tapped(batch.copy.tapped);
         let proposed = ProposedEvent::CreateToken {
             redirected_to: None,
@@ -1344,6 +1346,7 @@ fn apply_copy_token_batch_on_board(
         tapped,
         enters_attacking,
         attack_request,
+        blocking_attacker,
         sacrifice_at,
         source_id,
         controller,
@@ -1458,6 +1461,7 @@ fn apply_copy_token_batch_on_board(
                 tapped,
                 enters_attacking,
                 attack_request: attack_request.clone(),
+                blocking_attacker,
                 sacrifice_at: sacrifice_at.clone(),
                 source_id,
                 controller,
@@ -1498,6 +1502,7 @@ fn apply_copy_token_batch_on_board(
                     controller,
                     enters_attacking,
                     attack_destination: attack_destination.clone(),
+                    blocking_attacker,
                     attach_to: None,
                     sacrifice_at: sacrifice_at.clone(),
                     remaining_count: final_count.saturating_sub(index + 1),
@@ -1591,6 +1596,7 @@ fn apply_copy_token_batch_on_board(
             tapped,
             enters_attacking,
             attack_request: attack_request.clone(),
+            blocking_attacker,
             sacrifice_at: sacrifice_at.clone(),
             source_id,
             controller,
@@ -2005,6 +2011,7 @@ struct CopyTokenFinalization {
     name: String,
     enters_attacking: bool,
     attack_destination: EntryAttackDestination,
+    blocking_attacker: Option<ObjectIncarnationRef>,
     source_id: ObjectId,
     controller: crate::types::player::PlayerId,
     /// CR 608.2h + CR 707.9b: donor incarnation donor-referential exceptions
@@ -2082,6 +2089,7 @@ fn finish_non_liminal_copy_token_entry(
         name: name.clone(),
         enters_attacking,
         attack_destination: attack_destination.clone(),
+        blocking_attacker: tail.copy.blocking_attacker,
         source_id,
         controller,
         donor: copy_spec.donor,
@@ -2156,6 +2164,7 @@ fn finish_non_liminal_copy_token_entry(
                             name: name.clone(),
                             enters_attacking,
                             attack_destination: attack_destination.clone(),
+                            blocking_attacker: finalization.blocking_attacker,
                             source_id,
                             controller,
                         },
@@ -2206,6 +2215,7 @@ fn finish_non_liminal_copy_token_entry(
     // CR 608.2i battlefield-entry bookkeeping itself, so the co-located
     // `record_battlefield_entry` call is deleted — keeping it would double-count
     // `battlefield_entries_this_turn`.
+    super::token::place_token_blocking(state, token_id, finalization.blocking_attacker, events);
     super::token::push_committed_token_entry_events(state, token_id, name, source_id, events)
         .expect("token just created");
     sink.publish(state, token_id);
@@ -2492,6 +2502,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     name: String,
     enters_attacking: bool,
     attack_destination: EntryAttackDestination,
+    blocking_attacker: Option<ObjectIncarnationRef>,
     source_id: ObjectId,
     controller: crate::types::player::PlayerId,
     remaining_modifications: Vec<ContinuousModification>,
@@ -2502,6 +2513,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
         name: name.clone(),
         enters_attacking,
         attack_destination,
+        blocking_attacker,
         source_id,
         controller,
         donor,
@@ -2547,6 +2559,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     // and this batch's `created_ids`, which `drain_pending_copy_token_resolution` assigns wholesale
     // back onto ledger 3 — because a separate buffer push republished the withheld id and clobbered
     // the guarded list on top of it.
+    super::token::place_token_blocking(state, token_id, blocking_attacker, events);
     super::token::push_committed_token_entry_events(state, token_id, name, source_id, events);
     super::token::record_last_created_copy_batch_token(state, token_id);
     true
@@ -2687,6 +2700,7 @@ fn apply_token_modifications(
                                 name: finalization.name.clone(),
                                 enters_attacking: finalization.enters_attacking,
                                 attack_destination: finalization.attack_destination.clone(),
+                                blocking_attacker: finalization.blocking_attacker,
                                 source_id: finalization.source_id,
                                 controller: finalization.controller,
                                 remaining_modifications: modifications[index + 1..].to_vec(),
@@ -3254,6 +3268,7 @@ mod tests {
         let values =
             crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source_id]);
         let copy = CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(values),
             display: DisplayIdentity {
                 display_source: DisplaySource::Token,
@@ -3369,6 +3384,7 @@ mod tests {
         use crate::types::proposed_event::TokenAttackRequest;
 
         CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
                 &state.objects[&source_id],
             )),
@@ -7893,6 +7909,7 @@ mod tests {
             offered_batch: OfferedBatchCustody::Settled,
         });
         let copy = CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
                 &state.objects[&source_id],
             )),
@@ -8347,6 +8364,7 @@ mod tests {
             Zone::Battlefield,
         );
         crate::types::game_state::LiminalEntry {
+            blocking_attacker: None,
             copy_settlement: None,
             object: crate::types::game_state::LiminalEntrant::Token(
                 crate::types::game_state::TokenProjection::materialize(object),

@@ -158,6 +158,7 @@ mod tests {
         let source_filter =
             TargetFilter::Typed(
                 TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                    scope: Default::default(),
                     defender: Some(ControllerRef::You),
                 }]),
             );

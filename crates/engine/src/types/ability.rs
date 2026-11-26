@@ -2038,6 +2038,11 @@ pub enum DamageInstructionResult {
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// CR 400.7 + CR 603.7c: The announced occurrence a death watcher names.
+    /// The queued firing retains it to follow the recorded departure's split
+    /// components. The move's target pin still names the graveyard arrival.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delayed_watch_incarnation: Option<ObjectIncarnationRef>,
     /// CR 608.2f + CR 700.1: guards read for the simultaneous damage batch this node is a
     /// remaining portion of. Node-local: a later instruction reads live (CR 700.1). Lazily
     /// boxed, like `parked_damage_batch`, so the common empty case keeps every
@@ -5558,6 +5563,7 @@ impl ResolvedAbility {
             .target_incarnations
             .iter_mut()
             .chain(self.target_pins.iter_mut().flatten())
+            .chain(self.context.delayed_watch_incarnation.iter_mut())
             .chain(self.force_block_attacker.iter_mut())
             .chain(self.context.granting_object.iter_mut())
             .chain(self.context.creation_illegal_referents.iter_mut())

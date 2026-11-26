@@ -724,14 +724,6 @@ fn event_delayed_counters_it_had_reads_its_own_event() {
         &["Enchantment"],
     );
     assert!(
-        debug.contains("WhenDies") || debug.contains("WhenNextEvent"),
-        "inner delayed trigger must be event-delayed; got {debug}"
-    );
-    assert!(
-        !debug.contains("AtNextPhase"),
-        "inner delayed trigger must not be phase-delayed; got {debug}"
-    );
-    assert!(
         debug.contains("CountersOn"),
         "expected CountersOn ref; got {debug}"
     );
@@ -771,6 +763,23 @@ fn event_delayed_counters_it_had_reads_its_own_event() {
         runner.state().delayed_triggers.len(),
         1,
         "reach-guard: the outer trigger installed one event-delayed trigger"
+    );
+    let watcher = &runner.state().delayed_triggers[0];
+    assert!(matches!(
+        &watcher.condition,
+        engine::types::ability::DelayedTriggerCondition::WheneverEvent {
+            trigger,
+            expiry: engine::types::ability::WheneverEventExpiry::EndOfTurn,
+        } if trigger.origin == Some(Zone::Battlefield) && trigger.destination == Some(Zone::Graveyard)
+    ));
+    let pin = watcher
+        .ability
+        .context
+        .delayed_watch_incarnation
+        .expect("Y's announced incarnation");
+    assert_eq!(
+        (pin.object_id, pin.incarnation),
+        (y, runner.state().objects[&y].incarnation)
     );
     assert!(
         runner.state().delayed_triggers[0]

@@ -16,13 +16,15 @@
 //!   sacrifices the TRIGGERING Mountain instead of the source enchantment
 //!   (test 5 — both zone assertions flip).
 
+use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0};
-use engine::types::actions::GameAction;
+use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::counter::parse_counter_type;
-use engine::types::game_state::{ManaChoice, WaitingFor};
+use engine::types::game_state::{CastingVariant, ManaChoice, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -30,6 +32,7 @@ use engine::types::zones::Zone;
 const GEMSTONE_MINE_ORACLE: &str = "This land enters with three mining counters on it.\n{T}, Remove a mining counter from this land: Add one mana of any color. If there are no mining counters on this land, sacrifice it.";
 const PEAT_BOG_ORACLE: &str = "This land enters tapped with two depletion counters on it.\n{T}, Remove a depletion counter from this land: Add {B}{B}. If there are no depletion counters on this land, sacrifice it.";
 const DARK_RITUAL_ORACLE: &str = "Add {B}{B}{B}.";
+const KAMAHL_ORACLE: &str = "{G}: Target land becomes a 1/1 creature until end of turn. It's still a land.\n{2}{G}{G}{G}: Creatures you control get +3/+3 and gain trample until end of turn.";
 // Trigger line of Last Light of Durin's Day (the Mountaincycling keyword line
 // is irrelevant to the rider under test and omitted).
 const LAST_LIGHT_ORACLE: &str = "Whenever a Mountain you control enters, put a quest counter on this enchantment. If it has six or more quest counters on it, sacrifice it. If you do, search your hand and/or library for a Dragon card and put it onto the battlefield. If you search your library this way, shuffle.";
@@ -225,6 +228,79 @@ fn peat_bog_autotap_payment_sacrifices_after_last_counter() {
         Zone::Graveyard,
         "paying with Peat Bog's last depletion counter must sacrifice it"
     );
+}
+
+#[test]
+fn peat_bog_merged_death_during_autopayment_draws_once() {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Green; 4]
+            .into_iter()
+            .chain([ManaType::Black])
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let bog = scenario
+        .add_land_from_oracle(P0, "Peat Bog", PEAT_BOG_ORACLE)
+        .id();
+    scenario.with_counter(bog, parse_counter_type("depletion"), 1);
+    let kamahl = scenario
+        .add_creature_from_oracle(P0, "Kamahl, Fist of Krosa", 4, 3, KAMAHL_ORACLE)
+        .id();
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let day = scenario.add_real_card(P0, "A Good Day to Die", Zone::Hand, &db);
+    let ritual = scenario
+        .add_spell_to_hand_from_oracle(P0, "Dark Ritual", true, DARK_RITUAL_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    scenario.add_card_to_library_top(P0, "Second draw");
+    scenario.add_card_to_library_top(P0, "First draw");
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+
+    runner.activate(kamahl, 0).target_object(bog).resolve();
+    runner
+        .cast(gemrazer)
+        .casting_variant(CastingVariant::Mutate)
+        .alternative_cast(AlternativeCastDecision::Alternative)
+        .target_object(bog)
+        .commit();
+    runner.advance_until_stack_empty();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::MutateMergeChoice { player, .. } if player == P0
+    ));
+    runner
+        .act(GameAction::ChooseMutateMergeSide {
+            side: engine::game::merge::MergeSide::Bottom,
+        })
+        .expect("merge Gemrazer under Peat Bog");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&bog].merged_components.len(), 2);
+
+    runner.cast(day).target_object(bog).resolve();
+    assert!(runner.state().delayed_triggers.iter().any(|watcher| {
+        watcher.source_id == day && watcher.ability.context.delayed_watch_incarnation.is_some()
+    }));
+    assert_eq!(pool_count(&runner, P0, ManaType::Black), 0);
+
+    let outcome = runner.cast(ritual).resolve();
+    outcome.assert_zone(&[bog, gemrazer, ritual], Zone::Graveyard);
+    // CR 603.2c: the merged creature's single death triggers one draw.
+    outcome.assert_hand_drawn(P0, 1);
+    assert!(outcome.state().delayed_triggers.is_empty());
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
 }
 
 /// Test 5 (multi-authority hostile, discriminating): the typed-subject trigger

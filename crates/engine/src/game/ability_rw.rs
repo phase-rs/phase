@@ -2662,7 +2662,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::MostPrevalentCreatureTypeIn {
             scope: controller, ..
         } => legacy_controller_ref(controller),
-        FilterProp::Attacking { defender: c }
+        FilterProp::Attacking { defender: c , .. }
         | FilterProp::AttackedThisTurn { defender: c }
         | FilterProp::HasAttachment { controller: c, .. }
         | FilterProp::HasAnyAttachmentOf { controller: c, .. }
@@ -2980,7 +2980,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::MostPrevalentCreatureTypeIn {
             scope: controller, ..
         } => member_bound_controller_ref(controller),
-        FilterProp::Attacking { defender: c }
+        FilterProp::Attacking { defender: c , .. }
         | FilterProp::AttackedThisTurn { defender: c }
         | FilterProp::HasAttachment { controller: c, .. }
         | FilterProp::HasAnyAttachmentOf { controller: c, .. }
