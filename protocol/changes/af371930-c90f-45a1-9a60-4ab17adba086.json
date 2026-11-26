@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Parameterize top-of-library look and play permissions by library owner and support a cast-specific mana-spend rider"
+}

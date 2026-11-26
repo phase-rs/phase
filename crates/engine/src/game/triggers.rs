@@ -2262,6 +2262,29 @@ fn occurrence_trigger_events(
                 state,
             ))
         }
+        // CR 509.1h + CR 508.5a + CR 603.2c: "a creature attacks and isn't
+        // blocked" fires once PER unblocked attacker, each firing narrowed to
+        // a singleton attack declaration so the defending player (and "that
+        // creature") resolves per firing. The global defender is the first
+        // pair's — a fallback only; each singleton's own entry carries its
+        // defender.
+        TriggerMode::YouAttackUnblocked => {
+            let matching =
+                m::matching_you_attack_unblocked_pairs(event, trig_def, source_context, state);
+            let fallback = source_context.source_read(state).controller();
+            let defending_player = matching
+                .first()
+                .map(|(_, target)| {
+                    super::combat::defending_player_for_target_or(state, *target, fallback)
+                })
+                .unwrap_or(fallback);
+            let attacker_ids: Vec<_> = matching.iter().map(|(id, _)| *id).collect();
+            Some(singleton_attack_events(
+                defending_player,
+                matching,
+                declaration_records_for_attackers(event, &attacker_ids),
+            ))
+        }
         TriggerMode::Blocks => Some(m::matching_block_events(
             event,
             trig_def,
@@ -2522,9 +2545,16 @@ fn trigger_firing_groups(
     // the defending player from each expanded attack event; the batch-level
     // event is the wrong context, so their check waits for the narrowed firing.
     // CR 805.4d: so does a per-player phase firing, whose "that player" is its own.
+    // YouAttackUnblocked joins the exemption: the batch BlockersDeclared names
+    // no attack entries, so a defending-player condition is unanswerable there
+    // by construction — each firing's singleton declaration (below) is the
+    // context the check needs.
     let grouped = groups_simultaneous_occurrences(trig_def);
     if !grouped
-        && !matches!(trig_def.mode, TriggerMode::Attacks)
+        && !matches!(
+            trig_def.mode,
+            TriggerMode::Attacks | TriggerMode::YouAttackUnblocked
+        )
         && step_players.is_none()
         && !conditions.hold(state, controller, source_context, event)
     {
@@ -14194,6 +14224,7 @@ pub(crate) fn seed_event_referent_pins(
                 | Effect::ArrangePlanarDeckTop { .. }
                 | Effect::Planeswalk
                 | Effect::AbandonScheme
+                | Effect::SetSchemeInMotion { .. }
                 | Effect::ChaosEnsues
                 | Effect::ReverseTurnOrder
                 | Effect::RedistributeLifeTotals
@@ -22459,10 +22490,13 @@ fn zone_changed_condition_provenance_is_coherent(event: &GameEvent) -> bool {
 /// (`game/casting_costs.rs`, `game/stack.rs`) and so are captured by the
 /// Stack->Battlefield snapshot. It does NOT hold universally: for example
 /// `entered_via_ability_source` (behind `TriggerCondition::PlacedByAbilitySource`)
-/// is written AFTER the move, inside `apply_resolved_entry_provenance`, so the record
-/// context never carries it and this helper's `Latched` branch would report
-/// `None` for it. Any migration of another condition arm onto this helper MUST
-/// first establish that the provenance it reads is stamped pre-move.
+/// is written AFTER the move, inside `apply_resolved_entry_provenance`, so an
+/// ENTERING record's context never carries it and this helper's `Latched`
+/// branch would report `None` for it. (An EXITING record's context DOES carry
+/// it — the stamp predates the exit move — which is what the
+/// `PlacedByAbilitySource` arm's own record-context fallback reads for
+/// dies/leaves triggers.) Any migration of another condition arm onto this
+/// helper MUST first establish that the provenance it reads is stamped pre-move.
 ///
 /// The live-entrant branch is also scoped to `record.to_zone == Zone::Battlefield`
 /// — not because CR 608.2h + CR 113.7a's "public zone it was expected in" is
@@ -22650,6 +22684,21 @@ fn trigger_condition_anchors_resolvable(
                 trigger_event,
             )
             .is_some();
+        }
+        // CR 508.5 + CR 603.4: a combat-role identity leaf compares two
+        // scopes — both the subject and the defending-player anchor must
+        // resolve, or the leaf is unanswerable (never false).
+        Some(TriggerConditionAnchor::PlayerPair(first, second)) => {
+            return [first, second].iter().all(|scope| {
+                crate::game::quantity::resolve_player_scope_for_trigger_check(
+                    state,
+                    scope,
+                    controller,
+                    source_context,
+                    trigger_event,
+                )
+                .is_some()
+            });
         }
         // CR 607.1c + CR 603.4: a self-linked leaf is unanswerable without this
         // trigger's identity.
@@ -22911,6 +22960,23 @@ fn evaluate_trigger_condition_with_source(
             let via = event_object_id
                 .and_then(|id| state.objects.get(&id))
                 .and_then(|object| object.entered_via_ability_source)
+                .or_else(|| {
+                    // CR 608.2h + CR 603.6c + CR 111.7: dies/leaves triggers —
+                    // the subject has left the battlefield, so the live stamp
+                    // is cleared (CR 400.7) or the token purged. Read the
+                    // exiting record's pre-move snapshot instead: zones.rs
+                    // snapshots BEFORE resetting exit provenance, so the
+                    // latched context still carries the entry stamp. Entering
+                    // records predate their own stamp (written after the
+                    // move), so this fallback stays `None` for ETB events and
+                    // Kodama's live read above is unaffected.
+                    trigger_event.and_then(|e| match e {
+                        GameEvent::ZoneChanged { record, .. } => record
+                            .trigger_source_context()
+                            .and_then(|latched| latched.entered_via_ability_source),
+                        _ => None,
+                    })
+                })
                 .or_else(|| {
                     event_object_id
                         .is_none()
@@ -23574,6 +23640,30 @@ fn evaluate_trigger_condition_with_source(
                 trigger_event,
             )
             .is_some_and(|pid| crate::game::players::team_poison_total(state, pid) >= 1)
+        }
+        // CR 508.5 + CR 603.4: defending-player IDENTITY — true when the
+        // named scope resolves to the defending player of the triggering
+        // attacking creature. Both scopes resolve from the SAME explicit
+        // `trigger_event`, so the fire-time check and the resolution-time
+        // recheck read the same players. Unresolvable scopes cannot reach
+        // this arm (entry boundary, see above); the `is_some_and` pair is a
+        // total-function formality, not the fail-closed mechanism.
+        TriggerCondition::IsDefendingPlayer { player } => {
+            let subject = crate::game::quantity::resolve_player_scope_for_trigger_check(
+                state,
+                player,
+                controller,
+                source_context,
+                trigger_event,
+            );
+            let anchor = crate::game::quantity::resolve_player_scope_for_trigger_check(
+                state,
+                &PlayerScope::DefendingPlayer,
+                controller,
+                source_context,
+                trigger_event,
+            );
+            matches!((subject, anchor), (Some(a), Some(b)) if a == b)
         }
         // CR 726.3: True when the controller has the initiative.
         TriggerCondition::IsInitiative => eval_is_initiative(state, controller),
@@ -41272,6 +41362,7 @@ pub mod tests {
                         AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::Token {
+                                enters_blocking: None,
                                 name: "Illusion".to_string(),
                                 power: crate::types::ability::PtValue::Quantity(
                                     QuantityExpr::Ref {

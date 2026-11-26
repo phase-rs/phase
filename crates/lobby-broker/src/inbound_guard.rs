@@ -360,7 +360,7 @@ mod tests {
             display_name: "Host",
             password: None,
             timer_seconds: None,
-            player_count: 2,
+            player_count: 3,
             format_config: Some(&format_config),
             room_name: None,
             host_peer_id: None,

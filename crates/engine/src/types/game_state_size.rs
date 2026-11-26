@@ -213,6 +213,13 @@
 //! The staged parent's inline size fits within the existing bucket's slack;
 //! keep the 16,384 ceiling.
 //!
+//! On x86_64-unknown-linux-gnu (`nightly-2026-11-19`), the merged
+//! top-of-library permission branch measured 16,400 B. Its new look snapshot
+//! and synchronous cast latch already occupy one pointer each. Boxing
+//! `pending_library_search_delivery`, populated only during search delivery,
+//! reduced its inline footprint from 72 B to 8 B and brought `GameState` to
+//! 16,336 B under the existing 16,384 B ceiling.
+//!
 //! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-04-19`) at
 //! 16,416 B when the departed-trigger record (`departed_triggered_abilities`,
 //! an `im::HashMap`, 32 B inline with alignment) landed for #10027: the branch

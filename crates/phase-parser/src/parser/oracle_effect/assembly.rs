@@ -2337,6 +2337,7 @@ fn is_delayed_source_zone_condition(condition: &StaticCondition) -> bool {
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
@@ -5141,6 +5142,9 @@ pub(crate) fn assemble_effect_chain_with_provenance(
     // CR 608.2d: gate the whole "if they guessed wrong/right" branch, including
     // any "and ..." continuation steps.
     super::propagate_guess_branch_condition_to_continuations(&mut result);
+    // CR 110.2 + CR 608.2c: "an opponent gains control of them" — fail closed
+    // where the runtime cannot hand control to the chosen player.
+    super::fail_closed_chosen_recipient_gain_control(&mut result);
 
     // CR 608.2d + CR 202.3 + CR 115.1: the assembled tree is where both halves of
     // an aggregate-budget clause first exist together — the typed constraint the

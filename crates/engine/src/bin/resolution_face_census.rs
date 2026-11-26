@@ -9,7 +9,8 @@ use engine::game::zones::{add_to_zone, remove_from_zone};
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CastFromZoneDriver, ControllerRef,
     Effect, FilterProp, ManaSpendPermission, MultiTargetSpec, PlayerFilter, QuantityExpr,
-    QuantityRef, ResolutionCastWindow, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    QuantityRef, ResolutionCastPool, ResolutionCastWindow, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
 use engine::types::actions::{CastChoice, GameAction};
 use engine::types::card::CardFace;
@@ -852,6 +853,7 @@ fn source_effect(profile: Profile) -> Effect {
             None,
             CastFromZoneDriver::ResolutionWindow {
                 bounds: ResolutionCastWindow {
+                    pool: ResolutionCastPool::CurrentResolution,
                     max_casts: Some(2),
                     max_total_mv: None,
                 },

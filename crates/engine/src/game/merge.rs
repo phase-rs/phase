@@ -1361,6 +1361,7 @@ fn is_census_publisher(effect: &Effect) -> bool {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals

@@ -7,7 +7,7 @@ use crate::game::devotion::count_devotion;
 use crate::game::functioning_abilities::game_active_statics;
 use crate::game::mana_abilities;
 use crate::game::mana_sources::display_land_mana_pips;
-use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
+use crate::game::static_abilities::top_of_library_look_owners;
 use crate::types::ability::{AbilityBlockEntry, AbilityKind, StaticCondition};
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -259,13 +259,7 @@ pub fn derive_display_state(state: &mut GameState) {
         let peek_flags: Vec<bool> = state
             .players
             .iter()
-            .map(|p| {
-                let ctx = StaticCheckContext {
-                    player_id: Some(p.id),
-                    ..Default::default()
-                };
-                check_static_ability(state, StaticMode::MayLookAtTopOfLibrary, &ctx)
-            })
+            .map(|p| top_of_library_look_owners(state, p.id).any(|owner| owner == p.id))
             .collect();
         for (i, flag) in peek_flags.into_iter().enumerate() {
             state.players[i].can_look_at_top_of_library = flag;
@@ -273,11 +267,7 @@ pub fn derive_display_state(state: &mut GameState) {
     } else {
         let dirty_players: Vec<_> = dirty.dirty_players.iter().copied().collect();
         for player_id in dirty_players {
-            let ctx = StaticCheckContext {
-                player_id: Some(player_id),
-                ..Default::default()
-            };
-            let flag = check_static_ability(state, StaticMode::MayLookAtTopOfLibrary, &ctx);
+            let flag = top_of_library_look_owners(state, player_id).any(|owner| owner == player_id);
             if let Some(player) = state
                 .players
                 .iter_mut()

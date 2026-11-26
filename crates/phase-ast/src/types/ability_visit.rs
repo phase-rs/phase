@@ -1119,6 +1119,7 @@ where
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -1566,6 +1567,7 @@ pub(crate) fn static_condition(condition: &$($mut_)? StaticCondition, v: &mut im
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch

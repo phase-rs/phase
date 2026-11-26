@@ -596,7 +596,7 @@ pub(crate) fn equip_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefi
         AbilityKind::Activated,
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
-            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            target: TargetFilter::equip_target(),
             // CR 702.6a: the keyword's "target" names the HOST (the equipped
             // creature); the attachment ("this permanent") is determined.
             selection: AttachSelection::AtResolution {
@@ -886,6 +886,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
         attach_to: None,
         enters_attacking: true,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -1046,6 +1047,7 @@ fn synthesize_etb_token_attach_keyword(
         attach_to: None,
         enters_attacking: false,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -3893,6 +3895,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
             attach_to: None,
             enters_attacking: false,
             attack_destination: TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -4533,6 +4536,7 @@ fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
         attach_to: None,
         enters_attacking: false,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -8834,6 +8838,7 @@ fn type_filter_noun(filter: &TypeFilter, plural: bool) -> String {
         TypeFilter::Planeswalker => "planeswalker",
         TypeFilter::Battle => "battle",
         TypeFilter::Kindred => "kindred",
+        TypeFilter::Scheme => "scheme",
         TypeFilter::Permanent => "permanent",
         TypeFilter::Card => "card",
         TypeFilter::Any => "permanent",
