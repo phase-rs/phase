@@ -193,8 +193,14 @@ fn sewer_nemesis_trigger_still_mills_after_the_source_leaves() {
     runner.cast(spell).commit();
     assert_eq!(runner.state().stack.len(), 2);
     assert_eq!(runner.state().stack[1].source_id, nemesis);
-    // P1 has nothing left to do, so the engine passes on their behalf and
-    // P0 holds priority with the spell and the trigger on the stack.
+    // P0 responds with the spell and the trigger both on the stack. CR 117.3c
+    // gives the caster priority first; pass it to P0 if P1 still holds it.
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ) {
+        runner.act(GameAction::PassPriority).expect("pass to P0");
+    }
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { player: P0 }
