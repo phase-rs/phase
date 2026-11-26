@@ -1111,6 +1111,47 @@ pub(crate) fn triggering_activation(state: &GameState) -> Option<TriggeringActiv
     )
 }
 
+/// CR 113.1c + CR 608.2h: what an observer trigger's "that ability" currently
+/// names, per [`triggering_observed_ability`]. `Departed` is the observed
+/// triggered ability as it last existed on the stack once it was removed
+/// without resolving (countered, CR 701.6a). `Gone` is distinct from "no
+/// observed stack entry at all" (that case is `None` on the function's own
+/// return type): the event names a stack object with neither a live entry nor
+/// a departed record (it resolved, or the record ended with its step).
+pub(crate) enum TriggeringObservedAbility<'a> {
+    OnStack(&'a StackEntry),
+    Departed(&'a StackEntry),
+    Gone,
+}
+
+/// CR 608.2h + CR 707.10: an observer trigger's "that ability" is the stack
+/// object its trigger event names. Authoritative whenever the event names one:
+/// once that object has left the stack without resolving (countered,
+/// CR 701.6a) the answer is its departed record (CR 113.1c + CR 608.2h), and
+/// `Gone` only when no record exists — never another object that merely shares
+/// its source. `None` when the trigger event is not an observed ability that
+/// reached the stack (an occurrence removed during placement names no stack
+/// object, CR 603.3d). The single lookup of the named observed entry, beside
+/// its activation analog [`triggering_activation`].
+pub(crate) fn triggering_observed_ability(
+    state: &GameState,
+) -> Option<TriggeringObservedAbility<'_>> {
+    let Some(GameEvent::AbilityTriggered {
+        stack_entry: Some(entry_id),
+        ..
+    }) = state.current_trigger_event.as_ref()
+    else {
+        return None;
+    };
+    if let Some(entry) = state.stack.iter().find(|entry| entry.id == *entry_id) {
+        return Some(TriggeringObservedAbility::OnStack(entry));
+    }
+    Some(state.departed_triggered_abilities.get(entry_id).map_or(
+        TriggeringObservedAbility::Gone,
+        TriggeringObservedAbility::Departed,
+    ))
+}
+
 /// CR 707.10a: Resolve the triggering spell's `ResolvedAbility` for legality
 /// checks. Prefer the live stack entry; fall back to `resolving_stack_entry`
 /// (spell mid-resolution) or reconstruct from the spell object when the stack
@@ -3152,6 +3193,14 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             } = event
             {
                 return event_referent_controller(state, event).map(TargetRef::Player);
+            }
+            // CR 603.3a: on an ability-triggered event, "that ability's
+            // controller" is the event's carried controller — the player who
+            // controlled the source when it triggered. Ability stack entries
+            // carry no GameObject, so this cannot go through
+            // `extract_source_from_event` + a live-object read.
+            if let GameEvent::AbilityTriggered { controller, .. } = event {
+                return Some(TargetRef::Player(*controller));
             }
             let source_obj_id = extract_source_from_event(event)?;
             let controller = state.objects.get(&source_obj_id)?.controller;
@@ -10156,6 +10205,98 @@ mod tests {
         assert!(
             triggering_activation(&state).is_none(),
             "a spell-cast event is not an activation"
+        );
+    }
+
+    /// CR 608.2h + CR 707.10: the named-observed-entry lookup answers the entry
+    /// the event names (not the top, not a later same-source entry), `Departed`
+    /// once it left the stack without resolving, `Gone` with no record, and
+    /// `None` for an occurrence removed during placement or a non-observer
+    /// event.
+    #[test]
+    fn triggering_observed_ability_answers_the_named_entry_departed_gone_or_none() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(10);
+        let observed = |id| StackEntry {
+            id: ObjectId(id),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    source,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        };
+        state.stack.push_back(observed(100));
+        state.stack.push_back(observed(102));
+        let trigger = |stack_entry| GameEvent::AbilityTriggered {
+            stack_entry,
+            source_id: source,
+            controller: PlayerId(0),
+            origin: crate::types::events::TriggeredAbilityOrigin::SourceAbility,
+            causes: vec![],
+        };
+
+        state.current_trigger_event = Some(trigger(Some(ObjectId(100))));
+        assert!(
+            matches!(
+                triggering_observed_ability(&state),
+                Some(TriggeringObservedAbility::OnStack(entry)) if entry.id == ObjectId(100)
+            ),
+            "the named entry, not the top or a later same-source entry"
+        );
+
+        state
+            .departed_triggered_abilities
+            .insert(ObjectId(103), observed(103));
+        state.current_trigger_event = Some(trigger(Some(ObjectId(103))));
+        assert!(
+            matches!(
+                triggering_observed_ability(&state),
+                Some(TriggeringObservedAbility::Departed(entry)) if entry.id == ObjectId(103)
+            ),
+            "a countered observed trigger is still that ability (CR 113.1c + 608.2h), never the live same-source entries 100 or 102"
+        );
+
+        state.current_trigger_event = Some(trigger(Some(ObjectId(104))));
+        assert!(
+            matches!(
+                triggering_observed_ability(&state),
+                Some(TriggeringObservedAbility::Gone)
+            ),
+            "an entry with neither a live entry nor a record is gone"
+        );
+
+        state.current_trigger_event = Some(trigger(None));
+        assert!(
+            triggering_observed_ability(&state).is_none(),
+            "an occurrence removed during placement (CR 603.3d) names no entry"
+        );
+
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            controller: PlayerId(0),
+            object_id: ObjectId(100),
+            card_id: CardId(1),
+            cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
+        });
+        assert!(
+            triggering_observed_ability(&state).is_none(),
+            "a spell-cast event is not an observer event"
         );
     }
 

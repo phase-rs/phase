@@ -891,6 +891,208 @@ pub enum TriggerMode {
     Unknown(String),
 }
 
+/// CR 603.3b: the part of the two-part placement process a triggered ability
+/// is put on the stack in. Declaration order is placement order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TriggerPlacementPart {
+    /// CR 603.3b: a trigger condition that isn't another ability triggering.
+    Ordinary,
+    /// CR 603.3b: a trigger condition that is another ability triggering.
+    ObservesAbilityTriggering,
+}
+
+impl TriggerMode {
+    /// CR 603.3b: which part of the placement process an ability with this
+    /// trigger condition is put on the stack in.
+    pub fn placement_part(&self) -> TriggerPlacementPart {
+        match self {
+            // CR 603.3b: another ability triggering (Historian's Boon's final chapter ability "triggers", CR 714.2e).
+            TriggerMode::AbilityTriggered { .. }
+            | TriggerMode::FinalSagaChapterAbility {
+                lifecycle: AbilityLifecyclePoint::Triggered,
+            } => TriggerPlacementPart::ObservesAbilityTriggering,
+            // CR 603.3b: an ability resolving is not an ability triggering.
+            TriggerMode::FinalSagaChapterAbility {
+                lifecycle: AbilityLifecyclePoint::Resolved,
+            }
+            | TriggerMode::ChangesZone
+            | TriggerMode::ChangesZoneAll
+            | TriggerMode::ChangesController { .. }
+            | TriggerMode::LeavesBattlefield
+            | TriggerMode::DamageDone
+            | TriggerMode::DamageDoneOnce
+            | TriggerMode::DamageAll
+            | TriggerMode::DamageDealtOnce
+            | TriggerMode::DamageDoneOnceByController
+            | TriggerMode::DamageReceived
+            | TriggerMode::DamagePreventedOnce
+            | TriggerMode::ExcessDamage
+            | TriggerMode::ExcessDamageAll
+            | TriggerMode::SpellCast
+            | TriggerMode::SpellCopy
+            | TriggerMode::SpellCastOrCopy
+            | TriggerMode::AbilityCast
+            | TriggerMode::AbilityResolves
+            | TriggerMode::SpellAbilityCast
+            | TriggerMode::SpellAbilityCopy
+            | TriggerMode::Countered
+            | TriggerMode::Attacks
+            | TriggerMode::AttackersDeclared
+            | TriggerMode::YouAttack
+            | TriggerMode::YouAttackUnblocked
+            | TriggerMode::AttackersDeclaredOneTarget
+            | TriggerMode::AttackerBlocked
+            | TriggerMode::AttackerBlockedOnce
+            | TriggerMode::AttackerBlockedByCreature
+            | TriggerMode::AttackerUnblocked
+            | TriggerMode::AttackerUnblockedOnce
+            | TriggerMode::Blocks
+            | TriggerMode::BlockersDeclared
+            | TriggerMode::BecomesBlocked
+            | TriggerMode::CounterAdded
+            | TriggerMode::CounterAddedOnce
+            | TriggerMode::CounterAddedAll
+            | TriggerMode::CounterPlayerAddedAll
+            | TriggerMode::CounterTypeAddedAll
+            | TriggerMode::CounterRemoved
+            | TriggerMode::CounterRemovedOnce
+            | TriggerMode::Sacrificed
+            | TriggerMode::SacrificedOnce
+            | TriggerMode::Destroyed
+            | TriggerMode::Taps
+            | TriggerMode::TapsForMana
+            | TriggerMode::TapAll
+            | TriggerMode::Untaps
+            | TriggerMode::UntapAll
+            | TriggerMode::BecomesTarget
+            | TriggerMode::BecomesTargetOnce
+            | TriggerMode::Drawn
+            | TriggerMode::Discarded
+            | TriggerMode::DiscardedAll
+            | TriggerMode::Milled
+            | TriggerMode::MilledOnce
+            | TriggerMode::MilledAll
+            | TriggerMode::Exiled
+            | TriggerMode::Revealed
+            | TriggerMode::Shuffled
+            | TriggerMode::LifeGained
+            | TriggerMode::LifeLost
+            | TriggerMode::LifeLostAll
+            | TriggerMode::LifeChanged
+            | TriggerMode::PayLife
+            | TriggerMode::PayCumulativeUpkeep
+            | TriggerMode::PayEcho
+            | TriggerMode::TokenCreated
+            | TriggerMode::TokenCreatedOnce
+            | TriggerMode::TurnFaceUp
+            | TriggerMode::Transformed
+            | TriggerMode::Phase
+            | TriggerMode::PhaseIn
+            | TriggerMode::PhaseOut
+            | TriggerMode::PhaseOutAll
+            | TriggerMode::TurnBegin
+            | TriggerMode::NewGame
+            | TriggerMode::BecomeMonarch
+            | TriggerMode::TakesInitiative
+            | TriggerMode::LosesGame
+            | TriggerMode::Championed
+            | TriggerMode::Exerted
+            | TriggerMode::Crewed
+            | TriggerMode::Crews
+            | TriggerMode::Saddled
+            | TriggerMode::Saddles
+            | TriggerMode::SaddlesOrCrews
+            | TriggerMode::Cycled
+            | TriggerMode::CycledOrDiscarded
+            | TriggerMode::NinjutsuActivated
+            | TriggerMode::KeywordAbilityActivated(..)
+            | TriggerMode::AbilityActivated
+            | TriggerMode::LoyaltyAbilityActivated
+            | TriggerMode::Evolve
+            | TriggerMode::Evolved
+            | TriggerMode::GotchaSaid
+            | TriggerMode::Touched
+            | TriggerMode::Explored
+            | TriggerMode::Exploited
+            | TriggerMode::Enlisted
+            | TriggerMode::ManaAdded
+            | TriggerMode::ManaAbilityProduced
+            | TriggerMode::ManaExpend
+            | TriggerMode::LandPlayed
+            | TriggerMode::PlayCard
+            | TriggerMode::Attached
+            | TriggerMode::Unattach
+            | TriggerMode::Adapt
+            | TriggerMode::Connives
+            | TriggerMode::Foretell
+            | TriggerMode::Investigated
+            | TriggerMode::DungeonCompleted
+            | TriggerMode::RoomEntered
+            | TriggerMode::PlanarDice
+            | TriggerMode::Planeswalked { .. }
+            | TriggerMode::ChaosEnsues
+            | TriggerMode::RolledDie
+            | TriggerMode::RolledDieOnce
+            | TriggerMode::FlippedCoin
+            | TriggerMode::Clashed
+            | TriggerMode::DayTimeChanges
+            | TriggerMode::ClassLevelGained
+            | TriggerMode::Copied
+            | TriggerMode::ConjureAll
+            | TriggerMode::Vote
+            | TriggerMode::BecomeRenowned
+            | TriggerMode::BecomeMonstrous
+            | TriggerMode::Proliferate
+            | TriggerMode::RingTemptsYou
+            | TriggerMode::Surveil
+            | TriggerMode::Scry
+            | TriggerMode::PlayerPerformedAction
+            | TriggerMode::Fight
+            | TriggerMode::FightOnce
+            | TriggerMode::Abandoned
+            | TriggerMode::CaseSolved
+            | TriggerMode::ClaimPrize
+            | TriggerMode::CollectEvidence
+            | TriggerMode::CommitCrime
+            | TriggerMode::CrankContraption
+            | TriggerMode::Devoured
+            | TriggerMode::Discover
+            | TriggerMode::Forage
+            | TriggerMode::FullyUnlock
+            | TriggerMode::GiveGift
+            | TriggerMode::ManifestDread
+            | TriggerMode::Mentored
+            | TriggerMode::Mutates
+            | TriggerMode::SearchedLibrary
+            | TriggerMode::SeekAll
+            | TriggerMode::SetInMotion
+            | TriggerMode::AsSetInMotion
+            | TriggerMode::Specializes
+            | TriggerMode::Stationed
+            | TriggerMode::Trains
+            | TriggerMode::UnlockDoor
+            | TriggerMode::VisitAttraction
+            | TriggerMode::BecomesCrewed
+            | TriggerMode::BecomesPlotted
+            | TriggerMode::BecomesSaddled
+            | TriggerMode::Immediate
+            | TriggerMode::Always
+            | TriggerMode::EntersOrAttacks
+            | TriggerMode::AttacksOrBlocks
+            | TriggerMode::BlocksOrBecomesBlocked
+            | TriggerMode::EntersOrHauntedCreatureDies
+            | TriggerMode::StateCondition
+            | TriggerMode::Airbend
+            | TriggerMode::Earthbend
+            | TriggerMode::Firebend
+            | TriggerMode::Waterbend
+            | TriggerMode::ElementalBend
+            | TriggerMode::HauntedCreatureDies
+            | TriggerMode::Unknown(..) => TriggerPlacementPart::Ordinary,
+        }
+    }
+}
+
 impl Serialize for TriggerMode {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         TriggerMode::serialize(self, serializer)
@@ -1185,6 +1387,63 @@ pub fn trigger_mode_observes_mana_event(mode: &TriggerMode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 603.3b: a trigger condition that is another ability triggering is
+    /// placed in the second part; every other condition, including an ability
+    /// resolving, in the first.
+    #[test]
+    fn placement_part_separates_ability_triggering_conditions() {
+        use crate::types::statics::TriggerCause;
+        let second = [
+            TriggerMode::AbilityTriggered {
+                cause: TriggerCause::CreatureAttacking,
+                source: CausedAbilitySource::CausingObject,
+            },
+            TriggerMode::AbilityTriggered {
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
+                source: CausedAbilitySource::CausingObject,
+            },
+            TriggerMode::AbilityTriggered {
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
+                source: CausedAbilitySource::Any,
+            },
+            TriggerMode::FinalSagaChapterAbility {
+                lifecycle: AbilityLifecyclePoint::Triggered,
+            },
+        ];
+        for mode in &second {
+            assert_eq!(
+                mode.placement_part(),
+                TriggerPlacementPart::ObservesAbilityTriggering,
+                "{mode:?}"
+            );
+        }
+        let first = [
+            TriggerMode::FinalSagaChapterAbility {
+                lifecycle: AbilityLifecyclePoint::Resolved,
+            },
+            TriggerMode::Attacks,
+            TriggerMode::ChangesZone,
+            TriggerMode::CounterAdded,
+            TriggerMode::BecomesTarget,
+            TriggerMode::CommitCrime,
+            TriggerMode::Unknown("x".to_string()),
+        ];
+        for mode in &first {
+            assert_eq!(
+                mode.placement_part(),
+                TriggerPlacementPart::Ordinary,
+                "{mode:?}"
+            );
+        }
+        assert!(TriggerPlacementPart::Ordinary < TriggerPlacementPart::ObservesAbilityTriggering);
+    }
 
     #[test]
     fn parse_known_trigger_modes() {
