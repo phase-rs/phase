@@ -403,8 +403,10 @@ fn flash_foliage_keeps_its_attacker_when_a_copy_entry_pauses_and_restores() {
     let reflect = scenario
         .add_spell_to_hand_from_oracle(P1, "Mystic Reflection", true, REFLECTION)
         .id();
+    // CR 613.4c + CR 704.5f: Anthem keeps the printed 0/0 Clone alive after it declines to copy.
+    scenario.add_enchantment_from_oracle(P1, "Glorious Anthem", "Creatures you control get +1/+1.");
     let clone = scenario
-        .add_creature_from_oracle(P1, "Clone", 1, 1, CLONE)
+        .add_creature_from_oracle(P1, "Clone", 0, 0, CLONE)
         .id();
     let mimic = scenario
         .add_creature_from_oracle(P1, "Metallic Mimic", 2, 1, MIMIC)

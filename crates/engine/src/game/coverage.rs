@@ -21,7 +21,9 @@ use crate::parser::oracle_ir::diagnostic::{
     ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan, SpanPrecision,
 };
 use crate::parser::oracle_util::normalize_card_name_refs;
-use crate::types::ability::{filter_contains_filter_prop, CombatDamageScope, TurnWindow};
+use crate::types::ability::{
+    filter_contains_filter_prop, AttackDefenderMatch, CombatDamageScope, TurnWindow,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
@@ -946,20 +948,25 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::CastThisTurn { caster } => {
                 parts.push(format!("cast this turn ({})", fmt_controller(caster)))
             }
-            FilterProp::Attacking { defender, .. } => match defender {
-                None => parts.push("attacking".into()),
-                Some(ControllerRef::You) => parts.push("attacking you".into()),
-                Some(ControllerRef::Opponent) => parts.push("attacking your opponents".into()),
-                // CR 508.5: the defending-player anaphor ("attacking that
-                // player"). Rendering it through the `scoped player` catch-all
-                // below would name a DIFFERENT concept — `ControllerRef::
-                // ScopedPlayer` is the resolution-iteration player, not the
-                // player this creature is attacking.
-                Some(ControllerRef::DefendingPlayer) => {
-                    parts.push("attacking defending player".into())
-                }
-                Some(_) => parts.push("attacking scoped player".into()),
-            },
+            FilterProp::Attacking { defender, scope } => {
+                let attacker = match defender {
+                    None => "attacking",
+                    Some(ControllerRef::You) => "attacking you",
+                    Some(ControllerRef::Opponent) => "attacking your opponents",
+                    // CR 508.5: the defending-player anaphor ("attacking that
+                    // player"). Rendering it through the `scoped player` catch-all
+                    // below would name a DIFFERENT concept — `ControllerRef::
+                    // ScopedPlayer` is the resolution-iteration player, not the
+                    // player this creature is attacking.
+                    Some(ControllerRef::DefendingPlayer) => "attacking defending player",
+                    Some(_) => "attacking scoped player",
+                };
+                // CR 508.1b + CR 508.5: a direct attack excludes the defending player's permanents.
+                parts.push(match scope {
+                    AttackDefenderMatch::DefendingSide => attacker.into(),
+                    AttackDefenderMatch::DirectPlayer => format!("{attacker} directly"),
+                });
+            }
             FilterProp::Blocking => parts.push("blocking".into()),
             FilterProp::BlockingSource => parts.push("blocking source".into()),
             FilterProp::CombatRelation { .. } => parts.push("combat related".into()),
@@ -3386,6 +3393,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             tapped,
             attack_destination,
             attach_to,
+            block_attacker,
             ..
         } => {
             let mut desc = String::new();
@@ -3425,6 +3433,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 desc.push_str(" attached");
             }
             d.push(("token".into(), desc));
+            if let Some(attacker) = block_attacker {
+                d.push(("block_attacker".into(), fmt_target(attacker)));
+            }
         }
         Effect::PutCounter {
             counter_type,
@@ -18823,6 +18834,46 @@ mod tests {
             "{named:?}"
         );
         assert_ne!(named, unnamed);
+    }
+
+    #[test]
+    fn blocking_token_attacker_reaches_parse_details() {
+        let mut face = make_face();
+        face.name = "Flash Foliage".into();
+        let oracle = "Create a 1/1 green Saproling creature token that's blocking target creature attacking you.";
+        face.oracle_text = Some(oracle.into());
+        face.abilities =
+            crate::parser::parse_oracle_text(oracle, &face.name, &[], &["Instant".into()], &[])
+                .abilities;
+
+        let assert_attacker = |face: &CardFace, expected| {
+            let items = build_parse_details_for_face(face);
+            let token = items.iter().find(|item| item.label == "Token").unwrap();
+            assert!(
+                token
+                    .details
+                    .iter()
+                    .any(|(key, value)| key == "block_attacker" && value == expected),
+                "{token:?}"
+            );
+        };
+        assert_attacker(&face, "attacking you directly creature");
+
+        let Effect::Token {
+            block_attacker: Some(attacker),
+            ..
+        } = face.abilities[0].effect.as_mut()
+        else {
+            panic!("expected a token with a blocking rider");
+        };
+        let TargetFilter::Typed(filter) = attacker.as_mut() else {
+            panic!("expected a typed attacker filter");
+        };
+        let [FilterProp::Attacking { scope, .. }] = filter.properties.as_mut_slice() else {
+            panic!("expected an attacking property");
+        };
+        *scope = AttackDefenderMatch::DefendingSide;
+        assert_attacker(&face, "attacking you creature");
     }
 
     #[test]
