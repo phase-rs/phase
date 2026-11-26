@@ -1790,3 +1790,65 @@ fn released_compound_token_park_restores_applied_sets_through_jinnie_decline() {
     assert!(tokens(&runner, "Cat").is_empty());
     assert!(tokens(&runner, "Dog").is_empty());
 }
+
+fn assert_commuting_soldier_entry(grumgully: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Authority of the Consuls",
+        "Creatures your opponents control enter tapped.\nWhenever a creature an opponent controls enters, you gain 1 life.",
+    );
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Blind Obedience",
+        "Extort (Whenever you cast a spell, you may pay {W/B}. If you do, each opponent loses 1 life and you gain that much life.)\nArtifacts and creatures your opponents control enter tapped.",
+    );
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Kismet",
+        "Artifacts, creatures, and lands your opponents control enter tapped.",
+    );
+    scenario.add_creature_from_oracle(
+        P1,
+        "Thalia, Heretic Cathar",
+        3,
+        2,
+        "First strike\nCreatures and nonbasic lands your opponents control enter tapped.",
+    );
+    if grumgully {
+        scenario.add_creature_from_oracle(P0, "Grumgully, the Generous", 3, 3, GRUMGULLY);
+    } else {
+        scenario.add_artifact_from_oracle(P1, "Orb of Dreams", "Permanents enter tapped.");
+    }
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    settle(&mut runner, &[], Until::StackEmpty);
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    let soldiers = tokens(&runner, "Soldier");
+    assert_eq!(soldiers.len(), 2);
+    for soldier in soldiers {
+        assert_eq!(soldier.controller, P0);
+        assert!(soldier.tapped);
+        assert_eq!(plus_counters(&runner, soldier.id), u32::from(grumgully));
+    }
+}
+
+#[test]
+fn commuting_soldier_entry_with_five_tap_effects() {
+    assert_commuting_soldier_entry(false);
+}
+
+#[test]
+fn commuting_soldier_entry_with_four_tap_effects_and_counters() {
+    assert_commuting_soldier_entry(true);
+}

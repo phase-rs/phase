@@ -15579,8 +15579,19 @@ fn token_replacement_ordering_is_material(
     if candidates.len() < 2 {
         return false;
     }
-    if candidates.len() > MAX_PROBE_CANDIDATES
-        || candidates
+    let _probe = super::engine::SimulationProbeGuard::enter();
+    let _recorder =
+        ProposedEventRecorderGuard(PROPOSED_EVENT_RECORDER.with(|cell| cell.borrow_mut().take()));
+    let pruned = fixed_token_entry_prefix(state, proposed, owner, registry, &candidates);
+    let (probe_state, proposed, interacting) = match &pruned {
+        Some((scratch, event, interacting)) => (scratch, event, interacting.as_slice()),
+        None => (state, proposed, candidates.as_slice()),
+    };
+    if interacting.is_empty() {
+        return false;
+    }
+    if interacting.len() > MAX_PROBE_CANDIDATES
+        || interacting
             .iter()
             .filter(|&&rid| replacement_is_optional(state, rid))
             .take(2)
@@ -15590,7 +15601,7 @@ fn token_replacement_ordering_is_material(
         return true;
     }
 
-    let Some(work_options) = candidates
+    let Some(work_options) = interacting
         .iter()
         .map(|&rid| token_replacement_probe_work(state, rid))
         .collect::<Option<Vec<_>>>()
@@ -15608,7 +15619,7 @@ fn token_replacement_ordering_is_material(
     };
 
     let mut equivalent_effects = Vec::new();
-    let groups: Vec<_> = candidates
+    let groups: Vec<_> = interacting
         .iter()
         .enumerate()
         .map(|(index, &rid)| {
@@ -15626,18 +15637,16 @@ fn token_replacement_ordering_is_material(
         })
         .collect();
 
-    let _probe = super::engine::SimulationProbeGuard::enter();
-    let _recorder =
-        ProposedEventRecorderGuard(PROPOSED_EVENT_RECORDER.with(|cell| cell.borrow_mut().take()));
     let mut probe = TokenReplacementOrderProbe {
         original_state: state,
-        candidates: &candidates,
+        candidates: interacting,
+        known_candidates: &candidates,
         groups: &groups,
         owner,
         registry,
         steps_left: MAX_PROBE_STEPS,
     };
-    let remaining = (1 << candidates.len()) - 1;
+    let remaining = (1 << interacting.len()) - 1;
     (0..assignments).any(|mut assignment| {
         let work: Vec<_> = work_options
             .iter()
@@ -15647,8 +15656,132 @@ fn token_replacement_ordering_is_material(
                 choice
             })
             .collect();
-        !probe.all_orders_agree(state, Some(proposed), remaining, &work, &mut None)
+        !probe.all_orders_agree(probe_state, Some(proposed), remaining, &work, &mut None)
     })
+}
+
+// On a single ordinary token batch, identical tap writes stamp the same field.
+// Keep the proof narrow: another entry modifier may only append a fixed
+// counter payload, and there may be at most one such append. In particular,
+// substitution, copy, prevention, and competing tap states stay in the probe.
+fn fixed_token_entry_prefix(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    owner: PlayerId,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    candidates: &[ReplacementId],
+) -> Option<(GameState, ProposedEvent, Vec<ReplacementId>)> {
+    if !matches!(proposed, ProposedEvent::CreateToken { copy: None, .. })
+        || proposed.has_appended_token_batches()
+    {
+        return None;
+    }
+
+    let mut taps = Vec::new();
+    let mut tap_class = None;
+    let mut counter = None;
+    for &rid in candidates {
+        let def = replacement_definition_for_id(state, rid)?;
+        if state.replacement_rider(def).is_some() {
+            return None;
+        }
+        let effect = pure_token_entry_modifier(def)?;
+        match candidate_materiality(state, rid, proposed) {
+            CandidateMateriality::Writes {
+                field: EventField::EnterTapped,
+                commute,
+            } if enter_tapped_commute_class(effect) == Some(commute)
+                && tap_class.is_none_or(|previous| commute.commutes_with(previous)) =>
+            {
+                tap_class = Some(commute);
+                taps.push(rid);
+            }
+            CandidateMateriality::Disjoint
+                if matches!(
+                    effect,
+                    Effect::PutCounter {
+                        target: TargetFilter::SelfRef,
+                        count: QuantityExpr::Fixed { .. },
+                        ..
+                    }
+                ) && counter.is_none() =>
+            {
+                counter = Some(rid);
+            }
+            _ => return None,
+        }
+    }
+    let [first, rest @ ..] = taps.as_slice() else {
+        return None;
+    };
+    if rest.is_empty() {
+        return None;
+    }
+
+    let apply = |scratch: &mut GameState, event, rid| {
+        apply_chosen_replacement(
+            scratch,
+            event,
+            rid,
+            owner,
+            ChosenReplacementWork::Branch(ReplacementBranch::Execute),
+            registry,
+            &mut Vec::new(),
+        )
+        .ok()
+    };
+    let same_remaining = |scratch: &GameState, event: &ProposedEvent| {
+        let found = choosable_replacement_candidates(
+            scratch,
+            event,
+            find_applicable_replacements(scratch, event, registry),
+        );
+        found.iter().all(|rid| candidates.contains(rid))
+            && candidates
+                .iter()
+                .all(|rid| found.contains(rid) != event.already_applied(rid))
+    };
+
+    // The first tap is the only tap that can change the projection. Check that
+    // neither it nor a counter changes the remaining choices, including when
+    // both have applied. A fixed counter append and the tap stamp then produce
+    // the same event in either order. Subsequent taps only mark themselves applied.
+    if let Some(rid) = counter {
+        let mut scratch = state.clone();
+        let event = apply(&mut scratch, proposed.clone(), rid)?;
+        if !same_remaining(&scratch, &event) {
+            return None;
+        }
+        let event = apply(&mut scratch, event, *first)?;
+        if !same_remaining(&scratch, &event) {
+            return None;
+        }
+    }
+    let mut scratch = state.clone();
+    let mut event = apply(&mut scratch, proposed.clone(), *first)?;
+    if !same_remaining(&scratch, &event) {
+        return None;
+    }
+    for &rid in rest {
+        event = apply(&mut scratch, event, rid)?;
+    }
+    Some((scratch, event, counter.into_iter().collect()))
+}
+
+fn pure_token_entry_modifier(def: &ReplacementDefinition) -> Option<&Effect> {
+    if def.event != ReplacementEvent::ChangeZone {
+        return None;
+    }
+    let execute = def.execute.as_deref()?;
+    let mut modifier = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+        .destination_zone(Zone::Battlefield)
+        .execute(AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            execute.effect.as_ref().clone(),
+        ));
+    modifier.valid_card = def.valid_card.clone();
+    modifier.description = def.description.clone();
+    (def == &modifier).then_some(execute.effect.as_ref())
 }
 
 // Only merge sibling search branches for definitions whose behavior is
@@ -15678,8 +15811,7 @@ fn source_independent_token_order_effect(
             }
         }
         ReplacementEvent::ChangeZone => {
-            let execute = def.execute.as_deref()?;
-            enter_tapped_commute_class(&execute.effect)?;
+            enter_tapped_commute_class(pure_token_entry_modifier(def)?)?;
             if let Some(filter) = def.valid_card.as_ref() {
                 let TargetFilter::Typed(filter) = filter else {
                     return None;
@@ -15693,13 +15825,7 @@ fn source_independent_token_order_effect(
                     return None;
                 }
             }
-            modifier_only = modifier_only
-                .execute(AbilityDefinition::new(
-                    crate::types::ability::AbilityKind::Spell,
-                    execute.effect.as_ref().clone(),
-                ))
-                .destination_zone(Zone::Battlefield);
-            modifier_only.valid_card = def.valid_card.clone();
+            return Some((def, replacement_ability_controller(state, rid, def)));
         }
         _ => return None,
     }
@@ -15709,6 +15835,7 @@ fn source_independent_token_order_effect(
 struct TokenReplacementOrderProbe<'a> {
     original_state: &'a GameState,
     candidates: &'a [ReplacementId],
+    known_candidates: &'a [ReplacementId],
     groups: &'a [usize],
     owner: PlayerId,
     registry: &'a IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
@@ -15742,7 +15869,10 @@ impl TokenReplacementOrderProbe<'_> {
                 .collect();
             // A newly eligible effect can interrupt this sequence. A proof
             // over the original set cannot account for that interaction.
-            if applicable.iter().any(|rid| !self.candidates.contains(rid)) {
+            if applicable
+                .iter()
+                .any(|rid| !self.known_candidates.contains(rid))
+            {
                 return false;
             }
             let mut seen_groups = 0;
