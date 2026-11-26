@@ -311,6 +311,7 @@ mod locke_mug_single_treasure_multiplayer;
 mod locus_once_per_turn_cap;
 mod loki_becomes_target_ability;
 mod lolth_emblem_recipient;
+mod look_and_exile_anaphor_bindings;
 mod loop_only_dependency_fallback;
 mod lose_control_this_turn_delayed_trigger;
 mod lose_hexproof_family;
