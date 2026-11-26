@@ -672,7 +672,7 @@ fn prevented_extra_turn_retires_prohibition() {
 /// F1-bind0: the unbound "that turn" anaphor installs nothing without a
 /// singular grant (fail-closed), and a singular grant binds exactly one.
 ///
-/// CR 603.7a + CR 500.7: "that turn" names the extra turn this resolution
+/// CR 608.2c + CR 500.7: "that turn" names the extra turn this resolution
 /// granted; with none (or several) granted, no such turn exists. Resolved via
 /// `resolve_ability_chain` so the bind prelude runs on the production path.
 #[test]

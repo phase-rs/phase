@@ -5,8 +5,8 @@
 //! control."
 //!
 //! CR 701.32a + CR 904.9: the set-in-motion trigger deals the damage.
-//! CR 202.3 + CR 903.3d: the amount is the archenemy's commander's mana
-//! value (battlefield or command zone). CR 903.3: "noncommander" excludes
+//! CR 202.3 + CR 903.3e: the amount is the archenemy's commander's mana
+//! value, read in all zones, including library and hand. CR 903.3: "noncommander" excludes
 //! every commander — commander is a designation, not a subtype, so the
 //! exclusion is `Not(IsCommander)`, never the vacuous `Non(Subtype(...))`.
 //!
