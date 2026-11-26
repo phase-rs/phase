@@ -25,13 +25,14 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
 use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
-    effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
-    AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
-    Comparator, ControllerRef, DamageChannel, DigRestOrder, DigRestRemainder, DigSource, Duration,
-    Effect, EffectOutcomeSignal, EffectScope, FilterProp, InstructionJoin, LibraryPosition,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId,
-    SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
-    TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+    effect_has_stack_target_declaration, effect_variant_name, AbilityCondition, AbilityCost,
+    AbilityDefinition, AbilityKind, AggregateFunction, CastFromZoneDriver, CastingPermission,
+    ChoiceType, ChosenGroupId, Comparator, ControllerRef, DamageChannel, DelayedTriggerCondition,
+    DigRestOrder, DigRestRemainder, DigSource, Duration, Effect, EffectOutcomeSignal, EffectScope,
+    FilterProp, InstructionJoin, LibraryPosition, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, RepeatContinuation, ReturnResultId, SharedQuality, SharedQualityRelation,
+    SiblingCondition, StaticCondition, SubAbilityLink, TapStateChange, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::game_state_kinds::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -2393,6 +2394,59 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     assemble_effect_chain_with_provenance(ir).value
 }
 
+// CR 400.7j + CR 603.7c: on decline the optional move does not happen.
+// The delayed return follows the public-zone arrival of the preceding exile.
+fn optional_decline_exile_origin(
+    defs: &[AbilityDefinition],
+    arena: &Arena,
+    pending: ClauseId,
+    installer: &AbilityDefinition,
+) -> Option<Zone> {
+    let [.., exile, optional] = defs else {
+        return None;
+    };
+    let NodeProvenance {
+        origin: Some(exile_id),
+        role: NodeRole::Primary,
+    } = arena.prov_at(defs.len() - 2)?
+    else {
+        return None;
+    };
+    let NodeProvenance {
+        origin: Some(optional_id),
+        role: NodeRole::Primary,
+    } = arena.prov_at(defs.len() - 1)?
+    else {
+        return None;
+    };
+    if exile_id.0.checked_add(1) != Some(optional_id.0)
+        || optional_id.0.checked_add(1) != Some(pending.0)
+        || optional.sub_link != SubAbilityLink::SequentialSibling
+        || installer.sub_link != SubAbilityLink::SequentialSibling
+        || exile.optional
+        || exile.condition.is_some()
+        || exile.multi_target.is_some()
+        || exile.sub_ability.is_some()
+        || optional.sub_ability.is_some()
+        || optional.multi_target.is_some()
+        || optional.condition.is_some()
+    {
+        return None;
+    }
+    match exile.effect.as_ref() {
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            target,
+            ..
+        } if matches!(target, TargetFilter::Typed(_))
+            && effect_has_stack_target_declaration(&exile.effect) =>
+        {
+            Some(Zone::Exile)
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn assemble_effect_chain_with_provenance(
     ir: &EffectChainIr,
 ) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
@@ -4405,9 +4459,64 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                     Effect::ExileTop { .. } => Some(Zone::Exile),
                     _ => None,
                 };
-                if let Some(zone) = prev_zone {
-                    for current in &mut current_defs {
+                for current in &mut current_defs {
+                    let decline_inferred_return = defs.last().is_some_and(|prev| {
+                        prev.optional
+                            && matches!(
+                                prev.effect.as_ref(),
+                                Effect::ChangeZone {
+                                    destination: Zone::Battlefield,
+                                    ..
+                                }
+                            )
+                    }) && matches!(
+                        current.condition.as_ref(),
+                        Some(AbilityCondition::Not { condition }) if matches!(
+                            condition.as_ref(),
+                            AbilityCondition::EffectOutcome {
+                                signal: EffectOutcomeSignal::OptionalEffectPerformed
+                            }
+                        )
+                    ) && matches!(
+                        current.effect.as_ref(),
+                        Effect::CreateDelayedTrigger {
+                            condition: DelayedTriggerCondition::AtNextPhase {
+                                phase: crate::types::phase::Phase::End,
+                            },
+                            effect,
+                            uses_tracked_set: false,
+                        } if matches!(
+                            effect.effect.as_ref(),
+                            Effect::ChangeZone {
+                                target: TargetFilter::ParentTarget,
+                                destination: Zone::Battlefield,
+                                origin: None,
+                                ..
+                            }
+                        )
+                    );
+                    let zone = if decline_inferred_return {
+                        if !matches!(
+                            prev_eff,
+                            Effect::ChangeZone {
+                                target: TargetFilter::ParentTarget,
+                                ..
+                            }
+                        ) {
+                            None
+                        } else {
+                            optional_decline_exile_origin(&defs, &env.arena, clause_ir.id, current)
+                        }
+                    } else {
+                        prev_zone
+                    };
+                    if let Some(zone) = zone {
                         stamp_delayed_returns(&mut current.effect, zone);
+                    } else if decline_inferred_return {
+                        current.effect = Box::new(Effect::unimplemented(
+                            "unproved_optional_decline_return",
+                            clause_ir.source.fragment().unwrap_or_default(),
+                        ));
                     }
                 }
             }
@@ -6519,6 +6628,87 @@ mod arena_tests {
             ),
             None,
             "T-PLoc control: a non-zone predecessor must not receive a hard-coded origin"
+        );
+    }
+
+    #[test]
+    fn optional_decline_origin_requires_the_contiguous_same_referent_edges() {
+        const BODY: &str = "Exile another target creature you control. You may return that card to the battlefield under its owner's control. If you don't, at the beginning of the next end step, return that card to the battlefield under its owner's control with a vigilance counter and a lifelink counter on it.";
+        let parse = |text: &str| {
+            parse_effect_chain_ir(text, AbilityKind::Activated, &mut ParseContext::default())
+        };
+        let ir = parse(BODY);
+        assert_eq!(ir.clauses.len(), 3);
+        let assembled = assemble_effect_chain(&ir);
+        let optional = assembled.sub_ability.as_deref().expect("optional return");
+        let installer = optional.sub_ability.as_deref().expect("decline installer");
+        assert!(optional.optional && optional.forward_result);
+        assert_eq!(installer.sub_link, SubAbilityLink::SequentialSibling);
+        assert!(matches!(
+            installer.condition.as_ref(),
+            Some(AbilityCondition::Not { condition }) if matches!(
+                condition.as_ref(), AbilityCondition::EffectOutcome {
+                    signal: EffectOutcomeSignal::OptionalEffectPerformed
+                }
+            )
+        ));
+        assert_eq!(delayed_payload_origin(installer), Some(Zone::Exile));
+
+        for changed in [
+            BODY.replace(
+                "Exile another target creature you control.",
+                "Exile another target creature you control. Exile the top card of your library.",
+            ),
+            BODY.replacen(
+                "return that card",
+                "return target creature card from your graveyard",
+                1,
+            ),
+        ] {
+            let result = assemble_effect_chain(&parse(&changed));
+            let mut node = Some(&result);
+            let mut refused = false;
+            while let Some(def) = node {
+                refused |= matches!(
+                    def.effect.as_ref(),
+                    // allow-noncombinator: test assertion on the emitted diagnostic id.
+                    Effect::Unimplemented { name, .. } if name == "unproved_optional_decline_return"
+                );
+                node = def.sub_ability.as_deref();
+            }
+            assert!(refused, "{changed}");
+        }
+
+        let mut explicit = ir;
+        let changed = crate::types::ability_visit::effects_mut::visit_effect(
+            &mut explicit.clauses[2].parsed.effect,
+            &mut |effect: &mut Effect| {
+                if let Effect::ChangeZone {
+                    origin,
+                    destination: Zone::Battlefield,
+                    ..
+                } = effect
+                {
+                    *origin = Some(Zone::Graveyard);
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            },
+        );
+        assert!(changed.is_break(), "expected delayed return operand");
+        let result = assemble_effect_chain(&explicit);
+        assert_eq!(
+            delayed_payload_origin(
+                result
+                    .sub_ability
+                    .as_deref()
+                    .unwrap()
+                    .sub_ability
+                    .as_deref()
+                    .unwrap()
+            ),
+            Some(Zone::Graveyard),
         );
     }
 

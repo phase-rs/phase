@@ -2296,6 +2296,16 @@ fn occurrence_trigger_events(
             .into_iter()
             .collect(),
         ),
+        TriggerMode::DamageDoneOnce if m::is_whole_step_player_combat_damage(trig_def) => Some(
+            m::matching_damage_done_once_by_controller_event(
+                event,
+                trig_def,
+                source_context,
+                state,
+            )
+            .into_iter()
+            .collect(),
+        ),
         _ if m::listens_on_aggregate_combat_damage_done(trig_def)
             && matches!(event, GameEvent::CombatDamageDealtToPlayer { .. }) =>
         {
@@ -2759,6 +2769,14 @@ fn contextual_batched_trigger_event(
     trig_def: &TriggerDefinition,
     source_context: &TriggerSourceContext,
 ) -> Option<GameEvent> {
+    if super::trigger_matchers::is_whole_step_player_combat_damage(trig_def) {
+        return super::trigger_matchers::matching_damage_done_once_by_controller_event(
+            event,
+            trig_def,
+            source_context,
+            state,
+        );
+    }
     let (defending_player, matching_attacks) = match (event, trig_def.mode.clone()) {
         (
             GameEvent::AttackersDeclared {

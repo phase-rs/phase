@@ -2186,3 +2186,678 @@ fn delayed_event_subject_intervening_if_fails_closed() {
         "a bridged body-if stays supported: {bridged}"
     );
 }
+
+fn primary_trigger_event(
+    item: &engine::types::game_state::StackEntry,
+) -> Option<&engine::types::events::GameEvent> {
+    match &item.kind {
+        engine::types::game_state::StackEntryKind::TriggeredAbility { trigger_event, .. } => {
+            trigger_event.as_ref()
+        }
+        _ => None,
+    }
+}
+
+const FORTH_EORLINGAS: &str = "Create X 2/2 red Human Knight creature tokens with trample and haste.\nWhenever one or more creatures you control deal combat damage to one or more players this turn, you become the monarch.";
+const RAVENS_WARNING: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Create a 1/1 blue Bird creature token with flying. You gain 2 life.\nII — Whenever one or more creatures you control with flying deal combat damage to a player this turn, look at that player's hand and draw a card.\nIII — You may put a card you own from outside the game on top of your library.";
+
+/// CR 510.2 + CR 603.2c + CR 700.1: both hit players belong to the same
+/// occurrence, with a narrowed combat aggregate for each player.
+#[test]
+fn forth_eorlingas_groups_players_in_one_combat_step() {
+    use engine::types::events::GameEvent;
+    use engine::types::mana::{ManaCostShard, ManaType, ManaUnit};
+
+    let mut scenario = three_player_board();
+    let forth = scenario
+        .add_spell_to_hand_from_oracle(P0, "Forth Eorlingas!", false, FORTH_EORLINGAS)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red, ManaCostShard::White],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Red,
+            ManaType::White,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(forth).x(2).resolve();
+    assert_eq!(runner.state().monarch, None);
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    assert_eq!(runner.state().delayed_triggers[0].controller, P0);
+    let attackers: Vec<_> = runner.state().battlefield.iter().copied().collect();
+    let [first, second] = attackers.as_slice() else {
+        panic!("Forth must create two hasty Knights");
+    };
+    let prior = [runner.life(P1), runner.life(P2)];
+    assert_eq!(
+        declare_and_collect(
+            &mut runner,
+            &[
+                (*first, AttackTarget::Player(P1)),
+                (*second, AttackTarget::Player(P2)),
+            ],
+            forth
+        ),
+        1
+    );
+    assert_eq!(
+        [runner.life(P1), runner.life(P2)],
+        [prior[0] - 2, prior[1] - 2]
+    );
+    let item = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.source_id == forth)
+        .unwrap();
+    let events = &runner.state().stack_trigger_event_batches[&item.id];
+    assert_eq!(events.len(), 2);
+    for (player, source) in [(P1, *first), (P2, *second)] {
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id, source_amounts, total_damage: 2, source_incarnations,
+            } if *player_id == player
+                && source_amounts == &[(source, 2)]
+                && source_incarnations.len() == 1
+                && source_incarnations[0].object_id == source
+                && source_incarnations[0].incarnation == runner.state().objects[&source].incarnation
+        )));
+    }
+    resolve_top(&mut runner);
+    assert_eq!(runner.state().monarch, Some(P0));
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 603.2c + CR 608.2c + CR 701.20e: the installed chapter groups damage
+/// by qualifying recipient and looks at that hand before its controller draws.
+#[test]
+fn ravens_warning_looks_before_drawing_for_each_damaged_player() {
+    use engine::types::ability::EffectKind;
+    use engine::types::events::GameEvent;
+    use engine::types::keywords::Keyword;
+
+    let mut scenario = three_player_board();
+    let saga = scenario
+        .add_enchantment_from_oracle(P0, "The Raven's Warning", "")
+        .with_subtypes(vec!["Saga"])
+        .from_oracle_text(RAVENS_WARNING)
+        .id();
+    scenario.with_counter(saga, CounterType::Lore, 1);
+    let first = scenario
+        .add_creature(P0, "Flying one", 2, 2)
+        .with_keyword(Keyword::Flying)
+        .id();
+    let second = scenario
+        .add_creature(P0, "Flying two", 3, 3)
+        .with_keyword(Keyword::Flying)
+        .id();
+    let third = scenario
+        .add_creature(P0, "Flying three", 4, 4)
+        .with_keyword(Keyword::Flying)
+        .id();
+    let grounded = scenario.add_creature(P0, "Grounded attacker", 5, 5).id();
+    let grounded_first = scenario
+        .add_creature(P0, "Grounded first striker", 1, 1)
+        .with_keyword(Keyword::FirstStrike)
+        .id();
+    let hidden_first = scenario.add_creature_to_hand(P1, "Hidden one", 1, 1).id();
+    let hidden_second = scenario.add_creature_to_hand(P2, "Hidden two", 1, 1).id();
+    let mut runner = scenario.build();
+    let before_chapter = library(&runner, P0);
+    advance_sagas(&mut runner);
+    assert_eq!(
+        library(&runner, P0),
+        before_chapter - 1,
+        "only the draw step drew a card"
+    );
+    assert_eq!(runner.state().private_look_player, None);
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    assert_eq!(runner.state().delayed_triggers[0].controller, P0);
+    drive_until(&mut runner, |runner| {
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        )
+    });
+    let life = runner.life(P1);
+    runner
+        .declare_attackers(&[
+            (first, AttackTarget::Player(P1)),
+            (second, AttackTarget::Player(P1)),
+            (third, AttackTarget::Player(P2)),
+            (grounded, AttackTarget::Player(P2)),
+            (grounded_first, AttackTarget::Player(P1)),
+        ])
+        .expect("declare qualified and grounded attackers");
+    drive_until(&mut runner, |runner| runner.life(P1) == life - 1);
+    assert!(runner
+        .state()
+        .stack
+        .iter()
+        .all(|item| item.source_id != saga));
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::OrderTriggers { .. }
+    ));
+    drive_until(&mut runner, |runner| {
+        matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. })
+    });
+    let WaitingFor::OrderTriggers {
+        player: P0,
+        triggers,
+    } = &runner.state().waiting_for
+    else {
+        panic!("Raven's controller must order both firings");
+    };
+    assert_eq!(triggers.len(), 2);
+    assert!(triggers.iter().all(|trigger| trigger.source_id == saga));
+    runner
+        .act(GameAction::OrderTriggers { order: vec![1, 0] })
+        .expect("reverse firing order");
+
+    for _ in 0..2 {
+        let item = runner.state().stack.last().expect("chapter firing");
+        assert_eq!(item.source_id, saga);
+        let Some(engine::types::events::GameEvent::CombatDamageDealtToPlayer {
+            player_id,
+            total_damage,
+            source_amounts,
+            ..
+        }) = primary_trigger_event(item)
+        else {
+            panic!("expected one narrowed player aggregate");
+        };
+        assert!(!runner
+            .state()
+            .stack_trigger_event_batches
+            .contains_key(&item.id));
+        match *player_id {
+            P1 => {
+                assert_eq!(*total_damage, 5);
+                assert_eq!(source_amounts, &[(first, 2), (second, 3)]);
+            }
+            P2 => {
+                assert_eq!(*total_damage, 4);
+                assert_eq!(source_amounts, &[(third, 4)]);
+            }
+            other => panic!("unexpected damaged player {other:?}"),
+        }
+        let (hidden, other_player, name) = match *player_id {
+            P1 => (hidden_first, P2, "Hidden one"),
+            P2 => (hidden_second, P1, "Hidden two"),
+            _ => unreachable!("player verified above"),
+        };
+        let id = item.id;
+        let before = hand(&runner, P0);
+        let result = loop {
+            let result = runner
+                .act(GameAction::PassPriority)
+                .expect("resolve firing");
+            if !runner.state().stack.iter().any(|entry| entry.id == id) {
+                break result;
+            }
+        };
+        let look = result.events.iter().position(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::Reveal, source_id, .. } if *source_id == saga)).expect("private look resolves");
+        let draw = result
+            .events
+            .iter()
+            .position(|event| matches!(event, GameEvent::CardDrawn { player_id: P0, .. }))
+            .expect("controller draws");
+        assert!(look < draw);
+        assert!(!result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardsRevealed { .. })));
+        assert_eq!(runner.state().private_look_player, Some(P0));
+        assert_eq!(runner.state().private_look_ids, vec![hidden]);
+        let visible = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+        assert_eq!(visible.objects[&hidden].name, name);
+        let private =
+            engine::game::visibility::filter_state_for_viewer(runner.state(), other_player);
+        assert_ne!(
+            private.objects.get(&hidden).map(|card| card.name.as_str()),
+            Some(name)
+        );
+        assert_eq!(hand(&runner, P0), before + 1);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+/// CR 510.4 + CR 603.2c + CR 805.10b: first-strike and regular damage
+/// are separate steps. A teammate's leg reaches the raw player aggregate,
+/// then the installed watcher keeps only damage from its controller's creatures.
+#[test]
+fn forth_eorlingas_normalizes_team_damage_separately_in_each_step() {
+    use engine::types::events::GameEvent;
+    use engine::types::format::FormatConfig;
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::{ManaCostShard, ManaType, ManaUnit};
+
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Red, ManaType::White]
+            .into_iter()
+            .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let forth = scenario
+        .add_spell_to_hand_from_oracle(P0, "Forth Eorlingas!", false, FORTH_EORLINGAS)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red, ManaCostShard::White],
+            generic: 0,
+        })
+        .id();
+    let teammate = scenario
+        .add_creature(P1, "Teammate", 4, 4)
+        .with_keyword(Keyword::DoubleStrike)
+        .id();
+    let first = scenario
+        .add_creature(P0, "First striker", 2, 2)
+        .with_keyword(Keyword::FirstStrike)
+        .id();
+    let regular = scenario.add_creature(P0, "Regular attacker", 3, 3).id();
+    let mut runner = scenario.build();
+    runner.state_mut().turn_number = 2;
+    runner.cast(forth).x(0).resolve();
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    let p3 = PlayerId(3);
+    // Same entry point as the combined-attack case in
+    // n_or_more_creatures_attack_any_player.rs.
+    runner.state_mut().phase = Phase::DeclareAttackers;
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: vec![first, regular, teammate],
+        valid_attack_targets: vec![AttackTarget::Player(P2), AttackTarget::Player(p3)],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    runner
+        .declare_attackers(&[
+            (first, AttackTarget::Player(P2)),
+            (regular, AttackTarget::Player(P2)),
+            (teammate, AttackTarget::Player(P2)),
+        ])
+        .expect("combined attack");
+    for (source, amount) in [(first, 2), (regular, 3)] {
+        let mut raw = Vec::new();
+        for _ in 0..64 {
+            let action = match runner.state().waiting_for {
+                WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                    assignments: vec![],
+                },
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                ref other => panic!("unexpected combat decision: {other:?}"),
+            };
+            raw.extend(runner.act(action).expect("advance to damage").events);
+            if raw.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::CombatDamageDealtToPlayer { player_id: P2, .. }
+                )
+            }) {
+                break;
+            }
+        }
+        assert!(raw.iter().any(|event| matches!(
+            event,
+            GameEvent::CombatDamageDealtToPlayer { player_id: P2, source_amounts, total_damage, .. }
+                if source_amounts.contains(&(source, amount))
+                    && source_amounts.contains(&(teammate, 4))
+                    && *total_damage == amount + 4
+        )), "both combatants must reach the raw aggregate");
+        let mut entries = runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == forth);
+        let item = entries.next().expect("step queues Forth");
+        assert!(entries.next().is_none());
+        let context = primary_trigger_event(item);
+        assert!(!runner
+            .state()
+            .stack_trigger_event_batches
+            .contains_key(&item.id));
+        assert!(
+            matches!(context, Some(GameEvent::CombatDamageDealtToPlayer {
+                player_id: P2, source_amounts, total_damage, source_incarnations,
+            }) if *total_damage == amount && source_amounts == &[(source, amount)]
+                && source_incarnations.len() == 1
+                && source_incarnations[0].object_id == source
+                && source_incarnations[0].incarnation == runner.state().objects[&source].incarnation
+            ),
+            "queued context must be aggregate and exclude teammate: {context:?}"
+        );
+        resolve_top(&mut runner);
+        assert_eq!(runner.state().monarch, Some(P0));
+    }
+}
+
+/// CR 510.4 + CR 603.7b + CR 514.2: the existing Jace watcher loots once
+/// in each combat damage step and expires before its controller's next combat.
+#[test]
+fn jace_cunning_castaway_loots_in_both_damage_steps_then_expires() {
+    use engine::types::keywords::Keyword;
+
+    let mut scenario = board();
+    let jace = scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Jace, Cunning Castaway",
+            "Jace",
+            3,
+            JACE_CUNNING_CASTAWAY,
+        )
+        .as_legendary()
+        .id();
+    let first = scenario
+        .add_creature(P0, "First striker", 2, 2)
+        .with_keyword(Keyword::FirstStrike)
+        .id();
+    let regular = scenario.add_creature(P0, "Regular attacker", 3, 3).id();
+    let mut runner = scenario.build();
+    let before_install = library(&runner, P0);
+    runner.activate(jace, 0).resolve();
+    assert_eq!(library(&runner, P0), before_install);
+    assert_eq!(
+        runner.state().objects[&jace]
+            .counters
+            .get(&CounterType::Loyalty),
+        Some(&4)
+    );
+    let [watcher] = runner.state().delayed_triggers.as_slice() else {
+        panic!("one loyalty activation must install one watcher");
+    };
+    assert_eq!(watcher.controller, P0);
+    let before_damage = runner.life(P1);
+    assert_eq!(
+        declare_and_collect(
+            &mut runner,
+            &[
+                (first, AttackTarget::Player(P1)),
+                (regular, AttackTarget::Player(P1)),
+            ],
+            jace
+        ),
+        1
+    );
+    assert_eq!(runner.life(P1), before_damage - 2);
+    let before_discard = runner.state().players[0].graveyard.len();
+    resolve_discarding(&mut runner);
+    assert_eq!(library(&runner, P0), before_install - 1);
+    assert_eq!(
+        runner.state().players[0].graveyard.len(),
+        before_discard + 1
+    );
+    drive_until(&mut runner, |runner| {
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == jace)
+    });
+    assert_eq!(runner.life(P1), before_damage - 5);
+    resolve_discarding(&mut runner);
+    assert_eq!(library(&runner, P0), before_install - 2);
+    assert_eq!(
+        runner.state().players[0].graveyard.len(),
+        before_discard + 2
+    );
+
+    drive_until(&mut runner, |runner| runner.state().phase == Phase::End);
+    let turn = runner.state().turn_number;
+    assert!(runner
+        .state()
+        .delayed_triggers
+        .iter()
+        .any(|watcher| watcher.source_id == jace));
+    drive_until(&mut runner, |runner| runner.state().turn_number > turn);
+    assert!(!runner
+        .state()
+        .delayed_triggers
+        .iter()
+        .any(|watcher| watcher.source_id == jace));
+    drive_until(&mut runner, |runner| {
+        runner.state().active_player == P0
+            && matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareAttackers { .. }
+            )
+    });
+    let life = runner.life(P1);
+    assert_eq!(
+        declare_and_collect(&mut runner, &[(regular, AttackTarget::Player(P1))], jace),
+        0
+    );
+    assert_eq!(runner.life(P1), life - 3);
+}
+
+/// CR 510.4 + CR 603.7e + CR 514.2: control of the Saga may change while
+/// the installed watcher continues to read the creating controller's damage.
+#[test]
+fn ravens_warning_keeps_the_creating_controller_and_expires() {
+    use engine::types::keywords::Keyword;
+
+    let mut scenario = board();
+    let saga = scenario
+        .add_enchantment_from_oracle(P0, "The Raven's Warning", "")
+        .with_subtypes(vec!["Saga"])
+        .from_oracle_text(RAVENS_WARNING)
+        .id();
+    scenario.with_counter(saga, CounterType::Lore, 1);
+    let first = scenario
+        .add_creature(P0, "First-strike flyer", 2, 2)
+        .with_keyword(Keyword::Flying)
+        .with_keyword(Keyword::FirstStrike)
+        .id();
+    let regular = scenario
+        .add_creature(P0, "Regular flyer", 3, 3)
+        .with_keyword(Keyword::Flying)
+        .id();
+    let opponent = scenario
+        .add_creature(P1, "Opposing flyer", 1, 1)
+        .with_keyword(Keyword::Flying)
+        .id();
+    let hidden = scenario.add_creature_to_hand(P1, "Hidden card", 1, 1).id();
+    let steal = scenario
+        .add_enchantment_to_hand_from_oracle(P1, "Steal Enchantment", "")
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(
+            &["Enchant"],
+            "Enchant enchantment\nYou control enchanted enchantment.",
+        )
+        .with_keyword(Keyword::Flash)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    advance_sagas(&mut runner);
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    assert_eq!(runner.state().delayed_triggers[0].controller, P0);
+    drive_until(&mut runner, |runner| {
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        )
+    });
+    runner.cast(steal).target_object(saga).resolve();
+    assert_eq!(runner.state().objects[&saga].controller, P1);
+
+    let life = runner.life(P1);
+    assert_eq!(
+        declare_and_collect(
+            &mut runner,
+            &[
+                (first, AttackTarget::Player(P1)),
+                (regular, AttackTarget::Player(P1)),
+            ],
+            saga
+        ),
+        1
+    );
+    for damage_so_far in [2, 5] {
+        drive_until(&mut runner, |runner| {
+            runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == saga)
+        });
+        assert_eq!(runner.life(P1), life - damage_so_far);
+        assert_eq!(runner.state().stack.last().unwrap().controller, P0);
+        let before = hand(&runner, P0);
+        resolve_top(&mut runner);
+        assert_eq!(hand(&runner, P0), before + 1);
+        assert_eq!(runner.state().private_look_player, Some(P0));
+        assert_eq!(runner.state().private_look_ids, vec![hidden]);
+    }
+
+    drive_until(&mut runner, |runner| runner.state().phase == Phase::End);
+    let turn = runner.state().turn_number;
+    assert!(runner
+        .state()
+        .delayed_triggers
+        .iter()
+        .any(|watcher| watcher.source_id == saga));
+    drive_until(&mut runner, |runner| runner.state().turn_number > turn);
+    assert!(!runner
+        .state()
+        .delayed_triggers
+        .iter()
+        .any(|watcher| watcher.source_id == saga));
+    // Chapter III keeps its base path, including the current selection and
+    // optional resolution prompts. Answer them before exercising combat.
+    for _ in 0..64 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { player: P1, .. }
+        ) {
+            break;
+        }
+        let action = match &runner.state().waiting_for {
+            WaitingFor::TriggerTargetSelection {
+                player: P1,
+                source_id: Some(source),
+                selection,
+                ..
+            } if *source == saga => GameAction::ChooseTarget {
+                target: Some(selection.current_legal_targets[0].clone()),
+            },
+            WaitingFor::OptionalEffectChoice { player: P1, .. } => {
+                GameAction::DecideOptionalEffect { accept: false }
+            }
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected decision before the following combat: {other:?}"),
+        };
+        runner.act(action).expect("advance past chapter III");
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareAttackers { player: P1, .. }
+    ));
+    let p0_life = runner.life(P0);
+    assert_eq!(
+        declare_and_collect(&mut runner, &[(opponent, AttackTarget::Player(P0))], saga),
+        0
+    );
+    assert_eq!(runner.life(P0), p0_life - 1);
+    drive_until(&mut runner, |runner| {
+        runner.state().active_player == P0
+            && matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareAttackers { .. }
+            )
+    });
+    let p1_life = runner.life(P1);
+    assert_eq!(
+        declare_and_collect(&mut runner, &[(regular, AttackTarget::Player(P1))], saga),
+        0
+    );
+    assert_eq!(runner.life(P1), p1_life - 3);
+}
+
+/// CR 120.1a + CR 603.2c: object damage cannot qualify for Forth,
+/// whether it happens alone or alongside qualifying player damage.
+#[test]
+fn forth_eorlingas_ignores_combat_damage_dealt_to_a_planeswalker() {
+    use engine::types::events::GameEvent;
+
+    for hits_player in [false, true] {
+        let mut scenario = three_player_board();
+        let forth = free_spell(
+            &mut scenario,
+            P0,
+            "Forth Eorlingas!",
+            false,
+            FORTH_EORLINGAS,
+        );
+        let hits_object = scenario
+            .add_creature(P0, "Planeswalker attacker", 2, 2)
+            .id();
+        let other = scenario.add_creature(P0, "Second attacker", 3, 3).id();
+        let walker = scenario
+            .add_planeswalker_from_oracle(
+                P1,
+                "Opposing Walker",
+                "Walker",
+                8,
+                "+1: You gain 1 life.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(forth).resolve();
+        assert_eq!(runner.state().delayed_triggers.len(), 1);
+        let life = runner.life(P2);
+        let mut attacks = vec![(hits_object, AttackTarget::Planeswalker(walker))];
+        if hits_player {
+            attacks.push((other, AttackTarget::Player(P2)));
+        }
+        assert_eq!(
+            declare_and_collect(&mut runner, &attacks, forth),
+            usize::from(hits_player)
+        );
+        assert_eq!(
+            runner.state().objects[&walker]
+                .counters
+                .get(&CounterType::Loyalty),
+            Some(&6)
+        );
+        assert_eq!(runner.life(P2), life - if hits_player { 3 } else { 0 });
+        if hits_player {
+            let item = runner
+                .state()
+                .stack
+                .last()
+                .expect("the player leg fires Forth");
+            assert_eq!(item.source_id, forth);
+            assert!(matches!(primary_trigger_event(item),
+                Some(GameEvent::CombatDamageDealtToPlayer { player_id: P2, source_amounts, .. })
+                if source_amounts == &[(other, 3)]));
+            assert!(!runner
+                .state()
+                .stack_trigger_event_batches
+                .contains_key(&item.id));
+            resolve_top(&mut runner);
+            assert_eq!(runner.state().monarch, Some(P0));
+        } else {
+            assert_eq!(runner.state().monarch, None);
+        }
+    }
+}

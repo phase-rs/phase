@@ -1575,6 +1575,28 @@ fn keeps_delayed_entry_life_body(before: TextPair<'_>, after: &str) -> bool {
     super::imperative::is_fixed_opponent_loss_and_controller_gain(loss.trim(), gain.trim())
 }
 
+// CR 603.7b + CR 608.2c: the delayed installer owns both instructions.
+// Keep recognized malformed look/draw compounds together for strict failure.
+fn keeps_delayed_player_damage_look(before: TextPair<'_>, after: &str) -> bool {
+    use super::{
+        delayed_player_damage_admission, DelayedPlayerDamage, DelayedPlayerDamageAdmission,
+    };
+
+    let Some((head, look)) = super::parse_delayed_this_turn_head(before) else {
+        return false;
+    };
+    let after = after.to_lowercase();
+    matches!(
+        delayed_player_damage_admission(head),
+        DelayedPlayerDamageAdmission::Admitted(DelayedPlayerDamage::FlyingPerPlayer, _)
+            | DelayedPlayerDamageAdmission::Unsupported
+    ) && super::imperative::parse_possessive_hand_look(&look.to_lowercase()).is_ok()
+        && matches!(
+            super::delayed_player_damage_draw(&after),
+            Ok(_) | Err(nom::Err::Failure(_))
+        )
+}
+
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -2053,6 +2075,10 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
                         || keeps_delayed_entry_life_body(
+                            TextPair::new(before_and, &before_lower),
+                            remainder_trimmed,
+                        )
+                        || keeps_delayed_player_damage_look(
                             TextPair::new(before_and, &before_lower),
                             remainder_trimmed,
                         )

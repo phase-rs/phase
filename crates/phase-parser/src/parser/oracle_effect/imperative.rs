@@ -1468,7 +1468,7 @@ fn parse_discard_unless_filter<'a>(
 /// name", "nonland cards with that name"). The outer `None` means the noun is
 /// not recognized, so the instruction fails closed; the inner `None` means a
 /// plain "card(s)", which any card in the hand satisfies.
-fn parse_discard_noun_filter(noun: &str) -> Option<Option<TargetFilter>> {
+pub(super) fn parse_discard_noun_filter(noun: &str) -> Option<Option<TargetFilter>> {
     // CR 201.2a + CR 608.2c: a trailing "with that name" binds the discard to the
     // card name chosen earlier in this resolution (Brain Pry). It composes onto
     // whatever type qualifier precedes it.
@@ -4863,6 +4863,22 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
     }
 }
 
+pub(super) fn parse_possessive_hand_look(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, Option<QuantityExpr>, bool)> {
+    let (rest, _) = tag("look at ").parse(input)?;
+    let (rest, random_count) = opt(value(
+        QuantityExpr::Fixed { value: 1 },
+        alt((
+            tag::<_, _, OracleError<'_>>("a card at random in "),
+            tag("one card at random in "),
+        )),
+    ))
+    .parse(rest)?;
+    let (rest, target) = parse_hand_possessive_target(rest)?;
+    Ok((rest, (target, random_count.clone(), random_count.is_some())))
+}
+
 pub(super) fn parse_hand_reveal_ast(
     text: &str,
     lower: &str,
@@ -4896,19 +4912,9 @@ pub(super) fn parse_hand_reveal_ast(
         // explicitly so combat-trigger forms like "defending player's hand" and
         // random-card forms like "a card at random in target player's hand" do
         // not fall back to parsing "card" as the effect target.
-        if let Some(((target, count, random), _)) = nom_on_lower(text, lower, |input| {
-            let (rest, _) = tag("look at ").parse(input)?;
-            let (rest, random_count) = opt(value(
-                QuantityExpr::Fixed { value: 1 },
-                alt((
-                    tag::<_, _, OracleError<'_>>("a card at random in "),
-                    tag("one card at random in "),
-                )),
-            ))
-            .parse(rest)?;
-            let (rest, target) = parse_hand_possessive_target(rest)?;
-            Ok((rest, (target, random_count.clone(), random_count.is_some())))
-        }) {
+        if let Some(((target, count, random), _)) =
+            nom_on_lower(text, lower, parse_possessive_hand_look)
+        {
             return Some(HandRevealImperativeAst::LookAt {
                 target,
                 count,
@@ -15513,6 +15519,14 @@ fn attached_set_mass_effect(verb: AttachedSetVerb, population: TargetFilter) -> 
     })
 }
 
+pub(super) fn parse_become_monarch(input: &str) -> OracleResult<'_, ImperativeFamilyAst> {
+    value(
+        ImperativeFamilyAst::BecomeMonarch,
+        (alt((tag("becomes"), tag("become"))), tag(" the monarch")),
+    )
+    .parse(input)
+}
+
 pub(super) fn parse_imperative_family_ast(
     text: &str,
     lower: &str,
@@ -16608,13 +16622,10 @@ pub(super) fn parse_imperative_family_ast(
         // CR 701.51b: "open an Attraction" / "open two Attractions"
         "open" | "opens" => parse_open_attraction_imperative(lower),
         // CR 725.1: "become the monarch"
-        "become" | "becomes" => {
-            if lower == "become the monarch" || lower == "becomes the monarch" {
-                Some(ImperativeFamilyAst::BecomeMonarch)
-            } else {
-                None
-            }
-        }
+        "become" | "becomes" => all_consuming(parse_become_monarch)
+            .parse(lower)
+            .ok()
+            .map(|(_, ast)| ast),
         // CR 701.49: "venture into the dungeon" / "venture into the Undercity"
         "venture" => alt((
             value(

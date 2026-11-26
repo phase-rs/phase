@@ -2644,3 +2644,227 @@ fn t_z5_cycle_of_life_places_no_counter_on_a_blinked_referent() {
          no-op (CR 603.7b)"
     );
 }
+
+const GILRAEN: &str = "{2}, {T}: Exile another target creature you control. You may return that card to the battlefield under its owner's control. If you don't, at the beginning of the next end step, return that card to the battlefield under its owner's control with a vigilance counter and a lifelink counter on it.";
+
+/// CR 400.7j + CR 603.7c: the decline branch follows the exile arrival.
+/// CR 110.2a + CR 122.6: the delayed return enters under the owner with counters.
+#[test]
+fn gilraen_decline_pins_the_exile_arrival_and_returns_it() {
+    for accept in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, mana(2));
+        stock_libraries(&mut scenario);
+        let gilraen = scenario
+            .add_creature_from_oracle(P0, "Gilraen, Dúnedain Protector", 2, 3, GILRAEN)
+            .as_legendary()
+            .id();
+        let borrowed = scenario
+            .add_creature(P1, "Borrowed creature", 2, 2)
+            .controlled_by(P0)
+            .id();
+        // A second legal object prevents the engine from auto-selecting a
+        // singleton slot, so the test can inspect the announcement choice.
+        let alternative = scenario.add_creature(P0, "Other creature", 2, 2).id();
+        let mut runner = scenario.build();
+        use engine::types::game_state::CastPaymentMode;
+
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: gilraen,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("announce Gilraen's activation");
+        let WaitingFor::TargetSelection {
+            player: P0,
+            target_slots,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("Gilraen must ask P0 to choose its target");
+        };
+        // CR 115.1c: "another" excludes Gilraen from the announcement slot.
+        assert_eq!(target_slots.len(), 1);
+        assert_eq!(target_slots[0].legal_targets.len(), 2);
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(borrowed)));
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(alternative)));
+        assert!(!target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(gilraen)));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(borrowed)),
+            })
+            .expect("choose the other creature");
+        for _ in 0..8 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve the activated exile");
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ));
+        assert!(runner.state().objects[&gilraen].tapped);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(runner.state().objects[&borrowed].zone, Zone::Exile);
+        let arrival = runner.state().objects[&borrowed].incarnation;
+        runner
+            .act(GameAction::DecideOptionalEffect { accept })
+            .expect("answer optional return");
+        if accept {
+            assert!(runner.state().delayed_triggers.is_empty());
+        } else {
+            let [watcher] = runner.state().delayed_triggers.as_slice() else {
+                panic!("decline installs one watcher");
+            };
+            assert_eq!(watcher.controller, P0);
+            assert_eq!(runner.state().objects[&borrowed].zone, Zone::Exile);
+            let [pin] = watcher.ability.target_incarnations.as_slice() else {
+                panic!("delayed return must pin its target");
+            };
+            assert_eq!((pin.object_id, pin.incarnation), (borrowed, arrival));
+            let events = advance_until_delayed_triggers_resolve(&mut runner);
+            assert!(effect_resolved_from(&events, gilraen));
+            assert_eq!(runner.state().phase, Phase::End);
+        }
+        let permanent = &runner.state().objects[&borrowed];
+        assert_eq!(permanent.zone, Zone::Battlefield);
+        assert_eq!(permanent.controller, P1);
+        for kind in [
+            engine::types::keywords::KeywordKind::Vigilance,
+            engine::types::keywords::KeywordKind::Lifelink,
+        ] {
+            assert_eq!(
+                permanent
+                    .counters
+                    .get(&engine::types::counter::CounterType::Keyword(kind))
+                    .copied()
+                    .unwrap_or(0),
+                u32::from(!accept),
+            );
+        }
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+/// CR 400.7 + CR 603.7c: a departed exile arrival cannot be returned,
+/// even when the same card later enters exile under the same storage ID.
+#[test]
+fn gilraen_declined_return_ignores_departed_and_successor_incarnations() {
+    for reexile in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, mana(2));
+        stock_libraries(&mut scenario);
+        let gilraen = scenario
+            .add_creature_from_oracle(P0, "Gilraen, Dúnedain Protector", 2, 3, GILRAEN)
+            .as_legendary()
+            .id();
+        let creature = scenario
+            .add_creature(P1, "Borrowed creature", 2, 2)
+            .controlled_by(P0)
+            .id();
+        let unrelated = scenario
+            .add_creature_to_exile(P0, "Unrelated exiled creature", 2, 2)
+            .id();
+        let pull = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Pull from Eternity",
+                true,
+                "Put target face-up exiled card into its owner's graveyard.",
+            )
+            .id();
+        let cremate = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Cremate",
+                true,
+                "Exile target card from a graveyard.\nDraw a card.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let result = runner
+            .activate(gilraen, 0)
+            .target_object(creature)
+            .stop_at_optional()
+            .resolve();
+        assert!(matches!(
+            result.final_waiting_for(),
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ));
+        assert_eq!(result.zone_of(creature), Zone::Exile);
+        let arrival = result.state().objects[&creature].incarnation;
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .expect("decline");
+        let [watcher] = runner.state().delayed_triggers.as_slice() else {
+            panic!("decline must install the delayed return");
+        };
+        assert_eq!(
+            watcher.ability.target_incarnations,
+            [engine::types::identifiers::ObjectIncarnationRef::of(
+                creature, arrival
+            ),]
+        );
+        let result = runner.cast(pull).target_object(creature).resolve();
+        assert!(effect_resolved_from(result.events(), pull));
+        assert_eq!(result.zone_of(creature), Zone::Graveyard);
+        let expected_zone = if reexile {
+            let result = runner.cast(cremate).target_object(creature).resolve();
+            assert!(effect_resolved_from(result.events(), cremate));
+            assert_eq!(result.zone_of(creature), Zone::Exile);
+            assert_ne!(result.state().objects[&creature].incarnation, arrival);
+            Zone::Exile
+        } else {
+            Zone::Graveyard
+        };
+        for _ in 0..64 {
+            if runner.state().phase == Phase::End {
+                break;
+            }
+            let action = match runner.state().waiting_for {
+                WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                    attacks: vec![],
+                    bands: vec![],
+                },
+                WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                    assignments: vec![],
+                },
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                ref other => panic!("unexpected decision before the end step: {other:?}"),
+            };
+            runner.act(action).expect("advance to Gilraen firing");
+        }
+        assert_eq!(runner.state().phase, Phase::End);
+        assert!(runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == gilraen && entry.controller == P0));
+        runner.advance_until_stack_empty();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(runner.state().objects[&creature].zone, expected_zone);
+        assert_eq!(runner.state().objects[&unrelated].zone, Zone::Exile);
+    }
+}
