@@ -38456,6 +38456,7 @@ fn from_among_batch_bounds(rest: &str) -> Option<ResolutionCastWindow> {
         CastCapReading::Unrepresentable => return None,
     };
     Some(ResolutionCastWindow {
+        pool: crate::types::ability::ResolutionCastPool::CurrentResolution,
         max_casts,
         max_total_mv: parse_from_among_total_mv_budget(head),
     })
@@ -40118,6 +40119,11 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             ) {
             crate::types::ability::CastFromZoneDriver::ResolutionWindow {
                 bounds: crate::types::ability::ResolutionCastWindow {
+                    pool: if matches!(matched_anaphor, CastAnaphor::OneOfLinked) {
+                        crate::types::ability::ResolutionCastPool::SourceLinked
+                    } else {
+                        crate::types::ability::ResolutionCastPool::CurrentResolution
+                    },
                     max_casts: Some(1),
                     max_total_mv: None,
                 },

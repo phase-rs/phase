@@ -11376,6 +11376,7 @@ impl FreeCastWindowResume {
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::ResolutionWindow {
                 bounds: crate::types::ability::ResolutionCastWindow {
+                    pool: crate::types::ability::ResolutionCastPool::CurrentResolution,
                     max_casts: self.remaining_casts,
                     max_total_mv: self.remaining_mv_budget,
                 },

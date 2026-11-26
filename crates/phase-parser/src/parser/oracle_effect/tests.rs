@@ -60612,14 +60612,17 @@ fn cast_mechanism_bound_pairing_table_is_exact() {
     let one = ResolutionCastWindow {
         max_casts: Some(1),
         max_total_mv: None,
+        ..Default::default()
     };
     let two = ResolutionCastWindow {
         max_casts: Some(2),
         max_total_mv: None,
+        ..Default::default()
     };
     let budget = ResolutionCastWindow {
         max_casts: None,
         max_total_mv: Some(10),
+        ..Default::default()
     };
 
     // Lingering permissions have no shared budget: unbounded only.
@@ -60712,14 +60715,17 @@ fn duration_reconciliation_refuses_a_bound_the_lingering_grant_cannot_carry() {
         ResolutionCastWindow {
             max_casts: Some(1),
             max_total_mv: None,
+            ..Default::default()
         },
         ResolutionCastWindow {
             max_casts: Some(2),
             max_total_mv: None,
+            ..Default::default()
         },
         ResolutionCastWindow {
             max_casts: None,
             max_total_mv: Some(10),
+            ..Default::default()
         },
     ] {
         assert_eq!(
@@ -96422,6 +96428,7 @@ fn invasion_of_alara_body_lowers_cast_one_hand_one_bottom_the_rest() {
                     bounds: ResolutionCastWindow {
                         max_casts: Some(1),
                         max_total_mv: None,
+                        ..
                     },
                 },
                 ..

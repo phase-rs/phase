@@ -40020,6 +40020,10 @@ fn evercoat_ursine_combat_damage_gate_binds_and_swallow_warning_clears() {
     };
     assert_eq!(*target, TargetFilter::ExiledBySource);
     assert!(*without_paying_mana_cost);
+    assert_eq!(
+        bounds.pool,
+        crate::types::ability::ResolutionCastPool::SourceLinked
+    );
     assert_eq!(bounds.max_casts, Some(1));
     assert!(bounds.max_total_mv.is_none());
     for trigger in &parsed.triggers {

@@ -213,7 +213,7 @@ fn resolution_window_linked_batch_candidates(
     // its filtered intersection would silently narrow a source-anchored pool.
     // In that case, return `None` so the caller can use the durable linked
     // ledger instead.
-    if members.len() != linked_ids.len() || members.iter().any(|id| !linked_ids.contains(id)) {
+    if members.iter().any(|id| !linked_ids.contains(id)) {
         return None;
     }
     let mut seen = HashSet::new();
@@ -918,23 +918,33 @@ pub fn resolve(
         // seam and can span several player-scope publishes or follow a later
         // producer barrier, so it remains the stronger exact authority.
         if !exact_bound_batch {
-            if let Some(active_batch) =
-                resolution_window_linked_batch_candidates(state, ability.source_id)
-                    .filter(|ids| !ids.is_empty())
-            {
-                target_ids = active_batch;
-            } else if target_ids.is_empty() && target_filter.references_exiled_by_source() {
-                // CR 607.2a + CR 608.2g: a source-anchored plural anaphor can
-                // open a one-card resolution window over the source's durable
-                // linked-exile ledger (Evercoat Ursine). The active batch is
-                // authoritative when this ability follows an exile in the
-                // same resolution; when it is absent, use the same fallback
-                // authority as the singular linked-exile cast path.
-                if let ExiledBySourceBinding::LinkedExile(ids) =
-                    exiled_by_source_fallback_binding(state, ability, target_filter)
-                {
-                    target_ids = ids;
+            match resolution_window_linked_batch_candidates(state, ability.source_id) {
+                Some(active_batch) => {
+                    // CR 608.2c: an active producer owns even an empty batch;
+                    // do not reopen an earlier linked-exile ledger in that case.
+                    target_ids = active_batch;
                 }
+                None if matches!(
+                    driver,
+                    crate::types::ability::CastFromZoneDriver::ResolutionWindow {
+                        bounds: crate::types::ability::ResolutionCastWindow {
+                            pool: crate::types::ability::ResolutionCastPool::SourceLinked,
+                            ..
+                        }
+                    }
+                ) && target_ids.is_empty() =>
+                {
+                    // CR 607.2a + CR 608.2g: a source-anchored plural anaphor can
+                    // open a one-card resolution window over the source's durable
+                    // linked-exile ledger (Evercoat Ursine). Use that ledger only
+                    // when no current-resolution batch was published.
+                    if let ExiledBySourceBinding::LinkedExile(ids) =
+                        exiled_by_source_fallback_binding(state, ability, target_filter)
+                    {
+                        target_ids = ids;
+                    }
+                }
+                None => {}
             }
         }
     }
