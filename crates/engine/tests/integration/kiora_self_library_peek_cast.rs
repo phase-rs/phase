@@ -584,6 +584,7 @@ fn singular_batch_anaphors_are_one_shot_resolution_windows() {
                         bounds: ResolutionCastWindow {
                             max_casts: Some(1),
                             max_total_mv: None,
+                            ..
                         },
                         ..
                     },
@@ -642,6 +643,7 @@ fn exile_batch_anaphors_are_resolution_windows_with_their_stated_bounds() {
             ResolutionCastWindow {
                 max_casts: Some(2),
                 max_total_mv: None,
+                ..Default::default()
             },
         ),
         // CR 202.3: a running TOTAL budget, a different axis from the per-spell
@@ -653,6 +655,7 @@ fn exile_batch_anaphors_are_resolution_windows_with_their_stated_bounds() {
             ResolutionCastWindow {
                 max_casts: None,
                 max_total_mv: Some(10),
+                ..Default::default()
             },
         ),
         // CR 608.2c: "a spell" is an implicit cap of one, reached through the
@@ -664,6 +667,7 @@ fn exile_batch_anaphors_are_resolution_windows_with_their_stated_bounds() {
             ResolutionCastWindow {
                 max_casts: Some(1),
                 max_total_mv: None,
+                ..Default::default()
             },
         ),
     ] {

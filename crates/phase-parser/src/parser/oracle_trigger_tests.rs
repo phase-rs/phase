@@ -40249,15 +40249,31 @@ fn evercoat_ursine_combat_damage_gate_binds_and_swallow_warning_clears() {
         other => panic!("expected CardsExiledBySource GE 1 condition, got {other:?}"),
     }
 
-    // Positive reach-guards: the play-one-of-them body still parses (its
-    // pre-existing "one of them" binding is OUT of this fix's claimed axis and
-    // stays as-is), and no Unimplemented anywhere.
+    // CR 607.2a: "one of them" must bind to the source's linked exile pool,
+    // not the unrestricted fallback target. The one-card resolution window is
+    // the semantic bound printed by the anaphor.
     let execute = combat.execute.as_ref().expect("execute ability");
-    assert!(
-        matches!(&*execute.effect, Effect::CastFromZone { .. }),
-        "the play-one-of-them body must remain CastFromZone, got {:?}",
-        execute.effect
+    let Effect::CastFromZone {
+        target,
+        without_paying_mana_cost,
+        mode: crate::types::ability::CardPlayMode::Play,
+        driver: crate::types::ability::CastFromZoneDriver::ResolutionWindow { bounds },
+        ..
+    } = &*execute.effect
+    else {
+        panic!(
+            "the play-one-of-them body must be a one-card linked-exile window, got {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(*target, TargetFilter::ExiledBySource);
+    assert!(*without_paying_mana_cost);
+    assert_eq!(
+        bounds.pool,
+        crate::types::ability::ResolutionCastPool::SourceLinked
     );
+    assert_eq!(bounds.max_casts, Some(1));
+    assert!(bounds.max_total_mv.is_none());
     for trigger in &parsed.triggers {
         if let Some(execute) = trigger.execute.as_deref() {
             assert!(

@@ -4165,11 +4165,13 @@ mod duration_distribution_tests_7923 {
     #[test]
     fn reconciled_cast_seam_refuses_the_bound_before_gapping_the_lifetime() {
         use crate::types::ability::{
-            CastFromZoneDriver, ResolutionCastWindow, CAST_BOUND_LOST_TO_DURATION_GAP,
+            CastFromZoneDriver, ResolutionCastPool, ResolutionCastWindow,
+            CAST_BOUND_LOST_TO_DURATION_GAP,
         };
 
         let refusable = CastFromZoneDriver::ResolutionWindow {
             bounds: ResolutionCastWindow {
+                pool: ResolutionCastPool::CurrentResolution,
                 max_casts: Some(1),
                 max_total_mv: None,
             },

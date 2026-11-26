@@ -2748,8 +2748,19 @@ pub enum CopyTargetPurpose {
 pub enum KeywordAction {
     /// CR 702.6a: attach source equipment to target creature.
     Equip {
-        equipment_id: ObjectId,
-        target_creature_id: ObjectId,
+        /// CR 400.7: the permanent whose ability was activated. Legacy bare ids
+        /// cannot identify a permanent to move.
+        #[serde(alias = "equipment_id", serialize_with = "serialize_equip_pin")]
+        equipment: ObjectIncarnationRef,
+        /// CR 702.6a + CR 601.2c + CR 400.7: the creature chosen as the target,
+        /// pinned to the incarnation it had when it was chosen. A creature that
+        /// leaves the battlefield, even one that returns, is a new object, so
+        /// the pin no longer names it (CR 115.9b, CR 608.2b). A legacy bare id
+        /// decodes to `LEGACY_INCARNATION` in either field. Checked restore
+        /// refuses a pending Equip with either incarnation unknown. Completed
+        /// actions may retain these ids in the rules journal.
+        #[serde(alias = "target_creature_id", serialize_with = "serialize_equip_pin")]
+        target_creature: ObjectIncarnationRef,
     },
     /// CR 702.122a: the Vehicle becomes an artifact creature until end of turn.
     /// Paid-creature ids are captured for logging and trigger context only.
@@ -2774,16 +2785,60 @@ pub enum KeywordAction {
     },
 }
 
+// Keep historical Equip ids bare when re-exporting a checkpoint. JavaScript
+// would round the u64::MAX sentinel past the u64 range.
+fn serialize_equip_pin<S: Serializer>(
+    pin: &ObjectIncarnationRef,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if pin.incarnation == LEGACY_INCARNATION {
+        pin.object_id.serialize(serializer)
+    } else {
+        pin.serialize(serializer)
+    }
+}
+
 impl KeywordAction {
+    /// CR 702.6a + CR 601.2c: pin the Equipment and its chosen creature at activation.
+    pub fn equip(
+        equipment: &crate::game::game_object::GameObject,
+        target: &crate::game::game_object::GameObject,
+    ) -> Self {
+        KeywordAction::Equip {
+            equipment: ObjectIncarnationRef::from_object(equipment),
+            target_creature: ObjectIncarnationRef::from_object(target),
+        }
+    }
+
+    /// CR 115.1e + CR 601.2c + CR 400.7: the targets this keyword action
+    /// declared, each with the incarnation pinned when it was chosen. The
+    /// payload is the entry's only record of them: a keyword action carries
+    /// no `ResolvedAbility`.
+    pub(crate) fn declared_target_entries(
+        &self,
+    ) -> Vec<crate::game::ability_utils::DeclaredTargetEntry> {
+        match self {
+            Self::Equip {
+                target_creature, ..
+            } => {
+                vec![crate::game::ability_utils::DeclaredTargetEntry {
+                    target: TargetRef::Object(target_creature.object_id),
+                    pin: Some(*target_creature),
+                }]
+            }
+            // CR 702.122a / CR 702.171a / CR 702.184a: crew, saddle and
+            // station tap creatures as a cost and name no target.
+            Self::Crew { .. } | Self::Saddle { .. } | Self::Station { .. } => Vec::new(),
+        }
+    }
+
     /// CR 115.1e + CR 702.6a: the targets chosen for this keyword action; only
     /// equip targets (crew, saddle and station target nothing).
     pub fn targets(&self) -> Vec<TargetRef> {
-        match self {
-            Self::Equip {
-                target_creature_id, ..
-            } => vec![TargetRef::Object(*target_creature_id)],
-            Self::Crew { .. } | Self::Saddle { .. } | Self::Station { .. } => Vec::new(),
-        }
+        self.declared_target_entries()
+            .into_iter()
+            .map(|entry| entry.target)
+            .collect()
     }
 }
 
@@ -7012,6 +7067,62 @@ mod tests {
     use crate::types::events::GameEvent;
     use crate::types::game_state::{DelayedTrigger, GameState, ZoneChangeRecord};
     use crate::types::zones::{EtbTapState, Zone};
+
+    /// CR 400.7: the legacy bare source and target ids decode with
+    /// `LEGACY_INCARNATION`. The pinned shape round-trips unchanged.
+    #[test]
+    fn equip_payload_decodes_legacy_ids_and_round_trips_pinned_objects() {
+        let legacy: KeywordAction = serde_json::from_value(serde_json::json!({
+            "type": "Equip",
+            "data": { "equipment_id": 1, "target_creature_id": 2 }
+        }))
+        .expect("the legacy equip payload decodes");
+        assert_eq!(
+            legacy,
+            KeywordAction::Equip {
+                equipment: ObjectIncarnationRef::of(ObjectId(1), LEGACY_INCARNATION),
+                target_creature: ObjectIncarnationRef::of(ObjectId(2), LEGACY_INCARNATION),
+            }
+        );
+
+        let mixed: KeywordAction = serde_json::from_value(serde_json::json!({
+            "type": "Equip",
+            "data": {
+                "equipment": { "object_id": 1, "incarnation": LEGACY_INCARNATION },
+                "target_creature": { "object_id": 2, "incarnation": 3 }
+            }
+        }))
+        .expect("a previously exported full legacy pin decodes");
+        assert_eq!(
+            serde_json::to_value(&mixed).unwrap(),
+            serde_json::json!({
+                "type": "Equip",
+                "data": { "equipment": 1, "target_creature": { "object_id": 2, "incarnation": 3 } }
+            })
+        );
+
+        let pinned = serde_json::json!({
+            "type": "Equip",
+            "data": {
+                "equipment": { "object_id": 1, "incarnation": 4 },
+                "target_creature": { "object_id": 2, "incarnation": 3 }
+            }
+        });
+        let decoded: KeywordAction =
+            serde_json::from_value(pinned.clone()).expect("the pinned equip payload decodes");
+        assert_eq!(
+            decoded,
+            KeywordAction::Equip {
+                equipment: ObjectIncarnationRef::of(ObjectId(1), 4),
+                target_creature: ObjectIncarnationRef::of(ObjectId(2), 3),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("the equip payload encodes"),
+            pinned,
+            "the pinned shape round-trips"
+        );
+    }
 
     /// Saved states carry the marker as `phase_turn_player`: the field's rename keeps that key,
     /// and a state written without the key still decodes to no marker.

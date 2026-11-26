@@ -9817,8 +9817,8 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::KeywordAction {
                 action: KeywordAction::Equip {
-                    equipment_id: ObjectId(72),
-                    target_creature_id: ObjectId(73),
+                    equipment: ObjectIncarnationRef::of(ObjectId(72), 0),
+                    target_creature: ObjectIncarnationRef::of(ObjectId(73), 0),
                 },
             },
         };

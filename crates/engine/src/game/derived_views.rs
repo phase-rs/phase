@@ -4214,10 +4214,7 @@ mod tests {
                 actual_mana_spent: 0,
             },
             StackEntryKind::KeywordAction {
-                action: KeywordAction::Equip {
-                    equipment_id: id,
-                    target_creature_id: id,
-                },
+                action: KeywordAction::equip(&state.objects[&id], &state.objects[&id]),
             },
             StackEntryKind::CombatDamage {
                 sub_step: CombatDamageSubStep::Regular,
@@ -6852,10 +6849,7 @@ mod tests {
             source_id: equipment,
             controller: PlayerId(0),
             kind: StackEntryKind::KeywordAction {
-                action: KeywordAction::Equip {
-                    equipment_id: equipment,
-                    target_creature_id: source,
-                },
+                action: KeywordAction::equip(&state.objects[&equipment], &state.objects[&source]),
             },
         });
 
