@@ -2609,6 +2609,63 @@ pub(super) fn attack_firings(
         .valid_source
         .as_ref()
         .filter(|filter| filter.is_player_scope());
+    if let Some(filter) = player_scope.filter(|_| !trigger.batched) {
+        use crate::types::triggers::AttackTargetFilter;
+
+        // CR 508.3d + CR 508.3e + CR 805.10b: a combined declaration can contain
+        // multiple actors. A named defending player adds a second grouping
+        // axis. Keep the full admitted set for each actor's event conditions.
+        let binds_defender = combat_filter(trigger).is_some()
+            || matches!(
+                trigger.attack_target_filter,
+                Some(
+                    AttackTargetFilter::Player
+                        | AttackTargetFilter::Monarch
+                        | AttackTargetFilter::PlayerOrPlaneswalker
+                )
+            );
+        let mut groups = indexmap::IndexMap::new();
+        for &id in attacker_ids {
+            let Some(actor) =
+                super::targeting::attack_declaration_controller(state, declaration_records, id)
+            else {
+                continue;
+            };
+            let target = attack_target_of(id);
+            if !player_matches_filter(filter, state, actor, source_context)
+                || !attack_target_matches(trigger, state, target, *defending_player, source_context)
+            {
+                continue;
+            }
+            let defender =
+                super::combat::defending_player_for_target_or(state, target, *defending_player);
+            let key = (actor, binds_defender.then_some(defender));
+            groups
+                .entry(key)
+                .or_insert_with(|| (defender, Vec::new()))
+                .1
+                .push((id, target));
+        }
+        return groups
+            .into_values()
+            .map(|(defending_player, attacks)| {
+                let attacker_ids: Vec<_> = attacks.iter().map(|&(id, _)| id).collect();
+                let context = GameEvent::AttackersDeclared {
+                    declaration_records: super::triggers::declaration_records_for_attackers(
+                        event,
+                        &attacker_ids,
+                    ),
+                    attacker_ids,
+                    defending_player,
+                    attacks,
+                };
+                AttackFiring {
+                    admitted: context.clone(),
+                    context,
+                }
+            })
+            .collect();
+    }
     if let Some(filter) = player_scope {
         // CR 508.3d + CR 508.5a: "[player] attacks [opponent]" triggers
         // once per attacked defending player, not once per attacking

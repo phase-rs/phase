@@ -2176,6 +2176,14 @@ pub(super) fn declaration_records_for_attackers(
         .collect()
 }
 
+fn is_player_led_attackers_declared(trigger: &TriggerDefinition) -> bool {
+    trigger.mode == TriggerMode::AttackersDeclared
+        && trigger
+            .valid_source
+            .as_ref()
+            .is_some_and(TargetFilter::is_player_scope)
+}
+
 /// CR 603.2c + CR 508.3a + CR 509.3a/c/d + CR 510.2: the per-occurrence event
 /// fan-out for trigger modes whose single event can contain several
 /// occurrences — one attack declaration naming several attackers, one block
@@ -2200,33 +2208,26 @@ fn occurrence_trigger_events(
     ability: &ResolvedAbility,
 ) -> Option<Vec<FiringOccurrence>> {
     use super::trigger_matchers as m;
+    let attack_occurrences = || {
+        Some(
+            m::attack_firings(event, trig_def, source_context, state)
+                .into_iter()
+                .map(|firing| FiringOccurrence {
+                    context: firing.context,
+                    causes: vec![firing.admitted],
+                })
+                .collect(),
+        )
+    };
     let contexts = match trig_def.mode {
-        // CR 603.2c + CR 508.3d: an `Attacks` firing's cause record is its
-        // admitted attacker set, which a per-defending-player firing's narrowed
-        // context does not carry (charter D4).
-        TriggerMode::Attacks => {
-            return Some(
-                m::attack_firings(event, trig_def, source_context, state)
-                    .into_iter()
-                    .map(|firing| FiringOccurrence {
-                        context: firing.context,
-                        causes: vec![firing.admitted],
-                    })
-                    .collect(),
-            );
+        // CR 603.2c + CR 508.3d: an attack firing's cause record carries its full
+        // admitted attacker set, which a narrowed context need not carry.
+        TriggerMode::Attacks => return attack_occurrences(),
+        TriggerMode::AttackersDeclared if is_player_led_attackers_declared(trig_def) => {
+            return attack_occurrences();
         }
         TriggerMode::AttacksOrBlocks => match event {
-            GameEvent::AttackersDeclared { .. } => {
-                return Some(
-                    m::attack_firings(event, trig_def, source_context, state)
-                        .into_iter()
-                        .map(|firing| FiringOccurrence {
-                            context: firing.context,
-                            causes: vec![firing.admitted],
-                        })
-                        .collect(),
-                );
-            }
+            GameEvent::AttackersDeclared { .. } => return attack_occurrences(),
             GameEvent::BlockersDeclared { .. } => Some(m::matching_block_events(
                 event,
                 trig_def,
@@ -2541,6 +2542,7 @@ fn trigger_firing_groups(
     // context the check needs.
     let grouped = groups_simultaneous_occurrences(trig_def);
     if !grouped
+        && !is_player_led_attackers_declared(trig_def)
         && !matches!(
             trig_def.mode,
             TriggerMode::Attacks | TriggerMode::YouAttackUnblocked

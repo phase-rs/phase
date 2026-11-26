@@ -2464,7 +2464,6 @@ face = [
   { key = "tolls of war", class = "dropped_qualifier", clauses = ["Whenever you sacrifice a permanent during your turn, create a 1/1 white Ally creature token."] },
   { key = "toluz, clever conductor", class = "wrong_object", clauses = ["When Toluz dies, put the cards exiled with it into their owner's hand."] },
   { key = "tombstone stairwell", class = "dropped_qualifier", clauses = ["At the beginning of each end step and when this enchantment leaves the battlefield, destroy all tokens created with this enchantment. They can't be regenerated."] },
-  { key = "tomik, wielder of law", class = "wrong_player", clauses = ["Whenever an opponent attacks with creatures, if two or more of those creatures are attacking you and/or planeswalkers you control, that opponent loses 3 life and you draw a card."] },
   { key = "tomorrow, azami's familiar", class = "wrong_zone", clauses = ["Put one of those cards into your hand and the rest on the bottom of your library in any order."] },
   { key = "toolcraft exemplar", class = "condition_wrong", clauses = ["If you control three or more artifacts, it also gains first strike until end of turn."] },
   { key = "toph, greatest earthbender", class = "wrong_player", clauses = ["When Toph enters, earthbend X, where X is the amount of mana spent to cast her."] },

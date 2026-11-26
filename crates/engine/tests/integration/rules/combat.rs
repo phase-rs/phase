@@ -2788,6 +2788,179 @@ fn shared_scaled_tax_taxes_each_attacker_independently() {
     );
 }
 
+/// CR 508.3d: A player-led attack head without a named defender has one
+/// occurrence even when that player's attackers attack different players.
+#[test]
+fn player_led_attack_fires_once_across_multiple_defenders() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario
+        .add_creature_from_oracle(
+            P1,
+            "Attack watcher",
+            2,
+            2,
+            "Whenever a player attacks, you gain 1 life.",
+        )
+        .id();
+    let first = scenario.add_creature(P0, "First attacker", 2, 2).id();
+    let second = scenario.add_creature(P0, "Second attacker", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareAttackers { player: P0, .. }
+    ));
+
+    let starting_life = runner.life(P1);
+    runner
+        .declare_attackers(&[
+            (first, AttackTarget::Player(P1)),
+            (second, AttackTarget::Player(P2)),
+        ])
+        .expect("one player can declare attacks on both opponents");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, watcher);
+    runner.resolve_top();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.life(P1), starting_life + 1);
+}
+
+/// CR 508.3e: the named player adds one occurrence per attacked player.
+#[test]
+fn player_led_attack_with_a_defender_fires_for_each_defender() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Attack watcher",
+        2,
+        2,
+        "Whenever a player attacks a player, that player loses 1 life.",
+    );
+    let first = scenario.add_creature(P0, "First attacker", 2, 2).id();
+    let second = scenario.add_creature(P0, "Second attacker", 2, 2).id();
+    let third = scenario.add_creature(P0, "Third attacker", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    let life_before = [runner.life(P0), runner.life(P1), runner.life(P2)];
+    runner
+        .declare_attackers(&[
+            (first, AttackTarget::Player(P1)),
+            (second, AttackTarget::Player(P1)),
+            (third, AttackTarget::Player(P2)),
+        ])
+        .expect("one player can declare attacks on both opponents");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().stack.len(), 2);
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        [runner.life(P0), runner.life(P1), runner.life(P2)],
+        [life_before[0], life_before[1] - 1, life_before[2] - 1]
+    );
+}
+
+/// CR 508.3d + CR 805.10b: a combined team declaration gives each actor
+/// their own occurrence and their own set of "those creatures".
+#[test]
+fn tomik_counts_and_drains_the_qualifying_attacking_teammate() {
+    use engine::types::format::FormatConfig;
+
+    for qualifies in [false, true] {
+        let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let tomik = scenario
+            .add_creature_from_oracle(
+                P2,
+                "Tomik, Wielder of Law",
+                2,
+                4,
+                "Affinity for planeswalkers (This spell costs {1} less to cast for each planeswalker you control.)\nFlying, vigilance\nWhenever an opponent attacks with creatures, if two or more of those creatures are attacking you and/or planeswalkers you control, that opponent loses 3 life and you draw a card.",
+            )
+            .id();
+        let planeswalker = scenario
+            .add_planeswalker_from_oracle(P2, "Defending planeswalker", "Jace", 3, "")
+            .id();
+        let draw = scenario.add_card_to_library_top(P2, "Card to draw");
+        let lone_attacker = scenario.add_creature(P0, "Lone attacker", 2, 2).id();
+        let first = scenario.add_creature(P1, "First attacker", 2, 2).id();
+        let second = scenario.add_creature(P1, "Second attacker", 2, 2).id();
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { player: P0, .. }
+        ));
+
+        let defender = AttackTarget::Player(P2);
+        let attacker_life = runner.life(P1);
+        let defending_life = runner.life(P2);
+        runner
+            .declare_attackers(&[
+                (lone_attacker, defender),
+                (first, defender),
+                (
+                    second,
+                    if qualifies {
+                        AttackTarget::Planeswalker(planeswalker)
+                    } else {
+                        AttackTarget::Player(PlayerId(3))
+                    },
+                ),
+            ])
+            .expect("shared team declares one combined attack");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        if !qualifies {
+            assert!(runner.state().stack.is_empty());
+            assert_eq!(runner.life(P1), attacker_life);
+            assert_eq!(runner.life(P2), defending_life);
+            assert_eq!(
+                runner.state().objects.get(&draw).unwrap().zone,
+                Zone::Library
+            );
+            continue;
+        }
+        assert_eq!(runner.state().stack.len(), 1);
+        assert_eq!(runner.state().stack[0].source_id, tomik);
+        runner.resolve_top();
+        assert_eq!(
+            runner.state().players[usize::from(P0.0)].life_lost_this_turn,
+            0
+        );
+        assert_eq!(
+            runner.state().players[usize::from(P1.0)].life_lost_this_turn,
+            3
+        );
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(runner.life(P1), attacker_life - 3);
+        assert_eq!(runner.life(P2), defending_life);
+        assert_eq!(runner.state().objects.get(&draw).unwrap().zone, Zone::Hand);
+    }
+}
+
 /// CR 805.10a: during a Two-Headed Giant turn the active team is the attacking
 /// team, so a teammate's creature is a legal attacker in the same declaration and
 /// caps/requirements apply to the COMBINED attacker set. The team-bug fix
