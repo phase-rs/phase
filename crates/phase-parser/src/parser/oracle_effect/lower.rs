@@ -2,7 +2,7 @@ use std::ops::ControlFlow;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
-use nom::character::complete::{multispace0, multispace1, satisfy, space0, space1};
+use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{
     all_consuming, eof, map, map_opt, map_parser, not, opt, peek, recognize, rest, value, verify,
 };
@@ -20,9 +20,7 @@ use super::super::oracle_nom::enters_under::{
 use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_nom::target::{
-    parse_controller_phrase, parse_declared_target_prefix, ControllerPhrase,
-};
+use super::super::oracle_nom::target::parse_declared_target_prefix;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
     parse_event_context_quantity_with_context, parse_for_each_clause, parse_for_each_clause_expr,
@@ -31,9 +29,9 @@ use super::super::oracle_quantity::{
 };
 use super::super::oracle_target::{
     parse_bare_was_dealt_damage_suffix, parse_block_history_clause,
-    parse_controller_predicate_leaves, parse_target, parse_target_with_ctx,
-    parse_target_with_syntax, parse_that_clause_suffix, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, TargetSyntax,
+    parse_controller_predicate_leaves, parse_except_for_qualified_subset, parse_target,
+    parse_target_with_ctx, parse_target_with_syntax, parse_that_clause_suffix,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, TargetSyntax,
 };
 use super::super::oracle_util::{
     parse_comparator_prefix, parse_count_expr, parse_count_expr_combinator, strip_after, TextPair,
@@ -7958,7 +7956,7 @@ fn parse_each_damage_population<'a>(
     let (target, remainder) = parse_target_with_ctx(text, ctx);
     let (target, remainder) = refine_damage_target_remainder(target, remainder);
     let (target, remainder) = fold_each_object_legs(target, remainder, ctx);
-    let Some((subset, after)) = parse_damage_population_exception(remainder, ctx) else {
+    let Some((subset, after)) = parse_except_for_qualified_subset(remainder, ctx) else {
         return (target, remainder);
     };
 
@@ -7975,55 +7973,6 @@ fn parse_each_damage_population<'a>(
         },
         after,
     )
-}
-
-fn parse_damage_population_exception<'a>(
-    remainder: &'a str,
-    ctx: &mut ParseContext,
-) -> Option<(TargetFilter, &'a str)> {
-    let lower = remainder.to_ascii_lowercase();
-    let ((), operand) = nom_on_lower(remainder, &lower, |input| {
-        value((), preceded(space0, terminated(tag("except for"), space1))).parse(input)
-    })?;
-
-    // Check the first controller phrase before the type reader binds it, since
-    // a past or anaphoric phrase can also produce ControllerRef::You there.
-    let operand_lower = &lower[lower.len() - operand.len()..];
-    let (controller_text, phrase) =
-        nom_primitives::scan_at_word_boundaries(operand_lower, |input| {
-            let (rest, phrase) = parse_controller_phrase(input)?;
-            Ok((rest, (input, phrase)))
-        })?;
-    if phrase != ControllerPhrase::YOU_CONTROL {
-        return None;
-    }
-    let noun = operand[..operand.len() - controller_text.len()].trim_end();
-    let (prefix, noun_remainder) =
-        parse_type_phrase_folding_with_ctx(noun, &mut ctx.clone_throwaway());
-    if !noun_remainder.is_empty()
-        || !matches!(prefix, TargetFilter::Typed(typed) if typed.controller.is_none() && typed.has_meaningful_type_constraint())
-    {
-        return None;
-    }
-
-    let mut trial = ctx.clone();
-    let (subset, after) = parse_type_phrase_folding_with_ctx(operand, &mut trial);
-    if !matches!(&subset, TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You)
-        && typed.has_meaningful_type_constraint())
-    {
-        return None;
-    }
-    preceded(
-        space0,
-        peek(alt((
-            value((), eof),
-            value((), tag::<_, _, OracleError<'_>>(".")),
-        ))),
-    )
-    .parse(after)
-    .ok()?;
-    *ctx = trial;
-    Some((subset, after))
 }
 
 /// CR 102.2 + CR 102.3: leading "each opponent/player/foe/other opponent/other
