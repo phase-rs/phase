@@ -47460,7 +47460,7 @@ fn only_blood_ends_your_nightmares_full_oracle_parses_sacrifice_tail() {
         Effect::Sacrifice { target, count, .. } => {
             assert_eq!(
                 *count,
-                QuantityExpr::Fixed { value: 1 },
+                crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 }),
                 "the edict sacrifices one creature, got: {:?}",
                 execute.effect
             );
