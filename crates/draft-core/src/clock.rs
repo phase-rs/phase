@@ -186,7 +186,7 @@ fn for_each_clock(
 
 /// The earliest running deadline among a session's clock scopes. `None` for a
 /// session without FIFO state, or with no running clock (paused or untimed).
-/// A host schedules its next `AdvanceClock` by it; the expiry is [`advance`]'s.
+/// A host schedules its next `AdvanceClock` by it; the expiry is `advance`'s.
 pub fn next_running_deadline(session: &DraftSession) -> Option<u64> {
     clocks(session.fifo.as_ref()?)
         .filter_map(|clock| match clock.state {
