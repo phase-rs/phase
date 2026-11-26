@@ -394,18 +394,19 @@ fn if_that_player_chooses_self_carries_label_condition() {
     );
 }
 
-/// Which of You Burns Brightest? stays HONESTLY gapped: the "and each
-/// creature that player or that planeswalker's controller controls"
-/// continuation is a disjunctive target-anchored fan-out no splitter consumes.
-/// The pre-guard behavior parsed the primary DealDamage alone and silently
-/// dropped half the damage (assert_scheme_clean passed on a half-wrong rule).
-/// The `try_parse_damage` compound-connector guard declines the primary so the
-/// clause fails closed to Unimplemented instead. A future target-plus-each
-/// fan-out (Radiance-shaped: DealDamage primary + DamageAll sub over
-/// `Or[Typed{TargetPlayer}, Typed{ParentTargetController}]`) reclaims it.
+/// CR 120.1 + CR 608.2c + CR 109.4: Which of You Burns Brightest? — the
+/// targeted-primary compound damage instruction parses whole: may-pay {X},
+/// then X to the chosen opponent-or-planeswalker, then X to each creature
+/// that player (or that planeswalker's controller) controls. The sweep leg is
+/// a `DamageAll` sharing the primary's amount/source over
+/// `Typed { controller: ParentTargetController }`, which reads the inherited
+/// target back branch-correctly at resolution (a player answers itself, a
+/// planeswalker answers its controller, LKI when the primary already
+/// destroyed it). Reclaims the honest gap this test previously pinned.
 #[test]
-fn which_of_you_burns_brightest_fails_closed_on_creature_continuation() {
+fn which_of_you_burns_brightest_parses_target_plus_sweep_damage() {
     let oracle = "When you set this scheme in motion, you may pay {X}. If you do, this scheme deals X damage to target opponent or planeswalker and each creature that player or that planeswalker's controller controls.";
+    assert_scheme_clean("Which of You Burns Brightest?", oracle);
     let (types, subtypes) = scheme_types();
     let parsed = parse_oracle_text(
         oracle,
@@ -418,9 +419,53 @@ fn which_of_you_burns_brightest_fails_closed_on_creature_continuation() {
         .execute
         .as_deref()
         .expect("trigger has a body");
+    let Effect::PayCost { cost, .. } = body.effect.as_ref() else {
+        panic!("head must be the may-pay cost, got {:?}", body.effect);
+    };
     assert!(
-        has_unimplemented(body),
-        "Burns' dropped continuation must fail closed to Unimplemented, got {body:?}"
+        format!("{cost:?}").contains('X'),
+        "may-pay must be {{X}}, got {cost:?}"
+    );
+    assert!(body.optional, "the pay must be optional");
+    let primary = body.sub_ability.as_ref().expect("damage must chain");
+    let Effect::DealDamage {
+        amount,
+        target,
+        damage_source,
+        ..
+    } = primary.effect.as_ref()
+    else {
+        panic!("primary must be DealDamage, got {:?}", primary.effect);
+    };
+    assert!(
+        matches!(target, crate::types::ability::TargetFilter::Or { .. }),
+        "primary target must be the opponent-or-planeswalker disjunction, got {target:?}"
+    );
+    let sweep = primary.sub_ability.as_ref().expect("sweep must chain");
+    let Effect::DamageAll {
+        amount: sweep_amount,
+        target: sweep_target,
+        player_filter,
+        damage_source: sweep_source,
+    } = sweep.effect.as_ref()
+    else {
+        panic!("sweep must be DamageAll, got {:?}", sweep.effect);
+    };
+    assert_eq!(sweep_amount, amount, "sweep shares the primary X");
+    assert_eq!(sweep_source, damage_source, "sweep shares the source");
+    assert_eq!(*player_filter, None, "no player scope on the sweep");
+    let crate::types::ability::TargetFilter::Typed(tf) = sweep_target else {
+        panic!("sweep must target creatures, got {sweep_target:?}");
+    };
+    assert_eq!(
+        tf.type_filters,
+        crate::types::ability::TypedFilter::creature().type_filters,
+        "sweep population is creatures"
+    );
+    assert_eq!(
+        tf.controller,
+        Some(crate::types::ability::ControllerRef::ParentTargetController),
+        "sweep binds the inherited target's controller"
     );
 }
 

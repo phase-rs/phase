@@ -86,7 +86,7 @@ pub(crate) struct TriggerIr {
     pub(crate) condition: TriggerMode,
     /// Partially-populated `TriggerDefinition` from `parse_trigger_condition`.
     /// Carries typed fields (`valid_card`, `origin`, `destination`, `phase`,
-    /// `damage_kind`, etc.) that lowering merges into the final output.
+    /// `damage_kind`, `damage_received_grouping`, etc.) that lowering merges into the final output.
     pub(crate) partial_def: TriggerDefinition,
     /// The parsed effect body as typed IR.
     pub(crate) body: Option<TriggerBody>,

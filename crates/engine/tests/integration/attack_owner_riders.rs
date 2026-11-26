@@ -220,7 +220,9 @@ fn dead_shall_serve_reanimated_creatures_attack_their_owners() {
                 if runner.state().stack.is_empty() && iterations == 2 {
                     break;
                 }
-                runner.act(GameAction::PassPriority).unwrap();
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             other => panic!("unexpected prompt while resolving Dead Shall Serve: {other:?}"),
         }
@@ -357,7 +359,9 @@ fn masterstroke_seized_creatures_attack_owners_then_expire() {
                 if runner.state().stack.is_empty() {
                     break;
                 }
-                runner.act(GameAction::PassPriority).unwrap();
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             other => panic!("unexpected prompt while resolving Masterstroke: {other:?}"),
         }
@@ -438,7 +442,9 @@ fn masterstroke_seized_creatures_attack_owners_then_expire() {
                     .unwrap();
             }
             WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).unwrap();
+                runner
+                    .pass_holding_team()
+                    .expect("holding team passes together");
             }
             other => panic!("unexpected prompt while finishing P0's turn: {other:?}"),
         }

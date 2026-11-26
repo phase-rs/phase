@@ -401,9 +401,19 @@ fn resolve_choice(
     // none of its `waiting_for` arms, and its parked-cost-move fallback returns
     // `NotAffiliated` when no root is parked), so this fast path can never steal
     // a window the payment witness below owns.
-    if let WaitingFor::Priority { player } = state.waiting_for {
-        if priority::pass_priority_structurally_legal(state, player) {
-            return Ok((acting, GameAction::PassPriority, false, None));
+    if let WaitingFor::Priority { .. } = state.waiting_for {
+        // CR 805.5b: pass the first unpassed decision owner — re-issuing the
+        // parked holder's pass never advances a shared team and eddies to the
+        // step cap. Individual seats are their own whole team, so the holder
+        // keeps its fast path exactly.
+        if let Some(owner) = turn_control::decision_owners(state)
+            .into_iter()
+            .find(|owner| {
+                !state.priority_passes.contains(owner)
+                    && priority::pass_priority_structurally_legal(state, *owner)
+            })
+        {
+            return Ok((owner, GameAction::PassPriority, false, None));
         }
     }
 
@@ -742,6 +752,7 @@ pub(crate) mod projection_fixtures {
     use super::*;
     use engine::game::scenario::GameScenario;
     use engine::game::zones::create_object;
+    use engine::types::format::FormatConfig;
     use engine::types::identifiers::CardId;
     use engine::types::triggers::TriggerMode;
     use engine::types::zones::Zone;
@@ -911,6 +922,48 @@ pub(crate) mod projection_fixtures {
         // authority.
         state.combat = Some(engine::game::combat::CombatState::default());
         state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        state
+    }
+
+    /// A 2HG state at the AI team's precombat main from which `project_to`
+    /// must cross the shared-team priority windows to
+    /// `ProjectionHorizon::OpponentAttackersDeclared` on P2's turn, with
+    /// `ai_player = P0` and `target_opponent = P2`.
+    ///
+    /// Traversal: P0 passes, P1 passes (the team window completes instead of
+    /// eddying on P0), empty-hand phases advance, P2's turn runs its draw
+    /// from a stocked library, and P2 declares its bear. Without the
+    /// per-owner fast path the first window re-passes P0 256 times and bails
+    /// `StepCapExceeded`.
+    ///
+    /// Libraries are stocked for all four seats: the traversal crosses the
+    /// P2-team draw step, and an empty library there would end the game
+    /// (CR 704.5b) and bail `GameOverDuringProjection` — a red positive arm
+    /// for the wrong reason. P0's team holds no creatures, so its combat
+    /// skips declaration (CR 508.8) without policy branches of its own.
+    pub(crate) fn two_headed_giant_precombat_fixture() -> GameState {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.stack.clear();
+        state.creatures_attacked_this_turn.clear();
+        spawn_vanilla_creature(&mut state, PlayerId(2), "Projection Bear", 2, 2);
+        for player in [0u8, 1, 2, 3] {
+            for i in 0..5u64 {
+                create_object(
+                    &mut state,
+                    CardId(900 + u64::from(player) * 10 + i),
+                    PlayerId(player),
+                    format!("Filler {i}"),
+                    Zone::Library,
+                );
+            }
+        }
         state
     }
 
@@ -1229,6 +1282,54 @@ mod tests {
             matches!(bailed, Err(BailReason::TimeCapExceeded { .. })),
             "a pre-expired deadline must bail with TimeCapExceeded specifically, \
              not merely with some error; got {bailed:?}"
+        );
+    }
+
+    /// CR 805.5b: the projection fast path passes each unpassed team member
+    /// in turn instead of re-issuing the parked holder's pass to the step
+    /// cap, and `project_to` crosses a shared-team window to its horizon
+    /// with every living member recorded passed.
+    #[test]
+    fn project_to_crosses_a_shared_team_window_with_every_member_passed() {
+        let base = projection_fixtures::two_headed_giant_precombat_fixture();
+
+        // Fast-path unit level: the second choice passes the teammate, not P0
+        // again — re-issuing P0's pass is the eddy this test kills.
+        let mut state = base.clone();
+        let (seat, action, _, _) = resolve_choice(&state, PlayerId(0), PlayerId(2))
+            .expect("a parked team window offers a pass");
+        assert_eq!(seat, PlayerId(0));
+        assert!(matches!(action, GameAction::PassPriority));
+        let submitter = turn_control::authorized_submitter_for_player(&state, seat);
+        apply_interaction_for_simulation(&mut state, submitter, seat, action)
+            .expect("the holder's pass applies");
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::Priority { player } if player == PlayerId(0)
+            ),
+            "the team must still hold priority after one pass, got {:?}",
+            state.waiting_for
+        );
+        let (seat, action, _, _) = resolve_choice(&state, PlayerId(0), PlayerId(2))
+            .expect("the teammate still owes a pass");
+        assert_eq!(
+            seat,
+            PlayerId(1),
+            "the fast path must advance to the unpassed teammate, not re-pass P0"
+        );
+        let submitter = turn_control::authorized_submitter_for_player(&state, seat);
+        apply_interaction_for_simulation(&mut state, submitter, seat, action)
+            .expect("the teammate's pass applies");
+        assert!(state.priority_passes.contains(&PlayerId(0)));
+        assert!(state.priority_passes.contains(&PlayerId(1)));
+
+        // End to end: the horizon traversal completes instead of eddy-bailing.
+        projection_fixtures::assert_traverses_to(
+            &base,
+            PlayerId(0),
+            PlayerId(2),
+            ProjectionHorizon::OpponentAttackersDeclared,
         );
     }
 

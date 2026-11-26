@@ -1081,7 +1081,7 @@ fn empty_forward_result_resolves_independent_sibling_before_dependent_tail() {
                 AbilityKind::Spell,
                 Effect::Sacrifice {
                     target: TargetFilter::ParentTarget,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
             )),
@@ -1170,7 +1170,7 @@ fn empty_forward_result_suppresses_dependent_else_and_resumes_later_sibling() {
                 AbilityKind::Spell,
                 Effect::Sacrifice {
                     target: TargetFilter::ParentTarget,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
             )),

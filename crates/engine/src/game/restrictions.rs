@@ -736,7 +736,10 @@ fn entry_type_filter_matches(
         // Exhaustive on purpose: a new `TypeFilter` variant must fail to compile rather
         // than silently join this arm while `ledger_filter_is_evaluable`
         // keeps reporting type filters evaluable.
-        TypeFilter::Instant | TypeFilter::Sorcery => false,
+        // CR 314.1: scheme cards are nontraditional cards that are never
+        // permanents and never enter the battlefield, so a battlefield-entry
+        // record is never a scheme either.
+        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Scheme => false,
     }
 }
 
@@ -2693,14 +2696,30 @@ pub(crate) fn target_dependent_flash_permission_feasible(
 /// active player (or, under the shared team turns option, any player on the
 /// active team — CR 805.5a: "A player may cast a spell, activate an ability,
 /// or take a special action when their team has priority") has priority.
+/// CR 805.4a + CR 805.5a: whether `player` may act on the active turn — the
+/// active player themselves, or any living teammate when the active player's
+/// side takes shared team turns (the turn-structure predicate in
+/// `topology::side_takes_shared_turn`, so a future individual-turn team
+/// format stays correctly excluded).
+/// The single membership authority behind `is_sorcery_speed_window` and the
+/// teammate-aware special-action gates (foretell, ninjutsu-family offers,
+/// room unlocks): one spelling, so offer and enforcement cannot drift.
+pub(crate) fn acts_on_active_turn(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+) -> bool {
+    state.active_player == player
+        || (super::topology::side_takes_shared_turn(state, state.active_player)
+            && super::topology::team_members(state, state.active_player).contains(&player))
+}
+
 pub(crate) fn is_sorcery_speed_window(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
 ) -> bool {
     matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
         && state.stack.is_empty()
-        && (state.active_player == player
-            || super::players::teammates(state, state.active_player).contains(&player))
+        && acts_on_active_turn(state, player)
 }
 
 /// CR 506.1: the combat phase a "before <combat step>" window is measured in.

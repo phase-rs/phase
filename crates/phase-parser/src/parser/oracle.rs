@@ -18,12 +18,12 @@ use crate::types::ability::{
     AdditionalCost, CardPlayMode, CastFromZoneDriver, CastManaSpentMetric, CastTimingPermission,
     CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification,
     ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading,
-    ManaProduction, ModalChoice, ParitySource, ParsedCondition, PermissionGrantee, PlayerFilter,
-    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolutionCastWindow,
-    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, SubAbilityLink,
-    TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnloweredGuard, VoteSubject,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading, ModalChoice,
+    ParitySource, ParsedCondition, PermissionGrantee, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ReplacementMode, ResolutionCastWindow, SolveCondition,
+    SpellCastingOption, StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard,
+    VoteSubject,
 };
 use crate::types::ability_visit::{
     granter_symbols, visit_ability_def_scoped, visit_direct_effect_ability_payloads,
@@ -4888,7 +4888,7 @@ fn parse_flash_cleanup_sacrifice_casting_option(
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -10038,7 +10038,6 @@ fn parse_activated_ability_ir(
             .then_some(PlayerFilter::All)
     });
     ir.shell.stages = vec![
-        ShellStage::NormalizeActivatedManaInstead,
         ShellStage::ExtractCostReduction,
         ShellStage::ExtractManaSpendTrigger,
     ];
@@ -11102,6 +11101,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -12200,6 +12200,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -13091,18 +13092,18 @@ fn parse_equip_target_filter(cost_text: &str) -> Option<TargetFilter> {
         nom::sequence::terminated(take_until::<_, _, OracleError<'_>>("{"), tag("{"))
             .parse(lower.as_str())
     else {
-        return Some(default_equip_target_filter());
+        return Some(TargetFilter::equip_target());
     };
     let descriptor = descriptor.trim();
     if descriptor.is_empty() {
-        return Some(default_equip_target_filter());
+        return Some(TargetFilter::equip_target());
     }
 
     if tag::<_, _, OracleError<'_>>("pay")
         .parse(descriptor)
         .is_ok()
     {
-        return Some(default_equip_target_filter());
+        return Some(TargetFilter::equip_target());
     }
 
     if alt((
@@ -13163,12 +13164,6 @@ fn equip_target_has_explicit_attachable_type(typed: &TypedFilter) -> bool {
                 | crate::types::ability::TypeFilter::Planeswalker
         )
     })
-}
-
-fn default_equip_target_filter() -> TargetFilter {
-    TargetFilter::Typed(
-        TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
-    )
 }
 
 fn parse_equip_cost(cost_text: &str) -> AbilityCost {
@@ -14842,50 +14837,6 @@ pub(super) fn parse_activated_ability_ir_with_self_ref_fallback(
         ctx.diagnostics.extend(alt_diagnostics);
         ir
     }
-}
-
-pub(crate) fn normalize_activated_mana_instead_delta(def: &mut AbilityDefinition) {
-    let Effect::Mana {
-        produced:
-            ManaProduction::Colorless {
-                count: QuantityExpr::Fixed { value: base_count },
-            },
-        ..
-    } = def.effect.as_ref()
-    else {
-        return;
-    };
-    let Some(sub) = def.sub_ability.as_mut() else {
-        return;
-    };
-    let Some(condition) = sub.condition.take() else {
-        return;
-    };
-    let AbilityCondition::ConditionInstead { inner } = condition else {
-        sub.condition = Some(condition);
-        return;
-    };
-    let Effect::Mana {
-        produced:
-            ManaProduction::Colorless {
-                count:
-                    QuantityExpr::Fixed {
-                        value: replacement_count,
-                    },
-            },
-        ..
-    } = sub.effect.as_mut()
-    else {
-        sub.condition = Some(AbilityCondition::ConditionInstead { inner });
-        return;
-    };
-    let delta = replacement_count.saturating_sub(*base_count);
-    if delta == 0 {
-        sub.condition = Some(AbilityCondition::ConditionInstead { inner });
-        return;
-    }
-    *replacement_count = delta;
-    sub.condition = Some(*inner);
 }
 
 #[cfg(test)]

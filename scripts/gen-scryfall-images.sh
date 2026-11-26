@@ -53,6 +53,28 @@ mkdir -p "$(dirname "$OUTPUT")"
 # Non-playable layouts (token, emblem, art_series, etc.) are excluded from the
 # main card entries to prevent name collisions with real cards.
 #
+# `scheme` is deliberately NOT excluded: the engine supports the Archenemy
+# format, and scheme game objects resolve their art through this map by
+# oracle_id (ArchenemyPanel + hover preview). Scheme printings live in ARCH,
+# OARC (API code oe01, "Archenemy: Nicol Bolas Schemes"), and the DSC
+# commander decks (collector numbers 328-367); oracle-cards carries one
+# representative printing per scheme oracle, which is the image this map
+# serves. Name keys are collision-safe: the 102 scheme names share no
+# lowercase name with any of the other ~35k MTGJSON card names (measured
+# against AtomicCards.json; re-measure if a future set reuses a scheme name
+# for a playable card, since from_entries resolves duplicates last-wins).
+#
+# `planar` is deliberately NOT excluded either, for the same reason: the
+# engine supports the Planechase format, and plane/phenomenon game objects
+# (both share Scryfall's `planar` layout) resolve their art through this map
+# by oracle_id (PlanechasePanel + hover preview). Planar printings live in
+# HOP (API code ohop, "Planechase Planes"), PC2 (opc2), the Planechase
+# Anthology (opca), and commander decks such as MOC; oracle-cards carries one
+# representative printing per planar oracle. Name keys are collision-safe:
+# the 205 planar-layout names share no lowercase name with any of the other
+# ~35k MTGJSON card names (measured against AtomicCards.json; same
+# re-measure caveat as schemes above).
+#
 # Each entry value contains:
 #   - oracle_id        — Scryfall's stable per-card id (mirrors the key path)
 #   - face_names       — lowercased face names in Scryfall's card_faces order;
@@ -77,7 +99,7 @@ mkdir -p "$(dirname "$OUTPUT")"
 # name collisions (e.g., a card named "Saproling" vs a Saproling token).
 # The frontend resolves token images via this prefix key, avoiding live
 # Scryfall API calls at runtime.
-NON_PLAYABLE='["token","double_faced_token","emblem","art_series","vanguard","scheme","planar","augment","host"]'
+NON_PLAYABLE='["token","double_faced_token","emblem","art_series","vanguard","augment","host"]'
 
 jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
   # Printed orientation of one face (a card_faces element, or the card itself

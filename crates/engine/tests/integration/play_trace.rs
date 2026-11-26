@@ -200,7 +200,10 @@ pub(crate) fn settle(runner: &mut GameRunner, score: &dyn Fn(&GameAction) -> i32
         match &runner.state().waiting_for {
             WaitingFor::LoopShortcut { .. } | WaitingFor::GameOver { .. } => return,
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
-            WaitingFor::Priority { .. } => act(runner, GameAction::PassPriority),
+            // CR 805.5b: the holding team passes, not only its representative.
+            WaitingFor::Priority { .. } => {
+                runner.pass_holding_team().expect("the holding team passes");
+            }
             _ => answer(runner, score),
         }
     }

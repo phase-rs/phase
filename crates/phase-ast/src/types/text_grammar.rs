@@ -493,6 +493,9 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
         ("kindred", TypeFilter::Kindred),
         ("tribals", TypeFilter::Kindred),
         ("tribal", TypeFilter::Kindred),
+        // CR 314.1: Scheme card type (plural before singular, longest-match-first).
+        ("schemes", TypeFilter::Scheme),
+        ("scheme", TypeFilter::Scheme),
         ("permanents", TypeFilter::Permanent),
         ("permanent", TypeFilter::Permanent),
         ("cards", TypeFilter::Card),

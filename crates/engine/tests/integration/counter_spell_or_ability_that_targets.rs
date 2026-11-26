@@ -11,7 +11,7 @@ use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -32,6 +32,7 @@ const PRODIGAL_PYROMANCER: &str = "{T}: This creature deals 1 damage to any targ
 const CUOMBAJJ_WITCHES: &str = "{T}: This creature deals 1 damage to any target and 1 damage to any target of an opponent's choice.";
 const RISHADAN_PORT: &str = "{T}: Add {C}.\n{1}, {T}: Tap target land.";
 const BONESPLITTER: &str = "Equipped creature gets +2/+0.\nEquip {1}";
+const EPHEMERATE: &str = "Exile target creature you control, then return it to the battlefield under its owner's control.\nRebound (If you cast this spell from your hand, exile it as it resolves. At the beginning of your next upkeep, you may cast this card from exile without paying its mana cost.)";
 const SKY_SKIFF: &str = "Flying\nCrew 1 (Tap any number of creatures you control with total power 1 or more: This Vehicle becomes an artifact creature until end of turn.)";
 
 fn mana(n: usize, ty: ManaType) -> Vec<ManaUnit> {
@@ -576,6 +577,103 @@ fn zone_left_equip_target_is_ignored() {
     let legal = offered(&r);
     assert_eq!(legal, set(&[live, live2]));
     assert!(!legal.contains(&k_equip));
+}
+
+/// P1 equips Bonesplitter onto Grizzly Bears and activates two Prodigal
+/// Pyromancers on another creature; if `flicker`, P1 then casts Ephemerate on
+/// the equip's Bears and it resolves. P1 passes and P0 starts Diplomatic
+/// Escort's activation. Returns the Escort's legal set, the equip entry and the
+/// two Pyromancer entries. The second Pyromancer keeps the legal set at two or
+/// more, so the Escort always asks for its target.
+fn escort_offer_after_equip(flicker: bool) -> (BTreeSet<ObjectId>, ObjectId, [ObjectId; 2]) {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let theirs = bears(&mut s, P1);
+    let other = bears(&mut s, P1);
+    let pyro = pyromancer(&mut s, P1);
+    let pyro2 = pyromancer(&mut s, P1);
+    let sword = s
+        .add_artifact_from_oracle(P1, "Bonesplitter", BONESPLITTER)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let ephemerate = s
+        .add_spell_to_hand_from_oracle(P1, "Ephemerate", true, EPHEMERATE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        })
+        .id();
+    let escort = s
+        .add_creature_from_oracle(P0, "Diplomatic Escort", 1, 1, DIPLOMATIC_ESCORT)
+        .id();
+    s.add_creature_to_hand(P0, "Grizzly Bears", 2, 2);
+    s.with_mana_pool(
+        P1,
+        [mana(1, ManaType::White), mana(1, ManaType::Colorless)].concat(),
+    );
+    s.with_mana_pool(P0, mana(1, ManaType::Blue));
+    let mut r = s.build();
+    give_turn(&mut r, P1);
+
+    let k_equip = equip(&mut r, sword, theirs);
+    let live = activate(&mut r, pyro, &[TargetRef::Object(other)]);
+    let live2 = activate(&mut r, pyro2, &[TargetRef::Object(other)]);
+    if flicker {
+        let incarnation_before = r.state().objects[&theirs].incarnation;
+        let eph = cast(&mut r, ephemerate, &[theirs]);
+        pass(&mut r);
+        pass(&mut r);
+        assert!(!on_stack(&r, eph), "reach guard: Ephemerate resolved");
+        let bears_now = &r.state().objects[&theirs];
+        assert_eq!(
+            bears_now.zone,
+            Zone::Battlefield,
+            "reach guard: Ephemerate returned the Bears"
+        );
+        assert_ne!(
+            bears_now.incarnation, incarnation_before,
+            "reach guard: the returned Bears is a new object (CR 400.7)"
+        );
+        assert!(on_stack(&r, k_equip), "reach guard: the equip still waits");
+        assert!(
+            matches!(r.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+            "reach guard: the active player has priority after Ephemerate: {:?}",
+            r.state().waiting_for
+        );
+    }
+    pass(&mut r);
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "P1 passed with the equip on the stack: {:?}",
+        r.state().waiting_for
+    );
+    start_activation(&mut r, escort);
+    (offered(&r), k_equip, [live, live2])
+}
+
+/// CR 115.9b + CR 400.7: Diplomatic Escort ("{U}, {T}, Discard a card: Counter
+/// target spell or ability that targets a creature.") cannot target a
+/// Bonesplitter ("Equipped creature gets +2/+0.\nEquip {1}") equip whose
+/// creature Ephemerate ("Exile target creature you control, then return it to
+/// the battlefield under its owner's control. …") flickered: the returned
+/// creature is a new object the equip never targeted. The issue's repro
+/// (#11222). Without the flicker the equip targets a creature and is offered.
+#[test]
+fn diplomatic_escort_ignores_an_equip_whose_creature_was_flickered() {
+    let (legal, k_equip, [live, live2]) = escort_offer_after_equip(false);
+    assert_eq!(
+        legal,
+        set(&[k_equip, live, live2]),
+        "the equip targets a creature on the battlefield (CR 702.6a)"
+    );
+
+    let (legal, _k_equip, [live, live2]) = escort_offer_after_equip(true);
+    assert_eq!(
+        legal,
+        set(&[live, live2]),
+        "CR 115.9b + CR 400.7: the equip's creature left and returned as a new \
+         object, so Diplomatic Escort must ignore that target"
+    );
 }
 
 /// CR 608.2b + CR 115.9b: Not of This World does not resolve once its

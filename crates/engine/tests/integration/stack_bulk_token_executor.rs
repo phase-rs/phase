@@ -1114,7 +1114,7 @@ fn bulk_run_stays_inside_the_authorized_limit() {
             entries,
             cursor: 0,
             representatives: seats.clone(),
-            verified_pass_representatives: BTreeSet::from([P0, P1, PlayerId(2)]),
+            verified_pass_owners: BTreeSet::from([P0, P1, PlayerId(2)]),
             budget,
             policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
             auto_pass_overlay: StackResolutionAutoPassOverlay {

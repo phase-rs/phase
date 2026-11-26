@@ -140,6 +140,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_copiable_values_by_incarnation", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departed_stack_spells", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departed_activated_abilities", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departed_triggered_abilities", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::linked_exile_lki", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::ring_level", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::ring_bearer", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -415,6 +416,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "lki_copiable_values",
         "tracked_object_sets",
         "departed_activated_abilities",
+        "departed_triggered_abilities",
     ] {
         add_spec(
             &mut specs,
@@ -1401,7 +1403,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        64,
+        65,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -2247,6 +2249,31 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (ObjectId(1), departed_activation(ObjectId(1), PlayerId(0))),
         (ObjectId(2), departed_activation(ObjectId(2), PlayerId(1))),
     ]);
+    let departed_trigger = |entry_id: ObjectId, controller: PlayerId| StackEntry {
+        id: entry_id,
+        source_id: entry_id,
+        controller,
+        kind: StackEntryKind::TriggeredAbility {
+            source_id: entry_id,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                entry_id,
+                controller,
+            )),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: String::new(),
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        },
+    };
+    state.departed_triggered_abilities = im::HashMap::from_iter([
+        (ObjectId(1), departed_trigger(ObjectId(1), PlayerId(0))),
+        (ObjectId(2), departed_trigger(ObjectId(2), PlayerId(1))),
+    ]);
     state.linked_exile_lki = HashMap::from([
         (
             ObjectId(1),
@@ -2369,6 +2396,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "lki_copiable_values_by_incarnation",
         "departed_stack_spells",
         "departed_activated_abilities",
+        "departed_triggered_abilities",
         "linked_exile_lki",
         "ring_level",
         "ring_bearer",
@@ -2377,7 +2405,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        48,
+        49,
         "private stack_trigger_firings and scoped_reveal_sets have their own unit tests"
     );
     for field in direct_fields {
@@ -2997,8 +3025,8 @@ fn stack_resolution_session_fixture(budget: StackResolutionBudget) -> GameState 
         controller: PlayerId(2),
         kind: StackEntryKind::KeywordAction {
             action: KeywordAction::Equip {
-                equipment_id: ObjectId(9_004),
-                target_creature_id: ObjectId(9_005),
+                equipment: ObjectIncarnationRef::of(ObjectId(9_004), 0),
+                target_creature: ObjectIncarnationRef::of(ObjectId(9_005), 0),
             },
         },
     };
@@ -3009,7 +3037,7 @@ fn stack_resolution_session_fixture(budget: StackResolutionBudget) -> GameState 
         ],
         cursor: 1,
         representatives: BTreeSet::from([PlayerId(0), PlayerId(2)]),
-        verified_pass_representatives: BTreeSet::new(),
+        verified_pass_owners: BTreeSet::new(),
         budget,
         policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
         auto_pass_overlay: StackResolutionAutoPassOverlay {

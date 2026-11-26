@@ -9179,7 +9179,9 @@ fn top_of_library_peek_routes_to_static_parser() {
     assert_eq!(r.statics.len(), 1);
     assert_eq!(
         r.statics[0].mode,
-        crate::types::statics::StaticMode::MayLookAtTopOfLibrary
+        crate::types::statics::StaticMode::MayLookAtTopOfLibrary {
+            library: crate::types::ability::ControllerRef::You
+        }
     );
 }
 
@@ -10275,6 +10277,47 @@ You may pay {0} rather than pay the equip cost of the first equip ability you ac
         )
     });
     assert_eq!(alt.condition, None, "\"each turn\" carries no turn gate");
+}
+
+// CR 101.1 + CR 611.3a + CR 702.6a: Forge Anew lifts equip timing only while
+// its turn window holds. Leonin Shikari's permission has no turn window.
+#[test]
+fn printed_equip_timing_permissions_preserve_their_turn_scope() {
+    let forge = parse(
+        "When this enchantment enters, return target Equipment card from your graveyard to the battlefield.\nDuring your turn, you may activate equip abilities any time you could cast an instant.\nYou may pay {0} rather than pay the equip cost of the first equip ability you activate during each of your turns.",
+        "Forge Anew",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    let shikari = parse(
+        "You may activate equip abilities any time you could cast an instant.",
+        "Leonin Shikari",
+        &[],
+        &["Creature"],
+        &["Cat", "Soldier"],
+    );
+
+    for (parsed, expected_condition) in [
+        (forge, Some(StaticCondition::DuringYourTurn)),
+        (shikari, None),
+    ] {
+        assert!(parsed.abilities.iter().all(|def| !has_unimplemented(def)));
+        let permission = parsed
+            .statics
+            .iter()
+            .find(|def| {
+                matches!(
+                    def.mode,
+                    StaticMode::ActivateAsInstant {
+                        keyword: Some(crate::types::ability::AbilityTag::Equip),
+                        ..
+                    }
+                )
+            })
+            .expect("the printed equip timing permission should parse");
+        assert_eq!(permission.condition, expected_condition);
+    }
 }
 
 // CR 118.9 + CR 702.6a: Forge Anew — "during each of your turns" is a your-turn
@@ -12194,65 +12237,9 @@ fn parses_activate_only_land_condition_into_activation_restriction() {
     );
 }
 
-#[test]
-fn parses_urza_tower_conditional_mana_as_delta() {
-    let r = parse(
-            "{T}: Add {C}. If you control an Urza's Mine and an Urza's Power-Plant, add {C}{C}{C} instead.",
-            "Urza's Tower",
-            &[],
-            &["Land"],
-            &["Urza's", "Tower"],
-        );
-    assert_eq!(r.abilities.len(), 1);
-    let ability = &r.abilities[0];
-    match ability.effect.as_ref() {
-        Effect::Mana {
-            produced: ManaProduction::Colorless { count },
-            ..
-        } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
-        other => panic!("expected base colorless mana, got {other:?}"),
-    }
-    let sub = ability
-        .sub_ability
-        .as_ref()
-        .expect("expected conditional delta");
-    match sub.effect.as_ref() {
-        Effect::Mana {
-            produced: ManaProduction::Colorless { count },
-            ..
-        } => assert_eq!(*count, QuantityExpr::Fixed { value: 2 }),
-        other => panic!("expected colorless mana delta, got {other:?}"),
-    }
-    match sub.condition.as_ref().expect("expected condition") {
-        AbilityCondition::And { conditions } => assert_eq!(conditions.len(), 2),
-        other => panic!("expected conjunction condition, got {other:?}"),
-    }
-}
-
-#[test]
-fn activated_mana_instead_delta_preserves_non_instead_condition() {
-    let mut ability = parse(
-        "{T}: Add {C}. If you control an Urza's Mine and an Urza's Power-Plant, add {C}{C}{C} instead.",
-        "Urza's Tower",
-        &[],
-        &["Land"],
-        &["Urza's", "Tower"],
-    )
-    .abilities
-    .remove(0);
-    let before = ability.clone();
-
-    normalize_activated_mana_instead_delta(&mut ability);
-
-    assert_eq!(
-        ability, before,
-        "the normalizer must leave an already-lowered non-replacement condition intact"
-    );
-}
-
 /// CR 205.3i + CR 614.1a + CR 605.1a: All three Urza lands share a single
 /// parsed shape — an activated mana ability (`{T}: Add {C}.` per CR 605.1a)
-/// plus a conditional `Add {C}{C}{C} instead` sub-ability whose "instead"
+/// plus a conditional mana sub-ability whose "instead"
 /// makes it a replacement effect (CR 614.1a) gated on the player
 /// controlling the OTHER two Urza land subtypes (from the CR 205.3i land
 /// type list: Mine, Power-Plant, Tower). The
@@ -12262,31 +12249,40 @@ fn activated_mana_instead_delta_preserves_non_instead_condition() {
 /// silently change the rules. Each row in the table below pins the exact
 /// pair of subtypes the parsed condition must reference.
 #[test]
-fn urzas_lands_share_delta_shape() {
-    // (card name, oracle text, expected subtypes on the And conditions in
-    // the order the parser emits them)
-    let cases: [(&str, &str, [&str; 2], &[&str]); 3] = [
+fn urzas_lands_share_conditional_mana_swap_shape() {
+    // The expected And subtypes are in the order the parser emits them.
+    type UrzaLand = (
+        &'static str,
+        &'static str,
+        [&'static str; 2],
+        &'static [&'static str],
+        i32,
+    );
+    let cases: [UrzaLand; 3] = [
             (
                 "Urza's Tower",
                 "{T}: Add {C}. If you control an Urza's Mine and an Urza's Power-Plant, add {C}{C}{C} instead.",
                 ["Mine", "Power-Plant"],
                 &["Urza's", "Tower"],
+                3,
             ),
             (
                 "Urza's Power Plant",
-                "{T}: Add {C}. If you control an Urza's Mine and an Urza's Tower, add {C}{C}{C} instead.",
+                "{T}: Add {C}. If you control an Urza's Mine and an Urza's Tower, add {C}{C} instead.",
                 ["Mine", "Tower"],
                 &["Urza's", "Power-Plant"],
+                2,
             ),
             (
                 "Urza's Mine",
-                "{T}: Add {C}. If you control an Urza's Power-Plant and an Urza's Tower, add {C}{C}{C} instead.",
+                "{T}: Add {C}. If you control an Urza's Power-Plant and an Urza's Tower, add {C}{C} instead.",
                 ["Power-Plant", "Tower"],
                 &["Urza's", "Mine"],
+                2,
             ),
         ];
 
-    for (name, text, expected_subs, subtypes) in cases {
+    for (name, text, expected_subs, subtypes, replacement_count) in cases {
         let r = parse(text, name, &[], &["Land"], subtypes);
         assert_eq!(r.abilities.len(), 1, "{name}: expected one ability");
         let ability = &r.abilities[0];
@@ -12306,7 +12302,7 @@ fn urzas_lands_share_delta_shape() {
         let sub = ability
             .sub_ability
             .as_ref()
-            .unwrap_or_else(|| panic!("{name}: expected conditional delta sub-ability"));
+            .unwrap_or_else(|| panic!("{name}: expected conditional replacement sub-ability"));
 
         match sub.effect.as_ref() {
             Effect::Mana {
@@ -12314,10 +12310,12 @@ fn urzas_lands_share_delta_shape() {
                 ..
             } => assert_eq!(
                 *count,
-                QuantityExpr::Fixed { value: 2 },
-                "{name}: delta must be +2 colorless (total 3 minus base 1)"
+                QuantityExpr::Fixed {
+                    value: replacement_count
+                },
+                "{name}: the swap must carry the full production"
             ),
-            other => panic!("{name}: expected colorless mana delta, got {other:?}"),
+            other => panic!("{name}: expected replacement colorless mana, got {other:?}"),
         }
 
         let conditions = match sub
@@ -12325,8 +12323,11 @@ fn urzas_lands_share_delta_shape() {
             .as_ref()
             .unwrap_or_else(|| panic!("{name}: expected sub-ability condition"))
         {
-            AbilityCondition::And { conditions } => conditions,
-            other => panic!("{name}: expected And condition, got {other:?}"),
+            AbilityCondition::ConditionInstead { inner } => match inner.as_ref() {
+                AbilityCondition::And { conditions } => conditions,
+                other => panic!("{name}: expected And condition, got {other:?}"),
+            },
+            other => panic!("{name}: expected ConditionInstead, got {other:?}"),
         };
         assert_eq!(
             conditions.len(),
@@ -12358,15 +12359,133 @@ fn urzas_lands_share_delta_shape() {
 }
 
 #[test]
-fn parses_ugin_labyrinth_exiled_card_mana_as_delta() {
+fn conditional_mana_swap_owns_one_instead_clause_per_card() {
+    use crate::parser::oracle_ir::feature::audit_units;
+
+    type Card = (
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+        i32,
+    );
+    let cases: [Card; 6] = [
+        (
+            "Urza's Tower",
+            "{T}: Add {C}. If you control an Urza's Mine and an Urza's Power-Plant, add {C}{C}{C} instead.",
+            &["Land"],
+            &["Urza's", "Tower"],
+            3,
+        ),
+        (
+            "Urza's Mine",
+            "{T}: Add {C}. If you control an Urza's Power-Plant and an Urza's Tower, add {C}{C} instead.",
+            &["Land"],
+            &["Urza's", "Mine"],
+            2,
+        ),
+        (
+            "Urza's Power Plant",
+            "{T}: Add {C}. If you control an Urza's Mine and an Urza's Tower, add {C}{C} instead.",
+            &["Land"],
+            &["Urza's", "Power-Plant"],
+            2,
+        ),
+        (
+            "Tower Worker",
+            "Reach\n{T}: Add {C}. If you control creatures named Mine Worker and Power Plant Worker, add {C}{C}{C} instead.",
+            &["Artifact", "Creature"],
+            &["Assembly-Worker"],
+            3,
+        ),
+        (
+            "Sarevok's Tome",
+            "When this artifact enters, you take the initiative.\n{T}: Add {C}. If you have the initiative, add {C}{C} instead.\n{3}, {T}: Exile cards from the top of your library until you exile a nonland card. You may cast that card without paying its mana cost. Activate only if you've completed a dungeon.",
+            &["Artifact"],
+            &["Book"],
+            2,
+        ),
+        (
+            "Ugin's Labyrinth",
+            "Imprint — When this land enters, you may exile a colorless card with mana value 7 or greater from your hand.\n{T}: Add {C}. If a card is exiled with this land, add {C}{C} instead.\n{T}: Return the exiled card to its owner's hand.",
+            &["Land"],
+            &[],
+            2,
+        ),
+    ];
+    for (name, oracle, types, subtypes, amount) in cases {
+        let types = types.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let subtypes = subtypes.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let keywords = if name == "Tower Worker" {
+            vec!["Reach".to_string()]
+        } else {
+            Vec::new()
+        };
+        let mut ir = parse_oracle_ir(oracle, name, &keywords, &types, &subtypes);
+        let units = audit_units(&ir.items, &ir.source_text);
+        let instead_units = units
+            .iter()
+            .filter(|unit| unit.text.contains("instead"))
+            .collect::<Vec<_>>();
+        let [unit] = instead_units.as_slice() else {
+            panic!("{name}: expected one Oracle unit with an instead clause");
+        };
+        assert_eq!(unit.text.matches("instead").count(), 1, "{name}");
+        assert!(unit.text.contains("{T}: Add {C}."), "{name}");
+        assert!(!unit.item_ids().is_empty(), "{name}: unclaimed Oracle unit");
+
+        let parsed = lower_oracle_ir(&mut ir);
+        assert!(
+            parsed.abilities.iter().all(|def| !has_unimplemented(def)),
+            "{name}: unimplemented ability in {:?}",
+            parsed.abilities
+        );
+        // CR 614.15: The conditional clause replaces the base with the full amount.
+        assert!(
+            parsed.abilities.iter().any(|def| {
+                matches!(
+                    def.effect.as_ref(),
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        ..
+                    }
+                ) && def.sub_ability.as_ref().is_some_and(|sub| {
+                    matches!(
+                        sub.condition,
+                        Some(AbilityCondition::ConditionInstead { .. })
+                    ) && matches!(
+                        sub.effect.as_ref(),
+                        Effect::Mana {
+                            produced: ManaProduction::Colorless {
+                                count: QuantityExpr::Fixed { value },
+                            },
+                            ..
+                        } if *value == amount
+                    )
+                })
+            }),
+            "{name}: expected a typed mana swap"
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{name}: {:?}",
+            parsed.parse_warnings
+        );
+    }
+}
+
+#[test]
+fn parses_ugin_labyrinth_exiled_card_mana_as_swap() {
     let r = parse(
-            "Imprint — When this land enters, you may exile a colorless card with mana value 7 or greater from your hand.\n{T}: Add {C}. If a card is exiled with Ugin's Labyrinth, add {C}{C} instead.",
+            "Imprint — When this land enters, you may exile a colorless card with mana value 7 or greater from your hand.\n{T}: Add {C}. If a card is exiled with this land, add {C}{C} instead.\n{T}: Return the exiled card to its owner's hand.",
             "Ugin's Labyrinth",
             &[],
             &["Land"],
             &[],
         );
-    assert_eq!(r.abilities.len(), 1);
+    assert_eq!(r.abilities.len(), 2);
     let ability = &r.abilities[0];
     match ability.effect.as_ref() {
         Effect::Mana {
@@ -12378,15 +12497,18 @@ fn parses_ugin_labyrinth_exiled_card_mana_as_delta() {
     let sub = ability
         .sub_ability
         .as_ref()
-        .expect("expected conditional delta");
+        .expect("expected conditional replacement");
     match sub.effect.as_ref() {
         Effect::Mana {
             produced: ManaProduction::Colorless { count },
             ..
-        } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
-        other => panic!("expected colorless mana delta, got {other:?}"),
+        } => assert_eq!(*count, QuantityExpr::Fixed { value: 2 }),
+        other => panic!("expected replacement colorless mana, got {other:?}"),
     }
-    match sub.condition.as_ref().expect("expected condition") {
+    let Some(AbilityCondition::ConditionInstead { inner }) = &sub.condition else {
+        panic!("expected ConditionInstead, got {:?}", sub.condition);
+    };
+    match inner.as_ref() {
         AbilityCondition::QuantityCheck {
             lhs:
                 QuantityExpr::Ref {
@@ -19130,7 +19252,11 @@ fn parse_for_each_one_life_changed_full_cards() {
         &[],
     );
     let sac = execute_effect(&lichs_tomb, &|e| matches!(e, Effect::Sacrifice { .. }));
-    let Effect::Sacrifice { count, .. } = sac else {
+    let Effect::Sacrifice {
+        count: crate::types::ability::SacrificeSelection::Count(count),
+        ..
+    } = sac
+    else {
         unreachable!()
     };
     assert_eq!(
@@ -26262,7 +26388,11 @@ fn pox_plague_full_parse() {
     // as count, and the same Typed filter lifted into target.
     let sacrifice = discard.sub_ability.as_ref().expect("sacrifice sub_ability");
     match &*sacrifice.effect {
-        Effect::Sacrifice { target, count, .. } => {
+        Effect::Sacrifice {
+            target,
+            count: crate::types::ability::SacrificeSelection::Count(count),
+            ..
+        } => {
             assert!(!count.is_up_to(), "expected non-UpTo sacrifice count");
             match count {
                 QuantityExpr::DivideRounded {
@@ -31496,7 +31626,9 @@ fn depletion_land_rider_sacrifice_binds_self_ref() {
             rider.effect.as_ref(),
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
+                    value: 1
+                }),
                 ..
             }
         ),
@@ -31583,7 +31715,9 @@ fn typed_trigger_source_counter_rider_binds_self_ref_not_triggering_source() {
             rider.effect.as_ref(),
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
+                    value: 1
+                }),
                 ..
             }
         ),
@@ -33964,6 +34098,7 @@ fn render_net_reaches_every_nested_description_carrier() {
         attach_to: None,
         enters_attacking: false,
         attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![token_static],
         enter_with_counters: vec![],

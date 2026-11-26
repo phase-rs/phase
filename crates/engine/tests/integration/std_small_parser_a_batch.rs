@@ -369,7 +369,7 @@ fn vizier_filtered_any_type_spend_static_parses() {
         parsed
             .statics
             .iter()
-            .any(|s| matches!(s.mode, StaticMode::MayLookAtTopOfLibrary)),
+            .any(|s| matches!(s.mode, StaticMode::MayLookAtTopOfLibrary { .. })),
         "the look-at-top static must still parse"
     );
     assert!(

@@ -1406,6 +1406,7 @@ fn dragonstorm_globe_counters_created_dragon_token() {
         Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                enters_blocking: None,
                 name: "Dragon".to_string(),
                 power: crate::types::ability::PtValue::Fixed(4),
                 toughness: crate::types::ability::PtValue::Fixed(4),
@@ -3707,7 +3708,7 @@ fn cancelling_a_session_representative_restores_the_pre_overlay_preferences() {
         entries: vec![StackResolutionEntryFence::capture(&entry)],
         cursor: 0,
         representatives: [PlayerId(0)].into_iter().collect(),
-        verified_pass_representatives: BTreeSet::new(),
+        verified_pass_owners: BTreeSet::new(),
         budget: StackResolutionBudget::Unlimited,
         policy: StackResolutionPolicy::Committed,
         auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -3752,7 +3753,7 @@ fn representative_replacement_recaptures_the_restored_baseline() {
         entries: vec![StackResolutionEntryFence::capture(&entry)],
         cursor: 0,
         representatives: [PlayerId(0)].into_iter().collect(),
-        verified_pass_representatives: BTreeSet::new(),
+        verified_pass_owners: BTreeSet::new(),
         budget: StackResolutionBudget::Unlimited,
         policy: StackResolutionPolicy::Committed,
         auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -3842,7 +3843,7 @@ fn elimination_restores_session_baseline_before_departing_preferences_are_cleane
         entries: vec![StackResolutionEntryFence::capture(&entry)],
         cursor: 0,
         representatives: [PlayerId(0)].into_iter().collect(),
-        verified_pass_representatives: BTreeSet::new(),
+        verified_pass_owners: BTreeSet::new(),
         budget: StackResolutionBudget::Unlimited,
         policy: StackResolutionPolicy::Committed,
         auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -5944,24 +5945,38 @@ fn two_hg_empty_stack_two_team_passes_advance_and_return_priority() {
     };
     state.priority_passes.clear();
 
+    // CR 805.5b: P0 passes alone - the active team retains priority.
     let first = apply(&mut state, PlayerId(0), GameAction::PassPriority)
         .expect("active team representative should pass priority");
     assert_eq!(
         first.waiting_for,
         WaitingFor::Priority {
-            player: PlayerId(2)
+            player: PlayerId(0)
         }
     );
     assert!(state.priority_passes.contains(&PlayerId(0)));
     assert!(!state.priority_passes.contains(&PlayerId(1)));
 
-    let second = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+    // P1 (teammate) passes - now the team passes to the opposing team.
+    let second = apply(&mut state, PlayerId(1), GameAction::PassPriority)
+        .expect("active team teammate should pass priority");
+    assert_eq!(
+        second.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(2)
+        }
+    );
+
+    // Opposing team passes unanimously - the empty stack advances the phase.
+    apply(&mut state, PlayerId(2), GameAction::PassPriority)
         .expect("opposing team representative should pass priority");
+    let last = apply(&mut state, PlayerId(3), GameAction::PassPriority)
+        .expect("opposing team teammate should pass priority");
 
     assert_ne!(state.phase, Phase::PreCombatMain);
     assert!(state.priority_passes.is_empty());
     assert_eq!(
-        second.waiting_for,
+        last.waiting_for,
         WaitingFor::Priority {
             player: PlayerId(0)
         }
@@ -5981,8 +5996,10 @@ fn two_hg_non_empty_stack_two_team_passes_resolve_top_object() {
     state.stack.push_back(no_op_stack_entry(1, PlayerId(0)));
     state.priority_passes.clear();
 
-    let first = apply(&mut state, PlayerId(0), GameAction::PassPriority)
+    apply(&mut state, PlayerId(0), GameAction::PassPriority)
         .expect("active team representative should pass priority");
+    let first = apply(&mut state, PlayerId(1), GameAction::PassPriority)
+        .expect("active team teammate should pass priority");
     assert_eq!(
         first.waiting_for,
         WaitingFor::Priority {
@@ -5990,8 +6007,10 @@ fn two_hg_non_empty_stack_two_team_passes_resolve_top_object() {
         }
     );
 
-    let second = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+    apply(&mut state, PlayerId(2), GameAction::PassPriority)
         .expect("opposing team representative should pass priority");
+    let second = apply(&mut state, PlayerId(3), GameAction::PassPriority)
+        .expect("opposing team teammate should pass priority");
 
     assert!(state.stack.is_empty());
     assert!(second
@@ -11210,6 +11229,8 @@ fn once_per_turn_library_land_play_consumes_slot_and_blocks_second_play() {
     );
     {
         let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode: crate::types::ability::CardPlayMode::Play,
             frequency: CastFrequency::OncePerTurn,
             alt_cost: None,

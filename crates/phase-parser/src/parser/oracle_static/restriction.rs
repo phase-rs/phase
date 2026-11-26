@@ -4211,6 +4211,8 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
     ) {
         let alt_cost = parse_top_of_library_alt_cost_rider(rest, text);
         let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode: CardPlayMode::Play,
             // CR 601.2a: inherit the once-per-turn cap stripped above (the
             // shipping Bolas's Citadel form has no prefix → Unlimited).
@@ -4261,6 +4263,8 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
         // types, so the gate would otherwise be silently lost.
         let (condition, alt_cost) = parse_top_of_library_object_form_trailing(after)?.into_parts();
         let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode,
             frequency,
             alt_cost,
@@ -4301,6 +4305,8 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
     let alt_cost = parse_top_of_library_alt_cost_rider(trailing, text);
 
     let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+        library: crate::types::ability::ControllerRef::You,
+        mana_spend_permission: None,
         play_mode,
         frequency,
         alt_cost,
@@ -4604,6 +4610,8 @@ fn try_parse_disjunctive_top_of_library_cast_permission(
     let alt_cost = parse_top_of_library_alt_cost_rider(trailing, text);
 
     let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+        library: crate::types::ability::ControllerRef::You,
+        mana_spend_permission: None,
         play_mode: CardPlayMode::Play,
         frequency,
         alt_cost,

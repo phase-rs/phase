@@ -1483,7 +1483,8 @@ fn type_names_a_creature(filter: &TypeFilter) -> bool {
         | TypeFilter::Sorcery
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
-        | TypeFilter::Kindred => false,
+        | TypeFilter::Kindred
+        | TypeFilter::Scheme => false,
     }
 }
 
@@ -1504,7 +1505,8 @@ fn type_excludes_creatures(filter: &TypeFilter) -> bool {
         | TypeFilter::Sorcery
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
-        | TypeFilter::Kindred => false,
+        | TypeFilter::Kindred
+        | TypeFilter::Scheme => false,
     }
 }
 
@@ -5254,7 +5256,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Sacrifice {
                     target,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
             )
@@ -5281,7 +5283,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         );

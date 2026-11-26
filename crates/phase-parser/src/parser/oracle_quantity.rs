@@ -7650,6 +7650,7 @@ mod tests {
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::CommanderManaValue {
                     owner: ControllerRef::You,
+                    zones: vec![Zone::Battlefield, Zone::Command],
                 },
             })
         );

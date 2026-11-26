@@ -255,6 +255,7 @@
     "commanderDamage": "統率者ダメージ",
     "poisonCounters": "毒カウンター",
     "playerSeats": "プレイヤー座席",
+    "archenemySeat": "Archenemy",
     "seat": "座席{{number}}",
     "youHost": "自分（ホスト）",
     "ai": "AI",
