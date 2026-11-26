@@ -36073,6 +36073,7 @@ fn resolve_unless_payer(
         // taxes the right player.
         TargetFilter::DefendingPlayer {
             reading: AttackRelationReading::Current,
+            // allow-raw-event-referent: resolves a player referent (the tax payer), not an affected object
         } => crate::game::targeting::resolve_event_context_target(state, payer, ability.source_id)
             .and_then(|target| match target {
                 TargetRef::Player(player) => Some(player),
