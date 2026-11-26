@@ -528,40 +528,71 @@ fn dalkovan_encampment_installs_a_distinct_token_batch_per_declaration() {
         .act(GameAction::OrderTriggers { order: vec![0, 1] })
         .expect("order the two end-step triggers");
 
-    // CR 603.7c + CR 701.21a: resolve both triggers with priority passes alone,
-    // and record exactly which permanents were sacrificed.
-    let mut sacrificed = Vec::new();
-    for _ in 0..16 {
-        assert_eq!(runner.state().phase, Phase::End);
-        assert!(
-            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-            "end-step sacrifice must resolve without a choice prompt: {:?}",
-            runner.state().waiting_for
-        );
-        if runner.state().stack.is_empty() {
-            break;
-        }
-        let result = runner
-            .act(GameAction::PassPriority)
-            .expect("resolve end-step sacrifice");
-        sacrificed.extend(result.events.into_iter().filter_map(|event| match event {
-            GameEvent::PermanentSacrificed {
-                object_id,
-                player_id,
-            } => {
-                assert_eq!(player_id, P0);
-                Some(object_id)
+    assert_eq!(runner.state().stack.len(), expected_sets.len());
+    for remaining in (0..expected_sets.len()).rev() {
+        let entry = runner.state().stack.last().expect("end-step sacrifice");
+        let engine::types::game_state::StackEntryKind::TriggeredAbility { ability, .. } =
+            &entry.kind
+        else {
+            panic!("expected a triggered ability");
+        };
+        assert_eq!(entry.source_id, encampment);
+        let batch: BTreeSet<_> = ability
+            .targets
+            .iter()
+            .map(|target| {
+                let TargetRef::Object(id) = target else {
+                    panic!("unexpected sacrifice target: {target:?}");
+                };
+                *id
+            })
+            .collect();
+        let index = expected_sets
+            .iter()
+            .position(|expected| *expected == batch)
+            .expect("the trigger must bind a distinct installed batch");
+        expected_sets.remove(index);
+
+        // CR 603.7c + CR 701.21a: resolve one trigger at a time.
+        let mut sacrificed = Vec::new();
+        for _ in 0..16 {
+            assert_eq!(runner.state().phase, Phase::End);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            let result = runner
+                .act(GameAction::PassPriority)
+                .expect("resolve end-step sacrifice");
+            for event in result.events {
+                if let GameEvent::PermanentSacrificed {
+                    object_id,
+                    player_id,
+                } = event
+                {
+                    assert_eq!(player_id, P0);
+                    sacrificed.push(object_id);
+                }
             }
-            _ => None,
-        }));
+            if runner.state().stack.len() != remaining + 1 {
+                break;
+            }
+        }
+        assert_eq!(runner.state().stack.len(), remaining);
+        sacrificed.sort_unstable();
+        assert_eq!(sacrificed, batch.into_iter().collect::<Vec<_>>());
+        assert_eq!(
+            warrior_ids_on_battlefield(&runner)
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            expected_sets
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            "Warriors bound to a pending trigger must survive"
+        );
     }
-    assert!(runner.state().stack.is_empty());
-    sacrificed.sort_unstable();
-    assert_eq!(
-        sacrificed,
-        all_warriors.into_iter().collect::<Vec<_>>(),
-        "the end-step triggers must sacrifice every Warrior from both batches exactly once"
-    );
     assert!(warrior_ids_on_battlefield(&runner).is_empty());
     assert_eq!(
         soldiers(&runner),

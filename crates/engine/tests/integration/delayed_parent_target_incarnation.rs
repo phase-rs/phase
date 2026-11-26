@@ -243,22 +243,22 @@ fn watchers_expire_even_when_their_printed_payload_has_a_separate_gap() {
 }
 
 #[test]
-fn heroic_sacrifice_fires_its_existing_counter_payload_this_turn() {
+fn heroic_sacrifice_fires_its_death_watcher_this_turn() {
     exercise_watchers_with_existing_payload_gaps(Some("Heroic Sacrifice"));
 }
 
 #[test]
-fn reincarnation_fires_its_existing_graveyard_choice_this_turn() {
+fn reincarnation_fires_its_death_watcher_this_turn() {
     exercise_watchers_with_existing_payload_gaps(Some("Printed reanimation watcher"));
 }
 
 #[test]
-fn rushed_rebirth_fires_its_existing_search_payload_this_turn() {
+fn rushed_rebirth_fires_its_death_watcher_this_turn() {
     exercise_watchers_with_existing_payload_gaps(Some("Printed search watcher"));
 }
 
 #[test]
-fn end_blaze_epiphany_fires_its_existing_exile_payload_this_turn() {
+fn end_blaze_epiphany_fires_its_death_watcher_this_turn() {
     exercise_watchers_with_existing_payload_gaps(Some("End-Blaze Epiphany"));
 }
 
@@ -288,11 +288,11 @@ fn exercise_watchers_with_existing_payload_gaps(live_card: Option<&str>) {
     use engine::types::counter::CounterType;
     use engine::types::mana::{ManaCost, ManaCostShard};
 
-    for (name, oracle, x, immediate_draw) in [
-        ("Heroic Sacrifice", HEROIC_SACRIFICE_WATCH, None, 1),
-        ("Printed reanimation watcher", REINCARNATION_WATCH, None, 0),
-        ("Printed search watcher", RUSHED_REBIRTH_WATCH, None, 0),
-        ("End-Blaze Epiphany", END_BLAZE_EPIPHANY_WATCH, Some(1), 0),
+    for (name, oracle, x) in [
+        ("Heroic Sacrifice", HEROIC_SACRIFICE_WATCH, None),
+        ("Printed reanimation watcher", REINCARNATION_WATCH, None),
+        ("Printed search watcher", RUSHED_REBIRTH_WATCH, None),
+        ("End-Blaze Epiphany", END_BLAZE_EPIPHANY_WATCH, Some(1)),
     ] {
         if live_card.is_some_and(|card| card != name) {
             continue;
@@ -318,19 +318,14 @@ fn exercise_watchers_with_existing_payload_gaps(live_card: Option<&str>) {
             .id();
         scenario.with_counter(victim, CounterType::Plus1Plus1, 1);
         let recipient = scenario.add_creature(P0, "Counter recipient", 2, 2).id();
-        let other_recipient = scenario
-            .add_creature(P0, "Other counter recipient", 2, 2)
-            .id();
-        let caster_grave = scenario
-            .add_creature_to_graveyard(P0, "Caster's graveyard card", 1, 1)
-            .id();
-        let owner_grave = scenario
-            .add_creature_to_graveyard(P1, "Owner's graveyard card", 1, 1)
-            .id();
-        let unrelated_exile = scenario
-            .add_land_to_exile(P0, "Previously exiled land")
-            .id();
+        scenario.add_creature_to_graveyard(P0, "Caster's graveyard card", 1, 1);
+        scenario.add_creature_to_graveyard(P1, "Owner's graveyard card", 1, 1);
         let top = scenario.add_card_to_library_top(P0, "Top card");
+        let unrelated_exile = (name == "End-Blaze Epiphany").then(|| {
+            scenario
+                .add_land_to_exile(P0, "Previously exiled land")
+                .id()
+        });
         let lesser = (name == "Printed search watcher").then(|| {
             let db = engine::database::card_db::CardDatabase::from_integration_fixture_typing_faces_on_read()
                 .expect("integration card fixture must load");
@@ -356,8 +351,6 @@ fn exercise_watchers_with_existing_payload_gaps(live_card: Option<&str>) {
             cast.resolve()
         };
         assert_eq!(outcome.zone_of(victim), Zone::Battlefield);
-        assert_eq!(outcome.hand_drawn(P0), immediate_draw);
-        let hand_after_install = outcome.state().players[0].hand.len();
         let [watcher] = outcome.state().delayed_triggers.as_slice() else {
             panic!("{name} must install exactly one watcher");
         };
@@ -383,152 +376,111 @@ fn exercise_watchers_with_existing_payload_gaps(live_card: Option<&str>) {
                 .act(GameAction::PassPriority)
                 .expect("give P1 priority");
         }
-        if !late && name == "Heroic Sacrifice" {
-            runner.cast(removal).target_object(victim).commit();
-            runner
-                .act(GameAction::PassPriority)
-                .expect("pass to Murder");
-            runner
-                .act(GameAction::PassPriority)
-                .expect("resolve Murder");
-            assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
-            // Existing payload defects: the draw was already resolved above, and
-            // the counter recipient is required despite the printed "up to one".
-            let WaitingFor::TriggerTargetSelection {
-                player: P0,
-                target_slots,
-                ..
-            } = &runner.state().waiting_for
-            else {
-                panic!(
-                    "expected Heroic Sacrifice's counter target, got {:?}",
-                    runner.state().waiting_for
-                )
-            };
-            assert_eq!(target_slots[0].legal_targets.len(), 2);
-            assert!(target_slots[0]
-                .legal_targets
-                .contains(&TargetRef::Object(recipient)));
-            assert!(target_slots[0]
-                .legal_targets
-                .contains(&TargetRef::Object(other_recipient)));
-            assert!(!target_slots[0].optional);
-            runner
-                .act(GameAction::ChooseTarget {
-                    target: Some(TargetRef::Object(recipient)),
-                })
-                .expect("choose the counter recipient");
-            runner.advance_until_stack_empty();
-            assert_eq!(runner.state().players[0].hand.len(), hand_after_install);
-            assert_eq!(
-                runner.state().objects[&recipient]
-                    .counters
-                    .get(&CounterType::Plus1Plus1),
-                Some(&1)
-            );
-        } else if !late && name == "Printed search watcher" {
-            runner.cast(removal).target_object(victim).commit();
-            runner
-                .act(GameAction::PassPriority)
-                .expect("pass to Murder");
-            runner
-                .act(GameAction::PassPriority)
-                .expect("resolve Murder");
-            assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
-            assert_eq!(runner.state().stack.len(), 1);
-            assert_eq!(runner.state().stack[0].source_id, spell);
-            let firing = runner.state().stack[0].id;
-            runner
-                .act(GameAction::PassPriority)
-                .expect("pass to the Rushed Rebirth trigger");
-            let resolution = runner
-                .act(GameAction::PassPriority)
-                .expect("resolve the Rushed Rebirth trigger");
-            assert!(resolution.events.iter().any(|event| matches!(
-                event, GameEvent::StackResolved { object_id } if *object_id == firing
-            )));
-            // Existing payload defect: the lesser-MV search uses a cost-object
-            // reference. The trigger settles without offering the eligible creature.
-            assert_eq!(
-                runner.state().objects[&lesser.expect("seed the lesser-MV creature")].zone,
-                Zone::Library
-            );
-        } else {
-            let death = runner.cast(removal).target_object(victim).resolve();
-            assert_eq!(death.zone_of(victim), Zone::Graveyard);
-            match (late, name) {
-                (true, _) => {}
-                (false, "Printed reanimation watcher") => {
-                    // Existing payload defect: the graveyard choice is not restricted to the victim's owner.
-                    let WaitingFor::EffectZoneChoice {
+        resolve_watched_death(&mut runner, removal, victim);
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+        if !late {
+            // Other payload gaps are tracked in confirmed-misparses.toml:
+            // "heroic sacrifice" / trigger_wrong, "reincarnation" / wrong_player,
+            // and "rushed rebirth" / wrong_object.
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::TriggerTargetSelection { .. }
+            ) {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(recipient)),
+                    })
+                    .expect("choose the triggered ability's target");
+            }
+            let stack = &runner.state().stack;
+            assert_eq!(stack.len(), 1, "{name}: expected one watcher firing");
+            let trigger = &stack[0];
+            assert_eq!(trigger.source_id, spell);
+            let firing = trigger.id;
+            let mut resolutions = 0;
+            let mut exiled = Vec::new();
+            let mut chose_exiled_card = false;
+            for _ in 0..8 {
+                let action = match &runner.state().waiting_for {
+                    WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                    WaitingFor::Priority { .. } => GameAction::PassPriority,
+                    WaitingFor::SearchChoice { cards, .. } if unrelated_exile.is_none() => {
+                        GameAction::SelectCards {
+                            cards: lesser.filter(|id| cards.contains(id)).into_iter().collect(),
+                        }
+                    }
+                    WaitingFor::ChooseFromZoneChoice {
                         player: P0, cards, ..
-                    } = &runner.state().waiting_for
-                    else {
-                        panic!(
-                            "expected a graveyard choice, got {:?}",
-                            runner.state().waiting_for
-                        )
-                    };
-                    assert!(cards.contains(&caster_grave) && cards.contains(&owner_grave));
-                    runner
-                        .act(GameAction::SelectCards {
-                            cards: vec![caster_grave],
-                        })
-                        .expect("select a graveyard card");
-                    assert_eq!(
-                        runner.state().objects[&caster_grave].zone,
-                        Zone::Battlefield
-                    );
-                    assert_eq!(runner.state().objects[&caster_grave].controller, P0);
+                    } if unrelated_exile.is_some() => {
+                        assert!(!chose_exiled_card, "{name}: expected only one exile choice");
+                        // CR 608.2h: The creature's last known power includes its +1/+1 counter.
+                        assert_eq!(
+                            exiled.len(),
+                            3,
+                            "use the watched creature's departure power"
+                        );
+                        assert!(exiled.contains(&top));
+                        assert_eq!(cards.len(), exiled.len());
+                        assert!(exiled.iter().all(|id| cards.contains(id)));
+                        chose_exiled_card = true;
+                        GameAction::SelectCards { cards: vec![top] }
+                    }
+                    WaitingFor::EffectZoneChoice { cards, .. }
+                    | WaitingFor::ChooseFromZoneChoice { cards, .. }
+                        if unrelated_exile.is_none() =>
+                    {
+                        GameAction::SelectCards {
+                            cards: vec![*cards.first().expect("a legal payload choice")],
+                        }
+                    }
+                    other => panic!("{name}: unexpected watcher resolution prompt {other:?}"),
+                };
+                let result = runner.act(action).expect("resolve watcher payload");
+                if unrelated_exile.is_some() {
+                    exiled.extend(result.events.iter().filter_map(|event| match event {
+                        GameEvent::ZoneChanged {
+                            object_id,
+                            from: Some(Zone::Library),
+                            to: Zone::Exile,
+                            ..
+                        } => Some(*object_id),
+                        _ => None,
+                    }));
                 }
-                (false, "End-Blaze Epiphany") => {
-                    let exiled: Vec<_> = death
-                        .events()
-                        .iter()
-                        .filter_map(|event| match event {
-                            GameEvent::ZoneChanged {
-                                object_id,
-                                from: Some(Zone::Library),
-                                to: Zone::Exile,
-                                ..
-                            } => Some(*object_id),
-                            _ => None,
-                        })
-                        .collect();
-                    assert_eq!(
-                        exiled.len(),
-                        3,
-                        "use the watched creature's departure power"
-                    );
-                    assert!(exiled.contains(&top));
-                    let WaitingFor::ChooseFromZoneChoice {
-                        player: P0, cards, ..
-                    } = &runner.state().waiting_for
-                    else {
-                        panic!(
-                            "expected an exile choice, got {:?}",
-                            runner.state().waiting_for
+                resolutions += result
+                    .events
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            event, GameEvent::StackResolved { object_id } if *object_id == firing
                         )
-                    };
-                    assert_eq!(cards.len(), exiled.len());
-                    assert!(exiled.iter().all(|id| cards.contains(id)));
-                    assert!(!cards.contains(&unrelated_exile));
-                    runner
-                        .act(GameAction::SelectCards { cards: vec![top] })
-                        .expect("select an exiled card");
-                    for id in exiled.into_iter().chain([unrelated_exile]) {
-                        let can_play = runner.state().objects[&id].casting_permissions.iter().any(
-                            |permission| {
+                    })
+                    .count();
+            }
+            assert_eq!(
+                resolutions, 1,
+                "{name}: watcher stack entry must resolve once"
+            );
+            if let Some(unrelated_exile) = unrelated_exile {
+                assert!(chose_exiled_card, "{name}: expected P0's exile choice");
+                assert_eq!(
+                    exiled.len(),
+                    3,
+                    "{name}: expected exactly three cards exiled"
+                );
+                for id in exiled.into_iter().chain([unrelated_exile]) {
+                    let can_play =
+                        runner.state().objects[&id]
+                            .casting_permissions
+                            .iter()
+                            .any(|permission| {
                                 matches!(
                                     permission,
                                     CastingPermission::PlayFromExile { granted_to: P0, .. }
                                 )
-                            },
-                        );
-                        assert_eq!(can_play, id == top, "permission applies to the chosen card");
-                    }
+                            });
+                    assert_eq!(can_play, id == top, "{name}: play permission for {id:?}");
                 }
-                _ => unreachable!(),
             }
         }
         assert!(runner.state().stack.is_empty());
@@ -545,14 +497,12 @@ fn initiate_of_blood_expires_its_watch_on_a_creature_dealt_damage_this_turn() {
 }
 
 #[test]
-fn initiate_of_blood_fires_its_existing_flip_payload_this_turn() {
+fn initiate_of_blood_fires_its_death_watcher_this_turn() {
     exercise_initiate_of_blood_watch(false);
 }
 
 fn exercise_initiate_of_blood_watch(late: bool) {
     use engine::game::scenario_db::GameScenarioDbExt;
-    use engine::types::ability::EffectKind;
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     stock_libraries(&mut scenario);
@@ -594,17 +544,58 @@ fn exercise_initiate_of_blood_watch(late: bool) {
             .act(GameAction::PassPriority)
             .expect("give P1 priority");
     }
-    let death = runner.cast(removal).target_object(victim).resolve();
-    assert_eq!(death.zone_of(victim), Zone::Graveyard);
-    assert_eq!(death.events().iter().any(|event| matches!(event,
-        GameEvent::EffectResolved { kind: EffectKind::FlipPermanent, source_id, .. } if *source_id == source)), !late);
-    // Existing payload defect: the flip refers to the dead creature, leaving Initiate unflipped.
-    assert!(!death.state().objects[&source].flipped);
-    assert!(death.state().stack.is_empty());
+    resolve_watched_death(&mut runner, removal, victim);
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+    if late {
+        assert!(!runner.state().objects[&source].flipped);
+    } else {
+        // The delayed flip's source operand is tracked in
+        // confirmed-misparses.toml: "initiate of blood" / wrong_object.
+        resolve_single_death_watcher(&mut runner, source);
+    }
+    assert!(runner.state().stack.is_empty());
     assert!(matches!(
-        death.final_waiting_for(),
+        runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
+}
+
+fn resolve_watched_death(
+    runner: &mut engine::game::scenario::GameRunner,
+    removal: ObjectId,
+    victim: ObjectId,
+) {
+    runner.cast(removal).target_object(victim).commit();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pass to Murder");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("resolve Murder");
+}
+
+fn resolve_single_death_watcher(runner: &mut engine::game::scenario::GameRunner, source: ObjectId) {
+    let stack = &runner.state().stack;
+    assert_eq!(stack.len(), 1, "expected exactly one death watcher firing");
+    let trigger = &stack[0];
+    assert_eq!(trigger.source_id, source);
+    let firing = trigger.id;
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pass to the watcher");
+    let resolution = runner
+        .act(GameAction::PassPriority)
+        .expect("resolve the watcher");
+    assert_eq!(
+        resolution
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event, GameEvent::StackResolved { object_id } if *object_id == firing
+            ))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -670,7 +661,7 @@ fn bounded_death_watchers_queue_in_apnap_order() {
 }
 
 #[test]
-fn burn_away_bounds_the_watcher_with_its_existing_single_object_payload() {
+fn burn_away_fires_its_death_watcher_this_turn() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(P0, mana(8));
@@ -679,12 +670,8 @@ fn burn_away_bounds_the_watcher_with_its_existing_single_object_payload() {
         .add_creature(P1, "Announced creature", 7, 7)
         .controlled_by(P0)
         .id();
-    let owner_card = scenario
-        .add_land_to_graveyard(P1, "Owner's graveyard card")
-        .id();
-    let controller_card = scenario
-        .add_land_to_graveyard(P0, "Controller's graveyard card")
-        .id();
+    scenario.add_land_to_graveyard(P1, "Owner's graveyard card");
+    scenario.add_land_to_graveyard(P0, "Controller's graveyard card");
     let oracle = "Burn Away deals 6 damage to target creature. When that creature dies this turn, exile its controller's graveyard.";
     let (name, _) = oracle
         .split_once(" deals ")
@@ -715,19 +702,13 @@ fn burn_away_bounds_the_watcher_with_its_existing_single_object_payload() {
             ..
         }
     ));
-    let death = runner.cast(removal).target_object(victim).resolve();
-    assert!(death.events().iter().any(|event| matches!(
-        event,
-        GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, .. }
-            if *object_id == victim
-    )));
-    // The registry keeps the independent single-object exile defect open.
-    assert_eq!(death.zone_of(victim), Zone::Exile);
-    assert_eq!(death.zone_of(owner_card), Zone::Graveyard);
-    assert_eq!(death.zone_of(controller_card), Zone::Graveyard);
-    assert!(death.state().stack.is_empty());
+    resolve_watched_death(&mut runner, removal, victim);
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+    // The graveyard exile payload is tracked in confirmed-misparses.toml: "burn away" / wrong_object.
+    resolve_single_death_watcher(&mut runner, spell);
+    assert!(runner.state().stack.is_empty());
     assert!(matches!(
-        death.final_waiting_for(),
+        runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
 }

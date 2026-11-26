@@ -3426,6 +3426,8 @@ fn delayed_player_damage_admission(head: &str) -> DelayedPlayerDamageAdmission {
     {
         return Admission::OutsideFamily;
     }
+    // CR 603.2c: “one or more players” groups the damage step into one occurrence,
+    // while “a player” triggers separately for each damaged player.
     let mode = match (&head.recipient, source.properties.as_slice()) {
         (BatchedDamageRecipient::DefendingPlayer | BatchedDamageRecipient::Other(_), _) => {
             return Admission::OutsideFamily;
@@ -3439,7 +3441,9 @@ fn delayed_player_damage_admission(head: &str) -> DelayedPlayerDamageAdmission {
                 value: Keyword::Flying,
             }],
         ) => TriggerMode::DamageDone,
-        _ => return Admission::Unsupported,
+        (BatchedDamageRecipient::APlayer | BatchedDamageRecipient::OneOrMorePlayers, _) => {
+            return Admission::Unsupported;
+        }
     };
     if !rest.is_empty() || !head.source_remainder.trim().is_empty() || head.threshold.is_some() {
         return Admission::Unsupported;
