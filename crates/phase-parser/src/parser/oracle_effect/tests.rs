@@ -109062,6 +109062,25 @@ fn delayed_draw_discard_rejects_unconsumed_replacement_markers() {
 }
 
 #[test]
+fn forth_eorlingas_exports_delayed_spell_ability_description() {
+    let delayed_sentence = "Whenever one or more creatures you control deal combat damage to one or more players this turn, you become the monarch.";
+    let oracle = format!(
+        "Create X 2/2 red Human Knight creature tokens with trample and haste.\n{delayed_sentence}"
+    );
+    let parsed = parse_oracle_text(&oracle, "Forth Eorlingas!", &[], &["Sorcery".into()], &[]);
+    let [_, delayed] = parsed.abilities.as_slice() else {
+        panic!("expected two spell abilities");
+    };
+    assert_eq!(delayed.kind, AbilityKind::Spell);
+    assert!(matches!(
+        delayed.effect.as_ref(),
+        Effect::CreateDelayedTrigger { .. }
+    ));
+    let exported = serde_json::to_value(delayed).expect("serialize delayed spell ability");
+    assert_eq!(exported["description"], delayed_sentence);
+}
+
+#[test]
 fn delayed_player_damage_full_faces_commit_compound_payloads() {
     use crate::types::ability::DamageKindFilter;
     use std::ops::ControlFlow;

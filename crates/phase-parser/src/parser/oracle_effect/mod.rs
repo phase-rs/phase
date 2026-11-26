@@ -2998,7 +2998,7 @@ enum UnwindowedWhenever {
 }
 
 fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
-    try_parse_whenever_this_turn_from(tp, UnwindowedWhenever::Delayed)
+    try_parse_whenever_this_turn_from(tp, UnwindowedWhenever::Delayed).map(|(clause, _)| clause)
 }
 
 /// CR 603.4 + CR 608.2c: does this delayed body's intervening-if test the
@@ -3201,10 +3201,11 @@ fn parse_delayed_player_damage_body(
     ))
 }
 
-fn try_parse_whenever_this_turn_from(
-    tp: TextPair,
+fn try_parse_whenever_this_turn_from<'a>(
+    tp: TextPair<'a>,
     unwindowed: UnwindowedWhenever,
-) -> Option<ParsedEffectClause> {
+) -> Option<(ParsedEffectClause, Option<&'a str>)> {
+    let source_text = tp.original;
     // CR 603.7b: capture a leading stated duration as the delayed trigger's
     // EXPIRY (its own lifetime), not the enclosing clause's duration. This runs
     // at the head so it precedes the outer `strip_leading_duration` dispatch site,
@@ -3333,10 +3334,13 @@ fn try_parse_whenever_this_turn_from(
     let (strict_body, mut trigger_def, effect_text) = match admission {
         Some((DelayedPlayerDamageAdmission::Admitted(trigger), body)) => (true, *trigger, body),
         Some((DelayedPlayerDamageAdmission::Unsupported, _)) => {
-            return Some(parsed_clause(Effect::unimplemented(
-                "delayed_player_damage_head",
-                before.original,
-            )));
+            return Some((
+                parsed_clause(Effect::unimplemented(
+                    "delayed_player_damage_head",
+                    before.original,
+                )),
+                None,
+            ));
         }
         None | Some((DelayedPlayerDamageAdmission::OutsideFamily, _)) => (
             false,
@@ -3383,10 +3387,13 @@ fn try_parse_whenever_this_turn_from(
     inner_ctx.demonstrative_object_ref = anaphors.demonstrative_object_ref;
     let inner_lowered = if strict_body {
         let Some(body) = parse_delayed_player_damage_body(effect_text, &mut inner_ctx) else {
-            return Some(parsed_clause(Effect::unimplemented(
-                "delayed_player_damage_body",
-                effect_text,
-            )));
+            return Some((
+                parsed_clause(Effect::unimplemented(
+                    "delayed_player_damage_body",
+                    effect_text,
+                )),
+                None,
+            ));
         };
         body
     } else {
@@ -3432,7 +3439,7 @@ fn try_parse_whenever_this_turn_from(
         inner
     };
 
-    Some(ParsedEffectClause {
+    let clause = ParsedEffectClause {
         history: inner_lowered
             .history
             .into_iter()
@@ -3463,7 +3470,8 @@ fn try_parse_whenever_this_turn_from(
         optional: false,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
-    })
+    };
+    Some((clause, strict_body.then_some(source_text)))
 }
 
 /// Decompose the spell qualifier from `"when you next cast a <payload> this turn, ..."`
@@ -4327,16 +4335,23 @@ pub(crate) fn try_parse_temporal_delayed_trigger_ability(
 ) -> Option<AbilityIr> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
-    let clause = try_parse_whenever_this_turn_from(tp, UnwindowedWhenever::PrintedLine)
-        .or_else(|| try_parse_when_next_event(tp))
-        .or_else(|| try_parse_copy_next_spell_when_cast(tp))
-        .or_else(|| try_parse_at_next_phase_delayed_trigger(text, kind, antecedents))?;
+    let (clause, description) =
+        try_parse_whenever_this_turn_from(tp, UnwindowedWhenever::PrintedLine).or_else(|| {
+            try_parse_when_next_event(tp)
+                .or_else(|| try_parse_copy_next_spell_when_cast(tp))
+                .or_else(|| try_parse_at_next_phase_delayed_trigger(text, kind, antecedents))
+                .map(|clause| (clause, None))
+        })?;
+    let root_transforms = description
+        .map(|sentence| AbilityRootTransform::SetDescription(sentence.to_string()))
+        .into_iter()
+        .collect();
     Some(AbilityIr {
         source_text: text.to_string(),
         body: EffectChainIr::single_clause(text, kind, clause, None, None, false),
         shell: AbilityShellIr::default(),
         die_results: vec![],
-        root_transforms: vec![],
+        root_transforms,
         modal: None,
     })
 }
