@@ -391,8 +391,9 @@ fn strip_cost_mod_cast_scope_suffix(input: &str) -> &str {
 /// rather than re-deriving it: `oracle_classifier::is_static_pattern` (routing —
 /// does this line reach the static parser at all) and
 /// `oracle_static::dispatch::parse_static_line_inner` (composition — attach the
-/// matching `StaticCondition` to any enforceable continuous static the
-/// dispatcher would otherwise refuse). CR 604.1 + CR 611.3a + CR 102.1.
+/// matching `StaticCondition` to any static accepted by
+/// `can_compose_leading_turn_scope` that the dispatcher would otherwise
+/// refuse). CR 604.1 + CR 611.3a + CR 102.1.
 pub(crate) fn parse_leading_turn_scope(text: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         value(
