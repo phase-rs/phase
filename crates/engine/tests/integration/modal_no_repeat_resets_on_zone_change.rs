@@ -20,10 +20,12 @@
 //!
 //! Oracle (Genku, Future Shaper — modal trigger):
 //!   Whenever another nontoken permanent you control leaves the battlefield,
-//!   choose one that hasn't been chosen this turn —
-//!   • Create a 2/2 white Fox creature token with vigilance.
-//!   • Create a 1/2 blue Moonfolk creature token with flying.
-//!   • Create a 1/1 black Rat creature token with lifelink.
+//!   choose one that hasn't been chosen this turn. Create a creature token with
+//!   those characteristics.
+//!   • 2/2 white Fox with vigilance.
+//!   • 1/2 blue Moonfolk with flying.
+//!   • 1/1 black Rat with lifelink.
+//!   {3}{W}{U}: Put a +1/+1 counter on each creature you control.
 //!
 //! Oracle (Ghostly Flicker):
 //!   Exile two target artifacts, creatures, and/or lands you control, then
@@ -45,10 +47,11 @@ const GANDALF_ORACLE: &str = "Whenever you cast an instant or sorcery spell, cho
 \u{2022} Copy target instant or sorcery spell you control. You may choose new targets for the copy.\n\
 \u{2022} Put Gandalf the Grey on top of its owner's library.";
 
-const GENKU_ORACLE: &str = "Whenever another nontoken permanent you control leaves the battlefield, choose one that hasn't been chosen this turn \u{2014}\n\
-\u{2022} Create a 2/2 white Fox creature token with vigilance.\n\
-\u{2022} Create a 1/2 blue Moonfolk creature token with flying.\n\
-\u{2022} Create a 1/1 black Rat creature token with lifelink.";
+const GENKU_ORACLE: &str = "Whenever another nontoken permanent you control leaves the battlefield, choose one that hasn't been chosen this turn. Create a creature token with those characteristics.\n\
+\u{2022} 2/2 white Fox with vigilance.\n\
+\u{2022} 1/2 blue Moonfolk with flying.\n\
+\u{2022} 1/1 black Rat with lifelink.\n\
+{3}{W}{U}: Put a +1/+1 counter on each creature you control.";
 
 const LIFE_ORACLE: &str = "You gain 1 life.";
 const FODDER_ORACLE: &str = "Sacrifice this creature: You gain 1 life.";
@@ -482,7 +485,7 @@ fn genku_board(fodder_count: usize, bystanders: usize) -> Genku {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let genku = scenario
-        .add_creature_from_oracle(P0, "Genku, Future Shaper", 2, 4, GENKU_ORACLE)
+        .add_creature_from_oracle(P0, "Genku, Future Shaper", 2, 5, GENKU_ORACLE)
         .id();
     let fodder = (0..fodder_count)
         .map(|i| {
