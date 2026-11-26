@@ -3899,6 +3899,34 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn removing_a_fifo_owner_aborts_its_wake_task() {
+        use tokio::sync::oneshot::error::TryRecvError;
+        let mut mgr = DraftSessionManager::new();
+        let code = install_private_pod(&mut mgr, private_fifo_config());
+        let registration = mgr
+            .register_fifo_wake(&code, 2000)
+            .expect("a FIFO owner registers a wake");
+        // A wake task that never finishes on its own; `ended` reports
+        // `Closed` once the task is dropped.
+        let (alive, mut ended) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _alive = alive;
+            std::future::pending::<()>().await;
+        });
+        mgr.attach_fifo_wake_task(&code, &registration, task);
+        tokio::task::yield_now().await;
+        assert_eq!(mgr.current_fifo_wake(&code), Some(registration));
+        assert_eq!(ended.try_recv(), Err(TryRecvError::Empty));
+
+        let removed = mgr.remove_draft(&code).expect("the FIFO owner");
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(ended.try_recv(), Err(TryRecvError::Closed));
+        drop(removed);
+    }
+
     #[test]
     fn schedule_arm_follows_the_native_classification() {
         let is_legacy =
@@ -4113,7 +4141,7 @@ mod tests {
             );
         }
 
-        // C6: a valid FIFO row under a resident legacy pod's code is refused
+        // A valid FIFO row under a resident legacy pod's code is refused
         // and the legacy pod is unchanged.
         let before = serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap();
         let staged = manager.stage_restored_fifo(valid.clone()).unwrap();
@@ -4263,7 +4291,7 @@ mod tests {
                     .err(),
                 Some(fifo_text.clone())
             );
-            // D3: disconnect bookkeeping records no lapse.
+            // Disconnect bookkeeping records no lapse.
             mgr.handle_disconnect(code, 0, now);
             assert!(!mgr.reconnect.is_disconnected(code, PlayerId(0)));
             assert!(!mgr.sessions[code].connected[0]);

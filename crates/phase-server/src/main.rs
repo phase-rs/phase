@@ -8038,7 +8038,25 @@ fn spawn_pick_timer(
     });
 
     // Store the handle so it can be aborted if all picks come in early
-    tokio::spawn(async move {
+    tokio::spawn(pick_timer_handle::store(
+        draft_state,
+        draft_code,
+        handle,
+        pick_ms,
+    ));
+}
+
+mod pick_timer_handle {
+    use super::*;
+
+    /// Hands a pick timer's task to the legacy pod under `draft_code`,
+    /// aborting the pod's previous timer.
+    pub(super) async fn store(
+        draft_state: SharedDraftState,
+        draft_code: String,
+        handle: tokio::task::JoinHandle<()>,
+        pick_ms: u32,
+    ) {
         let mut mgr = draft_state.lock().await;
         match mgr
             .sessions
@@ -8057,7 +8075,7 @@ fn spawn_pick_timer(
             // timer, so it ends here.
             None => handle.abort(),
         }
-    });
+    }
 }
 
 type DraftPickWindow = (draft_core::types::DraftStatus, u8, u8);
@@ -8705,7 +8723,6 @@ mod fifo_scheduler_tests {
         }
     }
 
-    // A3
     #[tokio::test(start_paused = true)]
     async fn fifo_wake_acts_only_for_its_current_registration() {
         let fx = fixture();
@@ -8772,7 +8789,6 @@ mod fifo_scheduler_tests {
         assert_eq!(revision(&fx, &code).await, before + 1);
     }
 
-    // A4
     #[tokio::test(start_paused = true)]
     async fn fifo_wake_never_moves_to_a_later_owner() {
         let fx = fixture();
@@ -8833,7 +8849,6 @@ mod fifo_scheduler_tests {
             .is_some());
     }
 
-    // A5
     #[tokio::test(start_paused = true)]
     async fn fifo_wake_sleeps_until_its_core_deadline() {
         let fx = fixture();
@@ -8897,7 +8912,6 @@ mod fifo_scheduler_tests {
         assert_eq!(revision(&fx, &code).await, paused);
     }
 
-    // B1, B2, B3
     #[tokio::test(start_paused = true)]
     async fn failed_fifo_save_publishes_nothing_and_nothing_advances_past_it() {
         let fx = fixture();
@@ -8914,7 +8928,7 @@ mod fifo_scheduler_tests {
 
         tokio::time::advance(Duration::from_millis(100)).await;
         let now = fx.scheduler.clock.now_ms();
-        // B1: saved, then published.
+        // Saved, then published.
         assert_eq!(
             select_head(&fx, &code, 1, now).await,
             Ok(FifoStaged::Pending)
@@ -8923,7 +8937,7 @@ mod fifo_scheduler_tests {
         assert_eq!(row_revision(&fx, &code), r);
         assert_eq!(published_revisions(&mut rx), vec![r]);
 
-        // B2: a failed save publishes nothing and keeps the result unsaved.
+        // A failed save publishes nothing and keeps the result unsaved.
         let conn = fault(&fx, Some(&code));
         assert!(select_head(&fx, &code, 0, now).await.is_err());
         assert!(drain(&mut rx).is_empty());
@@ -8936,7 +8950,7 @@ mod fifo_scheduler_tests {
             assert_eq!(manager.current_fifo_wake(&code), None);
         }
 
-        // B3: nothing advances past the unsaved result.
+        // Nothing advances past the unsaved result.
         assert!(select_head(&fx, &code, 2, now).await.is_err());
         assert_eq!(revision(&fx, &code).await, r);
         assert!(drain(&mut rx).is_empty());
@@ -8954,7 +8968,46 @@ mod fifo_scheduler_tests {
         assert!(manager.current_fifo_wake(&code).is_some());
     }
 
-    // B4
+    #[tokio::test(start_paused = true)]
+    async fn a_retried_save_keeps_a_wake_when_the_operation_is_refused() {
+        let fx = fixture();
+        let code = started_private_pod(&fx, fifo_config()).await;
+        let mut rx = attach_seat(&fx, &code, 0).await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let now = fx.scheduler.clock.now_ms();
+        let r = revision(&fx, &code).await;
+        let conn = fault(&fx, Some(&code));
+        assert!(select_head(&fx, &code, 0, now).await.is_err());
+        {
+            let manager = fx.scheduler.draft_state.lock().await;
+            assert!(manager.pending_fifo_row(&code).is_some());
+            assert_eq!(manager.current_fifo_wake(&code), None);
+        }
+        release(conn);
+
+        // Seat 0's selection again, built from the committed core: the fence
+        // saves and publishes the unsaved result, then refuses the repeat.
+        assert_eq!(
+            select_head(&fx, &code, 0, now).await,
+            Err("Draft error: seat 0 has no pending pack".to_string())
+        );
+        assert_eq!(revision(&fx, &code).await, r + 1);
+        assert_eq!(row_revision(&fx, &code), r + 1);
+        assert_eq!(published_revisions(&mut rx), vec![r + 1]);
+
+        // The refused operation still leaves the session a wake, and it fires
+        // at the earliest running deadline.
+        let wake = current_wake(&fx, &code)
+            .await
+            .expect("a wake after the refused operation");
+        assert_eq!(wake.due_ms(), 2000);
+        tokio::time::advance(Duration::from_millis(wake.due_ms() - now)).await;
+        yield_a_few().await;
+        assert_eq!(revision(&fx, &code).await, r + 2);
+        assert_eq!(row_revision(&fx, &code), r + 2);
+        assert_eq!(published_revisions(&mut rx), vec![r + 2]);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn fifo_wake_saves_before_it_publishes() {
         let fx = fixture();
@@ -9033,7 +9086,51 @@ mod fifo_scheduler_tests {
         assert_eq!(manager.sessions[&review].session.current_pack_number, 1);
     }
 
-    // B5 (and C6's resident leg)
+    /// A task that never finishes on its own, and a receiver that reports
+    /// `Closed` once the task is dropped.
+    fn watched_task() -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (alive, ended) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _alive = alive;
+            std::future::pending::<()>().await;
+        });
+        (task, ended)
+    }
+
+    #[tokio::test]
+    async fn a_pick_timer_no_legacy_pod_takes_is_aborted() {
+        use tokio::sync::oneshot::error::TryRecvError;
+        let fx = fixture();
+        let draft_state = fx.scheduler.draft_state.clone();
+        let legacy = started_legacy_pod(&fx).await;
+        let (task, mut legacy_ended) = watched_task();
+        super::pick_timer_handle::store(draft_state.clone(), legacy.clone(), task, 5000).await;
+        yield_a_few().await;
+        assert_eq!(legacy_ended.try_recv(), Err(TryRecvError::Empty));
+        assert!(draft_state.lock().await.sessions[&legacy]
+            .legacy_schedule()
+            .expect("a legacy pod")
+            .timer_task
+            .is_some());
+
+        // A code whose legacy pod was removed, and a code a FIFO owner holds.
+        draft_state
+            .lock()
+            .await
+            .remove_draft(&legacy)
+            .expect("the legacy pod");
+        let fifo = started_private_pod(&fx, fifo_off_config()).await;
+        for code in [legacy, fifo] {
+            let (task, mut ended) = watched_task();
+            super::pick_timer_handle::store(draft_state.clone(), code.clone(), task, 5000).await;
+            yield_a_few().await;
+            assert_eq!(ended.try_recv(), Err(TryRecvError::Closed), "{code}");
+        }
+    }
+
     #[tokio::test]
     async fn private_fifo_install_saves_first() {
         let fx = fixture();
@@ -9088,7 +9185,6 @@ mod fifo_scheduler_tests {
         assert_eq!(row(&fx, prior), resident_row);
     }
 
-    // C4
     #[tokio::test]
     async fn startup_loader_retains_every_row_it_does_not_restore() {
         let fx = fixture();
@@ -9222,7 +9318,6 @@ mod fifo_scheduler_tests {
         }
     }
 
-    // E1 and E8
     #[tokio::test(start_paused = true)]
     async fn late_legacy_teardown_never_reaches_a_same_code_fifo_replacement() {
         let fx = fixture();
@@ -9258,13 +9353,13 @@ mod fifo_scheduler_tests {
         }
         let removed_first = s.draft_state.lock().await.remove_draft(&first).unwrap();
         let removed_control = s.draft_state.lock().await.remove_draft(&control).unwrap();
-        // E8 reach: before the restore the code is listed and routed.
+        // Before the restore the code is listed and routed.
         assert!(s.lobby.lock().await.lobby().has_game(&first));
         assert!(s.connections.lock().await.contains_key(&first));
         restore_private_fifo(s, &first, started_fifo_row(&first, fifo_config()))
             .await
             .unwrap();
-        // E8: installing claimed the code.
+        // Installing claimed the code.
         assert!(!s.lobby.lock().await.lobby().has_game(&first));
         assert!(!s.connections.lock().await.contains_key(&first));
         assert!(!s.draft_spectators.lock().await.contains_key(&first));
@@ -9323,7 +9418,6 @@ mod fifo_scheduler_tests {
         assert_eq!(row(&fx, &first), None);
     }
 
-    // E2
     #[tokio::test(start_paused = true)]
     async fn legacy_pick_timer_never_reaches_a_later_fifo_owner() {
         let fx = fixture();
@@ -9370,7 +9464,6 @@ mod fifo_scheduler_tests {
             .any(|message| matches!(message, ServerMessage::DraftStateUpdate { .. })));
     }
 
-    // E3
     #[test]
     fn late_legacy_save_never_writes_a_later_fifo_row() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -9415,7 +9508,6 @@ mod fifo_scheduler_tests {
         });
     }
 
-    // E4
     #[tokio::test(start_paused = true)]
     async fn legacy_publishers_skip_a_fifo_owner() {
         let fx = fixture();
@@ -9451,7 +9543,6 @@ mod fifo_scheduler_tests {
             .any(|message| matches!(message, ServerMessage::DraftSpectatorView { .. })));
     }
 
-    // E5
     #[tokio::test]
     async fn shutdown_flush_leaves_fifo_rows_to_the_fence() {
         let fx = fixture();
@@ -9547,7 +9638,6 @@ mod fifo_scheduler_tests {
         }
     }
 
-    // E6
     #[tokio::test]
     async fn legacy_match_spawn_skips_a_fifo_owner() {
         let fx = fixture();
@@ -14707,12 +14797,12 @@ async fn handle_client_message(
             identity.draft_token = Some(player_token);
 
             // Register in lobby so draft appears in the lobby list
+            let (host_version, host_build_commit) = identity
+                .client_hello
+                .as_ref()
+                .map(|h| (h.client_version.clone(), h.build_commit.clone()))
+                .unwrap_or_default();
             {
-                let (host_version, host_build_commit) = identity
-                    .client_hello
-                    .as_ref()
-                    .map(|h| (h.client_version.clone(), h.build_commit.clone()))
-                    .unwrap_or_default();
                 let mut lob_guard = lobby.lock().await;
                 lob_guard.lobby_mut().register_game(
                     &draft_code,
@@ -14721,8 +14811,8 @@ async fn handle_client_message(
                         public,
                         password,
                         timer_seconds,
-                        host_version,
-                        host_build_commit,
+                        host_version: host_version.clone(),
+                        host_build_commit: host_build_commit.clone(),
                         current_players: 1,
                         max_players: pod_size as u32,
                         format_config: None,
@@ -14738,6 +14828,9 @@ async fn handle_client_message(
                     },
                     &SysEnv,
                 );
+                // Unlisted until the recheck below confirms the pod, so no
+                // subscriber can see a row that may yet be withdrawn.
+                lob_guard.lobby_mut().mark_host_away(&draft_code);
             }
 
             // The registration ran after the create released the draft guard,
@@ -14745,7 +14838,7 @@ async fn handle_client_message(
             // owner, in between. Registering under the create's own guard would
             // make the creator's bootstrap wait on unrelated lobby work, so
             // the listing is rechecked here instead: a code no legacy pod holds
-            // is delisted before any public announcement.
+            // is withdrawn while still unlisted, so nothing is announced.
             {
                 let mgr = draft_state.lock().await;
                 if !mgr
@@ -14762,20 +14855,12 @@ async fn handle_client_message(
                 }
             }
 
-            if public {
-                {
-                    let lob = lobby.lock().await;
-                    let game = lob.lobby().public_game(&draft_code);
-                    if let Some(game) = game {
-                        broadcast_to_lobby_subscribers(
-                            &lob,
-                            lobby_subscribers,
-                            ServerMessage::LobbyGameAdded { game },
-                        )
-                        .await;
-                    }
-                }
-            }
+            // Lists the confirmed row and announces a public one. A row
+            // withdrawn since is absent, so this lists and announces nothing.
+            transition_listing(lobby, lobby_subscribers, &draft_code, |lob| {
+                lob.mark_host_returned(&draft_code, host_version, host_build_commit)
+            })
+            .await;
 
             info!(draft = %draft_code, host = %display_name, "draft created");
         }
@@ -21573,7 +21658,6 @@ mod issue_4548_full_create_tests {
         }
     }
 
-    // D1's socket leg and D2.
     #[tokio::test]
     async fn public_draft_entries_refuse_a_private_fifo_session() {
         let (url, server, _dir, app) = spawn_draft_server().await;
@@ -21602,7 +21686,7 @@ mod issue_4548_full_create_tests {
         );
         assert!(!app.connections.lock().await.contains_key(&fifo));
 
-        // D2: spectating the FIFO session is refused and registers nothing.
+        // Spectating the FIFO session is refused and registers nothing.
         let mut spectator = connect_as(&url, "build-a").await;
         send_test_message(
             &mut spectator,
@@ -21648,7 +21732,6 @@ mod issue_4548_full_create_tests {
         server.abort();
     }
 
-    // E7
     #[tokio::test]
     async fn a_late_create_listing_never_lists_a_fifo_owner() {
         let (url, server, _dir, app) = spawn_draft_server().await;
@@ -21668,19 +21751,34 @@ mod issue_4548_full_create_tests {
             super::draft_socket_authority_tests::next_draft_result(&mut host).await,
             ServerMessage::DraftCommandAccepted { request_id, .. } if request_id == id
         ));
-        {
-            let mut manager = app.draft_sessions.lock().await;
-            manager.remove_draft(&code).expect("the created pod");
-            let staged = manager
-                .stage_restored_fifo(super::fifo_scheduler_tests::started_fifo_row(
-                    &code,
-                    super::fifo_scheduler_tests::fifo_off_config(),
-                ))
-                .unwrap();
-            app.game_db.save_draft_session(&code, staged.row()).unwrap();
-            manager.install_fifo(staged).unwrap();
-        }
+        let mut manager = app.draft_sessions.lock().await;
+        manager.remove_draft(&code).expect("the created pod");
+        let staged = manager
+            .stage_restored_fifo(super::fifo_scheduler_tests::started_fifo_row(
+                &code,
+                super::fifo_scheduler_tests::fifo_off_config(),
+            ))
+            .unwrap();
+        app.game_db.save_draft_session(&code, staged.row()).unwrap();
+        manager.install_fifo(staged).unwrap();
         drop(held);
+        // Holding the draft guard keeps the create between its registration
+        // and its recheck. The row is registered there, but a subscriber
+        // arriving then is not shown it.
+        loop {
+            if app.lobby.lock().await.lobby().has_game(&code) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let window_snapshot = tokio::time::timeout(
+            Duration::from_secs(10),
+            snapshot_lists(&url, "build-a", &code),
+        )
+        .await
+        .expect("a lobby snapshot while the create waits on its recheck");
+        assert!(!window_snapshot);
+        drop(manager);
         // The socket's next create is refused, so the first create's handler
         // has finished.
         assert_eq!(
@@ -21705,7 +21803,9 @@ mod issue_4548_full_create_tests {
         };
         assert!(app.lobby.lock().await.lobby().has_game(&other));
         let frames = frames_until_lobby_snapshot(&mut sub).await;
-        assert!(!listing_of(&frames, &code).contains(&"Added"));
+        // The withdrawn row was never shown, so its withdrawal announces
+        // nothing either.
+        assert_eq!(listing_of(&frames, &code), Vec::<&str>::new());
         assert_eq!(listing_of(&frames, &other), vec!["Added"]);
         drop(other_host);
         server.abort();
