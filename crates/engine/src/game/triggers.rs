@@ -6112,17 +6112,39 @@ pub(super) fn resolve_tap_mana_triggers_inline(
 fn collect_mana_frame_triggers(
     state: &mut GameState,
     events: &[GameEvent],
+    unclaimed: Option<&UnclaimedTriggerEvents>,
 ) -> (Vec<AcceptedTriggeredMana>, Vec<PendingTriggerContext>) {
-    super::layers::flush_layers(state);
-    super::trigger_index::ensure_ready(state);
-    let seed = collect_triggers_for_batch(state, events);
-    let collected = collect_pending_and_delayed_triggers_for_batch(
+    let ordinary_events = unclaimed.map_or(events, |batch| batch.events.as_slice());
+    let seed = collect_triggers_for_batch(state, ordinary_events);
+    let (collected, _) = collect_pending_and_delayed_triggers_reporting_terminalized(
         state,
         seed,
         events,
         DelayedTriggerEventScope::Any,
+        None,
+        unclaimed,
     );
     partition_collected_mana_frame_contexts(state, collected.contexts)
+}
+
+/// CR 603.2c: the logical owner already observed claimed deaths for pinned
+/// watchers. Keep the raw payment suffix available to legacy delayed watchers.
+fn unclaimed_mana_frame_events(
+    state: &GameState,
+    events: &[GameEvent],
+    events_before: usize,
+) -> UnclaimedTriggerEvents {
+    let mut unclaimed = unclaimed_trigger_events_from(
+        events,
+        events_before,
+        TriggerCollectionRequester::Delayed,
+        &state.consumed_before_priority_trigger_events,
+    );
+    // Claims were matched against the full buffer. The matcher uses the suffix.
+    for position in &mut unclaimed.positions {
+        *position -= events_before;
+    }
+    unclaimed
 }
 
 /// CR 605.4a + CR 608.2d: what one accepted triggered-mana firing may do at a
@@ -6300,7 +6322,9 @@ pub(crate) fn settle_echo_bonuses_for_preview(
     state: &mut GameState,
     events: &[GameEvent],
 ) -> ChoiceFreeManaSettlement {
-    let (accepted, _ordinary) = collect_mana_frame_triggers(state, events);
+    super::layers::flush_layers(state);
+    super::trigger_index::ensure_ready(state);
+    let (accepted, _ordinary) = collect_mana_frame_triggers(state, events, None);
     let mut settlement = settle_choice_free_mana_firings(state, accepted);
     // The preview only reasons about firings that can actually contribute a
     // bonus; an echo event with no produced types is still carried by the live
@@ -6334,14 +6358,11 @@ pub(crate) fn settle_choice_free_delayed_mana(
     if events_before >= events.len() {
         return Ok(());
     }
-    // CR 603.2c: a completed zone owner already observed its claimed events.
-    let unclaimed = filter_consumed_trigger_events_from(
-        events,
-        events_before,
-        TriggerCollectionRequester::Delayed,
-        &state.consumed_before_priority_trigger_events,
-    );
-    let (accepted, ordinary) = collect_mana_frame_triggers(state, &unclaimed);
+    let unclaimed = unclaimed_mana_frame_events(state, events, events_before);
+    super::layers::flush_layers(state);
+    super::trigger_index::ensure_ready(state);
+    let (accepted, ordinary) =
+        collect_mana_frame_triggers(state, &events[events_before..], Some(&unclaimed));
     let settlement = settle_choice_free_mana_firings(state, accepted);
     if settlement.settled == 0 && settlement.carried.is_empty() && ordinary.is_empty() {
         return Ok(());
@@ -6399,14 +6420,13 @@ pub(crate) fn settle_skipped_echo_before_spend(
     events_before: usize,
     outer_resume: crate::types::game_state::ManaTriggerFixedPointResume,
 ) -> Option<WaitingFor> {
-    // CR 603.2c: do not reopen occurrences claimed for both collectors.
-    let unclaimed = filter_consumed_trigger_events_from(
-        events,
-        events_before,
-        TriggerCollectionRequester::Delayed,
-        &state.consumed_before_priority_trigger_events,
+    let unclaimed = unclaimed_mana_frame_events(state, events, events_before);
+    let pause = settle_collected_mana_action_triggers(
+        state,
+        &events[events_before..],
+        Some(&unclaimed),
+        outer_resume,
     );
-    let pause = collect_mana_action_trigger_batch(state, &unclaimed, outer_resume);
     // Only after the combined collection result is durably owned: claim every
     // exact live occurrence this payment is responsible for, by full-action
     // index, so the post-action pipeline cannot collect them a second time.
@@ -7264,6 +7284,7 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority_for(
                         .delayed_watch_incarnation
                         .is_some_and(|pin| pins.contains(&pin))
                 }),
+                None,
             );
             resolve_and_apply_trigger_collection(
                 state,
@@ -12069,6 +12090,7 @@ pub(crate) fn collect_as_enters_roll_observers(
         AsEntersRollScan::AtEmission,
         None,
         None,
+        None,
     )
     .contexts;
     // CR 603.2 + CR 603.10 + CR 603.6d + CR 611.3b: the roll triggers what is on
@@ -15852,20 +15874,22 @@ pub(crate) fn collect_mana_action_trigger_batch(
     raw_batch: &[GameEvent],
     outer_resume: crate::types::game_state::ManaTriggerFixedPointResume,
 ) -> Option<WaitingFor> {
+    settle_collected_mana_action_triggers(state, raw_batch, None, outer_resume)
+}
+
+fn settle_collected_mana_action_triggers(
+    state: &mut GameState,
+    raw_batch: &[GameEvent],
+    unclaimed: Option<&UnclaimedTriggerEvents>,
+    outer_resume: crate::types::game_state::ManaTriggerFixedPointResume,
+) -> Option<WaitingFor> {
     // The dispatch buffer is frame-local, exactly as baseline `process_triggers`
     // keeps its own: events emitted while announcing or inline-resolving this
     // batch are represented by the contexts and journal entries they produced,
     // and are deliberately not given a live occurrence identity in the reducer's
     // public event vector.
     let events_out = &mut Vec::new();
-    let seed = collect_triggers_for_batch(state, raw_batch);
-    let collected = collect_pending_and_delayed_triggers_for_batch(
-        state,
-        seed,
-        raw_batch,
-        DelayedTriggerEventScope::Any,
-    );
-    let (accepted, ordinary) = partition_collected_mana_frame_contexts(state, collected.contexts);
+    let (accepted, ordinary) = collect_mana_frame_triggers(state, raw_batch, unclaimed);
     let pause = run_accepted_triggered_mana_fixed_point(state, accepted, outer_resume, events_out);
     defer_rejected_mana_frame_contexts(state, ordinary);
     pause
@@ -15935,6 +15959,7 @@ pub(crate) fn collect_activation_event_at_boundary(
             seed,
             raw_batch,
             DelayedTriggerEventScope::Any,
+            None,
             None,
         );
     // Anything irreversible the observation did binds it: an admitted trigger
@@ -20797,7 +20822,15 @@ fn collect_matching_delayed_triggers(
     events: &[GameEvent],
     scope: DelayedTriggerEventScope,
 ) -> DelayedTriggerMatch {
-    collect_matching_delayed_triggers_with(state, events, scope, AsEntersRollScan::Held, None, None)
+    collect_matching_delayed_triggers_with(
+        state,
+        events,
+        scope,
+        AsEntersRollScan::Held,
+        None,
+        None,
+        None,
+    )
 }
 
 /// [`collect_matching_delayed_triggers`], naming which scan an as-enters roll
@@ -20810,6 +20843,7 @@ fn collect_matching_delayed_triggers_with(
     scan: AsEntersRollScan,
     immediately_before_suppressors: Option<&[LatchedSuppressTrigger]>,
     admits_watcher: Option<&dyn Fn(&DelayedTrigger) -> bool>,
+    unclaimed_for_pinned: Option<&UnclaimedTriggerEvents>,
 ) -> DelayedTriggerMatch {
     if state.delayed_triggers.is_empty() && state.epic_effects.is_empty() {
         return DelayedTriggerMatch::default();
@@ -20850,18 +20884,26 @@ fn collect_matching_delayed_triggers_with(
         if admits_watcher.is_some_and(|admits| !admits(delayed)) {
             continue;
         }
+        let pinned = delayed.ability.context.delayed_watch_incarnation.is_some();
+        let unclaimed = unclaimed_for_pinned.filter(|_| pinned);
+        let whenever_events = unclaimed.map_or(events, |batch| batch.events.as_slice());
         if let Some(firings) = delayed_whenever_event_firings(
             state,
             delayed,
-            events,
+            whenever_events,
             scope,
             scan,
             &active_suppress_triggers,
             immediately_before_suppressors,
         ) {
             // Only WhenNextEvent has an or_trigger, so the alternative is 0.
-            for firing in firings {
-                if delayed.ability.context.delayed_watch_incarnation.is_some() {
+            for mut firing in firings {
+                if let Some(batch) = unclaimed {
+                    for index in &mut firing.consume {
+                        *index = batch.positions[*index];
+                    }
+                }
+                if pinned {
                     to_remove.push((idx, firing, 0));
                 } else {
                     to_fire.push((
@@ -21303,6 +21345,7 @@ fn collect_pending_and_delayed_triggers_for_batch(
         delayed_events,
         delayed_scope,
         None,
+        None,
     )
     .0
 }
@@ -21316,6 +21359,7 @@ fn collect_pending_and_delayed_triggers_reporting_terminalized(
     delayed_events: &[GameEvent],
     delayed_scope: DelayedTriggerEventScope,
     admits_watcher: Option<&dyn Fn(&DelayedTrigger) -> bool>,
+    unclaimed_for_pinned: Option<&UnclaimedTriggerEvents>,
 ) -> (CollectedTriggerContextBatch, usize) {
     let normal_was_non_empty = !normal_pending.is_empty();
     let DelayedTriggerMatch {
@@ -21329,6 +21373,7 @@ fn collect_pending_and_delayed_triggers_reporting_terminalized(
         AsEntersRollScan::Held,
         None,
         admits_watcher,
+        unclaimed_for_pinned,
     );
     let mut contexts = normal_pending;
     contexts.extend(delayed_pending);
@@ -21458,6 +21503,7 @@ fn process_collected_triggers_with_delayed_events_scoped(
         delayed_events,
         delayed_scope,
         admits_watcher,
+        None,
     )
     .0;
     terminalize_unmatched_reflexives_for_closed_batch(state, delayed_events, delayed_scope);

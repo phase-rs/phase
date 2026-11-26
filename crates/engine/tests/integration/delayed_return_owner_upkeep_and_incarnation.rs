@@ -1188,6 +1188,71 @@ fn automatic_mana_payment_preserves_suppression_of_a_merged_death() {
 }
 
 #[test]
+fn automatic_mana_payment_fires_death_frenzy_once_for_a_merged_death() {
+    let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
+        .expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Green; 7]
+            .into_iter()
+            .chain([ManaType::Black])
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let host = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, &db);
+    let cauldron = scenario.add_real_card(P0, "Agatha's Soul Cauldron", Zone::Battlefield, &db);
+    let pet = scenario.add_real_card(P0, "Blood Pet", Zone::Graveyard, &db);
+    let gemrazer = scenario.add_real_card(P0, "Gemrazer", Zone::Hand, &db);
+    let frenzy = scenario.add_real_card(P0, "Death Frenzy", Zone::Hand, &db);
+    let ritual = scenario.add_real_card(P0, "Dark Ritual", Zone::Hand, &db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    mutate_gemrazer_under(&mut runner, gemrazer, host);
+
+    let grant = runner
+        .activate(cauldron, 0)
+        .target_objects(&[pet, host])
+        .resolve();
+    grant.assert_zone(&[pet], Zone::Exile);
+    grant.assert_counters(host, engine::types::counter::CounterType::Plus1Plus1, 1);
+    let setup = runner.cast(frenzy).resolve();
+    setup.assert_zone(&[host], Zone::Battlefield);
+    setup.assert_zone(&[frenzy], Zone::Graveyard);
+    setup.assert_life_delta(P0, 0);
+    assert_eq!(
+        only_delayed(&runner)
+            .ability
+            .context
+            .delayed_watch_incarnation,
+        None
+    );
+
+    let cast = runner.cast(ritual).commit();
+    assert_eq!(cast.state().objects[&host].zone, Zone::Graveyard);
+    assert_eq!(cast.state().objects[&gemrazer].zone, Zone::Graveyard);
+    // CR 603.2c + CR 730.3: the sacrifice is one death across both components.
+    assert_eq!(
+        cast.state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == frenzy)
+            .count(),
+        1,
+        "Death Frenzy triggers once during automatic payment",
+    );
+    let outcome = cast.resolve();
+    outcome.assert_life_delta(P0, 1);
+    outcome.assert_zone(&[ritual], Zone::Graveyard);
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
 fn rootless_mana_payment_preserves_suppression_of_a_merged_death() {
     let db = CardDatabase::from_integration_fixture_typing_faces_on_read()
         .expect("integration card fixture must load");
