@@ -221,6 +221,7 @@ fn create_gift_token(
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         },
         Vec::new(),
         ability.source_id,

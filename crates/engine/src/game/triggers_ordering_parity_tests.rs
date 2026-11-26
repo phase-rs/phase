@@ -1326,6 +1326,7 @@ fn token_power_src() -> Effect {
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 fn return_all_creatures_gy_to_bf() -> Effect {

@@ -628,6 +628,7 @@ fn effect_specified_host_raises_no_prompt() {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         })
         .id();
 

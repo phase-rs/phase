@@ -13271,27 +13271,25 @@ mod tests {
             &mut ctx,
         );
 
-        let mut names = Vec::new();
-        let mut effect = &clause.effect;
-        let mut next = clause.sub_ability.as_deref();
-        loop {
-            let Effect::Token { name, owner, .. } = effect else {
-                panic!("expected shared token sequence, got {effect:?}");
-            };
-            names.push(name.as_str());
-            assert_eq!(
-                owner,
-                &TargetFilter::AttachedTo,
-                "{name} must be created by the enchanted opponent"
-            );
-
-            let Some(definition) = next else {
-                break;
-            };
-            effect = definition.effect.as_ref();
-            next = definition.sub_ability.as_deref();
-        }
-
+        assert!(clause.sub_ability.is_none());
+        let Effect::Token {
+            name,
+            owner,
+            additional_members,
+            ..
+        } = &clause.effect
+        else {
+            panic!("expected shared token creation, got {:?}", clause.effect);
+        };
+        assert_eq!(owner, &TargetFilter::AttachedTo);
+        let names: Vec<_> = std::iter::once(name.as_str())
+            .chain(additional_members.iter().map(|member| {
+                let Effect::Token { name, .. } = member.effect() else {
+                    unreachable!("a token member holds a token effect");
+                };
+                name.as_str()
+            }))
+            .collect();
         assert_eq!(names, ["Clue", "Food", "Junk"]);
     }
 

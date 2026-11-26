@@ -729,9 +729,19 @@ pub(crate) enum TokenBatchProposal {
     Parked,
 }
 
-pub(crate) fn propose_token_batch(
+fn propose_token_batch(
     state: &mut GameState,
     ability: &ResolvedAbility,
+    host_override: Option<AttachTarget>,
+) -> TokenBatchProposal {
+    propose_token_member(state, ability, &ability.effect, None, host_override)
+}
+
+fn propose_token_member(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    effect: &Effect,
+    shared_owner: Option<&TargetFilter>,
     host_override: Option<AttachTarget>,
 ) -> TokenBatchProposal {
     let (
@@ -750,7 +760,7 @@ pub(crate) fn propose_token_batch(
         token_statics,
         etb_counters,
         attach_to,
-    ) = match &ability.effect {
+    ) = match effect {
         Effect::Token {
             name,
             power,
@@ -767,6 +777,7 @@ pub(crate) fn propose_token_batch(
             supertypes,
             static_abilities,
             enter_with_counters,
+            additional_members: _,
         } => (
             name.clone(),
             power.clone(),
@@ -805,7 +816,9 @@ pub(crate) fn propose_token_batch(
     let (count, enters_attacking, attack_request) =
         resolve_token_batch(state, ability, count, enters_attacking, &attack_destination);
     // CR 608.2b: a declared player whose target was illegal creates no token.
-    let Some(token_owner) = resolve_token_owner(state, ability, owner_filter) else {
+    let Some(token_owner) =
+        resolve_token_owner(state, ability, shared_owner.unwrap_or(owner_filter))
+    else {
         return TokenBatchProposal::NoToken;
     };
 
@@ -818,7 +831,9 @@ pub(crate) fn propose_token_batch(
     // and nothing bound it": CR 303.4i denies the entry of an Aura token in the
     // second case and says nothing about the first, and the seam that applies
     // that verdict runs after the CR 614 replacement pipeline, far from here.
-    let host_request = if let Some(host) = host_override {
+    let host_request = if let Some(host) = host_override
+        .filter(|_| shared_owner.is_none() || matches!(attach_to, Some(TargetFilter::ParentTarget)))
+    {
         // Resumed after a "one of them" host choice: the choice is bound.
         TokenHostRequest::Bound(host)
     } else {
@@ -904,6 +919,38 @@ pub(crate) fn propose_token_batch(
     }))
 }
 
+/// CR 701.7a: Bind the members against one pre-creation state and propose
+/// their batches together. The verb's subject controls every member.
+pub(crate) fn propose_token_instruction(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    host_override: Option<AttachTarget>,
+) -> TokenBatchProposal {
+    let Effect::Token {
+        owner,
+        additional_members,
+        ..
+    } = &ability.effect
+    else {
+        return propose_token_batch(state, ability, host_override);
+    };
+    if additional_members.is_empty() {
+        return propose_token_batch(state, ability, host_override);
+    }
+
+    let mut views = Vec::with_capacity(1 + additional_members.len());
+    for effect in ability.effect.token_creation_members() {
+        match propose_token_member(state, ability, effect, Some(owner), host_override) {
+            TokenBatchProposal::Ready(event) => views.push(*event),
+            TokenBatchProposal::Parked => return TokenBatchProposal::Parked,
+            TokenBatchProposal::NoToken => return TokenBatchProposal::NoToken,
+        }
+    }
+    TokenBatchProposal::Ready(Box::new(
+        ProposedEvent::from_token_batch_views(views).expect("token members produce token views"),
+    ))
+}
+
 /// `resolve` with a pre-chosen token host. `Some` resumes a "one of them"
 /// host choice the first pass paused for (`WaitingFor::ChooseTokenHost`):
 /// the choice binds the host and the pause branch is skipped, so a resumed
@@ -914,7 +961,7 @@ pub(crate) fn resolve_with_host_override(
     events: &mut Vec<GameEvent>,
     host_override: Option<AttachTarget>,
 ) -> Result<(), EffectError> {
-    match propose_token_batch(state, ability, host_override) {
+    match propose_token_instruction(state, ability, host_override) {
         TokenBatchProposal::Parked => Ok(()),
         TokenBatchProposal::NoToken => no_token(state, ability, events),
         TokenBatchProposal::Ready(proposed) => {
@@ -939,15 +986,17 @@ pub(crate) fn resolve_with_host_override(
             }
 
             // CR 608.2c: Consume the tracked set after reading its size for "this way" counting.
-            if matches!(
-                &ability.effect,
-                Effect::Token {
-                    count: QuantityExpr::Ref {
-                        qty: QuantityRef::TrackedSetSize
-                    },
-                    ..
-                }
-            ) {
+            if ability.effect.token_creation_members().any(|member| {
+                matches!(
+                    member,
+                    Effect::Token {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::TrackedSetSize
+                        },
+                        ..
+                    }
+                )
+            }) {
                 if let Some((&id, _)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
                 {
                     state.tracked_object_sets.remove(&id);
@@ -4148,11 +4197,13 @@ pub(crate) fn token_effect_is_source_independent(ability: &ResolvedAbility) -> b
         supertypes: _,
         static_abilities: _,
         enter_with_counters: _,
+        additional_members,
     } = &ability.effect
     else {
         return false;
     };
-    matches!(owner, TargetFilter::Controller)
+    additional_members.is_empty()
+        && matches!(owner, TargetFilter::Controller)
         && matches!(count, QuantityExpr::Fixed { .. })
         && !*enters_attacking
         && attach_to.is_none()
@@ -4548,10 +4599,15 @@ pub(crate) fn resolve_token_spec(
         supertypes,
         static_abilities,
         enter_with_counters,
+        additional_members,
     } = &ability.effect
     else {
         return None;
     };
+
+    if !additional_members.is_empty() {
+        return None;
+    }
 
     let token_owner = resolve_token_owner(state, ability, owner)?;
     let (count, enters_attacking, attack_request) =
@@ -4633,6 +4689,30 @@ pub(crate) fn boon_host_passes_projected_legality(
     ability: &ResolvedAbility,
     host: &TargetRef,
 ) -> bool {
+    let Effect::Token { owner, .. } = &ability.effect else {
+        return true;
+    };
+    let Some(token_owner) = resolve_token_owner(state, ability, owner) else {
+        return true;
+    };
+    ability.effect.token_creation_members().all(|member| {
+        !matches!(
+            member,
+            Effect::Token {
+                attach_to: Some(TargetFilter::ParentTarget),
+                ..
+            }
+        ) || token_member_host_passes_projected_legality(state, ability, member, token_owner, host)
+    })
+}
+
+fn token_member_host_passes_projected_legality(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    member: &Effect,
+    token_owner: PlayerId,
+    host: &TargetRef,
+) -> bool {
     let Effect::Token {
         name,
         power,
@@ -4641,9 +4721,8 @@ pub(crate) fn boon_host_passes_projected_legality(
         colors,
         keywords,
         supertypes,
-        owner,
         ..
-    } = &ability.effect
+    } = member
     else {
         return true;
     };
@@ -4656,9 +4735,6 @@ pub(crate) fn boon_host_passes_projected_legality(
         return true;
     };
     let projection_id = ObjectId(state.next_object_id);
-    let Some(token_owner) = resolve_token_owner(state, ability, owner) else {
-        return true;
-    };
     let mut projection = GameObject::new(
         projection_id,
         CardId(0),
@@ -6320,6 +6396,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         }
     }
 
@@ -6625,6 +6702,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(100),
@@ -7069,6 +7147,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(100),
@@ -7159,6 +7238,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(100),
@@ -7206,6 +7286,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(100),
@@ -7243,6 +7324,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(100),
@@ -7278,6 +7360,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(100),
@@ -7339,6 +7422,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![TargetRef::Object(target_id)],
             ObjectId(100),
@@ -9442,6 +9526,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![TargetRef::Object(foundry)],
             foundry,
@@ -10605,6 +10690,7 @@ mod tests {
                     CounterType::Plus1Plus1,
                     QuantityExpr::Fixed { value: 1 },
                 )],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(100),
@@ -11144,6 +11230,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(100),
@@ -11186,6 +11273,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         }
     }
 
@@ -12679,6 +12767,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![(CounterType::Plus1Plus1, rider)],
+                additional_members: Vec::new(),
             },
             vec![],
             source,

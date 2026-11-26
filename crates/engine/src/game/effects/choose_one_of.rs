@@ -726,6 +726,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         );
         let treasure = AbilityDefinition::new(
@@ -747,6 +748,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         );
         let labels = branch_descriptions(&[food, treasure]);

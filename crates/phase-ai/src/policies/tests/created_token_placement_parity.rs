@@ -80,6 +80,7 @@ pub(crate) fn token_effect(
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters,
+        additional_members: Vec::new(),
     }
 }
 

@@ -3386,6 +3386,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             tapped,
             attack_destination,
             attach_to,
+            additional_members,
             ..
         } => {
             let mut desc = String::new();
@@ -3425,6 +3426,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 desc.push_str(" attached");
             }
             d.push(("token".into(), desc));
+            for member in additional_members {
+                d.extend(effect_details(member.effect()));
+            }
         }
         Effect::PutCounter {
             counter_type,
@@ -6629,7 +6633,9 @@ fn append_effect_static_carrier_items(
             }
         }
         Effect::Token {
-            static_abilities, ..
+            static_abilities,
+            additional_members,
+            ..
         } if token_static_traversal.includes() => {
             for stat in static_abilities {
                 children.push(build_static_item(
@@ -6638,6 +6644,15 @@ fn append_effect_static_carrier_items(
                     static_registry,
                     token_static_traversal,
                 ));
+            }
+            for member in additional_members {
+                append_effect_static_carrier_items(
+                    member.effect(),
+                    trigger_registry,
+                    static_registry,
+                    token_static_traversal,
+                    children,
+                );
             }
         }
         Effect::Counter {
@@ -9369,10 +9384,19 @@ fn visit_effect_static_carrier_modifications(
             }
         }
         Effect::Token {
-            static_abilities, ..
+            static_abilities,
+            additional_members,
+            ..
         } if token_static_traversal.includes() => {
             for stat in static_abilities {
                 visit_static_modifications(stat, visit);
+            }
+            for member in additional_members {
+                visit_effect_static_carrier_modifications(
+                    member.effect(),
+                    token_static_traversal,
+                    visit,
+                );
             }
         }
         Effect::Counter {
@@ -18806,6 +18830,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         let token_detail = |effect: &Effect| {
             effect_details(effect)
@@ -21003,6 +21028,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 supertypes: vec![],
                 static_abilities: vec![static_ability],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         )
     }
@@ -26319,6 +26345,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
             )
             .description(
@@ -26369,6 +26396,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                             },
                         },
                     )],
+                    additional_members: Vec::new(),
                 },
             )
             .description(oracle.to_string()),

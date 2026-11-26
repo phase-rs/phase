@@ -994,6 +994,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             enters_attacking: _,
             attack_destination,
             supertypes: _,
+            additional_members,
         } => match mode {
             ScanMode::Conservative => Axes::CONSERVATIVE,
             ScanMode::LoopFirewall => {
@@ -1028,6 +1029,9 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
                 }
                 for (_counter_type, qty) in enter_with_counters {
                     acc = acc.or(scan_quantity_expr(qty, mode));
+                }
+                for member in additional_members {
+                    acc = acc.or(scan_effect(member.effect(), mode));
                 }
                 acc
             }
@@ -11456,6 +11460,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         }
     }
 

@@ -67,6 +67,7 @@ pub fn resolve(
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         },
     );
     token_branch.description = Some(format!("Create a {amount}/{amount} white Spirit token."));

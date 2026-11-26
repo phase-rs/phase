@@ -889,6 +889,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     };
 
     let sacrifice_at_end_step = AbilityDefinition::new(
@@ -1049,6 +1050,7 @@ fn synthesize_etb_token_attach_keyword(
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     };
 
     let attach_effect = AbilityDefinition::new(
@@ -3896,6 +3898,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         },
     )
     .description(format!(
@@ -4536,6 +4539,7 @@ fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     };
 
     let execute = AbilityDefinition::new(AbilityKind::Spell, token_effect).description(format!(

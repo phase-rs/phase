@@ -874,6 +874,7 @@ pub fn room_effects(
                     supertypes: vec![crate::types::card_type::Supertype::Legendary],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
                 source_id,
                 controller,
@@ -1290,6 +1291,7 @@ fn creature_token(
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 
@@ -1613,6 +1615,7 @@ fn treasure_token() -> Effect {
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 

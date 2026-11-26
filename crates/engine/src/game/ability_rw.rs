@@ -3804,6 +3804,7 @@ fn legacy_effect(x: &Effect) -> bool {
             attach_to,
             enter_with_counters,
             static_abilities,
+            additional_members,
             ..
         } => {
             legacy_quantity_expr(count)
@@ -3815,6 +3816,7 @@ fn legacy_effect(x: &Effect) -> bool {
                     .iter()
                     .any(|(_, q)| legacy_quantity_expr(q))
                 || static_abilities.iter().any(legacy_static_definition)
+                || additional_members.iter().any(|member| legacy_effect(member.effect()))
         }
         Effect::CopyTokenOf {
             target,
@@ -6096,13 +6098,14 @@ fn rw_effect(
             keywords: _,
             tapped: _,
             count,
-            owner: _,
-            attach_to: _,
+            owner,
+            attach_to,
             enters_attacking: _,
             attack_destination,
             supertypes: _,
             static_abilities: _,
             enter_with_counters,
+            additional_members,
         } => {
             let mut p = RwProfile::empty();
             p.writes_external.set(StateKind::SetMembership);
@@ -6119,9 +6122,16 @@ fn rw_effect(
                 p.merge(rw_quantity_expr(q));
             }
             p.merge(rw_quantity_expr(count));
+            p.merge(rw_target_filter(owner));
+            if let Some(host) = attach_to {
+                p.merge(rw_target_filter(host));
+            }
             p.merge(rw_pt_value(power));
             p.merge(rw_pt_value(toughness));
             p.merge(rw_token_attack_destination(attack_destination));
+            for member in additional_members {
+                p.merge(rw_effect(member.effect(), chain_root, pscope, chain_move_owner).0);
+            }
             (p, Some(WriteScope::Created))
         }
         Effect::CopyTokenOf {
@@ -8958,6 +8968,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         }
     }
     /// The destination a token instruction names is a player-reference read:

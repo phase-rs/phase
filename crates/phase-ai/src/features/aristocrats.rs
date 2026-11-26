@@ -357,7 +357,7 @@ fn is_fodder_source(face: &CardFace) -> bool {
 fn is_creature_fodder_effect(e: &&Effect) -> bool {
     match e {
         // CR 111.1: creature token production.
-        Effect::Token { types, .. } => types.iter().any(|s| s == "Creature"),
+        Effect::Token { .. } => e.token_creation_members().any(|member| matches!(member, Effect::Token { types, .. } if types.iter().any(|s| s == "Creature"))),
         // Recursion from graveyard to battlefield targeting a creature.
         // No CR keyword action — generic zone-change effect. The graveyard
         // constraint may ride `origin` or the target filter — `reanimator` owns
@@ -653,6 +653,7 @@ mod tests {
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
+                additional_members: Vec::new(),
             },
         )
     }
@@ -677,6 +678,7 @@ mod tests {
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
+                additional_members: Vec::new(),
             },
         )
     }

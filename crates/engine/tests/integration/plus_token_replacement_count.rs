@@ -4,7 +4,9 @@ use engine::game::combat::AttackTarget;
 use engine::game::game_object::GameObject;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::counter::parse_counter_type;
 use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -16,6 +18,14 @@ const ALLENAL: &str = "Queen Allenal of Ruadach";
 const CHATTERFANG: &str = "Chatterfang, Squirrel General";
 const DOUBLING_SEASON: &str = "Doubling Season";
 const RAISE: &str = "Raise the Alarm";
+const BESTIAL: &str = "Bestial Menace";
+const BESTIAL_MANA: &[ManaType] = &[
+    ManaType::Green,
+    ManaType::Green,
+    ManaType::Colorless,
+    ManaType::Colorless,
+    ManaType::Colorless,
+];
 
 fn tokens(runner: &GameRunner, owner: PlayerId) -> Vec<&GameObject> {
     let state = runner.state();
@@ -140,6 +150,11 @@ fn choose_append_order(other: &str, first: &str) -> GameRunner {
         &[ManaType::White, ManaType::Colorless],
     );
     runner.cast(spell).resolve();
+    answer_append_order(&mut runner, other, first);
+    runner
+}
+
+fn answer_append_order(runner: &mut GameRunner, other: &str, first: &str) {
     let WaitingFor::ReplacementChoice {
         player,
         kind,
@@ -163,7 +178,6 @@ fn choose_append_order(other: &str, first: &str) -> GameRunner {
         .act(GameAction::ChooseReplacement { index })
         .expect("apply the chosen replacement");
     runner.advance_until_stack_empty();
-    runner
 }
 
 #[test]
@@ -195,6 +209,231 @@ fn allenal_and_chatterfang_order_changes_the_admitted_count() {
         P0,
         &[("Soldier", 3), ("Squirrel", 2)],
     );
+}
+
+#[test]
+fn allenal_adds_one_soldier_to_bestial_menace() {
+    let (mut runner, spell) = cast_board(&[ALLENAL], P0, BESTIAL, BESTIAL_MANA);
+    runner.cast(spell).resolve();
+    assert_tokens(
+        &runner,
+        P0,
+        &[("Snake", 1), ("Wolf", 1), ("Elephant", 1), ("Soldier", 1)],
+    );
+}
+
+#[test]
+fn bankbuster_appenders_use_the_admitted_batches() {
+    let db = crate::support::shared_card_db().expect("curated card fixture");
+    for (source, extra, count) in [(ALLENAL, "Soldier", 1), (CHATTERFANG, "Squirrel", 2)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_real_card(P0, source, Zone::Battlefield, db);
+        let bankbuster = scenario.add_real_card(P0, "Reckoner Bankbuster", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Island", Zone::Library, db);
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ],
+        );
+        let mut runner = scenario.build();
+        // Use the last-charge state to exercise the conditional list.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&bankbuster)
+            .unwrap()
+            .counters
+            .insert(parse_counter_type("charge"), 1);
+        runner.activate(bankbuster, 0).resolve();
+        assert_tokens(
+            &runner,
+            P0,
+            &[("Treasure", 1), ("Pilot", 1), (extra, count)],
+        );
+        assert_eq!(runner.state().last_created_token_ids.len(), 2 + count);
+    }
+}
+
+#[test]
+fn bestial_menace_order_survives_serialization_and_publishes_all_created_ids() {
+    for (first, soldiers) in [(DOUBLING_SEASON, 1), (ALLENAL, 2)] {
+        let (mut runner, spell) =
+            cast_board(&[ALLENAL, DOUBLING_SEASON], P0, BESTIAL, BESTIAL_MANA);
+        runner.cast(spell).resolve();
+        let pending = &runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .expect("creation is still pending")
+            .proposed;
+        let views = pending.clone().into_token_batch_views();
+        assert_eq!(views.len(), 3);
+        assert!(views
+            .iter()
+            .all(|view| view.create_token_count() == Some(1) && view.applied_set().is_empty()));
+        assert!(tokens(&runner, P0).is_empty());
+
+        let bytes = serde_json::to_vec(runner.state()).expect("serialize parked state");
+        let mut runner =
+            GameRunner::from_state(serde_json::from_slice(&bytes).expect("restore parked state"));
+        let restored = &runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .proposed;
+        assert_eq!(restored, pending);
+        answer_append_order(&mut runner, DOUBLING_SEASON, first);
+
+        // CR 616.1e-f: double first gives 3 × 2 + 1. Append first gives (3 + 1) × 2.
+        assert_tokens(
+            &runner,
+            P0,
+            &[
+                ("Snake", 2),
+                ("Wolf", 2),
+                ("Elephant", 2),
+                ("Soldier", soldiers),
+            ],
+        );
+        let mut published = runner.state().last_created_token_ids.clone();
+        published.sort_unstable_by_key(|id| id.0);
+        let mut actual: Vec<_> = tokens(&runner, P0).iter().map(|obj| obj.id).collect();
+        actual.sort_unstable_by_key(|id| id.0);
+        assert_eq!(published, actual);
+    }
+}
+
+#[test]
+fn farmer_cotton_resolves_x_for_both_members() {
+    use ManaType::{Colorless, Green, White};
+    let (mut runner, spell) = cast_board(
+        &[],
+        P0,
+        "Farmer Cotton",
+        &[Green, White, Colorless, Colorless, Colorless],
+    );
+    runner.cast(spell).x(3).resolve();
+    runner.advance_until_stack_empty();
+    assert_tokens(&runner, P0, &[("Halfling", 3), ("Food", 3)]);
+    assert_eq!(runner.state().last_created_token_ids.len(), 6);
+}
+
+#[test]
+fn fae_offering_and_manufactor_create_three_of_each_in_one_batch() {
+    use ManaType::{Colorless, Red};
+    let db = crate::support::shared_card_db().expect("curated card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Fae Offering", Zone::Battlefield, db);
+    let manufactor = scenario.add_real_card(P0, "Academy Manufactor", Zone::Hand, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        [Colorless, Colorless, Colorless, Red]
+            .into_iter()
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(manufactor).resolve();
+    runner.cast(bolt).target_player(P1).resolve();
+    runner.advance_to_phase(Phase::End);
+    runner.advance_until_stack_empty();
+    assert_tokens(&runner, P0, &[("Clue", 3), ("Food", 3), ("Treasure", 3)]);
+    assert_eq!(runner.state().last_created_token_ids.len(), 9);
+}
+
+#[test]
+fn esix_offers_one_substitution_for_all_of_bestial_menace() {
+    let db = crate::support::shared_card_db().expect("curated card fixture");
+    for accept in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_real_card(P0, "Esix, Fractal Bloom", Zone::Battlefield, db);
+        let ox = scenario.add_creature(P0, "Decoy Ox", 5, 4).id();
+        let first = scenario.add_real_card(P0, BESTIAL, Zone::Hand, db);
+        let second = scenario.add_real_card(P0, BESTIAL, Zone::Hand, db);
+        scenario.with_mana_pool(
+            P0,
+            BESTIAL_MANA
+                .iter()
+                .cycle()
+                .take(10)
+                .map(|&color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner.cast(first).commit().stop_at_optional().resolve();
+        assert!(
+            matches!(&runner.state().waiting_for, WaitingFor::ReplacementChoice { player, candidates, .. }
+            if *player == P0 && candidates.iter().any(|c| c.source_name == "Esix, Fractal Bloom"))
+        );
+        runner
+            .act(GameAction::ChooseReplacement {
+                index: usize::from(!accept),
+            })
+            .unwrap();
+        if accept {
+            assert!(
+                matches!(&runner.state().waiting_for, WaitingFor::CopyTargetChoice { valid_targets, .. }
+                if valid_targets.contains(&ox))
+            );
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(ox)),
+                })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert_eq!(tokens(&runner, P0).len(), 3);
+            assert!(tokens(&runner, P0).iter().all(|obj| obj.name == "Decoy Ox"));
+        } else {
+            assert_tokens(&runner, P0, &[("Snake", 1), ("Wolf", 1), ("Elephant", 1)]);
+        }
+
+        runner.cast(second).commit().stop_at_optional().resolve();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        let originals = if accept { 1 } else { 2 };
+        for subtype in ["Snake", "Wolf", "Elephant"] {
+            assert_eq!(
+                tokens(&runner, P0)
+                    .iter()
+                    .filter(|obj| obj.card_types.subtypes.iter().any(|ty| ty == subtype))
+                    .count(),
+                originals
+            );
+        }
+    }
+}
+
+#[test]
+fn peregrin_appends_once_to_each_separate_create_instruction() {
+    use ManaType::{Blue, Colorless, Red};
+
+    // CR 608.2c + CR 614.5: Frost Fair Lure Fish instructs the controller
+    // to create two Fish and separately create two tapped Treasures. Each
+    // creation gives Peregrin an opportunity to add one Food.
+    let (mut runner, spell) = cast_board(
+        &["Peregrin Took"],
+        P0,
+        "Frost Fair Lure Fish",
+        &[
+            Blue, Red, Colorless, Colorless, Colorless, Colorless, Colorless,
+        ],
+    );
+    runner.cast(spell).resolve();
+    runner.advance_until_stack_empty();
+    assert_tokens(&runner, P0, &[("Fish", 2), ("Treasure", 2), ("Food", 2)]);
+    assert!(tokens(&runner, P0)
+        .iter()
+        .filter(|object| object.card_types.subtypes.iter().any(|ty| ty == "Treasure"))
+        .all(|object| object.tapped));
 }
 
 #[test]

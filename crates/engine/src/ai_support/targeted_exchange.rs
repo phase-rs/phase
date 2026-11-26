@@ -1770,6 +1770,7 @@ mod tests {
                     supertypes: vec![],
                     static_abilities: vec![grant_fight_static()],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
             ),
         ));

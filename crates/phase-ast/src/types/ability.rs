@@ -23520,6 +23520,66 @@ where
     })
 }
 
+/// An additional token noun phrase in a single creation instruction (CR 701.7a).
+/// Its characteristics and quantity remain unresolved until the instruction runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct TokenCreationMember(Box<Effect>);
+
+impl TokenCreationMember {
+    pub fn new(effect: Effect) -> Option<Self> {
+        match &effect {
+            Effect::Token {
+                additional_members, ..
+            } if additional_members.is_empty() => Some(Self(Box::new(effect))),
+            _ => None,
+        }
+    }
+
+    pub fn effect(&self) -> &Effect {
+        &self.0
+    }
+    pub fn count_and_pt_mut(&mut self) -> (&mut QuantityExpr, &mut PtValue, &mut PtValue) {
+        let Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } = self.0.as_mut()
+        else {
+            unreachable!("a token creation member carries a token effect");
+        };
+        (count, power, toughness)
+    }
+
+    pub(crate) fn static_abilities_mut(&mut self) -> &mut [StaticDefinition] {
+        let Effect::Token {
+            static_abilities, ..
+        } = self.0.as_mut()
+        else {
+            unreachable!("a token creation member carries a token effect");
+        };
+        static_abilities
+    }
+
+    pub(crate) fn static_abilities(&self) -> &[StaticDefinition] {
+        let Effect::Token {
+            static_abilities, ..
+        } = self.effect()
+        else {
+            unreachable!("a token creation member carries a token effect");
+        };
+        static_abilities
+    }
+}
+
+impl<'de> Deserialize<'de> for TokenCreationMember {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(Effect::deserialize(deserializer)?)
+            .ok_or_else(|| de::Error::custom("expected a single token creation member"))
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
@@ -23786,6 +23846,9 @@ pub enum Effect {
         /// X +1/+1 counters on it" patterns.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// Further noun phrases governed by this instruction's creation verb and owner.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_members: Vec<TokenCreationMember>,
     },
     GainLife {
         #[serde(default = "default_quantity_one")]
@@ -31928,6 +31991,22 @@ impl Effect {
         )
     }
 
+    /// The token batches governed by this creation instruction, in Oracle order.
+    pub fn token_creation_members(&self) -> impl Iterator<Item = &Effect> {
+        let members = match self {
+            Effect::Token {
+                additional_members, ..
+            } => Some(additional_members.as_slice()),
+            _ => None,
+        };
+        members.map(|_| self).into_iter().chain(
+            members
+                .into_iter()
+                .flatten()
+                .map(TokenCreationMember::effect),
+        )
+    }
+
     /// Single authority for constructing the "parser couldn't handle this"
     /// effect. Parser code must use this instead of a literal
     /// `Effect::Unimplemented { .. }` (enforced for new code by
@@ -34786,6 +34865,7 @@ macro_rules! define_effect_quantity_walk {
                 toughness,
                 count,
                 enter_with_counters,
+                additional_members,
                 ..
             } => {
                 visit_pt(power, f);
@@ -34793,6 +34873,9 @@ macro_rules! define_effect_quantity_walk {
                 f(count);
                 for (_, q) in enter_with_counters {
                     f(q);
+                }
+                for member in additional_members {
+                    member.0.$name(f);
                 }
             }
             Effect::GainLife { amount, .. } => {
@@ -46052,6 +46135,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         }
     }
 
@@ -49236,6 +49320,7 @@ mod tests {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         };
         assert_eq!(token.count_expr(), Some(&fixed(4)));
 
@@ -51315,6 +51400,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();

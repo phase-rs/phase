@@ -365,10 +365,9 @@ fn is_token_generator(face: &CardFace, tribe: &str) -> bool {
 }
 
 fn token_effect_has_tribe(e: &Effect, tribe: &str) -> bool {
-    if let Effect::Token { types, .. } = e {
-        return types.iter().any(|s| canonicalize_subtype_name(s) == tribe);
-    }
-    false
+    e.token_creation_members().any(|member| {
+        matches!(member, Effect::Token { types, .. } if types.iter().any(|s| canonicalize_subtype_name(s) == tribe))
+    })
 }
 
 /// True if `filter` references the given tribe with controller = You or unset (wildcard).
@@ -617,6 +616,7 @@ mod tests {
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
+                additional_members: Vec::new(),
             },
         ));
 

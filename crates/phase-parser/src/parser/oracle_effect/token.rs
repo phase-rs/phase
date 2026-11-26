@@ -188,6 +188,7 @@ pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Opti
         supertypes: token.supertypes,
         static_abilities: token.static_abilities,
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     })
 }
 

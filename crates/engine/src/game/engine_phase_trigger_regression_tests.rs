@@ -3422,6 +3422,7 @@ fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         },
     );
     let ability = ResolvedAbility::new(

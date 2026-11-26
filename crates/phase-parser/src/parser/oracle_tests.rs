@@ -22760,30 +22760,52 @@ fn overencumbered_etb_assigns_each_token_to_the_enchanted_opponent() {
     let oracle = "Enchant opponent\nWhen this Aura enters, enchanted opponent creates a Clue token, a Food token, and a Junk token.\nAt the beginning of combat on enchanted opponent's turn, that player may pay {1} for each artifact they control. If they don't, creatures can't attack this combat.";
     let parsed = parse(oracle, "Overencumbered", &[], &["Enchantment"], &["Aura"]);
 
-    let mut node = Some(
-        parsed
-            .triggers
-            .iter()
-            .filter_map(|trigger| trigger.execute.as_deref())
-            .find(
-                |execute| matches!(&*execute.effect, Effect::Token { name, .. } if name == "Clue"),
-            )
-            .expect("the ETB trigger must begin with the Clue token"),
+    let execute = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find(|execute| matches!(&*execute.effect, Effect::Token { name, .. } if name == "Clue"))
+        .expect("the ETB trigger must begin with the Clue token");
+    assert!(execute.sub_ability.is_none(), "the list is one instruction");
+    assert!(
+        matches!(&*execute.effect, Effect::Token { owner, .. } if *owner == TargetFilter::AttachedTo)
     );
+    let names: Vec<_> = execute
+        .effect
+        .token_creation_members()
+        .map(|member| {
+            let Effect::Token { name, .. } = member else {
+                unreachable!("a token creation member is a token effect");
+            };
+            name.as_str()
+        })
+        .collect();
+    assert_eq!(names, ["Clue", "Food", "Junk"]);
+}
 
-    for expected_name in ["Clue", "Food", "Junk"] {
-        let current = node.expect("expected another token in the shared ETB chain");
-        let Effect::Token { name, owner, .. } = &*current.effect else {
-            panic!(
-                "expected {expected_name} token in ETB chain, got {:?}",
-                current.effect
-            );
-        };
-        assert_eq!(name, expected_name);
-        assert_eq!(owner, &TargetFilter::AttachedTo);
-        node = current.sub_ability.as_deref();
-    }
-    assert!(node.is_none(), "no extra token should follow Junk");
+#[test]
+fn farmer_cotton_binds_cost_x_for_every_token_creation_member() {
+    let oracle = "When this creature enters, create X 1/1 white Halfling creature tokens and X Food tokens. (They're artifacts with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")";
+    let parsed = parse(
+        oracle,
+        "Farmer Cotton",
+        &[],
+        &["Creature"],
+        &["Halfling", "Peasant"],
+    );
+    let execute = parsed.triggers[0].execute.as_ref().expect("printed ETB");
+    assert!(execute.sub_ability.is_none());
+    let counts: Vec<_> = execute
+        .effect
+        .token_creation_members()
+        .map(Effect::count_expr)
+        .collect();
+    assert_eq!(
+        counts,
+        [Some(&QuantityExpr::Ref {
+            qty: QuantityRef::CostXPaid
+        }); 2]
+    );
 }
 
 /// CR 701.26b + CR 613.1f: Frozen in Ice — "Enchanted creature loses all
@@ -34046,6 +34068,7 @@ fn render_net_reaches_every_nested_description_carrier() {
         supertypes: vec![],
         static_abilities: vec![token_static],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }));
     tags.extend(["token_static", "token_static_mod"]);
 

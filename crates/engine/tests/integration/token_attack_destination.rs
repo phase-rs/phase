@@ -496,6 +496,7 @@ fn goblin_effect(destination: TokenAttackDestination) -> Effect {
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 

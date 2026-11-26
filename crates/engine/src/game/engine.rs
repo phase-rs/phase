@@ -24884,6 +24884,7 @@ mod stage2_injector_tests {
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
             );
             a.repeat_for = Some(QuantityExpr::Ref {

@@ -324,6 +324,7 @@ fn tracked_entry_counter_token_receives_discarded_count_counters() {
                     qty: QuantityRef::TrackedSetSize,
                 },
             )],
+            additional_members: Vec::new(),
         },
         vec![],
         source,

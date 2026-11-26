@@ -34,6 +34,7 @@ fn token_batch_effect(name: &str, types: &[&str], keywords: Vec<Keyword>, count:
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 
