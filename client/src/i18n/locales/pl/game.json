@@ -2522,7 +2522,7 @@
     "cost": {
       "card": "kartę",
       "cards": "karty",
-      "countAnyNumber": "dowolną liczbę",
+      "countAnyNumber": "dowolne",
       "filteredCard": "kartę {{types}}",
       "filteredCards": "karty {{types}}",
       "nonType": "nie-{{type}}",
