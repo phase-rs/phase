@@ -37432,13 +37432,10 @@ pub enum ActivationRestriction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         maximum: Option<u32>,
     },
-    /// CR 702.62a: "If you could begin to cast this card by putting it onto the
-    /// stack from your hand" — the activation is legal whenever the underlying
-    /// card type's natural cast timing is legal. For a sorcery / permanent card,
-    /// this is sorcery-speed; for an instant, it's instant-speed. Used by the
-    /// synthesized Suspend hand-activated ability so future "cast-timing-mirroring"
-    /// activations (Foretell, etc.) can reuse this primitive instead of
-    /// special-casing card type at synthesis time.
+    /// CR 702.62a + CR 702.62c: "If you could begin to cast this card by putting it onto the
+    /// stack from your hand": legal whenever that cast could begin (CR 601.3), by the card's own
+    /// timing or an open flash route, with no effect prohibiting the cast. Used by the synthesized
+    /// Suspend hand ability.
     MatchesCardCastTiming,
 }
 

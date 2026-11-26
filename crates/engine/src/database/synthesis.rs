@@ -9207,7 +9207,8 @@ fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u
 /// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
 /// carrying `Keyword::Suspend { count, cost }`:
 ///
-///   1. **Hand-activated alt-cost** ("Rather than cast this card from your hand,
+///   1. **Hand-activated alt-cost** (not for Suspend X)
+///      ("Rather than cast this card from your hand,
 ///      you may pay [cost] and exile it with N time counters on it. This action
 ///      doesn't use the stack."). Modeled as an activated ability with
 ///      `activation_zone = Hand` and `ActivationRestriction::MatchesCardCastTiming`
@@ -9265,7 +9266,9 @@ pub fn synthesize_suspend(face: &mut CardFace) {
                     if *counter_type == CounterType::Time
             )
     });
-    if !already_has_activation {
+    // CR 702.62a: no card prints suspend 0 ("X can't be 0", Aeon Chronicler); a count of 0 is
+    // the placeholder for an unread X, whose cost reads {0} too.
+    if time_counters > 0 && !already_has_activation {
         let composite_cost = AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Mana {
