@@ -15,6 +15,7 @@
 
 use engine::game::effects::{token, token_copy};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     ContinuousModification, ControllerRef, Effect, EffectKind, NamedDefenderScope, PlayerFilter,
     PtValue, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
@@ -26,12 +27,13 @@ use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 use super::rules::AttackTarget;
+use crate::support::shared_card_db;
 
 const P2: PlayerId = PlayerId(2);
 const P3: PlayerId = PlayerId(3);
@@ -1053,6 +1055,141 @@ fn mardu_siegebreaker_without_an_exiled_donor_creates_nothing() {
     reach_end_step(&mut runner, P0);
     drain(&mut runner, TriggerOrder::AsOffered);
     assert_eq!(tokens_named(&runner, "Soldier"), unrelated);
+}
+
+/// CR 400.7 + CR 607.2a: the old attack trigger cannot use the new
+/// incarnation's linked exile, even though its former donor has returned.
+#[test]
+fn mardu_siegebreaker_attack_uses_its_own_incarnations_linked_exile() {
+    let db = shared_card_db().expect("printed card fixture");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let giant = scenario.add_real_card(P0, "Hill Giant", Zone::Battlefield, db);
+    let card = scenario.add_real_card(P0, "Mardu Siegebreaker", Zone::Hand, db);
+    let blink = scenario.add_real_card(P0, "Cloudshift", Zone::Hand, db);
+    for color in [
+        ManaColor::Red,
+        ManaColor::White,
+        ManaColor::Black,
+        ManaColor::White,
+        ManaColor::White,
+    ] {
+        scenario.add_basic_land(P0, color);
+    }
+    let mut runner = scenario.build();
+    let attacker = resolve_siegebreaker(&mut runner, card, P0, Some(bears));
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("attack");
+    assert_eq!(runner.stack_names(), ["Mardu Siegebreaker"]);
+    let attack_trigger = runner.state().stack[0].id;
+
+    let _ = runner.cast(blink).target_object(attacker).commit();
+    runner.resolve_top();
+    let WaitingFor::TriggerTargetSelection { .. } = runner.state().waiting_for else {
+        panic!("expected the returned Siegebreaker's ETB target");
+    };
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(giant)),
+        })
+        .expect("choose a different donor for the returned Siegebreaker");
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&giant].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].id, attack_trigger);
+
+    drain(&mut runner, TriggerOrder::AsOffered);
+    assert!(runner
+        .state()
+        .battlefield
+        .iter()
+        .all(|id| !runner.state().objects[id].is_token));
+}
+
+/// CR 506.3a + CR 508.4: the Clone tokens' final creature characteristics
+/// allow each of them to enter attacking its assigned opponent.
+#[test]
+fn mardu_siegebreaker_seats_clone_tokens_after_their_copy_choices() {
+    let db = shared_card_db().expect("printed card fixture");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let giant = scenario.add_real_card(P0, "Hill Giant", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let clone = scenario.add_real_card(P0, "Clone", Zone::Hand, db);
+    let card = scenario.add_real_card(P0, "Mardu Siegebreaker", Zone::Hand, db);
+    let islands = [(); 4].map(|()| scenario.add_basic_land(P0, ManaColor::Blue));
+    for color in [
+        ManaColor::Red,
+        ManaColor::Black,
+        ManaColor::White,
+        ManaColor::White,
+    ] {
+        scenario.add_basic_land(P0, color);
+    }
+    let mut runner = scenario.build();
+    for source_id in islands {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("tap Island to pay for Clone");
+    }
+    runner
+        .cast(clone)
+        .replacement_choice(0)
+        .copy_target(giant)
+        .resolve();
+    assert_eq!(runner.state().objects[&clone].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&clone].name, "Hill Giant");
+    let attacker = resolve_siegebreaker(&mut runner, card, P0, Some(clone));
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("attack");
+    runner.resolve_top();
+
+    for _ in [P1, P2] {
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player, .. } if player == P0
+        ));
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("apply the Clone token's copy replacement");
+        let WaitingFor::CopyTargetChoice {
+            player,
+            valid_targets,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("expected a Clone token's as-enters copy choice");
+        };
+        assert_eq!(*player, P0);
+        assert!(valid_targets.contains(&bears));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bears)),
+            })
+            .expect("copy Grizzly Bears as the token enters");
+    }
+    drain(&mut runner, TriggerOrder::AsOffered);
+    let copies = tokens_named(&runner, "Grizzly Bears");
+    assert_eq!(
+        seats_in_creation_order(&runner, &copies),
+        players_attacked(&[P1, P2])
+    );
+    assert_all_tapped(&runner, &copies);
+    assert!(runner.state().active_copy_token().is_none());
+    assert!(runner.state().pending_token_battlefield_entry.is_none());
+    reach_end_step(&mut runner, P0);
+    drain(&mut runner, TriggerOrder::AsOffered);
+    assert!(tokens_named(&runner, "Grizzly Bears").is_empty());
 }
 
 /// CR 508.4a: P2 leaves after destinations were fixed. Its copy still enters
