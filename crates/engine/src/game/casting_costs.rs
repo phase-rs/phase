@@ -584,28 +584,116 @@ fn declaration_offerable_reserving(
     if total.is_without_paying_mana() {
         return Ok(true);
     }
-    let reserved = super::casting::PaymentReservation::life(
-        reserved_life
-            + split.residual.as_ref().map_or(0, |residual| {
-                cost_life_payment(state, player, pending.object_id, residual)
-            }),
+    let life = reserved_life
+        + split.residual.as_ref().map_or(0, |residual| {
+            cost_life_payment(state, player, pending.object_id, residual)
+        });
+    // CR 119.4 + CR 601.2h: the mana is judged with that life spoken for.
+    let life_state = super::casting::reserved_payment_state(
+        state,
+        player,
+        &super::casting::PaymentReservation::life(life),
     );
-    let scratch = super::casting::reserved_payment_state(state, player, &reserved);
-    let state = scratch.as_ref().unwrap_or(state);
-    let can_pay_normally =
-        super::casting::can_feasibly_pay_mana_cost(state, player, Some(pending.object_id), &total);
-    if can_pay_normally {
-        return Ok(true);
-    }
-    Ok(split.payment_mode.is_some_and(|mode| {
-        super::casting::can_feasibly_pay_mana_cost_with_tap_payment_mode(
-            state,
-            player,
-            pending.object_id,
-            &total,
-            mode,
-        )
-    }))
+    let payable = |probe: &GameState| {
+        super::casting::can_feasibly_pay_mana_cost(probe, player, Some(pending.object_id), &total)
+            || split.payment_mode.is_some_and(|mode| {
+                super::casting::can_feasibly_pay_mana_cost_with_tap_payment_mode(
+                    probe,
+                    player,
+                    pending.object_id,
+                    &total,
+                    mode,
+                )
+            })
+    };
+    // CR 601.2f-h + CR 118.3: the additional cost's hand and graveyard cards
+    // and the mana abilities' costs are paid from the same finite pool; CR
+    // 601.2g: mana abilities are activated before costs are paid, so the held
+    // cards must survive them. Where a mana ability could spend the declared
+    // cost's cards, the mana is judged with each assignment of them held.
+    let contended = split.residual.as_ref().and_then(|residual| {
+        contended_declaration_legs(state, player, pending.object_id, residual)
+    });
+    let Some((legs, fodder)) = contended else {
+        return Ok(payable(life_state.as_ref().unwrap_or(state)));
+    };
+    // One scratch for the whole search: an assignment is marked on it and
+    // released. Each assignment costs one mana judgment, the same judgment an
+    // uncontended declaration makes once. A hold only narrows what the mana
+    // abilities may spend, so the mana is judged with nothing held only once
+    // an assignment has failed, and when that fails too no further assignment
+    // is judged.
+    let scratch = std::cell::RefCell::new(super::casting::CardHoldScratch::new(
+        life_state.unwrap_or_else(|| state.clone()),
+    ));
+    let unheld = std::cell::OnceCell::new();
+    let payable_unheld =
+        || *unheld.get_or_init(|| scratch.borrow_mut().probe_holding(&[], payable));
+    let mut held = Vec::new();
+    let mut explored = 0;
+    let found = assign_reserved_legs(
+        &legs,
+        &|id| !fodder.contains(&id),
+        &mut held,
+        &mut explored,
+        CARD_HOLD_PROBE_BUDGET,
+        &|objects| {
+            if unheld.get() == Some(&false) {
+                return false;
+            }
+            let payable_held = scratch.borrow_mut().probe_holding(objects, payable);
+            if !payable_held {
+                payable_unheld();
+            }
+            payable_held
+        },
+    );
+    // A search that runs out of budget stays offered when the mana is payable
+    // with nothing held, as the alternative-cost search does; the real payment
+    // decides.
+    Ok(found.unwrap_or_else(payable_unheld))
+}
+
+/// CR 118.3 + CR 601.2g-h: whether some hand or graveyard card `cost`, an
+/// additional cost of the spell `object_id`, would be paid with is one a mana
+/// ability of `player` could also spend, so the two must be judged together
+/// ([`required_declaration_offerable`]).
+pub(super) fn cost_contends_with_mana_abilities(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &AbilityCost,
+) -> bool {
+    contended_declaration_legs(state, player, object_id, cost).is_some()
+}
+
+/// CR 118.3 + CR 601.2g-h: the hand and graveyard legs of `cost`, an additional
+/// cost of the spell `object_id`, that share a card with the cost of a mana
+/// ability of `player`, beside those shared cards (the card fodder). `None`
+/// when the cost has no such leg.
+///
+/// Battlefield legs aren't held here. CR 601.2g-h: the engine lets a cast with
+/// a sacrifice leg reach its mana-ability window before the sacrifice is paid,
+/// and `mana_abilities::deferred_spell_sacrifice_reserved` refuses a mana
+/// ability that would use up the reserved permanent there; a tap leg is
+/// published by the cast's `deferred_tapped_permanents`.
+fn contended_declaration_legs(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &AbilityCost,
+) -> Option<(
+    Vec<super::cost_payability::ReservableLeg>,
+    HashSet<ObjectId>,
+)> {
+    let fodder = mana_sources::mana_ability_card_fodder(state, player);
+    let legs = match cost {
+        AbilityCost::Composite { costs } => costs.as_slice(),
+        leaf => std::slice::from_ref(leaf),
+    };
+    let legs =
+        super::cost_payability::reservable_card_legs(state, player, object_id, legs, &fodder);
+    (!legs.is_empty()).then_some((legs, fodder))
 }
 
 fn continue_after_declared_mana_split(
@@ -1999,6 +2087,13 @@ pub enum ReservationVerdict {
 /// [`ReservationVerdict::Exhausted`].
 pub const RESERVATION_PROBE_BUDGET: usize = 4_096;
 
+/// The most assignments a search over an additional cost's hand and graveyard
+/// cards explores. Each one runs the mana feasibility authority, which copies
+/// the state, and the search runs for every contended spell whenever the legal
+/// actions are generated, so it is kept small. Past it the cast stays offered,
+/// as it was before the cards were held; the real payment decides.
+const CARD_HOLD_PROBE_BUDGET: usize = 64;
+
 /// CR 118.3 + CR 601.2g-h: search the assignments of `legs`' objects for one
 /// that leaves `base`'s priced total payable by the castability authority with
 /// those objects and `pricing.reserved`'s life held.
@@ -2062,6 +2157,7 @@ fn reserved_alternative_verdict(
         &|id| !mana_sources.contains(&id),
         &mut held,
         &mut explored,
+        RESERVATION_PROBE_BUDGET,
         &payable,
     ) {
         Some(true) => ReservationVerdict::Witness,
@@ -2077,6 +2173,7 @@ fn assign_reserved_legs(
     inert: &impl Fn(ObjectId) -> bool,
     held: &mut Vec<(ObjectId, super::casting::ReservedUse)>,
     explored: &mut usize,
+    budget: usize,
     payable: &impl Fn(&[(ObjectId, super::casting::ReservedUse)]) -> bool,
 ) -> Option<bool> {
     let Some((leg, rest)) = legs.split_first() else {
@@ -2102,12 +2199,12 @@ fn assign_reserved_legs(
     let mut cursor: Vec<usize> = (0..remainder).collect();
     let verdict = loop {
         *explored += 1;
-        if *explored > RESERVATION_PROBE_BUDGET {
+        if *explored > budget {
             break None;
         }
         held.truncate(start + from_inert);
         held.extend(cursor.iter().map(|&i| (active[i], leg.reserved_use)));
-        match assign_reserved_legs(rest, inert, held, explored, payable) {
+        match assign_reserved_legs(rest, inert, held, explored, budget, payable) {
             Some(false) => {}
             settled => break settled,
         }
@@ -11824,6 +11921,131 @@ fn defiler_offer_alongside<'a>(
     }
     let committed_life = committed_life_of(state, player, object_id, committed);
     defiler_reduction_alongside(state, player, object_id, committed_life)
+}
+
+/// CR 118.9d + CR 601.2f-h: whether some branch of a mandatory choice of
+/// additional costs can be declared when `alternative`, a granted alternative
+/// cost, is paid in place of the mana cost. Additional costs apply to an
+/// alternative cost, so each branch is judged with the alternative's mana as
+/// the cast's base.
+///
+/// CR 118.3: an alternative with a non-mana leg (Conspiracy Unraveler's
+/// collect evidence) could spend the objects a branch needs, and nothing here
+/// judges the two together, so such an alternative doesn't open the cast.
+pub(super) fn choice_branch_offerable_under_alternative(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    alternative: &AbilityCost,
+    branches: &[AbilityCost],
+) -> Result<bool, EngineError> {
+    let Some(priced) = pending_priced_with_mana_alternative(state, pending, alternative)? else {
+        return Ok(false);
+    };
+    for branch in branches {
+        if required_declaration_offerable(state, player, &priced, branch, None)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// CR 118.9d: `pending` with `alternative`, a mana-only alternative cost, as
+/// the cast's base in place of its mana cost. `None` when the alternative has
+/// a non-mana leg.
+fn pending_priced_with_mana_alternative(
+    state: &GameState,
+    pending: &PendingCast,
+    alternative: &AbilityCost,
+) -> Result<Option<PendingCast>, EngineError> {
+    let split =
+        split_declared_mana_addition_and_residual(Some(state), Some(pending), alternative.clone())?;
+    if split.residual.is_some() {
+        return Ok(None);
+    }
+    let mut priced = pending.clone();
+    priced.cost = ManaCost::zero();
+    priced.base_cost = Some(ManaCost::zero());
+    priced.declared_mana_additions.extend(split.declared);
+    Ok(Some(priced))
+}
+
+/// CR 118.9d + CR 601.2f-h: whether `required`, a required additional cost a
+/// mana ability's cost contends with, can be declared when `alternative`, a
+/// granted alternative cost, is paid in place of the mana cost.
+///
+/// A mana-only alternative (As Foretold's {0}) is the cast's base, and the
+/// declaration authority judges the required cost beside it. CR 118.3 +
+/// CR 118.10: an alternative with a non-mana leg (Conspiracy Unraveler's
+/// collect evidence) is paid with objects too, and one card pays one cost, so
+/// the alternative must still be payable with some assignment of the required
+/// cost's hand and graveyard cards held. The required cost's own legs were
+/// judged by the caller; a leg whose count the joint model doesn't represent
+/// isn't held here.
+pub(super) fn required_declaration_offerable_under_alternative(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    alternative: &AbilityCost,
+    required: &AbilityCost,
+) -> Result<bool, EngineError> {
+    if let Some(priced) = pending_priced_with_mana_alternative(state, pending, alternative)? {
+        return required_declaration_offerable(state, player, &priced, required, None);
+    }
+    // The required cost's mana isn't priced beside an alternative's objects.
+    let split =
+        split_declared_mana_addition_and_residual(Some(state), Some(pending), required.clone())?;
+    if !split.declared.is_empty() || split.payment_mode.is_some() {
+        return Ok(false);
+    }
+    let Some(residual) = split.residual.as_ref() else {
+        return Ok(true);
+    };
+    // The cards either the alternative or a mana ability could also spend.
+    let mut contended = mana_sources::mana_ability_card_fodder(state, player);
+    contended.extend(super::cost_payability::object_cost_candidates(
+        state,
+        player,
+        pending.object_id,
+        alternative,
+    ));
+    let legs = match residual {
+        AbilityCost::Composite { costs } => costs.as_slice(),
+        leaf => std::slice::from_ref(leaf),
+    };
+    let legs = super::cost_payability::reservable_card_legs(
+        state,
+        player,
+        pending.object_id,
+        legs,
+        &contended,
+    );
+    // The same alternative, not another one the held cards leave payable.
+    let alternative_payable = |probe: &GameState| {
+        payable_spell_alternative_cost_details_at_index(
+            probe,
+            player,
+            pending.object_id,
+            pending.casting_permission_index,
+        )
+        .is_some_and(|payable| payable.cost == *alternative)
+    };
+    let scratch = std::cell::RefCell::new(super::casting::CardHoldScratch::new(state.clone()));
+    let mut held = Vec::new();
+    let mut explored = 0;
+    // A search that runs out of budget stays offered; the real payment decides.
+    Ok(assign_reserved_legs(
+        &legs,
+        &|id| !contended.contains(&id),
+        &mut held,
+        &mut explored,
+        CARD_HOLD_PROBE_BUDGET,
+        &|objects| {
+            scratch
+                .borrow_mut()
+                .probe_holding(objects, alternative_payable)
+        },
+    ) != Some(false))
 }
 
 /// CR 601.2b + CR 601.2f: whether an object's own required additional cost can
@@ -38083,5 +38305,40 @@ its replicate cost was paid.)\nDraw a card.";
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod card_hold_probe_budget_tests {
+    use super::{assign_reserved_legs, CARD_HOLD_PROBE_BUDGET};
+    use crate::game::casting::ReservedUse;
+    use crate::game::cost_payability::ReservableLeg;
+    use crate::types::identifiers::ObjectId;
+    use std::cell::Cell;
+
+    /// A leg with C(20, 6) assignments, none of them payable: the search stops
+    /// at the budget without a verdict, so the caller keeps the offer, and the
+    /// payment probe runs no more often than the budget.
+    #[test]
+    fn a_card_hold_search_stops_at_its_budget() {
+        let leg = ReservableLeg {
+            reserved_use: ReservedUse::Present,
+            count: 6,
+            candidates: (0..20).map(ObjectId).collect(),
+        };
+        let probes = Cell::new(0usize);
+        let verdict = assign_reserved_legs(
+            &[leg],
+            &|_| false,
+            &mut Vec::new(),
+            &mut 0,
+            CARD_HOLD_PROBE_BUDGET,
+            &|_| {
+                probes.set(probes.get() + 1);
+                false
+            },
+        );
+        assert_eq!(verdict, None);
+        assert_eq!(probes.get(), CARD_HOLD_PROBE_BUDGET);
     }
 }

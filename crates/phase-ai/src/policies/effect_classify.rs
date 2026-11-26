@@ -3588,7 +3588,7 @@ mod temporary_combat_modifier_tests {
     fn sacrifice(target: TargetFilter) -> Effect {
         Effect::Sacrifice {
             target,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         }
     }

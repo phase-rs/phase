@@ -240,7 +240,7 @@ fn saga_token_entry_counter_and_carmen_pre_entry_gate_share_one_batch() {
     let sacrifice_step = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::SpecificObject { id: bears },
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
         Vec::new(),

@@ -3383,7 +3383,6 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Scry { count, target }
         | Effect::Surveil { count, target }
         | Effect::RemoveCounter { count, target, .. }
-        | Effect::Sacrifice { target, count, .. }
         | Effect::PutCounter { count, target, .. }
         | Effect::PutCounterAll { count, target, .. }
         | Effect::Connive { target, count }
@@ -3395,6 +3394,9 @@ fn legacy_effect(x: &Effect) -> bool {
             amount: count,
             target,
         } => legacy_quantity_expr(count) || legacy_target_filter(target),
+        Effect::Sacrifice { target, count, .. } => {
+            count.count_expr().is_some_and(legacy_quantity_expr) || legacy_target_filter(target)
+        }
         Effect::PutAtLibraryPosition {
             target,
             count,
@@ -5675,7 +5677,9 @@ fn rw_effect(
             min_count: _,
         } => {
             let (mut p, sc) = mem(target, Some(Zone::Battlefield), Zone::Graveyard);
-            p.merge(rw_quantity_expr(count));
+            if let Some(count) = count.count_expr() {
+                p.merge(rw_quantity_expr(count));
+            }
             (p, sc)
         }
         Effect::Bounce {
@@ -8948,7 +8952,7 @@ mod tests {
     fn sacrifice_self() -> Effect {
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: qfix(1),
+            count: qfix(1).into(),
             min_count: 0,
         }
     }
@@ -10149,7 +10153,7 @@ mod tests {
             assert!(
                 legacy(&ra(Effect::Sacrifice {
                     target: creature(),
-                    count: qref(tag.clone()),
+                    count: qref(tag.clone()).into(),
                     min_count: 0,
                 })),
                 "Sacrifice count {tag:?}"
@@ -10217,7 +10221,7 @@ mod tests {
         assert!(
             !legacy(&ra(Effect::Sacrifice {
                 target: creature(),
-                count: qfix(1),
+                count: qfix(1).into(),
                 min_count: 0,
             })),
             "Sacrifice with a fixed count carries no frozen tag"

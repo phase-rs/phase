@@ -13550,6 +13550,54 @@ pub(super) fn reserved_payment_state(
     Some(scratch)
 }
 
+/// CR 118.3 + CR 601.2g-h: one scratch state for a whole search over the hand
+/// and graveyard cards a cost's other legs hold. Each assignment is held on it
+/// and released again.
+///
+/// CR 118.3 + CR 118.10: a held card is committed to another part of the total
+/// cost, so no other cost can use it up ([`is_held_by_payment_probe`]). CR
+/// 601.2g: mana abilities are activated before costs are paid, so the card is
+/// still in its zone for everything that only reads it (Metalworker's reveal,
+/// Crypt of Agadeem's count). The scratch never reaches a real payment.
+pub(super) struct CardHoldScratch {
+    state: GameState,
+}
+
+impl CardHoldScratch {
+    pub(super) fn new(mut state: GameState) -> Self {
+        super::layers::flush_layers(&mut state);
+        Self { state }
+    }
+
+    /// `probe`'s answer with `held`'s hand and graveyard cards held. Objects in
+    /// other zones are left alone.
+    pub(super) fn probe_holding<T>(
+        &mut self,
+        held: &[(ObjectId, ReservedUse)],
+        probe: impl FnOnce(&GameState) -> T,
+    ) -> T {
+        let scratch = &mut self.state;
+        for &(id, _) in held {
+            let Some(owner) = scratch
+                .objects
+                .get(&id)
+                .filter(|obj| matches!(obj.zone, Zone::Hand | Zone::Graveyard))
+                .map(|obj| obj.owner)
+            else {
+                continue;
+            };
+            if let Some(holder) = scratch.players.iter_mut().find(|p| p.id == owner) {
+                holder.probe_held_cards.push(id);
+            }
+        }
+        let answer = probe(scratch);
+        for holder in scratch.players.iter_mut() {
+            holder.probe_held_cards.clear();
+        }
+        answer
+    }
+}
+
 /// CR 601.2g-h: whether the Auto payer can pay `cost` with `reserved` spoken for.
 pub(super) fn reserved_mana_payable(
     state: &GameState,
@@ -23217,6 +23265,43 @@ fn prepared_payment_terms_state(
         .and_then(|resolution| resolution.authority().payment_terms_state(state))
 }
 
+/// CR 601.2b: the pending cast a prepared spell's additional-cost declaration
+/// is previewed with, before the cast is announced.
+fn prepared_declaration_pending(prepared: &PreparedSpellCast, player: PlayerId) -> PendingCast {
+    let resolved = prepared.ability_def.as_ref().map_or_else(
+        || ResolvedAbility::new(Effect::NoOp, Vec::new(), prepared.object_id, player),
+        |def| build_resolved_from_def(def, prepared.object_id, player),
+    );
+    pending_cast_from_prepared(prepared, resolved)
+}
+
+/// CR 118.9a + CR 601.2b: the granted alternative cost `player` can pay for
+/// `prepared`, a cast that hasn't already elected an alternative cost by its
+/// method or its permission.
+fn granted_alternative_cost(
+    state: &GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+) -> Option<casting_costs::PayableSpellAlternativeCost> {
+    if cast_has_elected_alternative_cost(
+        state,
+        player,
+        prepared.object_id,
+        prepared.casting_permission_index,
+        prepared.casting_variant,
+    )
+    .unwrap_or(true)
+    {
+        return None;
+    }
+    casting_costs::payable_spell_alternative_cost_details_at_index(
+        state,
+        player,
+        prepared.object_id,
+        prepared.casting_permission_index,
+    )
+}
+
 fn can_cast_prepared_now_with_probe(
     state: &GameState,
     player: PlayerId,
@@ -23499,6 +23584,34 @@ fn can_cast_prepared_now_with_probe(
         {
             return false;
         }
+        // CR 601.2f-h + CR 118.3 + CR 118.10: when a mana ability's cost could
+        // use up a hand or graveyard card this cost is paid with (Rubble
+        // Rouser's graveyard exile beside Abhorrent Oculus, Skirge Familiar's
+        // discard beside Thrill of Possibility), the two are judged together
+        // by the declaration-time authority. The contention gate keeps every
+        // other spell, and every battlefield leg, on the checks above.
+        if casting_costs::cost_contends_with_mana_abilities(state, player, prepared.object_id, cost)
+        {
+            let pending = prepared_declaration_pending(prepared, player);
+            // CR 118.9d: additional costs apply to an alternative cost, which
+            // replaces the mana cost judged first. A payable granted one keeps
+            // the cast on offer when the cost can be paid beside it.
+            if !casting_costs::required_declaration_offerable(state, player, &pending, cost, None)
+                .unwrap_or(false)
+                && !granted_alternative_cost(state, player, prepared).is_some_and(|alternative| {
+                    casting_costs::required_declaration_offerable_under_alternative(
+                        state,
+                        player,
+                        &pending,
+                        &alternative.cost,
+                        cost,
+                    )
+                    .unwrap_or(false)
+                })
+            {
+                return false;
+            }
+        }
     }
 
     // CR 118.3 + CR 601.2f-h: A mandatory choice of additional costs is
@@ -23513,27 +23626,27 @@ fn can_cast_prepared_now_with_probe(
         .get(&prepared.object_id)
         .and_then(|o| o.additional_cost.as_ref())
     {
-        let resolved = prepared.ability_def.as_ref().map_or_else(
-            || ResolvedAbility::new(Effect::NoOp, Vec::new(), prepared.object_id, player),
-            |def| build_resolved_from_def(def, prepared.object_id, player),
-        );
-        let mut pending = PendingCast::new(
-            prepared.object_id,
-            prepared.card_id,
-            resolved,
-            prepared.mana_cost.clone(),
-        );
-        pending.base_cost = Some(prepared.base_mana_cost.clone());
-        pending.casting_variant = prepared.casting_variant;
-        pending.alternative_cost_keyword = prepared.alternative_cost_keyword.clone();
-        pending.cast_timing_permission = prepared.cast_timing_permission;
-        pending.origin_zone = prepared.origin_zone;
-        pending.payment_mode = prepared.payment_mode;
+        let pending = prepared_declaration_pending(prepared, player);
         let branch_is_offerable = |cost: &AbilityCost| {
             casting_costs::required_declaration_offerable(state, player, &pending, cost, None)
                 .unwrap_or(false)
         };
-        if !costs.iter().any(branch_is_offerable) {
+        // CR 118.9d: additional costs apply to an alternative cost, which
+        // replaces the mana cost the branches are judged with above. A payable
+        // granted one keeps the cast on offer when some branch can be paid
+        // beside it.
+        if !costs.iter().any(branch_is_offerable)
+            && !granted_alternative_cost(state, player, prepared).is_some_and(|alternative| {
+                casting_costs::choice_branch_offerable_under_alternative(
+                    state,
+                    player,
+                    &pending,
+                    &alternative.cost,
+                    costs,
+                )
+                .unwrap_or(false)
+            })
+        {
             return false;
         }
     }
@@ -23649,23 +23762,7 @@ fn can_cast_prepared_now_with_probe(
 
     // CR 118.9a + CR 601.2b: a cast that already elected an alternative cost, by its method or its
     // permission, can't also take a granted one.
-    if !cast_has_elected_alternative_cost(
-        state,
-        player,
-        prepared.object_id,
-        prepared.casting_permission_index,
-        prepared.casting_variant,
-    )
-    .unwrap_or(true)
-        && targets_ok
-        && super::casting_costs::payable_spell_alternative_cost_details_at_index(
-            state,
-            player,
-            prepared.object_id,
-            prepared.casting_permission_index,
-        )
-        .is_some()
-    {
+    if targets_ok && granted_alternative_cost(state, player, prepared).is_some() {
         return true;
     }
 
@@ -28577,6 +28674,20 @@ pub(crate) fn is_spell_being_cast(state: &GameState, object_id: ObjectId) -> boo
         })
 }
 
+/// CR 118.3 + CR 118.10 + CR 601.2g-h: Whether a payment probe holds
+/// `object_id` for another leg of the cost it is judging
+/// ([`CardHoldScratch`]). The card is committed to that leg, so it can't be
+/// chosen to pay any other cost; it hasn't been paid yet (mana abilities are
+/// activated before costs are paid), so it is still in its zone for everything
+/// that only reads it. Consulted beside [`is_spell_being_cast`] by the hand and
+/// graveyard cost-fodder enumerations. False on every live state.
+pub(crate) fn is_held_by_payment_probe(state: &GameState, object_id: ObjectId) -> bool {
+    state
+        .players
+        .iter()
+        .any(|player| player.probe_held_cards.contains(&object_id))
+}
+
 /// Shared eligibility helper for hand-card cost payments — returns every card
 /// in `player`'s hand matching `filter` (if any), excluding the cast source
 /// and any spell being cast ([`is_spell_being_cast`]).
@@ -28616,6 +28727,23 @@ fn find_eligible_hand_cost_targets(
         .unwrap_or_default()
 }
 
+/// CR 118.3: the hand cards a cost that uses them up (a discard, an exile) can
+/// take: [`find_eligible_hand_cost_targets`] without the cards a payment probe
+/// holds for another cost ([`is_held_by_payment_probe`]). A reveal uses nothing
+/// up and reads held cards too.
+fn find_consumable_hand_cost_targets(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    filter: Option<&TargetFilter>,
+) -> Vec<ObjectId> {
+    let mut targets =
+        find_eligible_hand_cost_targets(state, player, source, granting_object, filter);
+    targets.retain(|&id| !is_held_by_payment_probe(state, id));
+    targets
+}
+
 pub(crate) fn find_eligible_discard_targets(
     state: &GameState,
     player: PlayerId,
@@ -28623,7 +28751,7 @@ pub(crate) fn find_eligible_discard_targets(
     granting_object: Option<ObjectIncarnationRef>,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
-    find_eligible_hand_cost_targets(state, player, source, granting_object, filter)
+    find_consumable_hand_cost_targets(state, player, source, granting_object, filter)
 }
 
 /// CR 118.3 + CR 602.2b: Select the hand cards that can pay an activated
@@ -28648,6 +28776,7 @@ pub(crate) fn find_eligible_discard_targets_for_ability(
                 .filter(|&id| {
                     id != source
                         && !is_spell_being_cast(state, id)
+                        && !is_held_by_payment_probe(state, id)
                         && filter.is_none_or(|filter| {
                             super::filter::matches_target_filter(state, id, filter, &ctx)
                         })
@@ -28687,7 +28816,7 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
     let filter_ref = effective_filter.as_ref();
     match zone {
         ExileCostSourceZone::Hand => {
-            find_eligible_hand_cost_targets(state, player, source, granting_object, filter_ref)
+            find_consumable_hand_cost_targets(state, player, source, granting_object, filter_ref)
         }
         ExileCostSourceZone::Graveyard => {
             // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
@@ -41081,5 +41210,116 @@ mod alternative_keyword_cost_journal_tests {
             cost_observable_activation_journal(runner.state()).is_empty(),
             "with no first-activation modifier on the board the rows are stripped"
         );
+    }
+}
+
+#[cfg(test)]
+mod card_hold_scratch_tests {
+    use super::{is_held_by_payment_probe, CardHoldScratch, ReservedUse};
+    use crate::game::cost_payability::eligible_exile_cost_objects;
+    use crate::game::quantity::resolve_quantity;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::ability::{Effect, ManaProduction};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::mana::ManaColor;
+    use crate::types::zones::Zone;
+
+    /// CR 601.2g + CR 605.3a: mana abilities are activated before costs are
+    /// paid, so Crypt of Agadeem counts a creature card held for another cost.
+    #[test]
+    fn a_held_card_is_still_counted() {
+        let mut sc = GameScenario::new();
+        let crypt = sc
+            .add_land_from_oracle(
+                P0,
+                "Crypt of Agadeem",
+                "This land enters tapped.\n{T}: Add {B}.\n{2}, {T}: Add {B} for each black creature card in your graveyard.",
+            )
+            .id();
+        let creatures: Vec<ObjectId> = (0..5)
+            .map(|i| {
+                sc.add_creature_to_graveyard(P0, &format!("Black Creature {i}"), 1, 1)
+                    .with_color(vec![ManaColor::Black])
+                    .id()
+            })
+            .collect();
+        let runner = sc.build();
+        let state = runner.state();
+        let count = state.objects[&crypt]
+            .abilities
+            .iter()
+            .find_map(|ability| match &*ability.effect {
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor { count, .. },
+                    ..
+                } => Some(count.clone()),
+                _ => None,
+            })
+            .expect("Crypt's counted mana ability");
+
+        let mut scratch = CardHoldScratch::new(state.clone());
+        let held = [(creatures[0], ReservedUse::Present)];
+        let (counted, exilable) = scratch.probe_holding(&held, |probe| {
+            (
+                resolve_quantity(probe, &count, P0, crypt),
+                eligible_exile_cost_objects(probe, P0, crypt, None, Zone::Graveyard, None, 1),
+            )
+        });
+        assert_eq!(counted, 5, "the held card is still a card in the graveyard");
+        assert_eq!(exilable.len(), 4, "and no other cost can exile it");
+        assert!(!exilable.contains(&creatures[0]));
+    }
+
+    /// CR 118.3 + CR 601.2g-h: a held card stays in its zone, is reported held
+    /// for the probe only, and every hold is released.
+    #[test]
+    fn a_hold_marks_its_cards_and_is_released() {
+        let mut sc = GameScenario::new();
+        let hand: Vec<ObjectId> = (0..3)
+            .map(|i| sc.add_card_to_hand(P0, &format!("Hand Card {i}")))
+            .collect();
+        let graveyard: Vec<ObjectId> = (0..3)
+            .map(|i| {
+                sc.add_spell_to_graveyard(P0, &format!("Graveyard Card {i}"), true)
+                    .id()
+            })
+            .collect();
+        let runner = sc.build();
+        let state = runner.state();
+
+        let mut scratch = CardHoldScratch::new(state.clone());
+        let unheld = scratch.probe_holding(&[], Clone::clone);
+        for (&in_hand, &in_graveyard) in hand.iter().zip(&graveyard) {
+            let held = [
+                (in_hand, ReservedUse::Present),
+                (in_graveyard, ReservedUse::Present),
+            ];
+            scratch.probe_holding(&held, |probe| {
+                // CR 601.2g: the held cards are where they were, so a count of
+                // the zone still reads them (Crypt of Agadeem).
+                assert!(probe.players[0].hand.contains(&in_hand));
+                assert!(probe.graveyard_of(P0).contains(&in_graveyard));
+                assert_eq!(probe.objects[&in_graveyard].zone, Zone::Graveyard);
+                // CR 118.3: no other cost can take them.
+                let exilable =
+                    eligible_exile_cost_objects(probe, P0, in_hand, None, Zone::Graveyard, None, 1);
+                for &id in &graveyard {
+                    assert_eq!(exilable.contains(&id), id != in_graveyard);
+                }
+                for &id in hand.iter().chain(&graveyard) {
+                    assert_eq!(
+                        is_held_by_payment_probe(probe, id),
+                        id == in_hand || id == in_graveyard
+                    );
+                }
+            });
+            scratch.probe_holding(&[], |probe| {
+                assert_eq!(probe, &unheld);
+                assert!(hand
+                    .iter()
+                    .chain(&graveyard)
+                    .all(|&id| !is_held_by_payment_probe(probe, id)));
+            });
+        }
     }
 }

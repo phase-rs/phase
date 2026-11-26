@@ -31403,7 +31403,7 @@ mod tests {
             .expect("execute body required");
         let Effect::Sacrifice {
             target,
-            count,
+            count: crate::types::ability::SacrificeSelection::Count(count),
             min_count,
         } = &*execute.effect
         else {
@@ -31467,7 +31467,7 @@ mod tests {
                     trigger.definition.execute.as_deref().map(|ability| &*ability.effect),
                     Some(Effect::Sacrifice {
                         target: TargetFilter::Typed(filter),
-                        count: QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 }),
                         ..
                     }) if filter.controller == Some(ControllerRef::DefendingPlayer { reading: AttackRelationReading::Current })
                 )
@@ -31509,7 +31509,7 @@ mod tests {
                     trigger.definition.execute.as_deref().map(|ability| &*ability.effect),
                     Some(Effect::Sacrifice {
                         target: TargetFilter::Typed(filter),
-                        count: QuantityExpr::Fixed { value: 3 },
+                        count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 3 }),
                         ..
                     }) if filter.controller == Some(ControllerRef::DefendingPlayer { reading: AttackRelationReading::Current })
                 )

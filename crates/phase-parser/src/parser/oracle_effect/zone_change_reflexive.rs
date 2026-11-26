@@ -60,9 +60,8 @@ fn producer_moves_at_most_one(producer: &ClauseIr) -> bool {
         && producer.repeat_for.is_none();
     single_instruction
         && match &producer.parsed.effect {
-            Effect::Discard { count, .. }
-            | Effect::ExileTop { count, .. }
-            | Effect::Sacrifice { count, .. } => one(count),
+            Effect::Discard { count, .. } | Effect::ExileTop { count, .. } => one(count),
+            Effect::Sacrifice { count, .. } => count.count_expr().is_some_and(one),
             // `keep_count: None` keeps one card, except in the all-seen
             // library-to-library reorder mode.
             Effect::Dig {

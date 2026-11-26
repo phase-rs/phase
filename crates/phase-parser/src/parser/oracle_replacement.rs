@@ -17484,7 +17484,7 @@ fn parse_opponent_put_land_sacrifice_replacement(
             // of this class with a different permanent noun stays consistent. For
             // Land Equilibrium this is byte-identical to `TypedFilter::land()`.
             target: inject_controller(sacrifice_type_filter, ControllerRef::ScopedPlayer),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );

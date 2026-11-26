@@ -3226,8 +3226,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ChoosePermanent { filter } => {
             d.push(("choose".into(), fmt_target(filter)));
         }
+        Effect::Sacrifice { target, count, .. } => {
+            d.push(("target".into(), fmt_target(target)));
+            if matches!(count, crate::types::ability::SacrificeSelection::EntireReferent) {
+                d.push(("count".into(), "all of them".into()));
+            }
+        }
         Effect::Destroy { target, .. }
-        | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
         | Effect::Attach { target, .. }
         | Effect::UnattachAll { target, .. }
@@ -15961,6 +15966,29 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sacrifice_details_report_entire_referent_only() {
+        use crate::types::ability::SacrificeSelection;
+
+        let target = TargetFilter::LastCreated;
+        let sacrifice = |count| Effect::Sacrifice {
+            target: target.clone(),
+            count,
+            min_count: 0,
+        };
+        let target_detail = ("target".into(), fmt_target(&target));
+        assert_eq!(
+            effect_details(&sacrifice(SacrificeSelection::Count(QuantityExpr::Fixed {
+                value: 1
+            }))),
+            std::slice::from_ref(&target_detail)
+        );
+        assert_eq!(
+            effect_details(&sacrifice(SacrificeSelection::EntireReferent)),
+            [target_detail, ("count".into(), "all of them".into())]
+        );
+    }
+
     /// Every `player_scope` node of a parsed ability chain.
     /// The face's verdict from the two production consumers outside the
     /// coverage walk: precon playability (`database::is_card_playable`, read
