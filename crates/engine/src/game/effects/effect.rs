@@ -397,6 +397,26 @@ fn bind_transient_effect(
     end_permission: Option<&EndEffectPermission>,
     modifications: Vec<ContinuousModification>,
 ) {
+    // CR 608.2c + CR 500.7: "that turn" names the extra turn the preceding
+    // instruction of this resolution granted
+    // (`last_granted_extra_turn_ids`). When none was granted (no recipient,
+    // a count of zero) no such turn exists and no prohibition is installed.
+    // The anaphor is singular, so several granted turns are not a reading of
+    // the text either, and also install nothing. An already-bound window
+    // (defensive; the parser never emits one) passes through.
+    let bound_duration: Duration;
+    let duration: &Duration = match duration {
+        Duration::UntilEndOfGrantedTurn { turn: None } => {
+            let [granted] = state.last_granted_extra_turn_ids.as_slice() else {
+                return;
+            };
+            bound_duration = Duration::UntilEndOfGrantedTurn {
+                turn: Some(*granted),
+            };
+            &bound_duration
+        }
+        _ => duration,
+    };
     // CR 109.5: resolve the def's bound subject role once — every arm below
     // installs the same def, so the resolved actor is identical for all of
     // them. `controller_ref_player` is the shared single-ref resolver; an
@@ -662,6 +682,42 @@ fn bind_transient_effect(
                     characteristics,
                 );
             }
+            return;
+        }
+    }
+
+    // CR 701.32a + CR 904.9 + CR 611.2c: A duration-bound "schemes can't be
+    // set in motion" prohibition (All in Good Time) modifies the rules of the
+    // game, and its population — the scheme deck plus the face-up scheme —
+    // lives in the command zone, which the battlefield broadcast below cannot
+    // reach (it would match zero objects and install nothing). Keep the
+    // affected filter INTACT on one TCE so the archenemy gate
+    // (`scheme_setting_in_motion_prohibited`) reads it via
+    // `transient_grants_static_mode_to_object`, which evaluates intact
+    // filters against the queried object. Mirrors the
+    // `MustAttackAwayFromSource` branch above; like `ReduceAbilityCost` (and
+    // unlike `MustAttackAwayFromSource`) it is never grafted onto objects —
+    // schemes sit outside the layer population — so it stays out of the layer
+    // skip list for the opposite reason: there is nothing to graft to.
+    if modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: crate::types::statics::StaticMode::CantSetSchemeInMotion,
+            }
+        )
+    }) {
+        if let Some(affected) = static_def.affected.clone() {
+            install_transient(
+                state,
+                end_permission,
+                ability,
+                duration.clone(),
+                affected,
+                modifications,
+                static_def.condition.clone(),
+                bound_actor,
+            );
             return;
         }
     }

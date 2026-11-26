@@ -255,6 +255,7 @@
     "commanderDamage": "Commander Damage",
     "poisonCounters": "Poison Counters",
     "playerSeats": "Player Seats",
+    "archenemySeat": "Archenemy",
     "seat": "Seat {{number}}",
     "youHost": "You (Host)",
     "ai": "AI",

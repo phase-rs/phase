@@ -1483,7 +1483,8 @@ fn type_names_a_creature(filter: &TypeFilter) -> bool {
         | TypeFilter::Sorcery
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
-        | TypeFilter::Kindred => false,
+        | TypeFilter::Kindred
+        | TypeFilter::Scheme => false,
     }
 }
 
@@ -1504,7 +1505,8 @@ fn type_excludes_creatures(filter: &TypeFilter) -> bool {
         | TypeFilter::Sorcery
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
-        | TypeFilter::Kindred => false,
+        | TypeFilter::Kindred
+        | TypeFilter::Scheme => false,
     }
 }
 

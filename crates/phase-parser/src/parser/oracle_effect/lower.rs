@@ -3522,6 +3522,7 @@ impl ReflexiveGateParent {
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -4097,6 +4098,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             attach_to,
             enters_attacking,
             attack_destination,
+            enters_blocking,
             supertypes,
             static_abilities,
             enter_with_counters,
@@ -4114,6 +4116,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             attach_to: attach_to.clone(),
             enters_attacking: *enters_attacking,
             attack_destination: attack_destination.clone(),
+            enters_blocking: enters_blocking.clone(),
             supertypes: supertypes.clone(),
             static_abilities: static_abilities.clone(),
             enter_with_counters: enter_with_counters.clone(),
@@ -6809,10 +6812,12 @@ pub(super) fn strip_each_player_subject(
     target_anchor_in_scope: bool,
 ) -> (Option<PlayerFilter>, String) {
     // CR 701.9a + CR 608.2c: Reserve only the exact Kroxa/Strongarm
-    // mandatory-FILTERED decline-tail grammar for its dedicated dispatcher.
-    // A broad `who didn't` reservation also captures unrelated relative clauses
-    // (for example, sacrifice and choose), changing their parser routes even
-    // though this dispatcher intentionally supports discard only.
+    // mandatory-FILTERED decline-tail grammar — with or without the "this
+    // way" anaphor (Only Blood Ends Your Nightmares prints no anaphor) —
+    // for its dedicated dispatcher. A broad `who didn't` reservation also
+    // captures unrelated relative clauses (for example, choose), changing
+    // their parser routes even though this dispatcher intentionally
+    // supports only discard and sacrifice.
     if strip_each_scope_who_didnt_verb_filter_this_way_subject(text).is_some() {
         return (None, text.to_string());
     }
@@ -7220,7 +7225,7 @@ pub(super) fn strip_each_scope_who_does_subject(text: &str) -> Option<(PlayerFil
 }
 
 /// CR 701.9a + CR 608.2c + CR 109.5: Strip a leading "each <scope> who
-/// didn't / did not <verb> a [filter] this way, <body>" subject-only
+/// didn't / did not <verb> a [filter] [this way], <body>" subject-only
 /// mandatory-FILTERED decline-tail. Returns the player scope, the filter the
 /// scoped player's own zone change failed to match, and the body text.
 ///
@@ -7236,16 +7241,25 @@ pub(super) fn strip_each_scope_who_does_subject(text: &str) -> Option<(PlayerFil
 /// nonland card", matching the official ruling that Kroxa's life loss still
 /// applies to an opponent with no cards in hand.
 ///
-/// Verb is scoped to "discard" — the only verb this exact "who didn't <verb>
-/// a [filter] this way" relative-clause construction is verified against
+/// "This way" may be implicit: Only Blood Ends Your Nightmares prints "each
+/// opponent sacrifices a creature of their choice. Then each opponent who
+/// didn't sacrifice a creature discards two cards." Distract the Hydra's
+/// third sentence ("Each player who didn't sacrifice a creature loses 3
+/// life.") is the same no-anaphor shape. The body guard rejects the adjacent
+/// grammar the anaphor used to exclude: a trailing "this turn" window, a
+/// leaked second "this way", and "or"/"and" coordinations (Osseous
+/// Sticktwister's disjunctive tail stays out); a missing body declines.
+///
+/// Verb covers "discard" and "sacrifice" — the only verbs this exact "who didn't <verb>
+/// a [filter]" relative-clause construction is verified against
 /// (Kroxa, Titan of Death's Hunger — opponent scope, nonland filter; and
 /// Strongarm Tactics — all-players scope, creature filter: "Each player
 /// discards a card. Then each player who didn't discard a creature card
 /// this way loses 4 life."). `ZoneChangedThisWay` itself is verb-agnostic
 /// (it reads `last_zone_changed_ids`, which sacrifice/exile populate
-/// identically to discard), so widening the `alt()` to those verbs is a
-/// one-line change once a card actually prints that construction —
-/// deferred rather than speculatively added ahead of a verified card.
+/// identically to discard), so the `alt()` admits sacrifice as well,
+/// for Only Blood Ends Your Nightmares; exile stays deferred until a
+/// card prints that construction.
 pub(super) fn strip_each_scope_who_didnt_verb_filter_this_way_subject(
     text: &str,
 ) -> Option<(PlayerFilter, TargetFilter, String)> {
@@ -7258,14 +7272,24 @@ pub(super) fn strip_each_scope_who_didnt_verb_filter_this_way_subject(
         ))
         .parse(i)?;
         let (i, _) = alt((tag("didn't "), tag("did not "))).parse(i)?;
-        let (i, _) = tag("discard ").parse(i)?;
+        let (i, _) = alt((tag("discard "), tag("sacrifice "))).parse(i)?;
         let (i, _) = alt((tag("a "), tag("an "))).parse(i)?;
         let (filter, after_filter) = parse_type_phrase_folding(i);
         if matches!(filter, TargetFilter::Any) {
             return Err(oracle_err(i));
         }
-        let (i, _) = tag("this way").parse(after_filter.trim_start())?;
+        let (i, _) = opt(preceded(multispace0, tag("this way"))).parse(after_filter)?;
         let (i, _) = preceded(opt(tag(",")), opt(multispace1)).parse(i)?;
+        let (_, _) = not(alt((
+            tag("this turn"),
+            tag("this way"),
+            tag("or "),
+            tag("and "),
+        )))
+        .parse(i)?;
+        if i.is_empty() {
+            return Err(oracle_err(i));
+        }
         Ok((i, (scope, filter)))
     })
     .map(|((scope, filter), rest)| (scope, filter, rest.to_string()))
@@ -15666,6 +15690,7 @@ mod tests {
                 enters_attacking: false,
                 attack_destination:
                     crate::types::ability::TokenAttackDestination::ControllerChooses,
+                enters_blocking: None,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -17151,6 +17176,7 @@ mod tests {
                 enters_attacking: true,
                 attack_destination:
                     crate::types::ability::TokenAttackDestination::ControllerChooses,
+                enters_blocking: None,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -19158,6 +19184,7 @@ mod where_x_tests {
             attach_to: None,
             enters_attacking: false,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -19671,6 +19698,7 @@ mod token_anaphor_rewrite_tests {
             attach_to: None,
             enters_attacking: true,
             attack_destination: destination.clone(),
+            enters_blocking: None,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),

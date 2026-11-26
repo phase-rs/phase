@@ -6697,6 +6697,17 @@ fn create_token_applier(
                 // its own attack destination and disposal; its probe spec only
                 // seeds `enters_attacking`.
                 substitute_spec.enters_attacking |= spec.enters_attacking;
+                // CR 614.6 + the Divine Visitation ruling ("Anything else
+                // specified in the effect creating the token ... still
+                // applies"): the creating instruction's blocking rider (CR
+                // 509.4) applies to the substitute. The id resolved once at
+                // propose time against the pinned incarnation (CR 400.7 +
+                // CR 608.2k) travels verbatim — no re-resolution. Mirrors
+                // the `sacrifice_at` rider rule in
+                // `keep_creating_instruction_entry`.
+                if spec.blocking_attacker.is_some() {
+                    substitute_spec.blocking_attacker = spec.blocking_attacker;
+                }
                 match copy.as_deref() {
                     Some(batch_copy) => {
                         substitute_spec.attack_request = batch_copy.attack_request.clone();
@@ -6746,6 +6757,15 @@ fn create_token_applier(
             // rulings) — and a later ETB-tap replacement that matches it still
             // applies to it as part of the event.
             extra.tapped |= spec.tapped;
+            // CR 614.6 + the Chatterfang ruling ("... applies to both
+            // the original tokens and the Squirrels"): the appended
+            // batch is part of the one modified event, so it inherits
+            // the creating instruction's blocking rider (CR 509.4)
+            // alongside tapped. Pinned-incarnation id travels verbatim
+            // (CR 400.7 + CR 608.2k) — no re-resolution.
+            if spec.blocking_attacker.is_some() {
+                extra.blocking_attacker = spec.blocking_attacker;
+            }
             push_appended_token_batch(
                 &mut appended,
                 &applied,
@@ -25404,6 +25424,7 @@ mod tests {
             state.command_zone.push_back(host);
 
             let spec = TokenSpec {
+                blocking_attacker: None,
                 characteristics: TokenCharacteristics {
                     display_name: "Soldier".to_string(),
                     power: Some(1),
@@ -27502,6 +27523,7 @@ mod tests {
     ) -> TokenSpec {
         use crate::types::proposed_event::TokenCharacteristics;
         TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Test Token".to_string(),
                 power: Some(1),
@@ -32121,6 +32143,7 @@ mod tests {
         use crate::types::proposed_event::TokenCharacteristics;
         let chatterfang = ObjectId(500);
         let squirrel_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Squirrel".to_string(),
                 power: Some(1),
@@ -32150,6 +32173,7 @@ mod tests {
         let mut events = Vec::new();
 
         let plant_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Plant".to_string(),
                 power: Some(0),
@@ -32226,6 +32250,7 @@ mod tests {
         fn artifact_spec(name: &str) -> TokenSpec {
             use crate::types::proposed_event::TokenCharacteristics;
             TokenSpec {
+                blocking_attacker: None,
                 characteristics: TokenCharacteristics {
                     display_name: name.to_string(),
                     power: None,
@@ -32318,6 +32343,7 @@ mod tests {
         use crate::types::proposed_event::TokenCharacteristics;
         let creature = core == CoreType::Creature;
         TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: name.to_string(),
                 power: creature.then_some(1),
@@ -32549,6 +32575,7 @@ mod tests {
         state.battlefield.push_back(primal_vigor);
 
         let food_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Food".to_string(),
                 power: None,
@@ -32694,6 +32721,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: name.to_string(),
                     power: PtValue::Fixed(power),
                     toughness: PtValue::Fixed(toughness),
@@ -33008,6 +33036,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: "Beast".to_string(),
                     power: PtValue::Fixed(3),
                     toughness: PtValue::Fixed(3),
@@ -33079,6 +33108,7 @@ mod tests {
     fn token_spec_of(name: &str, core: CoreType, subtype: &str) -> TokenSpec {
         use crate::types::proposed_event::TokenCharacteristics;
         TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: name.to_string(),
                 power: (core == CoreType::Creature).then_some(1),
@@ -33334,6 +33364,7 @@ mod tests {
         state.battlefield.push_back(halving_season);
 
         let soldier_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Soldier".to_string(),
                 power: Some(1),
@@ -33870,6 +33901,7 @@ mod tests {
 
         fn artifact_spec(name: &str) -> TokenSpec {
             TokenSpec {
+                blocking_attacker: None,
                 characteristics: TokenCharacteristics {
                     display_name: name.to_string(),
                     power: None,
@@ -33992,6 +34024,7 @@ mod tests {
 
         fn artifact_spec(name: &str) -> TokenSpec {
             TokenSpec {
+                blocking_attacker: None,
                 characteristics: TokenCharacteristics {
                     display_name: name.to_string(),
                     power: None,
@@ -34177,6 +34210,7 @@ mod tests {
             redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(TokenSpec {
+                blocking_attacker: None,
                 characteristics: crate::types::proposed_event::TokenCharacteristics {
                     display_name: "Token".to_string(),
                     power: None,
@@ -35055,6 +35089,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: name.to_string(),
                     power: PtValue::Fixed(2),
                     toughness: PtValue::Fixed(2),

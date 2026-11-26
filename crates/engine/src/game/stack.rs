@@ -10793,6 +10793,7 @@ mod tests {
         /// A bare Insect Token effect: 1/1 green Insect, Fixed count.
         fn insect_token_effect() -> Effect {
             Effect::Token {
+                enters_blocking: None,
                 name: "Insect".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -12985,6 +12986,7 @@ mod tests {
         #[test]
         fn spec_emits_only_etb_pair_field_exclusions() {
             let base = TokenSpec {
+                blocking_attacker: None,
                 characteristics: crate::types::proposed_event::TokenCharacteristics {
                     display_name: "Insect".to_string(),
                     power: Some(1),

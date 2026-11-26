@@ -3584,6 +3584,7 @@ fn emerge_sacrifice_description(
         TypeFilter::Land => EmergeSacrificeQuality::Land,
         TypeFilter::Permanent => EmergeSacrificeQuality::Permanent,
         TypeFilter::Planeswalker => EmergeSacrificeQuality::Planeswalker,
+        TypeFilter::Scheme => EmergeSacrificeQuality::Scheme,
         TypeFilter::Sorcery => EmergeSacrificeQuality::Sorcery,
         TypeFilter::Subtype(subtype) => EmergeSacrificeQuality::Subtype(subtype.clone()),
         TypeFilter::Any | TypeFilter::AnyOf(_) | TypeFilter::Non(_) => return None,
@@ -6903,6 +6904,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 109.5 + CR 122.1f: a player-state predicate; like the monarch
         // arm it is not holder-bound by this permission path.
@@ -35560,9 +35562,11 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
             player_filter_reads_chosen_target(filter, read)
         }
         QuantityRef::BasicLandTypeCount { controller }
-        | QuantityRef::CommanderManaValue { owner: controller } => {
-            controller_ref_reads_chosen_target(controller, read)
-        }
+        // The zones field does not affect chosen-target reading: only the
+        // owner axis is consulted.
+        | QuantityRef::CommanderManaValue {
+            owner: controller, ..
+        } => controller_ref_reads_chosen_target(controller, read),
         QuantityRef::AttachmentsOnLeavingObject { controller, .. } => controller
             .as_ref()
             .is_some_and(|x| controller_ref_reads_chosen_target(x, read)),

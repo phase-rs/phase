@@ -165,6 +165,11 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // object_has_active_cant_be_regenerated(). Registered as a rule-mod so coverage
     // marks the standalone "can't be regenerated" effect as supported.
     registry.insert(StaticMode::CantBeRegenerated, handle_rule_mod);
+    // CR 701.32a + CR 904.9: "Schemes can't be set in motion" is a passive
+    // rule-modifying marker; enforcement lives in `archenemy.rs`'s
+    // set-in-motion gate. Registered as a rule-mod so coverage marks the
+    // standalone prohibition as supported.
+    registry.insert(StaticMode::CantSetSchemeInMotion, handle_rule_mod);
     // CR 702.34: FlashBack — allows casting from graveyard, exiled after resolution.
     registry.insert(StaticMode::FlashBack, handle_flashback);
     // CR 702.18: Shroud — permanent cannot be the target of spells or abilities.
@@ -1081,6 +1086,9 @@ fn active_player_transient_effects(
                 && crate::game::layers::transient_gate_conditions(tce).all(|condition| {
                     evaluate_condition(state, condition, tce.controller, tce.source_id)
                 })
+                // CR 611.2a + CR 500.7: a granted-turn window holds only during
+                // its bound turn.
+                && crate::game::layers::granted_turn_duration_window_holds(state, &tce.duration)
         })
 }
 
@@ -1207,6 +1215,11 @@ pub(crate) fn transient_grants_static_mode_to_object(
         if !crate::game::layers::transient_gate_conditions(tce)
             .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
         {
+            continue;
+        }
+        // CR 611.2a + CR 500.7: a granted-turn window holds only during its
+        // bound turn.
+        if !crate::game::layers::granted_turn_duration_window_holds(state, &tce.duration) {
             continue;
         }
         let grants_mode = tce.modifications.iter().any(|m| {

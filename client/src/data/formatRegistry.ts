@@ -354,7 +354,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     default_config: {
       format: "ArchenemyCommander",
       starting_life: 60,
-      min_players: 2,
+      min_players: 3,
       max_players: 6,
       deck_size: { type: "Exactly", data: 100 },
       singleton: true,
@@ -679,7 +679,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     default_config: {
       format: "Archenemy",
       starting_life: 20,
-      min_players: 2,
+      min_players: 3,
       max_players: 6,
       deck_size: { type: "Minimum", data: 60 },
       singleton: false,
@@ -884,4 +884,16 @@ export function formatSuppliesDeck(format: GameFormat): boolean {
  */
 export function isPlanechaseFamilyFormat(format: GameFormat | undefined | null): boolean {
   return format === "Planechase" || format === "PlanechaseCommander";
+}
+
+/**
+ * Whether the format seats a player-chosen archenemy against a team of
+ * heroes. Mirrors the engine's `GameFormat::is_archenemy_family` (the
+ * authority — update both if the family ever grows). Horde is deliberately
+ * excluded: it reuses the OneVsMany topology, but its special seat is the
+ * AI-piloted challenge deck, anchored automatically at game start — never
+ * a seat the user picks.
+ */
+export function isArchenemyFamilyFormat(format: GameFormat | undefined | null): boolean {
+  return format === "Archenemy" || format === "ArchenemyCommander";
 }
