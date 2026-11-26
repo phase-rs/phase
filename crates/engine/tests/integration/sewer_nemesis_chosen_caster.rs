@@ -11,6 +11,8 @@ use engine::types::Zone;
 const ORACLE: &str = "As this creature enters, choose a player.
 Sewer Nemesis's power and toughness are each equal to the number of cards in the chosen player's graveyard.
 Whenever the chosen player casts a spell, that player mills a card.";
+const WHITESUNS_PASSAGE: &str = "You gain 5 life.";
+const UNSUMMON: &str = "Return target creature to its owner's hand.";
 
 fn cast_and_choose(runner: &mut GameRunner, nemesis: ObjectId, chosen: PlayerId) {
     runner.cast(nemesis).commit();
@@ -38,15 +40,15 @@ fn sewer_nemesis_triggers_and_mills_only_for_the_chosen_caster() {
         .with_mana_cost(ManaCost::generic(0))
         .id();
     let unchosen_spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Unchosen Spell", true, "You gain 1 life.")
+        .add_spell_to_hand_from_oracle(P0, "Whitesun's Passage", true, WHITESUNS_PASSAGE)
         .with_mana_cost(ManaCost::generic(0))
         .id();
     let other_opponent_spell = scenario
-        .add_spell_to_hand_from_oracle(P1, "Other Opponent Spell", true, "You gain 1 life.")
+        .add_spell_to_hand_from_oracle(P1, "Whitesun's Passage", true, WHITESUNS_PASSAGE)
         .with_mana_cost(ManaCost::generic(0))
         .id();
     let chosen_spell = scenario
-        .add_spell_to_hand_from_oracle(chosen, "Chosen Spell", true, "You gain 1 life.")
+        .add_spell_to_hand_from_oracle(chosen, "Whitesun's Passage", true, WHITESUNS_PASSAGE)
         .with_mana_cost(ManaCost::generic(0))
         .id();
     scenario.add_creature_to_graveyard(chosen, "Chosen Graveyard Filler", 1, 1);
@@ -124,11 +126,11 @@ fn sewer_nemeses_keep_separate_choices_including_their_controller() {
         .with_mana_cost(ManaCost::generic(0))
         .id();
     let controller_spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Controller Spell", true, "You gain 1 life.")
+        .add_spell_to_hand_from_oracle(P0, "Whitesun's Passage", true, WHITESUNS_PASSAGE)
         .with_mana_cost(ManaCost::generic(0))
         .id();
     let opponent_spell = scenario
-        .add_spell_to_hand_from_oracle(P1, "Opponent Spell", true, "You gain 1 life.")
+        .add_spell_to_hand_from_oracle(P1, "Whitesun's Passage", true, WHITESUNS_PASSAGE)
         .with_mana_cost(ManaCost::generic(0))
         .id();
     scenario.with_graveyard(P0, &["Mountain"]);
@@ -175,16 +177,11 @@ fn sewer_nemesis_trigger_still_mills_after_the_source_leaves() {
         .with_mana_cost(ManaCost::generic(0))
         .id();
     let unsummon = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Unsummon",
-            true,
-            "Return target creature to its owner's hand.",
-        )
+        .add_spell_to_hand_from_oracle(P0, "Unsummon", true, UNSUMMON)
         .with_mana_cost(ManaCost::generic(0))
         .id();
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P1, "Chosen Spell", true, "You gain 1 life.")
+        .add_spell_to_hand_from_oracle(P1, "Whitesun's Passage", true, WHITESUNS_PASSAGE)
         .with_mana_cost(ManaCost::generic(0))
         .id();
     scenario.with_graveyard(P1, &["Island"]);
@@ -196,6 +193,12 @@ fn sewer_nemesis_trigger_still_mills_after_the_source_leaves() {
     runner.cast(spell).commit();
     assert_eq!(runner.state().stack.len(), 2);
     assert_eq!(runner.state().stack[1].source_id, nemesis);
+    // P1 has nothing left to do, so the engine passes on their behalf and
+    // P0 holds priority with the spell and the trigger on the stack.
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
 
     runner.cast(unsummon).target_object(nemesis).commit();
     runner.resolve_top();

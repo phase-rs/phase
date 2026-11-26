@@ -22707,7 +22707,10 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             if let Some(constraint) = turn_constraint {
                 def.constraint = Some(constraint);
             }
-            if spell_not_owned_by_caster {
+            // The ownership qualifier is enforced on `valid_card`; it must not
+            // replace an actor filter parsed above ("the chosen player",
+            // "an opponent", "enchanted player").
+            if spell_not_owned_by_caster && def.valid_target.is_none() {
                 def.valid_target = Some(TargetFilter::TriggeringPlayer);
             }
             // CR 601.2a: pre-extract the "from <zone>" cast-origin tail (see
@@ -27208,6 +27211,8 @@ mod prepared_spell_cast_trigger_tests {
             .expect("must parse a SpellCast trigger")
     }
 
+    /// Sewer Nemesis is the printed card; the creature-spell shape is a
+    /// composition check that the actor arm keeps the spell-quality parse.
     #[test]
     fn chosen_player_cast_spell_filters_caster_and_mills_them() {
         for (spell, expected_type) in [
@@ -27239,6 +27244,18 @@ mod prepared_spell_cast_trigger_tests {
                 "{effect:?}"
             );
         }
+    }
+
+    /// The "they don't own" qualifier composes with an actor filter instead of
+    /// replacing it, so the chosen-player restriction still applies.
+    #[test]
+    fn chosen_player_cast_keeps_caster_filter_with_ownership_qualifier() {
+        let trigger = spell_cast_trigger(
+            "As this creature enters, choose a player.\nWhenever the chosen player casts a spell they don't own, that player mills a card.",
+            "Test Creature",
+        );
+        assert_eq!(trigger.valid_target, Some(TargetFilter::SourceChosenPlayer));
+        assert!(trigger.valid_card.is_some(), "{:?}", trigger.valid_card);
     }
 
     fn chain_has_unimplemented(def: &AbilityDefinition) -> bool {
