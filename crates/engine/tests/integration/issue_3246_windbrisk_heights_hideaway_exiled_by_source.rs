@@ -618,3 +618,172 @@ Whenever this creature deals combat damage to a player, if there are cards exile
         "the unchosen linked spell must remain exiled after the one-play window ends"
     );
 }
+
+/// CR 614.12a + CR 701.18b + CR 608.2g: Evercoat Ursine's bounded Play window
+/// must play a real shock land through the production zone pipeline, pause on
+/// its pay-2-life replacement, and consume the one-card allowance once the
+/// land enters. The linked Shock must remain exiled and the Ursine trigger must
+/// finish without reopening a second FreeCastWindow.
+#[test]
+fn evercoat_ursine_play_window_pays_for_stomping_ground_and_does_not_reoffer_shock() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    const EVERCOAT_URSINE: &str = "Trample
+Hideaway 3, hideaway 3 (When this creature enters, look at the top three cards of your library, exile one face down, then put the rest on the bottom in a random order. Then do it again.)
+Whenever this creature deals combat damage to a player, if there are cards exiled with it, you may play one of them without paying its mana cost.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ursine = scenario
+        .add_creature_to_hand(P0, "Evercoat Ursine", 4, 4)
+        .from_oracle_text(EVERCOAT_URSINE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let stomping_ground = scenario.add_real_card(P0, "Stomping Ground", Zone::Library, db);
+    let shock = scenario.add_real_card(P0, "Shock", Zone::Library, db);
+    for _ in 0..4 {
+        scenario.add_real_card(P0, "Forest", Zone::Library, db);
+        scenario.add_real_card(P1, "Forest", Zone::Library, db);
+    }
+
+    let mut runner = scenario.build();
+    // Seat one target in each Hideaway 3 window: the first three cards contain
+    // Stomping Ground, and the next three contain Shock. The remaining cards
+    // are deterministic filler for the two reveal windows.
+    let filler = runner.state().players[P0.0 as usize]
+        .library
+        .iter()
+        .copied()
+        .filter(|id| *id != stomping_ground && *id != shock)
+        .collect::<Vec<_>>();
+    let mut ordered_library = vec![stomping_ground];
+    ordered_library.extend(filler.iter().take(2).copied());
+    ordered_library.push(shock);
+    ordered_library.extend(filler.iter().skip(2).copied());
+    runner.state_mut().players[P0.0 as usize].library = ordered_library.into();
+    runner.cast(ursine).commit();
+
+    let mut hidden = Vec::new();
+    for _ in 0..128 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order the Hideaway triggers");
+            }
+            WaitingFor::DigChoice { cards, .. } => {
+                let choice = [stomping_ground, shock]
+                    .into_iter()
+                    .find(|id| cards.contains(id))
+                    .expect("Hideaway must offer one of the planned cards");
+                hidden.push(choice);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![choice],
+                    })
+                    .expect("Hideaway selection accepted");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() && hidden.len() == 2 => {
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected Hideaway state: {other:?}"),
+        }
+    }
+    assert_eq!(hidden, vec![stomping_ground, shock]);
+
+    runner.advance_to_end_step();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(ursine, AttackTarget::Player(P1))])
+        .expect("Evercoat Ursine attacks P1");
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let mut free_cast_window_offers = 0;
+    let mut saw_replacement_choice = false;
+    let mut reached_terminal_priority = false;
+    for step in 0..128 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareBlockers { .. } => {
+                runner.declare_blockers(&[]).expect("declare no blockers");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept Evercoat Ursine's play offer");
+            }
+            WaitingFor::CastOffer {
+                kind:
+                    CastOfferKind::FreeCastWindow {
+                        candidates,
+                        remaining_casts,
+                        ..
+                    },
+                ..
+            } => {
+                free_cast_window_offers += 1;
+                assert_eq!(
+                    free_cast_window_offers, 1,
+                    "the bounded Play window must not be offered a second time"
+                );
+                assert_eq!(remaining_casts, Some(1));
+                assert_eq!(candidates.len(), 2);
+                assert!(candidates.contains(&stomping_ground));
+                assert!(candidates.contains(&shock));
+                runner
+                    .act(GameAction::FreeCastWindowChoice {
+                        selection: Some(stomping_ground),
+                    })
+                    .expect("choose the hidden Stomping Ground");
+            }
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                saw_replacement_choice = true;
+                let pay = candidates
+                    .iter()
+                    .position(|candidate| candidate.description != "Decline")
+                    .expect("Stomping Ground must offer a pay-2-life branch");
+                runner
+                    .act(GameAction::ChooseReplacement { index: pay })
+                    .expect("pay 2 life for Stomping Ground");
+            }
+            WaitingFor::Priority { .. }
+                if runner.state().stack.is_empty()
+                    && matches!(
+                        runner.state().phase,
+                        Phase::EndCombat | Phase::PostCombatMain
+                    ) =>
+            {
+                reached_terminal_priority = true;
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected Evercoat Ursine state at step {step}: {other:?}"),
+        }
+    }
+
+    assert_eq!(free_cast_window_offers, 1);
+    assert!(
+        saw_replacement_choice,
+        "Stomping Ground entry must pause for payment"
+    );
+    assert!(reached_terminal_priority);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().active_ability_continuation().is_none());
+    assert_eq!(runner.state().players[P0.0 as usize].life, life_before - 2);
+    assert_eq!(
+        runner.state().objects[&stomping_ground].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(runner.state().objects[&shock].zone, Zone::Exile);
+}
