@@ -284,6 +284,56 @@ fn finish_at_end_step(runner: &mut GameRunner) {
     runner.advance_until_stack_empty();
 }
 
+#[test]
+fn token_order_can_matter_only_after_a_third_replacement() {
+    for (first, second, soldiers) in [
+        ("Parallel Lives", None, 1),
+        ("Halving Season", Some("Halving Season"), 0),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let doubler = scenario
+            .add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES)
+            .id();
+        let first_halver = scenario
+            .add_enchantment_from_oracle(P1, "Halving Season", HALVING_SEASON)
+            .id();
+        let second_halver = scenario
+            .add_enchantment_from_oracle(P1, "Halving Season", HALVING_SEASON)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", false, RAISE_THE_ALARM)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).resolve();
+
+        // CR 616.1e + CR 616.1f: each pair commutes from two Soldiers, but the
+        // full sequences can yield either 2 → 4 → 2 → 1 or 2 → 1 → 0.
+        let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+            panic!(
+                "expected an initial order choice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        let mut sources: Vec<_> = candidates
+            .iter()
+            .map(|candidate| candidate.source_id)
+            .collect();
+        sources.sort_unstable();
+        assert_eq!(sources, [doubler, first_halver, second_halver]);
+        answer(&mut runner, order(3, first));
+        let remaining: Vec<_> = second.into_iter().map(|source| order(2, source)).collect();
+        settle(&mut runner, &remaining, Until::StackEmpty);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(tokens(&runner, "Soldier").len(), soldiers);
+        assert_eq!(ledger(&runner).len(), soldiers);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Legion Warboss: an ordering prompt over the compound event
 // ---------------------------------------------------------------------------

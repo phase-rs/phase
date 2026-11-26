@@ -309,6 +309,18 @@ fn bankbuster_ojer_taq_and_doubling_season_commute() {
     assert_tokens(&runner, P0, &[("Treasure", 2), ("Pilot", 6)]);
 }
 
+#[test]
+fn identical_doublers_keep_every_application_without_an_order_prompt() {
+    let (mut runner, spell) = cast_board(
+        &[DOUBLING_SEASON; 5],
+        P0,
+        RAISE,
+        &[ManaType::White, ManaType::Colorless],
+    );
+    runner.cast(spell).resolve();
+    assert_tokens(&runner, P0, &[("Soldier", 64)]);
+}
+
 fn resolve_bankbuster(sources: &[&str]) -> GameRunner {
     let db = crate::support::shared_card_db().expect("curated card fixture");
     let mut scenario = GameScenario::new();
