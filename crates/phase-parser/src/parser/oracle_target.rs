@@ -11376,12 +11376,10 @@ pub(crate) fn parse_except_for_qualified_subset<'a>(
 /// WHERE the decline happens decides whether it is honest, and the two sites
 /// differ. Declining HERE returns `None`, which propagates through `?` at the
 /// mass-return call sites, so no effect is built and the card is unsupported.
-/// Declining at the SUFFIX-POSITION site in `parse_type_phrase_folding_with_ctx` only
-/// drops the clause — that caller still builds its effect, and because
-/// `swallow_check` has no "except for" detector the card keeps reporting
-/// supported (measured: "mageta the lion", "flame sweep", both of which decline
-/// there and never reach this function). Making the suffix-position residue red
-/// is a separate issue and is NOT claimed here.
+/// The inline type reader leaves a declined suffix in its remainder.
+/// Damage lowering can consume that remainder with
+/// [`parse_except_for_qualified_subset`]. A caller that ignores it can still
+/// build a wider effect.
 ///
 /// The application is the `TargetFilter`-level form of the two lines the
 /// suffix-position call site in `parse_type_phrase_folding_with_ctx` already runs
