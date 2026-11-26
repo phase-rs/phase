@@ -7,6 +7,7 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
   return {
     ...actual,
     loadDraftGuestCapability: vi.fn(actual.loadDraftGuestCapability),
+    saveDraftGuestSession: vi.fn(actual.saveDraftGuestSession),
     clearDraftGuestRecovery: vi.fn(actual.clearDraftGuestRecovery),
   };
 });
@@ -299,6 +300,40 @@ describe("P2P draft guest capability", () => {
     await expect(storedRecord()).resolves.toMatchObject({ draftToken: "token-L", capabilityId });
     expect(second.events).toContainEqual({ type: "recoveryCommitted", pointer: committedPointer });
     expect(loadDraftGuestCapability).toHaveBeenCalledTimes(2);
+  });
+
+  it("a guest disposed while it looks up its capability writes no record", async () => {
+    await setUnnamedPair("token-L");
+    const actual = await vi.importActual<typeof import("../../services/draftPersistence")>(
+      "../../services/draftPersistence",
+    );
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    let lookupAnswered = false;
+    vi.mocked(loadDraftGuestCapability).mockImplementationOnce(async (owner) => {
+      await lookupGate;
+      const answer = await actual.loadDraftGuestCapability(owner);
+      lookupAnswered = true;
+      return answer;
+    });
+
+    const { guest, conn } = reconnectGuest("token-L");
+    const initialized = expect(guest.initialize(undefined, 1)).rejects.toMatchObject({ name: "AbortError" });
+    // The acknowledgement's handler is left running: it is held inside the lookup.
+    const delivered = conn.receiveRaw(rawMessage(reconnectAck));
+    await vi.waitFor(() => expect(loadDraftGuestCapability).toHaveBeenCalledOnce());
+    guest.dispose();
+    await initialized;
+
+    // A successor commits its own record while the retired lookup is still held.
+    await saveCapability("token-B", "cap-B");
+    const savesBeforeRelease = vi.mocked(saveDraftGuestSession).mock.calls.length;
+    releaseLookup();
+    await vi.waitFor(() => expect(lookupAnswered).toBe(true));
+    await delivered;
+
+    expect(vi.mocked(saveDraftGuestSession).mock.calls.length).toBe(savesBeforeRelease);
+    await expect(storedRecord()).resolves.toMatchObject({ draftToken: "token-B", capabilityId: "cap-B" });
   });
 
   it.each(["own", "pointer replaced"] as const)(

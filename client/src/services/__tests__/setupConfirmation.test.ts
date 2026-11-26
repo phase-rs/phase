@@ -129,6 +129,19 @@ describe("classifySetupFrame", () => {
     expect(classifySetupFrame("game", accepted(4), 4)).toEqual({ kind: "other" });
   });
 
+  it.each([
+    ["Created", { request_id: 4, result: { type: "Created", data: { view: {} } } }],
+    ["Joined", { request_id: 4, result: { type: "Joined", data: { view: {} } } }],
+    ["Applied", { request_id: 4, result: { type: "Applied", data: { view: {} } } }],
+    ["(no result)", { request_id: 4 }],
+  ] as const)("leaves a draft DraftCommandAccepted of kind %s unclassified, even with the reattach's own id", (_kind, data) => {
+    // Reach: the same id's own Reconnected result is positive.
+    expect(classifySetupFrame("draft", frame("DraftCommandAccepted", {
+      request_id: 4, result: { type: "Reconnected", data: { view: {} } },
+    }), 4)).toMatchObject({ kind: "positive" });
+    expect(classifySetupFrame("draft", frame("DraftCommandAccepted", data), 4)).toEqual({ kind: "other" });
+  });
+
   it("leaves a draft DraftStateUpdate unclassified: it is never the reattach's answer", () => {
     expect(classifySetupFrame("draft", frame("DraftStateUpdate", { view: {} }), 4)).toEqual({ kind: "other" });
   });
@@ -203,6 +216,18 @@ describe("SetupConfirmation.observe", () => {
     await expect(confirmation.settled).resolves.toBe("confirmed");
     expect(confirmation.refusal).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps its bound running past an accepted result of another kind carrying the reattach's own id", async () => {
+    const confirmation = new SetupConfirmation();
+    const created = frame("DraftCommandAccepted", {
+      request_id: 7, result: { type: "Created", data: { view: {} } },
+    });
+    expect(confirmation.observe("draft", created, 7)).toBeUndefined();
+    expect(confirmation.current).toBeNull();
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS);
+    await expect(confirmation.settled).resolves.toBe("timeout");
   });
 
   it("classifies nothing once settled", async () => {

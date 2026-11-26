@@ -181,7 +181,10 @@ export type ServerDraftAdapterEvent =
   | { type: "serverHello"; info: ServerInfo; compatible: boolean }
   | { type: "waitingForPlayers" }
   | { type: "draftViewUpdated"; view: DraftPlayerView }
-  /** A view the shared classifier refused; emitted before the operation it answered rejects. */
+  /**
+   * A view the shared classifier refused; emitted once the operation it answered has settled,
+   * before that operation's caller resumes.
+   */
   | { type: "incompatible"; failure: Draft27CompatibilityError }
   | { type: "matchStarting"; matchId: string; round: number; opponentName: string; gameCode: string }
   | { type: "timerSync"; remainingMs: number }
@@ -613,14 +616,19 @@ export class ServerDraftAdapter implements EngineAdapter {
       // From here the frame leaves this adapter, so a later match revocation
       // must settle the caller instead of leaving the slot fenced.
       this.submissionSent = true;
-      if (!this.send(this.submission.stamp(frame, submission)) && this.submission.release(submission)) {
+      const failure = this.trySend(this.submission.stamp(frame, submission));
+      if (failure === null) return;
+      // Settled before either announcement, so a throwing listener cannot
+      // strand the slot or the pending indicator's owner.
+      if (this.submission.release(submission)) {
         this.submissionSocket = null;
         this.submissionFullKey = null;
         this.submissionSent = false;
         this.retireIdleSockets();
-        this.emit({ type: "actionPendingChanged", pending: false });
         reject(sendFailure);
+        this.emit({ type: "actionPendingChanged", pending: false });
       }
+      this.emit({ type: "error", message: failure });
     });
   }
 
@@ -803,12 +811,18 @@ export class ServerDraftAdapter implements EngineAdapter {
    *
    * The callback pair is the pending authority; settlement clears it together
    * with its socket owner before retiring an otherwise idle attachment.
+   *
+   * `replySocket` is the socket the action's reply can arrive on: the current
+   * one for an action written there, none yet for a join, whose own candidate
+   * binds it at its handshake (`attachSocket`), so no other socket's close or
+   * error settles it.
    */
   private claimDraftAction(
     action: string,
     resolve: (view: DraftPlayerView) => void,
     reject: (error: Error) => void,
     stage: "PreparingDeck" | "AwaitingReply" = "AwaitingReply",
+    replySocket: PhaseSocketTransport | null = this.ws,
   ): boolean {
     if (this.draftResolve !== null || this.draftReject !== null) {
       reject(new AdapterError(
@@ -821,7 +835,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.draftResolve = resolve;
     this.draftReject = reject;
     this.draftActionStage = stage;
-    this.draftActionSocket = this.ws;
+    this.draftActionSocket = replySocket;
     return true;
   }
 
@@ -831,7 +845,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     password?: string,
   ): Promise<DraftPlayerView> {
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      if (!this.claimDraftAction("JoinDraft", resolve, reject)) return;
+      if (!this.claimDraftAction("JoinDraft", resolve, reject, "AwaitingReply", null)) return;
 
       if (!isValidWebSocketUrl(this.serverUrl)) {
         this.settleDraftAction(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
@@ -865,13 +879,10 @@ export class ServerDraftAdapter implements EngineAdapter {
     }
     return new Promise<DraftPlayerView>((resolve, reject) => {
       if (!this.claimDraftAction("Pick", resolve, reject)) return;
-      const sent = this.sendDraftAction(this.draftCode, {
+      this.sendDraftAction(this.draftCode, {
         type: "Pick",
         data: { seat: this.seatIndex, card_instance_ids: [cardInstanceId] },
       });
-      if (!sent) {
-        this.settleDraftAction(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
-      }
     });
   }
 
@@ -897,13 +908,10 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.assertNoReattachInterval();
     return new Promise<DraftPlayerView>((resolve, reject) => {
       if (!this.claimDraftAction("SharedStackDecision", resolve, reject)) return;
-      const sent = this.sendDraftAction(this.draftCode, {
+      this.sendDraftAction(this.draftCode, {
         type: "SharedStackDecision",
         data: { seat: this.seatIndex, pile, decision },
       });
-      if (!sent) {
-        this.settleDraftAction(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
-      }
     });
   }
 
@@ -940,7 +948,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         // A reattach written while the deck was being prepared gates it too.
         this.assertNoReattachInterval();
         this.draftActionStage = "AwaitingReply";
-        const sent = this.sendDraftAction(draftCode, {
+        this.sendDraftAction(draftCode, {
           type: "SubmitDeck",
           // Key order matches the Rust carrier (`seat`, `main_deck`,
           // `commanders`, `companion`, `printings`); absent companion and
@@ -951,7 +959,6 @@ export class ServerDraftAdapter implements EngineAdapter {
             ...(deck.printings?.length ? { printings: deck.printings } : {}),
           },
         });
-        if (!sent) throw new AdapterError("WS_CLOSED", "Failed to send draft action", true);
       };
       void prepare().catch((error: unknown) => {
         if (this.draftResolve !== resolve || this.draftReject !== reject) return;
@@ -963,12 +970,16 @@ export class ServerDraftAdapter implements EngineAdapter {
   /**
    * The one write site of a `DraftAction` frame. The id is minted and latched
    * on the action slot at the write, so the action settles only on the result
-   * that carries it.
+   * that carries it. A frame that cannot be written settles the action first
+   * and is announced after, so a throwing listener cannot strand the slot.
    */
-  private sendDraftAction(draftCode: string | null, action: unknown): boolean {
+  private sendDraftAction(draftCode: string | null, action: unknown): void {
     const requestId = this.mintDraftRequestId();
     this.draftActionCommand = { requestId, answers: "Applied" };
-    return this.send({ type: "DraftAction", data: { draft_code: draftCode, action, request_id: requestId } });
+    const failure = this.trySend({ type: "DraftAction", data: { draft_code: draftCode, action, request_id: requestId } });
+    if (failure === null) return;
+    this.settleDraftAction(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
+    this.emit({ type: "error", message: failure });
   }
 
   /**
@@ -1135,17 +1146,20 @@ export class ServerDraftAdapter implements EngineAdapter {
 
   /**
    * A view the shared classifier refused touches no seat, view or phase state.
-   * The typed event comes first, as on the P2P guest, then the command whose
-   * result carried it, if any, rejects with the same refusal. An unsolicited
-   * view rejects nothing.
+   * The command whose result carried it, if any, settles first with the same
+   * refusal, so a throwing listener cannot strand it; the typed event follows
+   * in the same synchronous step, as on the P2P guest, so the awaiting
+   * caller's continuation still runs after it. An unsolicited view rejects
+   * nothing.
    */
   private refuseView(
     failure: Draft27CompatibilityError,
     sourceSocket: PhaseSocketTransport,
     owner: DraftCommandOwner | null,
   ): void {
-    if (this.ws === sourceSocket) this.emit({ type: "incompatible", failure });
+    const current = this.ws === sourceSocket;
     if (owner !== null) this.settleDraftCommand(owner, new Draft27IncompatibilityError(failure));
+    if (current) this.emit({ type: "incompatible", failure });
   }
 
   private takeInteractionPreview(socket: PhaseSocketTransport, requestId: string) {
@@ -1226,10 +1240,11 @@ export class ServerDraftAdapter implements EngineAdapter {
   private ownsAttachment(attachment: DraftAttachment): boolean {
     return this.unfinishedAttachment === attachment
       && !attachment.controller.signal.aborted
-      // A join's pair is bound to the previous socket until its handshake, so
-      // that socket's close can release it before the handshake resumes. The
-      // attachment still must send the claimed join.
-      && (attachment.owner.type === "join" || this.pendingInit === attachment.owner.init);
+      // A join writes only while it holds its claim, as an initialization
+      // writes only while it is pending.
+      && (attachment.owner.type === "join"
+        ? this.draftResolve === attachment.owner.resolve && this.draftReject === attachment.owner.reject
+        : this.pendingInit === attachment.owner.init);
   }
 
   /**
@@ -1261,7 +1276,7 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   /** A close settles only the command, previews and draft action sent on that source. */
-  private settleSocketClose(source: PhaseSocketTransport, settleAction = true): void {
+  private settleSocketClose(source: PhaseSocketTransport): void {
     // Previews sent on the retired socket can no longer be answered; previews
     // sent on the current socket are not its to reject.
     this.rejectPendingManaPaymentPreviews(
@@ -1272,12 +1287,10 @@ export class ServerDraftAdapter implements EngineAdapter {
       new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
       source,
     );
-    if (settleAction) {
-      this.settleDraftAction(
-        new AdapterError("WS_CLOSED", "Connection closed during draft operation", true),
-        source,
-      );
-    }
+    this.settleDraftAction(
+      new AdapterError("WS_CLOSED", "Connection closed during draft operation", true),
+      source,
+    );
     // A match reattach written on this source can no longer be answered.
     if (this.matchReattach?.socket === source) this.matchReattach = null;
     if (this.submissionSocket !== source) return;
@@ -1356,14 +1369,11 @@ export class ServerDraftAdapter implements EngineAdapter {
       this.pingInterval = null;
     }
     this.stateCodec.clearRecovery();
-    // Its seat sender is gone: nothing it was owed can arrive, so settle it,
-    // except the action slot of a join that superseded this reattach: that
-    // claim is bound to the incumbent only until the join's own socket
-    // handshakes, and its attachment is still dialing.
-    const superseding = this.unfinishedAttachment?.owner;
-    const joinOwnsAction = superseding?.type === "join" && this.draftResolve === superseding.resolve;
+    // Its seat sender is gone: nothing it was owed can arrive, so settle it.
+    // A join that superseded this reattach is not bound to it: the join's own
+    // candidate binds its claim at its handshake.
     try {
-      this.settleSocketClose(incumbent, !joinOwnsAction);
+      this.settleSocketClose(incumbent);
     } finally {
       this.releaseSocket(incumbent);
     }
@@ -2400,25 +2410,29 @@ export class ServerDraftAdapter implements EngineAdapter {
     }, 5000);
   }
 
+  /** Writes one frame on `ws`, announcing a failure as an `error` event. */
   private send(msg: unknown, ws: PhaseSocketTransport | null = this.ws): boolean {
+    const failure = this.trySend(msg, ws);
+    if (failure !== null) this.emit({ type: "error", message: failure });
+    return failure === null;
+  }
+
+  /**
+   * Writes one frame on `ws` and returns why it could not, announcing nothing:
+   * a caller that holds a command settles it first and then announces the
+   * failure, so a throwing `error` listener cannot strand it.
+   */
+  private trySend(msg: unknown, ws: PhaseSocketTransport | null = this.ws): string | null {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      this.emit({
-        type: "error",
-        message: "Cannot send message: WebSocket is not open.",
-      });
-      return false;
+      return "Cannot send message: WebSocket is not open.";
     }
     try {
       ws.send(JSON.stringify(msg));
-      return true;
+      return null;
     } catch (err) {
-      this.emit({
-        type: "error",
-        message: `Failed to send message: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      });
-      return false;
+      return `Failed to send message: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
     }
   }
 

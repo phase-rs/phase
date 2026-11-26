@@ -880,6 +880,43 @@ describe("ServerDraftAdapter", () => {
     await expect(next).rejects.toMatchObject({ code: "ACTION_REJECTED" });
   });
 
+  it("settles a game submission whose frame cannot be written before announcing the failure, even when the error listener throws", async () => {
+    enterAcceptedFullMatch(adapter, ws);
+    const pending: boolean[] = [];
+    adapter.onEvent((event) => { if (event.type === "actionPendingChanged") pending.push(event.pending); });
+    const messages: string[] = [];
+    const sentinel = new Error("listener sentinel");
+    const off = adapter.onEvent((event) => {
+      if (event.type !== "error") return;
+      messages.push(event.message);
+      throw sentinel;
+    });
+    ws.send.mockImplementationOnce(() => { throw new Error("socket send sentinel"); });
+
+    const read = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+    const failed = await read();
+    expect(failed).toBeInstanceOf(AdapterError);
+    expect(failed).toMatchObject({ code: "WS_CLOSED", message: "Failed to send action" });
+    // Reach: the frame reached the transport, which threw, and the listener saw that failure.
+    expect(submissionTypes(ws)).toEqual(["Action"]);
+    expect(messages).toEqual(["Failed to send message: socket send sentinel"]);
+    expect(pending).toEqual([true, false]);
+
+    off();
+    const next = trackRejection(adapter.submitInteraction(interactionSubmission("after-listener-failure"), 0));
+    expect(submissionTypes(ws)).toEqual(["Action", "Interaction"]);
+    expect(await next()).toBe("never settled");
+    receive(ws, "ActionRejected", {
+      rejection: {
+        code: "invalid_action",
+        disposition: "invalid",
+        message: "Action rejected",
+        related_object_ids: [],
+      },
+    });
+    expect(await next()).toMatchObject({ code: "ACTION_REJECTED" });
+  });
+
   it("returns to between_rounds after GameOver", () => {
     // Enter match phase first.
     ws.dispatchSynthetic(
@@ -1587,6 +1624,94 @@ describe("ServerDraftAdapter", () => {
     const next = adapter.submitPick("card-after-refusal");
     answerApplied(ws, createMockDraftView({ pick_number: 9, pool: [card] }));
     await expect(next).resolves.toMatchObject({ pick_number: 9 });
+  });
+
+  it.each([
+    ["Pick", "the transport throws"],
+    ["Pick", "the socket is not open"],
+    ["SharedStackDecision", "the transport throws"],
+    ["SharedStackDecision", "the socket is not open"],
+  ] as const)(
+    "settles a %s whose frame cannot be written because %s before announcing the failure, even when the error listener throws",
+    async (command, failure) => {
+      const submit = (n: number) => (command === "Pick"
+        ? adapter.submitPick(`send-failure-${n}`)
+        : adapter.submitSharedStackDecision(n, "Take"));
+      const draftActions = () => ws.send.mock.calls
+        .filter(([raw]) => typeof raw === "string" && raw.includes('"DraftAction"')).length;
+      const log: string[] = [];
+      const messages: string[] = [];
+      const sentinel = new Error("listener sentinel");
+      const off = adapter.onEvent((event) => {
+        if (event.type !== "error") return;
+        messages.push(event.message);
+        log.push("error");
+        throw sentinel;
+      });
+      if (failure === "the transport throws") {
+        ws.send.mockImplementationOnce(() => { throw new Error("socket send sentinel"); });
+      } else {
+        ws.readyState = MockWebSocket.CLOSED;
+      }
+      const writtenBefore = draftActions();
+
+      const first = submit(1);
+      void first.catch((error: unknown) => { log.push(`rejected:${(error as Error).message}`); });
+      const read = trackRejection(first);
+      const failed = await read();
+      expect(failed).toBeInstanceOf(AdapterError);
+      expect(failed).toMatchObject({ code: "WS_CLOSED", message: "Failed to send draft action" });
+      expect(log).toEqual(["error", "rejected:Failed to send draft action"]);
+      // Reach: the write failed in this leg's own branch.
+      if (failure === "the transport throws") {
+        expect(messages).toEqual(["Failed to send message: socket send sentinel"]);
+        expect(draftActions()).toBe(writtenBefore + 1);
+      } else {
+        expect(messages).toEqual(["Cannot send message: WebSocket is not open."]);
+        expect(draftActions()).toBe(writtenBefore);
+      }
+
+      off();
+      ws.readyState = MockWebSocket.OPEN;
+      const writtenAfterFailure = draftActions();
+      const next = trackRejection(submit(2));
+      expect(draftActions()).toBe(writtenAfterFailure + 1);
+      expect(await next()).toBe("never settled");
+    },
+  );
+
+  it("settles a deck whose frame cannot be written with its own failure before announcing it, even when the error listener throws", async () => {
+    const draftActions = () => ws.send.mock.calls
+      .filter(([raw]) => typeof raw === "string" && raw.includes('"DraftAction"')).length;
+    const log: string[] = [];
+    const messages: string[] = [];
+    const sentinel = new Error("listener sentinel");
+    const off = adapter.onEvent((event) => {
+      if (event.type !== "error") return;
+      messages.push(event.message);
+      log.push("error");
+      throw sentinel;
+    });
+    ws.send.mockImplementationOnce(() => { throw new Error("socket send sentinel"); });
+    const writtenBefore = draftActions();
+
+    const first = adapter.submitDeck(["Plains"], []);
+    void first.catch((error: unknown) => { log.push(`rejected:${(error as Error).message}`); });
+    const read = trackRejection(first);
+    await drainArt();
+    const failed = await read();
+    expect(failed).toBeInstanceOf(AdapterError);
+    expect(failed).toMatchObject({ code: "WS_CLOSED", message: "Failed to send draft action" });
+    expect(log).toEqual(["error", "rejected:Failed to send draft action"]);
+    // Reach: the frame reached the transport, which threw.
+    expect(messages).toEqual(["Failed to send message: socket send sentinel"]);
+    expect(draftActions()).toBe(writtenBefore + 1);
+
+    off();
+    const next = trackRejection(adapter.submitDeck(["Plains"], []));
+    await drainArt();
+    expect(draftActions()).toBe(writtenBefore + 2);
+    expect(await next()).toBe("never settled");
   });
 
   it("DraftStateUpdate preserves workspace presentation metadata", async () => {
@@ -3210,29 +3335,65 @@ describe("draft attachment settlement", () => {
     expect(await created!()).toEqual({ resolvedWith: undefined });
   });
 
-  it("J6 preserves a join whose pair was settled by another socket before its handshake resumes", async () => {
+  it.each(["close", "error"] as const)(
+    "J6 keeps a dialing join pending through the established socket's %s and settles it on its own result",
+    async (failure) => {
+      const events = vi.fn();
+      adapter.onEvent(events);
+      const settle = vi.spyOn(
+        adapter as unknown as { settleDraftAction: (result: unknown, onlySocket?: unknown) => boolean },
+        "settleDraftAction",
+      );
+      const join = trackRejection(adapter.joinDraft("NEXT12", "Alice"));
+      const j = MockWebSocket.last!;
+      // The join holds the draft pair while its handshake is still open, so no
+      // hello has been accepted and no setup frame can have gone out yet.
+      expect(await join()).toBe("never settled");
+      expect(frames(j)).toEqual([]);
+      expect(events.mock.calls.filter(([event]) => event.type === "serverHello")).toHaveLength(0);
+
+      // The join's reply can arrive only on its own candidate, so the
+      // established socket's failure does not settle it.
+      if (failure === "close") established.dispatchEvent(new Event("close"));
+      else established.onerror?.();
+      expect(settle).toHaveBeenCalledExactlyOnceWith(expect.any(Error), established);
+      expect(settle.mock.results.map((result) => result.value)).toEqual([false]);
+      expect(await join()).toBe("never settled");
+
+      const resumed = await completeHandshake();
+      expect(resumed).toBe(j);
+      expect(frames(j).filter((type) => type === "JoinDraftWithPassword")).toHaveLength(1);
+      const view = createMockDraftView({ pick_number: 2 });
+      answerJoined(j, view, { draft_code: "NEXT12", player_token: "next-token", seat_index: 1 });
+      expect(await join()).toEqual({ resolvedWith: view });
+      expect(adapter.credential).toEqual({ draftCode: "NEXT12", playerToken: "next-token", seatIndex: 1 });
+    },
+  );
+
+  it("abandons a join's candidate whose own error settled the join while its setup receipt was pending", async () => {
     const events = vi.fn();
     adapter.onEvent(events);
     const join = trackRejection(adapter.joinDraft("NEXT12", "Alice"));
     const j = MockWebSocket.last!;
-    // The join holds the draft pair while its handshake is still open, so no
-    // hello has been accepted and no setup frame can have gone out yet.
-    expect(await join()).toBe("never settled");
-    expect(frames(j)).toEqual([]);
+    expect(j).not.toBe(established);
+    let releaseReceipt!: () => void;
+    j.sendReceipt = vi.fn(() => new Promise<void>((resolve) => { releaseReceipt = resolve; }));
+    j.dispatchSynthetic("message", SERVER_HELLO);
+    await vi.waitFor(() => expect(j.sendReceipt).toHaveBeenCalledOnce());
+    // Reach: the held receipt carries the join's setup frame.
+    expect(writtenFrames(j).map((frame) => frame.type)).toContain("JoinDraftWithPassword");
+
+    // The handshake bound the claim to the candidate, so its own error settles the join.
+    j.onerror!();
+    expect(await join()).toMatchObject({ code: "WS_ERROR", message: "WebSocket connection failed" });
+
+    releaseReceipt();
+    for (let turn = 0; turn < 3; turn++) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(j.close).toHaveBeenCalledOnce();
+    expect(established.close).not.toHaveBeenCalled();
     expect(events.mock.calls.filter(([event]) => event.type === "serverHello")).toHaveLength(0);
-
-    // Until J's handshake the pair is bound to the established socket, so that
-    // socket's close settles the pending join before J resumes its handshake.
-    // (Its own result can arrive only on J, after the setup is written.)
-    established.dispatchEvent(new Event("close"));
-    expect(await join()).toMatchObject({ code: "WS_CLOSED", message: "Connection closed during draft operation" });
-
-    // The pair is released, but the join attachment still owes its setup
-    // frame: continuation rests on attachment identity + signal, not on the
-    // pair still being installed.
-    const resumed = await completeHandshake();
-    expect(resumed).toBe(j);
-    expect(frames(j)).toContain("JoinDraftWithPassword");
+    expect(adapter.credential).toEqual({ draftCode: "ABCD12", playerToken: "tok123", seatIndex: 0 });
   });
 
   it.each(["create", "reconnect", "join"] as const)("L1 dispose fences queued %s continuation", async (kind) => {
@@ -3547,6 +3708,33 @@ describe("draft attachment settlement", () => {
       expect(await read()).toEqual({ resolvedWith: undefined });
       expect(adapter.credential).toEqual({ draftCode: "NEXT12", playerToken: "next-token", seatIndex: 1 });
       expect(await pick()).toBe("never settled");
+    });
+
+    it("settles an action whose result carries a refused view before announcing it, even when a listener throws", async () => {
+      const { pick, read } = await pendingPick(established, "refused-view");
+      const log: string[] = [];
+      const sentinel = new Error("incompatible listener sentinel");
+      let thrown = 0;
+      adapter.onEvent((event) => { if (event.type === "incompatible") log.push("incompatible"); });
+      adapter.onEvent((event) => {
+        if (event.type !== "incompatible") return;
+        thrown++;
+        throw sentinel;
+      });
+      void pick.catch((error: unknown) => { log.push(`rejected:${(error as { code?: string }).code}`); });
+
+      expect(() => answerApplied(established, reviewView())).toThrow(sentinel);
+      const refusal = await read();
+      expect(refusal).toBeInstanceOf(Draft27IncompatibilityError);
+      expect(refusal).toMatchObject({ code: "review_status" });
+      expect(thrown).toBe(1);
+      expect(log).toEqual(["incompatible", "rejected:review_status"]);
+
+      const draftActions = () => frames(established).filter((type) => type === "DraftAction").length;
+      const writtenBefore = draftActions();
+      const next = await pendingPick(established, "after-refused-view");
+      expect(draftActions()).toBe(writtenBefore + 1);
+      expect(await next.read()).toBe("never settled");
     });
 
     it("settles a join only on its own Joined result, which announces nothing itself", async () => {
@@ -5530,6 +5718,35 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
     });
 
     it.each([
+      ["Created", { type: "Created", data: SEAT }],
+      ["Applied", { type: "Applied", data: { prompt_id: null, view: createMockDraftView() } }],
+    ] as const)(
+      "does not adopt on an accepted %s result carrying the reattach's id: the bound retires both sockets and rejects the reattach",
+      async (_kind, result) => {
+        vi.useFakeTimers();
+        const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
+        try {
+          // Synthetic: an accepted result of another kind carrying the reattach's own id.
+          acceptCommand(candidate, "ReconnectDraft", result as DraftCommandResult);
+          await vi.advanceTimersByTimeAsync(4000);
+          expect(ws.close).not.toHaveBeenCalled();
+          expect(candidate.close).not.toHaveBeenCalled();
+          expect(reconnecting.value()).toBe("never settled");
+          await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS);
+          await vi.waitFor(() => expect(ws.close).toHaveBeenCalledOnce());
+          await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({
+            code: "WS_CLOSED", message: "Reconnect was not confirmed in time",
+          }));
+          await vi.waitFor(() => expect(command.value()).toMatchObject({ code: "WS_CLOSED" }));
+          expect(candidate.close).toHaveBeenCalled();
+        } finally {
+          adapter.dispose();
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it.each([
       ["a newer revision", 12, "rev12"],
       ["an older revision", 9, "rev9"],
     ] as const)(
@@ -5693,10 +5910,12 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       vi.useFakeTimers();
       const { adapter, candidate, reconnecting } = await sentCandidate();
       try {
-        // Synthetic: the reattach's own DraftCommandAccepted without its result.
+        // Synthetic: the reattach's own Reconnected result without its data.
         // It confirms the candidate, and handling the frame throws before the
         // reattach is settled.
-        receive(candidate, "DraftCommandAccepted", { request_id: sentRequestId(candidate, "ReconnectDraft") });
+        receive(candidate, "DraftCommandAccepted", {
+          request_id: sentRequestId(candidate, "ReconnectDraft"), result: { type: "Reconnected" },
+        });
         // Nothing else would settle the reattach, so it fails and the
         // candidate is retired, as before the drain was isolated.
         await vi.waitFor(() => expect(reconnecting.value()).toBeInstanceOf(Error));

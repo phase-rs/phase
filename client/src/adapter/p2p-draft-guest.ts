@@ -736,8 +736,8 @@ export class P2PDraftGuest {
             draftToken: msg.draftToken,
             seatIndex: msg.seatIndex,
             draftCode: msg.draftCode,
-          }, "welcome");
-          if (this.session !== session) return;
+          }, "welcome", session);
+          if (pointer === null || this.session !== session) return;
           this.emit({ type: "recoveryCommitted", pointer });
         } catch (err) {
           this.rejectHandshake(session, asError(err), "retire");
@@ -767,8 +767,8 @@ export class P2PDraftGuest {
               draftToken: this.draftToken,
               seatIndex: msg.seatIndex,
               draftCode: msg.draftCode,
-            }, "reconnect");
-            if (this.session !== session) return;
+            }, "reconnect", session);
+            if (pointer === null || this.session !== session) return;
             this.emit({ type: "recoveryCommitted", pointer });
           } catch (err) {
             this.rejectHandshake(session, asError(err), "retire");
@@ -1211,11 +1211,16 @@ export class P2PDraftGuest {
     }
   }
 
-  /** Commits the private record and returns the pointer the owner publishes; writes no pointer. */
+  /**
+   * Commits the private record and returns the pointer the owner publishes; writes no pointer.
+   * Returns null, writing nothing, when the admitting session was retired or this guest was
+   * terminated while it looked up its capability's name.
+   */
   private async persistRecoveryIdentity(
     data: { draftToken: string; seatIndex: number; draftCode: string },
     admission: RecoveryAdmission,
-  ): Promise<DraftGuestRecoveryPointer> {
+    session: DraftPeerSession,
+  ): Promise<DraftGuestRecoveryPointer | null> {
     const owner: DraftGuestCapabilityOwner = {
       hostPeerId: this.hostPeerId,
       draftToken: data.draftToken,
@@ -1223,6 +1228,7 @@ export class P2PDraftGuest {
       displayName: this.connection.displayName,
     };
     const capabilityId = await this.admissionCapabilityId(owner, admission);
+    if (this.session !== session || this.terminated) return null;
     await saveDraftGuestSession(this.hostPeerId, {
       ...data,
       roomCode: owner.roomCode,

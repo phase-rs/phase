@@ -170,7 +170,8 @@ export type SetupFrameClass =
  * unsolicited `DraftStateUpdate`. Every refusal of the reattach, before or in
  * dispatch, is that correlated refusal.
  * Positive bootstrap, draft: `DraftCommandAccepted` carrying the reattach's own
- * id, and `DraftMatchStart`, which is sent only to the seat's current sender and
+ * id whose result is `Reconnected`, the reattach's own kind, and
+ * `DraftMatchStart`, which is sent only to the seat's current sender and
  * so proves the seat is routed to the candidate (it settles nothing: the
  * reattach still waits for its result).
  * Answered, draft: `DraftCommandRefused` carrying the reattach's own id. It
@@ -178,8 +179,10 @@ export type SetupFrameClass =
  * retiring it could drop a seat the server gave it, and nothing retries a
  * reattach: the candidate is adopted, and the dispatched refusal rejects the
  * reattach.
- * A `DraftStateUpdate` is never the reattach's answer, and a result carrying
- * another id answers another command: both are `other`.
+ * A `DraftStateUpdate` is never the reattach's answer, a result carrying
+ * another id answers another command, and an accepted result of another kind,
+ * or one without a result, is not the reattach's: each is `other`, so the
+ * bound still runs.
  * Refusal, draft: `Error`, which answers only a frame the server could not
  * decode, so nothing was installed.
  *
@@ -191,7 +194,10 @@ const POSITIVE_FRAMES: Record<"game" | "draft", ReadonlySet<string>> = {
   draft: new Set(["DraftMatchStart", "DraftCommandAccepted"]),
 };
 
-/** Draft results that settle the interval only when they carry the reattach's own id. */
+/**
+ * Draft results that settle the interval only when they carry the reattach's own id
+ * (an acceptance only when its result is `Reconnected`).
+ */
 const CORRELATED_DRAFT_RESULTS: ReadonlySet<string> = new Set(["DraftCommandAccepted", "DraftCommandRefused"]);
 
 /**
@@ -229,6 +235,10 @@ export function classifySetupFrame(
   if (surface === "draft" && CORRELATED_DRAFT_RESULTS.has(type)) {
     const requestId = (message.data as { request_id?: unknown } | null | undefined)?.request_id;
     if (draftRequestId === undefined || requestId !== draftRequestId) return { kind: "other" };
+    if (type === "DraftCommandAccepted"
+      && (message.data as { result?: { type?: unknown } } | null | undefined)?.result?.type !== "Reconnected") {
+      return { kind: "other" };
+    }
   }
   if (POSITIVE_FRAMES[surface].has(type)) return { kind: "positive", message };
   if (type === "DraftCommandRefused") return { kind: "answered", message };
