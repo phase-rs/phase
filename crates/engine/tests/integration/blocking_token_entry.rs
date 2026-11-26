@@ -391,6 +391,8 @@ fn flash_foliage_announces_only_creatures_attacking_its_caster_directly() {
 #[test]
 fn flash_foliage_keeps_its_attacker_when_a_copy_entry_pauses_and_restores() {
     const REFLECTION: &str = "Choose target nonlegendary creature. The next time one or more creatures or planeswalkers enter this turn, they enter as copies of the chosen creature.\nForetell {U}";
+    const CLONE: &str =
+        "You may have this creature enter as a copy of any creature on the battlefield.";
     const MIMIC: &str = "As this creature enters, choose a creature type.\nThis creature is the chosen type in addition to its other types.\nEach other creature you control of the chosen type enters with an additional +1/+1 counter on it.";
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::BeginCombat);
@@ -400,6 +402,9 @@ fn flash_foliage_keeps_its_attacker_when_a_copy_entry_pauses_and_restores() {
         .id();
     let reflect = scenario
         .add_spell_to_hand_from_oracle(P1, "Mystic Reflection", true, REFLECTION)
+        .id();
+    let clone = scenario
+        .add_creature_from_oracle(P1, "Clone", 1, 1, CLONE)
         .id();
     let mimic = scenario
         .add_creature_from_oracle(P1, "Metallic Mimic", 2, 1, MIMIC)
@@ -417,21 +422,37 @@ fn flash_foliage_keeps_its_attacker_when_a_copy_entry_pauses_and_restores() {
         &mut runner,
         |waiting| matches!(waiting, WaitingFor::Priority { player } if *player == P1),
     );
-    runner.cast(reflect).target_object(mimic).resolve();
+    runner.cast(reflect).target_object(clone).resolve();
     pass_to(
         &mut runner,
         |waiting| matches!(waiting, WaitingFor::Priority { player } if *player == P1),
     );
-    let paused = runner.cast(flash).target_object(attacker).resolve();
+    runner.cast(flash).target_object(attacker).resolve();
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .unwrap();
+    }
+    let WaitingFor::CopyTargetChoice { source_id, .. } = runner.state().waiting_for else {
+        panic!("the token must offer Clone's copy choice");
+    };
+    let copy = runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(mimic)),
+        })
+        .unwrap();
     let WaitingFor::NamedChoice {
         player, options, ..
-    } = paused.final_waiting_for()
+    } = &copy.waiting_for
     else {
         panic!("the copy owes Metallic Mimic's as-enters choice");
     };
     assert_eq!(*player, P1);
     assert!(options.iter().any(|option| option == "Goblin"));
-    assert!(!paused
+    assert!(!runner
         .state()
         .combat
         .as_ref()
@@ -439,39 +460,83 @@ fn flash_foliage_keeps_its_attacker_when_a_copy_entry_pauses_and_restores() {
         .blocker_assignments
         .contains_key(&attacker));
     let saved =
-        serde_json::to_string(&TrustedGameStateEnvelope::capture(paused.state().clone())).unwrap();
+        serde_json::to_string(&TrustedGameStateEnvelope::capture(runner.state().clone())).unwrap();
     let pin = engine::types::identifiers::ObjectIncarnationRef::of(
         attacker,
-        paused.state().objects[&attacker].incarnation,
+        runner.state().objects[&attacker].incarnation,
     );
-    assert!(paused
+    let pending = runner
         .state()
-        .liminal_entries
-        .values()
-        .any(|entry| entry.block_attacker == Some(pin)));
-    assert!(saved.contains("block_attacker"));
+        .pending_token_battlefield_entry
+        .as_ref()
+        .expect("copy entry publication must be parked");
+    assert_eq!(pending.object_id, source_id);
+    assert_eq!(pending.block_attacker, Some(pin));
+    let entry_event = |event: &GameEvent| {
+        matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                to: engine::types::zones::Zone::Battlefield,
+                ..
+            } if *object_id == source_id
+        )
+    };
+    assert!(!copy.events.iter().any(entry_event));
     let restored: TrustedGameStateEnvelope = serde_json::from_str(&saved).unwrap();
     let mut resumed = GameRunner::from_state(restored.into_game_state());
-    resumed
+    assert_eq!(
+        resumed.state().pending_token_battlefield_entry.as_ref(),
+        Some(pending)
+    );
+    let result = resumed
         .act(GameAction::ChooseOption {
             choice: "Goblin".into(),
         })
         .unwrap();
+    let entry_index = result.events.iter().position(entry_event).unwrap();
+    let first_blocked: Vec<_> = result.events.iter().enumerate().filter_map(|(index, event)| {
+        matches!(event, GameEvent::AttackerBecameBlocked { attacker: id, .. } if *id == attacker)
+            .then_some(index)
+    }).collect();
+    let per_blocker: Vec<_> = result.events.iter().enumerate().filter_map(|(index, event)| {
+        matches!(event, GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker: id, blocker } if *id == attacker && *blocker == source_id)
+            .then_some(index)
+    }).collect();
+    assert_eq!(first_blocked.len(), 1);
+    assert_eq!(per_blocker.len(), 1);
+    assert!(first_blocked[0] < entry_index);
+    assert!(per_blocker[0] < entry_index);
     resumed.advance_until_stack_empty();
     let state = resumed.state();
     assert!(state.stack.is_empty());
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     let blockers = &state.combat.as_ref().unwrap().blocker_assignments[&attacker];
-    assert_eq!(blockers.len(), 1);
+    assert_eq!(blockers, &[source_id]);
     assert!(state.objects[&blockers[0]].is_token);
     assert_eq!(state.objects[&blockers[0]].name, "Metallic Mimic");
 }
 
 #[test]
 fn blocking_rider_wire_is_additive() {
-    use engine::types::ability::{Effect, PtValue};
+    use engine::types::ability::{AttackDefenderMatch, Effect, FilterProp, PtValue};
     use engine::types::game_state::PendingTokenBattlefieldEntry;
     use serde_json::{json, to_value};
+
+    let legacy_attacking = json!({"type": "Attacking", "defender": "You"});
+    let mut attacking: FilterProp = serde_json::from_value(legacy_attacking.clone()).unwrap();
+    assert_eq!(to_value(&attacking).unwrap(), legacy_attacking);
+    let FilterProp::Attacking { scope, .. } = &mut attacking else {
+        panic!("legacy attacking filter");
+    };
+    assert_eq!(*scope, AttackDefenderMatch::DefendingSide);
+    *scope = AttackDefenderMatch::DirectPlayer;
+    let direct_attacking = json!({"type": "Attacking", "defender": "You", "scope": "DirectPlayer"});
+    assert_eq!(to_value(&attacking).unwrap(), direct_attacking);
+    assert_eq!(
+        serde_json::from_value::<FilterProp>(direct_attacking).unwrap(),
+        attacking
+    );
 
     let legacy_effect = json!({
             "type": "Token",

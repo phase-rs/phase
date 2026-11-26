@@ -3,7 +3,6 @@
 //! Replaces the Forge-style string filter parsing with typed enum matching.
 //! All filter logic works against the TargetFilter enum hierarchy from types/ability.rs.
 
-use crate::types::attack_target::AttackTarget;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
@@ -11531,20 +11530,21 @@ fn matches_filter_prop(
         // CR 508.1b: Attacking creatures may be scoped by defending player
         // relation ("attacking", "attacking you", "attacking your opponents").
         FilterProp::Attacking { defender, scope } => state.combat.as_ref().is_some_and(|combat| {
-            combat.attackers.iter().any(|a| {
-                a.object_id == object_id
-                    && (scope.is_defending_side()
-                        || matches!(
-                            crate::game::combat::active_attack_target(state, a),
-                            Some((AttackTarget::Player(_), _))
-                        ))
-                    && attacking_defender_matches(
-                        state,
-                        source,
-                        a.defending_player,
-                        defender.as_ref(),
-                    )
-            })
+            combat
+                .attackers
+                .iter()
+                .filter(|attacker| attacker.object_id == object_id)
+                .any(|attacker| {
+                    let defending_player = if scope.is_defending_side() {
+                        Some(attacker.defending_player)
+                    } else {
+                        combat::active_attack_target(state, attacker)
+                            .and_then(|(target, _)| combat::attacked_player_for_target(target))
+                    };
+                    defending_player.is_some_and(|player| {
+                        attacking_defender_matches(state, source, player, defender.as_ref())
+                    })
+                })
         }),
         // CR 509.1a: A creature is blocking if it was declared as a blocker.
         FilterProp::Blocking => state
@@ -12913,16 +12913,20 @@ fn zone_change_record_matches_property(
         // Live combat maps are cleared when an object leaves combat (CR 506.4),
         // so look-back filters must read the zone-change snapshot.
         FilterProp::Attacking { defender, scope } => {
+            let defending_player = if scope.is_defending_side() {
+                record.combat_status.defending_player
+            } else {
+                record
+                    .combat_status
+                    .attack_target
+                    .and_then(combat::attacked_player_for_target)
+            };
             record.combat_status.attacking
-                && (scope.is_defending_side()
-                    || matches!(record.combat_status.attack_target, Some(AttackTarget::Player(_))))
                 && match defender {
-                    None => true,
-                    Some(defender) => record.combat_status.defending_player.is_some_and(
-                        |defending_player| {
-                            attacking_defender_matches(state, source, defending_player, Some(defender))
-                        },
-                    ),
+                    None => scope.is_defending_side() || defending_player.is_some(),
+                    Some(defender) => defending_player.is_some_and(|player| {
+                        attacking_defender_matches(state, source, player, Some(defender))
+                    }),
                 }
         }
         FilterProp::Blocking => record.combat_status.blocking,

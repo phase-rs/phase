@@ -1041,8 +1041,8 @@ where
             return Some((offset, val, rest));
         }
         if let Some(rel) = remaining.find(' ') {
-            offset += rel + 1;
             remaining = remaining[rel + 1..].trim_start();
+            offset = text.len() - remaining.len();
         } else {
             break;
         }

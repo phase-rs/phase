@@ -12927,6 +12927,22 @@ mod tests {
             );
         }
 
+        #[test]
+        fn blocking_token_effect_is_excluded_from_batching() {
+            let mut state = setup();
+            let src = add_scute_source(&mut state);
+            let mut effect = insect_token_effect();
+            push_token_triggers(&mut state, src, effect.clone(), None, 2);
+            assert_eq!(batch_run_len(&state), Some(2));
+
+            let Effect::Token { block_attacker, .. } = &mut effect else {
+                panic!("expected a token effect");
+            };
+            *block_attacker = Some(Box::new(TargetFilter::ParentTarget));
+            push_token_triggers(&mut state, src, effect, None, 2);
+            assert_eq!(batch_run_len(&state), None);
+        }
+
         // §2.2a companion field exclusions.
         #[test]
         fn spec_emits_only_etb_pair_field_exclusions() {
@@ -12957,6 +12973,15 @@ mod tests {
             // Bare spec passes.
             assert!(super::super::effects::token::spec_emits_only_etb_pair(
                 &base
+            ));
+
+            let mut blocking = base.clone();
+            blocking.block_attacker = Some(crate::types::identifiers::ObjectIncarnationRef::of(
+                ObjectId(2),
+                0,
+            ));
+            assert!(!super::super::effects::token::spec_emits_only_etb_pair(
+                &blocking
             ));
 
             let mut with_counter = base.clone();

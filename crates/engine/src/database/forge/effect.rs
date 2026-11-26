@@ -319,6 +319,7 @@ fn translate_token(
         attach_to: None,
         enters_attacking: false,
         attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+        block_attacker: None,
         supertypes: Vec::new(),
         static_abilities: Vec::new(),
         enter_with_counters: Vec::new(),

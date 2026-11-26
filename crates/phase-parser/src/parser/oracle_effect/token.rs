@@ -623,13 +623,10 @@ fn parse_token_description_with_context(
     // CR 509.4: strip the named blocking rider before parsing token keywords.
     let lower = text.to_ascii_lowercase();
     let outside = nom_primitives::mask_double_quoted_spans_preserving_len(&lower);
-    let entry_block = outside.char_indices().find_map(|(offset, _)| {
-        parse_token_block_attacker(&outside[offset..])
-            .ok()
-            .map(|(_, attacker)| (offset, attacker))
-    });
+    let entry_block =
+        nom_primitives::scan_at_word_boundaries_with_offset(&outside, parse_token_block_attacker);
     let (text, block_attacker) = match entry_block {
-        Some((offset, attacker)) => (&text[..offset], Some(Box::new(attacker))),
+        Some((offset, attacker, _)) => (text[..offset].trim_end(), Some(Box::new(attacker))),
         None => (text, None),
     };
 
@@ -966,7 +963,7 @@ fn parse_token_description_with_context(
 
 /// CR 509.4: a token entry instruction naming a particular attacking creature.
 fn parse_token_block_attacker(input: &str) -> OracleResult<'_, TargetFilter> {
-    let (input, _) = alt((tag(" that's"), tag(" that is"), tag(" that are"))).parse(input)?;
+    let (input, _) = alt((tag("that's"), tag("that is"), tag("that are"))).parse(input)?;
     let (input, _) = tag(" blocking ").parse(input)?;
     let (input, attacker) = alt((
         value(TargetFilter::ParentTarget, tag("that creature")),
