@@ -6559,11 +6559,44 @@ fn create_token_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameS
     matches!(event, ProposedEvent::CreateToken { count, .. } if *count > 0)
 }
 
+fn token_append_definition(
+    state: &GameState,
+    rid: ReplacementId,
+) -> Option<(&crate::types::ability::AdditionalTokenSpec, PlayerId)> {
+    let definition = stored_replacement_definition(state, rid)?;
+    let controller = replacement_ability_controller(state, rid, definition);
+    Some((definition.additional_token_spec.as_deref()?, controller))
+}
+
+fn resolve_token_append_count(
+    state: &GameState,
+    rid: ReplacementId,
+    controller: PlayerId,
+    quantity: &QuantityExpr,
+    admitted_count: u32,
+) -> u32 {
+    let mut context = crate::game::quantity::QuantityContext::new(rid.source);
+    context.event_amount = Some(u32_to_i32_saturating(admitted_count));
+    u32::try_from(crate::game::quantity::resolve_quantity_with_ctx(
+        state, quantity, controller, context,
+    ))
+    .unwrap_or_default()
+}
+
 fn create_token_applier(
     event: ProposedEvent,
     rid: ReplacementId,
     state: &mut GameState,
     _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    apply_create_token_replacement(event, rid, state, None)
+}
+
+fn apply_create_token_replacement(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &GameState,
+    compound_append_count: Option<u32>,
 ) -> ApplyResult {
     use crate::types::ability::QuantityModification;
     // Extract the six fields the applier reads, given a def and the controller
@@ -6720,14 +6753,17 @@ fn create_token_applier(
         // CR 614.1a + CR 616.1f + CR 616.2: "those tokens plus ..." (Chatterfang
         // Squirrels, Donatello Mutagen) — "instead" yields ONE modified event, so
         // the added batch joins this event rather than becoming a separate event.
-        // It is sized at the already-modified `new_count`, so a replacement the
-        // affected player ordered earlier (CR 616.1) reaches it; every replacement
-        // applied afterwards applies to it too, to each batch it matches, under
+        // Its count reads the event at the moment this replacement is chosen.
+        // Every replacement applied afterwards applies to it too, under
         // the same ordering (CR 616.1f), and one the added batch newly makes
         // applicable is offered then (CR 616.2). It shares the event's applied set
         // (CR 614.5), which already holds this replacement, so it cannot re-fire
         // on its own batch.
-        if let Some(mut extra) = additional_spec {
+        if let Some(payload) = additional_spec {
+            let append_count = compound_append_count.unwrap_or_else(|| {
+                resolve_token_append_count(state, rid, source_controller, &payload.count, count)
+            });
+            let mut extra = Box::new(payload.spec);
             // Fill in the replacement source's runtime identity. The parser
             // stores placeholder ObjectId(0) / PlayerId(0) since these cannot
             // be known until the replacement fires.
@@ -6746,19 +6782,30 @@ fn create_token_applier(
             // rulings) — and a later ETB-tap replacement that matches it still
             // applies to it as part of the event.
             extra.tapped |= spec.tapped;
-            push_appended_token_batch(
-                &mut appended,
-                &applied,
-                TokenBatch {
-                    owner,
-                    spec: extra,
-                    copy: None,
-                    enter_tapped: EtbTapState::Unspecified,
-                    count: new_count,
-                    redirected_to: None,
-                    applied: HashSet::new(),
-                },
-            );
+            // CR 614.6 + CR 508.4: the creating instruction still governs
+            // both whether and where the appended token enters attacking.
+            if spec.enters_attacking {
+                extra.enters_attacking = true;
+                extra.attack_request = copy.as_deref().map_or_else(
+                    || spec.attack_request.clone(),
+                    |batch_copy| batch_copy.attack_request.clone(),
+                );
+            }
+            if append_count > 0 {
+                push_appended_token_batch(
+                    &mut appended,
+                    &applied,
+                    TokenBatch {
+                        owner,
+                        spec: extra,
+                        copy: None,
+                        enter_tapped: EtbTapState::Unspecified,
+                        count: append_count,
+                        redirected_to: None,
+                        applied: HashSet::new(),
+                    },
+                );
+            }
         }
 
         // CR 614.1a + CR 616.1f: Manufactor's "instead create one of each" — add
@@ -13617,6 +13664,7 @@ fn apply_single_replacement(
     mut proposed: ProposedEvent,
     rid: ReplacementId,
     branch: ReplacementBranch,
+    compound_append_count: Option<u32>,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
@@ -14331,6 +14379,8 @@ fn apply_single_replacement(
             && !matches!(proposed, ProposedEvent::Discard { .. })
         {
             ApplyResult::Modified(proposed)
+        } else if compound_append_count.is_some() {
+            apply_create_token_replacement(proposed, rid, state, compound_append_count)
         } else {
             (handler.applier)(proposed, rid, state, events)
         };
@@ -14965,13 +15015,34 @@ fn apply_replacement_to_token_batches(
         return Ok(ProposedEvent::from_token_batch_views(views)
             .expect("a compound token event's views reassemble"));
     }
+    // CR 614.5 + CR 616.1f: the chosen appender acts once on the owner's
+    // current admitted batches. Its output stays in the same pending event.
+    let mut append_count = token_append_definition(state, rid).map(|(definition, controller)| {
+        let admitted_count = views
+            .iter()
+            .zip(&admits)
+            .filter(|(_, admitted)| **admitted)
+            .filter_map(|(view, _)| view.create_token_count())
+            .fold(0u32, u32::saturating_add);
+        resolve_token_append_count(state, rid, controller, &definition.count, admitted_count)
+    });
     let mut survivors = Vec::with_capacity(views.len());
     for (view, admitted) in views.into_iter().zip(admits) {
         if !admitted {
             survivors.push(view);
             continue;
         }
-        match apply_single_replacement(state, view, rid, work.branch(), registry, events) {
+        let batch_append_count = append_count;
+        append_count = append_count.map(|_| 0);
+        match apply_single_replacement(
+            state,
+            view,
+            rid,
+            work.branch(),
+            batch_append_count,
+            registry,
+            events,
+        ) {
             Ok(applied) => match &work {
                 ChosenReplacementWork::Branch(_) => survivors.push(applied),
                 ChosenReplacementWork::TokenSubstitute(sub) => {
@@ -15260,13 +15331,21 @@ fn apply_chosen_replacement(
             {
                 Ok(proposed)
             } else {
-                apply_single_replacement(state, proposed, rid, work.branch(), registry, events)
-                    .and_then(|event| match &work {
-                        ChosenReplacementWork::Branch(_) => Ok(event),
-                        ChosenReplacementWork::TokenSubstitute(sub) => {
-                            substitute_token_batch(event, sub)
-                        }
-                    })
+                apply_single_replacement(
+                    state,
+                    proposed,
+                    rid,
+                    work.branch(),
+                    None,
+                    registry,
+                    events,
+                )
+                .and_then(|event| match &work {
+                    ChosenReplacementWork::Branch(_) => Ok(event),
+                    ChosenReplacementWork::TokenSubstitute(sub) => {
+                        substitute_token_batch(event, sub)
+                    }
+                })
             }
         }
         // `apply_replacement_to_token_batches` marks `owner`'s batches itself,
@@ -15386,6 +15465,26 @@ pub(crate) fn replacement_ordering_is_material(
     // competitor reads makes the order the affected player's choice.
     if as_enters_choice_changes_applicability(state, candidates, proposed) {
         return true;
+    }
+    // CR 616.1e-f: an appended batch can change a competitor's admitted
+    // count. A multiplier applied after a fixed append can scale it.
+    if matches!(proposed, ProposedEvent::CreateToken { .. }) {
+        for rid in candidates {
+            let Some((append, _)) = token_append_definition(state, *rid) else {
+                continue;
+            };
+            for other in candidates.iter().filter(|other| *other != rid) {
+                let other_appends = token_append_definition(state, *other);
+                let other_scales = stored_replacement_definition(state, *other)
+                    .is_some_and(|definition| definition.quantity_modification.is_some());
+                if other_appends.is_some_and(|(other_append, _)| {
+                    !matches!(other_append.count, QuantityExpr::Fixed { .. })
+                }) || (other_scales && matches!(append.count, QuantityExpr::Fixed { .. }))
+                {
+                    return true;
+                }
+            }
+        }
     }
     let mut seen_writes: Vec<(EventField, CommuteClass)> = Vec::new();
     for rid in candidates {
@@ -20968,6 +21067,7 @@ mod tests {
             entry,
             rid,
             ReplacementBranch::Execute,
+            None,
             registry,
             &mut events,
         )
@@ -29000,6 +29100,7 @@ mod tests {
                 index: 0,
             },
             ReplacementBranch::Execute,
+            None,
             &registry,
             &mut events,
         )
@@ -29040,6 +29141,7 @@ mod tests {
                 index: 0,
             },
             ReplacementBranch::Execute,
+            None,
             &registry,
             &mut events,
         )
@@ -29057,6 +29159,7 @@ mod tests {
                 index: 0,
             },
             ReplacementBranch::Execute,
+            None,
             &registry,
             &mut events,
         )
@@ -29074,6 +29177,7 @@ mod tests {
                 index: 0,
             },
             ReplacementBranch::Execute,
+            None,
             &registry,
             &mut events,
         )
@@ -32145,7 +32249,10 @@ mod tests {
         };
         let repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::You)
-            .additional_token_spec(squirrel_spec);
+            .additional_token_spec(
+                squirrel_spec,
+                crate::types::ability::AdditionalTokenSpec::proportional_count(),
+            );
         let mut state = test_state_with_object(chatterfang, Zone::Battlefield, vec![repl]);
         let mut events = Vec::new();
 
@@ -35028,6 +35135,7 @@ mod tests {
             event,
             ReplacementId { source, index: 0 },
             ReplacementBranch::Decline,
+            None,
             &registry,
             &mut events,
         );

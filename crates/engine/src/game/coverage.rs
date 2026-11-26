@@ -6081,10 +6081,14 @@ fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
             format!("{:?}", repl.mana_replacement_scope),
         ));
     }
-    if let Some(spec) = &repl.additional_token_spec {
+    if let Some(append) = &repl.additional_token_spec {
         d.push((
             "additional token".into(),
-            without_unspecified_attack_request(format!("{spec:?}")),
+            without_unspecified_attack_request(format!("{:?}", append.spec)),
+        ));
+        d.push((
+            "additional token count".into(),
+            format!("{:?}", append.count),
         ));
     }
     if let Some(specs) = &repl.ensure_token_specs {
@@ -18747,7 +18751,10 @@ mod tests {
         };
         let details = |attack_request: TokenAttackRequest| {
             let mut repl = ReplacementDefinition::new(ReplacementEvent::CreateToken);
-            repl.additional_token_spec = Some(Box::new(spec(attack_request.clone())));
+            repl = repl.additional_token_spec(
+                spec(attack_request.clone()),
+                QuantityExpr::Fixed { value: 1 },
+            );
             repl.ensure_token_specs = Some(vec![spec(attack_request)]);
             replacement_details(&repl)
         };

@@ -12805,9 +12805,10 @@ fn replacement_matchers_read_filter_population(
         || damage_modification.as_ref().is_some_and(|modification| {
             damage_modification_reads_filter_population(modification, leaf)
         })
-        || additional_token_spec
-            .as_deref()
-            .is_some_and(token_spec_reads)
+        || additional_token_spec.as_deref().is_some_and(|append| {
+            token_spec_reads(&append.spec)
+                || quantity_expr_counts_population_matching(&append.count, leaf)
+        })
         || ensure_token_specs.iter().flatten().any(token_spec_reads)
         || entry_payment_max
             .as_ref()

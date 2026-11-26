@@ -398,29 +398,32 @@ mod tests {
         let mut scenario = GameScenario::new();
         let chatterfang_replacement = ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::You)
-            .additional_token_spec(TokenSpec {
-                characteristics: TokenCharacteristics {
-                    display_name: "Squirrel".to_string(),
-                    power: Some(1),
-                    toughness: Some(1),
-                    loyalty: None,
-                    core_types: vec![CoreType::Creature],
-                    subtypes: vec!["Squirrel".to_string()],
-                    supertypes: Vec::new(),
-                    colors: vec![ManaColor::Green],
-                    keywords: Vec::new(),
+            .additional_token_spec(
+                TokenSpec {
+                    characteristics: TokenCharacteristics {
+                        display_name: "Squirrel".to_string(),
+                        power: Some(1),
+                        toughness: Some(1),
+                        loyalty: None,
+                        core_types: vec![CoreType::Creature],
+                        subtypes: vec!["Squirrel".to_string()],
+                        supertypes: Vec::new(),
+                        colors: vec![ManaColor::Green],
+                        keywords: Vec::new(),
+                    },
+                    script_name: "Squirrel".to_string(),
+                    static_abilities: Vec::new(),
+                    enter_with_counters: Vec::new(),
+                    tapped: false,
+                    enters_attacking: false,
+                    attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
+                    attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
+                    sacrifice_at: None,
+                    source_id: ObjectId(0),
+                    controller: P0,
                 },
-                script_name: "Squirrel".to_string(),
-                static_abilities: Vec::new(),
-                enter_with_counters: Vec::new(),
-                tapped: false,
-                enters_attacking: false,
-                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
-                attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
-                sacrifice_at: None,
-                source_id: ObjectId(0),
-                controller: P0,
-            });
+                crate::types::ability::AdditionalTokenSpec::proportional_count(),
+            );
         scenario
             .add_creature(P0, "Chatterfang, Squirrel General", 3, 3)
             .with_subtypes(vec!["Squirrel", "Warrior"])

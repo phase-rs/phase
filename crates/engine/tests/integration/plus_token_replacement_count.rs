@@ -1,0 +1,233 @@
+//! Printed-card regressions for the count and entry riders of token append replacements.
+
+use engine::game::combat::AttackTarget;
+use engine::game::game_object::GameObject;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::actions::GameAction;
+use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
+
+const ALLENAL: &str = "Queen Allenal of Ruadach";
+const CHATTERFANG: &str = "Chatterfang, Squirrel General";
+const DOUBLING_SEASON: &str = "Doubling Season";
+const RAISE: &str = "Raise the Alarm";
+
+fn tokens(runner: &GameRunner, owner: PlayerId) -> Vec<&GameObject> {
+    let state = runner.state();
+    state
+        .battlefield
+        .iter()
+        .map(|id| &state.objects[id])
+        .filter(|object| object.is_token && object.controller == owner)
+        .collect()
+}
+
+fn assert_tokens(runner: &GameRunner, owner: PlayerId, counts: &[(&str, usize)]) {
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    let tokens = tokens(runner, owner);
+    assert_eq!(
+        tokens.len(),
+        counts.iter().map(|(_, count)| count).sum::<usize>()
+    );
+    for (subtype, count) in counts {
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|object| { object.card_types.subtypes.iter().any(|ty| ty == subtype) })
+                .count(),
+            *count,
+            "count of {subtype} tokens"
+        );
+    }
+}
+
+fn cast_board(
+    replacement_sources: &[&str],
+    caster: PlayerId,
+    spell: &str,
+    mana: &[ManaType],
+) -> (GameRunner, ObjectId) {
+    let db = crate::support::shared_card_db().expect("curated card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for name in replacement_sources {
+        scenario.add_real_card(P0, name, Zone::Battlefield, db);
+    }
+    let spell = scenario.add_real_card(caster, spell, Zone::Hand, db);
+    scenario.with_mana_pool(
+        caster,
+        mana.iter()
+            .map(|color| ManaUnit::new(*color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    if caster == P1 {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P1 gains priority");
+    }
+    (runner, spell)
+}
+
+#[test]
+fn printed_appenders_apply_their_count_and_owner_or_type_gates() {
+    use ManaType::{Colorless, Green, Red, White};
+    // CR 614.1a + CR 614.5: one replacement opportunity modifies this creation.
+    let rows: &[(_, _, _, &[_], &[_])] = &[
+        (
+            ALLENAL,
+            P0,
+            "Sprout",
+            &[Green],
+            &[("Saproling", 1), ("Soldier", 1)],
+        ),
+        (ALLENAL, P0, RAISE, &[White, Colorless], &[("Soldier", 3)]),
+        (ALLENAL, P0, "Strike It Rich", &[Red], &[("Treasure", 1)]),
+        (ALLENAL, P1, RAISE, &[White, Colorless], &[("Soldier", 2)]),
+        (
+            CHATTERFANG,
+            P0,
+            RAISE,
+            &[White, Colorless],
+            &[("Soldier", 2), ("Squirrel", 2)],
+        ),
+        (
+            "Peregrin Took",
+            P0,
+            RAISE,
+            &[White, Colorless],
+            &[("Soldier", 2), ("Food", 1)],
+        ),
+        (
+            "Worldwalker Helm",
+            P0,
+            "Strike It Rich",
+            &[Red],
+            &[("Treasure", 1), ("Map", 1)],
+        ),
+        (
+            "Worldwalker Helm",
+            P0,
+            RAISE,
+            &[White, Colorless],
+            &[("Soldier", 2)],
+        ),
+    ];
+    for &(source, caster, spell, mana, expected) in rows {
+        let (mut runner, spell) = cast_board(&[source], caster, spell, mana);
+        runner.cast(spell).resolve();
+        assert_tokens(&runner, caster, expected);
+        if caster == P1 {
+            assert_tokens(&runner, P0, &[]);
+        }
+    }
+}
+
+fn choose_append_order(other: &str, first: &str) -> GameRunner {
+    let (mut runner, spell) = cast_board(
+        &[ALLENAL, other],
+        P0,
+        RAISE,
+        &[ManaType::White, ManaType::Colorless],
+    );
+    runner.cast(spell).resolve();
+    let WaitingFor::ReplacementChoice {
+        player,
+        kind,
+        candidates,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected ordering between {ALLENAL} and {other}");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*kind, ReplacementChoiceKind::Order);
+    assert_eq!(candidates.len(), 2);
+    assert!([ALLENAL, other]
+        .iter()
+        .all(|name| candidates.iter().any(|c| c.source_name == *name)));
+    let index = candidates
+        .iter()
+        .position(|c| c.source_name == first)
+        .unwrap();
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("apply the chosen replacement");
+    runner.advance_until_stack_empty();
+    runner
+}
+
+#[test]
+fn allenal_and_doubling_season_order_changes_the_soldier_count() {
+    // CR 616.1e-f: double then append is 2 × 2 + 1; append then double is (2 + 1) × 2.
+    assert_tokens(
+        &choose_append_order(DOUBLING_SEASON, DOUBLING_SEASON),
+        P0,
+        &[("Soldier", 5)],
+    );
+    assert_tokens(
+        &choose_append_order(DOUBLING_SEASON, ALLENAL),
+        P0,
+        &[("Soldier", 6)],
+    );
+}
+
+#[test]
+fn allenal_and_chatterfang_order_changes_the_admitted_count() {
+    // CR 616.1f: Chatterfang reads the current event, which can already include
+    // Allenal's Soldier. Allenal still adds one if Chatterfang has gone first.
+    assert_tokens(
+        &choose_append_order(CHATTERFANG, ALLENAL),
+        P0,
+        &[("Soldier", 3), ("Squirrel", 3)],
+    );
+    assert_tokens(
+        &choose_append_order(CHATTERFANG, CHATTERFANG),
+        P0,
+        &[("Soldier", 3), ("Squirrel", 2)],
+    );
+}
+
+#[test]
+fn allenals_extra_soldier_inherits_the_attacking_instruction() {
+    let db = crate::support::shared_card_db().expect("curated card fixture");
+    for (name, tapped) in [
+        ("Skyknight Vanguard", true),
+        ("Brimaz, King of Oreskos", false),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_real_card(P0, ALLENAL, Zone::Battlefield, db);
+        let attacker = scenario.add_real_card(P0, name, Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+            .expect("declare the printed attacker");
+        runner.advance_until_stack_empty();
+
+        // CR 508.4 + CR 110.5b + CR 614.6: both tokens enter attacking.
+        // Skyknight Vanguard's instruction additionally specifies tapped.
+        assert_tokens(&runner, P0, &[("Soldier", 2)]);
+        let combat = runner.state().combat.as_ref().expect("live combat");
+        for token in tokens(&runner, P0) {
+            assert_eq!(token.tapped, tapped, "{name}: {}", token.name);
+            assert!(
+                combat.attackers.iter().any(|entry| {
+                    entry.object_id == token.id && entry.attack_target == AttackTarget::Player(P1)
+                }),
+                "{name}: {} must be attacking P1",
+                token.name
+            );
+        }
+    }
+}

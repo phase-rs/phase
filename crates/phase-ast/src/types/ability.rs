@@ -44343,6 +44343,26 @@ impl DefinitionOrigin {
     }
 }
 
+/// CR 614.1a + CR 616.1f: Token characteristics and quantity appended to
+/// the same creation event by a replacement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdditionalTokenSpec {
+    #[serde(flatten)]
+    pub spec: crate::types::token_spec::TokenSpec,
+    /// "That many" reads the count admitted when the replacement applies.
+    #[serde(default = "AdditionalTokenSpec::proportional_count")]
+    pub count: QuantityExpr,
+}
+
+impl AdditionalTokenSpec {
+    /// Legacy records appended proportionally to the admitted token count.
+    pub const fn proportional_count() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        }
+    }
+}
+
 /// Replacement effect definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplacementDefinition {
@@ -44545,11 +44565,8 @@ pub struct ReplacementDefinition {
     /// pattern class (Chatterfang, Squirrel General; Donatello, Sol Invictus).
     /// The stored spec carries static characteristics only; `source_id` and
     /// `controller` are filled from the replacement source at apply time.
-    /// Count equals the primary event's `count` at apply time, so additional
-    /// replacements (e.g., Doubling Season) ordered before Chatterfang are
-    /// reflected in the Squirrel count per CR 616.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_token_spec: Option<Box<crate::types::token_spec::TokenSpec>>,
+    pub additional_token_spec: Option<Box<AdditionalTokenSpec>>,
     /// CR 614.1a + CR 111.1: Ensure-all token-creation replacement. Used by
     /// Academy Manufactor ("If you would create a Clue, Food, or Treasure
     /// token, instead create one of each"). Each listed spec whose subtype
@@ -45085,8 +45102,12 @@ impl ReplacementDefinition {
     /// the primary `CreateToken` event (Chatterfang Squirrels, Donatello
     /// Mutagen). The stored spec's `source_id` / `controller` are placeholders
     /// overwritten with the replacement source at apply time.
-    pub fn additional_token_spec(mut self, spec: crate::types::token_spec::TokenSpec) -> Self {
-        self.additional_token_spec = Some(Box::new(spec));
+    pub fn additional_token_spec(
+        mut self,
+        spec: crate::types::token_spec::TokenSpec,
+        count: QuantityExpr,
+    ) -> Self {
+        self.additional_token_spec = Some(Box::new(AdditionalTokenSpec { spec, count }));
         self
     }
 

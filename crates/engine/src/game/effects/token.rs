@@ -15,11 +15,11 @@ use crate::types::ability::{
     quantity_expr_recipient_read, AbilityCost, AbilityDefinition, AbilityKind,
     ActivationRestriction, AttachCardinality, AttachSelection, CastingPermission, ChosenAttribute,
     Comparator, ContinuousModification, ControllerRef, CopiableValues, DelayedTriggerCondition,
-    DelayedTriggerKind, Duration, Effect, EffectError, EffectKind, FilterProp, ManaContribution,
-    ManaProduction, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
-    RecipientRead, ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition,
-    TargetFilter, TargetRef, TokenAttackDestination, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter,
+    DelayedTriggerKind, Duration, Effect, EffectError, EffectKind, EntryAttackDestination,
+    FilterProp, ManaContribution, ManaProduction, PermissionGrantee, PlayerFilter, PtValue,
+    QuantityExpr, QuantityRef, RecipientRead, ResolvedAbility, SacrificeCost,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TokenAttackDestination,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card::PrintedLoyalty;
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -1995,7 +1995,7 @@ fn apply_create_token_batch(
 
         // CR 508.4: Token enters attacking — not declared as attacker.
         if spec.enters_attacking {
-            crate::game::combat::enter_attacking_at_destination(
+            enter_resolved_token_attacking(
                 state,
                 obj_id,
                 spec.source_id,
@@ -3456,6 +3456,32 @@ fn liminal_token_entry_finalization_action(
     }
 }
 
+/// CR 506.3a + CR 508.4: the creation's attack instruction seats a
+/// resolved token only if its resulting battlefield characteristics are a creature.
+fn enter_resolved_token_attacking(
+    state: &mut GameState,
+    object_id: ObjectId,
+    source_id: ObjectId,
+    controller: PlayerId,
+    destination: &EntryAttackDestination,
+) {
+    crate::game::layers::mark_layers_entered(state, object_id);
+    crate::game::layers::flush_layers(state);
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|entrant| entrant.card_types.core_types.contains(&CoreType::Creature))
+    {
+        crate::game::combat::enter_attacking_at_destination(
+            state,
+            object_id,
+            source_id,
+            controller,
+            destination,
+        );
+    }
+}
+
 pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     state: &mut GameState,
     action: PendingCounterPostAction,
@@ -3494,13 +3520,13 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     crate::game::restrictions::record_token_created(state, object_id);
 
     if enters_attacking {
-        crate::game::combat::enter_attacking_at_destination(
-            state,
-            object_id,
-            source_id,
-            controller,
-            &attack_destination,
-        );
+        let enter_attacking = match ability_injection {
+            LiminalTokenAbilityInjection::ResolvedToken => enter_resolved_token_attacking,
+            LiminalTokenAbilityInjection::PredefinedToken => {
+                crate::game::combat::enter_attacking_at_destination
+            }
+        };
+        enter_attacking(state, object_id, source_id, controller, &attack_destination);
     }
     if let Some(host) = attach_to {
         match host {

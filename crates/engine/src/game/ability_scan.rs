@@ -9329,8 +9329,8 @@ fn replacement_definition_axes<'a>(
         counter_replacement_subject: _,
         granting_object: _,
         entry_payment_max,
+        additional_token_spec,
         // The objects these create are scanned once they are live.
-        additional_token_spec: _,
         ensure_token_specs: _,
     } = def;
     let mut acc = Axes::NONE;
@@ -9381,6 +9381,9 @@ fn replacement_definition_axes<'a>(
     // CR 614.12a: the entry-payment cap reads live game state (Nameless Race).
     if let Some(max) = entry_payment_max {
         acc = acc.or(scan_quantity_expr(max, mode));
+    }
+    if let Some(append) = additional_token_spec {
+        acc = acc.or(scan_quantity_expr(&append.count, mode));
     }
     if let Some(modification) = damage_modification {
         acc = acc.or(scan_damage_modification(modification, mode));
