@@ -1182,7 +1182,7 @@ fn resolve_top(runner: &mut GameRunner) {
                 drain_order_triggers_with_identity(runner.state_mut());
             }
             WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
+                runner.pass_holding_team().expect("pass priority");
             }
             other => panic!("unexpected decision: {other:?}"),
         }
@@ -2597,14 +2597,22 @@ fn forth_eorlingas_normalizes_team_damage_separately_in_each_step() {
     for (source, amount) in [(first, 2), (regular, 3)] {
         let mut raw = Vec::new();
         for _ in 0..64 {
-            let action = match runner.state().waiting_for {
-                WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
-                    assignments: vec![],
-                },
-                WaitingFor::Priority { .. } => GameAction::PassPriority,
+            let events = match runner.state().waiting_for {
+                WaitingFor::DeclareBlockers { .. } => {
+                    runner
+                        .act(GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        })
+                        .expect("declare no blockers")
+                        .events
+                }
+                // CR 805.5b: Every player on the holding team must pass.
+                WaitingFor::Priority { .. } => {
+                    runner.pass_holding_team().expect("advance to damage")
+                }
                 ref other => panic!("unexpected combat decision: {other:?}"),
             };
-            raw.extend(runner.act(action).expect("advance to damage").events);
+            raw.extend(events);
             if raw.iter().any(|event| {
                 matches!(
                     event,
@@ -2620,7 +2628,8 @@ fn forth_eorlingas_normalizes_team_damage_separately_in_each_step() {
                 if source_amounts.contains(&(source, amount))
                     && source_amounts.contains(&(teammate, 4))
                     && *total_damage == amount + 4
-        )), "both combatants must reach the raw aggregate");
+        )), "both combatants must reach the raw aggregate: {raw:#?}");
+        assert_eq!(runner.state().phase, Phase::CombatDamage);
         let mut entries = runner
             .state()
             .stack
@@ -2645,6 +2654,11 @@ fn forth_eorlingas_normalizes_team_damage_separately_in_each_step() {
         );
         resolve_top(&mut runner);
         assert_eq!(runner.state().monarch, Some(P0));
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
     }
 }
 
