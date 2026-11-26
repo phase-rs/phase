@@ -90,6 +90,14 @@ pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)
 }
 
+/// Count instances of a keyword kind on a battlefield object's post-layer list.
+pub(crate) fn battlefield_keyword_instance_count(obj: &GameObject, kind: KeywordKind) -> usize {
+    obj.keywords
+        .iter()
+        .filter(|keyword| keyword.kind() == kind)
+        .count()
+}
+
 /// CR 702.5a + CR 702.5c: the object's own enchant restrictions — the filter of
 /// each `Enchant [object or player]` keyword it has. CR 702.5c: with multiple
 /// instances, all of them apply, so a host is legal only when it matches every

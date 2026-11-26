@@ -10,15 +10,18 @@
 //! payment, a damage division, an Aura's enchant target, and a replacement
 //! choice raised by a cost.
 
+use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
     CastPaymentMode, PersistedGameState, PersistedRestoreFinalization, ShardChoice, StackEntryKind,
     WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::KeywordKind;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -32,6 +35,9 @@ const SHAPERS_SANCTUARY: &str = "Whenever a creature you control becomes the tar
 const KAMBAL: &str =
     "Whenever an opponent casts a noncreature spell, that player loses 2 life and you gain 2 life.";
 const MONASTERY_SWIFTSPEAR: &str = "Haste\nProwess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.)";
+const NARSET_ENLIGHTENED_EXILE: &str = "Creatures you control have prowess.\nWhenever Narset attacks, exile target noncreature, nonland card with mana value less than Narset's power from a graveyard and copy it. You may cast the copy without paying its mana cost.";
+const RURIC_THAR_BIOMAGUS: &str = "Flying\nProwess, prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn twice.)\nWhenever Ruric Thar becomes the target of a spell or ability an opponent controls, draw a card.";
+const THOR_ODINSON: &str = "Flying, vigilance, prowess, prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn twice.)";
 const MANABARBS: &str =
     "Whenever a player taps a land for mana, this enchantment deals 1 damage to that player.";
 const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
@@ -832,6 +838,256 @@ fn ward_and_the_casters_prowess_go_on_the_stack_in_apnap_order() {
         |kind, _| matches!(kind, StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == swiftspear),
     );
     assert!(ward_at > prowess_at, "ward (non-active player) is on top");
+}
+
+fn prowess_instances(runner: &GameRunner, source: ObjectId) -> usize {
+    runner.state().objects[&source]
+        .keywords
+        .iter()
+        .filter(|keyword| keyword.kind() == KeywordKind::Prowess)
+        .count()
+}
+
+fn finish_prowess_trigger_order(runner: &mut GameRunner, expected: usize) {
+    if let WaitingFor::OrderTriggers { player, triggers } = &runner.state().waiting_for {
+        assert_eq!((*player, triggers.len()), (P0, expected));
+        runner
+            .act(GameAction::OrderTriggers {
+                order: (0..expected).rev().collect(),
+            })
+            .expect("P0 orders the cast triggers");
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+fn pass_to_resolve_top(runner: &mut GameRunner) {
+    for _ in 0..2 {
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 702.108b: each printed instance stacks and resolves independently.
+#[test]
+fn printed_prowess_instances_stack_and_resolve_separately() {
+    for (name, toughness, owner, keywords, oracle) in [
+        (
+            "Ruric Thar, Biomagus",
+            6,
+            P1,
+            &["Flying", "Prowess"][..],
+            RURIC_THAR_BIOMAGUS,
+        ),
+        (
+            "Thor Odinson",
+            4,
+            P0,
+            &["Flying", "Vigilance", "Prowess"][..],
+            THOR_ODINSON,
+        ),
+    ] {
+        let mut sc = board();
+        sc.at_phase(Phase::PostCombatMain);
+        let source = sc
+            .add_creature(owner, name, 4, toughness)
+            .from_oracle_text_with_keywords(keywords, oracle)
+            .controlled_by(P0)
+            .id();
+        let draw_card = sc.add_land_to_library_top(P0, "Forest").id();
+        let spell = shock(&mut sc, P0);
+        sc.with_mana_pool(P0, pool(&[ManaType::Red]));
+        let mut runner = sc.build();
+        assert_eq!(runner.state().objects[&source].owner, owner);
+        runner.assert_controls(P0, source);
+        assert_eq!(prowess_instances(&runner, source), 2, "{name}");
+
+        cast(&mut runner, spell, CastPaymentMode::Auto);
+        let prompts = drive(
+            &mut runner,
+            &Answers {
+                target: Some(source),
+                ..Default::default()
+            },
+        );
+        assert_eq!(prompts, ["TargetSelection"]);
+        finish_prowess_trigger_order(&mut runner, 2);
+
+        runner.assert_stack_size(3);
+        assert_eq!(triggers_from(&runner, source), 2);
+        assert!(spell_on_stack(&runner, spell));
+        let stack = &runner.state().stack;
+        assert_eq!(stack[0].id, spell);
+        assert_ne!(stack[1].id, stack[2].id);
+        assert_eq!((stack[1].controller, stack[2].controller), (P0, P0));
+        runner.assert_power_toughness(source, 4, toughness);
+
+        pass_to_resolve_top(&mut runner);
+        runner.assert_stack_size(2);
+        assert_eq!(triggers_from(&runner, source), 1);
+        assert!(spell_on_stack(&runner, spell));
+        runner.assert_power_toughness(source, 5, toughness + 1);
+
+        pass_to_resolve_top(&mut runner);
+        runner.assert_stack_size(1);
+        assert!(spell_on_stack(&runner, spell));
+        runner.assert_power_toughness(source, 6, toughness + 2);
+
+        pass_to_resolve_top(&mut runner);
+        runner.assert_stack_size(0);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        assert_eq!(runner.damage_marked(source), 2);
+        assert_eq!(runner.state().objects[&draw_card].zone, Zone::Library);
+        runner.assert_zone_count(P0, Zone::Hand, 0);
+
+        // CR 514.2: both until-end-of-turn bonuses end during cleanup.
+        runner.advance_to_upkeep();
+        assert_eq!(runner.state().phase, Phase::Upkeep);
+        assert_eq!(runner.state().active_player, P1);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.assert_power_toughness(source, 4, toughness);
+    }
+}
+
+/// CR 613.1f + CR 702.108b: Narset grants an independent instance to each
+/// creature its controller controls, including Narset.
+#[test]
+fn printed_and_granted_prowess_each_trigger() {
+    for (narset_controller, swiftspear_count, narset_count) in [(P0, 2, 1), (P1, 1, 0)] {
+        let mut sc = board();
+        let swiftspear = sc
+            .add_creature(P0, "Monastery Swiftspear", 1, 2)
+            .from_oracle_text_with_keywords(&["Haste", "Prowess"], MONASTERY_SWIFTSPEAR)
+            .id();
+        let narset = sc
+            .add_creature(narset_controller, "Narset, Enlightened Exile", 3, 4)
+            .from_oracle_text(NARSET_ENLIGHTENED_EXILE)
+            .id();
+        let target = sc.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let spell = shock(&mut sc, P0);
+        sc.with_mana_pool(P0, pool(&[ManaType::Red]));
+        let mut runner = sc.build();
+        evaluate_layers(runner.state_mut());
+        assert_eq!(prowess_instances(&runner, swiftspear), swiftspear_count);
+        assert_eq!(prowess_instances(&runner, narset), 1);
+
+        cast(&mut runner, spell, CastPaymentMode::Auto);
+        drive(
+            &mut runner,
+            &Answers {
+                target: Some(target),
+                ..Default::default()
+            },
+        );
+        finish_prowess_trigger_order(&mut runner, swiftspear_count + narset_count);
+        runner.assert_stack_size(1 + swiftspear_count + narset_count);
+        assert!(spell_on_stack(&runner, spell));
+        assert_eq!(triggers_from(&runner, swiftspear), swiftspear_count);
+        assert_eq!(triggers_from(&runner, narset), narset_count);
+        runner.assert_power_toughness(swiftspear, 1, 2);
+        runner.assert_power_toughness(narset, 3, 4);
+
+        resolve_all(&mut runner, false);
+        let swiftspear_bonus = swiftspear_count as i32;
+        let narset_bonus = narset_count as i32;
+        runner.assert_power_toughness(swiftspear, 1 + swiftspear_bonus, 2 + swiftspear_bonus);
+        runner.assert_power_toughness(narset, 3 + narset_bonus, 4 + narset_bonus);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    }
+}
+
+/// CR 109.5 + CR 702.108a: an artifact creature cast and an opponent's
+/// noncreature cast both leave Ruric's prowess idle. Becoming the target of
+/// that opponent's spell still triggers the separate draw ability.
+#[test]
+fn ruric_thar_prowess_only_sees_its_controllers_noncreature_casts() {
+    let mut sc = board();
+    let ruric = sc
+        .add_creature(P1, "Ruric Thar, Biomagus", 4, 6)
+        .from_oracle_text_with_keywords(&["Flying", "Prowess"], RURIC_THAR_BIOMAGUS)
+        .controlled_by(P0)
+        .id();
+    let swiftspear = sc
+        .add_creature(P1, "Monastery Swiftspear", 1, 2)
+        .from_oracle_text_with_keywords(&["Haste", "Prowess"], MONASTERY_SWIFTSPEAR)
+        .id();
+    let ornithopter = sc
+        .add_creature_to_hand(P0, "Ornithopter", 0, 2)
+        .as_artifact_creature()
+        .with_mana_cost(mana(&[], 0))
+        .from_oracle_text_with_keywords(&["Flying"], "Flying")
+        .id();
+    let draw_card = sc.add_land_to_library_top(P0, "Forest").id();
+    let opponent_draw_card = sc.add_land_to_library_top(P1, "Island").id();
+    let spell = shock(&mut sc, P1);
+    sc.with_mana_pool(P1, pool(&[ManaType::Red]));
+    let mut runner = sc.build();
+    assert_eq!(runner.state().objects[&ruric].owner, P1);
+    runner.assert_controls(P0, ruric);
+
+    cast(&mut runner, ornithopter, CastPaymentMode::Auto);
+    assert!(spell_on_stack(&runner, ornithopter));
+    let spell_types = &runner.state().objects[&ornithopter].card_types.core_types;
+    assert!(spell_types.contains(&CoreType::Artifact));
+    assert!(spell_types.contains(&CoreType::Creature));
+    runner.assert_stack_size(1);
+    pass_to_resolve_top(&mut runner);
+    assert_eq!(runner.state().objects[&ornithopter].zone, Zone::Battlefield);
+    runner.assert_stack_size(0);
+    runner.assert_power_toughness(ruric, 4, 6);
+
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    cast(&mut runner, spell, CastPaymentMode::Auto);
+    drive(
+        &mut runner,
+        &Answers {
+            target: Some(ruric),
+            ..Default::default()
+        },
+    );
+    runner.assert_stack_size(3);
+    assert!(spell_on_stack(&runner, spell));
+    assert_eq!(triggers_from(&runner, ruric), 1);
+    assert_eq!(triggers_from(&runner, swiftspear), 1);
+    let stack = &runner.state().stack;
+    assert_eq!((stack[0].id, stack[0].controller), (spell, P1));
+    // CR 603.3b: P0's draw trigger goes below P1's prowess trigger.
+    assert_eq!((stack[1].source_id, stack[1].controller), (ruric, P0));
+    assert_eq!((stack[2].source_id, stack[2].controller), (swiftspear, P1));
+
+    pass_to_resolve_top(&mut runner);
+    runner.assert_power_toughness(swiftspear, 2, 3);
+    assert_eq!(runner.state().objects[&draw_card].zone, Zone::Library);
+    pass_to_resolve_top(&mut runner);
+    assert_eq!(runner.state().objects[&draw_card].zone, Zone::Hand);
+    runner.assert_zone_count(P0, Zone::Hand, 1);
+    runner.assert_zone_count(P1, Zone::Hand, 0);
+    assert_eq!(
+        runner.state().objects[&opponent_draw_card].zone,
+        Zone::Library
+    );
+
+    pass_to_resolve_top(&mut runner);
+    runner.assert_stack_size(0);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    assert_eq!(runner.damage_marked(ruric), 2);
+    runner.assert_power_toughness(ruric, 4, 6);
 }
 
 /// CR 603.7b + CR 603.3b: Doublecast's delayed trigger watches for the
