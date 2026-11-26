@@ -84,7 +84,20 @@ pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Opti
         let (target_text, extra_keywords, additional_modifications) =
             split_token_except_clause(target_text, ctx);
         let target_lower = target_text.trim().to_lowercase();
-        let (mut target, target_remainder) = if parse_cost_paid_object_copy_target(&target_lower) {
+        let linked_attack = parse_exiled_copy_source(&target_lower)
+            .and_then(|(rest, ())| parse_copy_token_attack_destination(rest))
+            .ok();
+        let (mut target, target_remainder) = if linked_attack.is_some() {
+            (
+                super::resolve_singular_exiled_card_target(
+                    ctx.chain_prior_publishers,
+                    TargetFilter::TrackedSet {
+                        id: crate::types::identifiers::TrackedSetId(0),
+                    },
+                ),
+                "",
+            )
+        } else if parse_cost_paid_object_copy_target(&target_lower) {
             (TargetFilter::CostPaidObject, "")
         } else {
             parse_target_with_ctx(target_text, ctx)
@@ -141,10 +154,13 @@ pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Opti
             // subject is lifted into `owner` later by `inject_subject_target`.
             owner: TargetFilter::Controller,
             source_filter: None,
-            enters_attacking,
-            // CR 508.4: the copy modifiers name no destination; a following
-            // "enters tapped and attacking …" sentence sets it.
-            attack_destination: TokenAttackDestination::ControllerChooses,
+            enters_attacking: enters_attacking || linked_attack.is_some(),
+            // CR 508.4: an explicitly named defender takes precedence over
+            // the controller's default choice on entry.
+            attack_destination: linked_attack.map_or(
+                TokenAttackDestination::ControllerChooses,
+                |(_, destination)| destination,
+            ),
             tapped,
             count,
             extra_keywords,
@@ -272,6 +288,18 @@ fn parse_copy_token_trailing_entry_modifiers(
     parse_suffix(remainder.trim_start(), count_bound_by_where_x)
         .ok()
         .map(|(_, flags)| flags)
+}
+
+fn parse_exiled_copy_source(input: &str) -> OracleResult<'_, ()> {
+    value((), tag("the exiled card")).parse(input)
+}
+
+fn parse_copy_token_attack_destination(input: &str) -> OracleResult<'_, TokenAttackDestination> {
+    all_consuming(terminated(
+        preceded(tag(" attacking"), parse_token_attack_destination),
+        opt(tag(".")),
+    ))
+    .parse(input)
 }
 
 fn parse_cost_paid_object_copy_target(lower: &str) -> bool {

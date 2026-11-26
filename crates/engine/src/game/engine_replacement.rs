@@ -4792,11 +4792,17 @@ fn complete_token_entry_after_copy(
     // The entry's `name` / `source_id` ride the parked `pending_token_battlefield_entry` that
     // the `Suppress` commit installs, so only the liminal entry's PRESENCE matters here.
     let has_liminal_entry = state.liminal_entries.contains_key(&source_id);
-    // CR 508.4: how many tokens of the batch exist once this entry is realized.
-    let entrants_through_this_entry = state
+    let attack_on_entry = state
         .liminal_entries
         .get(&source_id)
-        .map_or(0, |entry| entry.created_ids.len() + 1);
+        .filter(|entry| entry.enters_attacking)
+        .map(|entry| {
+            (
+                entry.source_id,
+                entry.controller,
+                entry.attack_destination.clone(),
+            )
+        });
     // Captured before the settlement may rewrite the entry's copy description.
     let copy_continuation = token::liminal_copy_token_continuation(state, source_id);
     // CR 403.3 + CR 603.6a: the commit applies the token's enter-with-counters, which can
@@ -4863,7 +4869,11 @@ fn complete_token_entry_after_copy(
                 return Ok(state.waiting_for.clone());
             }
             state.finish_active_paused_post_replacement_dispatch();
-            token::continue_liminal_copy_token_batch(state, copy_continuation, events);
+            token::continue_liminal_copy_token_batch(
+                state,
+                copy_continuation.map(|continuation| continuation.after_entry()),
+                events,
+            );
             return Ok(state.waiting_for.clone());
         }
         TokenEntrySettlement::Prevented => {
@@ -4901,6 +4911,12 @@ fn complete_token_entry_after_copy(
     ) {
         return Ok(state.waiting_for.clone());
     }
+    // CR 508.4: advance only if this destination's copy was created.
+    let copy_continuation = if state.last_created_token_ids.contains(&source_id) {
+        copy_continuation.map(|continuation| continuation.after_entry())
+    } else {
+        copy_continuation
+    };
     let entrant_pin = state
         .objects
         .get(&source_id)
@@ -4952,6 +4968,24 @@ fn complete_token_entry_after_copy(
             let _ = effects::resolve_ability_chain(state, ability, events, 0);
         }
     }
+    // CR 506.3a + CR 508.4: the parked token's initial projection may have a
+    // different type from the object it becomes. Assign combat membership
+    // after the selected copy has installed its characteristics.
+    if let Some((creator, controller, destination)) = attack_on_entry {
+        if state
+            .pending_token_battlefield_entry
+            .as_ref()
+            .is_some_and(|pending| pending.object_id == source_id)
+        {
+            super::combat::enter_attacking_at_destination(
+                state,
+                source_id,
+                creator,
+                controller,
+                &destination,
+            );
+        }
+    }
     // CR 707.9f: type-gated exceptions apply only to an installed copy,
     // not to the uncopied entrant if installation failed.
     let copy_applied =
@@ -4974,7 +5008,6 @@ fn complete_token_entry_after_copy(
     if let Some(continuation) = copy_continuation.clone() {
         counter_pause_post_actions.push(token::liminal_copy_token_continuation_post_action(
             continuation,
-            entrants_through_this_entry,
         ));
     }
     let entry_counters = match settled_counters {
