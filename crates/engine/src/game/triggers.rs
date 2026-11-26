@@ -3569,6 +3569,7 @@ pub(crate) fn allocate_logical_zone_change_group(
 ) -> LogicalZoneChangeGroup {
     let immediately_before_state = immediately_before_projection(state);
     let mut group = state.allocate_logical_zone_change_group(announced);
+    crate::game::zones::capture_batch_departure_combat(state, &mut group);
     latch_logical_zone_change_group_immediately_before(&immediately_before_state, &mut group);
     group
 }

@@ -5,15 +5,20 @@
 //! Tomik's "that opponent" is the attacking player.
 
 use engine::game::combat::AttackTarget;
+use engine::game::merge::{merge_object_onto, MergeSide};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::move_to_zone;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{PersistedGameState, WaitingFor};
-use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::format::FormatConfig;
+use engine::types::game_state::{CastPaymentMode, PersistedGameState, WaitingFor};
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::Zone;
+
+use crate::support::shared_card_db;
 
 const TOMIK: &str = "Affinity for planeswalkers (This spell costs {1} less to cast for each planeswalker you control.)\nFlying, vigilance\nWhenever an opponent attacks with creatures, if two or more of those creatures are attacking you and/or planeswalkers you control, that opponent loses 3 life and you draw a card.";
 const MANGARA: &str = "Lifelink\nWhenever an opponent attacks with creatures, if two or more of those creatures are attacking you and/or planeswalkers you control, draw a card.\nWhenever an opponent casts their second spell each turn, draw a card.";
@@ -304,6 +309,305 @@ fn mangara_counts_an_attacker_that_left_the_battlefield() {
     bounce_attacker(&mut b, first);
     b.runner.advance_until_stack_empty();
     assert_eq!(b.runner.state().objects[&b.draw].zone, Zone::Hand);
+}
+
+/// CR 506.4c + CR 608.2h: Mangara counts the attack at Jace when both
+/// Jace and its attacker left in the same event.
+#[test]
+fn mangara_counts_an_attacker_destroyed_with_its_attack_target() {
+    for (planeswalker_first, merged_attacker) in [(true, false), (false, false), (true, true)] {
+        assert_simultaneous_attack_departures(planeswalker_first, merged_attacker);
+    }
+}
+
+/// CR 603.10a + CR 608.2h: Fated Retribution destroys Jace and the Bear
+/// attacking it in one event; in either battlefield order, and across a
+/// checked save/restore, Mangara still sees two qualifying attackers.
+#[test]
+fn mangara_draws_once_after_fated_retribution_destroys_jace_and_its_attacker() {
+    for (jace_first, round_trip) in [(true, false), (false, false), (true, true)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let observer = scenario
+            .add_creature_from_oracle(P1, "Mangara, the Diplomat", 2, 4, MANGARA)
+            .id();
+        let add_jace = |scenario: &mut GameScenario| {
+            scenario
+                .add_planeswalker_from_oracle(P1, "Jace Beleren", "Jace", 3, JACE_BELEREN)
+                .id()
+        };
+        let add_bear =
+            |scenario: &mut GameScenario| scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let (jace, at_jace) = if jace_first {
+            let jace = add_jace(&mut scenario);
+            (jace, add_bear(&mut scenario))
+        } else {
+            let bear = add_bear(&mut scenario);
+            (add_jace(&mut scenario), bear)
+        };
+        let at_player = add_bear(&mut scenario);
+        let wipe = scenario
+            .add_spell_to_hand_from_oracle(
+                P1,
+                "Fated Retribution",
+                true,
+                "Destroy all creatures and planeswalkers. If it's your turn, scry 2.",
+            )
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let draw = scenario.add_card_to_library_top(P1, "Island");
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[
+                (at_jace, AttackTarget::Planeswalker(jace)),
+                (at_player, AttackTarget::Player(P1)),
+            ])
+            .expect("attack you and your planeswalker");
+        assert_eq!(observer_triggers(&runner, observer), 1);
+
+        runner
+            .act(GameAction::PassPriority)
+            .expect("the attacking player passes");
+        runner.cast(wipe).commit();
+        runner.resolve_top();
+        for id in [jace, at_jace, at_player] {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+        }
+        assert_eq!(observer_triggers(&runner, observer), 1);
+
+        if round_trip {
+            let saved = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+                .expect("the pending trigger saves");
+            let restored = serde_json::from_value::<PersistedGameState>(saved)
+                .expect("the pending trigger decodes")
+                .into_game_state()
+                .expect("the simultaneous departure evidence restores");
+            runner = GameRunner::from_state(restored);
+        }
+        assert_mangara_draws(runner, draw);
+    }
+}
+
+fn assert_simultaneous_attack_departures(planeswalker_first: bool, merged_attacker: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let observer = scenario
+        .add_creature_from_oracle(P1, "Mangara, the Diplomat", 2, 4, MANGARA)
+        .id();
+    let add_jace = |scenario: &mut GameScenario| {
+        scenario
+            .add_planeswalker_from_oracle(P1, "Jace Beleren", "Jace", 3, JACE_BELEREN)
+            .id()
+    };
+    let add_attacker =
+        |scenario: &mut GameScenario| scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let (jace, at_jace) = if planeswalker_first {
+        (add_jace(&mut scenario), add_attacker(&mut scenario))
+    } else {
+        let attacker = add_attacker(&mut scenario);
+        (add_jace(&mut scenario), attacker)
+    };
+    let component = merged_attacker.then(|| scenario.add_creature(P0, "Gemrazer", 4, 4).id());
+    let at_player = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let stone = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Oblivion Stone",
+            "{4}, {T}: Put a fate counter on target permanent.\n{5}, {T}, Sacrifice this artifact: Destroy each nonland permanent without a fate counter on it, then remove all fate counters from all permanents.",
+        )
+        .id();
+    let draw = scenario.add_card_to_library_top(P1, "Island");
+    let mut runner = scenario.build();
+    if let Some(component) = component {
+        // Set up the merged permanent through the same helper used by mutate.
+        let state = runner.state_mut();
+        merge_object_onto(
+            state,
+            component,
+            at_jace,
+            MergeSide::Bottom,
+            &mut Vec::new(),
+        );
+        state.battlefield.retain(|&id| id != component);
+        assert_eq!(
+            state.objects[&at_jace].merged_components,
+            [at_jace, component]
+        );
+    }
+    let jace_identity = ObjectIncarnationRef::of(jace, runner.state().objects[&jace].incarnation);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (at_jace, AttackTarget::Planeswalker(jace)),
+            (at_player, AttackTarget::Player(P1)),
+        ])
+        .expect("attack you and your planeswalker");
+    assert_eq!(observer_triggers(&runner, observer), 1);
+    let pool = &mut runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|player| player.id == P0)
+        .expect("active player")
+        .mana_pool;
+    for _ in 0..5 {
+        pool.add(ManaUnit::new(ManaType::Colorless, stone, false, vec![]));
+    }
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: stone,
+            ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Oblivion Stone in response to Mangara");
+    assert_eq!(runner.state().stack.last().unwrap().source_id, stone);
+    runner.resolve_top();
+    assert_eq!(observer_triggers(&runner, observer), 1);
+    let records = &runner.state().zone_changes_this_turn;
+    let departure = |id| {
+        records
+            .iter()
+            .position(|record| {
+                record.object_id == id && record.from_zone == Some(Zone::Battlefield)
+            })
+            .expect("Oblivion Stone destroyed the permanent")
+    };
+    let attacker_record = departure(at_jace);
+    assert_eq!(departure(jace) < attacker_record, planeswalker_first);
+    for attacker in [at_jace, at_player] {
+        let status = records[departure(attacker)].combat_status;
+        assert!(status.attacking && !status.attacking_alone);
+    }
+    if let Some(component) = component {
+        assert_eq!(runner.state().objects[&component].zone, Zone::Graveyard);
+    }
+    assert_eq!(
+        records[attacker_record].combat_status.attack_target,
+        Some(AttackTarget::Planeswalker(jace))
+    );
+    assert_eq!(
+        records[attacker_record]
+            .combat_status
+            .attack_target_identity,
+        Some(jace_identity)
+    );
+    assert_mangara_draws(runner, draw);
+}
+
+/// CR 506.4c + CR 608.2h: Displacement Wave removes Jace, pauses on an
+/// absorbed commander's hand replacement, then removes Jace's attacker.
+#[test]
+fn mangara_keeps_the_pre_departure_attack_target_across_a_parked_batch() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let jace = scenario.add_real_card(P1, "Jace Beleren", Zone::Battlefield, db);
+    let at_player = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let at_jace = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let observer = scenario.add_real_card(P1, "Mangara, the Diplomat", Zone::Battlefield, db);
+    let commander = scenario.add_real_card(P0, "Brokkos, Apex of Forever", Zone::Command, db);
+    let orrery = scenario.add_real_card(P0, "Vedalken Orrery", Zone::Battlefield, db);
+    let wave = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Displacement Wave",
+            false,
+            "Return all nonland permanents with mana value X or less to their owners' hands.",
+        )
+        .with_mana_cost(parse_mtgjson_mana_cost("{X}{U}{U}"))
+        .id();
+    let draw = scenario.add_card_to_library_top(P1, "Island");
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.objects.get_mut(&commander).unwrap().is_commander = true;
+    merge_object_onto(
+        state,
+        commander,
+        at_player,
+        MergeSide::Bottom,
+        &mut Vec::new(),
+    );
+    assert_eq!(
+        state.objects[&at_player].merged_components,
+        [at_player, commander]
+    );
+
+    let jace_identity = ObjectIncarnationRef::of(jace, runner.state().objects[&jace].incarnation);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (at_player, AttackTarget::Player(P1)),
+            (at_jace, AttackTarget::Planeswalker(jace)),
+        ])
+        .expect("attack Mangara's controller and their planeswalker");
+    assert_eq!(observer_triggers(&runner, observer), 1);
+    let pool = &mut runner.state_mut().players[0].mana_pool;
+    for _ in 0..6 {
+        pool.add(ManaUnit::new(ManaType::Blue, orrery, false, vec![]));
+    }
+    runner.cast(wave).x(4).commit();
+    runner.resolve_top();
+    let WaitingFor::ReplacementChoice {
+        player: P0,
+        candidates,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected the merged commander's replacement, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let command = candidates
+        .iter()
+        .position(|choice| choice.description == "Move to command zone")
+        .expect("the owner can choose the command zone");
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.proposed.affected_object_id()),
+        Some(commander)
+    );
+    assert_eq!(runner.state().objects[&jace].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&at_jace].zone, Zone::Battlefield);
+    let combat = runner
+        .state()
+        .combat
+        .as_ref()
+        .expect("combat is still in progress");
+    assert!(!combat.attacked_permanents.contains_key(&at_jace));
+
+    let saved = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the interrupted resolution saves");
+    let restored = serde_json::from_value::<PersistedGameState>(saved)
+        .expect("the interrupted resolution decodes")
+        .into_game_state()
+        .expect("the interrupted resolution restores");
+    let mut runner = GameRunner::from_state(restored);
+    runner
+        .act(GameAction::ChooseReplacement { index: command })
+        .expect("the owner moves their commander to the command zone");
+    assert_eq!(runner.state().objects[&commander].zone, Zone::Command);
+    assert_eq!(runner.state().objects[&at_jace].zone, Zone::Hand);
+    assert_eq!(observer_triggers(&runner, observer), 1);
+    let departure = runner
+        .state()
+        .zone_changes_this_turn
+        .iter()
+        .find(|record| record.object_id == at_jace && record.from_zone == Some(Zone::Battlefield))
+        .expect("the attacker departed after restore");
+    assert_eq!(
+        departure.combat_status.attack_target,
+        Some(AttackTarget::Planeswalker(jace))
+    );
+    assert_eq!(
+        departure.combat_status.attack_target_identity,
+        Some(jace_identity)
+    );
+    assert_mangara_draws(runner, draw);
 }
 
 /// CR 506.4: an attacker removed from combat and then returned to hand was
