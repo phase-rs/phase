@@ -2,7 +2,7 @@ use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::GameObject;
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::game::targeting::{TriggeringActivation, TriggeringSpell};
+use crate::game::targeting::{TriggeringActivation, TriggeringObservedAbility, TriggeringSpell};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, CopyRetargetPermission,
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
@@ -588,8 +588,9 @@ struct CopySource {
     /// (`crate::types::game_state::DepartedStackSpell`) rather than a live
     /// stack object — `resolve` must read this object, not
     /// `state.objects.get(&entry.id)`, which could now name an unrelated
-    /// later object at the same storage id. A departed activated ability
-    /// (`targeting::TriggeringActivation::Departed`) has none: this engine
+    /// later object at the same storage id. A departed ability
+    /// (`targeting::TriggeringActivation::Departed` or
+    /// `targeting::TriggeringObservedAbility::Departed`) has none: this engine
     /// stores no `GameObject` for an ability entry, so `resolve`'s
     /// `state.objects.get(&entry.id)` fallback finds nothing for it either.
     departed_object: Option<Box<GameObject>>,
@@ -642,6 +643,30 @@ fn copy_source_from_triggering_activation(source: TriggeringActivation<'_>) -> C
             departed_object: None,
         })),
         TriggeringActivation::Gone => CopySourceLookup::Gone,
+    }
+}
+
+/// CR 608.2h + CR 707.10: Adapt `targeting::triggering_observed_ability`'s
+/// answer to a [`CopySourceLookup`]. `Departed` is the countered observed
+/// trigger's last-known entry; `Gone` means the named stack object has neither
+/// a live entry nor a departed record; it differs from no source.
+fn copy_source_from_triggering_observed_ability(
+    source: TriggeringObservedAbility<'_>,
+) -> CopySourceLookup {
+    match source {
+        TriggeringObservedAbility::OnStack(entry) => {
+            CopySourceLookup::Source(Box::new(CopySource::on_stack(entry.clone())))
+        }
+        // CR 707.10 + CR 113.1c: a countered observed trigger is copied as it
+        // last existed. An ability on the stack has no `GameObject` here, so
+        // there is no departed object.
+        TriggeringObservedAbility::Departed(entry) => {
+            CopySourceLookup::Source(Box::new(CopySource {
+                entry: entry.clone(),
+                departed_object: None,
+            }))
+        }
+        TriggeringObservedAbility::Gone => CopySourceLookup::Gone,
     }
 }
 
@@ -785,6 +810,23 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> CopySource
             }
         }
         return CopySourceLookup::Absent;
+    }
+    // CR 608.2k + CR 707.10: an ability-triggering observer ("that ability"
+    // — Firebender Ascension, Aboleth Spawn) copies the observed stack entry
+    // by its entry id, through the same on-stack/departed/gone authority as
+    // the `TriggeringSource` arm above. Never `source_id`: sibling firings
+    // share it (see the CR 608.2h comment above for the same trap). `None`
+    // (the observed occurrence was removed during placement, CR 603.3d) and
+    // an entry with no departed record both resolve to `Gone`, the clean
+    // no-op; a countered observed trigger copies from its record (CR 608.2h).
+    if let Some(source) = crate::game::targeting::triggering_observed_ability(state) {
+        return copy_source_from_triggering_observed_ability(source);
+    }
+    if matches!(
+        state.current_trigger_event,
+        Some(GameEvent::AbilityTriggered { .. })
+    ) {
+        return CopySourceLookup::Gone;
     }
     // CR 608.2h: final untargeted fallback. With a spell-cast event in scope,
     // use its on-stack/departed/gone answer — never `triggering_spell_stack_entry`'s
@@ -1894,7 +1936,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Sacrifice {
                     target: TargetFilter::SelfRef,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
             ));
@@ -2629,6 +2671,7 @@ mod tests {
         // Push an intermediate triggered ability (e.g. Monastery Mentor token trigger)
         let mentor_ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Monk".to_string(),
                 power: crate::types::ability::PtValue::Fixed(1),
                 toughness: crate::types::ability::PtValue::Fixed(1),

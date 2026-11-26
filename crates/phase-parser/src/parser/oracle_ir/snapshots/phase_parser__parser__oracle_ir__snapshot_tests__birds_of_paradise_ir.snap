@@ -132,7 +132,6 @@ expression: "&ir"
             },
             "description": "{T}: Add one mana of any color.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

@@ -487,7 +487,7 @@ fn translate_sacrifice(params: &ForgeParams) -> Result<Effect, ForgeTranslateErr
         .unwrap_or(TargetFilter::Any);
     Ok(Effect::Sacrifice {
         target,
-        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
         min_count: 0,
     })
 }

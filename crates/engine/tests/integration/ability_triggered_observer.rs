@@ -3,10 +3,12 @@
 //! once for each attack- or enter-caused triggered occurrence, at its push or
 //! at its removal during placement (CR 603.3c, CR 603.3d).
 //!
-//! The observers are the D1 shapes of the printed cards (phase 1 of the
-//! Firebender Ascension class: the parser cannot produce them until phase 4).
-//! Each is built from its verbatim Oracle text; only the trigger condition the
-//! parser cannot yet produce is replaced, keeping today's parse of its effect.
+//! The observers are the D1 shapes of the printed cards: each is built from
+//! its verbatim Oracle text, then its trigger condition is replaced with the
+//! hand-built D1 shape (keeping the parsed effect), so these tests pin the
+//! engine's observer machinery independently of the live parser. (The parser
+//! produces the real shapes since #11338; the replacement is retained
+//! deliberately as an engine-level pin.)
 //!
 //! Oracle text (card data):
 //! - Firebender Ascension: "When this enchantment enters, create a 2/2 red
@@ -22,21 +24,41 @@
 //!   creature entering under an opponent's control causes a triggered ability
 //!   of that creature to trigger, you may copy that ability. You may choose new
 //!   targets for the copy."
+//!
+//! The CR 603.3b placement tests (the last section) put each first-part ability
+//! of every player on the stack before any second-part ability (one whose
+//! trigger condition is another ability triggering), and an ability that
+//! triggered while a placement process was put on the stack after that whole
+//! process, in the next repetition. Each board is built from its cards'
+//! verbatim Oracle text.
+//!
+//! A reflexive ability (CR 603.12) in these tests goes on the stack as its
+//! targets or modes are chosen, below the other abilities that triggered
+//! earlier in the same resolution, without an order choice. That is the
+//! engine's existing placement of a reflexive ability (`effects/mod.rs`), not a
+//! CR 603.3b requirement: CR 603.3b lets its controller order it among their
+//! other first-part abilities. Those rows assert the reflexive ability and the
+//! other abilities of its resolution as one group, in any order; their CR 603.3b
+//! claim is what goes on after the process.
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::trigger_index::reindex_object_triggers;
+use engine::game::triggers::{PendingTriggerContext, PLACEMENT_PROCESS_FIELD};
 use engine::game::visibility::{
     filter_events_for_viewer, filter_state_for_viewer, HIDDEN_CARD_NAME,
 };
-use engine::types::ability::{ControllerRef, TargetFilter, TriggerDefinition, TypedFilter};
+use engine::types::ability::{
+    ControllerRef, StackAbilityKind, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card::PrintedCardRef;
 use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, TriggeredAbilityOrigin};
 use engine::types::game_state::{
-    AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerAutoChoiceSelector,
-    MayTriggerOrigin, StackEntryKind, WaitingFor,
+    ActionResult, AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerAutoChoiceSelector,
+    MayTriggerOrigin, PersistedGameState, PersistedRestoreError, PersistedRestoreFinalization,
+    StackEntryKind, StackObjectClass, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -124,9 +146,9 @@ impl Observer {
 }
 
 /// Add the printed observer to `player`'s battlefield from its verbatim Oracle
-/// text, then replace the trigger condition the parser cannot yet produce
-/// (Ascension's `Unknown` line; Aboleth's and Proctor's misparsed `ChangesZone`
-/// line) with its D1 shape, keeping the parsed effect half.
+/// text, then replace the trigger condition with its D1 shape, keeping the
+/// parsed effect half. (The parser produces the real shapes since #11338;
+/// the replacement pins the engine-level D1 shape.)
 fn add_observer(scenario: &mut GameScenario, player: PlayerId, observer: Observer) -> ObjectId {
     let id = match observer {
         Observer::FirebenderAscension => scenario
@@ -2042,4 +2064,3072 @@ fn v21b_deferred_context_causes_are_private() {
         vec![false],
         "another player's copy has no cause record"
     );
+}
+
+// ---------------------------------------------------------------------------
+// CR 603.3b two-part placement and repetition
+// ---------------------------------------------------------------------------
+//
+// CR 603.3b: "First, each player, in APNAP order, puts each triggered ability
+// they control with a trigger condition that isn't another ability triggering
+// on the stack in any order they choose. … Second, each player, in APNAP order,
+// puts all remaining triggered abilities they control on the stack in any
+// order they choose. Then … abilities that triggered during this process go on
+// the stack. This process repeats …"
+
+const ORIMS_PRAYER: &str =
+    "Whenever one or more creatures attack you, you gain 1 life for each attacking creature.";
+const HISTORIANS_BOON: &str = "Whenever this enchantment or another nontoken enchantment you control enters, create a 1/1 white Soldier creature token.\nWhenever the final chapter ability of a Saga you control triggers, create a 4/4 white Angel creature token with flying and vigilance.";
+const HISTORY_OF_BENALIA: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI, II — Create a 2/2 white Knight creature token with vigilance.\nIII — Knights you control get +2/+1 until end of turn.";
+const THE_ELDEST_REBORN: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Each opponent sacrifices a creature or planeswalker of their choice.\nII — Each opponent discards a card.\nIII — Put target creature or planeswalker card from a graveyard onto the battlefield under your control.";
+const TAR_PIT_WARRIOR: &str =
+    "When this creature becomes the target of a spell or ability, sacrifice it.";
+const DEEPMUCK_DESPERADO: &str = "Whenever you commit a crime, each opponent mills three cards. This ability triggers only once each turn. (Targeting opponents, anything they control, and/or cards in their graveyards is a crime.)";
+const HAMA_PASHAR: &str = "Room abilities of dungeons you own trigger an additional time.";
+const FATES_REVERSAL: &str = "Return up to one target creature card from your graveyard to your hand. Venture into the dungeon. (Enter the first room or advance to the next room.)";
+const PLANAR_VOID: &str =
+    "Whenever another card is put into a graveyard from anywhere, exile that card.";
+const DESECRATED_TOMB: &str = "Whenever one or more creature cards leave your graveyard, create a 1/1 black Bat creature token with flying.";
+const DOOMED_DISSENTER: &str = "When this creature dies, create a 2/2 black Zombie creature token.";
+const BOLG_OF_THE_NORTH: &str = "When Bolg enters, you may sacrifice another creature. When you do, Bolg deals damage equal to that creature's power to another target creature. If excess damage was dealt this way, amass Goblins X, where X is that excess damage. (Put X +1/+1 counters on an Army you control. It's also a Goblin. If you don't control an Army, create a 0/0 black Goblin Army creature token first.)";
+const BACK_FOR_MORE: &str = "Return target creature card from your graveyard to the battlefield. When you do, it fights up to one target creature you don't control. (Each deals damage equal to its power to the other.)";
+const DUNGEON_MAP: &str = "{T}: Add {C}.\n{3}, {T}: Venture into the dungeon. Activate only as a sorcery. (Enter the first room or advance to the next room.)";
+const ACERERAK_THE_ARCHLICH: &str = "When Acererak enters, if you haven't completed Tomb of Annihilation, return Acererak to its owner's hand and venture into the dungeon.\nWhenever Acererak attacks, for each opponent, you create a 2/2 black Zombie creature token unless that player sacrifices a creature of their choice.";
+const FLAMING_FIST_OFFICER: &str =
+    "Whenever another creature you control leaves the battlefield, put a +1/+1 counter on this creature.";
+const MORTICIAN_BEETLE: &str =
+    "Whenever a player sacrifices a creature, you may put a +1/+1 counter on this creature.";
+const PERILOUS_MYR: &str = "When this creature dies, it deals 2 damage to any target.";
+
+/// One triggered stack entry or queued context, told apart by source, by the
+/// ability it observes, or by its Oracle description.
+#[derive(Clone, Copy, Debug)]
+enum Pick {
+    /// A trigger of this source that observes no ability.
+    Of(ObjectId),
+    /// A trigger of this source whose description contains the text.
+    OfWith(ObjectId, &'static str),
+    /// A trigger of this source whose description lacks the text.
+    OfWithout(ObjectId, &'static str),
+    /// An observer firing of the first source that observes the second.
+    Observing(ObjectId, ObjectId),
+}
+
+fn observed_by(event: Option<&GameEvent>) -> Option<ObjectId> {
+    match event {
+        Some(GameEvent::AbilityTriggered { source_id, .. }) => Some(*source_id),
+        _ => None,
+    }
+}
+
+fn pick_matches(
+    pick: Pick,
+    source: ObjectId,
+    event: Option<&GameEvent>,
+    description: Option<&str>,
+) -> bool {
+    let observed = observed_by(event);
+    match pick {
+        Pick::Of(id) => source == id && observed.is_none(),
+        Pick::OfWith(id, text) => {
+            source == id && observed.is_none() && description.is_some_and(|d| d.contains(text))
+        }
+        Pick::OfWithout(id, text) => {
+            source == id && observed.is_none() && !description.is_some_and(|d| d.contains(text))
+        }
+        Pick::Observing(observer, of) => source == observer && observed == Some(of),
+    }
+}
+
+fn context_matches(ctx: &PendingTriggerContext, pick: Pick) -> bool {
+    pick_matches(
+        pick,
+        ctx.pending.source_id,
+        ctx.pending.trigger_event.as_ref(),
+        ctx.pending.description.as_deref(),
+    )
+}
+
+/// The triggered entries on the stack, bottom→top, with their trigger event
+/// and description.
+fn triggered_entries(state: &GameState) -> Vec<(ObjectId, Option<GameEvent>, Option<String>)> {
+    state
+        .stack
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                source_id,
+                trigger_event,
+                description,
+                ..
+            } => Some((*source_id, trigger_event.clone(), description.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The triggered stack sources, bottom→top.
+fn triggered_stack_sources(state: &GameState) -> Vec<ObjectId> {
+    triggered_entries(state)
+        .into_iter()
+        .map(|(source, _, _)| source)
+        .collect()
+}
+
+fn object_name(state: &GameState, id: ObjectId) -> String {
+    state
+        .objects
+        .get(&id)
+        .map_or_else(|| format!("#{}", id.0), |obj| obj.name.clone())
+}
+
+fn target_names(state: &GameState, targets: &[TargetRef]) -> String {
+    targets
+        .iter()
+        .map(|target| match target {
+            TargetRef::Object(id) => object_name(state, *id),
+            TargetRef::Player(player) => format!("P{}", player.0),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// A readable bottom→top stack, for assertion messages.
+fn stack_reading(state: &GameState) -> Vec<String> {
+    state
+        .stack
+        .iter()
+        .map(|entry| {
+            let mut label = format!(
+                "{}(P{})",
+                object_name(state, entry.source_id),
+                entry.controller.0
+            );
+            if let StackEntryKind::TriggeredAbility {
+                trigger_event,
+                description,
+                ..
+            } = &entry.kind
+            {
+                if let Some(of) = observed_by(trigger_event.as_ref()) {
+                    label.push_str(&format!(" observing {}", object_name(state, of)));
+                }
+                if !state.objects.contains_key(&entry.source_id) {
+                    label = description.clone().unwrap_or(label);
+                    label.truncate(24);
+                }
+            } else {
+                label = format!("spell {label}");
+            }
+            if let Some(ability) = entry.ability() {
+                if !ability.targets.is_empty() {
+                    label.push_str(&format!(" -> {}", target_names(state, &ability.targets)));
+                }
+            }
+            label
+        })
+        .collect()
+}
+
+/// Assert the triggered stack entries, bottom→top, are exactly `expected`.
+fn assert_triggered_stack(state: &GameState, expected: &[Pick], what: &str) {
+    let entries = triggered_entries(state);
+    let matches = entries.len() == expected.len()
+        && entries
+            .iter()
+            .zip(expected)
+            .all(|((source, event, description), pick)| {
+                pick_matches(*pick, *source, event.as_ref(), description.as_deref())
+            });
+    assert!(
+        matches,
+        "{what}: expected {expected:?} bottom→top, got {:?}",
+        stack_reading(state)
+    );
+}
+
+/// Whether `items` and `expected` match one to one, in any order (each pick
+/// consumes one item).
+fn matches_in_any_order<T>(
+    items: &[T],
+    expected: &[Pick],
+    matches: impl Fn(&T, Pick) -> bool,
+) -> bool {
+    let mut used = vec![false; items.len()];
+    items.len() == expected.len()
+        && expected.iter().all(|pick| {
+            let found = (0..items.len()).find(|&i| !used[i] && matches(&items[i], *pick));
+            found.map(|i| used[i] = true).is_some()
+        })
+}
+
+/// CR 603.3b + CR 101.4: assert the triggered stack entries, bottom→top, are
+/// `groups` in this order, the abilities of each group in any order. A group
+/// is a set of abilities its controller may put on the stack in any order, so
+/// only the order of the groups is asserted.
+fn assert_triggered_stack_groups(state: &GameState, groups: &[&[Pick]], what: &str) {
+    let entries = triggered_entries(state);
+    let total: usize = groups.iter().map(|group| group.len()).sum();
+    let mut rest = entries.as_slice();
+    let matches = entries.len() == total
+        && groups.iter().all(|group| {
+            let (bottom, above) = rest.split_at(group.len());
+            rest = above;
+            matches_in_any_order(bottom, group, |(source, event, description), pick| {
+                pick_matches(pick, *source, event.as_ref(), description.as_deref())
+            })
+        });
+    assert!(
+        matches,
+        "{what}: expected the groups {groups:?} bottom→top, got {:?}",
+        stack_reading(state)
+    );
+}
+
+/// The contexts the open `OrderTriggers` prompt lists, in prompt order (the
+/// first unordered group of `pending_trigger_order`).
+fn prompt_contexts(state: &GameState) -> Vec<PendingTriggerContext> {
+    state
+        .pending_trigger_order
+        .as_ref()
+        .and_then(|order| order.groups.iter().find(|group| !group.ordered))
+        .map(|group| group.triggers.clone())
+        .unwrap_or_default()
+}
+
+/// Whether the open prompt lists exactly the contexts `expected` picks (in
+/// any order).
+fn prompt_lists_exactly(state: &GameState, expected: &[Pick]) -> bool {
+    matches_in_any_order(&prompt_contexts(state), expected, |ctx, pick| {
+        context_matches(ctx, pick)
+    })
+}
+
+/// CR 603.3b: submit the order whose first listed contexts are `first` (each
+/// pick consumes one listed context); the rest follow in prompt order. Returns
+/// the action's result.
+fn order_by_identity(runner: &mut GameRunner, first: &[Pick]) -> ActionResult {
+    let contexts = prompt_contexts(runner.state());
+    let mut used = vec![false; contexts.len()];
+    let mut order = Vec::new();
+    for pick in first {
+        let index = (0..contexts.len())
+            .find(|&i| !used[i] && context_matches(&contexts[i], *pick))
+            .unwrap_or_else(|| panic!("{pick:?} is not listed by the order prompt"));
+        used[index] = true;
+        order.push(index);
+    }
+    order.extend((0..contexts.len()).filter(|&i| !used[i]));
+    runner
+        .act(GameAction::OrderTriggers { order })
+        .expect("the engine-issued order is legal")
+}
+
+/// Answer every order prompt with the identity order; return how many were
+/// answered.
+fn count_identity_orders(runner: &mut GameRunner) -> usize {
+    let mut answered = 0;
+    while let WaitingFor::OrderTriggers { triggers, .. } = runner.state().waiting_for.clone() {
+        runner
+            .act(GameAction::OrderTriggers {
+                order: (0..triggers.len()).collect(),
+            })
+            .expect("the identity order is legal");
+        answered += 1;
+        assert!(answered <= 8, "too many order prompts");
+    }
+    answered
+}
+
+/// CR 603.3b + CR 603.5: no construction prompt opens for an ability that is
+/// placed in the second part (none of the class's second-part abilities has a
+/// target, mode or division).
+fn assert_no_second_part_construction(runner: &GameRunner, second_part_sources: &[ObjectId]) {
+    let state = runner.state();
+    let constructing = matches!(
+        state.waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+            | WaitingFor::AbilityModeChoice { .. }
+            | WaitingFor::OptionalEffectChoice { .. }
+            | WaitingFor::DistributeAmong { .. }
+    );
+    if constructing {
+        if let Some(pending) = state.pending_trigger.as_ref() {
+            assert!(
+                !second_part_sources.contains(&pending.source_id),
+                "a second-part ability opened a construction prompt: {:?}",
+                state.waiting_for
+            );
+        }
+    }
+}
+
+/// The completion boundary: `Priority`, nothing queued, no open order.
+fn assert_completion_boundary(runner: &GameRunner, what: &str) {
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "{what}: expected Priority, got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "{what}: the queue is empty at the boundary"
+    );
+    assert!(
+        state.pending_trigger_order.is_none(),
+        "{what}: no order is open at the boundary"
+    );
+}
+
+/// CR 603.3b: the queued contexts that `pick` names.
+fn queued_matching(state: &GameState, pick: Pick) -> usize {
+    state
+        .deferred_triggers
+        .iter()
+        .filter(|ctx| context_matches(ctx, pick))
+        .count()
+}
+
+/// Round-trip the live state through its serialized form at a pause and keep
+/// playing from the restored copy. Returns whether a serialized context of the
+/// queue or the order groups was marked as a member of the placement process
+/// under way.
+fn round_trip_state(runner: &mut GameRunner) -> bool {
+    let json = serde_json::to_string(runner.state()).expect("the state serializes");
+    let restored: GameState = serde_json::from_str(&json).expect("the state deserializes");
+    *runner.state_mut() = restored;
+    queued_contexts(runner.state()).any(queued_under_way)
+}
+
+/// Every queued context: the deferred queue, then the order groups.
+fn queued_contexts(state: &GameState) -> impl Iterator<Item = &PendingTriggerContext> {
+    state.deferred_triggers.iter().chain(
+        state
+            .pending_trigger_order
+            .iter()
+            .flat_map(|order| order.groups.iter())
+            .flat_map(|group| group.triggers.iter()),
+    )
+}
+
+fn tts_legal_targets(runner: &GameRunner) -> Vec<TargetRef> {
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected a trigger target prompt, got {:?} (stack {:?})",
+            runner.state().waiting_for,
+            stack_reading(runner.state())
+        );
+    };
+    target_slots[0].legal_targets.clone()
+}
+
+fn assert_tts(runner: &GameRunner, source: Option<ObjectId>, legal: &[TargetRef], what: &str) {
+    let WaitingFor::TriggerTargetSelection { source_id, .. } = &runner.state().waiting_for else {
+        panic!(
+            "{what}: expected a trigger target prompt, got {:?} (stack {:?})",
+            runner.state().waiting_for,
+            stack_reading(runner.state())
+        );
+    };
+    if let Some(source) = source {
+        assert_eq!(*source_id, Some(source), "{what}: the prompt's source");
+    }
+    let mut got = tts_legal_targets(runner);
+    let mut want = legal.to_vec();
+    let key = |t: &TargetRef| match t {
+        TargetRef::Object(id) => (0u8, id.0),
+        TargetRef::Player(p) => (1u8, u64::from(p.0)),
+    };
+    got.sort_by_key(key);
+    want.sort_by_key(key);
+    assert_eq!(got, want, "{what}: the legal targets");
+}
+
+fn select(runner: &mut GameRunner, targets: Vec<TargetRef>) -> ActionResult {
+    runner
+        .act(GameAction::SelectTargets { targets })
+        .expect("the engine-offered targets are legal")
+}
+
+fn object(id: ObjectId) -> TargetRef {
+    TargetRef::Object(id)
+}
+
+/// Advance from P0's precombat main to P0's next precombat main, declaring no
+/// attackers or blockers on the way.
+fn advance_to_p0_next_precombat_main(runner: &mut GameRunner) {
+    let start_turn = runner.state().turn_number;
+    for _ in 0..80 {
+        let state = runner.state();
+        if state.turn_number > start_turn
+            && state.active_player == P0
+            && state.phase == Phase::PreCombatMain
+            && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        {
+            return;
+        }
+        let action = match &state.waiting_for {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: Vec::new(),
+                bands: Vec::new(),
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: Vec::new(),
+            },
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            // A placement prompt on the way is the caller's to assert.
+            _ => return,
+        };
+        runner.act(action).expect("the turn advances");
+    }
+    panic!("never reached P0's next precombat main");
+}
+
+/// Cast Azula at this turn and move to P0's next precombat main, so Azula's
+/// entered-battlefield turn is later than every creature the scenario built.
+fn azula_entered_this_turn(runner: &mut GameRunner, azula: ObjectId) {
+    cast_and_resolve(runner, azula);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner.pass_both_players();
+    }
+    advance_to_p0_next_precombat_main(runner);
+    let state = runner.state();
+    assert!(
+        state.active_player == P0
+            && state.phase == Phase::PreCombatMain
+            && matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "P0's next precombat main: {:?}",
+        state.waiting_for
+    );
+}
+
+/// CR 603.3b + CR 101.4: an observer goes on the stack after every first-part
+/// trigger of every player, even when the observed ability paused for its
+/// target. Iroh's mentor (two legal targets) and Zuko's firebending are P0's;
+/// Orim's Prayer is P1's.
+#[test]
+fn observer_goes_above_every_players_first_part_across_a_target_pause() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ascension = add_observer(&mut scenario, P0, Observer::FirebenderAscension);
+    let iroh = scenario
+        .add_creature_from_oracle(P0, "Iroh, Dragon of the West", 4, 4, IROH)
+        .id();
+    let zuko = scenario
+        .add_creature(P0, "Zuko, Seeking Honor", 2, 2)
+        .from_oracle_text_with_keywords(&["firebending"], ZUKO)
+        .id();
+    let goblin = scenario
+        .add_creature_from_oracle(P0, "Raging Goblin", 1, 1, RAGING_GOBLIN)
+        .id();
+    let prayer = scenario
+        .add_enchantment_from_oracle(P1, "Orim's Prayer", ORIMS_PRAYER)
+        .id();
+    let mut runner = scenario.build();
+    install_observer(runner.state_mut(), ascension, Observer::FirebenderAscension);
+    let second_part = [ascension];
+
+    attack(&mut runner, &[iroh, zuko, goblin]);
+    assert!(
+        prompt_lists_exactly(runner.state(), &[Pick::Of(iroh), Pick::Of(zuko)]),
+        "P0 orders the mentor and the firebending, got {:?}",
+        runner.state().waiting_for
+    );
+    order_by_identity(&mut runner, &[Pick::Of(iroh)]);
+    assert_no_second_part_construction(&runner, &second_part);
+    assert_tts(
+        &runner,
+        Some(iroh),
+        &[object(zuko), object(goblin)],
+        "the mentor",
+    );
+    assert_not_first_ability_of_an_ability_resolution(&runner, "the mentor");
+    select(&mut runner, vec![object(goblin)]);
+    let answered = count_identity_orders(&mut runner);
+    assert_eq!(answered, 1, "one order prompt for the two firings");
+
+    assert_completion_boundary(&runner, "after the mentor's target");
+    assert_triggered_stack(
+        runner.state(),
+        &[
+            Pick::Of(iroh),
+            Pick::Of(zuko),
+            Pick::Of(prayer),
+            Pick::Observing(ascension, iroh),
+            Pick::Observing(ascension, zuko),
+        ],
+        "CR 603.3b: both parts, APNAP within the first",
+    );
+}
+
+/// CR 603.3b: a chosen first-part order survives a target pause beside
+/// observers, and the second part is ordered as one complete set. The order
+/// submitted is against timestamp order (Azula entered after Zuko).
+#[test]
+fn chosen_first_part_order_survives_a_pause_and_the_second_part_is_ordered_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Plains", "Plains", "Plains", "Plains"]);
+    scenario.with_library_top(P1, &["Plains", "Plains", "Plains", "Plains"]);
+    let ascension = add_observer(&mut scenario, P0, Observer::FirebenderAscension);
+    let iroh = scenario
+        .add_creature_from_oracle(P0, "Iroh, Dragon of the West", 4, 4, IROH)
+        .id();
+    let zuko = scenario
+        .add_creature(P0, "Zuko, Seeking Honor", 2, 2)
+        .from_oracle_text_with_keywords(&["firebending"], ZUKO)
+        .id();
+    let goblin = scenario
+        .add_creature_from_oracle(P0, "Raging Goblin", 1, 1, RAGING_GOBLIN)
+        .id();
+    let azula = scenario
+        .add_creature_to_hand(P0, "Azula, On the Hunt", 4, 3)
+        .from_oracle_text_with_keywords(&["firebending"], AZULA)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    install_observer(runner.state_mut(), ascension, Observer::FirebenderAscension);
+    azula_entered_this_turn(&mut runner, azula);
+    let entered = |id: ObjectId| runner.state().objects[&id].entered_battlefield_turn;
+    assert!(
+        entered(azula) > entered(zuko),
+        "Azula entered after Zuko: {:?} vs {:?}",
+        entered(azula),
+        entered(zuko)
+    );
+    let second_part = [ascension];
+
+    attack(&mut runner, &[iroh, zuko, azula, goblin]);
+    let a1 = Pick::OfWithout(azula, "lose 1 life");
+    let a2 = Pick::OfWith(azula, "lose 1 life");
+    assert!(
+        prompt_lists_exactly(runner.state(), &[Pick::Of(iroh), Pick::Of(zuko), a1, a2]),
+        "P0 orders four first-part triggers, got {:?}",
+        runner.state().waiting_for
+    );
+    order_by_identity(&mut runner, &[a1, Pick::Of(iroh), a2, Pick::Of(zuko)]);
+    assert_no_second_part_construction(&runner, &second_part);
+    assert_tts(
+        &runner,
+        Some(iroh),
+        &[object(zuko), object(goblin)],
+        "the mentor",
+    );
+    assert_not_first_ability_of_an_ability_resolution(&runner, "the mentor");
+    let result = select(&mut runner, vec![object(goblin)]);
+    assert!(
+        matches!(result.waiting_for, WaitingFor::OrderTriggers { player, .. } if player == P0),
+        "the second part is ordered next, got {:?}",
+        result.waiting_for
+    );
+    assert!(
+        prompt_lists_exactly(
+            runner.state(),
+            &[
+                Pick::Observing(ascension, azula),
+                Pick::Observing(ascension, iroh),
+                Pick::Observing(ascension, azula),
+                Pick::Observing(ascension, zuko),
+            ]
+        ),
+        "the prompt lists exactly the four firings"
+    );
+    assert_triggered_stack(
+        runner.state(),
+        &[a1, Pick::Of(iroh), a2, Pick::Of(zuko)],
+        "CR 603.3b: the chosen first-part order",
+    );
+    count_identity_orders(&mut runner);
+
+    assert_completion_boundary(&runner, "after the second part");
+    let entries = triggered_entries(runner.state());
+    assert_eq!(entries.len(), 8);
+    assert!(
+        entries[4..]
+            .iter()
+            .all(|(source, event, _)| *source == ascension && observed_by(event.as_ref()).is_some()),
+        "the top four entries are the firings: {:?}",
+        stack_reading(runner.state())
+    );
+}
+
+/// CR 603.3b + CR 101.4: an entering causes part-2 triggers of two players;
+/// both go above every first-part trigger, APNAP within the second part (P1 is
+/// active).
+#[test]
+fn enter_observers_of_two_players_follow_every_first_part_trigger_in_apnap_order() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let proctor_p1 = add_observer(&mut scenario, P1, Observer::StrictProctor);
+    let hunter = scenario
+        .add_creature_to_hand_from_oracle(P1, "Fiend Hunter", 1, 3, FIEND_HUNTER)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let warden = scenario
+        .add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN)
+        .id();
+    let proctor_p0 = add_observer(&mut scenario, P0, Observer::StrictProctor);
+    let mut runner = scenario.build();
+    install_observer(runner.state_mut(), proctor_p1, Observer::StrictProctor);
+    install_observer(runner.state_mut(), proctor_p0, Observer::StrictProctor);
+    give_turn(&mut runner, P1);
+    let second_part = [proctor_p0, proctor_p1];
+
+    cast_and_resolve(&mut runner, hunter);
+    assert_no_second_part_construction(&runner, &second_part);
+    assert!(tts_legal_targets(&runner).len() >= 2);
+    assert_not_first_ability_of_an_ability_resolution(&runner, "Fiend Hunter's ETB");
+    select(&mut runner, vec![object(warden)]);
+    let mut prompts = Vec::new();
+    while let WaitingFor::OrderTriggers { player, triggers } = runner.state().waiting_for.clone() {
+        prompts.push(player);
+        assert_eq!(triggers.len(), 2);
+        let contexts = prompt_contexts(runner.state());
+        assert_eq!(
+            contexts.len(),
+            triggers.len(),
+            "the open order group lists the prompt's two firings"
+        );
+        assert!(contexts
+            .iter()
+            .all(
+                |ctx| observed_by(ctx.pending.trigger_event.as_ref()).is_some()
+                    && ctx.pending.controller == player
+            ));
+        count_identity_orders_once(&mut runner);
+    }
+    assert_eq!(prompts, vec![P1, P0], "one prompt per controller, APNAP");
+
+    assert_completion_boundary(&runner, "after both parts");
+    let sources = triggered_stack_sources(runner.state());
+    assert_eq!(
+        sources,
+        vec![hunter, warden, proctor_p1, proctor_p1, proctor_p0, proctor_p0],
+        "bottom→top: {:?}",
+        stack_reading(runner.state())
+    );
+}
+
+fn count_identity_orders_once(runner: &mut GameRunner) {
+    let WaitingFor::OrderTriggers { triggers, .. } = runner.state().waiting_for.clone() else {
+        panic!("expected an order prompt");
+    };
+    runner
+        .act(GameAction::OrderTriggers {
+            order: (0..triggers.len()).collect(),
+        })
+        .expect("the identity order is legal");
+}
+
+fn saga_on_battlefield(
+    scenario: &mut GameScenario,
+    name: &str,
+    cost: engine::types::mana::ManaCost,
+    oracle: &str,
+) -> ObjectId {
+    let id = scenario
+        .add_creature(P0, name, 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Saga"])
+        .with_mana_cost(cost)
+        .from_oracle_text(oracle)
+        .id();
+    // CR 714.3a: the scenario seeds the Saga with the lore counters it has.
+    scenario.with_counter(id, CounterType::Lore, 2);
+    id
+}
+
+fn lore(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Lore)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// CR 603.3b + CR 714.2e: Historian's Boon's "the final chapter ability of a
+/// Saga you control triggers" is a second-part trigger: it goes on the stack
+/// after chapter III, whichever permanent was created first.
+#[test]
+fn final_chapter_observer_is_placed_after_the_chapter_ability() {
+    for boon_first in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Plains", "Plains"]);
+        scenario.with_library_top(P1, &["Plains", "Plains", "Plains"]);
+        let benalia_cost = engine::types::mana::ManaCost::generic(3);
+        let (boon, history) = if boon_first {
+            let boon = scenario
+                .add_enchantment_from_oracle(P0, "Historian's Boon", HISTORIANS_BOON)
+                .id();
+            let history = saga_on_battlefield(
+                &mut scenario,
+                "History of Benalia",
+                benalia_cost,
+                HISTORY_OF_BENALIA,
+            );
+            (boon, history)
+        } else {
+            let history = saga_on_battlefield(
+                &mut scenario,
+                "History of Benalia",
+                benalia_cost,
+                HISTORY_OF_BENALIA,
+            );
+            let boon = scenario
+                .add_enchantment_from_oracle(P0, "Historian's Boon", HISTORIANS_BOON)
+                .id();
+            (boon, history)
+        };
+        let mut runner = scenario.build();
+
+        advance_to_p0_next_precombat_main(&mut runner);
+        assert_eq!(lore(&runner, history), 3, "boon first {boon_first}");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "boon first {boon_first}: no order prompt, got {:?}",
+            runner.state().waiting_for
+        );
+        assert_triggered_stack(
+            runner.state(),
+            &[Pick::Of(history), Pick::Of(boon)],
+            &format!("boon first {boon_first}"),
+        );
+    }
+}
+
+/// CR 603.3b + CR 700.13: a fresh batch's second part (Historian's Boon) goes
+/// on the stack before a crime trigger that triggered while the batch's first
+/// part (The Eldest Reborn's chapter III, auto-targeting P1's graveyard card)
+/// was put on the stack.
+#[test]
+fn fresh_second_part_goes_before_what_its_first_part_triggered() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Plains", "Plains", "Plains"]);
+    scenario.with_library_top(P1, &["Plains", "Plains", "Plains", "Plains"]);
+    let boon = scenario
+        .add_enchantment_from_oracle(P0, "Historian's Boon", HISTORIANS_BOON)
+        .id();
+    let reborn = saga_on_battlefield(
+        &mut scenario,
+        "The Eldest Reborn",
+        engine::types::mana::ManaCost::generic(5),
+        THE_ELDEST_REBORN,
+    );
+    let deepmuck = scenario
+        .add_creature_from_oracle(P0, "Deepmuck Desperado", 2, 4, DEEPMUCK_DESPERADO)
+        .id();
+    let goblin_card = scenario
+        .add_creature_to_graveyard(P1, "Raging Goblin", 1, 1)
+        .id();
+    let mut runner = scenario.build();
+
+    advance_to_p0_next_precombat_main(&mut runner);
+    assert_eq!(lore(&runner, reborn), 3);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "no order or target prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_triggered_stack(
+        runner.state(),
+        &[Pick::Of(reborn), Pick::Of(boon), Pick::Of(deepmuck)],
+        "CR 603.3b: III, Boon, then the crime trigger",
+    );
+    let chapter = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.source_id == reborn)
+        .and_then(|entry| entry.ability())
+        .expect("chapter III is on the stack");
+    assert_eq!(chapter.targets, vec![object(goblin_card)]);
+}
+
+/// CR 603.3b: an ability that triggers while an ability is put on the stack
+/// (Tar Pit Warrior becoming the auto-chosen mentor target) goes above that
+/// ability's observer.
+#[test]
+fn becomes_target_trigger_goes_above_the_observer_of_its_targeting_ability() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ascension = add_observer(&mut scenario, P0, Observer::FirebenderAscension);
+    let iroh = scenario
+        .add_creature_from_oracle(P0, "Iroh, Dragon of the West", 4, 4, IROH)
+        .id();
+    let tar_pit = scenario
+        .add_creature_from_oracle(P0, "Tar Pit Warrior", 3, 4, TAR_PIT_WARRIOR)
+        .id();
+    let mut runner = scenario.build();
+    install_observer(runner.state_mut(), ascension, Observer::FirebenderAscension);
+
+    attack(&mut runner, &[iroh, tar_pit]);
+    assert_completion_boundary(&runner, "no order prompt");
+    assert_triggered_stack(
+        runner.state(),
+        &[
+            Pick::Of(iroh),
+            Pick::Observing(ascension, iroh),
+            Pick::Of(tar_pit),
+        ],
+        "CR 603.3b: mentor, its observer, then Tar Pit",
+    );
+}
+
+/// CR 603.3b + CR 702.21a: Aboleth Spawn's ward triggers while Fiend Hunter's
+/// ETB (P1's) is put on the stack targeting it; it goes above Aboleth's own
+/// observer firing.
+#[test]
+fn ward_of_an_observer_goes_above_its_firing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let aboleth = add_observer(&mut scenario, P0, Observer::AbolethSpawn);
+    let hunter = scenario
+        .add_creature_to_hand_from_oracle(P1, "Fiend Hunter", 1, 3, FIEND_HUNTER)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    install_observer(runner.state_mut(), aboleth, Observer::AbolethSpawn);
+    give_turn(&mut runner, P1);
+
+    cast_and_resolve(&mut runner, hunter);
+    assert_completion_boundary(&runner, "no order prompt");
+    assert_triggered_stack(
+        runner.state(),
+        &[
+            Pick::Of(hunter),
+            Pick::Observing(aboleth, hunter),
+            Pick::Of(aboleth),
+        ],
+        "CR 603.3b: ETB, Aboleth's firing, ward",
+    );
+}
+
+/// The board shared by the chosen-remainder tests: P0's Iroh, Zuko, Raging
+/// Goblin, Goblin Racketeer and Deepmuck Desperado (built), Azula cast this
+/// turn, and Firebender Ascension when asked.
+struct RemainderBoard {
+    runner: GameRunner,
+    ascension: Option<ObjectId>,
+    iroh: ObjectId,
+    zuko: ObjectId,
+    azula: ObjectId,
+    goblin: ObjectId,
+    racketeer: ObjectId,
+    deepmuck: ObjectId,
+    theirs: Vec<ObjectId>,
+}
+
+fn remainder_board(with_ascension: bool, p1_bears: usize) -> RemainderBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Plains", "Plains", "Plains", "Plains"]);
+    scenario.with_library_top(P1, &["Plains", "Plains", "Plains", "Plains"]);
+    let ascension =
+        with_ascension.then(|| add_observer(&mut scenario, P0, Observer::FirebenderAscension));
+    let iroh = scenario
+        .add_creature_from_oracle(P0, "Iroh, Dragon of the West", 4, 4, IROH)
+        .id();
+    let zuko = scenario
+        .add_creature(P0, "Zuko, Seeking Honor", 2, 2)
+        .from_oracle_text_with_keywords(&["firebending"], ZUKO)
+        .id();
+    let goblin = scenario
+        .add_creature_from_oracle(P0, "Raging Goblin", 1, 1, RAGING_GOBLIN)
+        .id();
+    let racketeer = scenario
+        .add_creature_from_oracle(P0, "Goblin Racketeer", 4, 2, GOBLIN_RACKETEER)
+        .id();
+    let deepmuck = scenario
+        .add_creature_from_oracle(P0, "Deepmuck Desperado", 2, 4, DEEPMUCK_DESPERADO)
+        .id();
+    let azula = scenario
+        .add_creature_to_hand(P0, "Azula, On the Hunt", 4, 3)
+        .from_oracle_text_with_keywords(&["firebending"], AZULA)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let theirs = if p1_bears == 0 {
+        vec![scenario
+            .add_creature_from_oracle(P1, "Raging Goblin", 1, 1, RAGING_GOBLIN)
+            .id()]
+    } else {
+        (0..p1_bears)
+            .map(|_| scenario.add_creature(P1, "Grizzly Bears", 2, 2).id())
+            .collect()
+    };
+    let mut runner = scenario.build();
+    if let Some(ascension) = ascension {
+        install_observer(runner.state_mut(), ascension, Observer::FirebenderAscension);
+    }
+    azula_entered_this_turn(&mut runner, azula);
+    let entered = |id: ObjectId| runner.state().objects[&id].entered_battlefield_turn;
+    assert!(entered(azula) > entered(zuko), "Azula entered after Zuko");
+    RemainderBoard {
+        runner,
+        ascension,
+        iroh,
+        zuko,
+        azula,
+        goblin,
+        racketeer,
+        deepmuck,
+        theirs,
+    }
+}
+
+/// CR 603.3b + CR 700.13: a chosen first-part order keeps its order beside a
+/// crime trigger collected while the auto-targeted goad was put on the stack,
+/// and that trigger goes above the whole process (both parts).
+#[test]
+fn chosen_remainder_keeps_its_order_beside_a_window_collected_crime_trigger() {
+    for with_ascension in [false, true] {
+        let RemainderBoard {
+            mut runner,
+            ascension,
+            iroh,
+            zuko,
+            azula,
+            goblin,
+            racketeer,
+            deepmuck,
+            theirs,
+        } = remainder_board(with_ascension, 0);
+        let second_part: Vec<ObjectId> = ascension.into_iter().collect();
+        let what = format!("with ascension {with_ascension}");
+
+        attack(&mut runner, &[iroh, zuko, azula, goblin, racketeer]);
+        let (g, m, z) = (Pick::Of(racketeer), Pick::Of(iroh), Pick::Of(zuko));
+        let a1 = Pick::OfWithout(azula, "lose 1 life");
+        let a2 = Pick::OfWith(azula, "lose 1 life");
+        assert!(
+            prompt_lists_exactly(runner.state(), &[g, m, z, a1, a2]),
+            "{what}: five first-part triggers, got {:?}",
+            runner.state().waiting_for
+        );
+        order_by_identity(&mut runner, &[g, m, a1, a2, z]);
+        assert_no_second_part_construction(&runner, &second_part);
+        assert_tts(&runner, Some(iroh), &[object(zuko), object(goblin)], &what);
+        assert_not_first_ability_of_an_ability_resolution(&runner, &what);
+        let goad = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.source_id == racketeer)
+            .and_then(|entry| entry.ability())
+            .expect("the goad was put on the stack");
+        assert_eq!(goad.targets, vec![object(theirs[0])], "{what}");
+        select(&mut runner, vec![object(goblin)]);
+        let answered = count_identity_orders(&mut runner);
+        assert_eq!(answered, usize::from(with_ascension), "{what}: prompts");
+
+        assert_completion_boundary(&runner, &what);
+        let mut expected = vec![g, m, a1, a2, z];
+        if let Some(ascension) = ascension {
+            expected.extend([
+                Pick::Observing(ascension, racketeer),
+                Pick::Observing(ascension, iroh),
+                Pick::Observing(ascension, azula),
+                Pick::Observing(ascension, azula),
+                Pick::Observing(ascension, zuko),
+            ]);
+        }
+        expected.push(Pick::Of(deepmuck));
+        let entries = triggered_entries(runner.state());
+        assert_eq!(
+            entries.len(),
+            expected.len(),
+            "{what}: {:?}",
+            stack_reading(runner.state())
+        );
+        // The firings are one controller's ordered set; check them as a set.
+        let (fixed_bottom, rest) = expected.split_at(5);
+        assert_triggered_stack_prefix(runner.state(), fixed_bottom, &what);
+        assert!(
+            pick_matches(
+                Pick::Of(deepmuck),
+                entries.last().unwrap().0,
+                entries.last().unwrap().1.as_ref(),
+                None
+            ),
+            "{what}: the crime trigger is on top: {:?}",
+            stack_reading(runner.state())
+        );
+        let firings = &entries[5..entries.len() - 1];
+        assert_eq!(firings.len(), rest.len() - 1, "{what}");
+        assert!(firings
+            .iter()
+            .all(|(source, event, _)| Some(*source) == ascension
+                && observed_by(event.as_ref()).is_some()));
+    }
+}
+
+/// Assert the bottom of the triggered stack is exactly `expected`.
+fn assert_triggered_stack_prefix(state: &GameState, expected: &[Pick], what: &str) {
+    let entries = triggered_entries(state);
+    let matches = entries.len() >= expected.len()
+        && entries
+            .iter()
+            .zip(expected)
+            .all(|((source, event, description), pick)| {
+                pick_matches(*pick, *source, event.as_ref(), description.as_deref())
+            });
+    assert!(
+        matches,
+        "{what}: expected bottom {expected:?}, got {:?}",
+        stack_reading(state)
+    );
+}
+
+/// CR 603.3b + CR 601.2c via CR 603.3d + CR 603.2e: Tar Pit Warrior (P0)
+/// becomes the target of Fiend Hunter's ETB (P1's) as that ETB is put on the
+/// stack after a target choice; its trigger is collected once and goes on
+/// after the whole process, both parts, the second of which P1 orders.
+#[test]
+fn finisher_collected_trigger_goes_after_both_parts_at_an_order_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let proctor = add_observer(&mut scenario, P1, Observer::StrictProctor);
+    let hunter = scenario
+        .add_creature_to_hand_from_oracle(P1, "Fiend Hunter", 1, 3, FIEND_HUNTER)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let warden = scenario
+        .add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN)
+        .id();
+    let tar_pit = scenario
+        .add_creature_from_oracle(P0, "Tar Pit Warrior", 3, 4, TAR_PIT_WARRIOR)
+        .id();
+    let mut runner = scenario.build();
+    install_observer(runner.state_mut(), proctor, Observer::StrictProctor);
+    give_turn(&mut runner, P1);
+    let second_part = [proctor];
+
+    cast_and_resolve(&mut runner, hunter);
+    assert_no_second_part_construction(&runner, &second_part);
+    assert_tts(
+        &runner,
+        Some(hunter),
+        &[object(proctor), object(warden), object(tar_pit)],
+        "Fiend Hunter's ETB",
+    );
+    assert!(
+        runner.state().resolving_stack_entry.is_none(),
+        "no resolution is under way"
+    );
+    assert_not_first_ability_of_an_ability_resolution(&runner, "Fiend Hunter's ETB");
+    let result = select(&mut runner, vec![object(tar_pit)]);
+    assert!(
+        matches!(result.waiting_for, WaitingFor::OrderTriggers { player, .. } if player == P1),
+        "P1 orders the two firings, got {:?} (stack {:?})",
+        result.waiting_for,
+        stack_reading(runner.state())
+    );
+    assert!(prompt_lists_exactly(
+        runner.state(),
+        &[
+            Pick::Observing(proctor, hunter),
+            Pick::Observing(proctor, warden)
+        ]
+    ));
+    assert_eq!(
+        queued_matching(runner.state(), Pick::Of(tar_pit)),
+        1,
+        "Tar Pit's trigger waits in the queue"
+    );
+    assert_eq!(runner.state().deferred_triggers.len(), 1);
+    assert!(triggered_stack_sources(runner.state()).contains(&warden));
+    assert!(
+        runner.state().pending_trigger_order.is_some()
+            && matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }),
+        "reach: the order prompt is the wait"
+    );
+    assert_stripped_save_is_refusable(&runner, "the second-part order prompt");
+    let marked = round_trip_state(&mut runner);
+    order_by_identity(&mut runner, &[Pick::Observing(proctor, warden)]);
+
+    assert_completion_boundary(&runner, "after the order");
+    assert_triggered_stack(
+        runner.state(),
+        &[
+            Pick::Of(hunter),
+            Pick::Of(warden),
+            Pick::Observing(proctor, warden),
+            Pick::Observing(proctor, hunter),
+            Pick::Of(tar_pit),
+        ],
+        "CR 603.3b: part 1, part 2 in P1's order, then Tar Pit",
+    );
+    assert!(
+        marked,
+        "the serialized order groups carried the placement-process mark"
+    );
+}
+
+/// CR 603.3b + CR 700.13: the goad (two legal targets) commits a crime as it
+/// is put on the stack after its target choice; Deepmuck Desperado's trigger
+/// waits beside the chosen remainder (mentor, Azula's two, Zuko), which keeps
+/// its order, and goes above the whole process, once.
+#[test]
+fn finisher_collected_crime_waits_beside_a_chosen_remainder() {
+    for with_ascension in [false, true] {
+        let RemainderBoard {
+            mut runner,
+            ascension,
+            iroh,
+            zuko,
+            azula,
+            goblin,
+            racketeer,
+            deepmuck,
+            theirs,
+        } = remainder_board(with_ascension, 2);
+        let second_part: Vec<ObjectId> = ascension.into_iter().collect();
+        let what = format!("with ascension {with_ascension}");
+
+        attack(&mut runner, &[iroh, zuko, azula, goblin, racketeer]);
+        let (g, m, z) = (Pick::Of(racketeer), Pick::Of(iroh), Pick::Of(zuko));
+        let a1 = Pick::OfWithout(azula, "lose 1 life");
+        let a2 = Pick::OfWith(azula, "lose 1 life");
+        assert!(
+            prompt_lists_exactly(runner.state(), &[g, m, z, a1, a2]),
+            "{what}: five first-part triggers, got {:?}",
+            runner.state().waiting_for
+        );
+        order_by_identity(&mut runner, &[g, m, a1, a2, z]);
+        assert_no_second_part_construction(&runner, &second_part);
+        assert_tts(
+            &runner,
+            Some(racketeer),
+            &[object(theirs[0]), object(theirs[1])],
+            &what,
+        );
+        assert!(
+            runner.state().resolving_stack_entry.is_none(),
+            "{what}: no resolution is under way"
+        );
+        assert_not_first_ability_of_an_ability_resolution(&runner, &what);
+        select(&mut runner, vec![object(theirs[0])]);
+        assert_no_second_part_construction(&runner, &second_part);
+        assert_tts(&runner, Some(iroh), &[object(zuko), object(goblin)], &what);
+        assert!(
+            runner.state().resolving_stack_entry.is_none(),
+            "{what}: no resolution is under way"
+        );
+        assert_not_first_ability_of_an_ability_resolution(&runner, &what);
+        assert_eq!(
+            queued_matching(runner.state(), Pick::Of(deepmuck)),
+            1,
+            "{what}: the crime trigger is queued"
+        );
+        if let Some(ascension) = ascension {
+            assert_eq!(
+                queued_matching(runner.state(), Pick::Observing(ascension, racketeer)),
+                1,
+                "{what}: the goad's firing is queued"
+            );
+        }
+        assert_stripped_save_is_refusable(&runner, &what);
+        let marked = round_trip_state(&mut runner);
+        let result = select(&mut runner, vec![object(goblin)]);
+        if let Some(ascension) = ascension {
+            assert!(
+                prompt_lists_exactly(
+                    runner.state(),
+                    &[
+                        Pick::Observing(ascension, racketeer),
+                        Pick::Observing(ascension, iroh),
+                        Pick::Observing(ascension, azula),
+                        Pick::Observing(ascension, azula),
+                        Pick::Observing(ascension, zuko),
+                    ]
+                ),
+                "{what}: the second part is one prompt, got {:?}",
+                result.waiting_for
+            );
+            count_identity_orders_once(&mut runner);
+        }
+
+        assert_completion_boundary(&runner, &what);
+        assert_triggered_stack_prefix(runner.state(), &[g, m, a1, a2, z], &what);
+        let entries = triggered_entries(runner.state());
+        let expected_len = 6 + if with_ascension { 5 } else { 0 };
+        assert_eq!(
+            entries.len(),
+            expected_len,
+            "{what}: {:?}",
+            stack_reading(runner.state())
+        );
+        let (top, _, _) = entries.last().unwrap();
+        assert_eq!(*top, deepmuck, "{what}: the crime trigger is on top");
+        assert_eq!(
+            triggered_stack_sources(runner.state())
+                .iter()
+                .filter(|s| **s == deepmuck)
+                .count(),
+            1,
+            "{what}: one crime trigger"
+        );
+        assert!(
+            marked,
+            "{what}: the serialized queue carried the placement-process mark"
+        );
+    }
+}
+
+/// CR 603.3b + CR 101.4: abilities that triggered during one process, one
+/// collected while the auto-targeted goad was put on the stack and one when
+/// the mentor's target was chosen, go on the stack together in the next
+/// repetition, each player's in APNAP order.
+#[test]
+fn triggers_of_one_process_from_two_controllers_are_placed_in_apnap_order() {
+    // P1's Tar Pit Warrior is the goad's only target.
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let iroh = scenario
+            .add_creature_from_oracle(P0, "Iroh, Dragon of the West", 4, 4, IROH)
+            .id();
+        let p0_tar_pit = scenario
+            .add_creature_from_oracle(P0, "Tar Pit Warrior", 3, 4, TAR_PIT_WARRIOR)
+            .id();
+        let goblin = scenario
+            .add_creature_from_oracle(P0, "Raging Goblin", 1, 1, RAGING_GOBLIN)
+            .id();
+        let racketeer = scenario
+            .add_creature_from_oracle(P0, "Goblin Racketeer", 4, 2, GOBLIN_RACKETEER)
+            .id();
+        let p1_tar_pit = scenario
+            .add_creature_from_oracle(P1, "Tar Pit Warrior", 3, 4, TAR_PIT_WARRIOR)
+            .id();
+        let mut runner = scenario.build();
+
+        attack(&mut runner, &[iroh, p0_tar_pit, goblin, racketeer]);
+        assert!(
+            prompt_lists_exactly(runner.state(), &[Pick::Of(iroh), Pick::Of(racketeer)]),
+            "got {:?}",
+            runner.state().waiting_for
+        );
+        order_by_identity(&mut runner, &[Pick::Of(racketeer), Pick::Of(iroh)]);
+        let goad = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.source_id == racketeer)
+            .and_then(|entry| entry.ability())
+            .expect("the goad is on the stack");
+        assert_eq!(goad.targets, vec![object(p1_tar_pit)]);
+        assert_eq!(queued_matching(runner.state(), Pick::Of(p1_tar_pit)), 1);
+        assert_tts(
+            &runner,
+            Some(iroh),
+            &[object(p0_tar_pit), object(goblin)],
+            "the mentor",
+        );
+        assert!(
+            runner.state().resolving_stack_entry.is_none(),
+            "no resolution is under way"
+        );
+        assert_not_first_ability_of_an_ability_resolution(&runner, "the mentor");
+        select(&mut runner, vec![object(p0_tar_pit)]);
+
+        assert_completion_boundary(&runner, "cross-controller");
+        assert_triggered_stack(
+            runner.state(),
+            &[
+                Pick::Of(racketeer),
+                Pick::Of(iroh),
+                Pick::Of(p0_tar_pit),
+                Pick::Of(p1_tar_pit),
+            ],
+            "CR 603.3b + CR 101.4: P0's Tar Pit, then P1's",
+        );
+    }
+}
+
+/// CR 603.3b + CR 700.13: the same, with both abilities P0's: the goad's
+/// auto-target is a crime (Deepmuck Desperado) and the mentor targets P0's Tar
+/// Pit Warrior; P0 orders the two.
+#[test]
+fn triggers_of_one_process_from_one_controller_are_ordered_together() {
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P1, &["Plains", "Plains", "Plains"]);
+        let iroh = scenario
+            .add_creature_from_oracle(P0, "Iroh, Dragon of the West", 4, 4, IROH)
+            .id();
+        let tar_pit = scenario
+            .add_creature_from_oracle(P0, "Tar Pit Warrior", 3, 4, TAR_PIT_WARRIOR)
+            .id();
+        let goblin = scenario
+            .add_creature_from_oracle(P0, "Raging Goblin", 1, 1, RAGING_GOBLIN)
+            .id();
+        let racketeer = scenario
+            .add_creature_from_oracle(P0, "Goblin Racketeer", 4, 2, GOBLIN_RACKETEER)
+            .id();
+        let deepmuck = scenario
+            .add_creature_from_oracle(P0, "Deepmuck Desperado", 2, 4, DEEPMUCK_DESPERADO)
+            .id();
+        let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let mut runner = scenario.build();
+
+        attack(&mut runner, &[iroh, tar_pit, goblin, racketeer]);
+        order_by_identity(&mut runner, &[Pick::Of(racketeer), Pick::Of(iroh)]);
+        let goad = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.source_id == racketeer)
+            .and_then(|entry| entry.ability())
+            .expect("the goad is on the stack");
+        assert_eq!(goad.targets, vec![object(bears)]);
+        assert_tts(
+            &runner,
+            Some(iroh),
+            &[object(tar_pit), object(goblin)],
+            "the mentor",
+        );
+        assert!(
+            runner.state().resolving_stack_entry.is_none(),
+            "no resolution is under way"
+        );
+        assert_not_first_ability_of_an_ability_resolution(&runner, "the mentor");
+        let result = select(&mut runner, vec![object(tar_pit)]);
+        assert!(
+            matches!(result.waiting_for, WaitingFor::OrderTriggers { player, .. } if player == P0),
+            "same-controller: P0 orders them, got {:?} (stack {:?})",
+            result.waiting_for,
+            stack_reading(runner.state())
+        );
+        assert!(prompt_lists_exactly(
+            runner.state(),
+            &[Pick::Of(deepmuck), Pick::Of(tar_pit)]
+        ));
+        order_by_identity(&mut runner, &[Pick::Of(tar_pit)]);
+
+        assert_completion_boundary(&runner, "same-controller");
+        assert_triggered_stack(
+            runner.state(),
+            &[
+                Pick::Of(racketeer),
+                Pick::Of(iroh),
+                Pick::Of(tar_pit),
+                Pick::Of(deepmuck),
+            ],
+            "CR 603.3b: P0's chosen order",
+        );
+    }
+}
+
+/// CR 603.3b + CR 603.12 + CR 309.4c: whether the construction prompt open now
+/// is for the first ability that the ability resolution under way put on the
+/// stack: the resolving object is an ability and the pending entry is the only
+/// ability on the stack put there after it.
+fn first_ability_of_an_ability_resolution(state: &GameState) -> bool {
+    let Some(carrier) = state
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| matches!(entry.kind.class(), StackObjectClass::Ability(_)))
+    else {
+        return false;
+    };
+    state
+        .stack
+        .iter()
+        .filter(|entry| {
+            matches!(entry.kind.class(), StackObjectClass::Ability(_)) && entry.id > carrier.id
+        })
+        .count()
+        == 1
+}
+
+/// The kind of the object whose resolution is under way, if any.
+fn resolving_class(state: &GameState) -> Option<StackObjectClass> {
+    state
+        .resolving_stack_entry
+        .as_ref()
+        .map(|entry| entry.kind.class())
+}
+
+/// The prompt open now is not the first ability an ability's resolution put on
+/// the stack.
+fn assert_not_first_ability_of_an_ability_resolution(runner: &GameRunner, what: &str) {
+    assert!(
+        !first_ability_of_an_ability_resolution(runner.state()),
+        "{what}: not the first ability of an ability's resolution (resolving {:?}, stack {:?})",
+        resolving_class(runner.state()),
+        stack_reading(runner.state())
+    );
+}
+
+/// Whether a queued context is marked as a member of the placement process
+/// under way (read from its serialized form).
+fn queued_under_way(ctx: &PendingTriggerContext) -> bool {
+    serde_json::to_value(ctx)
+        .expect("a queued context serializes")
+        .get("placement_process")
+        == Some(&serde_json::json!("UnderWay"))
+}
+
+/// The targets of each triggered stack entry, bottom→top.
+fn triggered_targets(state: &GameState) -> Vec<Vec<TargetRef>> {
+    state
+        .stack
+        .iter()
+        .filter(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+        .map(|entry| {
+            entry
+                .ability()
+                .map(|ability| ability.targets.clone())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// The targets of each triggered stack entry of `source`, bottom→top.
+fn triggered_targets_of(state: &GameState, source: ObjectId) -> Vec<Vec<TargetRef>> {
+    triggered_stack_sources(state)
+        .into_iter()
+        .zip(triggered_targets(state))
+        .filter(|(entry_source, _)| *entry_source == source)
+        .map(|(_, targets)| targets)
+        .collect()
+}
+
+/// The bottom→top index, among the triggered stack entries, of the only entry
+/// of `source` with exactly `targets`.
+fn triggered_index(state: &GameState, source: ObjectId, targets: &[TargetRef]) -> usize {
+    let found: Vec<usize> = triggered_stack_sources(state)
+        .into_iter()
+        .zip(triggered_targets(state))
+        .enumerate()
+        .filter(|(_, (entry_source, entry_targets))| {
+            *entry_source == source && entry_targets.as_slice() == targets
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "one entry of #{} targeting {targets:?}: {:?}",
+        source.0,
+        stack_reading(state)
+    );
+    found[0]
+}
+
+fn set_dungeon(runner: &mut GameRunner, room: u8) {
+    let progress = runner.state_mut().dungeon_progress.entry(P0).or_default();
+    progress.current_dungeon = Some(engine::game::dungeon::DungeonId::LostMineOfPhandelver);
+    progress.current_room = room;
+}
+
+fn colorless_pool(scenario: &mut GameScenario, amount: u64) {
+    scenario.with_mana_pool(
+        P0,
+        (0..amount)
+            .map(|i| {
+                engine::types::mana::ManaUnit::new(
+                    engine::types::mana::ManaType::Colorless,
+                    ObjectId(9_900 + i),
+                    false,
+                    vec![],
+                )
+            })
+            .collect(),
+    );
+}
+
+/// Pass priority until the resolution under way asks for a choice.
+fn pass_until_resolution_choice(runner: &mut GameRunner) {
+    for _ in 0..8 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority pass is accepted");
+    }
+    panic!("no resolution choice opened");
+}
+
+/// CR 309.4c: move the venture marker into Storeroom (Lost Mine of
+/// Phandelver's room 3) at the open room choice, which the resolution of
+/// `carrier`'s kind asks for.
+fn choose_storeroom(runner: &mut GameRunner, carrier: StackObjectClass) -> ObjectId {
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseDungeonRoom { .. }
+        ),
+        "reach guard: the venture asks for the room, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        resolving_class(runner.state()),
+        Some(carrier),
+        "the room is chosen while the venture resolves"
+    );
+    runner
+        .act(GameAction::ChooseDungeonRoom { room_index: 3 })
+        .expect("Storeroom follows Goblin Lair");
+    let WaitingFor::TriggerTargetSelection { source_id, .. } = runner.state().waiting_for else {
+        panic!(
+            "Storeroom's ability asks for its target, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    source_id.expect("the room ability has a source")
+}
+
+/// The board of the Dungeon Map tests: P0's Hama Pashar, Ruin Seeker, Tar Pit
+/// Warrior and Dungeon Map with three colorless mana, P1's Tar Pit Warrior when
+/// asked, and Lost Mine of Phandelver at Goblin Lair. Dungeon Map's venture is
+/// activated and resolving.
+fn dungeon_map_venture(p1_tar_pit: bool) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+    let (mut runner, map, hama, tar_pit, theirs) = dungeon_map_board(p1_tar_pit);
+    activate_dungeon_map(&mut runner, map);
+    (runner, hama, tar_pit, theirs)
+}
+
+/// The Dungeon Map board before the venture is activated: (runner, Dungeon
+/// Map, Hama Pashar, P0's Tar Pit Warrior, P1's Tar Pit Warrior).
+fn dungeon_map_board(
+    p1_tar_pit: bool,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, Option<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hama = scenario
+        .add_creature_from_oracle(P0, "Hama Pashar, Ruin Seeker", 2, 3, HAMA_PASHAR)
+        .id();
+    let tar_pit = scenario
+        .add_creature_from_oracle(P0, "Tar Pit Warrior", 3, 4, TAR_PIT_WARRIOR)
+        .id();
+    let theirs = p1_tar_pit.then(|| {
+        scenario
+            .add_creature_from_oracle(P1, "Tar Pit Warrior", 3, 4, TAR_PIT_WARRIOR)
+            .id()
+    });
+    let map = scenario
+        .add_artifact_from_oracle(P0, "Dungeon Map", DUNGEON_MAP)
+        .id();
+    colorless_pool(&mut scenario, 3);
+    let mut runner = scenario.build();
+    set_dungeon(&mut runner, 1);
+    (runner, map, hama, tar_pit, theirs)
+}
+
+/// Activate Dungeon Map's venture and pass until it asks for its room.
+fn activate_dungeon_map(runner: &mut GameRunner, map: ObjectId) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: map,
+            ability_index: 1,
+            payment_mode: Default::default(),
+        })
+        .expect("Dungeon Map's venture is activated as a sorcery");
+    pass_until_resolution_choice(runner);
+    assert!(
+        runner
+            .state()
+            .resolving_stack_entry
+            .as_ref()
+            .is_some_and(|entry| entry.source_id == map),
+        "Dungeon Map's ability is resolving"
+    );
+}
+
+/// CR 603.3b + CR 603.2d + CR 309.4c + CR 603.3d: Hama Pashar makes Storeroom's
+/// ability trigger twice as Dungeon Map's ability resolves; both instances are
+/// one placement process, each choosing its own target. Tar Pit Warrior's
+/// trigger, which triggered as the first instance was put on the stack
+/// targeting it, goes on after both, with no order to choose.
+#[test]
+fn doubled_room_instances_are_placed_before_what_the_first_instance_triggered() {
+    let (mut runner, hama, tar_pit, _) = dungeon_map_venture(false);
+    let room = choose_storeroom(
+        &mut runner,
+        StackObjectClass::Ability(StackAbilityKind::Activated),
+    );
+    assert_tts(
+        &runner,
+        Some(room),
+        &[object(hama), object(tar_pit)],
+        "the first instance",
+    );
+    assert!(first_ability_of_an_ability_resolution(runner.state()));
+    let queued = &runner.state().deferred_triggers;
+    assert_eq!(queued.len(), 1, "the second instance is queued");
+    assert_eq!(queued[0].pending.source_id, room);
+    assert!(!queued_under_way(&queued[0]), "queued as a fresh context");
+    assert_stripped_save_is_refusable(&runner, "the first room instance");
+    round_trip_state(&mut runner);
+    let result = select(&mut runner, vec![object(tar_pit)]);
+    assert!(
+        matches!(
+            result.waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "the second instance asks for its target, got {:?}",
+        result.waiting_for
+    );
+    assert_tts(
+        &runner,
+        Some(room),
+        &[object(hama), object(tar_pit)],
+        "the second instance",
+    );
+    assert_not_first_ability_of_an_ability_resolution(&runner, "the second instance");
+    assert_eq!(queued_matching(runner.state(), Pick::Of(tar_pit)), 1);
+    select(&mut runner, vec![object(hama)]);
+
+    assert_completion_boundary(&runner, "after the second instance");
+    assert_triggered_stack_groups(
+        runner.state(),
+        &[&[Pick::Of(room), Pick::Of(room)], &[Pick::Of(tar_pit)]],
+        "CR 603.3b: both instances, then Tar Pit",
+    );
+    // CR 603.3b: P0 may order the two instances; each keeps its own target.
+    let room_targets = triggered_targets_of(runner.state(), room);
+    assert_eq!(room_targets.len(), 2, "{room_targets:?}");
+    assert!(room_targets.contains(&vec![object(tar_pit)]));
+    assert!(room_targets.contains(&vec![object(hama)]));
+    assert_eq!(
+        triggered_targets_of(runner.state(), tar_pit),
+        vec![Vec::<TargetRef>::new()]
+    );
+}
+
+/// CR 603.3b + CR 101.4 + CR 603.2d + CR 603.3d: each of the two Storeroom
+/// instances targets a Tar Pit Warrior of a different player. Both Tar Pit
+/// triggers triggered while the instances were put on the stack, so they go on
+/// together after both instances, the active player's first.
+#[test]
+fn second_room_instance_places_both_becomes_target_triggers_in_apnap_order() {
+    let (mut runner, hama, ours, theirs) = dungeon_map_venture(true);
+    let theirs = theirs.expect("P1 controls a Tar Pit Warrior");
+    let room = choose_storeroom(
+        &mut runner,
+        StackObjectClass::Ability(StackAbilityKind::Activated),
+    );
+    let legal = [object(hama), object(ours), object(theirs)];
+    assert_tts(&runner, Some(room), &legal, "the first instance");
+    assert!(first_ability_of_an_ability_resolution(runner.state()));
+    assert_eq!(runner.state().deferred_triggers.len(), 1);
+    assert!(!queued_under_way(&runner.state().deferred_triggers[0]));
+    let result = select(&mut runner, vec![object(theirs)]);
+    assert!(
+        matches!(
+            result.waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "the second instance asks for its target, got {:?}",
+        result.waiting_for
+    );
+    assert_tts(&runner, Some(room), &legal, "the second instance");
+    let queued = &runner.state().deferred_triggers;
+    assert_eq!(queued.len(), 1, "only P1's Tar Pit trigger is queued");
+    assert_eq!(queued[0].pending.source_id, theirs);
+    assert!(!queued_under_way(&queued[0]), "it stays a fresh context");
+    assert_eq!(triggered_stack_sources(runner.state()), vec![room, room]);
+    assert!(
+        runner.state().resolving_stack_entry.is_some(),
+        "Dungeon Map's ability is still resolving"
+    );
+    assert_not_first_ability_of_an_ability_resolution(&runner, "the second instance");
+    assert_fresh_only_queue_save_restores(&runner, theirs);
+    assert_stripped_save_is_refusable(&runner, "the second room instance");
+    round_trip_state(&mut runner);
+    select(&mut runner, vec![object(ours)]);
+
+    assert_completion_boundary(&runner, "after the second instance");
+    assert_triggered_stack_groups(
+        runner.state(),
+        &[
+            &[Pick::Of(room), Pick::Of(room)],
+            &[Pick::Of(ours)],
+            &[Pick::Of(theirs)],
+        ],
+        "CR 603.3b + CR 101.4: both instances, then P0's Tar Pit, then P1's",
+    );
+    // CR 603.3b: P0 may order the two instances; each keeps its own target.
+    let room_targets = triggered_targets_of(runner.state(), room);
+    assert_eq!(room_targets.len(), 2, "{room_targets:?}");
+    assert!(room_targets.contains(&vec![object(theirs)]));
+    assert!(room_targets.contains(&vec![object(ours)]));
+}
+
+/// The board of the Acererak tests: P0's Flaming Fist Officer and Tar Pit
+/// Warrior, Hama Pashar, Ruin Seeker when asked, Acererak the Archlich cast at
+/// no cost, Lost Mine of Phandelver at Goblin Lair (Tomb of Annihilation not
+/// completed). Acererak's ETB returns it to its owner's hand and ventures.
+fn acererak_venture(hama: bool) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let officer = scenario
+        .add_creature_from_oracle(P0, "Flaming Fist Officer", 2, 2, FLAMING_FIST_OFFICER)
+        .id();
+    let tar_pit = scenario
+        .add_creature_from_oracle(P0, "Tar Pit Warrior", 3, 4, TAR_PIT_WARRIOR)
+        .id();
+    let hama = hama.then(|| {
+        scenario
+            .add_creature_from_oracle(P0, "Hama Pashar, Ruin Seeker", 2, 3, HAMA_PASHAR)
+            .id()
+    });
+    let acererak = scenario
+        .add_creature_to_hand_from_oracle(P0, "Acererak the Archlich", 5, 5, ACERERAK_THE_ARCHLICH)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    set_dungeon(&mut runner, 1);
+    runner.cast(acererak).commit();
+    pass_until_resolution_choice(&mut runner);
+    (runner, officer, tar_pit, hama)
+}
+
+/// CR 603.3b + CR 309.4c + CR 603.3d: Acererak's ETB returns it to hand
+/// (Flaming Fist Officer triggers) and then ventures into Storeroom. The room
+/// ability is placed with the Officer's trigger, and Tar Pit Warrior's trigger,
+/// which triggered as the room ability was put on the stack targeting it, goes
+/// on after both.
+#[test]
+fn room_ability_is_placed_with_an_earlier_trigger_of_its_resolution() {
+    let (mut runner, officer, tar_pit, _) = acererak_venture(false);
+    let room = choose_storeroom(
+        &mut runner,
+        StackObjectClass::Ability(StackAbilityKind::Triggered),
+    );
+    assert_tts(
+        &runner,
+        Some(room),
+        &[object(officer), object(tar_pit)],
+        "Storeroom",
+    );
+    assert!(first_ability_of_an_ability_resolution(runner.state()));
+    assert_eq!(runner.state().deferred_triggers.len(), 1);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(officer)), 1);
+    select(&mut runner, vec![object(tar_pit)]);
+
+    assert_completion_boundary(&runner, "after Storeroom's target");
+    assert_triggered_stack_groups(
+        runner.state(),
+        &[&[Pick::Of(room), Pick::Of(officer)], &[Pick::Of(tar_pit)]],
+        "CR 603.3b: the room and the Officer, then Tar Pit",
+    );
+}
+
+/// CR 603.3b + CR 603.2d + CR 309.4c: with Hama Pashar, the second Storeroom
+/// instance and Flaming Fist Officer's trigger are placed together, in the
+/// order P0 chooses; Tar Pit Warrior's trigger goes on after all three.
+#[test]
+fn doubled_room_and_an_earlier_trigger_of_its_resolution_are_ordered_together() {
+    let (mut runner, officer, tar_pit, hama) = acererak_venture(true);
+    let hama = hama.expect("Hama Pashar is on the battlefield");
+    let room = choose_storeroom(
+        &mut runner,
+        StackObjectClass::Ability(StackAbilityKind::Triggered),
+    );
+    let legal = [object(officer), object(tar_pit), object(hama)];
+    assert_tts(&runner, Some(room), &legal, "the first instance");
+    assert!(first_ability_of_an_ability_resolution(runner.state()));
+    assert_eq!(runner.state().deferred_triggers.len(), 2);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(officer)), 1);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(room)), 1);
+    let result = select(&mut runner, vec![object(tar_pit)]);
+    assert!(
+        matches!(result.waiting_for, WaitingFor::OrderTriggers { player, .. } if player == P0),
+        "P0 orders the second instance and the Officer, got {:?}",
+        result.waiting_for
+    );
+    assert!(prompt_lists_exactly(
+        runner.state(),
+        &[Pick::Of(officer), Pick::Of(room)]
+    ));
+    order_by_identity(&mut runner, &[Pick::Of(officer)]);
+    assert_tts(&runner, Some(room), &legal, "the second instance");
+    assert_not_first_ability_of_an_ability_resolution(&runner, "the second instance");
+    assert_eq!(queued_matching(runner.state(), Pick::Of(tar_pit)), 1);
+    select(&mut runner, vec![object(hama)]);
+
+    assert_completion_boundary(&runner, "after the second instance");
+    assert_triggered_stack_groups(
+        runner.state(),
+        &[
+            &[Pick::Of(room), Pick::Of(officer), Pick::Of(room)],
+            &[Pick::Of(tar_pit)],
+        ],
+        "CR 603.3b: both instances and the Officer, then Tar Pit",
+    );
+    let state = runner.state();
+    triggered_index(state, room, &[object(tar_pit)]);
+    assert!(
+        triggered_index(state, officer, &[]) < triggered_index(state, room, &[object(hama)]),
+        "CR 603.3b: P0's chosen order puts the Officer below the second instance: {:?}",
+        stack_reading(state)
+    );
+}
+
+/// Cast Bolg of the North at no cost, accept its sacrifice and sacrifice
+/// `victim` (the legal choices are exactly `choices`); Bolg's reflexive
+/// ability then asks for its target.
+fn bolg_sacrificing(
+    runner: &mut GameRunner,
+    bolg: ObjectId,
+    victim: ObjectId,
+    choices: &[ObjectId],
+) {
+    runner.cast(bolg).commit();
+    pass_until_resolution_choice(runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "Bolg's ETB offers the sacrifice, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("the sacrifice is accepted");
+    let WaitingFor::EffectZoneChoice { cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "the sacrifice is chosen, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let mut cards = cards;
+    let mut want = choices.to_vec();
+    cards.sort();
+    want.sort();
+    assert_eq!(cards, want, "the creatures Bolg may sacrifice");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![victim],
+        })
+        .expect("the sacrifice is legal");
+    assert_eq!(
+        resolving_class(runner.state()),
+        Some(StackObjectClass::Ability(StackAbilityKind::Triggered)),
+        "Bolg's ETB is resolving"
+    );
+}
+
+/// The board of the Bolg tests: P0's Doomed Dissenter and Tar Pit Warrior, P1's
+/// Grizzly Bears and, when asked, Mortician Beetle.
+fn bolg_board(
+    beetle: bool,
+) -> (
+    GameRunner,
+    ObjectId,
+    ObjectId,
+    ObjectId,
+    Option<ObjectId>,
+    ObjectId,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dissenter = scenario
+        .add_creature_from_oracle(P0, "Doomed Dissenter", 1, 1, DOOMED_DISSENTER)
+        .id();
+    let tar_pit = scenario
+        .add_creature_from_oracle(P0, "Tar Pit Warrior", 3, 4, TAR_PIT_WARRIOR)
+        .id();
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let beetle = beetle.then(|| {
+        scenario
+            .add_creature_from_oracle(P1, "Mortician Beetle", 1, 1, MORTICIAN_BEETLE)
+            .id()
+    });
+    let bolg = scenario
+        .add_creature_to_hand_from_oracle(P0, "Bolg of the North", 5, 5, BOLG_OF_THE_NORTH)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    (scenario.build(), dissenter, tar_pit, bears, beetle, bolg)
+}
+
+/// CR 603.3b + CR 603.12 + CR 603.3d: Bolg's ETB sacrifices Doomed Dissenter;
+/// Bolg's reflexive ability and the Dissenter's dies trigger go on in either
+/// order (see the module note), and
+/// Tar Pit Warrior's trigger, which triggered as the reflexive ability was put
+/// on the stack targeting it, goes on after both, with no order to choose.
+#[test]
+fn reflexive_ability_is_placed_with_an_earlier_trigger_of_its_resolution() {
+    let (mut runner, dissenter, tar_pit, bears, _, bolg) = bolg_board(false);
+    bolg_sacrificing(&mut runner, bolg, dissenter, &[dissenter, tar_pit]);
+    assert_tts(
+        &runner,
+        Some(bolg),
+        &[object(tar_pit), object(bears)],
+        "Bolg's reflexive ability",
+    );
+    assert!(first_ability_of_an_ability_resolution(runner.state()));
+    assert_eq!(runner.state().deferred_triggers.len(), 1);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(dissenter)), 1);
+    select(&mut runner, vec![object(tar_pit)]);
+
+    assert_completion_boundary(&runner, "after the reflexive target");
+    assert_triggered_stack_groups(
+        runner.state(),
+        &[&[Pick::Of(bolg), Pick::Of(dissenter)], &[Pick::Of(tar_pit)]],
+        "CR 603.3b: the reflexive ability and the Dissenter, then Tar Pit",
+    );
+}
+
+/// CR 603.3b + CR 603.12 + CR 101.4: the same with P1's Mortician Beetle, which
+/// triggered on the sacrifice: both players' earlier triggers, APNAP, go before
+/// Tar Pit Warrior's trigger.
+#[test]
+fn reflexive_ability_and_earlier_triggers_of_both_players_precede_what_it_triggered() {
+    let (mut runner, dissenter, tar_pit, bears, beetle, bolg) = bolg_board(true);
+    let beetle = beetle.expect("P1 controls Mortician Beetle");
+    bolg_sacrificing(&mut runner, bolg, dissenter, &[dissenter, tar_pit]);
+    assert_tts(
+        &runner,
+        Some(bolg),
+        &[object(tar_pit), object(bears), object(beetle)],
+        "Bolg's reflexive ability",
+    );
+    assert!(first_ability_of_an_ability_resolution(runner.state()));
+    assert_eq!(runner.state().deferred_triggers.len(), 2);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(dissenter)), 1);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(beetle)), 1);
+    select(&mut runner, vec![object(tar_pit)]);
+
+    assert_completion_boundary(&runner, "after the reflexive target");
+    assert_triggered_stack_groups(
+        runner.state(),
+        &[
+            &[Pick::Of(bolg), Pick::Of(dissenter)],
+            &[Pick::Of(beetle)],
+            &[Pick::Of(tar_pit)],
+        ],
+        "CR 603.3b + CR 101.4: P0's two, then P1's, then Tar Pit",
+    );
+}
+
+/// CR 603.3b + CR 101.4 + CR 603.12 + CR 603.3d: Bolg sacrifices Perilous Myr,
+/// whose dies trigger is itself targeted. Bolg's reflexive ability targets P1's
+/// Tar Pit Warrior and the Myr's trigger P0's: both Tar Pit triggers triggered
+/// while that batch was put on the stack, so they go on together after it, the
+/// active player's first.
+#[test]
+fn earlier_targeted_trigger_of_a_resolution_places_both_becomes_target_triggers_in_apnap_order() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let myr = scenario
+        .add_creature_from_oracle(P0, "Perilous Myr", 1, 1, PERILOUS_MYR)
+        .as_artifact_creature()
+        .id();
+    let ours = scenario
+        .add_creature_from_oracle(P0, "Tar Pit Warrior", 3, 4, TAR_PIT_WARRIOR)
+        .id();
+    let theirs = scenario
+        .add_creature_from_oracle(P1, "Tar Pit Warrior", 3, 4, TAR_PIT_WARRIOR)
+        .id();
+    let bolg = scenario
+        .add_creature_to_hand_from_oracle(P0, "Bolg of the North", 5, 5, BOLG_OF_THE_NORTH)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    bolg_sacrificing(&mut runner, bolg, myr, &[myr, ours]);
+    assert_tts(
+        &runner,
+        Some(bolg),
+        &[object(ours), object(theirs)],
+        "Bolg's reflexive ability",
+    );
+    assert!(first_ability_of_an_ability_resolution(runner.state()));
+    let queued = &runner.state().deferred_triggers;
+    assert_eq!(queued.len(), 1, "the Myr's dies trigger is queued");
+    assert_eq!(queued[0].pending.source_id, myr);
+    let result = select(&mut runner, vec![object(theirs)]);
+    assert!(
+        matches!(
+            result.waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "the Myr's trigger asks for its target, got {:?}",
+        result.waiting_for
+    );
+    assert_tts(
+        &runner,
+        Some(myr),
+        &[
+            TargetRef::Player(P0),
+            TargetRef::Player(P1),
+            object(bolg),
+            object(ours),
+            object(theirs),
+        ],
+        "Perilous Myr's trigger",
+    );
+    let queued = &runner.state().deferred_triggers;
+    assert_eq!(queued.len(), 1, "only P1's Tar Pit trigger is queued");
+    assert_eq!(queued[0].pending.source_id, theirs);
+    assert!(!queued_under_way(&queued[0]), "it stays a fresh context");
+    let mut placed = triggered_stack_sources(runner.state());
+    placed.sort();
+    let mut batch = vec![bolg, myr];
+    batch.sort();
+    assert_eq!(placed, batch, "the reflexive ability and the Myr's trigger");
+    assert!(
+        runner.state().resolving_stack_entry.is_some(),
+        "Bolg's ETB is still resolving"
+    );
+    assert_not_first_ability_of_an_ability_resolution(&runner, "the Myr's trigger");
+    assert_stripped_save_is_refusable(&runner, "Perilous Myr's trigger");
+    round_trip_state(&mut runner);
+    select(&mut runner, vec![object(ours)]);
+
+    assert_completion_boundary(&runner, "after the Myr's target");
+    assert_triggered_stack_groups(
+        runner.state(),
+        &[
+            &[Pick::Of(bolg), Pick::Of(myr)],
+            &[Pick::Of(ours)],
+            &[Pick::Of(theirs)],
+        ],
+        "CR 603.3b + CR 101.4: the reflexive ability and the Myr, then P0's Tar Pit, then P1's",
+    );
+    assert_eq!(
+        triggered_targets_of(runner.state(), bolg),
+        vec![vec![object(theirs)]]
+    );
+    assert_eq!(
+        triggered_targets_of(runner.state(), myr),
+        vec![vec![object(ours)]]
+    );
+}
+
+/// The board of the Caesar tests: P0's Caesar, Legion's Emperor, Doomed
+/// Dissenter and Deepmuck Desperado (one card in P0's library), P1's Mortician
+/// Beetle when asked. Caesar attacks alone and "Whenever you attack" resolves;
+/// P0 sacrifices Doomed Dissenter and the reflexive ability asks for its modes.
+fn caesar_sacrificing_dissenter(
+    beetle: bool,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, Option<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_card_to_library_top(P0, "Plains");
+    scenario.with_library_top(P1, &["Plains", "Plains", "Plains"]);
+    let caesar = scenario
+        .add_creature_from_oracle(P0, "Caesar, Legion's Emperor", 4, 4, CAESAR)
+        .id();
+    let dissenter = scenario
+        .add_creature_from_oracle(P0, "Doomed Dissenter", 1, 1, DOOMED_DISSENTER)
+        .id();
+    let deepmuck = scenario
+        .add_creature_from_oracle(P0, "Deepmuck Desperado", 2, 4, DEEPMUCK_DESPERADO)
+        .id();
+    let beetle = beetle.then(|| {
+        scenario
+            .add_creature_from_oracle(P1, "Mortician Beetle", 1, 1, MORTICIAN_BEETLE)
+            .id()
+    });
+    let mut runner = scenario.build();
+    attack(&mut runner, &[caesar]);
+    pass_until_resolution_choice(&mut runner);
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("the sacrifice is accepted");
+    let WaitingFor::EffectZoneChoice { cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "the sacrifice is chosen, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let mut cards = cards;
+    let mut want = vec![dissenter, deepmuck];
+    cards.sort();
+    want.sort();
+    assert_eq!(cards, want, "the creatures Caesar's ability may sacrifice");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![dissenter],
+        })
+        .expect("the sacrifice is legal");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::AbilityModeChoice { .. }
+        ),
+        "the reflexive ability asks for its modes, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        resolving_class(runner.state()),
+        Some(StackObjectClass::Ability(StackAbilityKind::Triggered)),
+        "Caesar's attack trigger is resolving"
+    );
+    assert!(first_ability_of_an_ability_resolution(runner.state()));
+    (runner, caesar, dissenter, deepmuck, beetle)
+}
+
+/// Choose Caesar's draw mode and damage mode; the damage mode's only legal
+/// target is P1 (a crime, CR 700.13).
+fn choose_draw_and_damage(runner: &mut GameRunner) {
+    runner
+        .act(GameAction::SelectModes {
+            indices: vec![1, 2],
+        })
+        .expect("two modes are chosen");
+}
+
+/// CR 603.3b + CR 603.12 + CR 700.2b + CR 700.13: Caesar's reflexive ability
+/// (modes chosen as it is put on the stack, its damage mode targeting P1) and
+/// Doomed Dissenter's dies trigger go on in either order (see the module note);
+/// Deepmuck Desperado's crime
+/// trigger goes on after both, with no order to choose.
+#[test]
+fn modal_reflexive_ability_is_placed_with_an_earlier_trigger_of_its_resolution() {
+    let (mut runner, caesar, dissenter, deepmuck, _) = caesar_sacrificing_dissenter(false);
+    assert_eq!(runner.state().deferred_triggers.len(), 1);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(dissenter)), 1);
+    choose_draw_and_damage(&mut runner);
+
+    assert_completion_boundary(&runner, "after the modes");
+    assert_triggered_stack_groups(
+        runner.state(),
+        &[
+            &[Pick::Of(caesar), Pick::Of(dissenter)],
+            &[Pick::Of(deepmuck)],
+        ],
+        "CR 603.3b: the reflexive ability and the Dissenter, then the crime trigger",
+    );
+}
+
+/// CR 603.3b + CR 603.12 + CR 101.4 + CR 700.13: the same with P1's Mortician
+/// Beetle: both players' earlier triggers go before the crime trigger.
+#[test]
+fn modal_reflexive_ability_and_earlier_triggers_of_both_players_precede_its_crime_trigger() {
+    let (mut runner, caesar, dissenter, deepmuck, beetle) = caesar_sacrificing_dissenter(true);
+    let beetle = beetle.expect("P1 controls Mortician Beetle");
+    assert_eq!(runner.state().deferred_triggers.len(), 2);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(dissenter)), 1);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(beetle)), 1);
+    choose_draw_and_damage(&mut runner);
+
+    assert_completion_boundary(&runner, "after the modes");
+    assert_triggered_stack_groups(
+        runner.state(),
+        &[
+            &[Pick::Of(caesar), Pick::Of(dissenter)],
+            &[Pick::Of(beetle)],
+            &[Pick::Of(deepmuck)],
+        ],
+        "CR 603.3b + CR 101.4: P0's two, then P1's, then the crime trigger",
+    );
+}
+
+/// The board of the Fates' Reversal tests: P0's Hama Pashar, Ruin Seeker and
+/// Grizzly Bears, Planar Void or Desecrated Tomb (with a Grizzly Bears card in
+/// P0's graveyard, the spell's target), Lost Mine of Phandelver at Goblin Lair.
+/// Fates' Reversal is cast at no cost and its venture asks for the room.
+fn fates_reversal_venture(void: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hama = scenario
+        .add_creature_from_oracle(P0, "Hama Pashar, Ruin Seeker", 2, 3, HAMA_PASHAR)
+        .id();
+    let other = if void {
+        scenario
+            .add_enchantment_from_oracle(P0, "Planar Void", PLANAR_VOID)
+            .id()
+    } else {
+        scenario
+            .add_artifact_from_oracle(P0, "Desecrated Tomb", DESECRATED_TOMB)
+            .id()
+    };
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let graveyard_bears = (!void).then(|| {
+        scenario
+            .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+            .id()
+    });
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Fates' Reversal", false, FATES_REVERSAL)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    set_dungeon(&mut runner, 1);
+    match graveyard_bears {
+        Some(card) => runner.cast(spell).target_objects(&[card]).commit(),
+        None => runner.cast(spell).commit(),
+    };
+    pass_until_resolution_choice(&mut runner);
+    (runner, hama, other, bears)
+}
+
+/// CR 603.3b + CR 608.2n + CR 603.2d: while Fates' Reversal (a sorcery)
+/// resolves, Hama Pashar doubles Storeroom's ability; Planar Void triggers on
+/// the sorcery's own move to the graveyard, the final part of its resolution.
+/// The second instance and Planar Void's trigger are ordered together.
+#[test]
+fn spell_resolution_room_instance_is_ordered_with_a_trigger_of_the_spell_going_to_the_graveyard() {
+    let (mut runner, hama, void, bears) = fates_reversal_venture(true);
+    let room = choose_storeroom(&mut runner, StackObjectClass::Spell);
+    assert_tts(
+        &runner,
+        Some(room),
+        &[object(hama), object(bears)],
+        "the first instance",
+    );
+    assert!(!first_ability_of_an_ability_resolution(runner.state()));
+    let result = select(&mut runner, vec![object(bears)]);
+    assert!(
+        matches!(result.waiting_for, WaitingFor::OrderTriggers { player, .. } if player == P0),
+        "P0 orders the second instance and Planar Void, got {:?}",
+        result.waiting_for
+    );
+    assert!(prompt_lists_exactly(
+        runner.state(),
+        &[Pick::Of(room), Pick::Of(void)]
+    ));
+    order_by_identity(&mut runner, &[Pick::Of(void)]);
+    assert_tts(
+        &runner,
+        Some(room),
+        &[object(hama), object(bears)],
+        "the second instance",
+    );
+    select(&mut runner, vec![object(hama)]);
+
+    assert_completion_boundary(&runner, "after the second instance");
+    assert_triggered_stack_groups(
+        runner.state(),
+        &[&[Pick::Of(room), Pick::Of(void), Pick::Of(room)]],
+        "CR 603.3b: both instances and Planar Void",
+    );
+    let state = runner.state();
+    triggered_index(state, room, &[object(bears)]);
+    assert!(
+        triggered_index(state, void, &[]) < triggered_index(state, room, &[object(hama)]),
+        "CR 603.3b: P0's chosen order puts Planar Void below the second instance: {:?}",
+        stack_reading(state)
+    );
+}
+
+/// CR 603.3b + CR 603.2d: while Fates' Reversal resolves, returning the
+/// graveyard Grizzly Bears triggers Desecrated Tomb; the second Storeroom
+/// instance and the Tomb's trigger are ordered together.
+#[test]
+fn spell_resolution_room_instance_is_ordered_with_an_earlier_trigger_of_the_spell() {
+    let (mut runner, hama, tomb, bears) = fates_reversal_venture(false);
+    let room = choose_storeroom(&mut runner, StackObjectClass::Spell);
+    assert_tts(
+        &runner,
+        Some(room),
+        &[object(hama), object(bears)],
+        "the first instance",
+    );
+    assert!(!first_ability_of_an_ability_resolution(runner.state()));
+    assert_eq!(queued_matching(runner.state(), Pick::Of(tomb)), 1);
+    let result = select(&mut runner, vec![object(bears)]);
+    assert!(
+        matches!(result.waiting_for, WaitingFor::OrderTriggers { player, .. } if player == P0),
+        "P0 orders the second instance and the Tomb, got {:?}",
+        result.waiting_for
+    );
+    assert!(prompt_lists_exactly(
+        runner.state(),
+        &[Pick::Of(room), Pick::Of(tomb)]
+    ));
+    order_by_identity(&mut runner, &[Pick::Of(tomb)]);
+    assert_tts(
+        &runner,
+        Some(room),
+        &[object(hama), object(bears)],
+        "the second instance",
+    );
+    select(&mut runner, vec![object(hama)]);
+
+    assert_completion_boundary(&runner, "after the second instance");
+    assert_triggered_stack_groups(
+        runner.state(),
+        &[&[Pick::Of(room), Pick::Of(tomb), Pick::Of(room)]],
+        "CR 603.3b: both instances and the Tomb",
+    );
+    let state = runner.state();
+    triggered_index(state, room, &[object(bears)]);
+    assert!(
+        triggered_index(state, tomb, &[]) < triggered_index(state, room, &[object(hama)]),
+        "CR 603.3b: P0's chosen order puts the Tomb below the second instance: {:?}",
+        stack_reading(state)
+    );
+}
+
+/// CR 603.3b + CR 603.12 + CR 608.2n: while Back for More (an instant) resolves,
+/// returning the graveyard Grizzly Bears triggers Desecrated Tomb, and Planar
+/// Void triggers on the instant's own move to the graveyard; the reflexive
+/// fight ability, Desecrated Tomb and Planar Void go on as one group, in any
+/// order, with the Tomb below the Void.
+#[test]
+fn spell_resolution_reflexive_batch_orders_an_earlier_and_a_later_trigger_together() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tomb = scenario
+        .add_artifact_from_oracle(P0, "Desecrated Tomb", DESECRATED_TOMB)
+        .id();
+    let void = scenario
+        .add_enchantment_from_oracle(P0, "Planar Void", PLANAR_VOID)
+        .id();
+    let card = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .id();
+    let bear_1 = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let bear_2 = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Back for More", true, BACK_FOR_MORE)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).target_objects(&[card]).commit();
+    pass_until_resolution_choice(&mut runner);
+    assert_tts(
+        &runner,
+        Some(spell),
+        &[object(bear_1), object(bear_2)],
+        "the reflexive fight",
+    );
+    assert_eq!(
+        resolving_class(runner.state()),
+        Some(StackObjectClass::Spell)
+    );
+    assert!(!first_ability_of_an_ability_resolution(runner.state()));
+    assert_eq!(queued_matching(runner.state(), Pick::Of(tomb)), 1);
+    let result = select(&mut runner, vec![object(bear_1)]);
+    assert!(
+        matches!(result.waiting_for, WaitingFor::OrderTriggers { player, .. } if player == P0),
+        "P0 orders the Tomb and Planar Void, got {:?}",
+        result.waiting_for
+    );
+    assert!(prompt_lists_exactly(
+        runner.state(),
+        &[Pick::Of(tomb), Pick::Of(void)]
+    ));
+    order_by_identity(&mut runner, &[Pick::Of(tomb)]);
+
+    assert_completion_boundary(&runner, "after the order");
+    assert_triggered_stack_groups(
+        runner.state(),
+        &[&[Pick::Of(spell), Pick::Of(tomb), Pick::Of(void)]],
+        "CR 603.3b: the reflexive fight, the Tomb and Planar Void",
+    );
+    let state = runner.state();
+    triggered_index(state, spell, &[object(bear_1)]);
+    assert!(
+        triggered_index(state, tomb, &[]) < triggered_index(state, void, &[]),
+        "CR 603.3b: P0's chosen order puts the Tomb below Planar Void: {:?}",
+        stack_reading(state)
+    );
+}
+
+// A save written before queued triggered abilities recorded their placement
+// process (CR 603.3b) cannot say which queued abilities are the remainder of
+// the process under way. The persisted restore refuses such a save while a
+// placement may be under way; a save written now carries the record on every
+// queued ability and restores exactly.
+
+const CHARMING_PRINCE: &str = "When this creature enters, choose one —\n• Scry 2.\n• You gain 3 life.\n• Exile another target creature you own. Return it to the battlefield under your control at the beginning of the next end step.";
+const BOGARDAN_HELLKITE: &str = "Flash\nFlying\nWhen this creature enters, it deals 5 damage divided as you choose among any number of targets.";
+
+/// The stable prefix of the legacy placement refusal's message.
+const LEGACY_PLACEMENT_REFUSAL: &str = "RESTORE_INCOMPATIBLE_TRIGGER_PLACEMENT:";
+
+/// Visit every queued context object (`deferred_triggers` and the
+/// `pending_trigger_order` groups) of every serialized state in `wire`,
+/// whichever envelope holds it.
+fn for_each_wire_context(
+    wire: &mut serde_json::Value,
+    visit: &mut dyn FnMut(&mut serde_json::Map<String, serde_json::Value>),
+) {
+    match wire {
+        serde_json::Value::Object(object) => {
+            if let Some(contexts) = object
+                .get_mut("deferred_triggers")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                contexts
+                    .iter_mut()
+                    .filter_map(serde_json::Value::as_object_mut)
+                    .for_each(&mut *visit);
+            }
+            if let Some(groups) = object
+                .get_mut("pending_trigger_order")
+                .and_then(|order| order.get_mut("groups"))
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                groups
+                    .iter_mut()
+                    .filter_map(|group| group.get_mut("triggers"))
+                    .filter_map(serde_json::Value::as_array_mut)
+                    .flat_map(|contexts| contexts.iter_mut())
+                    .filter_map(serde_json::Value::as_object_mut)
+                    .for_each(&mut *visit);
+            }
+            for (key, child) in object.iter_mut() {
+                if key != "deferred_triggers" && key != "pending_trigger_order" {
+                    for_each_wire_context(child, visit);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                for_each_wire_context(child, visit);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
+/// How many queued contexts `wire` holds, and how many carry the
+/// placement-process key.
+fn wire_queue_census(wire: &serde_json::Value) -> (usize, usize) {
+    let mut wire = wire.clone();
+    let (mut contexts, mut keyed) = (0, 0);
+    for_each_wire_context(&mut wire, &mut |context| {
+        contexts += 1;
+        keyed += usize::from(context.contains_key(PLACEMENT_PROCESS_FIELD));
+    });
+    (contexts, keyed)
+}
+
+/// What a writer from before the placement-process record wrote: the same
+/// wire with the key removed from every queued context.
+fn legacy_stripped(wire: &mut serde_json::Value) {
+    for_each_wire_context(wire, &mut |context| {
+        context.remove(PLACEMENT_PROCESS_FIELD);
+    });
+}
+
+/// The trusted persisted wire the production writer produces.
+fn capture_wire(state: &GameState) -> serde_json::Value {
+    serde_json::to_value(PersistedGameState::capture(state.clone()))
+        .expect("the persisted state serializes")
+}
+
+/// The raw persisted wire.
+fn raw_wire(state: &GameState) -> serde_json::Value {
+    serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+        .expect("the persisted state serializes")
+}
+
+/// The production restore: decode, prepare, finalize.
+fn restore_persisted(wire: serde_json::Value) -> Result<GameState, PersistedRestoreError> {
+    serde_json::from_value::<PersistedGameState>(wire)
+        .expect("the persisted wire decodes")
+        .into_game_state()
+}
+
+/// The production restore's preparation stage alone (the refusal runs there).
+fn prepare_persisted(wire: serde_json::Value) -> Result<(), PersistedRestoreError> {
+    serde_json::from_value::<PersistedGameState>(wire)
+        .expect("the persisted wire decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+        .map(|_| ())
+}
+
+/// CR 603.3b: `wire`, stripped as a pre-record writer would have written it,
+/// is refused by the production restore with the typed incompatibility.
+fn assert_legacy_wire_refused(mut wire: serde_json::Value, what: &str) {
+    legacy_stripped(&mut wire);
+    let (contexts, keyed) = wire_queue_census(&wire);
+    assert!(
+        contexts > 0,
+        "{what}: reach: the stripped save holds a queue"
+    );
+    assert_eq!(keyed, 0, "{what}: reach: no queued context carries the key");
+    let error = restore_persisted(wire).expect_err("a pre-record save paused mid-placement");
+    assert_eq!(
+        error,
+        PersistedRestoreError::LegacyTriggerPlacementNotRestorable,
+        "{what}"
+    );
+    assert!(
+        error.to_string().starts_with(LEGACY_PLACEMENT_REFUSAL),
+        "{what}: {error}"
+    );
+}
+
+/// CR 603.3b: at a pause whose queue is not empty, the production save
+/// restores, and the same save without the placement-process record is
+/// refused, on both persisted wires.
+fn assert_stripped_save_is_refusable(runner: &GameRunner, what: &str) {
+    let state = runner.state();
+    assert!(
+        queued_contexts(state).next().is_some(),
+        "{what}: reach: the save holds a queue"
+    );
+    for wire in [capture_wire(state), raw_wire(state)] {
+        let (contexts, keyed) = wire_queue_census(&wire);
+        assert_eq!(
+            contexts, keyed,
+            "{what}: every queued context carries the key"
+        );
+        restore_persisted(wire.clone())
+            .unwrap_or_else(|error| panic!("{what}: the production save restores, got {error:?}"));
+        assert_legacy_wire_refused(wire, what);
+    }
+}
+
+/// CR 603.3b: a production save whose queue holds only `Fresh` contexts,
+/// paused at a construction prompt, carries the record and restores.
+fn assert_fresh_only_queue_save_restores(runner: &GameRunner, queued_source: ObjectId) {
+    let state = runner.state();
+    assert_eq!(state.deferred_triggers.len(), 1);
+    assert_eq!(state.deferred_triggers[0].pending.source_id, queued_source);
+    assert!(!queued_contexts(state).any(queued_under_way));
+    let wire = capture_wire(state);
+    let queue = &wire_state(&wire)["deferred_triggers"];
+    assert_eq!(
+        queue[0][PLACEMENT_PROCESS_FIELD],
+        serde_json::json!("Fresh"),
+        "the fresh context's record is written"
+    );
+    restore_persisted(wire).expect("a fresh-only queue at a construction prompt restores");
+}
+
+/// The serialized state object inside a persisted wire, whichever envelope.
+fn wire_state(wire: &serde_json::Value) -> &serde_json::Value {
+    fn find(value: &serde_json::Value) -> Option<&serde_json::Value> {
+        match value {
+            serde_json::Value::Object(object) if object.contains_key("deferred_triggers") => {
+                Some(value)
+            }
+            serde_json::Value::Object(object) => object.values().find_map(find),
+            serde_json::Value::Array(values) => values.iter().find_map(find),
+            _ => None,
+        }
+    }
+    find(wire).expect("the wire holds a serialized state")
+}
+
+/// The witness board: P0's The Eldest Reborn about to reach chapter III,
+/// Deepmuck Desperado and (when asked) Historian's Boon; a creature card in
+/// each graveyard, so chapter III asks for its target. Returns the runner at
+/// that prompt, with (reborn, boon, deepmuck, P1's card).
+fn eldest_reborn_target_prompt(
+    with_boon: bool,
+) -> (GameRunner, ObjectId, Option<ObjectId>, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Plains", "Plains", "Plains"]);
+    scenario.with_library_top(P1, &["Plains", "Plains", "Plains", "Plains"]);
+    let boon = with_boon.then(|| {
+        scenario
+            .add_enchantment_from_oracle(P0, "Historian's Boon", HISTORIANS_BOON)
+            .id()
+    });
+    let reborn = saga_on_battlefield(
+        &mut scenario,
+        "The Eldest Reborn",
+        engine::types::mana::ManaCost::generic(5),
+        THE_ELDEST_REBORN,
+    );
+    let deepmuck = scenario
+        .add_creature_from_oracle(P0, "Deepmuck Desperado", 2, 4, DEEPMUCK_DESPERADO)
+        .id();
+    let ours = scenario
+        .add_creature_to_graveyard(P0, "Raging Goblin", 1, 1)
+        .id();
+    let theirs = scenario
+        .add_creature_to_graveyard(P1, "Raging Goblin", 1, 1)
+        .id();
+    let mut runner = scenario.build();
+    advance_to_p0_next_precombat_main(&mut runner);
+    assert_eq!(lore(&runner, reborn), 3);
+    assert_tts(
+        &runner,
+        Some(reborn),
+        &[object(ours), object(theirs)],
+        "chapter III",
+    );
+    (runner, reborn, boon, deepmuck, theirs)
+}
+
+/// CR 603.3b + CR 700.13 + CR 714.2e: The Eldest Reborn's chapter III waits for
+/// its target with Historian's Boon's second-part trigger parked behind it. A
+/// production save there restores and finishes III, Boon, then the crime
+/// trigger. The same save without the placement-process record cannot tell
+/// Boon (the remainder of the process) from what the target choice will
+/// trigger, so it is refused rather than loaded into the wrong order.
+#[test]
+fn legacy_save_paused_at_a_placement_target_choice_is_refused() {
+    let (runner, reborn, boon, deepmuck, theirs) = eldest_reborn_target_prompt(true);
+    let boon = boon.expect("the board has Historian's Boon");
+    assert_eq!(queued_matching(runner.state(), Pick::Of(boon)), 1);
+    assert!(
+        runner
+            .state()
+            .deferred_triggers
+            .iter()
+            .filter(|ctx| ctx.pending.source_id == boon)
+            .all(queued_under_way),
+        "reach: Boon is parked as the process's later part"
+    );
+
+    let restored =
+        restore_persisted(capture_wire(runner.state())).expect("the production save restores");
+    let mut restored = GameRunner::from_state(restored);
+    select(&mut restored, vec![object(theirs)]);
+    assert_completion_boundary(&restored, "the restored save");
+    assert_triggered_stack(
+        restored.state(),
+        &[Pick::Of(reborn), Pick::Of(boon), Pick::Of(deepmuck)],
+        "CR 603.3b: III, Boon, then the crime trigger",
+    );
+
+    assert_legacy_wire_refused(capture_wire(runner.state()), "trusted wire");
+    assert_legacy_wire_refused(raw_wire(runner.state()), "raw wire");
+}
+
+/// CR 603.3b + CR 700.13: the same target prompt with nothing queued behind it
+/// restores from a save without the record, and plays on: III, then the crime
+/// trigger.
+#[test]
+fn legacy_save_paused_at_a_target_choice_with_an_empty_queue_restores() {
+    let (runner, reborn, _, deepmuck, theirs) = eldest_reborn_target_prompt(false);
+    assert!(runner.state().deferred_triggers.is_empty());
+    let mut wire = capture_wire(runner.state());
+    legacy_stripped(&mut wire);
+    let restored = restore_persisted(wire).expect("an empty queue has nothing to misplace");
+    let mut restored = GameRunner::from_state(restored);
+    select(&mut restored, vec![object(theirs)]);
+    assert_completion_boundary(&restored, "the restored save");
+    assert_triggered_stack(
+        restored.state(),
+        &[Pick::Of(reborn), Pick::Of(deepmuck)],
+        "III, then the crime trigger",
+    );
+}
+
+/// The board of the mode and division rows: P0's Soul Warden and `name` (cast
+/// at no cost), whose enter trigger is ordered first; Soul Warden's trigger
+/// from the same event waits in the queue.
+fn cast_with_soul_warden(name: &str, oracle: &str, power: i32) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let warden = scenario
+        .add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN)
+        .id();
+    let spell = scenario
+        .add_creature_to_hand_from_oracle(P0, name, power, power, oracle)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    cast_and_resolve(&mut runner, spell);
+    if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+        order_by_identity(&mut runner, &[Pick::Of(spell)]);
+    }
+    (runner, spell, warden)
+}
+
+/// CR 603.3b + CR 603.3c: Charming Prince's enter trigger waits for its mode
+/// with Soul Warden's trigger queued behind it; a save there without the
+/// record is refused.
+#[test]
+fn legacy_save_paused_at_a_placement_mode_choice_is_refused() {
+    let (runner, prince, warden) = cast_with_soul_warden("Charming Prince", CHARMING_PRINCE, 2);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::AbilityModeChoice { source_id, .. } if source_id == prince
+        ),
+        "reach: Charming Prince's trigger asks for its mode, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().deferred_triggers.len(), 1);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(warden)), 1);
+    assert_stripped_save_is_refusable(&runner, "the mode choice");
+}
+
+/// CR 603.3b + CR 601.2d + CR 603.3d: Bogardan Hellkite's enter trigger waits
+/// for its division with Soul Warden's trigger queued behind it; a save there
+/// without the record is refused.
+#[test]
+fn legacy_save_paused_at_a_placement_division_is_refused() {
+    let (mut runner, hellkite, warden) =
+        cast_with_soul_warden("Bogardan Hellkite", BOGARDAN_HELLKITE, 5);
+    assert_tts(
+        &runner,
+        Some(hellkite),
+        &tts_legal_targets(&runner),
+        "the Hellkite",
+    );
+    select(&mut runner, vec![TargetRef::Player(P1), object(warden)]);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DistributeAmong {
+                scope: engine::types::game_state::DistributionScope::AnnouncedTargets,
+                ..
+            }
+        ),
+        "reach: the Hellkite's trigger asks for its division, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().deferred_triggers.len(), 1);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(warden)), 1);
+    assert_stripped_save_is_refusable(&runner, "the division");
+}
+
+/// Replace the serialized state's `field` in a raw wire.
+fn graft(wire: &mut serde_json::Value, field: &str, value: serde_json::Value) {
+    wire.as_object_mut()
+        .expect("a raw wire is the state object")
+        .insert(field.to_string(), value);
+}
+
+/// The no-placement carriers of a raw wire read as nothing under way: no
+/// announcement, no order prompt, no triggered-mana pause, no ability
+/// resolution under way.
+fn assert_no_placement_carrier(wire: &serde_json::Value, what: &str) {
+    for field in [
+        "pending_trigger",
+        "pending_trigger_entry",
+        "pending_trigger_order",
+    ] {
+        assert!(
+            wire.get(field).is_none_or(serde_json::Value::is_null),
+            "{what}: {field} is unset"
+        );
+    }
+    assert!(
+        wire.get("resolving_stack_entry")
+            .is_none_or(serde_json::Value::is_null),
+        "{what}: no resolution is under way"
+    );
+    assert_eq!(wire["waiting_for"]["type"], "Priority", "{what}");
+}
+
+fn wire_stack_holds_a_triggered_ability(wire: &serde_json::Value) -> bool {
+    wire["stack"]
+        .as_array()
+        .expect("the stack serializes as an array")
+        .iter()
+        .any(|entry| entry["kind"]["type"] == "TriggeredAbility")
+}
+
+fn wire_queue_holds_an_ability_triggered_event(wire: &serde_json::Value) -> bool {
+    wire["deferred_triggers"]
+        .as_array()
+        .expect("the queue serializes as an array")
+        .iter()
+        .flat_map(|context| context["trigger_events"].as_array().into_iter().flatten())
+        .any(|event| event["type"] == "AbilityTriggered")
+}
+
+/// An idle save of a board: `Priority`, nothing on the stack, nothing queued
+/// and no resolution under way. The graft rows move a paused save's queue
+/// into it, so the state around the queue is a real save with nothing under
+/// way rather than a later save with fields removed by hand (emptying a later
+/// save's stack would orphan its `stack_trigger_firings`).
+fn idle_wire(runner: &GameRunner, what: &str) -> serde_json::Value {
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && state.stack.is_empty()
+            && state.resolving_stack_entry.is_none()
+            && queued_contexts(state).next().is_none(),
+        "{what}: reach: the board is idle, got {:?}",
+        state.waiting_for
+    );
+    raw_wire(state)
+}
+
+/// CR 603.3b: a save without the record whose queue sits beneath a triggered
+/// ability on the stack may be the remainder of a placement whose paused
+/// member that ability is, so it is refused; the same queue in an idle save
+/// of the same board restores. Every state is a real save of the Dungeon Map
+/// board; the paused save's queue is moved into the save taken once the
+/// resolution completes (whose resolution carrier is then cleared) and into
+/// the board's idle save.
+///
+/// The save taken once the resolution completes keeps Dungeon Map's ability
+/// as the resolution carrier at `Priority`, with the room abilities above it.
+/// With the queue moved in and the carrier left set it is refused too, by the
+/// term that reads an ability's resolution that has put an ability on the
+/// stack: a legacy save at `Priority` whose resolution carrier is still set
+/// with at least one ability above it and a non-empty queue is refused.
+#[test]
+fn legacy_queue_beneath_a_triggered_ability_is_refused() {
+    let (mut runner, map, _, ours, theirs) = dungeon_map_board(true);
+    let theirs = theirs.expect("P1 controls a Tar Pit Warrior");
+    let idle = idle_wire(&runner, "before the venture");
+    activate_dungeon_map(&mut runner, map);
+    choose_storeroom(
+        &mut runner,
+        StackObjectClass::Ability(StackAbilityKind::Activated),
+    );
+    select(&mut runner, vec![object(theirs)]);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(theirs)), 1);
+    let mut paused = raw_wire(runner.state());
+    legacy_stripped(&mut paused);
+    let queue = paused["deferred_triggers"].clone();
+    select(&mut runner, vec![object(ours)]);
+    assert_completion_boundary(&runner, "after the second instance");
+
+    let mut grafted = raw_wire(runner.state());
+    graft(&mut grafted, "deferred_triggers", queue.clone());
+    assert_eq!(wire_queue_census(&grafted), (1, 0), "reach");
+
+    // As written: the activated ability is still the resolution carrier, with
+    // abilities it put on the stack above it.
+    let state = runner.state();
+    let carrier = state
+        .resolving_stack_entry
+        .as_ref()
+        .expect("reach: Dungeon Map's ability is still the resolution carrier");
+    assert_eq!(
+        carrier.kind.class(),
+        StackObjectClass::Ability(StackAbilityKind::Activated),
+        "reach: the carrier is the activated ability"
+    );
+    assert!(
+        state.stack.iter().any(
+            |entry| matches!(entry.kind.class(), StackObjectClass::Ability(_))
+                && entry.id > carrier.id
+        ),
+        "reach: the resolution has put an ability on the stack"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(
+        prepare_persisted(grafted.clone()),
+        Err(PersistedRestoreError::LegacyTriggerPlacementNotRestorable),
+        "the carrier left set refuses the save"
+    );
+
+    // The carrier cleared: only the triggered abilities on the stack remain.
+    graft(
+        &mut grafted,
+        "resolving_stack_entry",
+        serde_json::Value::Null,
+    );
+    assert_no_placement_carrier(&grafted, "the grafted save");
+    assert!(wire_stack_holds_a_triggered_ability(&grafted), "reach");
+    assert!(
+        !wire_queue_holds_an_ability_triggered_event(&grafted),
+        "reach"
+    );
+    assert_eq!(
+        prepare_persisted(grafted),
+        Err(PersistedRestoreError::LegacyTriggerPlacementNotRestorable)
+    );
+
+    // The same queue with nothing on the stack.
+    let mut grafted = idle;
+    graft(&mut grafted, "deferred_triggers", queue);
+    assert_no_placement_carrier(&grafted, "the idle save");
+    assert!(!wire_stack_holds_a_triggered_ability(&grafted), "reach");
+    assert_eq!(wire_queue_census(&grafted), (1, 0), "reach");
+    assert_eq!(prepare_persisted(grafted), Ok(()));
+}
+
+/// CR 603.2 + CR 603.3b: a save without the record that queues an observer of
+/// an ability triggering is refused; with the observed event removed from the
+/// queued contexts it restores. The observer is Firebender Ascension's firing
+/// for the goad, queued while Iroh's mentor waits for its target, moved into
+/// the board's idle save. The typed observer is installed by hand, as the
+/// board's other rows do, so this is the shape a save takes once the parser
+/// emits such observers.
+#[test]
+fn legacy_queue_holding_an_ability_triggered_observer_is_refused() {
+    let RemainderBoard {
+        mut runner,
+        ascension,
+        iroh,
+        zuko,
+        azula,
+        goblin,
+        racketeer,
+        deepmuck,
+        theirs,
+    } = remainder_board(true, 2);
+    let ascension = ascension.expect("the board has Firebender Ascension");
+    let idle = idle_wire(&runner, "before the attack");
+    attack(&mut runner, &[iroh, zuko, azula, goblin, racketeer]);
+    let (g, m, z) = (Pick::Of(racketeer), Pick::Of(iroh), Pick::Of(zuko));
+    let a1 = Pick::OfWithout(azula, "lose 1 life");
+    let a2 = Pick::OfWith(azula, "lose 1 life");
+    order_by_identity(&mut runner, &[g, m, a1, a2, z]);
+    select(&mut runner, vec![object(theirs[0])]);
+    assert_tts(
+        &runner,
+        Some(iroh),
+        &[object(zuko), object(goblin)],
+        "the mentor",
+    );
+    assert_eq!(
+        queued_matching(runner.state(), Pick::Observing(ascension, racketeer)),
+        1,
+        "reach: the goad's firing is queued"
+    );
+    assert_eq!(queued_matching(runner.state(), Pick::Of(deepmuck)), 1);
+    let mut paused = raw_wire(runner.state());
+    legacy_stripped(&mut paused);
+
+    let mut grafted = idle;
+    graft(
+        &mut grafted,
+        "deferred_triggers",
+        paused["deferred_triggers"].clone(),
+    );
+    assert_no_placement_carrier(&grafted, "the grafted save");
+    assert!(!wire_stack_holds_a_triggered_ability(&grafted), "reach");
+    assert!(
+        wire_queue_holds_an_ability_triggered_event(&grafted),
+        "reach"
+    );
+    assert!(
+        grafted["deferred_triggers"]
+            .as_array()
+            .expect("the queue serializes as an array")
+            .iter()
+            .any(|context| context["pending"]["source_id"] == serde_json::json!(ascension.0)),
+        "reach: Firebender Ascension's firing is queued"
+    );
+    assert_eq!(wire_queue_census(&grafted).1, 0, "reach: no key");
+    assert_eq!(
+        prepare_persisted(grafted.clone()),
+        Err(PersistedRestoreError::LegacyTriggerPlacementNotRestorable)
+    );
+
+    for context in grafted["deferred_triggers"]
+        .as_array_mut()
+        .expect("the queue serializes as an array")
+    {
+        context["trigger_events"]
+            .as_array_mut()
+            .expect("a queued context has trigger events")
+            .retain(|event| event["type"] != "AbilityTriggered");
+    }
+    assert!(!wire_queue_holds_an_ability_triggered_event(&grafted));
+    assert!(
+        grafted["deferred_triggers"]
+            .as_array()
+            .expect("the queue serializes as an array")
+            .iter()
+            .any(|context| context["trigger_events"]
+                .as_array()
+                .is_some_and(|events| !events.is_empty())),
+        "reach: a queued context keeps a trigger event"
+    );
+    let (contexts, keyed) = wire_queue_census(&grafted);
+    assert!(
+        contexts > 0 && keyed == 0,
+        "reach: the queue stays, unmarked"
+    );
+    assert_eq!(prepare_persisted(grafted), Ok(()));
+}
+
+/// A committed state that holds a queue was written without the record, and
+/// reads as nothing under way on every term of the restore refusal.
+fn assert_committed_queue_reads_nothing_under_way(state: &serde_json::Value, what: &str) {
+    let queue = state["deferred_triggers"]
+        .as_array()
+        .expect("the committed state has a queue");
+    assert!(!queue.is_empty(), "{what}: reach: the queue is not empty");
+    assert!(
+        queue
+            .iter()
+            .all(|context| context.get(PLACEMENT_PROCESS_FIELD).is_none()),
+        "{what}: reach: no queued context carries the record"
+    );
+    for field in [
+        "pending_trigger",
+        "pending_trigger_entry",
+        "pending_trigger_order",
+    ] {
+        assert!(
+            state.get(field).is_none_or(serde_json::Value::is_null),
+            "{what}: {field} is unset"
+        );
+    }
+    let waiting = state["waiting_for"]["type"]
+        .as_str()
+        .expect("the wait is tagged");
+    assert!(
+        ![
+            "OptionalEffectChoice",
+            "OpponentMayChoice",
+            "RepeatDecision",
+            "ReplacementChoice",
+            "ChooseManaColor",
+        ]
+        .contains(&waiting),
+        "{what}: the wait {waiting} is not a triggered-mana pause"
+    );
+    assert!(
+        !wire_stack_holds_a_triggered_ability(state),
+        "{what}: no triggered ability is on the stack"
+    );
+    assert!(
+        !wire_queue_holds_an_ability_triggered_event(state),
+        "{what}: no observer is queued"
+    );
+    let is_ability = |kind: &serde_json::Value| {
+        kind["type"] == "ActivatedAbility" || kind["type"] == "TriggeredAbility"
+    };
+    let carrier_is_ability = is_ability(&state["resolving_stack_entry"]["kind"]);
+    let abilities_above = state["stack"]
+        .as_array()
+        .expect("the stack serializes as an array")
+        .iter()
+        .filter(|entry| is_ability(&entry["kind"]))
+        .count();
+    assert!(
+        !carrier_is_ability || abilities_above == 0,
+        "{what}: no ability's resolution has put an ability on the stack"
+    );
+}
+
+fn committed_fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/integration/fixtures")
+        .join(name)
+}
+
+/// CR 603.3b: the two committed Mycoloth saves hold a queue written without the
+/// record, during a spell's and an activated ability's resolution, with
+/// nothing being placed. The restore admits them, as before.
+#[test]
+fn committed_mycoloth_saves_with_an_unmarked_queue_are_admitted() {
+    for name in [
+        "mycoloth_devour_wedge_turn15.json.gz",
+        "mycoloth_devour_wedge_turn20.json.gz",
+    ] {
+        let path = committed_fixture(name);
+        let bytes = std::fs::read(&path).expect("the committed save is readable");
+        let projected =
+            crate::issue_8024_terminal_rest_captures::projected_capture_snapshot(&bytes);
+        assert_committed_queue_reads_nothing_under_way(&projected, name);
+        crate::committed_dump_walk::restore_committed(&path)
+            .unwrap_or_else(|error| panic!("{name}: the committed save restores, got {error}"));
+    }
+}
+
+/// CR 603.3b: the committed Ureni save holds a queue written without the record
+/// during a triggered ability's resolution, with nothing being placed. The
+/// restore admits it past the placement refusal and still refuses it, as
+/// before, for its unsettled resolution.
+#[test]
+fn committed_ureni_save_with_an_unmarked_queue_passes_the_placement_refusal() {
+    let capture = crate::raw_resolution_stack_restore::repaired_capture();
+    assert_committed_queue_reads_nothing_under_way(&capture, "ureni");
+    let error = prepare_persisted(capture).expect_err("the save stays refused");
+    assert_eq!(error, PersistedRestoreError::UnsettledPriorityResolution);
 }

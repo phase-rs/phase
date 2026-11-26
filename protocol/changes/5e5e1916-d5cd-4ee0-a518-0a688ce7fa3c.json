@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Use typed passive damage trigger occurrence grouping for per-event, whole-batch, and per-player firings, migrating legacy batched definitions when decoded"
+}

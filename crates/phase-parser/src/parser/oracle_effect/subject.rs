@@ -16,6 +16,7 @@ use super::imperative;
 use super::lower::BOUNDED_TARGET_CARDINALITIES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::context::DeclaredSlotRegistry;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenSubtypeKind, ColorChangeMode,
     ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient, Duration,
@@ -3294,11 +3295,41 @@ pub(super) fn owner_subject_seed(
         {
             return None;
         }
-        let target = ctx.chain_declared_object_target.as_ref()?;
-        if !matches!(target, TargetFilter::Typed(_))
-            || super::target_filter_can_target_player(target)
-        {
-            return None;
+        if let Some(target) = &ctx.chain_declared_object_target {
+            if !matches!(target, TargetFilter::Typed(_))
+                || super::target_filter_can_target_player(target)
+            {
+                return None;
+            }
+        } else {
+            // CR 115.1 + CR 608.2c: a disjunction in one declared slot gives
+            // both pronouns the same object. The pending resolution-time bare
+            // choice admits only a single Typed filter, never this Or.
+            let target @ TargetFilter::Or { filters } = ctx.chain_prior_chosen_target.as_ref()?
+            else {
+                return None;
+            };
+            if filters.is_empty()
+                || !filters.iter().all(|filter| {
+                    matches!(filter, TargetFilter::Typed(_))
+                        && !super::target_filter_can_target_player(filter)
+                })
+                || ctx
+                    .object_pronoun_ref
+                    .as_ref()
+                    .is_some_and(|target| *target != TargetFilter::ParentTarget)
+            {
+                return None;
+            }
+            let DeclaredSlotRegistry::Known(entries) = &ctx.chain_declared_slots else {
+                return None;
+            };
+            let [slot] = entries.as_slice() else {
+                return None;
+            };
+            if slot.index != Some(0) || &slot.filter != target {
+                return None;
+            }
         }
         Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
     })
@@ -7568,6 +7599,21 @@ fn try_parse_become_color_modification(become_text: &str) -> Option<ContinuousMo
 /// input parsed, trailing fixed phrase consumed last): `take_until` skips to the
 /// final occurrence and `all_consuming` requires the suffix to terminate the
 /// input. Replaces a bare `ends_with` so the dispatch stays combinator-driven.
+/// CR 701.32a + CR 904.9: strip a trailing "that turn" anaphoric extra-turn
+/// window, returning the head. Pattern 2: `take_until` skips to the marker
+/// and `all_consuming` requires the suffix to terminate the input, so an
+/// interior "that turn" never matches. Replaces a bare `ends_with` + slicing
+/// so the dispatch stays combinator-driven.
+fn ends_with_that_turn_window(lower: &str) -> Option<&str> {
+    let (_, head) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" that turn"),
+        tag(" that turn"),
+    ))
+    .parse(lower)
+    .ok()?;
+    Some(head)
+}
+
 fn ends_with_of_your_choice(lower: &str) -> bool {
     all_consuming(terminated(
         take_until::<_, _, OracleError<'_>>("of your choice"),
@@ -7880,6 +7926,28 @@ fn build_restriction_clause(
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
     let (predicate, duration) = super::strip_trailing_duration(&normalized);
+    // CR 701.32a + CR 904.9 + CR 608.2c + CR 611.2a: a trailing "that
+    // turn" on a restriction predicate is the anaphoric extra-turn window
+    // (All in Good Time: "Schemes can't be set in motion that turn"). The
+    // generic duration table has no bare-"that turn" production — it would
+    // amputate "Skip the untap step of that turn" — so the restriction path
+    // resolves it here, where the corpus holds exactly one shape. The window
+    // binds the granted turn at resolve (the anaphor's antecedent is this
+    // chain's grant) instead of arming on the controller's next untap.
+    let deperioded = predicate.trim_end_matches('.');
+    let (predicate, duration) = match duration {
+        Some(_) => (predicate, duration),
+        None => {
+            let lower_candidate = deperioded.to_lowercase();
+            match ends_with_that_turn_window(&lower_candidate) {
+                Some(_) => (
+                    deperioded[..deperioded.len() - " that turn".len()].trim_end(),
+                    Some(Duration::UntilEndOfGrantedTurn { turn: None }),
+                ),
+                None => (predicate, None),
+            }
+        }
+    };
     let lower = predicate.to_lowercase();
 
     // CR 702.18a + CR 109.5: a duration-scoped "can't be the target [of ...]"
@@ -8426,6 +8494,11 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             // bypass in replacement.rs::destroy_applier observes it via
             // active_static_definitions.
             | StaticMode::CantBeRegenerated
+            // CR 701.32a + CR 904.9: CantSetSchemeInMotion is granted to the
+            // scheme subject and must propagate onto its `static_definitions`
+            // as an `AddStaticMode` transient grant — without it the TCE
+            // carries empty modifications and the archenemy gate never sees it.
+            | StaticMode::CantSetSchemeInMotion
             // CR 702.18a / CR 702.11b / CR 109.5: CantBeTargeted is granted to
             // a subject/target creature and must propagate onto its
             // `static_definitions` so the targeting check in `targeting.rs::can_target`
@@ -8675,6 +8748,19 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     .is_ok()
     {
         return Some(vec![StaticMode::CantGainLife]);
+    }
+    // CR 701.32a + CR 904.9: "can't be set in motion" — schemes can't be set
+    // in motion (All in Good Time). Runs on the duration-stripped predicate;
+    // the "that turn" tail is resolved to the extra-turn window by the
+    // anaphoric-window branch in `build_restriction_clause` before this.
+    if all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("can't be set in motion"),
+        tag("cannot be set in motion"),
+    )))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(vec![StaticMode::CantSetSchemeInMotion]);
     }
     // CR 305.1 + CR 611.1: "can't play lands" — a player can't take the land-play
     // special action (CR 305.1). This is the player-scoped prohibition shared by
@@ -10005,6 +10091,189 @@ mod tests {
         ctx.token_created_in_chain = false;
         ctx.chain_declared_object_target = Some(TargetFilter::Player);
         assert_eq!(owner_subject_seed(&subject, &ctx), None);
+    }
+
+    #[test]
+    fn owner_anaphor_requires_one_numbered_object_disjunction() {
+        use crate::parser::oracle_ir::context::DeclaredSlotEntry;
+        use crate::types::ability::TargetChoiceTiming;
+
+        let app = parse_subject_application("its owner", &mut ParseContext::default())
+            .expect("owner subject");
+        let subject = subject_phrase_ast(Some(app));
+        let (target, rest) = parse_target_with_ctx(
+            "creature or planeswalker an opponent controls",
+            &mut ParseContext::default(),
+        );
+        assert!(rest.is_empty());
+        assert!(matches!(&target, TargetFilter::Or { filters } if filters.len() == 2));
+        let slot = DeclaredSlotEntry {
+            index: Some(0),
+            filter: target.clone(),
+        };
+        let ctx = ParseContext {
+            chain_prior_chosen_target: Some(target),
+            chain_declared_slots: DeclaredSlotRegistry::Known(vec![slot.clone()]),
+            ..ParseContext::default()
+        };
+        assert_eq!(
+            owner_subject_seed(&subject, &ctx),
+            Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
+        );
+
+        let mixed = TargetFilter::Or {
+            filters: vec![
+                parse_target_with_ctx("creature", &mut ParseContext::default()).0,
+                TargetFilter::Player,
+            ],
+        };
+        let bare = "choose a creature you control";
+        let mut bare_ctx = ParseContext::default();
+        let Some(ChooseImperativeAst::TargetOnly {
+            target: bare_target,
+        }) = imperative::parse_choose_ast(bare, bare, &mut bare_ctx)
+        else {
+            panic!("bare choice must reach the TargetOnly producer");
+        };
+        assert_eq!(
+            bare_ctx.declared_target_choice_timing,
+            Some(TargetChoiceTiming::Resolution)
+        );
+        for (label, target) in [
+            ("player alternative", mixed),
+            ("pending bare choice", bare_target),
+        ] {
+            let adverse = ParseContext {
+                chain_prior_chosen_target: Some(target.clone()),
+                chain_declared_slots: DeclaredSlotRegistry::Known(vec![DeclaredSlotEntry {
+                    filter: target,
+                    ..slot.clone()
+                }]),
+                ..ctx.clone()
+            };
+            assert_eq!(owner_subject_seed(&subject, &adverse), None, "{label}");
+        }
+
+        for registry in [
+            DeclaredSlotRegistry::Known(vec![]),
+            DeclaredSlotRegistry::Known(vec![DeclaredSlotEntry {
+                index: None,
+                ..slot.clone()
+            }]),
+            DeclaredSlotRegistry::Known(vec![
+                slot.clone(),
+                DeclaredSlotEntry {
+                    index: Some(1),
+                    ..slot
+                },
+            ]),
+            DeclaredSlotRegistry::Indeterminate,
+        ] {
+            let adverse = ParseContext {
+                chain_declared_slots: registry,
+                ..ctx.clone()
+            };
+            assert_eq!(
+                owner_subject_seed(&subject, &adverse),
+                None,
+                "{:?}",
+                adverse.chain_declared_slots
+            );
+        }
+        for adverse in [
+            ParseContext {
+                chain_prior_chosen_target: None,
+                ..ctx.clone()
+            },
+            ParseContext {
+                token_created_in_chain: true,
+                ..ctx.clone()
+            },
+            ParseContext {
+                object_pronoun_ref: Some(TargetFilter::SelfRef),
+                ..ctx
+            },
+        ] {
+            assert_eq!(owner_subject_seed(&subject, &adverse), None);
+        }
+    }
+
+    /// SHAPE: a printed disjunction declares one stack target and its owner
+    /// uses that exact object in the move and terminal shuffle.
+    #[test]
+    fn disjunctive_owner_shuffle_keeps_one_stack_target() {
+        use crate::types::ability::{
+            LibraryInstructionActor, LibraryShuffleMode, TargetChoiceTiming,
+        };
+        use crate::types::zones::Zone;
+
+        const SPELL: &str =
+            "Choose target artifact or enchantment. Its owner shuffles it into their library.";
+        let living_library_types = ["Artifact".to_string(), "Creature".to_string()];
+        let living_library_subtypes = ["Book".to_string(), "Illusion".to_string()];
+        let instant_types = ["Instant".to_string()];
+        for (name, oracle, card_types, subtypes, expected_kind, types, controller) in [
+            (
+                "Living Library",
+                "{6}, Sacrifice this creature: Choose target creature or planeswalker an opponent controls. Its owner shuffles it into their library.",
+                living_library_types.as_slice(),
+                living_library_subtypes.as_slice(),
+                AbilityKind::Activated,
+                [TypeFilter::Creature, TypeFilter::Planeswalker],
+                Some(ControllerRef::Opponent),
+            ),
+            (
+                "Deglamer",
+                SPELL,
+                instant_types.as_slice(),
+                &[],
+                AbilityKind::Spell,
+                [TypeFilter::Artifact, TypeFilter::Enchantment],
+                None,
+            ),
+            (
+                "Unravel the Aether",
+                SPELL,
+                instant_types.as_slice(),
+                &[],
+                AbilityKind::Spell,
+                [TypeFilter::Artifact, TypeFilter::Enchantment],
+                None,
+            ),
+        ] {
+            let face = crate::parser::oracle::parse_oracle_text(oracle, name, &[], card_types, subtypes);
+            let [def] = face.abilities.as_slice() else {
+                panic!("expected one ability: {:?}", face.abilities);
+            };
+            assert_eq!(def.kind, expected_kind);
+            assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
+            assert!(!def.optional_targeting);
+            assert!(def.multi_target.is_none());
+            assert_eq!(
+                *def.effect,
+                Effect::TargetOnly {
+                    target: TargetFilter::Or {
+                        filters: types.into_iter().map(|ty| TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![ty],
+                            controller: controller.clone(),
+                            ..TypedFilter::default()
+                        })).collect(),
+                    },
+                }
+            );
+            let movement = def.sub_ability.as_deref().expect("selected object move");
+            assert!(matches!(*movement.effect, Effect::ChangeZoneAll {
+                actor: LibraryInstructionActor::Player { player: TargetFilter::ParentTargetOwner },
+                destination: Zone::Library,
+                target: TargetFilter::ParentTarget,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                ..
+            }), "{movement:?}");
+            let shuffle = movement.sub_ability.as_deref().expect("owner's terminal shuffle");
+            assert_eq!(*shuffle.effect, Effect::Shuffle { target: TargetFilter::ScopedPlayer });
+            assert_eq!(shuffle.player_scope, Some(imperative::owner_library_shuffle_scope()));
+            assert!(shuffle.sub_ability.is_none());
+        }
     }
 
     /// SHAPE: owner actor, object exclusion, and optional count are independent
@@ -12523,6 +12792,63 @@ mod tests {
                 mode: StaticMode::CantGainLife
             }
         )));
+    }
+
+    /// CR 701.32a + CR 904.9 + CR 608.2c + CR 611.2a: All in Good Time's
+    /// tail. "Schemes can't be set in motion that turn" builds a
+    /// `GenericEffect` carrying `CantSetSchemeInMotion` over the scheme-typed
+    /// subject, with the trailing "that turn" resolved to the granted-turn
+    /// window (the grant in the preceding sentence) — not `UntilEndOfTurn`,
+    /// which would expire before the extra turn begins. The `AddStaticMode`
+    /// grant propagation is what the archenemy set-in-motion gate queries at
+    /// runtime.
+    #[test]
+    fn schemes_cant_be_set_in_motion_that_turn_builds_granted_turn_restriction() {
+        for text in [
+            "Schemes can't be set in motion that turn",
+            "Schemes cannot be set in motion that turn",
+        ] {
+            let mut ctx = ParseContext::default();
+            let clause = try_parse_subject_restriction_clause(text, &mut ctx)
+                .expect("scheme prohibition should parse");
+
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+                end_cost: _,
+            } = clause.effect
+            else {
+                panic!(
+                    "expected GenericEffect restriction, got {:?}",
+                    clause.effect
+                );
+            };
+
+            assert_eq!(target, None, "{text}");
+            assert_eq!(
+                duration,
+                Some(Duration::UntilEndOfGrantedTurn { turn: None }),
+                "{text}"
+            );
+            assert_eq!(static_abilities.len(), 1, "{text}");
+            let def = &static_abilities[0];
+            assert_eq!(def.mode, StaticMode::CantSetSchemeInMotion, "{text}");
+            assert_eq!(
+                def.affected,
+                Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Scheme))),
+                "{text}"
+            );
+            assert!(
+                def.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantSetSchemeInMotion
+                    }
+                )),
+                "{text}"
+            );
+        }
     }
 
     /// CR 119.7 + CR 608.2c + CR 104.1: Screaming Nemesis's rider. The

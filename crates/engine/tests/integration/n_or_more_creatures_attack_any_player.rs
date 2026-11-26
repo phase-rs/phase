@@ -72,6 +72,14 @@ const P3: PlayerId = PlayerId(3);
 fn drive_attack_triggers(runner: &mut GameRunner, target: Option<ObjectId>, accept: bool) -> usize {
     let mut optional_prompts = 0;
     for _ in 0..60 {
+        // CR 805.5b: the holding team passes together; the Priority arm
+        // below only runs on an empty stack, where the window is done.
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && !runner.state().stack.is_empty()
+        {
+            let _ = runner.pass_holding_team();
+            continue;
+        }
         let action = match &runner.state().waiting_for {
             WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
                 order: (0..triggers.len()).collect(),

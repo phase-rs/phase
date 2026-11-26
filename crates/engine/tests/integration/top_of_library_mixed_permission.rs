@@ -69,6 +69,8 @@ fn install_top_of_library_creature_static(
         Zone::Battlefield,
     );
     let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+        library: engine::types::ability::ControllerRef::You,
+        mana_spend_permission: None,
         play_mode: CardPlayMode::Cast,
         frequency,
         alt_cost: None,

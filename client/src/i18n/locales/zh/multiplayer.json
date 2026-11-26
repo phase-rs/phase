@@ -123,6 +123,7 @@
     "p2pSeatCap": "P2P 牌桌最多容纳 {{max}} 名牌手，因此座位数已受限。",
     "passwordPlaceholder": "牌局密码",
     "playerSeats": "牌手座位",
+    "archenemySeat": "Archenemy",
     "players": "牌手",
     "ranked": "排名",
     "roomName": "房间名称",

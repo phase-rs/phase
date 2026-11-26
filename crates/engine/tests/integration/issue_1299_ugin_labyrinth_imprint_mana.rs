@@ -7,14 +7,14 @@
 //!   {T}: Add {C}. If a card is exiled with Ugin's Labyrinth, add {C}{C} instead.
 //!
 //! CR 605.3b: Mana abilities resolve immediately on activation.
-//! CR 614.1a: The "instead" clause is a replacement; the parsed shape is base
-//! `{C}` plus a +1 colorless delta when `CardsExiledBySource >= 1`.
+//! CR 614.1a: The "instead" clause replaces the base `{C}` with `{C}{C}`
+//! when `CardsExiledBySource >= 1`.
 //! CR 406.6 + CR 607.2a: Imprint exiles must be linked to the source so the
 //! mana ability's condition can read them.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
-use engine::types::ability::{Effect, QuantityExpr, QuantityRef, TargetRef};
+use engine::types::ability::{AbilityCondition, Effect, QuantityExpr, QuantityRef, TargetRef};
 use engine::types::card_type::CoreType;
 use engine::types::identifiers::CardId;
 use engine::types::mana::{ManaCost, ManaType};
@@ -82,15 +82,18 @@ fn ugin_labyrinth_with_imprinted_card_produces_two_colorless() {
     let sub = mana_def
         .sub_ability
         .as_ref()
-        .expect("mana ability must carry imprint delta sub_ability");
+        .expect("mana ability must carry the imprint replacement");
     match sub.condition.as_ref() {
-        Some(engine::types::ability::AbilityCondition::QuantityCheck {
-            lhs:
-                QuantityExpr::Ref {
-                    qty: QuantityRef::CardsExiledBySource,
-                },
-            ..
-        }) => {}
+        Some(AbilityCondition::ConditionInstead { inner })
+            if matches!(
+                inner.as_ref(),
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                    ..
+                }
+            ) => {}
         other => panic!("expected CardsExiledBySource condition, got {other:?}"),
     }
 
@@ -111,7 +114,7 @@ fn ugin_labyrinth_with_imprinted_card_produces_two_colorless() {
     assert_eq!(
         outcome.mana_pool_color(P0, ManaType::Colorless),
         2,
-        "imprinted Ugin's Labyrinth must produce 2 colorless (1 base + 1 delta)"
+        "imprinted Ugin's Labyrinth must produce 2 colorless instead"
     );
     assert_eq!(outcome.mana_pool_total(P0), 2);
 }

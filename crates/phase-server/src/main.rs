@@ -18826,8 +18826,11 @@ mod full_create_guard_tests {
     fn full_create_guard_rejects_archenemy_seat_outside_player_count() {
         let deck = deck();
         let mut fields = fields(&deck, None, None);
+        // A legal Archenemy table (at least three seats, CR 904.2 + CR 800.1)
+        // whose archenemy seat lies past its last seat.
+        fields.player_count = 3;
         let mut format_config = engine::types::format::FormatConfig::archenemy();
-        format_config.archenemy_player = Some(engine::types::player::PlayerId(2));
+        format_config.archenemy_player = Some(engine::types::player::PlayerId(3));
         fields.format_config = Some(&format_config);
 
         let err = guard_full_create_game_settings_inbound(fields, &[]).unwrap_err();

@@ -508,6 +508,9 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         // bottom of its owner's scheme deck — whether that is good depends on
         // the scheme (ongoing pressure vs. cycling to the next scheme).
         | Effect::AbandonScheme
+        // CR 701.32b: re-firing a face-up scheme's abilities — whether that is
+        // good depends on the scheme being set in motion again.
+        | Effect::SetSchemeInMotion { .. }
         | Effect::AddRestriction { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::Amass { .. }
@@ -1060,7 +1063,11 @@ fn type_filter_domain(tf: &TypeFilter) -> TypeDomain {
         // combines Instant or Sorcery with Creature, and this engine's
         // `core_types` set does not carry both at once for any live object.
         // Provably creature-excluding, unlike the permanent types below.
-        TypeFilter::Instant | TypeFilter::Sorcery => TypeDomain::NON_CREATURE_ONLY,
+        // CR 314.1: schemes are nontraditional command-zone cards, never
+        // creatures — provably creature-excluding for the same reason.
+        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Scheme => {
+            TypeDomain::NON_CREATURE_ONLY
+        }
 
         // These five permanent types are NOT structurally creature-excluding
         // — real printed cards double them with Creature (Dryad Arbor is a
@@ -2715,7 +2722,7 @@ fn quoted_static_rides_a_trick(definition: &StaticDefinition) -> bool {
         | StaticMode::CantCrew
         | StaticMode::CantPhaseIn
         | StaticMode::CrewContribution { .. }
-        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtTopOfLibrary { .. }
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
         | StaticMode::MayChooseNotToUntap
@@ -2745,6 +2752,7 @@ fn quoted_static_rides_a_trick(definition: &StaticDefinition) -> bool {
         | StaticMode::EntersWithAdditionalCounters { .. }
         | StaticMode::CountersCantBeRemoved { .. }
         | StaticMode::CountsAsNamed { .. }
+        | StaticMode::CantSetSchemeInMotion
         | StaticMode::Other(..) => false,
     }
 }
@@ -3586,7 +3594,7 @@ mod temporary_combat_modifier_tests {
     fn sacrifice(target: TargetFilter) -> Effect {
         Effect::Sacrifice {
             target,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         }
     }

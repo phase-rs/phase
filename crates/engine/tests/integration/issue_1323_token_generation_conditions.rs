@@ -71,7 +71,8 @@ fn drive_end_step_stack(runner: &mut engine::game::scenario::GameRunner) {
                 if runner.state().stack.is_empty() {
                     return;
                 }
-                runner.act(GameAction::PassPriority).ok();
+                // CR 805.5b: the holding team passes together.
+                let _ = runner.pass_holding_team();
             }
             _ if runner.state().phase == Phase::End && runner.state().stack.is_empty() => return,
             _ => runner.pass_both_players(),
@@ -150,7 +151,8 @@ fn drive_end_step_to_settle(runner: &mut GameRunner) {
                 );
             }
             _ => {
-                runner.pass_both_players();
+                // CR 805.5b: the holding team passes together.
+                let _ = runner.pass_holding_team();
             }
         }
     }

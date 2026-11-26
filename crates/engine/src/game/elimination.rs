@@ -2488,14 +2488,12 @@ fn do_eliminate(
             state.active_player = member;
         }
     }
-    // CR 800.4a + CR 117.4 + CR 805.5b: a player who has left is not among the players who pass
-    // in succession; a side still in the game keeps its pass under its living representative.
-    if state.priority_passes.remove(&player) {
-        let representative = super::topology::priority_pass_representative(state, player);
-        if representative != player && players::is_alive(state, representative) {
-            state.priority_passes.insert(representative);
-        }
-    }
+    // CR 800.4a + CR 117.4: a player who has left is not among the players who pass in
+    // succession, so only the departed seat's own pass record is dropped.
+    // CR 805.5b: a team passes only when no player on it wishes to act; pass records are per
+    // seat, so a surviving teammate keeps exactly the record it made, and one player's pass is
+    // never moved to a teammate (or to the team's representative), which has decided nothing.
+    state.priority_passes.remove(&player);
     state.planar_die_actions_this_turn.remove(&player);
 
     // CR 725.4: If the monarch leaves the game, the active player becomes the monarch.
