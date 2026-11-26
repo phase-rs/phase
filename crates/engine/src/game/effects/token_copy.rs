@@ -2071,7 +2071,9 @@ fn finish_non_liminal_copy_token_entry(
     let enter_with_counters = &tail.enter_with_counters;
     let etb_counters = &tail.etb_counters;
     let remaining_count = tail.remaining_count;
-    let enters_attacking = copy_spec.enters_attacking;
+    let choose_defender = copy_spec.enters_attacking
+        && copy_spec.attack_request == TokenAttackRequest::ChooseDefender;
+    let enters_attacking = copy_spec.enters_attacking && !choose_defender;
     let attack_destination = tail.attack_destination.clone();
     let source_id = copy_spec.source_id;
     let controller = copy_spec.controller;
@@ -2114,63 +2116,61 @@ fn finish_non_liminal_copy_token_entry(
     // CR 614.1c + CR 122.6a: ETB-counter replacement mutations are carried
     // on the accepted CreateToken spec, even for copy tokens whose full
     // CR 707 payload lives in `CopyTokenSpec`.
-    for (counter_index, (counter_type, counter_count)) in etb_counters.iter().enumerate() {
-        if *counter_count > 0
-            && !super::counters::add_counter_with_replacement(
+    let attack_paused = choose_defender && super::token::choose_token_entry_attack(state, token_id);
+    let mut counters = etb_counters.iter().filter(|(_, count)| *count > 0);
+    if attack_paused
+        || counters.by_ref().any(|(counter_type, count)| {
+            !super::counters::add_counter_with_replacement(
                 state,
                 token_owner,
                 token_id,
                 counter_type.clone(),
-                *counter_count,
-                // CR 614.16: entering-with-counters placements are
-                // replacement-driven entry modifications.
+                *count,
                 CounterCause::ReplacementOrPrevention,
                 events,
             )
-        {
-            state.last_created_token_ids = sink.snapshot(state);
-            let remaining_counters = etb_counters[counter_index + 1..]
-                .iter()
-                .filter(|(_, count)| *count > 0)
-                .map(|(counter_type, count)| {
-                    crate::types::game_state::PendingCounterAddition::Object {
-                        actor: token_owner,
+        })
+    {
+        state.last_created_token_ids = sink.snapshot(state);
+        let remaining_counters = counters
+            .map(|(counter_type, count)| {
+                crate::types::game_state::PendingCounterAddition::Object {
+                    actor: token_owner,
+                    object_id: token_id,
+                    counter_type: counter_type.clone(),
+                    count: *count,
+                    // CR 614.16: entering-with-counters placements are
+                    // replacement-driven entry modifications.
+                    cause: CounterCause::ReplacementOrPrevention,
+                }
+            })
+            .collect();
+        super::counters::stash_pending_counter_additions(
+            state,
+            remaining_counters,
+            crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
+                EffectKind::CopyTokenOf,
+                source_id,
+                vec![
+                    PendingCounterPostAction::FinalizeCopyTokenEntry {
                         object_id: token_id,
-                        counter_type: counter_type.clone(),
-                        count: *count,
-                        // CR 614.16: entering-with-counters placements are
-                        // replacement-driven entry modifications.
-                        cause: CounterCause::ReplacementOrPrevention,
-                    }
-                })
-                .collect();
-            super::counters::stash_pending_counter_additions(
-                state,
-                remaining_counters,
-                crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
-                    EffectKind::CopyTokenOf,
-                    source_id,
-                    vec![
-                        PendingCounterPostAction::FinalizeCopyTokenEntry {
-                            object_id: token_id,
-                            name: name.clone(),
-                            enters_attacking,
-                            attack_destination: attack_destination.clone(),
-                            source_id,
-                            controller,
-                        },
-                        PendingCounterPostAction::ContinueCopyTokenCreation {
-                            owner: token_owner,
-                            copy: copy_spec.clone(),
-                            enter_tapped,
-                            enter_with_counters: enter_with_counters.clone(),
-                            remaining_count,
-                        },
-                    ],
-                ),
-            );
-            return false;
-        }
+                        name: name.clone(),
+                        enters_attacking,
+                        attack_destination: attack_destination.clone(),
+                        source_id,
+                        controller,
+                    },
+                    PendingCounterPostAction::ContinueCopyTokenCreation {
+                        owner: token_owner,
+                        copy: copy_spec.clone(),
+                        enter_tapped,
+                        enter_with_counters: enter_with_counters.clone(),
+                        remaining_count,
+                    },
+                ],
+            ),
+        );
+        return false;
     }
 
     // CR 508.4: Uses shared helper for defending player resolution.

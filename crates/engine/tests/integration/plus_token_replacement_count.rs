@@ -32,6 +32,8 @@ const FARMER_COTTON: &str = "Farmer Cotton";
 const FARMER_COTTON_ORACLE: &str = r#"When this creature enters, create X 1/1 white Halfling creature tokens and X Food tokens. (They're artifacts with "{2}, {T}, Sacrifice this token: You gain 3 life.")"#;
 const MANUFACTOR: &str = "Academy Manufactor";
 const VISITATION: &str = "Divine Visitation";
+const ESIX: &str = "Esix, Fractal Bloom";
+const OJER_TAQ: &str = "Ojer Taq, Deepest Foundation";
 const HALVING: &str = "Halving Season";
 const BESTIAL_MANA: &[ManaType] = &[
     ManaType::Green,
@@ -198,7 +200,11 @@ fn answer_append_order(runner: &mut GameRunner, other: &str, first: &str) {
     answer_replacement_order(runner, [ALLENAL, other], first);
 }
 
-fn answer_replacement_order(runner: &mut GameRunner, sources: [&str; 2], first: &str) {
+fn answer_replacement_order<const N: usize>(
+    runner: &mut GameRunner,
+    sources: [&str; N],
+    first: &str,
+) {
     let WaitingFor::ReplacementChoice {
         player,
         kind,
@@ -215,7 +221,7 @@ fn answer_replacement_order(runner: &mut GameRunner, sources: [&str; 2], first: 
     };
     assert_eq!(*player, P0);
     assert_eq!(*kind, ReplacementChoiceKind::Order);
-    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates.len(), N);
     assert!(sources
         .iter()
         .all(|name| candidates.iter().any(|c| c.source_name == *name)));
@@ -273,33 +279,8 @@ fn allenal_adds_one_soldier_to_bestial_menace() {
 
 #[test]
 fn bankbuster_appenders_use_the_admitted_batches() {
-    let db = crate::support::shared_card_db().expect("curated card fixture");
     for (source, extra, count) in [(ALLENAL, "Soldier", 1), (CHATTERFANG, "Squirrel", 2)] {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        scenario.add_real_card(P0, source, Zone::Battlefield, db);
-        let bankbuster = scenario
-            .add_artifact_from_oracle(P0, "Reckoner Bankbuster", BANKBUSTER_ORACLE)
-            .with_subtypes(vec!["Vehicle"])
-            .id();
-        scenario.add_real_card(P0, "Island", Zone::Library, db);
-        scenario.with_mana_pool(
-            P0,
-            vec![
-                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-            ],
-        );
-        let mut runner = scenario.build();
-        // Use the last-charge state to exercise the conditional list.
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&bankbuster)
-            .unwrap()
-            .counters
-            .insert(parse_counter_type("charge"), 1);
-        runner.activate(bankbuster, 0).resolve();
+        let runner = resolve_bankbuster(&[source]);
         assert_tokens(
             &runner,
             P0,
@@ -310,6 +291,57 @@ fn bankbuster_appenders_use_the_admitted_batches() {
 }
 
 #[test]
+fn bankbuster_chatterfang_and_ojer_taq_order_changes_the_squirrel_count() {
+    for (first, squirrels) in [(OJER_TAQ, 4), (CHATTERFANG, 6)] {
+        let mut runner = resolve_bankbuster(&[CHATTERFANG, OJER_TAQ]);
+        answer_replacement_order(&mut runner, [CHATTERFANG, OJER_TAQ], first);
+        assert_tokens(
+            &runner,
+            P0,
+            &[("Treasure", 1), ("Pilot", 3), ("Squirrel", squirrels)],
+        );
+    }
+}
+
+#[test]
+fn bankbuster_ojer_taq_and_doubling_season_commute() {
+    let runner = resolve_bankbuster(&[OJER_TAQ, DOUBLING_SEASON]);
+    assert_tokens(&runner, P0, &[("Treasure", 2), ("Pilot", 6)]);
+}
+
+fn resolve_bankbuster(sources: &[&str]) -> GameRunner {
+    let db = crate::support::shared_card_db().expect("curated card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for source in sources {
+        scenario.add_real_card(P0, source, Zone::Battlefield, db);
+    }
+    let bankbuster = scenario
+        .add_artifact_from_oracle(P0, "Reckoner Bankbuster", BANKBUSTER_ORACLE)
+        .with_subtypes(vec!["Vehicle"])
+        .id();
+    scenario.add_real_card(P0, "Island", Zone::Library, db);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    // Use the last-charge state to exercise the conditional list.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&bankbuster)
+        .unwrap()
+        .counters
+        .insert(parse_counter_type("charge"), 1);
+    runner.activate(bankbuster, 0).resolve();
+    runner
+}
+
+#[test]
 fn bestial_menace_order_survives_serialization_and_publishes_all_created_ids() {
     for (first, soldiers) in [(DOUBLING_SEASON, 1), (ALLENAL, 2)] {
         let db = crate::support::shared_card_db().expect("curated card fixture");
@@ -317,8 +349,10 @@ fn bestial_menace_order_survives_serialization_and_publishes_all_created_ids() {
         scenario.at_phase(Phase::PreCombatMain);
         scenario.add_real_card(P0, ALLENAL, Zone::Battlefield, db);
         scenario.add_real_card(P0, DOUBLING_SEASON, Zone::Battlefield, db);
-        // Use Scout for Survivors' printed counter instruction as a test-local
-        // follow-up to Bestial Menace's list.
+        // The printed shared-verb list census has no supported follow-up
+        // that consumes the created set. Liberated Livestock is the closest
+        // analogue, but its per-token Aura instruction is unsupported.
+        // Add one counter instruction to exercise the resumed set referent.
         let oracle = format!("{BESTIAL_ORACLE} Put a +1/+1 counter on each of them.");
         let spell = add_bestial_menace(&mut scenario, P0, &oracle);
         give_bestial_mana(&mut scenario, 1);
@@ -394,7 +428,7 @@ fn farmer_cotton_resolves_x_for_both_members() {
 
 #[test]
 fn fae_offering_and_manufactor_create_three_of_each_in_one_batch() {
-    let runner = resolve_fae_offering(None);
+    let runner = resolve_fae_offering(None, None);
     assert_tokens(&runner, P0, &[("Clue", 3), ("Food", 3), ("Treasure", 3)]);
     assert_eq!(runner.state().last_created_token_ids.len(), 9);
 }
@@ -402,7 +436,7 @@ fn fae_offering_and_manufactor_create_three_of_each_in_one_batch() {
 #[test]
 fn manufactor_and_chatterfang_order_changes_the_squirrel_count() {
     for (first, squirrels) in [(MANUFACTOR, 9), (CHATTERFANG, 3)] {
-        let runner = resolve_fae_offering(Some(first));
+        let runner = resolve_fae_offering(Some((CHATTERFANG, P0)), Some(first));
         assert_tokens(
             &runner,
             P0,
@@ -416,15 +450,15 @@ fn manufactor_and_chatterfang_order_changes_the_squirrel_count() {
     }
 }
 
-fn resolve_fae_offering(first: Option<&str>) -> GameRunner {
+fn resolve_fae_offering(other: Option<(&str, PlayerId)>, first: Option<&str>) -> GameRunner {
     use ManaType::{Colorless, Red};
     let db = crate::support::shared_card_db().expect("curated card fixture");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_enchantment_from_oracle(P0, "Fae Offering", FAE_OFFERING_ORACLE);
     let manufactor = scenario.add_real_card(P0, MANUFACTOR, Zone::Hand, db);
-    if first.is_some() {
-        scenario.add_real_card(P0, CHATTERFANG, Zone::Battlefield, db);
+    if let Some((card, owner)) = other {
+        scenario.add_real_card(owner, card, Zone::Battlefield, db);
     }
     let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
     scenario.with_mana_pool(
@@ -453,10 +487,67 @@ fn resolve_fae_offering(first: Option<&str>) -> GameRunner {
             .act(GameAction::PassPriority)
             .expect("resolve Fae Offering's end step trigger");
     }
-    if let Some(first) = first {
-        answer_replacement_order(&mut runner, [MANUFACTOR, CHATTERFANG], first);
+    if let (Some((card, _)), Some(first)) = (other, first) {
+        answer_replacement_order(&mut runner, [MANUFACTOR, card], first);
     }
     runner
+}
+
+#[test]
+fn fae_offering_manufactor_and_halving_season_order_changes_the_artifact_count() {
+    for (first, count) in [(MANUFACTOR, 1), (HALVING, 0)] {
+        let runner = resolve_fae_offering(Some((HALVING, P1)), Some(first));
+        assert_tokens(
+            &runner,
+            P0,
+            &[("Clue", count), ("Food", count), ("Treasure", count)],
+        );
+    }
+}
+
+#[test]
+fn halving_season_groups_esix_copies_with_allenals_soldier() {
+    use engine::types::mana::ManaColor;
+
+    let db = crate::support::shared_card_db().expect("curated card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, ESIX, Zone::Battlefield, db);
+    scenario.add_real_card(P0, ALLENAL, Zone::Battlefield, db);
+    scenario.add_real_card(P1, HALVING, Zone::Battlefield, db);
+    let donor = scenario
+        .add_creature(P0, "Soldier", 1, 1)
+        .with_subtypes(vec!["Soldier"])
+        .with_color(vec![ManaColor::White])
+        .id();
+    let spell = add_bestial_menace(&mut scenario, P0, BESTIAL_ORACLE);
+    give_bestial_mana(&mut scenario, 1);
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&donor).unwrap().is_token = true;
+
+    runner.cast(spell).commit().stop_at_optional().resolve();
+    answer_replacement_order(&mut runner, [ESIX, ALLENAL, HALVING], ESIX);
+    assert!(matches!(
+        &runner.state().waiting_for,
+        WaitingFor::ReplacementChoice {
+            kind: ReplacementChoiceKind::OptionalBranch,
+            ..
+        }
+    ));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .unwrap();
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::CopyTargetChoice { valid_targets, .. } if valid_targets.contains(&donor))
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(donor)),
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_tokens(&runner, P0, &[("Soldier", 3)]);
+    assert_eq!(runner.state().last_created_token_ids.len(), 2);
 }
 
 #[test]

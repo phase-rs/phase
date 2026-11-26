@@ -871,13 +871,69 @@ fn veteran_soldier_soldiers_attack_each_opponent() {
 
 #[test]
 fn allenal_added_soldier_chooses_its_defender_after_veteran_soldier() {
+    assert_veteran_soldier_extra_attacker(None);
+}
+
+#[test]
+fn allenals_esix_copies_keep_the_extra_attackers_defender_choice() {
+    assert_veteran_soldier_extra_attacker(Some("Decoy Ox"));
+}
+
+#[test]
+fn allenals_esix_copies_with_entry_counters_keep_the_defender_choice() {
+    assert_veteran_soldier_extra_attacker(Some("Triskelion"));
+}
+
+fn assert_veteran_soldier_extra_attacker(copy_name: Option<&str>) {
+    let esix = "Esix, Fractal Bloom";
+    let mut donor = None;
     let mut runner = per_opponent_board(4, |s| {
         let db = crate::support::shared_card_db().expect("curated card fixture");
         s.add_real_card(P0, "Queen Allenal of Ruadach", Zone::Battlefield, db);
+        if let Some(name) = copy_name {
+            s.add_real_card(P0, esix, Zone::Battlefield, db);
+            donor = Some(if name == "Decoy Ox" {
+                s.add_creature(P0, name, 5, 4).id()
+            } else {
+                s.add_real_card(P0, name, Zone::Battlefield, db)
+            });
+        }
         s.add_enchantment_from_oracle(P0, "Veteran Soldier", VETERAN_SOLDIER);
         s.add_creature(P0, "Commander Bear", 2, 2).commander().id()
     });
     runner.advance_until_stack_empty();
+    if let Some(donor) = donor {
+        let WaitingFor::ReplacementChoice {
+            candidates, kind, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("Allenal and Esix must offer an order");
+        };
+        assert_eq!(
+            *kind,
+            engine::types::game_state::ReplacementChoiceKind::Order
+        );
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_name == "Queen Allenal of Ruadach")
+            .unwrap();
+        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+        assert!(
+            matches!(&runner.state().waiting_for, WaitingFor::ReplacementChoice { candidates, kind: engine::types::game_state::ReplacementChoiceKind::OptionalBranch, .. } if candidates.iter().all(|candidate| candidate.source_name == esix))
+        );
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .unwrap();
+        assert!(
+            matches!(&runner.state().waiting_for, WaitingFor::CopyTargetChoice { valid_targets, .. } if valid_targets.contains(&donor))
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(donor)),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+    }
     let WaitingFor::EntryAttackTargetChoice {
         player,
         object_id,
@@ -895,7 +951,7 @@ fn allenal_added_soldier_chooses_its_defender_after_veteran_soldier() {
         .expect("the extra Soldier attacks P3");
     drain(&mut runner, TriggerOrder::AsOffered);
 
-    let mut originals = tokens_named(&runner, "Soldier");
+    let mut originals = tokens_named(&runner, copy_name.unwrap_or("Soldier"));
     assert_eq!(originals.len(), 4);
     assert_all_tapped(&runner, &originals);
     originals.retain(|&id| id != extra);

@@ -2046,13 +2046,7 @@ fn apply_create_token_batch(
         // assignment must pick its destination before this entry is finalized.
         let attack_choice = spec.enters_attacking
             && match spec.attack_request {
-                TokenAttackRequest::ChooseDefender => {
-                    resolved_token_is_creature(state, obj_id)
-                        && crate::game::combat::choose_entry_attack_target_or_enter(
-                            state, obj_id, owner,
-                        )
-                        .is_some()
-                }
+                TokenAttackRequest::ChooseDefender => choose_token_entry_attack(state, obj_id),
                 TokenAttackRequest::Unspecified
                 | TokenAttackRequest::Named { .. }
                 | TokenAttackRequest::PerEntrant { .. } => {
@@ -3140,7 +3134,7 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
     let Some(mut entry) = state.liminal_entries.remove(&entry_ref) else {
         return true;
     };
-    let finalization = liminal_token_entry_finalization_action(entry_ref, &entry, entry_events);
+    let mut finalization = liminal_token_entry_finalization_action(entry_ref, &entry, entry_events);
     let counters_to_apply: Vec<_> = enter_with_counters
         .iter()
         .chain(entry.enter_with_counters.iter())
@@ -3415,70 +3409,76 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
         }
     }
 
-    for (counter_index, (counter_type, counter_count)) in counters_to_apply.iter().enumerate() {
-        let applied = *counter_count == 0
-            || match mode {
-                TokenEntryMode::Standard => super::counters::add_counter_with_replacement(
+    // CR 508.4: the copy payload retains an added entrant's request even
+    // though it has no fixed attack destination.
+    let attack_choice = entry.enters_attacking
+        && entry
+            .copy_resume
+            .as_ref()
+            .is_some_and(|copy| copy.attack_request == TokenAttackRequest::ChooseDefender);
+    let attack_paused = if attack_choice {
+        if let PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+            enters_attacking,
+            ..
+        } = &mut finalization
+        {
+            *enters_attacking = false;
+        }
+        choose_token_entry_attack(state, entry_ref)
+    } else {
+        false
+    };
+    let mut counters = counters_to_apply.iter().filter(|(_, count)| *count > 0);
+    if attack_paused
+        || counters.by_ref().any(|(counter_type, count)| match mode {
+            TokenEntryMode::Standard => !super::counters::add_counter_with_replacement(
+                state,
+                owner,
+                entry_ref,
+                counter_type.clone(),
+                *count,
+                CounterCause::ReplacementOrPrevention,
+                events,
+            ),
+            TokenEntryMode::Forced => {
+                super::counters::apply_counter_addition(
                     state,
                     owner,
                     entry_ref,
                     counter_type.clone(),
-                    *counter_count,
-                    // CR 614.16: entering-with-counters placements are
-                    // replacement-driven entry modifications.
-                    CounterCause::ReplacementOrPrevention,
+                    *count,
                     events,
-                ),
-                // CR 122.6a: the controller puts the counters; CR 306.5b /
-                // CR 310.4b are themselves replacement effects (CR 614.1c) the
-                // forced entry does not consult. `apply_counter_addition`
-                // re-derives `loyalty` / `defense` from the counter map
-                // (CR 306.5c / CR 310.4c), exactly what the DebugCommand card
-                // arm installs, so the two modes cannot drift.
-                TokenEntryMode::Forced => {
-                    super::counters::apply_counter_addition(
-                        state,
-                        owner,
-                        entry_ref,
-                        counter_type.clone(),
-                        *counter_count,
-                        events,
-                    );
-                    true
-                }
-            };
-        if *counter_count > 0 && !applied {
-            state.last_created_token_ids = entry.created_ids.clone();
-            let remaining_counters = counters_to_apply[counter_index + 1..]
-                .iter()
-                .filter(|(_, count)| *count > 0)
-                .map(|(counter_type, count)| PendingCounterAddition::Object {
-                    actor: owner,
-                    object_id: entry_ref,
-                    counter_type: counter_type.clone(),
-                    count: *count,
-                    // CR 614.16: entering-with-counters placements are
-                    // replacement-driven entry modifications.
-                    cause: CounterCause::ReplacementOrPrevention,
-                })
-                .collect();
-            let mut post_actions = vec![finalization];
-            post_actions.extend(post_actions_after_finalize);
-            super::counters::stash_pending_counter_additions(
-                state,
-                remaining_counters,
-                crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
-                    if entry.copy_resume.is_some() {
-                        EffectKind::CopyTokenOf
-                    } else {
-                        EffectKind::Token
-                    },
-                    entry.source_id,
-                    post_actions,
-                ),
-            );
-            return false;
-        }
+                );
+                false
+            }
+        })
+    {
+        state.last_created_token_ids = entry.created_ids.clone();
+        let remaining_counters = counters
+            .map(|(counter_type, count)| PendingCounterAddition::Object {
+                actor: owner,
+                object_id: entry_ref,
+                counter_type: counter_type.clone(),
+                count: *count,
+                cause: CounterCause::ReplacementOrPrevention,
+            })
+            .collect();
+        let mut post_actions = vec![finalization];
+        post_actions.extend(post_actions_after_finalize);
+        super::counters::stash_pending_counter_additions(
+            state,
+            remaining_counters,
+            crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
+                if entry.copy_resume.is_some() {
+                    EffectKind::CopyTokenOf
+                } else {
+                    EffectKind::Token
+                },
+                entry.source_id,
+                post_actions,
+            ),
+        );
+        return false;
     }
 
     finalize_committed_liminal_token_entry_from_action(state, finalization, events);
@@ -3527,6 +3527,15 @@ fn enter_resolved_token_attacking(
             destination,
         );
     }
+}
+
+/// CR 508.4: an added attacker with no assignment uses its controller's choice.
+pub(super) fn choose_token_entry_attack(state: &mut GameState, object_id: ObjectId) -> bool {
+    if !resolved_token_is_creature(state, object_id) {
+        return false;
+    }
+    let controller = state.objects[&object_id].controller;
+    crate::game::combat::choose_entry_attack_target_or_enter(state, object_id, controller).is_some()
 }
 
 fn resolved_token_is_creature(state: &mut GameState, object_id: ObjectId) -> bool {
@@ -6085,22 +6094,68 @@ fn inject_resolved_token_abilities_inner(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
-    let Some(mut materialized) = materialize_token_ability_payload_for_object(state, obj_id) else {
-        return;
-    };
+    if let Some(obj) = state.objects.get_mut(&obj_id) {
+        inject_resolved_token_abilities_into(obj);
+    }
+}
+
+fn inject_resolved_token_abilities_into(obj: &mut GameObject) {
+    let mut materialized = materialize_token_ability_payload_for_object(obj);
     if materialized.source == TokenAbilitySource::CatalogRulesText
         && !materialized.has_functional_payload()
     {
         return;
     }
-    // Two separate apply calls, never folded: the extras carry
-    // `CatalogRulesText` provenance so the with-clause suppress guard sees
-    // them exactly as it saw the old catalog fallback.
     let extras = materialized.merged_extras.take();
-    apply_token_ability_materialization(state, obj_id, materialized, true);
+    apply_token_ability_materialization(obj, materialized, true);
     if let Some(extras) = extras {
-        apply_token_ability_materialization(state, obj_id, *extras, true);
+        apply_token_ability_materialization(obj, *extras, true);
     }
+}
+
+/// CR 111.3 + CR 707.2: Compare the body an ordinary token would receive
+/// with the copiable body of a token copy, without proposing another event.
+pub(crate) fn token_spec_copiable_values(state: &GameState, spec: &TokenSpec) -> CopiableValues {
+    let ch = &spec.characteristics;
+    let mut object = GameObject::new(
+        ObjectId(0),
+        CardId(0),
+        spec.controller,
+        ch.display_name.clone(),
+        Zone::Battlefield,
+    );
+    let image_ref = crate::game::token_presets::find_exact_token_ref(state, spec.source_id, ch);
+    materialize_token_spec_body(&mut object, spec, image_ref, state.turn_number, 0, false);
+    inject_resolved_token_abilities_into(&mut object);
+    crate::game::printed_cards::intrinsic_copiable_values(&object)
+}
+
+/// CR 707.2 + CR 707.9: Use the same folded copy exceptions as entry when
+/// comparing a pending copy's body with a regular token's body.
+pub(crate) fn copy_token_copiable_values(
+    state: &GameState,
+    copy: &CopyTokenSpec,
+) -> CopiableValues {
+    let mut object = GameObject::new(
+        ObjectId(0),
+        CardId(0),
+        copy.controller,
+        copy.values.name.clone(),
+        Zone::Battlefield,
+    );
+    let modifications = ResolvedCopyBodyModifications::Folded {
+        modifications: copy.additional_modifications.clone(),
+        all_creature_types: state.all_creature_types.clone(),
+    };
+    materialize_token_copy_body(
+        &mut object,
+        copy,
+        &modifications,
+        state.turn_number,
+        0,
+        false,
+    );
+    crate::game::printed_cards::intrinsic_copiable_values(&object)
 }
 
 /// CR 111.3 + CR 111.4: Grant catalog `rules_text` when token creation resolved
@@ -6121,31 +6176,28 @@ fn inject_catalog_token_abilities_inner(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
-    let Some(mut materialized) = materialize_token_ability_payload_for_object(state, obj_id) else {
+    let Some(obj) = state.objects.get_mut(&obj_id) else {
         return;
     };
+    let mut materialized = materialize_token_ability_payload_for_object(obj);
     if materialized.source == TokenAbilitySource::CatalogRulesText
         && materialized.has_functional_payload()
     {
-        apply_token_ability_materialization(state, obj_id, materialized, true);
+        apply_token_ability_materialization(obj, materialized, true);
     } else if let Some(extras) = materialized.merged_extras.take() {
         // Debug preset-spawn path: creation already installed the predefined
         // payload, so only the semantically-new catalog extras are applied
         // here (gaining e.g. Gingerbrute's rider for free), through the same
         // suppress guard.
-        apply_token_ability_materialization(state, obj_id, *extras, true);
+        apply_token_ability_materialization(obj, *extras, true);
     }
 }
 
 fn apply_token_ability_materialization(
-    state: &mut GameState,
-    obj_id: crate::types::identifiers::ObjectId,
+    obj: &mut GameObject,
     materialized: TokenAbilityMaterialization,
     suppress_catalog_if_existing_statics: bool,
 ) -> bool {
-    let Some(obj) = state.objects.get_mut(&obj_id) else {
-        return false;
-    };
     // CR 111.3: A token's abilities are defined by the effect that creates it, so
     // when the creating effect already granted this token abilities via a
     // `with "..."` clause (parsed into `static_definitions` at creation, before
@@ -6309,30 +6361,22 @@ fn inject_predefined_token_abilities_inner(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) -> bool {
-    let Some(obj) = state.objects.get(&obj_id) else {
+    let Some(obj) = state.objects.get_mut(&obj_id) else {
         return false;
     };
     let materialized = materialize_predefined_token_payload(&obj.name, &obj.card_types.subtypes);
     if materialized.source != TokenAbilitySource::Predefined {
         return false;
     }
-    apply_token_ability_materialization(state, obj_id, materialized, false)
+    apply_token_ability_materialization(obj, materialized, false)
 }
 
-fn materialize_token_ability_payload_for_object(
-    state: &GameState,
-    obj_id: crate::types::identifiers::ObjectId,
-) -> Option<TokenAbilityMaterialization> {
-    let obj = state.objects.get(&obj_id)?;
+fn materialize_token_ability_payload_for_object(obj: &GameObject) -> TokenAbilityMaterialization {
     let preset = obj.token_image_ref.as_ref().and_then(|image_ref| {
         crate::game::token_presets::known_token_preset_by_id(&image_ref.preset_id)
     });
 
-    Some(materialize_token_ability_payload(
-        &obj.name,
-        &obj.card_types.subtypes,
-        preset,
-    ))
+    materialize_token_ability_payload(&obj.name, &obj.card_types.subtypes, preset)
 }
 
 #[cfg(test)]

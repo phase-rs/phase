@@ -1235,8 +1235,8 @@ fn copy_on_entry_after_chatterfang_copies_every_token() {
 }
 
 /// CR 616.1g + CR 616.1: two creation-replacement prompts (Chatterfang, then
-/// Parallel Lives; P1's Halving Season last) settle the event as two Soldiers
-/// plus two Squirrels before Mystic Reflection, a replacement of the contained
+/// Parallel Lives; P1's Halving Season last) settle the event as one Saproling
+/// plus one Squirrel before Mystic Reflection, a replacement of the contained
 /// entry, can be chosen; it then makes every one of them a copy of Colossal
 /// Dreadmaw. Neither prompt offers it.
 #[test]
@@ -1250,7 +1250,12 @@ fn contained_copy_reaches_every_batch_after_outer_prompts() {
         .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
         .id();
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Sprout",
+            true,
+            "Create a 1/1 green Saproling creature token.",
+        )
         .id();
     let mut runner = scenario.build();
     runner.cast(mystic).target_object(dreadmaw).resolve();
@@ -1266,12 +1271,12 @@ fn contained_copy_reaches_every_batch_after_outer_prompts() {
 
     assert_eq!(
         tokens_named(&runner, "Colossal Dreadmaw").len(),
-        4,
-        "2 + 2, doubled, then halved: all four enter as Dreadmaw copies"
+        2,
+        "1 + 1, doubled, then halved: both enter as Dreadmaw copies"
     );
     assert!(tokens(&runner, "Squirrel").is_empty());
-    assert!(tokens(&runner, "Soldier").is_empty());
-    assert_eq!(ledger(&runner).len(), 4);
+    assert!(tokens(&runner, "Saproling").is_empty());
+    assert_eq!(ledger(&runner).len(), 2);
 }
 
 /// Grumgully added before or after Chatterfang; Raise the Alarm.
