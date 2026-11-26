@@ -70508,7 +70508,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             ability: Box::new(ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 1,
                 },
                 Vec::new(),

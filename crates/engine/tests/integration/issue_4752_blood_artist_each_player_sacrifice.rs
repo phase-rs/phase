@@ -75,7 +75,7 @@ fn blood_artist_observes_each_creature_in_simultaneous_each_player_sacrifice() {
     let mut ability = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::Typed(TypedFilter::creature()),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
         vec![],

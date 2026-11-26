@@ -4532,7 +4532,7 @@ fn a_dies_trigger_from_a_sacrifice_child_goes_on_the_stack_once_above_the_activa
                     target: TargetFilter::Typed(
                         TypedFilter::creature().controller(ControllerRef::You),
                     ),
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 1,
                 },
             )),

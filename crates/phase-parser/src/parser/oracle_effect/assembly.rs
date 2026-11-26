@@ -4424,6 +4424,16 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                     rebind_plural_recall_delayed_payload_to_tracked_set(&mut current.effect);
                 }
             }
+            let sacrifice_body = if clause_ir.prefix_delayed_condition.is_some() {
+                super::lower::strip_temporal_prefix(&source_text_lower).0
+            } else {
+                &source_text_lower
+            };
+            if super::imperative::starts_with_countless_plural_sacrifice(sacrifice_body) {
+                for current in &mut current_defs {
+                    super::lower::bind_plural_token_sacrifice(current, &defs);
+                }
+            }
         }
 
         // CR 608.2c: this clause's definitions begin here. A nested delayed

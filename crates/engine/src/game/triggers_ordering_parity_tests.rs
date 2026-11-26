@@ -1858,7 +1858,7 @@ fn creatures_of(cr: ControllerRef) -> TargetFilter {
 fn sacrifice_self() -> Effect {
     Effect::Sacrifice {
         target: TargetFilter::SelfRef,
-        count: qfix(1),
+        count: qfix(1).into(),
         min_count: 0,
     }
 }
@@ -2290,7 +2290,8 @@ fn sacrifice_all_own_creatures() -> ResolvedAbility {
         target: creatures_of(ControllerRef::You),
         count: qref(QuantityRef::ObjectCount {
             filter: creatures_of(ControllerRef::You),
-        }),
+        })
+        .into(),
         min_count: 0,
     })
 }

@@ -1101,7 +1101,9 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
-            acc = acc.or(scan_quantity_expr(count, mode));
+            if let Some(count) = count.count_expr() {
+                acc = acc.or(scan_quantity_expr(count, mode));
+            }
             acc
         }
         Effect::DiscardCard { target, count: _ } => {
@@ -11119,7 +11121,7 @@ mod tests {
         assert!(
             !reads(Effect::Sacrifice {
                 target: TargetFilter::EventTarget,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             }),
             "the sacrifice resolver reads the captured pin, never the journal"

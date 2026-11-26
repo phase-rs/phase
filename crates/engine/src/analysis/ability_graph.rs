@@ -928,7 +928,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         // CR 701.21a: sacrificing produces sac + LTB (+ dies for creature filters,
         // §3.5) — same polarity as the 4a `AbilityCost::Sacrifice` cost arm.
         Effect::Sacrifice { target, count, .. } => {
-            let (a, mag) = count_seed(count);
+            let (a, mag) = count.count_expr().map_or((1, AxisMagnitude::Unbounded), count_seed);
             b.add_sac(a, mag);
             b.add_ltb(a, mag);
             if sac_produces_death(target) {
@@ -3261,7 +3261,7 @@ mod tests {
     fn sacrifice(target: TargetFilter) -> Effect {
         Effect::Sacrifice {
             target,
-            count: fixed(1),
+            count: fixed(1).into(),
             min_count: 0,
         }
     }

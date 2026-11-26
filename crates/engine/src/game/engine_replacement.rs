@@ -12721,7 +12721,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Sacrifice {
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         );

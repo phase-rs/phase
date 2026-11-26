@@ -18448,7 +18448,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],
@@ -18562,7 +18562,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![],

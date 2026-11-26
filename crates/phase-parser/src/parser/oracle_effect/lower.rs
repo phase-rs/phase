@@ -4304,6 +4304,122 @@ pub(super) fn resolve_populated_token_anaphors(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// CR 603.7c + CR 608.2c: Resolve the count-less plural sacrifice only
+/// after assembly has enough context to identify its token-producing clause.
+pub(super) fn bind_plural_token_sacrifice(
+    def: &mut AbilityDefinition,
+    prior_defs: &[AbilityDefinition],
+) {
+    let Effect::CreateDelayedTrigger {
+        effect,
+        uses_tracked_set,
+        ..
+    } = def.effect.as_mut()
+    else {
+        return;
+    };
+    let Effect::Sacrifice { target, count, .. } = effect.effect.as_mut() else {
+        return;
+    };
+    if !matches!(
+        count,
+        crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 })
+    ) {
+        return;
+    }
+    // LastCreated and tracked-set anaphors can see different publications.
+    // Stop at the nearest potential antecedent before checking whether its
+    // producer is admitted for whole-cohort cleanup.
+    let nested_creator = prior_defs.last().and_then(|previous| {
+        use crate::types::ability::NestedDefinitionEdge;
+
+        // The AST's exhaustive walk classifies every Effect's nested definitions.
+        let mut creator = None;
+        previous
+            .effect
+            .for_each_nested_definition(&mut |edge, producer| match edge {
+                NestedDefinitionEdge::CreateDelayedTriggerEffect => {
+                    if matches!(
+                        previous.effect.as_ref(),
+                        Effect::CreateDelayedTrigger {
+                            condition: DelayedTriggerCondition::WheneverEvent { .. },
+                            ..
+                        }
+                    ) {
+                        creator = Some(producer.effect.as_ref());
+                    }
+                }
+                NestedDefinitionEdge::VotePerChoice
+                | NestedDefinitionEdge::VoteObjectOutcome
+                | NestedDefinitionEdge::SeparateIntoPilesChosen
+                | NestedDefinitionEdge::SeparateIntoPilesUnchosen
+                | NestedDefinitionEdge::ExileTopCardContestWinner
+                | NestedDefinitionEdge::RevealFromHandOnDecline
+                | NestedDefinitionEdge::CreateDrawReplacementEffect
+                | NestedDefinitionEdge::CreateBoonTrigger
+                | NestedDefinitionEdge::RollDieResult
+                | NestedDefinitionEdge::FlipCoinsWin
+                | NestedDefinitionEdge::FlipCoinsLose
+                | NestedDefinitionEdge::ChooseOneOfBranch => {}
+            });
+        creator
+    });
+    let nearest_producer = nested_creator.or_else(|| {
+        prior_defs
+            .iter()
+            .rev()
+            .map(|def| def.effect.as_ref())
+            .find(|effect| {
+                publishes_chain_created_referent(effect)
+                    || super::publishes_aggregate_set_from_resolution(effect)
+                    || matches!(
+                        effect,
+                        Effect::PumpAll { .. }
+                            | Effect::TargetOnly { .. }
+                            | Effect::ChooseObjectsIntoTrackedSet { .. }
+                            | Effect::Unimplemented { .. }
+                    )
+            })
+    });
+    let Some(producer) = nearest_producer else {
+        return;
+    };
+    // Populate is outside the admitted cleanup class. Copy batches routed
+    // through a tracked set are also deferred.
+    if matches!(target, TargetFilter::TrackedSet { .. }) {
+        if *uses_tracked_set
+            && matches!(producer, Effect::Token { .. })
+            && nested_creator.is_none()
+            && prior_defs
+                .iter()
+                .filter(|def| super::publishes_aggregate_set_from_resolution(&def.effect))
+                .count()
+                == 1
+        {
+            *count = crate::types::ability::SacrificeSelection::EntireReferent;
+        }
+        return;
+    }
+    if !matches!(producer, Effect::Token { .. } | Effect::CopyTokenOf { .. }) {
+        return;
+    }
+
+    // Use the ordinary post-token operand rewrite, or the per-attack cleanup
+    // fold when assembly is about to move this cleanup under its producer.
+    rewrite_parent_target_to_last_created(&mut effect.effect, false);
+    if nested_creator.is_none() {
+        rewrite_delayed_cleanup_self_ref_to_last_created(&mut effect.effect);
+    }
+    if let Effect::Sacrifice {
+        target: TargetFilter::LastCreated,
+        count,
+        ..
+    } = effect.effect.as_mut()
+    {
+        *count = crate::types::ability::SacrificeSelection::EntireReferent;
+    }
+}
+
 /// CR 111.1: is this a token-creation effect? The authority is
 /// [`Effect::is_token_creator`]; this name is kept for the parser's callers.
 pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
@@ -13510,7 +13626,7 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
         | Effect::Renown { count: amount, .. }
         | Effect::RevealUntil { count: amount, .. }
         | Effect::RollDie { count: amount, .. }
-        | Effect::Sacrifice { count: amount, .. }
+        | Effect::Sacrifice { count: crate::types::ability::SacrificeSelection::Count(amount), .. }
         | Effect::SearchOutsideGame { count: amount, .. }
         | Effect::OpenBoosterPack { count: amount, .. }
         | Effect::SetLifeTotal { amount, .. }
@@ -17074,7 +17190,7 @@ mod tests {
                     AbilityKind::Spell,
                     Effect::Sacrifice {
                         target: TargetFilter::ParentTarget,
-                        count: QuantityExpr::Fixed { value: 2 },
+                        count: QuantityExpr::Fixed { value: 2 }.into(),
                         min_count: 0,
                     },
                 )),

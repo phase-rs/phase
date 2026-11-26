@@ -10854,7 +10854,7 @@ mod tests {
             ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: TargetFilter::ParentTargetSlot { index: 0 },
-                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
                 vec![],
