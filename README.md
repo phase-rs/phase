@@ -520,18 +520,11 @@ also settles that source's owned work before releasing it, including synchronous
 `serverHello` reentry and setup-send failure. The only new reply bound is the
 reconnect interval above; Create and Join keep waiting without one.
 
-A draft view completes a pick only when its inventory proves the exact newly
-selected instance. Reply ownership and pick counters alone are not outcome
-evidence. A pick backed by the complete selection offered in the original
-authoritative view can be completed by a replacement's view too, if the
-replacement matches the original draft code/token. A pick without that
-evidence can be completed only by its own sending socket; once a different
-socket is adopted it is retired as unconfirmed with a recoverable error.
-Retired views can settle their own permitted reply but cannot overwrite the
-current view, phase or credentials, or publish themselves as the current view.
-This reports the selected-inventory outcome, not a new request-level
-acknowledgement: an automatic timer pick of the identical instance is
-indistinguishable on the existing wire.
+A draft pick settles only on its own correlated command result on the sending
+socket, or on transport failure or disposal. Unsolicited and replacement views
+update inventory independently and never acknowledge the pick. A retired socket
+may settle its own pending command, but its result cannot overwrite the current
+view, phase or credentials.
 
 A command already sent for the outgoing match cannot complete once that same
 socket announces a replacement match: its addressed reply is fenced by the new
