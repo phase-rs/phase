@@ -2684,6 +2684,7 @@ fn optional_decline_exile_origin(
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::SetSchemeInMotion { .. }
         | Effect::Unimplemented { .. } => None,
     }
 }

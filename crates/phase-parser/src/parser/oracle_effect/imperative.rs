@@ -1412,6 +1412,7 @@ pub(super) fn lower_delayed_player_instruction(
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
+            | Effect::SetSchemeInMotion { .. }
             | Effect::Unimplemented { .. } => {}
         }
     }
