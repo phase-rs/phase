@@ -2960,6 +2960,67 @@ fn tomik_counts_and_drains_the_qualifying_attacking_teammate() {
     }
 }
 
+/// CR 508.3d + CR 805.10b: when both teammates qualify in one combined
+/// declaration, each gets their own trigger and loses their own 3 life.
+#[test]
+fn tomik_triggers_once_for_each_qualifying_attacking_teammate() {
+    use engine::types::format::FormatConfig;
+
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let tomik = scenario
+        .add_creature_from_oracle(
+            P2,
+            "Tomik, Wielder of Law",
+            2,
+            4,
+            "Affinity for planeswalkers (This spell costs {1} less to cast for each planeswalker you control.)\nFlying, vigilance\nWhenever an opponent attacks with creatures, if two or more of those creatures are attacking you and/or planeswalkers you control, that opponent loses 3 life and you draw a card.",
+        )
+        .id();
+    let first_draw = scenario.add_card_to_library_top(P2, "First card to draw");
+    let second_draw = scenario.add_card_to_library_top(P2, "Second card to draw");
+    let attackers: Vec<_> = [P0, P0, P1, P1]
+        .into_iter()
+        .enumerate()
+        .map(|(i, player)| {
+            scenario
+                .add_creature(player, &format!("Attacker {i}"), 2, 2)
+                .id()
+        })
+        .collect();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    let declaration: Vec<_> = attackers
+        .iter()
+        .map(|&id| (id, AttackTarget::Player(P2)))
+        .collect();
+    runner
+        .declare_attackers(&declaration)
+        .expect("shared team declares one combined attack");
+    let pending = match &runner.state().waiting_for {
+        WaitingFor::OrderTriggers { triggers, .. } => {
+            triggers.iter().filter(|t| t.source_id == tomik).count()
+        }
+        _ => runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == tomik)
+            .count(),
+    };
+    assert_eq!(pending, 2);
+    runner.advance_until_stack_empty();
+    for player in [P0, P1] {
+        assert_eq!(
+            runner.state().players[usize::from(player.0)].life_lost_this_turn,
+            3
+        );
+    }
+    for card in [first_draw, second_draw] {
+        assert_eq!(runner.state().objects[&card].zone, Zone::Hand);
+    }
+}
+
 /// CR 805.10a: during a Two-Headed Giant turn the active team is the attacking
 /// team, so a teammate's creature is a legal attacker in the same declaration and
 /// caps/requirements apply to the COMBINED attacker set. The team-bug fix

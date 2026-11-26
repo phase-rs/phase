@@ -194,6 +194,7 @@ mod burning_eye_zubera_damage_threshold;
 mod burning_rune_demon_exact_count_search;
 mod cait_sith_fortune_teller;
 mod calamity_of_the_titans_reveal_cost;
+mod calculating_lich_zhang_liao_that_player;
 mod call_damage_control_modal_return;
 mod call_forth_tempest_and_rootha;
 mod call_to_the_kindred;

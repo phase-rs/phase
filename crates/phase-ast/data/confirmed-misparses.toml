@@ -2747,7 +2747,6 @@ face = [
   { key = "zero, incorporeal sensate", class = "wrong_object", clauses = ["You may exile a nonland card from it."] },
   { key = "zethi, arcane blademaster", class = "wrong_object", clauses = ["Whenever Zethi attacks, copy each exiled card you own with a kick counter on it.", "You may cast the copies."] },
   { key = "zhalfirin crusader", class = "wrong_duration", clauses = ["{1}{W}: The next 1 damage that would be dealt to this creature this turn is dealt to any target instead."] },
-  { key = "zhang liao, hero of hefei", class = "wrong_player", clauses = ["Whenever Zhang Liao deals damage to an opponent, that opponent discards a card."] },
   { key = "zhao, the moon slayer", class = "wrong_object", clauses = ["Nonbasic lands enter tapped."] },
   { key = "ziatora's envoy", class = "missing_effect", clauses = ["You may play a land from the top of your library or cast a spell with mana value less than or equal to the damage dealt from the top of your library without paying its mana cost."] },
   { key = "zimone's hypothesis", class = "dropped_qualifier", clauses = ["Return each creature with power of the chosen quality to its owner's hand."] },

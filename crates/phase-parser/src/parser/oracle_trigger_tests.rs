@@ -36107,8 +36107,8 @@ fn player_led_attack_demonstratives_follow_the_head() {
         "Tomik, Wielder of Law",
     );
     let explicit_defender = parse_trigger_line(
-        "Whenever you attack a player, that player loses 3 life.",
-        "Test enchantment",
+        "Whenever a creature attacks one of your opponents, that player loses 1 life.",
+        "Calculating Lich",
     );
     for (trigger, expected) in [
         (tomik, TargetFilter::TriggeringPlayer),
@@ -36126,6 +36126,24 @@ fn player_led_attack_demonstratives_follow_the_head() {
             "{execute:?}"
         );
     }
+
+    // Tahngarth, First Mate: "that opponent" after the same player-led head is
+    // the attacking opponent who gains control.
+    let tahngarth = parse_trigger_line(
+        "Whenever an opponent attacks with one or more creatures, if Tahngarth is tapped, you may have that opponent gain control of Tahngarth until end of combat.",
+        "Tahngarth, First Mate",
+    );
+    let execute = tahngarth.execute.expect("trigger has a parsed effect");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::GiveControl {
+                recipient: TargetFilter::TriggeringPlayer,
+                ..
+            }
+        ),
+        "{execute:?}"
+    );
 }
 
 /// CR 109.4 + CR 115.1 + CR 506.2: Karazikar's first trigger introduces
