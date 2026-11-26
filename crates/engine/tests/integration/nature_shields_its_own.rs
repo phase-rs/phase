@@ -331,10 +331,12 @@ fn nature_shields_blocks_for_defender_and_abandons_on_four() {
 
 // F4 rows (CR 400.7): the blocking rider's "that creature" is an event
 // anaphor resolved against incarnation-pinned referents, so a returned or
-// blinked attacker is not blocked as its earlier incarnation. The
-// behavioral legs pass pre-fix too (CR 506.4: a zone-changed attacker
+// blinked attacker is not blocked as its earlier incarnation. The ninja leg
+// discriminates behaviorally: the Ninja re-attacks under its original
+// storage ID, so a resolver that ignored the captured pin would block it.
+// The cloud leg passes pre-fix too (CR 506.4: a zone-changed attacker
 // leaves `combat.attackers`, so `place_blocking` no-matches either way):
-// discrimination rests on the folded F4-pins assertions (`[]`
+// its discrimination rests on the folded F4-pins assertions (`[]`
 // pre-fix, `[(attacker, incarnation)]` post-fix) plus the F4-unit slot
 // matrix in `phase-ast`.
 
@@ -484,44 +486,43 @@ fn stack_unblocked_triggers(runner: &mut GameRunner, expected: usize) {
     );
 }
 
-/// F4-ninja: the frozen two-ninja sequence (Mistblade Shinobi returns A, then
-/// Ninja of the Deep Hours returns Mistblade) with the Nature Shields
-/// triggers on the stack. The returned A is not blocked as its earlier
-/// incarnation (CR 400.7); the hostile second attacker B is still blocked.
+/// F4-ninja: the round-4 witness — Ninja of the Deep Hours attacks, Mistblade
+/// Shinobi's ninjutsu returns it, and its own ninjutsu returns Shinobi,
+/// putting the Ninja back attacking under the same storage ID with a new
+/// incarnation (CR 400.7). Nature's trigger still grows its Plant, but the
+/// Plant must not block the Ninja's new incarnation; the hostile second
+/// attacker B is still blocked.
 #[test]
 fn ninjutsu_returned_attacker_not_blocked_as_earlier_incarnation() {
-    let (mut scenario, raiders) = archenemy_scenario(2);
+    let (mut scenario, raiders) = archenemy_scenario(1);
+    let ninja = scenario
+        .add_creature_from_oracle(P1, "Ninja of the Deep Hours", 2, 2, NINJA_OF_THE_DEEP_HOURS)
+        .with_subtypes(vec!["Human", "Ninja"])
+        .id();
     let mistblade = scenario
         .add_creature_to_hand_from_oracle(P1, "Mistblade Shinobi", 1, 1, MISTBLADE_SHINOBI)
         .with_subtypes(vec!["Human", "Ninja"])
         .id();
-    let ninja = scenario
-        .add_creature_to_hand_from_oracle(
-            P1,
-            "Ninja of the Deep Hours",
-            2,
-            2,
-            NINJA_OF_THE_DEEP_HOURS,
-        )
-        .with_subtypes(vec!["Human", "Ninja"])
-        .id();
     let mut runner = build_with_scheme(scenario);
     drive_to_p1_combat(&mut runner);
-    let (a, b) = (raiders[0], raiders[1]);
+    let b = raiders[0];
     let p0_life = life_of(&runner, P0);
 
     attack_unblocked(
         &mut runner,
-        &[(a, AttackTarget::Player(P0)), (b, AttackTarget::Player(P0))],
+        &[
+            (ninja, AttackTarget::Player(P0)),
+            (b, AttackTarget::Player(P0)),
+        ],
     );
     stack_unblocked_triggers(&mut runner, 2);
 
     // F4-pins: each firing pins its own attacker at the pre-return incarnation.
-    let incarn_a = runner.state().objects[&a].incarnation;
+    let incarn_ninja = runner.state().objects[&ninja].incarnation;
     let incarn_b = runner.state().objects[&b].incarnation;
     assert_eq!(
         stack_pins(&runner),
-        sorted_pins(vec![(a, incarn_a), (b, incarn_b)]),
+        sorted_pins(vec![(ninja, incarn_ninja), (b, incarn_b)]),
         "each stacked trigger pins its attacker"
     );
 
@@ -536,14 +537,15 @@ fn ninjutsu_returned_attacker_not_blocked_as_earlier_incarnation() {
             .add_mana_to_pool(P1, ManaUnit::new(mana, source, false, vec![]));
     }
 
-    // The frozen two-ninja sequence through the public action.
+    // The witness sequence through the public action: Mistblade returns the
+    // Ninja, then the Ninja's own ninjutsu returns Mistblade.
     runner
         .act(GameAction::ActivateNinjutsu {
             ninjutsu_object_id: mistblade,
-            creature_to_return: a,
+            creature_to_return: ninja,
         })
-        .expect("Mistblade ninjutsu returns A");
-    assert_eq!(runner.state().objects[&a].zone, Zone::Hand);
+        .expect("Mistblade ninjutsu returns the Ninja");
+    assert_eq!(runner.state().objects[&ninja].zone, Zone::Hand);
     assert_eq!(runner.state().objects[&mistblade].zone, Zone::Battlefield);
     runner
         .act(GameAction::ActivateNinjutsu {
@@ -554,21 +556,38 @@ fn ninjutsu_returned_attacker_not_blocked_as_earlier_incarnation() {
     assert_eq!(runner.state().objects[&mistblade].zone, Zone::Hand);
     assert_eq!(runner.state().objects[&ninja].zone, Zone::Battlefield);
 
-    // F4-pins no-overwrite: the returns do not restamp the pins, while A
-    // itself is a new object in hand (CR 400.7).
+    // The witness's core: the original storage ID attacks again as a new
+    // object (CR 400.7), with no new attack triggers (a ninjutsu entry is
+    // not an attack), and the pins survive the returns unstamped.
+    assert_eq!(
+        runner.state().objects[&ninja].incarnation,
+        incarn_ninja + 2,
+        "the hand round-trip is a new object"
+    );
+    assert!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .expect("combat is live")
+            .attackers
+            .iter()
+            .any(|a| a.object_id == ninja),
+        "the Ninja is attacking again under its original storage ID"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "reach guard: no new triggers from the ninjutsu entries"
+    );
     assert_eq!(
         stack_pins(&runner),
-        sorted_pins(vec![(a, incarn_a), (b, incarn_b)]),
+        sorted_pins(vec![(ninja, incarn_ninja), (b, incarn_b)]),
         "pins survive the returns unstamped"
     );
-    assert_eq!(
-        runner.state().objects[&a].incarnation,
-        incarn_a + 1,
-        "reach guard: A left and is a new object"
-    );
 
-    // Both triggers resolve: A's Plant cannot block the departed A, while
-    // B's Plant blocks B.
+    // Both triggers resolve: the Ninja's Plant cannot block the Ninja's new
+    // incarnation, while B's Plant blocks B.
     drain_triggers(&mut runner);
     assert_eq!(
         plants_on_battlefield(&runner),
@@ -577,8 +596,11 @@ fn ninjutsu_returned_attacker_not_blocked_as_earlier_incarnation() {
     );
     let combat = runner.state().combat.as_ref().expect("combat is live");
     assert!(
-        combat.blocker_assignments.get(&a).is_none_or(Vec::is_empty),
-        "no Plant blocks the returned A"
+        combat
+            .blocker_assignments
+            .get(&ninja)
+            .is_none_or(Vec::is_empty),
+        "no Plant blocks the returned Ninja's new incarnation"
     );
     let b_blockers = combat
         .blocker_assignments
