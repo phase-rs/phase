@@ -13,6 +13,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{EndEffectPermission, GameState, TransientContinuousEffectBindings};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::statics::StaticMode;
 
 pub use crate::types::ability::{
     generic_effect_affected_uses_inherited_targets, generic_effect_application_filter,
@@ -409,6 +410,53 @@ fn bind_transient_effect(
             role,
         )
     });
+
+    // CR 608.2b + CR 611.2c: bind the library owner while the announced
+    // target is available. The grantee and duration live on the player-scoped
+    // effect, whose permission follows the top card even after the source leaves.
+    let mut modifications = modifications;
+    let original_modification_count = modifications.len();
+    let mut has_library_permission = false;
+    modifications.retain_mut(|modification| {
+        let ContinuousModification::AddStaticMode {
+            mode:
+                StaticMode::MayLookAtTopOfLibrary { library }
+                | StaticMode::TopOfLibraryCastPermission { library, .. },
+        } = modification
+        else {
+            return true;
+        };
+        let Some(id) = filter::controller_ref_player(
+            state,
+            ability.source_id,
+            Some(ability.controller),
+            Some(ability),
+            library,
+        ) else {
+            return false;
+        };
+        *library = ControllerRef::SpecificPlayer { id };
+        has_library_permission = true;
+        true
+    });
+    if modifications.is_empty() && original_modification_count != 0 {
+        return;
+    }
+    if has_library_permission {
+        install_transient(
+            state,
+            end_permission,
+            ability,
+            duration.clone(),
+            TargetFilter::SpecificPlayer {
+                id: ability.controller,
+            },
+            modifications,
+            static_def.condition.clone(),
+            bound_actor,
+        );
+        return;
+    }
 
     // CR 708.5: A duration-bound "you may look at face-down [permanents] you don't
     // control any time" permission (Lumbering Laundry) is a *player-scoped* look

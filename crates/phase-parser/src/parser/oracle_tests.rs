@@ -9179,7 +9179,9 @@ fn top_of_library_peek_routes_to_static_parser() {
     assert_eq!(r.statics.len(), 1);
     assert_eq!(
         r.statics[0].mode,
-        crate::types::statics::StaticMode::MayLookAtTopOfLibrary
+        crate::types::statics::StaticMode::MayLookAtTopOfLibrary {
+            library: crate::types::ability::ControllerRef::You
+        }
     );
 }
 

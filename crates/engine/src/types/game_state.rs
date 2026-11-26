@@ -16868,6 +16868,36 @@ pub struct AnnouncedGraveyardPermission {
     pub slot_type: Option<super::card_type::CoreType>,
 }
 
+/// An action that can hold a foreign-library look at its CR 401.5 boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ForeignLibraryLookAction {
+    Cast,
+    Activate(ObjectId),
+    PlayLand,
+    /// CR 401.5 + CR 116.2: A special action with a resumable cost.
+    Special(crate::types::mana::SpecialAction),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ForeignLibraryLookSnapshot {
+    pub player: PlayerId,
+    pub action: ForeignLibraryLookAction,
+    pub tops: Vec<(PlayerId, ObjectId)>,
+}
+
+/// CR 601.2a + CR 609.4b: Terms of the library permission elected before
+/// costs are paid, retained even if payment changes the top or grant source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopOfLibraryCastLatch {
+    pub spell_id: ObjectId,
+    pub source: ObjectId,
+    pub frequency: crate::types::statics::CastFrequency,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_cost: Option<AbilityCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+}
+
 /// CR 601.2f + CR 601.2h + CR 614.1c: a graveyard permission's terms as they
 /// were when the cast was announced. The cast pays and applies these even if
 /// the permission's source leaves or loses the ability during casting.
@@ -29961,6 +29991,8 @@ declare_game_state! {
     /// (`game_state_size`).
     #[serde(skip)]
     pub active_graveyard_permission_latch: Option<Box<GraveyardPermissionLatch>>,
+    #[serde(skip)]
+    pub(crate) active_top_of_library_cast_latch: Option<Box<TopOfLibraryCastLatch>>,
     /// The single synchronous handoff from a paid offer's immediate direct
     /// `CreateDelayedTrigger` tail to the installer. It is never persisted.
     #[serde(skip)]
@@ -30111,6 +30143,8 @@ declare_game_state! {
     /// frontend doesn't need to maintain a parallel list of casting states.
     #[serde(skip_deserializing, default)]
     pub has_pending_cast: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) foreign_library_look_snapshot: Option<Box<ForeignLibraryLookSnapshot>>,
     /// CR 601.2i: display-only authority for whether the current pending cast
     /// may be withdrawn. Separate from `has_pending_cast` so choice prompts
     /// can expose an in-flight cast without encouraging an illegal cancel.
@@ -31901,8 +31935,9 @@ declare_game_state! {
     /// Typed cleanup waiting for an ordinary search's leading ChangeZone to
     /// settle. The chain walker consumes it synchronously; the paused
     /// ChangeZone drain consumes the same value after its final member lands.
+    /// Boxed because it is populated only while a search delivery settles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_library_search_delivery: Option<LibrarySearchDeliveryResume>,
+    pub pending_library_search_delivery: Option<Box<LibrarySearchDeliveryResume>>,
     /// Exact-incarnation audience provenance from a search delivery that
     /// settled in the current action. It is cleared at the next outer action
     /// boundary and never appears in a viewer projection.
@@ -41761,6 +41796,7 @@ impl GameState {
             active_copy_token_resolution_tokens: None,
             active_casting_permission_index: None,
             active_graveyard_permission_latch: None,
+            active_top_of_library_cast_latch: None,
             active_paid_resolution_offer_tail: None,
             active_spend_only_on_x_count: None,
             ingress_life_window: None,
@@ -41789,6 +41825,7 @@ impl GameState {
             next_interaction_serial: default_interaction_serial(),
             active_interaction_slots: Vec::new(),
             has_pending_cast: false,
+            foreign_library_look_snapshot: None,
             allows_cancel_cast: false,
             lands_played_this_turn: 0,
             max_lands_per_turn: 1,
@@ -45849,6 +45886,7 @@ impl GameState {
             active_copy_token_resolution_tokens: _,
             active_casting_permission_index: _,
             active_graveyard_permission_latch: _,
+            active_top_of_library_cast_latch: _,
             active_paid_resolution_offer_tail: _,
             active_spend_only_on_x_count: _,
             ingress_life_window: _,
@@ -45872,6 +45910,7 @@ impl GameState {
             next_interaction_serial: _,
             active_interaction_slots: _,
             has_pending_cast: _,
+            foreign_library_look_snapshot: _,
             allows_cancel_cast: _,
             lands_played_this_turn: _,
             max_lands_per_turn: _,
@@ -47448,6 +47487,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_copy_token_resolution_tokens: _,
         active_casting_permission_index: _,
         active_graveyard_permission_latch: _,
+        active_top_of_library_cast_latch: _,
         active_paid_resolution_offer_tail: _,
         active_spend_only_on_x_count: _,
         ingress_life_window: _,
@@ -47486,6 +47526,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_interaction_serial: _,
         active_interaction_slots: _,
         has_pending_cast: _,
+        foreign_library_look_snapshot: _,
         allows_cancel_cast: _,
         lands_played_this_turn: _,
         max_lands_per_turn: _,
@@ -75717,13 +75758,13 @@ mod restored_exact_attack_authority_tests {
                 // A scoped search delivery's "after the search" tail.
                 16 => {
                     state.pending_library_search_delivery =
-                        Some(LibrarySearchDeliveryResume::Scoped {
+                        Some(Box::new(LibrarySearchDeliveryResume::Scoped {
                             player: P0,
                             source_id: attacker,
                             search_keys: vec![],
                             grants: vec![],
                             after_scope: Some(node.clone()),
-                        });
+                        }));
                     state.waiting_for.clone()
                 }
                 // A player-scope sacrifice choice's ability.

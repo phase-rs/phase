@@ -171,7 +171,7 @@ pub(crate) fn link_search_look(
     source_id: Option<ObjectId>,
 ) {
     // A scoped search names a set of searchers, not the one player a fixed grant needs.
-    let searcher = match &state.pending_library_search_delivery {
+    let searcher = match state.pending_library_search_delivery.as_deref() {
         Some(LibrarySearchDeliveryResume::Standard { searcher, .. }) => Some(*searcher),
         Some(LibrarySearchDeliveryResume::Scoped { .. }) | None => None,
     };

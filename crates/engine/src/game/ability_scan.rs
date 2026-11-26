@@ -9054,9 +9054,10 @@ fn static_mode_axes(static_mode: &StaticMode, mode: ScanMode) -> Axes<'_> {
             ..
         } => cost_opt(extra_cost.as_ref().map(|extra| &extra.cost), mode)
             .or(scan_pending_enters(enters_modifications, mode)),
-        StaticMode::TopOfLibraryCastPermission { alt_cost, .. } => {
-            cost_opt(alt_cost.as_ref(), mode)
-        }
+        StaticMode::TopOfLibraryCastPermission {
+            library, alt_cost, ..
+        } => scan_controller_ref(library).or(cost_opt(alt_cost.as_ref(), mode)),
+        StaticMode::MayLookAtTopOfLibrary { library } => scan_controller_ref(library),
         StaticMode::ExileCastPermission { extra_cost, .. } => {
             cost_opt(extra_cost.as_ref().map(|extra| &extra.cost), mode)
         }
@@ -9157,7 +9158,6 @@ fn static_mode_axes(static_mode: &StaticMode, mode: ScanMode) -> Axes<'_> {
         | StaticMode::CantCrew
         | StaticMode::CantPhaseIn
         | StaticMode::CrewContribution { .. }
-        | StaticMode::MayLookAtTopOfLibrary
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
         | StaticMode::MayChooseNotToUntap

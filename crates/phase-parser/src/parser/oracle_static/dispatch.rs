@@ -3275,11 +3275,13 @@ pub(crate) fn parse_static_line_inner(
     // --- "You may look at the top card of your library any time." ---
     if nom_tag_tp(&tp, "you may look at the top card of your library").is_some() {
         return Some(
-            StaticDefinition::new(StaticMode::MayLookAtTopOfLibrary)
-                .affected(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::You),
-                ))
-                .description(text.to_string()),
+            StaticDefinition::new(StaticMode::MayLookAtTopOfLibrary {
+                library: crate::types::ability::ControllerRef::You,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+            .description(text.to_string()),
         );
     }
 
