@@ -604,8 +604,8 @@ impl UnitEvidence {
     ///
     /// The typed sibling of [`Self::has_slot`] for a slot that a lowered node fills on behalf
     /// of text the detector has already stripped: that node must not also vouch for the
-    /// residual text. A value that does not deserialize as `T` counts as "other" (fail-open
-    /// toward reporting, the module's conservative-red direction), so composed or differently
+    /// residual text. A value that does not deserialize as `T` counts as "other" (the slot
+    /// stays populated, exactly the previous `has_slot` behavior), so composed or differently
     /// typed carriers sharing the key are never discounted.
     pub(super) fn has_slot_other_than<T: DeserializeOwned>(
         &self,
@@ -836,7 +836,7 @@ mod tests {
             r#"{{"abilities":[{{"condition":{SEARCH_GATE}}},{{"condition":{OTHER_CONDITION}}}]}}"#
         )));
         // (c) a carrier that does not deserialize as the typed condition (e.g. a
-        // StaticCondition-shaped value) -> "other" (fail-open toward reporting).
+        // StaticCondition-shaped value) -> "other" (undecodable: keeps the previous populated-slot behavior).
         assert!(slot_other_than_gate(
             r#"{"statics":[{"condition":{"type":"NotAnAbilityCondition"}}]}"#
         ));

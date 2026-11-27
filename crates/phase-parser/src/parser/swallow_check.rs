@@ -7678,13 +7678,14 @@ that land.";
 
     /// A text whose FIRST `if` is exempted reports the guard that survives.
     ///
-    /// What this discriminates: `strip_cr_implicit_if_phrases` drops the inserted
-    /// sentence, so the surviving guard is the sang-a-song one. Passing `cleaned` instead
-    /// of `stripped` at the `Condition_If` push site yields
-    /// `Some(Condition { guard: "you searched your library this way" })` — a DIFFERENT,
-    /// non-None value, measured. The test is therefore red under the single most likely
-    /// wiring mistake, and it cannot be satisfied vacuously by an upstream short-circuit,
-    /// which would give `None` rather than the other guard.
+    /// What this discriminates: the present-tense search sentence is lowered to a `Shuffle`
+    /// gate and `strip_cr_implicit_if_phrases` drops the sentence, so the surviving guard is the
+    /// sang-a-song one. With the old type-agnostic `has_slot("condition")` early return the
+    /// lowered gate would vouch for that guard and no `Condition_If` would be reported. The
+    /// stripping itself is discriminated separately by
+    /// `strip_then_extract_reports_the_surviving_guard`, on the past-tense text. The test
+    /// cannot be satisfied vacuously by an upstream short-circuit, which would give `None`
+    /// rather than the other guard.
     #[test]
     fn condition_if_swallow_reports_the_guard_that_survives_the_exemptions() {
         let parsed = parse_named(EXEMPTED_FIRST_IF, "Land Aid '04", &["Sorcery"]);
