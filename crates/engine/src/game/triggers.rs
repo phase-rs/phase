@@ -9508,6 +9508,8 @@ fn collect_pending_triggers_with_collection(
                                 ) > 0
                             })
                         });
+                    // CR 702.78a + CR 603.4: A paid Conspire instance
+                    // triggers; an unpaid one does not.
                     paid.then_some(obj.controller)
                 })
                 .map(|controller| {

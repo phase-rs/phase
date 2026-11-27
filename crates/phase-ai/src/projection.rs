@@ -592,7 +592,147 @@ fn resolve_choice(
             .iter()
             .filter_map(|action| match action {
                 GameAction::DecideOptionalCost { index } => Some((*index, action)),
-                _ => None,
+                GameAction::PassPriority
+                | GameAction::ChooseMeldPair { .. }
+                | GameAction::ChooseEntryAttackTarget { .. }
+                | GameAction::PlayLand { .. }
+                | GameAction::CastSpell { .. }
+                | GameAction::Foretell { .. }
+                | GameAction::ActivateAbility { .. }
+                | GameAction::DeclareAttackers { .. }
+                | GameAction::DeclareBlockers { .. }
+                | GameAction::ChooseUntap { .. }
+                | GameAction::ChooseExert { .. }
+                | GameAction::ChooseEnlist { .. }
+                | GameAction::ChooseClashOpponent { .. }
+                | GameAction::ChooseZoneOpponentChooser { .. }
+                | GameAction::ChoosePileOpponent { .. }
+                | GameAction::ChooseAnnouncingOpponent { .. }
+                | GameAction::ChooseGiftRecipient { .. }
+                | GameAction::ChooseAssistPlayer { .. }
+                | GameAction::CommitAssistPayment { .. }
+                | GameAction::MulliganDecision { .. }
+                | GameAction::ReorderHand { .. }
+                | GameAction::TapLandForMana { .. }
+                | GameAction::ActivateManaSource { .. }
+                | GameAction::BackToManaPayment
+                | GameAction::UntapLandForMana { .. }
+                | GameAction::SpendPoolMana { .. }
+                | GameAction::UnspendPoolMana { .. }
+                | GameAction::SelectCards { .. }
+                | GameAction::ChooseRemoveCounterCostDistribution { .. }
+                | GameAction::SelectCoinFlips { .. }
+                | GameAction::SelectDieRolls { .. }
+                | GameAction::ChooseOutsideGameCards { .. }
+                | GameAction::SelectTargets { .. }
+                | GameAction::ChooseTarget { .. }
+                | GameAction::ChooseReplacement { .. }
+                | GameAction::ChooseReplacementAndRemember { .. }
+                | GameAction::SetReplacementAutoChoice { .. }
+                | GameAction::ChooseEntryController { .. }
+                | GameAction::OrderTriggers { .. }
+                | GameAction::OrderCostReductions { .. }
+                | GameAction::CancelCast
+                | GameAction::Equip { .. }
+                | GameAction::CrewVehicle { .. }
+                | GameAction::ActivateStation { .. }
+                | GameAction::SaddleMount { .. }
+                | GameAction::Transform { .. }
+                | GameAction::PlayFaceDown { .. }
+                | GameAction::TurnFaceUp { .. }
+                | GameAction::SubmitSideboard { .. }
+                | GameAction::ChoosePlayDraw { .. }
+                | GameAction::ChooseStartingPlayer { .. }
+                | GameAction::ChooseOption { .. }
+                | GameAction::SubmitVoteCandidate { .. }
+                | GameAction::SubmitSpellbookDraft { .. }
+                | GameAction::SubmitPilePartition { .. }
+                | GameAction::ChoosePile { .. }
+                | GameAction::ChooseBranch { .. }
+                | GameAction::SubmitLifeRedistribution { .. }
+                | GameAction::ChooseDamageSource { .. }
+                | GameAction::SelectModes { .. }
+                | GameAction::ChooseAdventureFace { .. }
+                | GameAction::ChooseModalFace { .. }
+                | GameAction::ChooseAlternativeCast { .. }
+                | GameAction::ChooseCastingVariant { .. }
+                | GameAction::KeepAllCopyTargets
+                | GameAction::ChoosePermanentTypeSlot { .. }
+                | GameAction::ActivateNinjutsu { .. }
+                | GameAction::CastSpellAsSneak { .. }
+                | GameAction::CastSpellAsWebSlinging { .. }
+                | GameAction::CastSpellForFree { .. }
+                | GameAction::CastSpellAsMiracle { .. }
+                | GameAction::CastSpellAsMadness { .. }
+                | GameAction::DecideOptionalEffect { .. }
+                | GameAction::ChooseResolutionOptionalPaymentBranch { .. }
+                | GameAction::RespondToSpliceOffer { .. }
+                | GameAction::DecideOptionalEffectAndRemember { .. }
+                | GameAction::PayUnlessCost { .. }
+                | GameAction::ChooseUnlessCostBranch { .. }
+                | GameAction::ChooseActivationCostBranch { .. }
+                | GameAction::PayCombatTax { .. }
+                | GameAction::ChooseRingBearer { .. }
+                | GameAction::ChoosePair { .. }
+                | GameAction::ChooseDungeon { .. }
+                | GameAction::ChooseDungeonRoom { .. }
+                | GameAction::UnlockRoomDoor { .. }
+                | GameAction::RollPlanarDie
+                | GameAction::ChooseRoomDoor { .. }
+                | GameAction::TapForConvoke { .. }
+                | GameAction::HarmonizeTap { .. }
+                | GameAction::ChooseSecretAgendaNames { .. }
+                | GameAction::DeclareCompanion { .. }
+                | GameAction::CompanionToHand
+                | GameAction::DiscoverChoice { .. }
+                | GameAction::GraveyardPaidCastChoice { .. }
+                | GameAction::CascadeChoice { .. }
+                | GameAction::RippleChoice { .. }
+                | GameAction::FreeCastWindowChoice { .. }
+                | GameAction::ChooseTopOrBottom { .. }
+                | GameAction::ChooseMutateMergeSide { .. }
+                | GameAction::CipherEncode { .. }
+                | GameAction::ChooseLegend { .. }
+                | GameAction::ChooseBattleProtector { .. }
+                | GameAction::SetAutoPass { .. }
+                | GameAction::CancelAutoPass
+                | GameAction::SetPhaseStops { .. }
+                | GameAction::SetPriorityPassingMode { .. }
+                | GameAction::SetPriorityYield { .. }
+                | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::UnAction { .. }
+                | GameAction::SetTriggerOrderTemplate { .. }
+                | GameAction::AssignCombatDamage { .. }
+                | GameAction::AssignBlockerDamage { .. }
+                | GameAction::DistributeAmong { .. }
+                | GameAction::ChooseCounterMoveDistribution { .. }
+                | GameAction::ChooseCountersToRemove { .. }
+                | GameAction::SubmitPayAmount { .. }
+                | GameAction::RetargetSpell { .. }
+                | GameAction::LearnDecision { .. }
+                | GameAction::SelectCategoryPermanents { .. }
+                | GameAction::ChooseKeptCreatures { .. }
+                | GameAction::ChooseKeptPermanents { .. }
+                | GameAction::ChooseX { .. }
+                | GameAction::SubmitPhyrexianChoices { .. }
+                | GameAction::ChooseManaColor { .. }
+                | GameAction::PayManaAbilityMana { .. }
+                | GameAction::CastPreparedCopy { .. }
+                | GameAction::ChooseSpecializeColor { .. }
+                | GameAction::CastParadigmCopy { .. }
+                | GameAction::PassParadigmOffer
+                | GameAction::Debug(..)
+                | GameAction::GrantDebugPermission { .. }
+                | GameAction::RevokeDebugPermission { .. }
+                | GameAction::Concede { .. }
+                | GameAction::DeclareShortcut { .. }
+                | GameAction::RespondToShortcut { .. }
+                | GameAction::DeclineShortcut
+                | GameAction::PrecastCopyShortcut { .. }
+                | GameAction::EndContinuousEffect { .. }
+                | GameAction::BeginResolveAll { .. }
+                | GameAction::RespondResolveAllConsent { .. }
+                | GameAction::RevokeResolveAllConsent { .. } => None,
             })
             .min_by_key(|(index, _)| *index)
             .map(|(_, action)| action.clone())

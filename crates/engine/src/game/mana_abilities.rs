@@ -88,12 +88,12 @@ pub enum ManaActivationPurpose {
 impl ManaActivationPurpose {
     /// CR 601.2h: whether `id` is held from this activation's tap payments.
     pub(crate) fn excludes_held(self, state: &GameState, id: ObjectId) -> bool {
-        (self == Self::Planning && super::restrictions::payment_tap_reserved(state, id))
-            || state
-                .pending_cast
-                .as_deref()
-                .or_else(|| state.waiting_for.pending_cast_ref())
-                .is_some_and(|pending| pending.holds_replicate_tap_reservation(id))
+        self == Self::Planning
+            && (super::restrictions::payment_tap_reserved(state, id)
+                || state
+                    .waiting_for
+                    .pending_cast_ref()
+                    .is_some_and(|pending| pending.holds_replicate_tap_reservation(id)))
     }
 }
 
@@ -1533,11 +1533,15 @@ fn begin_mana_ability_activation(
             required_zone
         )));
     }
-    // CR 601.2h: a direct activation must honor the same held payment
-    // resources as a mana-source selection.
-    if ManaActivationPurpose::Explicit.excludes_held(state, source_id)
-        && (mana_sources::has_tap_component(&ability_def.cost)
-            || cost_removes_self_from_battlefield(&ability_def.cost))
+    // CR 601.2g + CR 605.3a + CR 107.6 + CR 601.2h: a held creature may
+    // tap for mana and untap before payment. Keep it available on the
+    // battlefield for the commit-time recheck.
+    if cost_removes_self_from_battlefield(&ability_def.cost)
+        && state
+            .pending_cast
+            .as_deref()
+            .or_else(|| state.waiting_for.pending_cast_ref())
+            .is_some_and(|pending| pending.holds_replicate_tap_reservation(source_id))
     {
         return Err(EngineError::ActionNotAllowed(
             "This permanent is reserved for a spell cost".into(),
@@ -6711,9 +6715,6 @@ fn tap_creature_cost_choice(
         .iter()
         .copied()
         .filter(|&id| {
-            if ManaActivationPurpose::Explicit.excludes_held(state, id) {
-                return false;
-            }
             if cost_has_source_tap_component(cost) && id == source_id {
                 return false;
             }

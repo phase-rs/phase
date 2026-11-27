@@ -2573,8 +2573,8 @@ fn handle_decide_repeatable_additional_cost(
     let Some(cost) = next_repeatable_additional_cost(state, player, &pending) else {
         if queued_origin.is_some() {
             pending.additional_cost_queue.remove(0);
-            // CR 601.2b: as for a once-only instance, an emptied queue is
-            // decided, so the post-target re-detection does not re-offer it.
+            // CR 601.2b + CR 702.56a + CR 702.56b: Declining or exhausting
+            // this instance advances the queue.
             pending.additional_cost_decided |= pending.additional_cost_queue.is_empty();
         } else {
             pending.additional_cost_flow = None;
@@ -2585,8 +2585,8 @@ fn handle_decide_repeatable_additional_cost(
     if !pay {
         if queued_origin.is_some() {
             pending.additional_cost_queue.remove(0);
-            // CR 601.2b: as for a once-only instance, an emptied queue is
-            // decided, so the post-target re-detection does not re-offer it.
+            // CR 601.2b + CR 702.56a + CR 702.56b: Declining or exhausting
+            // this instance advances the queue.
             pending.additional_cost_decided |= pending.additional_cost_queue.is_empty();
         } else {
             pending.additional_cost_flow = None;
@@ -2602,6 +2602,8 @@ fn handle_decide_repeatable_additional_cost(
         ));
     }
     if let Some(instance) = queued_instance.as_ref() {
+        // CR 601.2b + CR 702.56a + CR 702.56b: Accepting declares one payment
+        // for this ordinal.
         pending
             .ability
             .context
@@ -2702,7 +2704,39 @@ fn replicate_declaration_is_offerable(
         AbilityCost::TapCreatures { filter, .. } => {
             return Ok(!replicate_tap_choices(state, player, pending, cost, filter)?.is_empty());
         }
-        _ => {}
+        AbilityCost::PayEnergy { .. }
+        | AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::SayPhrase { .. }
+        | AbilityCost::Sacrifice(..)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Composite { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => {}
     }
     additional_cost_declaration_is_offerable(state, player, pending, cost.clone())
 }
@@ -2720,14 +2754,47 @@ fn remaining_required_cast_energy(
             AbilityCost::Composite { costs } => costs.iter().fold(0u32, |energy, cost| {
                 energy.saturating_add(energy_in(state, player, source, cost))
             }),
-            _ => 0,
+            AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::SayPhrase { .. }
+            | AbilityCost::Sacrifice(..)
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Discard { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::OneOf { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::EffectCost { .. }
+            | AbilityCost::PerCounter { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::GetPlayerCounters { .. }
+            | AbilityCost::Unimplemented { .. } => 0,
         }
     }
 
     fn required(cost: &AdditionalCost) -> Option<&AbilityCost> {
         match cost {
             AdditionalCost::Required(cost) => Some(cost),
-            _ => None,
+            AdditionalCost::Optional { .. }
+            | AdditionalCost::Kicker { .. }
+            | AdditionalCost::Choice(_) => None,
         }
     }
     let flow = pending.additional_cost_flow.as_ref().and_then(required);
@@ -2796,14 +2863,15 @@ fn replicate_tap_choices(
 }
 
 fn queued_replicate_ordinal(pending: &PendingCast, cost: &AbilityCost) -> Option<u32> {
-    match pending.additional_cost_queue.first() {
-        Some(AdditionalCostInstance {
-            origin: AdditionalCostOrigin::Replicate,
-            cost: AdditionalCost::Optional { cost: queued, .. },
-            origin_ordinal,
-            ..
-        }) if queued == cost => Some(*origin_ordinal),
-        _ => None,
+    let instance = pending.additional_cost_queue.first()?;
+    match &instance.cost {
+        AdditionalCost::Optional { cost: queued, .. } => {
+            (instance.origin == AdditionalCostOrigin::Replicate && queued == cost)
+                .then_some(instance.origin_ordinal)
+        }
+        AdditionalCost::Required(_) | AdditionalCost::Kicker { .. } | AdditionalCost::Choice(_) => {
+            None
+        }
     }
 }
 
@@ -3178,6 +3246,8 @@ pub(crate) fn finish_pending_cost_or_cast(
                 if instance.origin == AdditionalCostOrigin::Replicate
                     && !replicate_declaration_is_offerable(state, player, &pending, &cost)?
                 {
+                    // CR 601.2b + CR 702.56a + CR 702.56b: Exhausting this
+                    // instance advances the queue.
                     pending.additional_cost_queue.remove(0);
                     pending.additional_cost_decided |= pending.additional_cost_queue.is_empty();
                     return finish_pending_cost_or_cast(state, player, pending, events);
@@ -5668,6 +5738,7 @@ fn commit_deferred_spell_taps_and_energy(
     for id in selected.into_iter().flat_map(|tap| tap.object_ids) {
         super::restrictions::tap_permanent_for_cost(state, id, events)?;
     }
+    // CR 107.14 + CR 118.3 + CR 601.2h: Successful payment removes the reserved amount.
     let mut energy = std::mem::take(&mut pending.unpaid_replicate_energy);
     while energy > 0 {
         let amount = i32::try_from(energy).unwrap_or(i32::MAX);
@@ -5704,7 +5775,8 @@ fn validate_deferred_spell_taps(
                     {
                         *count as usize
                     }
-                    _ => n,
+                    crate::types::ability::TapCreaturesRequirement::Count { .. }
+                    | crate::types::ability::TapCreaturesRequirement::Aggregate { .. } => n,
                 };
                 validate_tap_creatures_selection(
                     state,
@@ -5738,6 +5810,8 @@ fn validate_deferred_spell_energy(
     pending: &PendingCast,
 ) -> Result<(), EngineError> {
     let payer = &state.players[player.0 as usize];
+    // CR 107.14 + CR 118.3 + CR 601.2h: Reject an unaffordable obligation
+    // before removing counters.
     if payer.energy < pending.unpaid_replicate_energy
         || payer
             .energy_paid_or_lost_this_turn

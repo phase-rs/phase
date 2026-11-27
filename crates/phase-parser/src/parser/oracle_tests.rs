@@ -31696,9 +31696,11 @@ fn printed_and_granted_mana_replicate_keep_their_individual_prices() {
         let prices: Vec<_> = parsed
             .extracted_keywords
             .iter()
-            .filter_map(|keyword| match keyword {
-                Keyword::Replicate(ReplicateCost::Mana(price)) => Some(price.clone()),
-                _ => None,
+            .filter_map(|keyword| {
+                let Keyword::Replicate(ReplicateCost::Mana(price)) = keyword else {
+                    return None;
+                };
+                Some(price.clone())
             })
             .collect();
         assert_eq!(
@@ -31709,9 +31711,14 @@ fn printed_and_granted_mana_replicate_keep_their_individual_prices() {
         let grants: Vec<_> = parsed
             .statics
             .iter()
-            .filter_map(|definition| match &definition.mode {
-                StaticMode::CastWithKeyword { keyword: Keyword::Replicate(ReplicateCost::Mana(price)) } => Some(price.clone()),
-                _ => None,
+            .filter_map(|definition| {
+                let StaticMode::CastWithKeyword {
+                    keyword: Keyword::Replicate(ReplicateCost::Mana(price)),
+                } = &definition.mode
+                else {
+                    return None;
+                };
+                Some(price.clone())
             })
             .collect();
         assert_eq!(grants, granted.as_slice(), "{name}");

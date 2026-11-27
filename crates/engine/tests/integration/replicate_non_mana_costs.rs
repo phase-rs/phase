@@ -1,19 +1,21 @@
-use engine::game::engine::apply;
+use engine::game::engine::{apply, EngineError};
 use engine::game::mana_sources::activatable_mana_source_selections;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AdditionalCostOrigin, TapCreaturesSelectionMode, TargetRef,
+    AbilityCost, AdditionalCost, AdditionalCostOrigin, QuantityExpr, QuantityModification,
+    ReplacementDefinition, TapCreaturesSelectionMode, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, ConvokeMode, ManaChoice, PayCostKind, PersistedGameState,
-    PersistedRestoreFinalization, StackEntryKind, WaitingFor,
+    CastPaymentMode, ConvokeMode, DeferredLifeCostResume, ManaChoice, PayCostKind,
+    PersistedGameState, PersistedRestoreFinalization, ShardChoice, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+use engine::types::ReplacementEvent;
 
 const EXTERMINATE: &str = "Replicate—Tap an untapped Dalek you control. (When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)\nDestroy target creature. Its controller loses 3 life.";
 const PSIONIC_RITUAL: &str = "Replicate—Tap an untapped Horror you control. (When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)\nExile target instant or sorcery card from a graveyard and copy it. You may cast the copy without paying its mana cost.\nExile Psionic Ritual.";
@@ -24,6 +26,9 @@ const THREEFOLD_SIGNAL: &str = "When this artifact enters, scry 3.\nEach spell y
 const AETHER_HUB: &str = "When this land enters, you get {E} (an energy counter).\n{T}: Add {C}.\n{T}, Pay {E}: Add one mana of any color.";
 const CAETUS: &str = "Noncreature spells you cast have convoke. (Your creatures can help cast those spells. Each creature you tap while casting a noncreature spell pays for {1} or one mana of that creature's color.)\nAt the beginning of your end step, untap up to four target creatures.";
 const ASHNODS_ALTAR: &str = "Sacrifice a creature: Add {C}{C}.";
+const GRAND_ARCHITECT: &str = "Other blue creatures you control get +1/+1.\n{U}: Target artifact creature becomes blue until end of turn.\nTap an untapped blue creature you control: Add {C}{C}. Spend this mana only to cast artifact spells or activate abilities of artifacts.";
+const PILI_PALA: &str = "Flying\n{2}, {Q}: Add one mana of any color. ({Q} is the untap symbol.)";
+const MASKWOOD_NEXUS: &str = "Creatures you control are every creature type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 2/2 blue Shapeshifter creature token with changeling. (It is every creature type.)";
 
 fn act(runner: &mut GameRunner, action: GameAction) -> Vec<GameEvent> {
     runner
@@ -311,15 +316,6 @@ fn exterminate_reserves_distinct_daleks_then_copies_and_retargets() {
         } = dalek_board(true, None);
         let mana_selections =
             |runner: &GameRunner| activatable_mana_source_selections(runner.state(), P0);
-        let dalek_selection = mana_selections(&runner)
-            .into_iter()
-            .find(|selection| selection.source.object_id == mana_dalek)
-            .expect("Dalek can make black mana before reservation");
-        let reserved_mana_action = GameAction::ActivateAbility {
-            source_id: mana_dalek,
-            ability_index: dalek_selection.ability_index.expect("Dalek's mana ability"),
-            payment_mode: CastPaymentMode::Auto,
-        };
         assert!(runner.state().objects[&sick_dalek].summoning_sick);
         cast(&mut runner, spell, mode);
         offer(&runner, AdditionalCostOrigin::Replicate, 0);
@@ -351,11 +347,6 @@ fn exterminate_reserves_distinct_daleks_then_copies_and_retargets() {
                 runner.state().waiting_for,
                 WaitingFor::ManaPayment { player: P0, .. }
             ));
-            let blocked = runner.act(reserved_mana_action);
-            assert!(
-                blocked.is_err() || blocked.is_ok_and(|outcome| !outcome.disposition.is_applied()),
-                "the held Dalek cannot pay an explicit mana ability"
-            );
             assert!(!runner.state().objects[&mana_dalek].tapped);
             assert_eq!(runner.state().players[0].mana_pool.total(), 2);
             let selection = mana_selections(&runner)
@@ -417,6 +408,151 @@ fn exterminate_reserves_distinct_daleks_then_copies_and_retargets() {
         assert_eq!(runner.state().players[0].life, 17);
         assert_eq!(runner.state().players[1].life, 17);
     }
+}
+
+// CR 601.2g + CR 605.3a + CR 107.6 + CR 601.2h: a reserved Dalek may tap
+// for mana and untap again before it pays Replicate.
+#[test]
+fn exterminate_reserved_pili_pala_can_tap_and_untap_for_mana() {
+    for untap in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_artifact_from_oracle(P0, "Maskwood Nexus", MASKWOOD_NEXUS);
+        let architect = scenario
+            .add_creature_from_oracle(P0, "Grand Architect", 1, 3, GRAND_ARCHITECT)
+            .with_color(vec![ManaColor::Blue])
+            .id();
+        let pili = scenario
+            .add_creature_from_oracle(P0, "Pili-Pala", 1, 1, PILI_PALA)
+            .as_artifact_creature()
+            .id();
+        let victim = scenario.add_creature(P1, "Victim", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Exterminate!", false, EXTERMINATE)
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}"))
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            [
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Black,
+                ManaType::Black,
+            ]
+            .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+            .to_vec(),
+        );
+        let mut runner = scenario.build();
+        // Supply the creature-type catalog normally installed by deck loading.
+        runner.state_mut().all_creature_types = ["Dalek", "Scarecrow", "Vedalken", "Artificer"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let activate = |source_id, ability_index| GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        };
+        act(&mut runner, activate(architect, 0));
+        // Pili-Pala is the only artifact creature, so the activation chooses it.
+        finish(&mut runner);
+
+        cast(&mut runner, spell, CastPaymentMode::Manual);
+        offer(&runner, AdditionalCostOrigin::Replicate, 0);
+        decide(&mut runner, true);
+        assert!(tap_choices(&runner, 1).contains(&pili));
+        act(&mut runner, select(&[pili]));
+        offer(&runner, AdditionalCostOrigin::Replicate, 1);
+        decide(&mut runner, false);
+        act(&mut runner, target(victim));
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaPayment { .. }
+        ));
+        act(&mut runner, activate(architect, 1));
+        assert!(tap_choices(&runner, 1).contains(&pili));
+        let mut events = act(&mut runner, select(&[pili]));
+        assert!(runner.state().objects[&pili].tapped);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 5);
+        let restricted = |runner: &GameRunner| {
+            runner.state().players[0]
+                .mana_pool
+                .units()
+                .filter(|unit| !unit.restrictions.is_empty())
+                .count()
+        };
+        assert_eq!(restricted(&runner), 2);
+        if !untap {
+            assert!(matches!(
+                runner.act(GameAction::PassPriority),
+                Err(EngineError::ActionNotAllowed(message))
+                    if message.contains("can no longer pay it")
+            ));
+            assert!(records(&runner, spell).is_empty());
+            continue;
+        }
+
+        events.extend(act(&mut runner, activate(pili, 0)));
+        events.extend(act(
+            &mut runner,
+            GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Black),
+                count: 1,
+            },
+        ));
+        assert!(!runner.state().objects[&pili].tapped);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 4);
+        assert_eq!(restricted(&runner), 0);
+        events.extend(act(&mut runner, GameAction::PassPriority));
+        let pili_changes: Vec<_> = events
+            .iter()
+            .filter_map(|event| {
+                if matches!(event, GameEvent::PermanentTapped { object_id, .. } if *object_id == pili) {
+                    Some(true)
+                } else if matches!(event, GameEvent::PermanentUntapped { object_id, .. } if *object_id == pili) {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(pili_changes, [true, false, true]);
+        assert_eq!(records(&runner, spell), [(0, 1)]);
+        assert!(runner.state().objects[&pili].tapped);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+    }
+}
+
+#[test]
+fn exterminate_revalidates_a_stale_singleton_choice() {
+    let mut board = dalek_board(true, None);
+    let runner = &mut board.runner;
+    cast(runner, board.spell, CastPaymentMode::Auto);
+    offer(runner, AdditionalCostOrigin::Replicate, 0);
+    decide(runner, true);
+    assert!(tap_choices(runner, 1).contains(&board.mana_dalek));
+    let pending = runner
+        .state()
+        .waiting_for
+        .pending_cast_ref()
+        .unwrap()
+        .clone();
+    // Simulate the advertised choice going stale without changing the prompt.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&board.mana_dalek)
+        .unwrap()
+        .tapped = true;
+    reject_tap(runner, board.mana_dalek);
+    assert_eq!(
+        runner.state().waiting_for.pending_cast_ref(),
+        Some(&pending)
+    );
+    act(runner, select(&[board.sick_dalek]));
+    target_prompt(runner);
+    act(runner, target(board.original_target));
+    assert_eq!(records(runner, board.spell), [(0, 1)]);
 }
 
 #[test]
@@ -763,18 +899,23 @@ fn exterminate_restore_rejects_a_missing_previously_selected_dalek() {
         .is_err());
 }
 
-fn bolt_board(energy: u32) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+fn bolt_scenario(mana_cost: &str) -> (GameScenario, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Reiterating Bolt", false, REITERATING_BOLT)
-        .with_mana_cost(parse_mtgjson_mana_cost("{1}{R}"))
+        .with_mana_cost(parse_mtgjson_mana_cost(mana_cost))
         .id();
     let creature = scenario.add_creature(P1, "Resilient creature", 1, 10).id();
     let walker = scenario
         .add_planeswalker_from_oracle(P1, "Jace", "Jace", 6, "")
         .id();
     pool(&mut scenario, ManaType::Red, 2);
+    (scenario, spell, creature, walker)
+}
+
+fn bolt_board(energy: u32) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let (scenario, spell, creature, walker) = bolt_scenario("{1}{R}");
     let mut runner = scenario.build();
     runner.state_mut().players[0].energy = energy;
     (runner, spell, creature, walker)
@@ -805,10 +946,6 @@ fn reiterating_bolt_energy_budget_and_copy_count_survive_restore() {
         assert!(!engine::ai_support::legal_actions(runner.state())
             .iter()
             .any(|action| matches!(action, GameAction::DecideOptionalCost { index: 0 })));
-        assert!(runner
-            .act(GameAction::DecideOptionalCost { index: 0 })
-            .is_err());
-        target_prompt(&runner);
         assert_eq!(runner.state().players[0].energy, energy);
         let events = act(&mut runner, target(creature));
         assert!(events.iter().any(|event| matches!(event,
@@ -846,8 +983,142 @@ fn reiterating_bolt_energy_budget_and_copy_count_survive_restore() {
 }
 
 #[test]
+fn reiterating_bolt_rejects_acceptance_when_an_outstanding_offer_loses_its_budget() {
+    let (mut runner, spell, creature, _) = bolt_board(6);
+    cast(&mut runner, spell, CastPaymentMode::Auto);
+    offer(&runner, AdditionalCostOrigin::Replicate, 0);
+    decide(&mut runner, true);
+    offer(&runner, AdditionalCostOrigin::Replicate, 1);
+    let pending = runner
+        .state()
+        .waiting_for
+        .pending_cast_ref()
+        .unwrap()
+        .clone();
+    assert_eq!(pending.unpaid_replicate_energy, 3);
+    assert_eq!(pending.ability.context.additional_cost_payments.len(), 1);
+
+    // Simulate the live budget changing after the second offer was issued.
+    runner.state_mut().players[0].energy = 5;
+    assert!(matches!(
+        runner.act(GameAction::DecideOptionalCost { index: 0 }),
+        Err(EngineError::ActionNotAllowed(message)) if message == "This replicate cost cannot be paid"
+    ));
+    offer(&runner, AdditionalCostOrigin::Replicate, 1);
+    assert_eq!(
+        runner.state().waiting_for.pending_cast_ref(),
+        Some(&pending)
+    );
+    assert_eq!(runner.state().players[0].energy, 5);
+
+    decide(&mut runner, false);
+    target_prompt(&runner);
+    act(&mut runner, target(creature));
+    assert_eq!(records(&runner, spell), [(0, 1)]);
+    assert_eq!(runner.state().players[0].energy, 2);
+}
+
+// CR 601.2b + CR 107.14 + CR 118.3: the optional election must leave enough
+// energy for the mandatory part of the same spell's total cost.
+#[test]
+fn reiterating_bolt_composes_replicate_with_mandatory_energy() {
+    for (energy, repeats) in [(4, 0), (5, 1), (7, 1), (8, 2)] {
+        let (mut runner, spell, creature, _) = bolt_board(energy);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .additional_cost = Some(AdditionalCost::Required(AbilityCost::PayEnergy {
+            amount: QuantityExpr::Fixed { value: 2 },
+        }));
+        cast(&mut runner, spell, CastPaymentMode::Auto);
+        for paid in 0..repeats {
+            offer(&runner, AdditionalCostOrigin::Replicate, paid);
+            decide(&mut runner, true);
+        }
+        target_prompt(&runner);
+        act(&mut runner, target(creature));
+        assert_eq!(records(&runner, spell), vec![(0, 1); repeats as usize]);
+        assert_eq!(runner.state().players[0].energy, energy - 2 - 3 * repeats);
+    }
+}
+
+// CR 601.2h + CR 107.4f + CR 616.1: paying the Phyrexian shard pauses
+// the commit while the Replicate energy obligation is still outstanding.
+#[test]
+fn reiterating_bolt_settles_replicate_once_after_a_replacement_pause() {
+    let (mut scenario, spell, creature, _) = bolt_scenario("{1}{R}{B/P}");
+    scenario
+        .add_creature(P0, "Life-loss replacements", 0, 1)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                .quantity_modification(QuantityModification::DOUBLE)
+                .description("Double".to_string()),
+        )
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                .quantity_modification(QuantityModification::Plus { value: 1 })
+                .description("Plus one".to_string()),
+        );
+    let mut runner = scenario.build();
+    runner.state_mut().players[0].energy = 5;
+    cast(&mut runner, spell, CastPaymentMode::Manual);
+    offer(&runner, AdditionalCostOrigin::Replicate, 0);
+    decide(&mut runner, true);
+    target_prompt(&runner);
+    act(&mut runner, target(creature));
+    act(&mut runner, GameAction::PassPriority);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PhyrexianPayment { .. }
+    ));
+    let mut events = act(
+        &mut runner,
+        GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife],
+        },
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    let Some(DeferredLifeCostResume::Cast {
+        pending: Some(pending),
+        ..
+    }) = &runner.state().pending_deferred_life_cost_resume
+    else {
+        panic!("expected the cast to be parked on the replacement");
+    };
+    assert_eq!(pending.unpaid_replicate_energy, 3);
+    assert_eq!(runner.state().players[0].energy, 5);
+    events.extend(act(&mut runner, GameAction::ChooseReplacement { index: 0 }));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().players[0].energy, 2);
+    assert_eq!(runner.state().players[0].energy_paid_or_lost_this_turn, 3);
+    assert_eq!(records(&runner, spell), [(0, 1)]);
+    assert_eq!(runner.state().stack.len(), 2);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EnergyChanged {
+                    player: P0,
+                    delta: -3
+                }
+            ))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn reiterating_bolt_leaves_energy_for_the_mana_ability_that_funds_it() {
-    for (energy, pay) in [(3, false), (4, true)] {
+    for (energy, pay, cancel) in [(3, false, false), (4, true, false), (4, true, true)] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let spell = scenario
@@ -866,8 +1137,12 @@ fn reiterating_bolt_leaves_energy_for_the_mana_ability_that_funds_it() {
             .abilities
             .iter()
             .position(|ability| {
-                matches!(&ability.cost, Some(AbilityCost::Composite { costs })
-                if costs.iter().any(|cost| matches!(cost, AbilityCost::PayEnergy { .. })))
+                let Some(AbilityCost::Composite { costs }) = &ability.cost else {
+                    return false;
+                };
+                costs
+                    .iter()
+                    .any(|cost| matches!(cost, AbilityCost::PayEnergy { .. }))
             })
             .expect("only the energy ability can produce red");
         cast(&mut runner, spell, CastPaymentMode::Manual);
@@ -905,6 +1180,26 @@ fn reiterating_bolt_leaves_energy_for_the_mana_ability_that_funds_it() {
             },
         );
         assert_eq!(runner.state().players[0].energy, energy - 1);
+        assert!(runner.state().objects[&hub].tapped);
+        if cancel {
+            // CR 733.1: cancel the spell and keep the completed mana ability.
+            act(&mut runner, GameAction::CancelCast);
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+            assert!(runner.state().objects[&hub].tapped);
+            assert_eq!(runner.state().players[0].energy, energy - 1);
+            assert_eq!(runner.state().players[0].energy_paid_or_lost_this_turn, 1);
+            assert_eq!(runner.state().players[0].mana_pool.total(), 2);
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().pending_cast.is_none());
+            cast(&mut runner, spell, CastPaymentMode::Auto);
+            offer(&runner, AdditionalCostOrigin::Replicate, 0);
+            decide(&mut runner, true);
+            target_prompt(&runner);
+            act(&mut runner, target(creature));
+            assert_eq!(records(&runner, spell), [(0, 1)]);
+            assert_eq!(runner.state().players[0].energy, 0);
+            continue;
+        }
         act(&mut runner, GameAction::PassPriority);
         assert_eq!(runner.state().players[0].energy, if pay { 0 } else { 2 });
         assert_eq!(
@@ -1013,13 +1308,16 @@ fn psionic_ritual_retargets_to_a_second_graveyard_and_casts_only_one_copy() {
             let events = answer_ritual_copy_offer(&mut runner, dark_ritual, true);
             let casts: Vec<_> = events
                 .iter()
-                .filter_map(|event| match event {
-                    GameEvent::SpellCast {
+                .filter_map(|event| {
+                    let GameEvent::SpellCast {
                         object_id,
                         cast_mana_spent,
                         ..
-                    } => Some((*object_id, *cast_mana_spent)),
-                    _ => None,
+                    } = event
+                    else {
+                        return None;
+                    };
+                    Some((*object_id, *cast_mana_spent))
                 })
                 .collect();
             assert_eq!(casts.len(), 1);
