@@ -474,13 +474,13 @@ retires the candidate at once (a game reconnect can decode its bootstrap Full in
 draft reattach is answered by a plain frame first, `DraftMatchStart` or its own
 correlated result, so this server never puts a decode there). A draft
 reattach's interval is classified by the results that carry the reattach's own
-request id: its `DraftCommandAccepted` is positive, and its
+request id: its `Reconnected` acceptance is positive, and its
 `DraftCommandRefused` adopts the candidate instead of retiring it, because the
 server may refuse a reattach after it has already moved the seat to the
 candidate, so the refusal is dispatched there and rejects the reattach. A
 `DraftMatchStart` is positive too: it adopts the candidate but settles nothing,
 and the reattach still waits for its result. A `DraftStateUpdate`, or a result
-carrying another command's id, is neither: it is kept in order for the adopted
+carrying another command's id, or an accepted result of another kind, is neither: it is kept in order for the adopted
 socket. A
 candidate's terminal codec failure moves the sticky snapshot-only policy: each
 adapter applies it when it retires the candidate (`retireSocket`,
