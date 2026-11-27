@@ -203,16 +203,14 @@ fn opponent_attack_destination_resolves_each_firing_against_its_own_creatures() 
             .id();
         let mut runner = p1_priority(scenario);
         runner.advance_to_combat();
-        let mut attacks = vec![
+        let attacks = [
             (toward_p2, AttackTarget::Player(p2)),
+            (also_toward_p2, AttackTarget::Player(p2)),
             (toward_p2_walker, AttackTarget::Planeswalker(p2_walker)),
+            (toward_p3, AttackTarget::Player(p3)),
             (toward_p0, AttackTarget::Player(P0)),
             (toward_p0_walker, AttackTarget::Planeswalker(p0_walker)),
         ];
-        if name != "Gahiji, Honored One" {
-            attacks.push((also_toward_p2, AttackTarget::Player(p2)));
-            attacks.push((toward_p3, AttackTarget::Player(p3)));
-        }
         runner.declare_attackers(&attacks).expect("declare attacks");
         let expected_groups = match name {
             "Frontier Warmonger" => {
@@ -223,8 +221,14 @@ fn opponent_attack_destination_resolves_each_firing_against_its_own_creatures() 
                 ]
             }
             "Gahiji, Honored One" => {
-                // CR 508.3a + CR 603.2c: one occurrence per qualifying creature.
-                vec![vec![toward_p2], vec![toward_p2_walker]]
+                // CR 508.3a + CR 603.2c: one occurrence per qualifying creature,
+                // even when two of them attack the same destination.
+                vec![
+                    vec![toward_p2],
+                    vec![also_toward_p2],
+                    vec![toward_p2_walker],
+                    vec![toward_p3],
+                ]
             }
             "Frenzied Gorespawn" => vec![vec![toward_p2, also_toward_p2], vec![toward_p3]],
             _ => unreachable!(),
