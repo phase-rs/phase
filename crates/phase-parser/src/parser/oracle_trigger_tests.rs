@@ -566,6 +566,7 @@ fn count_gate_rebind_reaches_token_entry_counters_but_not_granted_statics() {
                 StaticDefinition::continuous().condition(granted_condition.clone())
             ],
             enter_with_counters: vec![(CounterType::Plus1Plus1, placeholder.clone())],
+            additional_members: Vec::new(),
         },
     );
     match execute.effect.as_ref() {
@@ -2928,14 +2929,10 @@ fn tolsimir_midnights_light_preserves_combat_source_and_event_attacker_axes() {
 
 #[test]
 fn intervening_if_source_attacked_or_blocked_this_turn_populates_condition() {
-    // CR 508.1 + CR 509.1 + CR 603.4: the "attacked or blocked" sibling of the
-    // attacked-only intervening-if. Gates on the source creature having attacked
-    // OR blocked this turn, composed from the existing, already-evaluated
-    // `FilterProp::AttackedOrBlockedThisTurn` via `SourceMatchesFilter` — no new
-    // `TriggerCondition` variant.
+    // SHAPE — CR 700.7: The filter describes the source's combat history.
     let expected = Some(TriggerCondition::SourceMatchesFilter {
         filter: TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
+            TypedFilter::default().properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
         ),
     });
 
@@ -2943,11 +2940,13 @@ fn intervening_if_source_attacked_or_blocked_this_turn_populates_condition() {
     // owner's library every end step, even on a turn it neither attacked nor
     // blocked.
     let hellion = parse_trigger_line(
-        "At the beginning of each end step, if Inferno Hellion attacked or blocked this turn, \
+        "At the beginning of each end step, if this creature attacked or blocked this turn, \
          its owner shuffles it into their library.",
         "Inferno Hellion",
     );
     assert_eq!(hellion.condition, expected);
+    assert_eq!(hellion.mode, TriggerMode::Phase);
+    assert_eq!(hellion.phase, Some(Phase::End));
     // The intervening-if clause is stripped, so the effect still parses.
     assert!(hellion.execute.is_some());
 }
@@ -49022,5 +49021,100 @@ fn opponent_attack_destination_keeps_the_union_in_one_trigger() {
             }) if !batched => {}
             other => panic!("unexpected application for {oracle}: {other:?}"),
         }
+    }
+}
+
+// SHAPE: a declaration in an earlier clause and a rider in the body both use
+// the ordinary chain parser.
+#[test]
+fn source_owner_shuffle_preserves_target_declarations_and_riders() {
+    let riftsweeper = parse_trigger_line(
+        "When this creature enters, choose target face-up exiled card. Its owner shuffles it into their library.",
+        "Riftsweeper",
+    );
+    let declaration = riftsweeper.execute.as_deref().expect("ETB body");
+    assert!(matches!(
+        declaration.effect.as_ref(),
+        Effect::TargetOnly { target } if target.extract_zones() == [Zone::Exile]
+    ));
+    assert_eq!(
+        declaration.target_choice_timing,
+        crate::types::ability::TargetChoiceTiming::Stack
+    );
+    let movement = declaration.sub_ability.as_deref().expect("selected move");
+    assert!(matches!(
+        movement.effect.as_ref(),
+        Effect::ChangeZoneAll {
+            target: TargetFilter::ParentTarget,
+            destination: Zone::Library,
+            ..
+        }
+    ));
+    let shuffle = movement
+        .sub_ability
+        .as_deref()
+        .expect("tracked-owner shuffle");
+    assert_eq!(
+        *shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    );
+    assert!(shuffle.player_scope.is_some());
+    assert_no_unimplemented(declaration);
+
+    // Synthetic continuation on Lembas's printed trigger. The extra
+    // sentence must reach chain parsing even with a proven source antecedent.
+    let with_rider = parse_trigger_line(
+        "When this artifact is put into a graveyard from the battlefield, its owner shuffles it into their library. Draw a card.",
+        "Lembas",
+    );
+    let body = with_rider
+        .execute
+        .as_deref()
+        .expect("extended departure body");
+    assert_no_unimplemented(body);
+    assert!(
+        std::iter::successors(Some(body), |node| node.sub_ability.as_deref())
+            .any(|node| matches!(node.effect.as_ref(), Effect::Draw { .. }))
+    );
+}
+
+// SHAPE: a printed self-cycle head pins the pronoun, independent of the
+// narrowly scoped source proof for this shuffle. No printed self-cycle
+// trigger has the synthetic shuffle body below. Yidaro, Wandering Monster
+// has the nearest printed instruction, shuffling itself from its graveyard.
+#[test]
+fn source_owner_shuffle_requires_the_proven_trigger_antecedent() {
+    let yidaro = parse_trigger_line(
+        "When you cycle this card, shuffle it into your library from your graveyard. If you've cycled a card named Yidaro, Wandering Monster four or more times this game, put it onto the battlefield from your graveyard instead. (Do this before you draw.)",
+        "Yidaro, Wandering Monster",
+    );
+    assert_eq!(yidaro.mode, TriggerMode::Cycled);
+    assert!(yidaro.execute.is_some());
+    let pin = trigger_condition_anaphors("When you cycle this card", &mut ParseContext::default());
+    assert_eq!(pin.object_pronoun_ref, Some(TargetFilter::SelfRef));
+
+    for text in [
+        "When you cycle this card, its owner shuffles it into their library.",
+        "At the beginning of each end step, its owner shuffles it into their library.",
+    ] {
+        let trigger = parse_trigger_line(text, "Synthetic");
+        let body = trigger.execute.as_deref().expect("generic body");
+        assert!(matches!(
+            body.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                ..
+            }
+        ));
+        let shuffle = body.sub_ability.as_deref().expect("generic shuffle");
+        assert!(matches!(shuffle.effect.as_ref(), Effect::Shuffle { .. }));
+        assert!(!matches!(
+            shuffle.effect.as_ref(),
+            Effect::Shuffle {
+                target: TargetFilter::Owner
+            }
+        ));
     }
 }

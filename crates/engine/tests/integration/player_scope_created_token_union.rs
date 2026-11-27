@@ -514,6 +514,7 @@ fn vanilla_token(name: &str, count: i32) -> Effect {
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 
@@ -1001,6 +1002,7 @@ fn untapped_token(name: &str) -> Effect {
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 

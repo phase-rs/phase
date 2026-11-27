@@ -176,7 +176,10 @@ fn effect_counts_artifacts(effect: &&Effect) -> bool {
         Effect::Draw { count, .. } => quantity_counts_artifacts(count),
         Effect::DealDamage { amount, .. } => quantity_counts_artifacts(amount),
         Effect::GainLife { amount, .. } => quantity_counts_artifacts(amount),
-        Effect::Token { count, .. } => quantity_counts_artifacts(count),
+        Effect::Token { .. } => effect
+            .token_creation_members()
+            .filter_map(Effect::count_expr)
+            .any(quantity_counts_artifacts),
         _ => false,
     }
 }
@@ -225,7 +228,7 @@ fn is_artifact_enabler(face: &CardFace) -> bool {
 /// Servo, Thopter, etc. all carry `"Artifact"` in `Effect::Token.types`.
 /// CR 111.1.
 fn effect_is_artifact_token(effect: &&Effect) -> bool {
-    matches!(effect, Effect::Token { types, .. } if types.iter().any(|t| t == "Artifact"))
+    effect.token_creation_members().any(|member| matches!(member, Effect::Token { types, .. } if types.iter().any(|t| t == "Artifact")))
 }
 
 // ─── Shared filter helpers (consumed by `ArtifactSynergyPolicy`) ──────────────

@@ -508,6 +508,7 @@ fn finish_simultaneous_token_clause(state: &mut GameState, events: &mut Vec<Game
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         },
         Vec::new(),
         source_id,
@@ -11202,6 +11203,7 @@ mod tests {
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
             )
         };
@@ -11369,6 +11371,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         );
         jinnie.replacement_definitions.push(
@@ -11491,6 +11494,7 @@ mod tests {
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
                 vec![],
                 source_id,
