@@ -18852,11 +18852,14 @@ fn when_you_do_mandatory_parent_did_nothing(
 ///   "cards exiled with this enchantment" readers (Court of Locthwain) would
 ///   otherwise narrow to the current resolution's exile. Deliberately excludes
 ///   `CastFromZone`, which can also cast during resolution.
-/// - CR 121.1: a draw puts a card into its owner's hand, which no head's verb
-///   names (the condition verb table `ThisWayVerb` has no draw verb, and no
-///   printed card has an "if … drawn this way" head). Lord Windgrace's "Discard
-///   a card, then draw a card. If a land card is discarded this way, draw an
-///   additional card."
+/// - CR 121.1: a draw (putting the top card of a library into a hand) is not
+///   the instruction a ledger head names. The printed draw-reading heads ("If
+///   you draw one or more cards this way" — Transcendent Archaic; Sarek,
+///   Federation Ambassador) read the draw's count (`PreviousEffectAmount`),
+///   not this ledger, and no printed card places a hand-arrival ledger head
+///   ("If you put a card into your hand this way" — Sidequest: Catch a Fish)
+///   directly after a draw. Lord Windgrace's "Discard a card, then draw a
+///   card. If a land card is discarded this way, draw an additional card."
 /// - The heads of one gated run all name the run's shared antecedent, so a
 ///   gated node — even one that moved an object or created a token (CR 111.1)
 ///   — is not the antecedent. Old Rutstein's "mill a card. If a land card is
