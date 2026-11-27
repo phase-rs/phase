@@ -442,26 +442,77 @@ export function clearActiveDraftPod(): void {
 
 // ── Active Guest Meta ─────────────────────────────────────────────────
 
-/**
- * The room code and display name are enough to reconnect, but never confer a
- * seat. The opaque draft token stays in IndexedDB under the expected host id.
- * Settles once a native seat's record this pointer replaces is dealt with.
- */
-export function saveActiveDraftGuest(
-  meta: Omit<ActiveDraftGuestMeta, "timestamp" | "capabilityId"> & { capabilityId: string },
-): Promise<void> {
+/** What a guest seat publishes as its pointer; the write stamps the time. */
+export type ActiveDraftGuestPublication = Omit<ActiveDraftGuestMeta, "timestamp" | "capabilityId"> & {
+  capabilityId: string;
+};
+
+/** The pointer a publication writes, stamped now; null for one that does not validate. */
+function activeDraftGuestPointer(meta: ActiveDraftGuestPublication): ActiveDraftGuestMeta | null {
   const roomCode = parseRoomCode(meta.roomCode);
   const displayName = meta.displayName.trim();
   if (!roomCode || !displayName || !meta.hostPeerId.trim() || !isNonEmptyString(meta.capabilityId)) {
-    return Promise.resolve();
+    return null;
   }
-  return replaceActiveDraftPointer(JSON.stringify({
+  return {
     roomCode,
     displayName,
     hostPeerId: meta.hostPeerId,
     timestamp: Date.now(),
     capabilityId: meta.capabilityId,
-  }));
+  };
+}
+
+/**
+ * The room code and display name are enough to reconnect, but never confer a
+ * seat. The opaque draft token stays in IndexedDB under the expected host id.
+ * Writes over whatever is stored. Settles once a native seat's record this
+ * pointer replaces is dealt with.
+ */
+export function saveActiveDraftGuest(meta: ActiveDraftGuestPublication): Promise<void> {
+  const written = activeDraftGuestPointer(meta);
+  return written === null ? Promise.resolve() : replaceActiveDraftPointer(JSON.stringify(written));
+}
+
+/**
+ * Writes a guest seat's pointer only while the stored pointer is still
+ * `standsOn`, read and written in one synchronous step, and returns the
+ * capture of what it wrote; null when it wrote nothing. The text it replaces
+ * is a guest pointer, which names no native record. Throws as the write does.
+ */
+export function republishActiveDraftGuest(
+  standsOn: ActiveDraftGuestMetaCapture,
+  meta: ActiveDraftGuestPublication,
+): ActiveDraftGuestMetaCapture | null {
+  const written = activeDraftGuestPointer(meta);
+  if (written === null) return null;
+  const settled = replaceActiveDraftPointerIfCurrent(JSON.stringify(written), (stored) => {
+    const current = storedGuestCapture(stored);
+    return current !== null && sameActiveDraftGuestCapture(current, standsOn);
+  });
+  return settled === null ? null : activeDraftGuestCapture(written);
+}
+
+/** Whether two guest captures are the same stored pointer, capability included. */
+export function sameActiveDraftGuestCapture(
+  left: ActiveDraftGuestMetaCapture,
+  right: ActiveDraftGuestMetaCapture,
+): boolean {
+  return left.roomCode === right.roomCode
+    && left.displayName === right.displayName
+    && left.hostPeerId === right.hostPeerId
+    && left.timestamp === right.timestamp
+    && left.capabilityId === right.capabilityId;
+}
+
+/** The guest capture of a stored pointer's text: null for none, unparseable or tagged text. */
+function storedGuestCapture(raw: string | null): ActiveDraftGuestMetaCapture | null {
+  if (raw === null) return null;
+  try {
+    return activeDraftGuestCapture(JSON.parse(raw));
+  } catch {
+    return null;
+  }
 }
 
 function activeDraftGuestCapture(value: unknown): ActiveDraftGuestMetaCapture | null {
@@ -506,13 +557,7 @@ export function clearActiveDraftGuestIfCurrent(capture: ActiveDraftGuestMetaCapt
     const raw = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
     if (!raw) return;
     const currentCapture = activeDraftGuestCapture(JSON.parse(raw));
-    if (
-      currentCapture?.roomCode === capture.roomCode
-      && currentCapture.displayName === capture.displayName
-      && currentCapture.hostPeerId === capture.hostPeerId
-      && currentCapture.timestamp === capture.timestamp
-      && currentCapture.capabilityId === capture.capabilityId
-    ) {
+    if (currentCapture !== null && sameActiveDraftGuestCapture(currentCapture, capture)) {
       clearActiveDraftGuest();
     }
   } catch {
@@ -1054,28 +1099,46 @@ async function removeUnnamedNativeDraftCapability(capabilityId: string): Promise
 }
 
 /**
- * Writes the tab's one recovery pointer, throwing as the write does. A native
- * pointer it replaces leaves its seat's private record with no route back, so
- * the returned promise settles once that record is removed or kept.
+ * The one write of the tab's recovery pointer, over `stored`, the text it
+ * replaces; throws as the write does. A native pointer it replaces leaves its
+ * seat's private record with no route back, so the returned promise settles
+ * once that record is removed or kept.
  */
-function replaceActiveDraftPointer(text: string): Promise<void> {
-  let replaced: string | null;
-  try {
-    replaced = nativePointerCapabilityId(localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY));
-  } catch {
-    replaced = null;
-  }
+function writeActiveDraftPointerOver(stored: string | null, text: string): Promise<void> {
+  const replaced = nativePointerCapabilityId(stored);
   localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, text);
   return replaced === null ? Promise.resolve() : removeUnnamedNativeDraftCapability(replaced);
 }
 
+/** Writes the tab's one recovery pointer over whatever is stored. */
+function replaceActiveDraftPointer(text: string): Promise<void> {
+  let stored: string | null;
+  try {
+    stored = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
+  } catch {
+    stored = null;
+  }
+  return writeActiveDraftPointerOver(stored, text);
+}
+
 /**
- * Writes a native pointer; one that does not validate is not written. Settles
- * once a native record the pointer replaces is dealt with.
+ * Writes the tab's one recovery pointer only when `isCurrent` holds for the
+ * stored text, reading, deciding and writing in one synchronous step; null
+ * when it wrote nothing. A read it cannot make throws, as the write does: it
+ * is no evidence that the stored pointer is current.
  */
-export function publishActiveNativeDraft(pointer: ActiveNativeDraftPointer): Promise<void> {
-  if (!isActiveNativeDraftPointer(pointer)) return Promise.resolve();
-  return replaceActiveDraftPointer(JSON.stringify({
+function replaceActiveDraftPointerIfCurrent(
+  text: string,
+  isCurrent: (stored: string | null) => boolean,
+): Promise<void> | null {
+  const stored = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
+  if (!isCurrent(stored)) return null;
+  return writeActiveDraftPointerOver(stored, text);
+}
+
+/** A native pointer's stored text, its fields in their stored order. */
+function nativePointerText(pointer: ActiveNativeDraftPointer): string {
+  return JSON.stringify({
     transport: "native",
     capabilityId: pointer.capabilityId,
     endpoint: pointer.endpoint,
@@ -1083,7 +1146,16 @@ export function publishActiveNativeDraft(pointer: ActiveNativeDraftPointer): Pro
     seatIndex: pointer.seatIndex,
     participant: pointer.participant,
     timestamp: pointer.timestamp,
-  }));
+  });
+}
+
+/**
+ * Writes a native pointer over whatever is stored; one that does not validate
+ * is not written. Settles once a native record the pointer replaces is dealt with.
+ */
+export function publishActiveNativeDraft(pointer: ActiveNativeDraftPointer): Promise<void> {
+  if (!isActiveNativeDraftPointer(pointer)) return Promise.resolve();
+  return replaceActiveDraftPointer(nativePointerText(pointer));
 }
 
 /**
@@ -1149,6 +1221,34 @@ export async function loadNativeDraftCapability(
     return { type: "mismatch" };
   }
   return { type: "present", record: value };
+}
+
+/**
+ * What a native republication did. Either way `settled` settles once the
+ * private records it may remove are dealt with.
+ */
+export type NativeDraftRepublication =
+  | { readonly status: "published"; readonly settled: Promise<void> }
+  | { readonly status: "superseded"; readonly settled: Promise<void> };
+
+/**
+ * Writes `pointer` only while the stored text is still `capture`, read and
+ * written in one synchronous step. Otherwise it writes and removes nothing of
+ * the stored pointer's, and removes this capability's record only once no
+ * pointer names it. Throws on a pointer that does not validate or names
+ * another capability than the capture, and as the read or the write does.
+ */
+export function republishActiveNativeDraft(
+  capture: NativeDraftPointerCapture,
+  pointer: ActiveNativeDraftPointer,
+): NativeDraftRepublication {
+  if (!isActiveNativeDraftPointer(pointer) || nativePointerCapabilityId(capture.raw) !== pointer.capabilityId) {
+    throw new Error("Invalid native draft recovery pointer");
+  }
+  const settled = replaceActiveDraftPointerIfCurrent(nativePointerText(pointer), (stored) => stored === capture.raw);
+  return settled === null
+    ? { status: "superseded", settled: removeUnnamedNativeDraftCapability(pointer.capabilityId) }
+    : { status: "published", settled };
 }
 
 /**

@@ -18,6 +18,8 @@ import {
   loadDraftGuestSession,
   loadNativeDraftCapability,
   publishActiveNativeDraft,
+  republishActiveDraftGuest,
+  republishActiveNativeDraft,
   saveActiveDraftGuest,
   saveDraftDeckSubmission,
   saveDraftGuestSession,
@@ -757,6 +759,105 @@ describe("guest recovery records", () => {
       publishActiveNativeDraft(await saveNativeDraftCapability({ ...capC, playerToken: "tok-X" }));
       await clearNativeDraftCapability(hold);
       await expect(storedNative("cap-C")).resolves.toMatchObject({ playerToken: "tok-X" });
+      expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+    });
+
+    it("a native republication writes only over the pointer it captured", async () => {
+      /** Stores cap-C's record and pointer, and returns the pointer's capture. */
+      const storeAndCapture = async () => {
+        const pointer = await saveNativeDraftCapability(capC);
+        publishActiveNativeDraft(pointer);
+        const active = inspectActiveNativeDraft();
+        if (active.type !== "present") throw new Error("expected a native pointer");
+        return { pointer, capture: active.capture };
+      };
+
+      // Over its own capture: written in the call's own step, record kept.
+      {
+        const { pointer, capture } = await storeAndCapture();
+        const refreshed = nativePointer({ timestamp: pointer.timestamp + 1_000 });
+        const result = republishActiveNativeDraft(capture, refreshed);
+        expect(result.status).toBe("published");
+        expect(JSON.parse(localStorage.getItem(POINTER_KEY)!)).toEqual(refreshed);
+        await result.settled;
+        await expect(storedNative("cap-C")).resolves.toMatchObject({ capabilityId: "cap-C" });
+      }
+
+      // Over another writer's pointer: that pointer and its record stay, and
+      // this capability's record goes once no pointer names it.
+      {
+        localStorage.clear();
+        await clear(getDraftStore());
+        const { pointer, capture } = await storeAndCapture();
+        await saveNativeDraftCapability({ ...capC, capabilityId: "cap-D", playerToken: "tok-D" });
+        const recordD = await storedNative("cap-D");
+        const otherText = JSON.stringify(nativePointer({ capabilityId: "cap-D" }));
+        localStorage.setItem(POINTER_KEY, otherText);
+        const result = republishActiveNativeDraft(capture, nativePointer({ timestamp: pointer.timestamp + 1_000 }));
+        expect(result.status).toBe("superseded");
+        expect(localStorage.getItem(POINTER_KEY)).toBe(otherText);
+        await result.settled;
+        await expect(storedNative("cap-C")).resolves.toBeUndefined();
+        await expect(storedNative("cap-D")).resolves.toEqual(recordD);
+        expect(localStorage.getItem(POINTER_KEY)).toBe(otherText);
+      }
+
+      // Over the same capability's newer pointer: that pointer stays, and so does the record it names.
+      {
+        localStorage.clear();
+        await clear(getDraftStore());
+        const { pointer, capture } = await storeAndCapture();
+        const newerText = JSON.stringify(nativePointer({ timestamp: pointer.timestamp + 500 }));
+        localStorage.setItem(POINTER_KEY, newerText);
+        const result = republishActiveNativeDraft(capture, nativePointer({ timestamp: pointer.timestamp + 1_000 }));
+        expect(result.status).toBe("superseded");
+        await result.settled;
+        expect(localStorage.getItem(POINTER_KEY)).toBe(newerText);
+        await expect(storedNative("cap-C")).resolves.toMatchObject({ capabilityId: "cap-C" });
+      }
+
+      // Hostile: a pointer naming another capability than the capture, or one
+      // that does not validate, throws and writes nothing.
+      {
+        localStorage.clear();
+        await clear(getDraftStore());
+        const { capture } = await storeAndCapture();
+        expect(() => republishActiveNativeDraft(capture, nativePointer({ capabilityId: "cap-D" }))).toThrow();
+        expect(() => republishActiveNativeDraft(capture, nativePointer({ endpoint: "ws://h:9374" }))).toThrow();
+        expect(localStorage.getItem(POINTER_KEY)).toBe(capture.raw);
+      }
+    });
+
+    it("a guest republication writes only over the pointer it stands on", async () => {
+      const publication = { roomCode: "ABCDE", displayName: "Al", hostPeerId: HOST1, capabilityId: "cap-A" };
+      const timestamp = Date.now() - 1_000;
+      const standsOn = { roomCode: "ABCDE", displayName: "Al", hostPeerId: HOST1, timestamp, capabilityId: "cap-A" };
+
+      // Over an equal pointer: written, with a new timestamp, and its capture returned.
+      setRawPointer({ timestamp, capabilityId: "cap-A" });
+      const written = republishActiveDraftGuest(standsOn, publication);
+      expect(written).toMatchObject({ roomCode: "ABCDE", hostPeerId: HOST1, capabilityId: "cap-A" });
+      expect(written!.timestamp).toBeGreaterThan(timestamp);
+      const active = inspectActiveDraftGuest();
+      expect(active.type === "present" && active.capture).toEqual(written);
+
+      // Over a pointer differing only in its capability: refused, unchanged.
+      setRawPointer({ timestamp, capabilityId: "cap-B" });
+      const otherGuest = localStorage.getItem(POINTER_KEY);
+      expect(republishActiveDraftGuest(standsOn, publication)).toBeNull();
+      expect(localStorage.getItem(POINTER_KEY)).toBe(otherGuest);
+
+      // Over a native pointer: refused, and the pointer and its record stay.
+      publishActiveNativeDraft(await saveNativeDraftCapability(capC));
+      const nativeText = localStorage.getItem(POINTER_KEY);
+      const nativeRecord = await storedNative("cap-C");
+      expect(republishActiveDraftGuest(standsOn, publication)).toBeNull();
+      expect(localStorage.getItem(POINTER_KEY)).toBe(nativeText);
+      await expect(storedNative("cap-C")).resolves.toEqual(nativeRecord);
+
+      // Over no stored pointer: refused, nothing written.
+      localStorage.removeItem(POINTER_KEY);
+      expect(republishActiveDraftGuest(standsOn, publication)).toBeNull();
       expect(localStorage.getItem(POINTER_KEY)).toBeNull();
     });
   });

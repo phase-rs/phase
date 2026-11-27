@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * is doubled at the module boundary; every answer it gives is stated on
  * `NativeDouble` below. The P2P guest is the real `DraftPodGuestAdapter` over
  * a doubled `P2PDraftGuest` and room join, and a host is a doubled
- * `DraftPodHostAdapter`. Storage is real on fake-indexeddb; four native
+ * `DraftPodHostAdapter`. Storage is real on fake-indexeddb; five native
  * storage functions are wrapped only to log their order and to hold or fail
  * one call.
  */
@@ -168,6 +168,31 @@ const storage = vi.hoisted(() => ({
 
 vi.mock("../../services/draftPersistence", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../services/draftPersistence")>();
+  /**
+   * Takes the one-shot removal gate. Opened first, its transaction keeps
+   * itself alive with reads until the gate settles; the removal's read-write
+   * transaction runs only after it.
+   */
+  const holdNextRemoval = (): boolean => {
+    const gate = storage.removalGate;
+    storage.removalGate = null;
+    if (!gate) return false;
+    let open = true;
+    void gate.then(() => {
+      open = false;
+    });
+    void actual.getDraftStore()("readwrite", (objects) => new Promise<void>((resolve) => {
+      const keepAlive = () => {
+        if (!open) {
+          resolve();
+          return;
+        }
+        objects.get("keep-alive").onsuccess = keepAlive;
+      };
+      keepAlive();
+    }));
+    return true;
+  };
   return {
     ...actual,
     saveNativeDraftCapability: async (...args: Parameters<typeof actual.saveNativeDraftCapability>) => {
@@ -186,27 +211,22 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
     },
     publishActiveNativeDraft: (...args: Parameters<typeof actual.publishActiveNativeDraft>) => {
       storage.log.push(`pointerWrite:${args[0].capabilityId}`);
-      const gate = storage.removalGate;
-      storage.removalGate = null;
-      if (!gate) return actual.publishActiveNativeDraft(...args);
-      let open = true;
-      void gate.then(() => {
-        open = false;
-      });
-      // Opened first, this transaction keeps itself alive with reads until the
-      // gate settles; the removal's read-write transaction runs only after it.
-      void actual.getDraftStore()("readwrite", (objects) => new Promise<void>((resolve) => {
-        const keepAlive = () => {
-          if (!open) {
-            resolve();
-            return;
-          }
-          objects.get("keep-alive").onsuccess = keepAlive;
-        };
-        keepAlive();
-      }));
+      if (!holdNextRemoval()) return actual.publishActiveNativeDraft(...args);
       storage.heldRemoval = actual.publishActiveNativeDraft(...args);
       return storage.heldRemoval;
+    },
+    republishActiveNativeDraft: (...args: Parameters<typeof actual.republishActiveNativeDraft>) => {
+      const held = holdNextRemoval();
+      let result: ReturnType<typeof actual.republishActiveNativeDraft>;
+      try {
+        result = actual.republishActiveNativeDraft(...args);
+      } catch (error) {
+        storage.log.push("republish:threw");
+        throw error;
+      }
+      storage.log.push(`republish:${result.status}:${args[1].capabilityId}`);
+      if (held) storage.heldRemoval = result.settled;
+      return result;
     },
     clearNativeDraftCapability: async (...args: Parameters<typeof actual.clearNativeDraftCapability>) => {
       storage.log.push("clear:enter");
@@ -1312,6 +1332,204 @@ describe("the native draft owner", () => {
         expect(localStorage.getItem(POINTER_KEY)).toBe(pointerText);
         return;
       }
+    }
+  });
+
+  it.each(["another seat's pointer", "no pointer", "the same seat's newer pointer"] as const)(
+    "a native resume leaves another writer's pointer as it is: %s",
+    async (leg) => {
+      await joinP2PGuest();
+      const { capabilityId, pointerText } = await storeNativePair();
+      const before = snapshot();
+      const write = held();
+      storage.saveGate = write.promise;
+      const resuming = store().resumeNativeDraft();
+      // Reach: the refresh write was entered after the reconnect.
+      await vi.waitFor(() => expect(storage.log).toContain("privateSave:enter"));
+      expect(native.log).toEqual(["reconnect:resolved:0"]);
+
+      // Another tab's publication: its record, its pointer, and the removal of
+      // the record the pointer it replaced named.
+      const otherRecord = {
+        capabilityId: "cap-B",
+        endpoint: ENDPOINT,
+        draftCode: "NAT002",
+        playerToken: "tok-B",
+        seatIndex: 1,
+        participant: "guest",
+        timestamp: Date.now(),
+      };
+      let otherText: string | null;
+      switch (leg) {
+        case "another seat's pointer":
+          await idbSet(nativeKey("cap-B"), otherRecord, getDraftStore());
+          otherText = JSON.stringify({
+            transport: "native",
+            capabilityId: "cap-B",
+            endpoint: ENDPOINT,
+            draftCode: "NAT002",
+            seatIndex: 1,
+            participant: "guest",
+            timestamp: Date.now(),
+          });
+          localStorage.setItem(POINTER_KEY, otherText);
+          await idbDel(nativeKey(capabilityId), getDraftStore());
+          break;
+        case "no pointer":
+          otherText = null;
+          localStorage.removeItem(POINTER_KEY);
+          await idbDel(nativeKey(capabilityId), getDraftStore());
+          break;
+        case "the same seat's newer pointer": {
+          const pointer = JSON.parse(pointerText) as Record<string, unknown>;
+          otherText = JSON.stringify({ ...pointer, timestamp: (pointer.timestamp as number) + 1_000 });
+          localStorage.setItem(POINTER_KEY, otherText);
+          break;
+        }
+      }
+      write.resolve();
+
+      await expect(resuming).resolves.toEqual({ status: "superseded" });
+      expect(localStorage.getItem(POINTER_KEY)).toBe(otherText);
+      if (leg === "another seat's pointer") {
+        await expect(storedRecord("cap-B")).resolves.toEqual(otherRecord);
+      }
+      if (leg === "the same seat's newer pointer") {
+        await expect(storedRecord(capabilityId)).resolves.toMatchObject({ capabilityId });
+      } else {
+        await expect(storedRecord(capabilityId)).resolves.toBeUndefined();
+      }
+      expect(native.instances).toHaveLength(1);
+      expect(native.instances[0]!.disposeCount).toBe(1);
+      expect(snapshot()).toStrictEqual(before);
+      // Reach: the publication compared the stored text and refused.
+      expect(storage.log).toContain(`republish:superseded:${capabilityId}`);
+
+      // The guest is still the installed owner: a leave reaches it, and only an
+      // installed owner is within a leave's reach.
+      expect(guests.instances[0]!.dispose).toHaveBeenCalledTimes(0);
+      await store().leave(true);
+      expect(guests.instances[0]!.dispose).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["beside a P2P guest", "beside a native seat that lost its connection"] as const)(
+    "a native resume whose pointer write fails ends as failed and retires nothing: %s",
+    async (leg) => {
+      let predecessorDisposals: () => number;
+      if (leg === "beside a P2P guest") {
+        await joinP2PGuest();
+        await storeNativePair();
+        predecessorDisposals = () => guests.instances[0]!.dispose.mock.calls.length;
+      } else {
+        await joinNative();
+        native.instances[0]!.emit({ type: "disconnected" });
+        // Reach: the held seat is not live.
+        expect(store().phase).toBe("error");
+        predecessorDisposals = () => native.instances[0]!.disposeCount;
+      }
+      const pointerText = localStorage.getItem(POINTER_KEY);
+      const before = snapshot();
+      native.state.log.length = 0;
+      storage.log.length = 0;
+      const setItem = localStorage.setItem.bind(localStorage);
+      const pointerWrites: string[] = [];
+      const spy = vi.spyOn(localStorage, "setItem").mockImplementation((key: string, value: string) => {
+        if (key === POINTER_KEY) {
+          pointerWrites.push(native.state.log.join(","));
+          throw new DOMException("Quota exceeded", "QuotaExceededError");
+        }
+        setItem(key, value);
+      });
+      let outcome: Promise<unknown>;
+      try {
+        outcome = store().resumeNativeDraft();
+        await expect(outcome).resolves.toEqual({ status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR });
+      } finally {
+        spy.mockRestore();
+      }
+      const resumeAdapter = native.instances.at(-1)!;
+      // Reach: the write was refused once, after the reconnect resolved.
+      expect(pointerWrites).toEqual([`reconnect:resolved:${resumeAdapter.index}`]);
+      expect(storage.log).toContain("republish:threw");
+      expect(predecessorDisposals()).toBe(0);
+      expect(resumeAdapter.disposeCount).toBe(1);
+      expect(snapshot()).toStrictEqual(before);
+      expect(localStorage.getItem(POINTER_KEY)).toBe(pointerText);
+
+      // The predecessor is still the installed owner: a leave reaches it.
+      await store().leave(true);
+      expect(predecessorDisposals()).toBe(1);
+    },
+  );
+
+  it("a native resume starts its predecessor's teardown before it installs", async () => {
+    await joinP2PGuest();
+    await storeNativePair();
+    const failure = new Error("subscriber failed");
+    let thrown = 0;
+    const unsubscribe = useMultiplayerDraftStore.subscribe((state, previous) => {
+      if (state.transport === "native" && previous.transport !== "native" && thrown === 0) {
+        thrown += 1;
+        throw failure;
+      }
+    });
+    try {
+      await expect(store().resumeNativeDraft()).rejects.toBe(failure);
+    } finally {
+      unsubscribe();
+    }
+    // Reach: the install published its native session, and the subscriber threw there.
+    expect(thrown).toBe(1);
+    await flush();
+    expect(guests.instances[0]!.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["create", "join"] as const)("a native %s whose pointer write fails reports the save error", async (kind) => {
+    const setItem = localStorage.setItem.bind(localStorage);
+    const spy = vi.spyOn(localStorage, "setItem").mockImplementation((key: string, value: string) => {
+      if (key === POINTER_KEY) throw new DOMException("Quota exceeded", "QuotaExceededError");
+      setItem(key, value);
+    });
+    let outcome: unknown;
+    try {
+      outcome = kind === "create"
+        ? await store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings })
+        : await store().joinNativeDraft({ endpoint: ENDPOINT, draftCode: "NAT001", displayName: "Bo" });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(outcome).toEqual({ status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR });
+    // Reach: the record committed and the publication was reached.
+    const capabilityId = storage.lastSavedId!;
+    expect(storage.log).toEqual(expect.arrayContaining(["privateSave:committed", `pointerWrite:${capabilityId}`]));
+    expect(store()).toMatchObject({ role: null, transport: null, error: DRAFT_RECOVERY_SAVE_ERROR });
+    expect(native.instances).toHaveLength(1);
+    expect(native.instances[0]!.disposeCount).toBe(1);
+    await expect(storedRecord(capabilityId)).resolves.toBeUndefined();
+    expect(storedPointer()).toBeNull();
+  });
+
+  it("a reset while a native resume's handoff settles reports superseded", async () => {
+    await joinP2PGuest();
+    const { capabilityId } = await storeNativePair();
+    const removal = held();
+    storage.removalGate = removal.promise;
+    try {
+      const resuming = store().resumeNativeDraft();
+      await vi.waitFor(() => expect(storage.heldRemoval).not.toBeNull());
+      await flush();
+      // Reach: the handoff ran, and the removal its publication returned is still pending.
+      expect(store().transport).toBe("native");
+      expect(storedPointer()?.capabilityId).toBe(capabilityId);
+
+      store().reset();
+      removal.resolve();
+      await expect(resuming).resolves.toEqual({ status: "superseded" });
+      expect(store()).toMatchObject({ role: null, transport: null, phase: "idle" });
+      expect(storage.log).toContain(`republish:published:${capabilityId}`);
+    } finally {
+      removal.resolve();
     }
   });
 });

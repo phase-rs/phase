@@ -75,7 +75,7 @@ import {
   type DraftPodGuestEvent,
   type DraftPodGuestStatus,
 } from "../adapter/draftPodGuestAdapter";
-import type { DraftGuestRecoveryFailure } from "../adapter/p2p-draft-guest";
+import type { DraftGuestRecoveryFailure, DraftGuestRecoveryPointer } from "../adapter/p2p-draft-guest";
 import {
   ServerDraftAdapter,
   type CreateDraftSettings,
@@ -97,15 +97,20 @@ import {
   loadDraftSettlementOutbox,
   loadNativeDraftCapability,
   publishActiveNativeDraft,
+  republishActiveDraftGuest,
+  republishActiveNativeDraft,
+  sameActiveDraftGuestCapture,
   saveActiveDraftGuest,
   saveActiveDraftPod,
   saveDraftIntergameCommands,
   saveDraftSettlementOutbox,
   saveNativeDraftCapability,
+  type ActiveDraftGuestMetaCapture,
   type ActiveDraftPodMeta,
   type ActiveDraftPodPhase,
   type ActiveNativeDraftPointer,
   type NativeDraftCapabilityHold,
+  type NativeDraftRepublication,
 } from "../services/draftPersistence";
 import { getEffectiveOffline } from "./connectivityStore";
 import { assertNever } from "../utils/assertNever";
@@ -464,7 +469,11 @@ interface MultiplayerDraftActions {
   /** Guest: join an existing draft pod by room code. */
   joinDraft: (
     config: DraftPodGuestConfig,
-    options?: { failureReport?: DraftJoinFailureReport },
+    options?: {
+      failureReport?: DraftJoinFailureReport;
+      /** The stored pointer a reconnect's seat stands on; null for a new seat. */
+      standsOn?: ActiveDraftGuestMetaCapture | null;
+    },
   ) => Promise<DraftSessionOpenOutcome>;
   /** Reconnect exclusively through the persisted capability, never `draft_join`. */
   resumeDraft: (options?: { routeToken?: number; signal?: AbortSignal }) => Promise<GuestDraftResumeOutcome>;
@@ -618,7 +627,17 @@ type InstalledDraftOwner =
     readonly persistenceId: string | null;
     readonly lifetime: OwnerLifetime;
   }
-  | { readonly role: "guest"; readonly adapter: DraftPodGuestAdapter; readonly lifetime: OwnerLifetime }
+  | {
+    readonly role: "guest";
+    readonly adapter: DraftPodGuestAdapter;
+    readonly lifetime: OwnerLifetime;
+    /**
+     * The stored pointer this seat's recovery stands on: its resume's captured
+     * locator, then each pointer it publishes; null for a new seat until its
+     * welcome's pointer is stored.
+     */
+    standsOn: ActiveDraftGuestMetaCapture | null;
+  }
   | {
     readonly role: "native";
     readonly adapter: ServerDraftAdapter;
@@ -628,6 +647,8 @@ type InstalledDraftOwner =
     /** Set once, by the installed owner, when its private record commits. */
     capability: NativeDraftCapabilityHold | null;
   };
+
+type InstalledGuestOwner = Extract<InstalledDraftOwner, { readonly role: "guest" }>;
 
 /** Written non-null only by `installDraftOwner`, and null only by `detachInstalledDraftOwner`. */
 let installedDraftOwner: InstalledDraftOwner | null = null;
@@ -2004,7 +2025,11 @@ function replaceDraftSession(set: SetFn, next: Partial<MultiplayerDraftState>): 
 /** The adapter a host start, a recovery's commit, a guest join or a native start or handoff installs. */
 type DraftOwnerInstall =
   | { readonly role: "host"; readonly adapter: DraftPodHostAdapter; readonly persistenceId: string | null }
-  | { readonly role: "guest"; readonly adapter: DraftPodGuestAdapter }
+  | {
+    readonly role: "guest";
+    readonly adapter: DraftPodGuestAdapter;
+    readonly standsOn: ActiveDraftGuestMetaCapture | null;
+  }
   | {
     readonly role: "native";
     readonly adapter: ServerDraftAdapter;
@@ -2055,12 +2080,14 @@ function installDraftOwner(
       break;
     }
     case "guest": {
+      // The listener runs only on a later event, after `guest` is initialized.
       const unsubscribe = install.adapter.onEvent((event) => {
-        if (generation === lifecycleGeneration && installedDraftOwner === owner) {
-          handleGuestEvent(event, set);
+        if (generation === lifecycleGeneration && installedDraftOwner === guest) {
+          handleGuestEvent(event, set, guest);
         }
       });
-      owner = { ...install, lifetime: { controller, generation, unsubscribe, route } };
+      const guest: InstalledGuestOwner = { ...install, lifetime: { controller, generation, unsubscribe, route } };
+      owner = guest;
       break;
     }
     case "native": {
@@ -2226,7 +2253,13 @@ async function openNativeOwner(
     }
     if (owner.role === "native") owner.capability = hold;
     // Publishing over a predecessor's native pointer removes the record it named.
-    await publishActiveNativeDraft(pointer);
+    let published: Promise<void>;
+    try {
+      published = publishActiveNativeDraft(pointer);
+    } catch {
+      throw new Error(DRAFT_RECOVERY_SAVE_ERROR);
+    }
+    await published;
     // A successor may have started while that removal was pending.
     if (!isCurrentOwner()) return { status: "superseded" };
     return { status: "opened" };
@@ -2630,7 +2663,7 @@ export const useMultiplayerDraftStore = create<
     return { status: "failed", error: get().error };
   },
 
-  joinDraft: async (config, { failureReport = "store" } = {}) => {
+  joinDraft: async (config, { failureReport = "store", standsOn = null } = {}) => {
     // A call already cancelled retires and writes nothing.
     if (config.signal?.aborted) return { status: "superseded" };
     if (getEffectiveOffline()) {
@@ -2682,7 +2715,7 @@ export const useMultiplayerDraftStore = create<
     }
 
     const adapter = new DraftPodGuestAdapter();
-    const owner = installDraftOwner(set, { role: "guest", adapter }, config.signal);
+    const owner = installDraftOwner(set, { role: "guest", adapter, standsOn }, config.signal);
     const { controller, generation } = owner.lifetime;
     const isCurrentOwner = () => installedDraftOwner === owner
       && epoch === draftAdapterEpoch
@@ -2748,11 +2781,7 @@ export const useMultiplayerDraftStore = create<
       const startingEpoch = draftAdapterEpoch;
       const locatorIsCurrent = () => {
         const current = inspectActiveDraftGuest();
-        return current.type === "present"
-          && current.capture.roomCode === capture.roomCode
-          && current.capture.displayName === capture.displayName
-          && current.capture.hostPeerId === capture.hostPeerId
-          && current.capture.timestamp === capture.timestamp;
+        return current.type === "present" && sameActiveDraftGuestCapture(current.capture, capture);
       };
       // Provisional while it reads its seat: a leave or a later attempt
       // supersedes it. It supersedes nobody itself; its join does, on entry.
@@ -2795,7 +2824,7 @@ export const useMultiplayerDraftStore = create<
           hostPeerId: locator.hostPeerId,
           draftToken: session.draftToken,
           signal: options.signal,
-        });
+        }, { standsOn: capture });
         if (!isCurrentResume() || joined.status === "superseded") return "superseded";
         if (joined.status === "opened") return "resumed";
         if (getEffectiveOffline()) {
@@ -2946,15 +2975,33 @@ export const useMultiplayerDraftStore = create<
         return { status: "offline" };
       }
 
-      // The handoff: retire the installed owner, install this one, deliver
-      // what it buffered, publish its pointer. It contains no await; after it,
-      // the resume awaits only the removal of the record the replaced pointer named.
+      // The pointer goes first, and only over the pointer this resume read: a
+      // pointer another writer stored meanwhile, and its record, stay, and so
+      // does the installed owner. The handoff follows in the same synchronous
+      // step: retire the installed owner and start its teardown, install this
+      // one, deliver what it buffered. Neither contains an await; after them,
+      // the resume awaits only the removal the publication returned.
+      let published: NativeDraftRepublication;
+      try {
+        published = republishActiveNativeDraft(capture, refreshed);
+      } catch {
+        abandon();
+        return { status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR };
+      }
+      if (published.status === "superseded") {
+        abandon();
+        await published.settled;
+        return { status: "superseded" };
+      }
       stopAbandonListeners();
       stopBuffering();
       settleProvisional(provisional);
-      advanceDraftAdapterEpoch("replaced");
+      const epoch = advanceDraftAdapterEpoch("replaced");
       const previous = detachInstalledDraftOwner();
-      installDraftOwner(set, {
+      const previousTeardown = disposeDetachedOwner(previous, true);
+      retainDraftSessionTeardown(detachedPersistenceId(previous), previousTeardown);
+      void previousTeardown;
+      const owner = installDraftOwner(set, {
         role: "native",
         adapter,
         participant: record.participant,
@@ -2967,12 +3014,15 @@ export const useMultiplayerDraftStore = create<
       }, signal);
       set({ seatIndex: record.seatIndex });
       for (const event of buffered) handleNativeEvent(event, set);
-      // Publishing over a predecessor's native pointer removes the record it named.
-      const replaced = publishActiveNativeDraft(refreshed);
-      const previousTeardown = disposeDetachedOwner(previous, true);
-      retainDraftSessionTeardown(detachedPersistenceId(previous), previousTeardown);
-      void previousTeardown;
-      await replaced;
+      await published.settled;
+      // A successor, a leave or a reset owns the session published now.
+      if (
+        installedDraftOwner !== owner
+        || epoch !== draftAdapterEpoch
+        || owner.lifetime.generation !== lifecycleGeneration
+      ) {
+        return { status: "superseded" };
+      }
       return { status: "resumed" };
     } finally {
       settleProvisional(provisional);
@@ -4578,13 +4628,37 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
   }
 }
 
-function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
+/**
+ * Publishes a guest seat's committed pointer. A new seat's welcome is an
+ * explicit open and writes over whatever is stored; what it wrote becomes the
+ * seat's standing pointer only when it is the pointer actually stored. Every
+ * later commit writes only over the pointer the seat stands on.
+ */
+function publishGuestRecoveryPointer(owner: InstalledGuestOwner, pointer: DraftGuestRecoveryPointer): void {
+  if (owner.standsOn === null) {
+    // A native pointer it replaces takes its record with it.
+    void saveActiveDraftGuest(pointer);
+    const stored = inspectActiveDraftGuest();
+    if (
+      stored.type === "present"
+      && stored.capture.hostPeerId === pointer.hostPeerId
+      && stored.capture.capabilityId === pointer.capabilityId
+    ) {
+      owner.standsOn = stored.capture;
+    }
+    return;
+  }
+  const written = republishActiveDraftGuest(owner.standsOn, pointer);
+  if (written !== null) owner.standsOn = written;
+}
+
+function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn, owner: InstalledGuestOwner): void {
   switch (event.type) {
     case "recoveryCommitted":
       // This event reaches only the installed owner, so a superseded or ended
       // owner publishes nothing, and the write runs in the commit's own
-      // continuation. A native pointer it replaces takes its record with it.
-      void saveActiveDraftGuest(event.pointer);
+      // continuation.
+      publishGuestRecoveryPointer(owner, event.pointer);
       break;
     case "workspaceRestored":
       restoredWorkspace = {

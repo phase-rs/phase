@@ -9,7 +9,7 @@ import type { DraftGuestCapability } from "../../services/draftPersistence";
  * Who publishes a guest's public recovery pointer, on the real lifecycle
  * store, the real guest adapter and P2PDraftGuest, the real draft peer session
  * over a fake data connection, and real persistence on fake-indexeddb. Only
- * the room join is doubled; three persistence functions are wrapped so each
+ * the room join is doubled; four persistence functions are wrapped so each
  * row can read the order in which the private commit, the public pointer and
  * any revocation happened.
  */
@@ -41,6 +41,11 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
       harness.log.push(`pointerWrite:${args[0].capabilityId}`);
       actual.saveActiveDraftGuest(...args);
     },
+    republishActiveDraftGuest: (...args: Parameters<typeof actual.republishActiveDraftGuest>) => {
+      const written = actual.republishActiveDraftGuest(...args);
+      harness.log.push(`${written === null ? "pointerRefused" : "pointerWrite"}:${args[1].capabilityId}`);
+      return written;
+    },
     clearDraftGuestRecovery: async (capability: DraftGuestCapability) => {
       harness.log.push("revoke:clear");
       await actual.clearDraftGuestRecovery(capability);
@@ -58,6 +63,8 @@ import {
 } from "../../services/draftPersistence";
 
 const POINTER_KEY = "phase-active-draft-guest";
+const NATIVE_ENDPOINT = "wss://native.example/ws";
+const nativeRecordKey = (capabilityId: string) => `phase-native-draft-capability:${capabilityId}`;
 
 const hostPeerIdFor = (roomCode: string) => `host-peer-${roomCode}`;
 const recordKeyFor = (roomCode: string) => `phase-draft-guest:${hostPeerIdFor(roomCode)}`;
@@ -157,6 +164,53 @@ async function seedUnnamedPair(draftToken = "guest-token"): Promise<void> {
     hostPeerId: hostPeerIdFor("ABCDE"),
     timestamp: Date.now(),
   }));
+}
+
+/** Lets every pending continuation run. */
+async function flush(): Promise<void> {
+  for (let turn = 0; turn < 5; turn++) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** A named pair for room ABCDE, as a committed admission leaves it, with an empty log. */
+async function seedNamedPair(capabilityId = "cap-S"): Promise<void> {
+  await saveDraftGuestSession(hostPeerIdFor("ABCDE"), {
+    draftToken: "guest-token",
+    seatIndex: 2,
+    draftCode: "draft-xyz",
+    roomCode: "ABCDE",
+    displayName: "Alice",
+    capabilityId,
+  });
+  saveActiveDraftGuest({ roomCode: "ABCDE", displayName: "Alice", hostPeerId: hostPeerIdFor("ABCDE"), capabilityId });
+  harness.log.length = 0;
+}
+
+/**
+ * Another tab's native publication: its record and its pointer. Returns the
+ * record and the pointer text it stored.
+ */
+async function storeOtherNativeSeat(): Promise<{ record: Record<string, unknown>; text: string }> {
+  const record = {
+    capabilityId: "cap-B",
+    endpoint: NATIVE_ENDPOINT,
+    draftCode: "NAT002",
+    playerToken: "tok-B",
+    seatIndex: 1,
+    participant: "guest",
+    timestamp: Date.now(),
+  };
+  await idbSet(nativeRecordKey("cap-B"), record, getDraftStore());
+  const text = JSON.stringify({
+    transport: "native",
+    capabilityId: "cap-B",
+    endpoint: NATIVE_ENDPOINT,
+    draftCode: "NAT002",
+    seatIndex: 1,
+    participant: "guest",
+    timestamp: Date.now(),
+  });
+  localStorage.setItem(POINTER_KEY, text);
+  return { record, text };
 }
 
 /** Records `joinDraft`'s outcome in the order log once its promise settles. */
@@ -417,6 +471,97 @@ describe("guest recovery pointer publication", () => {
     await expect(storedRecord()).resolves.toBeUndefined();
     expect(inspectActiveDraftGuest().type).toBe("absent");
   });
+
+  it.each(["a native seat's", "a guest seat's", "no pointer"] as const)(
+    "a resumed guest's reconnect commit leaves another writer's pointer: %s",
+    async (leg) => {
+      await seedNamedPair("cap-S");
+      const { resumed } = await startResume();
+      // Reach: the reconnect is on the wire, and the guest's own pointer is still stored.
+      expect(storedPointer()).toMatchObject({ capabilityId: "cap-S" });
+
+      let otherText: string | null = null;
+      let otherRecord: Record<string, unknown> | null = null;
+      switch (leg) {
+        case "a native seat's": {
+          const other = await storeOtherNativeSeat();
+          otherText = other.text;
+          otherRecord = other.record;
+          break;
+        }
+        case "a guest seat's":
+          otherText = JSON.stringify({
+            roomCode: "FGHJK",
+            displayName: "Bob",
+            hostPeerId: hostPeerIdFor("FGHJK"),
+            timestamp: Date.now(),
+            capabilityId: "cap-G",
+          });
+          localStorage.setItem(POINTER_KEY, otherText);
+          break;
+        case "no pointer":
+          localStorage.removeItem(POINTER_KEY);
+          break;
+      }
+      await connFor("ABCDE").receiveRaw(rawMessage(reconnectAck()));
+      await expect(resumed).resolves.toBe("resumed");
+      await flush();
+
+      expect(localStorage.getItem(POINTER_KEY)).toBe(otherText);
+      if (otherRecord) {
+        await expect(get(nativeRecordKey("cap-B"), getDraftStore())).resolves.toEqual(otherRecord);
+      }
+      // Reach: the commit ran, then the republication ran and refused.
+      expect(harness.log).toContain("privateSave:committed");
+      expect(harness.log).toContain("pointerRefused:cap-S");
+      expect(pointerWrites()).toEqual([]);
+    },
+  );
+
+  it("a background reconnect republishes only over the pointer this guest published", { timeout: 15_000 }, async () => {
+    const { joined } = await startNewJoin();
+    await connFor("ABCDE").receiveRaw(rawMessage(welcome()));
+    await expect(joined).resolves.toEqual({ status: "opened" });
+    const capabilityId = storedPointer()?.capabilityId as string;
+    expect(capabilityId).toEqual(expect.any(String));
+    const other = await storeOtherNativeSeat();
+
+    connFor("ABCDE").simulateClose();
+    await new Promise((done) => setTimeout(done, 1_100));
+    const dial = roomFor("ABCDE").dials.at(-1)!;
+    dial.simulateOpen();
+    await vi.waitFor(() => expect(dial.sentRaw.length).toBeGreaterThan(0));
+    await dial.receiveRaw(rawMessage(reconnectAck()));
+    // Reach: the reconnect's commit ran.
+    await vi.waitFor(() => expect(harness.log.filter((entry) => entry === "privateSave:committed")).toHaveLength(2));
+    await flush();
+
+    expect(localStorage.getItem(POINTER_KEY)).toBe(other.text);
+    await expect(get(nativeRecordKey("cap-B"), getDraftStore())).resolves.toEqual(other.record);
+    expect(pointerWrites()).toEqual([`pointerWrite:${capabilityId}`]);
+    expect(harness.log).toContain(`pointerRefused:${capabilityId}`);
+  });
+
+  it.each(["another capability", "another timestamp"] as const)(
+    "a guest resume is superseded when its pointer changes during the record read: %s",
+    async (leg) => {
+      await seedNamedPair("cap-S");
+      const pointer = storedPointer()!;
+      let outcome: string | null = null;
+      // Its first await is the record read, so this rewrite lands during it.
+      const resumed = useMultiplayerDraftStore.getState().resumeDraft();
+      localStorage.setItem(POINTER_KEY, JSON.stringify(leg === "another capability"
+        ? { ...pointer, capabilityId: "cap-T" }
+        : { ...pointer, timestamp: (pointer.timestamp as number) + 1 }));
+      void resumed.then((value) => {
+        outcome = value;
+      });
+
+      await vi.waitFor(() => expect(outcome !== null || harness.joinRoom.mock.calls.length > 0).toBe(true));
+      expect(harness.joinRoom).not.toHaveBeenCalled();
+      expect(outcome).toBe("superseded");
+    },
+  );
 
   it("a refused publication fails the join", async () => {
     const setItem = localStorage.setItem.bind(localStorage);
