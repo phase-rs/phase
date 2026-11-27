@@ -29,14 +29,14 @@ use crate::types::ability::{DamageGuardReading, SettledDamageGuard};
 use crate::types::events::GameEvent;
 use crate::types::game_state::DamageBatchLedger;
 use crate::types::game_state::{
-    CombatPreventionTally, DrainStatus, GameState, HeldBatchRider, LiminalEntry, LiminalEntryKind,
-    NamedChoiceSource, NamedChoiceSourceBinding, ParentTargetOccurrences, PayableResource,
-    PendingCombatLegChoice, PendingCombatLegProgress, PendingCostMoveResume, PendingReplacement,
-    PendingTokenSubstitute, PostReplacementDrain, ReplacementAutoChoiceId,
+    CastingVariant, CombatPreventionTally, DrainStatus, GameState, HeldBatchRider, LiminalEntry,
+    LiminalEntryKind, NamedChoiceSource, NamedChoiceSourceBinding, ParentTargetOccurrences,
+    PayableResource, PendingCombatLegChoice, PendingCombatLegProgress, PendingCostMoveResume,
+    PendingReplacement, PendingTokenSubstitute, PostReplacementDrain, ReplacementAutoChoiceId,
     ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord,
     ReplacementAutoChoiceTail, ReplacementCandidateSummary, ReplacementChoiceKind,
     ReplacementIndexEntry, ResidentDrainPolicy, ResolutionPaymentOrigin, RiderTiming,
-    TokenSubstituteChoice, WaitingFor,
+    StackEntryKind, TokenSubstituteChoice, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, ProtectionReplacementSourceExt};
 use crate::types::keywords::{
@@ -8886,6 +8886,78 @@ fn replacement_active_player_matches(
     }
 }
 
+/// CR 400.7d + CR 702.138b: read the paid variant of the exact spell
+/// resolving into this permanent. The copy finisher consults the same entry
+/// after the move, when the arrival record ties it to the resolving Stack pin.
+fn entry_was_cast_with_escape(state: &GameState, event: &ProposedEvent) -> bool {
+    let ProposedEvent::ZoneChange {
+        object_id,
+        from,
+        to: Zone::Battlefield,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    let (Some(entry), Some(stack_pin), Some(entrant)) = (
+        state.resolving_stack_entry.as_ref(),
+        state.resolving_stack_object,
+        state.objects.get(object_id),
+    ) else {
+        return false;
+    };
+    if entry.id != *object_id
+        || stack_pin.object_id != *object_id
+        || entrant.zone != *from
+        || entrant.cast_origin_zone() != Some(Zone::Graveyard)
+        || !matches!(
+            &entry.kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::Escape,
+                ..
+            }
+        )
+    {
+        return false;
+    }
+
+    let current = ObjectIncarnationRef::from_object(entrant);
+    match from {
+        Zone::Stack => stack_pin == current,
+        Zone::Battlefield => state
+            .incarnation_entry_record(current)
+            .is_some_and(|arrival| {
+                arrival.from_zone == Some(Zone::Stack)
+                    && arrival.trigger_source_context().is_some_and(|departure| {
+                        departure.identity.reference == stack_pin
+                            && departure.identity.expected_zone == Zone::Stack
+                    })
+                    && arrival.recorded_zone_change_successor() == Some(current)
+            }),
+        _ => false,
+    }
+}
+
+/// CR 614.1c + CR 614.6 + CR 702.138c: select the counter placement before
+/// the entry modifiers fold it into the event.
+fn replacement_execute_for_event<'a>(
+    replacement: &'a ReplacementDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+    event: &ProposedEvent,
+) -> Option<&'a AbilityDefinition> {
+    match super::printed_cards::escape_entry_counter_bodies(replacement) {
+        Some((escaped, ordinary)) if liminal_entry_ref(event) == Some(source_id) => {
+            Some(if entry_was_cast_with_escape(state, event) {
+                escaped
+            } else {
+                ordinary
+            })
+        }
+        _ => replacement.execute.as_deref(),
+    }
+}
+
 fn evaluate_replacement_condition(
     condition: &ReplacementCondition,
     controller: PlayerId,
@@ -9120,12 +9192,8 @@ fn evaluate_replacement_condition(
             super::layers::evaluate_condition(state, condition, controller, source_id)
         }
         ReplacementCondition::HasMaxSpeed => super::speed::has_max_speed(state, controller),
-        // CR 702.138c: "escapes with" — applies only when the source was cast via escape.
-        // Check cast_from_zone on the entering permanent as a proxy for escape.
-        ReplacementCondition::CastViaEscape => state
-            .objects
-            .get(&source_id)
-            .is_some_and(|o| o.cast_from_zone == Some(Zone::Graveyard)),
+        // CR 702.138c: a source's replacement may apply to another entrant.
+        ReplacementCondition::CastViaEscape => entry_was_cast_with_escape(state, event),
         // CR 702.188a: applies only when the source permanent's spell was cast
         // using the named alternative cost. Mirrors
         // `TriggerCondition::CastVariantPaid` (triggers.rs).
@@ -9134,8 +9202,8 @@ fn evaluate_replacement_condition(
             .get(&source_id)
             .is_some_and(|o| o.cast_variant_paid == Some((*variant, state.turn_number))),
         // CR 603.4: "if you cast it from [zone]" — applies only when the source
-        // permanent was cast from the gated zone. Equivalent to CastViaEscape
-        // for arbitrary zones (Hand for Myojin, Exile for foretell-style, etc.).
+        // permanent was cast from the gated zone (Hand for Myojin, Exile
+        // for foretell-style, etc.).
         ReplacementCondition::CastFromZone { zone } => state
             .objects
             .get(&source_id)
@@ -13010,14 +13078,10 @@ pub(super) fn current_self_enter_replacement_modifiers(
 
         // CR 607.2d + CR 614.12: the choice's linked modifier tail is
         // evaluated after its answer, on the same entry board as the prefix.
-        for ability in
-            replacement
-                .execute
-                .as_deref()
-                .into_iter()
-                .chain(copy_entry_linked_counter_tail(
-                    replacement.execute.as_deref(),
-                ))
+        let execute = replacement_execute_for_event(replacement, source_id, state, &event);
+        for ability in execute
+            .into_iter()
+            .chain(copy_entry_linked_counter_tail(execute))
         {
             let modifiers = event_modifiers_for_ability(
                 Some(ability),
@@ -13797,7 +13861,9 @@ fn apply_single_replacement(
                     None
                 };
                 let ability = match branch {
-                    ReplacementBranch::Execute => repl_def.execute.as_deref(),
+                    ReplacementBranch::Execute => {
+                        replacement_execute_for_event(repl_def, rid.source, state, &proposed)
+                    }
                     ReplacementBranch::Decline => replacement_mode_decline(&repl_def.mode),
                 };
                 // CR 614.1c + CR 616.1: on a mandatory battlefield-entry

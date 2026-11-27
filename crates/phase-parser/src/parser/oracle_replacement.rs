@@ -12,7 +12,7 @@ use nom::combinator::{
 };
 use nom::multi::{many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
-use nom::Parser;
+use nom::{Offset, Parser};
 
 use super::oracle_classifier::has_enters_with_counter_tokens;
 use super::oracle_effect::become_copy_except::parse_except_clause;
@@ -59,9 +59,9 @@ use super::oracle_util::{
 use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
-    CoinFlipRun, CombatDamageScope, Comparator, ContinuousModification, ControllerRef,
-    CopyManaValueLimit, CountScope, CounterReplacementSubject, DamageModification,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType,
+    ChooseOneOfKind, CoinFlipRun, CombatDamageScope, Comparator, ContinuousModification,
+    ControllerRef, CopyManaValueLimit, CountScope, CounterReplacementSubject, DamageModification,
     DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DieRollIgnoreRule,
     DrawReplacementScope, Duration, Effect, EffectScope, FilterProp, LibraryInstructionActor,
     LibraryPosition, ManaModification, ManaReplacementScope, ManaSpendPermission,
@@ -4993,12 +4993,10 @@ fn multi_sentence_enters_with_decline(norm_lower: &str) -> Option<EntersWithDecl
     (units.len() > 1).then(|| classify_multi_sentence(&units))
 }
 
-/// CR 614.1c + CR 608.2c: a line of several sentences whose enters-with
-/// sentence names this object or a distributive subset is the enters-with
-/// parser's, and that parser fails it closed (`EntersWithGap::Clause`). No
-/// replacement arm may claim such a line whole: whichever arm reads its first
-/// sentence would drop the enters-with sentence while the line looks
-/// supported (Power Level Analyzer, issue #9993).
+/// CR 614.1c + CR 608.2c: the enters-with parser owns a self or
+/// distributive counter placement in a multi-sentence line and an escape
+/// placement with an unpaired "instead". Other replacement parsers must
+/// not claim part of either line and drop its remaining instructions.
 ///
 /// Same normalized input and the same precondition as
 /// [`enters_with_fails_closed`], so every line this gate declines is one that
@@ -5007,8 +5005,107 @@ fn multi_sentence_enters_with_decline(norm_lower: &str) -> Option<EntersWithDecl
 /// record the line as the `enters_with_clause` gap.
 fn is_line_owned_enters_with_clause(norm_lower: &str) -> bool {
     has_enters_with_counter_tokens(norm_lower)
-        && multi_sentence_enters_with_decline(norm_lower)
+        && (multi_sentence_enters_with_decline(norm_lower)
             == Some(EntersWithDecline::FailsClosed(EntersWithGap::Clause))
+            || parse_enters_with_head(peel_enters_with_gates(norm_lower).work_text)
+                .is_some_and(|head| has_escape_counter_override_tail(&head)))
+}
+
+/// CR 614.1c + CR 614.6 + CR 702.138c: an adjacent "escapes with ...
+/// instead" sets the amount of the same self-entry replacement.
+pub(crate) fn parse_escape_entry_counter_override(
+    base: &str,
+    override_sentence: &str,
+    source: &str,
+    card_name: &str,
+) -> Option<ReplacementIr> {
+    let mut definition =
+        parse_simple_entry_counter_replacement(base, card_name, EntryVerb::Enters)?;
+    let override_definition =
+        parse_simple_entry_counter_replacement(override_sentence, card_name, EntryVerb::Escapes)?;
+    if definition.condition.is_some()
+        || override_definition.condition != Some(ReplacementCondition::CastViaEscape)
+    {
+        return None;
+    }
+
+    let fallback = definition.execute.take()?;
+    let escape = override_definition.execute?;
+    match (&*fallback.effect, &*escape.effect) {
+        (
+            Effect::PutCounter {
+                counter_type: ordinary,
+                count: QuantityExpr::Fixed { .. },
+                target: TargetFilter::SelfRef,
+            },
+            Effect::PutCounter {
+                counter_type: escaped,
+                count: QuantityExpr::Fixed { .. },
+                target: TargetFilter::SelfRef,
+            },
+        ) if ordinary == escaped => {}
+        _ => return None,
+    }
+
+    let execute = (*escape)
+        .condition(AbilityCondition::CastVariantPaidInstead {
+            variant: CastVariantPaid::Escape,
+        })
+        .with_else_ability(*fallback);
+    Some(ReplacementIr::from_definition(
+        source,
+        definition.execute(execute).description(source.to_owned()),
+    ))
+}
+
+/// Read one self-scoped counter-only instruction with its exact recipient.
+/// The escape sentence's terminal override marker belongs to the pair;
+/// reuse the ordinary counter reader on the sentence through its recipient.
+fn parse_simple_entry_counter_replacement(
+    original: &str,
+    card_name: &str,
+    verb: EntryVerb,
+) -> Option<ReplacementDefinition> {
+    let normalized = replace_self_refs(&strip_reminder_text(original), card_name).to_lowercase();
+    let head = parse_enters_with_head(&normalized)?;
+    if !matches!(head.subject, EntersWithSubject::Source(_))
+        || head.verb != verb
+        || head.leading_gate.is_some()
+    {
+        return None;
+    }
+    let (_, after_counter) = parse_counted_enters_counter_entry(head.after_with)?;
+    let (_, recipient) = all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>(" on it"),
+        (
+            cond(verb.is_escape(), tag(" instead")),
+            opt(char('.')),
+            multispace0,
+        ),
+    ))
+    .parse(after_counter)
+    .ok()?;
+
+    let clean = &normalized[..normalized.as_str().offset(recipient) + recipient.len()];
+    let definition = enters_with_counters_outcome(clean, original).ok()?;
+    let execute = definition.execute.as_deref()?;
+    (definition.event == ReplacementEvent::Moved
+        && definition.valid_card == Some(TargetFilter::SelfRef)
+        && definition.destination_zone == Some(Zone::Battlefield)
+        && definition.mode == ReplacementMode::Mandatory
+        && is_mandatory_unconditional_node(execute)
+        && execute.sub_ability.is_none())
+    .then_some(definition)
+}
+
+/// A terminal "instead" needs the base instruction even if this particular
+/// escape counter placement is outside the pair grammar.
+fn has_escape_counter_override_tail(head: &EntersWithHead<'_>) -> bool {
+    head.verb.is_escape()
+        && nom_primitives::scan_at_word_boundaries(head.after_with, |tail| {
+            all_consuming((tag("instead"), opt(char('.')), multispace0)).parse(tail)
+        })
+        .is_some()
 }
 
 /// CR 614.1c: The "enters with [counters]" parser with a typed decline, so the
@@ -5051,6 +5148,9 @@ fn enters_with_counters_outcome(
     // CR 702.138c: "escapes with" / plural-subject "escape with" is
     // semantically "enters with" gated on escape.
     let is_escape = head.verb.is_escape();
+    if has_escape_counter_override_tail(&head) {
+        return Err(EntersWithDecline::FailsClosed(EntersWithGap::Clause));
+    }
     // The payload after the entry verb's own "with ", past any LEADING keyword
     // riders ("…enters with flying and with X +1/+1 counters on it…", Dralnu's
     // Pet). CR 614.1c makes those riders part of this one replacement; every
@@ -26549,6 +26649,93 @@ mod tests {
     }
 
     // ── Escape-with-counters ──
+
+    #[test]
+    fn polukranos_replaces_its_normal_entry_counter_amount_when_it_escapes() {
+        let text = "Polukranos enters with six +1/+1 counters on it. It escapes with twelve +1/+1 counters on it instead.\n\
+If damage would be dealt to Polukranos while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it.\n\
+{1}{B}{G}: Polukranos fights another target creature.\n\
+Escape—{4}{B}{G}, Exile six other cards from your graveyard.";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            text,
+            "Polukranos, Unchained",
+            &["Escape".into()],
+            &["Creature".into()],
+            &["Zombie".into(), "Hydra".into()],
+        );
+        let [entry, damage] = parsed.replacements.as_slice() else {
+            panic!(
+                "expected one entry replacement and one damage replacement, got {:?}",
+                parsed.replacements
+            );
+        };
+        assert_eq!(entry.event, ReplacementEvent::Moved);
+        assert_eq!(entry.mode, ReplacementMode::Mandatory);
+        assert_eq!(entry.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(entry.destination_zone, Some(Zone::Battlefield));
+        assert_eq!(entry.condition, None);
+        assert!(entry.description.as_deref().unwrap().ends_with(
+            "enters with six +1/+1 counters on it. It escapes with twelve +1/+1 counters on it instead."
+        ));
+        let escape = entry.execute.as_deref().expect("escape entry amount");
+        assert_eq!(
+            escape.condition,
+            Some(AbilityCondition::CastVariantPaidInstead {
+                variant: CastVariantPaid::Escape,
+            })
+        );
+        assert!(matches!(
+            escape.effect.as_ref(),
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 12 },
+                ..
+            }
+        ));
+        let ordinary = escape
+            .else_ability
+            .as_deref()
+            .expect("ordinary entry amount");
+        assert_eq!(ordinary.condition, None);
+        assert!(matches!(
+            ordinary.effect.as_ref(),
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 6 },
+                ..
+            }
+        ));
+        assert_eq!(damage.event, ReplacementEvent::DamageDone);
+        assert!(matches!(
+            parsed.abilities.as_slice(),
+            [fight] if matches!(fight.effect.as_ref(), Effect::Fight { .. })
+        ));
+        assert!(matches!(
+            parsed.extracted_keywords.as_slice(),
+            [crate::types::keywords::Keyword::Escape(_)]
+        ));
+    }
+
+    #[test]
+    fn escape_counter_override_without_compatible_base_fails_closed() {
+        let name = "Polukranos, Unchained";
+        for text in [
+            "It escapes with twelve +1/+1 counters on it instead.",
+            "Polukranos enters with six charge counters on it. It escapes with twelve +1/+1 counters on it instead.",
+        ] {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                text, name, &[], &["Creature".into()], &[],
+            );
+            assert!(parsed.replacements.is_empty(), "{text}: {:?}", parsed.replacements);
+            assert!(matches!(
+                parsed.abilities.as_slice(),
+                [gap] if matches!(gap.effect.as_ref(), Effect::Unimplemented { name, .. }
+                    if name == EntersWithGap::Clause.gap_name())
+            ), "{text}: {:?}", parsed.abilities);
+        }
+    }
 
     #[test]
     fn escape_with_three_counters() {

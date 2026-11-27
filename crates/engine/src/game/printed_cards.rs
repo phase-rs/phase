@@ -2,9 +2,10 @@ use crate::database::card_db::CardDbHandle;
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::database::CardDatabase;
 use crate::types::ability::{
-    AbilityDefinition, ChoiceType, ConjureSource, CopiableValues, Effect, PtValue, QuantityExpr,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
-    StaticDefinition, TargetFilter, TriggerDefinition, TriggerDefinitionOccurrenceRef,
+    AbilityCondition, AbilityDefinition, CastVariantPaid, ChoiceType, ConjureSource,
+    CopiableValues, Effect, PtValue, QuantityExpr, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, RestrictionExpiry, StaticDefinition, TargetFilter, TriggerDefinition,
+    TriggerDefinitionOccurrenceRef,
 };
 // `VoteSubject` is NOT re-imported here: `mod tests`'s only use of it
 // (`crate::types::ability::VoteSubject::Named`) is fully qualified, so a gated
@@ -549,6 +550,54 @@ pub fn intrinsic_etb_counters(
     counters
 }
 
+fn is_mandatory_self_entry(repl: &ReplacementDefinition) -> bool {
+    repl.event == ReplacementEvent::Moved
+        && repl.destination_zone == Some(Zone::Battlefield)
+        && matches!(repl.mode, ReplacementMode::Mandatory)
+        && repl.condition.is_none()
+        && matches!(repl.valid_card, Some(TargetFilter::SelfRef))
+}
+
+/// CR 614.1c + CR 702.138c: the two fixed amounts of one self-entry replacement.
+pub(super) fn escape_entry_counter_bodies(
+    repl: &ReplacementDefinition,
+) -> Option<(&AbilityDefinition, &AbilityDefinition)> {
+    if !is_mandatory_self_entry(repl) || repl.runtime_execute.is_some() {
+        return None;
+    }
+    let escaped = repl.execute.as_deref()?;
+    let ordinary = escaped.else_ability.as_deref()?;
+    if !matches!(
+        escaped.condition,
+        Some(AbilityCondition::CastVariantPaidInstead {
+            variant: CastVariantPaid::Escape,
+        })
+    ) || escaped.sub_ability.is_some()
+        || ordinary.sub_ability.is_some()
+        || ordinary.condition.is_some()
+        || ordinary.else_ability.is_some()
+    {
+        return None;
+    }
+
+    let (
+        Effect::PutCounter {
+            counter_type: escaped_type,
+            count: QuantityExpr::Fixed { .. },
+            target: TargetFilter::SelfRef,
+        },
+        Effect::PutCounter {
+            counter_type: ordinary_type,
+            count: QuantityExpr::Fixed { .. },
+            target: TargetFilter::SelfRef,
+        },
+    ) = (&*escaped.effect, &*ordinary.effect)
+    else {
+        return None;
+    };
+    (escaped_type == ordinary_type).then_some((escaped, ordinary))
+}
+
 /// CR 614.1c: The counters a permanent enters with from a "~ enters with N
 /// <type> counters on it" ability (Atraxa's Skitterfang → three oil counters;
 /// Hangarback Walker / Walking Ballista copies → +1/+1). The parser models this
@@ -562,10 +611,10 @@ pub fn intrinsic_etb_counters(
 /// This extracts them from the copiable replacement set so a token copy of an
 /// "enters with counters" creature enters with them.
 ///
-/// Only the unconditional, mandatory, fixed-count self form is recognized:
-/// variable or conditional counts ("a +1/+1 counter for each artifact you
-/// control") need resolution context this static extraction lacks, and on
-/// non-copy entries the normal replacement pass still handles every form.
+/// This extracts mandatory, fixed self-entry counts, including the ordinary
+/// amount of an Escape replacement. A token created directly on the battlefield
+/// was never cast (CR 702.138b). Other conditional quantities need the context
+/// provided by the normal replacement pass.
 pub fn self_etb_counter_replacements(
     replacements: &[ReplacementDefinition],
 ) -> Vec<(CounterType, u32)> {
@@ -581,19 +630,18 @@ pub fn self_etb_counter_replacement_entries(
     replacements: &[ReplacementDefinition],
 ) -> impl Iterator<Item = (&ReplacementDefinition, CounterType, u32)> {
     replacements.iter().filter_map(|repl| {
-        if repl.event != ReplacementEvent::Moved
-            || repl.destination_zone != Some(Zone::Battlefield)
-            || !matches!(repl.mode, ReplacementMode::Mandatory)
-            || repl.condition.is_some()
-            || !matches!(repl.valid_card, Some(TargetFilter::SelfRef))
-        {
+        if !is_mandatory_self_entry(repl) {
             return None;
         }
+        let execute = match escape_entry_counter_bodies(repl) {
+            Some((_, ordinary)) => ordinary,
+            None => repl.execute.as_deref()?,
+        };
         let Effect::PutCounter {
             counter_type,
             count: QuantityExpr::Fixed { value },
             target: TargetFilter::SelfRef,
-        } = &*repl.execute.as_ref()?.effect
+        } = &*execute.effect
         else {
             return None;
         };

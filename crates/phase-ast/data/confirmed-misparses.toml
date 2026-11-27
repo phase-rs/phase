@@ -1729,7 +1729,7 @@ face = [
   { key = "plot armor", class = "dropped_qualifier", clauses = ["and can't be blocked except by creatures with flavor text."] },
   { key = "pollen lullaby", class = "wrong_player", clauses = ["If you win, creatures that player controls don't untap during the player's next untap step."] },
   { key = "pollen remedy", class = "target_wrong", clauses = ["Prevent the next 3 damage that would be dealt this turn to any number of targets, divided as you choose.", "If this spell was kicked, prevent the next 6 damage this way instead."] },
-  { key = "polukranos, unchained", class = "condition_wrong", clauses = ["It escapes with twelve +1/+1 counters on it instead.", "If damage would be dealt to Polukranos while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it."] },
+  { key = "polukranos, unchained", class = "condition_wrong", clauses = ["If damage would be dealt to Polukranos while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it."] },
   { key = "pompous gadabout", class = "dropped_qualifier", clauses = ["This creature can't be blocked by creatures that don't have a name."] },
   { key = "porphyry nodes", class = "wrong_object", clauses = ["At the beginning of your upkeep, destroy the creature with the least power.", "If two or more creatures are tied for least power, you choose one of them."] },
   { key = "port razer", class = "dropped_qualifier", clauses = ["This creature can't attack a player it has already attacked this turn."] },

@@ -7,7 +7,7 @@ use nom::character::complete::{anychar, multispace0};
 use nom::combinator::{all_consuming, map, not, opt, recognize, value};
 use nom::multi::{many1, separated_list1};
 use nom::sequence::{preceded, terminated};
-use nom::Parser;
+use nom::{Offset, Parser};
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
@@ -132,9 +132,9 @@ use super::oracle_replacement::{
     find_copy_verb_present, is_as_self_enters_frame, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir,
     parse_as_enters_one_shot_replacement_with_provenance, parse_bidirectional_damage_prevention,
-    parse_oneshot_damage_replacement, parse_replacement_line, parse_replacement_line_ir,
-    parse_whenever_you_cast_enters_with_outcome, parse_windowed_graveyard_redirect_install,
-    CastEntersWithOutcome, EntersWithGap,
+    parse_escape_entry_counter_override, parse_oneshot_damage_replacement, parse_replacement_line,
+    parse_replacement_line_ir, parse_whenever_you_cast_enters_with_outcome,
+    parse_windowed_graveyard_redirect_install, CastEntersWithOutcome, EntersWithGap,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -332,9 +332,22 @@ fn parse_replacement_sentence_sequence_ir(
     }
 
     let mut replacements = Some(Vec::with_capacity(sentences.len()));
-    for sentence in sentences {
+    let mut sentences = sentences.into_iter().peekable();
+    while let Some(sentence) = sentences.next() {
         if !is_replacement_pattern(&sentence.to_lowercase()) {
             return Ok(None);
+        }
+        if let Some(next) = sentences.peek().copied() {
+            let source = &line[line.offset(sentence)..line.offset(next) + next.len()];
+            if let Some(override_ir) =
+                parse_escape_entry_counter_override(sentence, next, source, card_name)
+            {
+                sentences.next();
+                if let Some(parsed) = replacements.as_mut() {
+                    parsed.push(override_ir);
+                }
+                continue;
+            }
         }
         match parse_replacement_line_ir(sentence, card_name) {
             Some(ir) => {
