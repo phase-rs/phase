@@ -7,15 +7,15 @@ use crate::game::cost_payability::AbilityCostPayability;
 use crate::game::filter::ReplacementDefinitionFilterExt;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, CastVariantPaid, CastingPermission,
-    ChoiceType, ChosenAttribute, CoinFlipRun, CombatDamageScope, ContinuousModification,
-    ControllerRef, CopyTargetPurpose, DamageModification, DamageRedirectTarget, DamageTargetFilter,
-    DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope,
-    EntryAttackDestination, ManaSpendPermission, ObjectScope, PermissionGrantee, PlayerFilter,
-    PostReplacementContinuation, PreventionAmount, PreventionFormula, QuantityExpr,
-    QuantityModification, QuantityRef, RedirectionLifetime, ReplacementChoiceAuthority,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, ResolvedAbility, RoundingMode,
-    ShieldKind, SplitDamagePortion, TapStateChange, TargetFilter, TargetRef,
+    AbilityCost, AbilityDefinition, CastingPermission, ChoiceType, ChosenAttribute, CoinFlipRun,
+    CombatDamageScope, ContinuousModification, ControllerRef, CopyTargetPurpose,
+    DamageModification, DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope,
+    DrawReplacementScope, Duration, Effect, EffectScope, EntryAttackDestination,
+    ManaSpendPermission, PermissionGrantee, PlayerFilter, PostReplacementContinuation,
+    PreventionAmount, PreventionFormula, QuantityExpr, QuantityModification, QuantityRef,
+    RedirectionLifetime, ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, ResolvedAbility, RoundingMode, ShieldKind, SplitDamagePortion, TapStateChange,
+    TargetFilter, TargetRef,
 };
 use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
@@ -9094,6 +9094,19 @@ fn evaluate_replacement_condition(
     event: &ProposedEvent,
 ) -> bool {
     match condition {
+        ReplacementCondition::Not { condition } => {
+            // Preserve the bare legacy enters-tapped fallback without letting
+            // an unsupported predicate authorize a negated replacement.
+            condition.first_unrecognized().is_none()
+                && !evaluate_replacement_condition(
+                    condition,
+                    controller,
+                    source_id,
+                    state,
+                    affected_object_id,
+                    event,
+                )
+        }
         ReplacementCondition::And { conditions } => conditions.iter().all(|condition| {
             evaluate_replacement_condition(
                 condition,
@@ -10278,27 +10291,6 @@ fn object_replacement_candidate_applies_on_entry_board(
         if !matches_dest {
             return false;
         }
-    }
-    // CR 614.6 + CR 702.138c: the Escape amount takes the ordinary amount's
-    // place. Gate the ordinary fixed-counter definition before it can be offered.
-    if is_entering
-        && repl_def.condition.is_none()
-        && fixed_self_entry_counter_body(repl_def).is_some_and(|(body, _)| {
-            matches!(
-                &body.condition,
-                Some(AbilityCondition::Not { condition })
-                    if matches!(
-                        condition.as_ref(),
-                        AbilityCondition::CastVariantPaid {
-                            variant: CastVariantPaid::Escape,
-                            subject: ObjectScope::Source,
-                        }
-                    )
-            )
-        })
-        && entry_was_cast_with_escape(state, event)
-    {
-        return false;
     }
     if let Some(ref cond) = repl_def.condition {
         // CR 608.2f + CR 700.1: a guard the current simultaneous batch already read gives
@@ -29553,6 +29545,32 @@ mod tests {
             None,
             &dummy_begin_turn_event(),
         ));
+    }
+
+    #[test]
+    fn negated_replacement_condition_fails_closed_for_unsupported_predicates() {
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let event = dummy_begin_turn_event();
+        let applies = |condition: &ReplacementCondition| {
+            evaluate_replacement_condition(
+                condition,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                None,
+                &event,
+            )
+        };
+        let unknown = ReplacementCondition::Unrecognized {
+            text: "unsupported".into(),
+        };
+        assert!(applies(&unknown));
+        let double_negation = ReplacementCondition::Not {
+            condition: Box::new(ReplacementCondition::Not {
+                condition: Box::new(unknown),
+            }),
+        };
+        assert!(!applies(&double_negation));
     }
 
     #[test]

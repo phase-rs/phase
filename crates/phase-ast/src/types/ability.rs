@@ -42073,6 +42073,11 @@ pub enum ReplacementCondition {
     And {
         conditions: Vec<ReplacementCondition>,
     },
+    /// CR 614.1d + CR 616.1: an "unless" condition inverts a recognized
+    /// replacement applicability check.
+    Not {
+        condition: Box<ReplacementCondition>,
+    },
     /// "unless you control a [subtype] or a [subtype]"
     /// Replacement is suppressed if the controller controls any permanent with a listed subtype.
     /// Used for check lands (Clifftop Retreat, Drowned Catacomb, etc.).
@@ -42364,6 +42369,19 @@ pub enum ReplacementCondition {
     /// Using this variant lets the replacement be recognized for coverage while deferring
     /// the condition evaluation.
     Unrecognized { text: String },
+}
+
+impl ReplacementCondition {
+    /// Find the first unsupported predicate for eligibility and coverage checks.
+    pub fn first_unrecognized(&self) -> Option<&str> {
+        match self {
+            Self::Unrecognized { text } => Some(text),
+            Self::And { conditions } => conditions.iter().find_map(Self::first_unrecognized),
+            Self::Not { condition } => condition.first_unrecognized(),
+            Self::OnlyIfStatic { condition } => condition.unrecognized_texts().into_iter().next(),
+            _ => None,
+        }
+    }
 }
 
 /// The historical wire shape of `NthSpellThisTurn` (and `NthDrawThisTurn`) represented an

@@ -562,10 +562,9 @@ pub fn intrinsic_etb_counters(
 /// This extracts them from the copiable replacement set so a token copy of an
 /// "enters with counters" creature enters with them.
 ///
-/// Only the unconditional, mandatory, fixed-count self form is recognized:
-/// variable or conditional counts ("a +1/+1 counter for each artifact you
-/// control") need resolution context this static extraction lacks, and on
-/// non-copy entries the normal replacement pass still handles every form.
+/// This reads mandatory fixed counts whose conditions are known to hold for
+/// an uncast entrant (CR 702.138b). Counts that depend on the game state need
+/// the normal replacement pass.
 pub fn self_etb_counter_replacements(
     replacements: &[ReplacementDefinition],
 ) -> Vec<(CounterType, u32)> {
@@ -584,11 +583,19 @@ pub fn self_etb_counter_replacement_entries(
         if repl.event != ReplacementEvent::Moved
             || repl.destination_zone != Some(Zone::Battlefield)
             || !matches!(repl.mode, ReplacementMode::Mandatory)
-            || repl.condition.is_some()
             || !matches!(repl.valid_card, Some(TargetFilter::SelfRef))
         {
             return None;
         }
+
+        // CR 702.138b: a token entering directly was never cast with Escape.
+        match &repl.condition {
+            None => {}
+            Some(ReplacementCondition::Not { condition })
+                if matches!(condition.as_ref(), ReplacementCondition::CastViaEscape) => {}
+            Some(_) => return None,
+        }
+
         let Effect::PutCounter {
             counter_type,
             count: QuantityExpr::Fixed { value },

@@ -612,8 +612,7 @@ fn polukranos_escape_refuses_the_ambiguous_legacy_entry_and_loads_before_entry()
         .get_face_by_name(POLUKRANOS_NAME)
         .unwrap()
         .clone();
-    let ordinary = legacy_face.replacements[0].execute.as_deref_mut().unwrap();
-    assert!(ordinary.condition.take().is_some());
+    assert!(legacy_face.replacements[0].condition.take().is_some());
 
     let object = runner.state_mut().objects.get_mut(&polukranos).unwrap();
     engine::game::printed_cards::apply_card_face_to_object(object, &legacy_face);
@@ -1114,6 +1113,15 @@ fn rite_of_replication_creates_a_polukranos_token_with_six_counters() {
     let mut runner = scenario.build();
 
     let donor_pin = cast_polukranos_donor(&mut runner, donor);
+    let donor_values =
+        engine::game::printed_cards::intrinsic_copiable_values(&runner.state().objects[&donor]);
+    assert_eq!(
+        engine::game::printed_cards::self_etb_counter_replacements(
+            &donor_values.replacement_definitions,
+        ),
+        vec![(CounterType::Plus1Plus1, 6)],
+        "the ordinary amount must be available to the direct token entry path"
+    );
     let _ = runner
         .cast(rite)
         .target_object(donor)

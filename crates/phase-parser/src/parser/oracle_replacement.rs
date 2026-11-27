@@ -59,9 +59,9 @@ use super::oracle_util::{
 use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType,
-    ChooseOneOfKind, CoinFlipRun, CombatDamageScope, Comparator, ContinuousModification,
-    ControllerRef, CopyManaValueLimit, CountScope, CounterReplacementSubject, DamageModification,
+    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
+    CoinFlipRun, CombatDamageScope, Comparator, ContinuousModification, ControllerRef,
+    CopyManaValueLimit, CountScope, CounterReplacementSubject, DamageModification,
     DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DieRollIgnoreRule,
     DrawReplacementScope, Duration, Effect, EffectScope, FilterProp, LibraryInstructionActor,
     LibraryPosition, ManaModification, ManaReplacementScope, ManaSpendPermission,
@@ -72,7 +72,7 @@ use crate::types::ability::{
     SubAbilityLink, TapStateChange, TargetFilter, TokenAttackDestination, TriggerConstraint,
     TriggerDefinition, TypeFilter, TypedFilter,
 };
-use crate::types::ability::{CardPlayMode, CastingPermission, ObjectScope, PlayerScope};
+use crate::types::ability::{CardPlayMode, CastingPermission, PlayerScope};
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -5019,7 +5019,7 @@ pub(crate) fn parse_escape_entry_counter_override(
         return None;
     }
 
-    let ordinary_body = ordinary.execute.as_deref_mut()?;
+    let ordinary_body = ordinary.execute.as_deref()?;
     let escape_body = escape.execute.as_deref()?;
     match (ordinary_body.effect.as_ref(), escape_body.effect.as_ref()) {
         (
@@ -5038,11 +5038,8 @@ pub(crate) fn parse_escape_entry_counter_override(
     }
 
     // Keep the definition ordinals used by saved replacement choices.
-    ordinary_body.condition = Some(AbilityCondition::Not {
-        condition: Box::new(AbilityCondition::CastVariantPaid {
-            variant: CastVariantPaid::Escape,
-            subject: ObjectScope::Source,
-        }),
+    ordinary.condition = Some(ReplacementCondition::Not {
+        condition: Box::new(ReplacementCondition::CastViaEscape),
     });
     Some([
         ReplacementIr::from_definition(base, ordinary),
@@ -26586,7 +26583,12 @@ Escape—{4}{B}{G}, Exile six other cards from your graveyard.";
             assert_eq!(entry.valid_card, Some(TargetFilter::SelfRef));
             assert_eq!(entry.destination_zone, Some(Zone::Battlefield));
         }
-        assert_eq!(ordinary.condition, None);
+        assert_eq!(
+            ordinary.condition,
+            Some(ReplacementCondition::Not {
+                condition: Box::new(ReplacementCondition::CastViaEscape),
+            })
+        );
         assert_eq!(escape.condition, Some(ReplacementCondition::CastViaEscape));
         assert_eq!(
             ordinary.description.as_deref(),
@@ -26598,15 +26600,7 @@ Escape—{4}{B}{G}, Exile six other cards from your graveyard.";
         );
         let ordinary = ordinary.execute.as_deref().expect("ordinary entry amount");
         let escape = escape.execute.as_deref().expect("Escape entry amount");
-        assert_eq!(
-            ordinary.condition,
-            Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::CastVariantPaid {
-                    variant: CastVariantPaid::Escape,
-                    subject: ObjectScope::Source,
-                }),
-            })
-        );
+        assert_eq!(ordinary.condition, None);
         assert_eq!(escape.condition, None);
         for (body, expected_count) in [(ordinary, 6), (escape, 12)] {
             assert!(matches!(
