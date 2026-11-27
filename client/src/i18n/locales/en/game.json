@@ -1326,6 +1326,7 @@
       "onlyForSpellColor": "Only for spells of the {{color}} color.",
       "onlyForSpellFromZone": "Only for spells {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "Can't be spent to cast spells from {{zone}}.",
+      "cannotCastSpellsOutsideType": "Can't be spent to cast spells outside the {{spellType}} type.",
       "onlyForFaceDownSpell": "Only for face-down spells.",
       "onlyForAny": "Only for one of these uses: {{restrictions}}",
       "onlyForSpecialAction": "Only for the {{action}} special action.",

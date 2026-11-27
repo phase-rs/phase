@@ -1205,7 +1205,7 @@ export type KeywordKind = string;
 
 export type Comparator = "GT" | "LT" | "GE" | "LE" | "EQ" | "NE";
 
-export type AbilityActivationScope = "OfSpellType" | "Any";
+export type AbilityActivationScope = "OfSpellType" | "Any" | "AnyNonSpellPayment";
 
 export type AbilityTag = {
   type:
@@ -1239,7 +1239,8 @@ export type SpecialAction =
   // CR 116.2c: pay a continuous effect's printed termination cost to end it.
   | "EndContinuousEffect"
   // CR 116.2h: pay {2} to exile a card with foretell from hand face down.
-  | "Foretell";
+  | "Foretell"
+  | "Suspend";
 
 export type ManaRestriction =
   // "Spend this mana only to cast spells."
@@ -2601,6 +2602,9 @@ export interface PendingCast {
   ability: ResolvedAbility;
   cost: ManaCost;
   activation_cost?: SerializedAbilityCost;
+  // Engine marker that `cost` holds the mana leg and `activation_cost` holds
+  // the unpaid tail. The default `None` is omitted on the wire.
+  activation_residual?: "XMana" | "ManaLeg";
   activation_ability_index?: number;
   target_constraints?: Array<{ type: string }>;
   deferred_sacrificed_permanents?: DeferredSpellSacrifice[];

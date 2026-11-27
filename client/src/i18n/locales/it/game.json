@@ -1290,6 +1290,7 @@
       "onlyForSpellColor": "Solo per magie del colore {{color}}.",
       "onlyForSpellFromZone": "Solo per magie {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "Non può essere speso per lanciare magie da {{zone}}.",
+      "cannotCastSpellsOutsideType": "Non può essere speso per lanciare magie che non siano del tipo {{spellType}}.",
       "onlyForFaceDownSpell": "Solo per magie a faccia in giù.",
       "onlyForAny": "Solo per uno di questi usi: {{restrictions}}",
       "onlyForSpecialAction": "Solo per l'azione speciale {{action}}.",

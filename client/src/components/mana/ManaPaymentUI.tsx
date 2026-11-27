@@ -89,14 +89,15 @@ export function ManaPaymentUI() {
     // Checked first: an outer spell's `pending_cast` persists while a mana
     // ability activated to pay it has its own window open.
     if (manaAbilityPayment) return manaCostToShards(manaAbilityPayment.cost);
-    if (gameState.pending_cast) {
-      // Activated-ability mana payment: prefer `activation_cost` when present.
-      // The engine reuses PendingCast for both spell casts and activated abilities;
-      // for the latter, the mana to be paid is stored on `activation_cost`.
-      if (gameState.pending_cast.activation_cost) {
-        return abilityCostToManaShards(gameState.pending_cast.activation_cost) ?? [];
+    const pending = gameState.pending_cast;
+    if (pending) {
+      if (pending.activation_residual === "ManaLeg" || pending.activation_residual === "XMana") {
+        return manaCostToShards(pending.cost);
       }
-      return manaCostToShards(gameState.pending_cast.cost);
+      if (pending.activation_cost) {
+        return abilityCostToManaShards(pending.activation_cost) ?? [];
+      }
+      return manaCostToShards(pending.cost);
     }
     if (isPhyrexianPayment && spellObjectId != null) {
       const sourceObj = gameState.objects[spellObjectId];
@@ -810,7 +811,7 @@ function ManaChip({ group, count, selected = false, onActivate }: ManaChipProps)
   // Combine the restriction/grant detail with the source name so neither is
   // hidden when both exist (the inline source label may be truncated).
   const tooltip =
-    [manaGroupTooltip((k) => t(k), group), group.sourceName]
+    [manaGroupTooltip((key, options) => t(key, options), group), group.sourceName]
       .filter(Boolean)
       .join(" — ") || undefined;
 

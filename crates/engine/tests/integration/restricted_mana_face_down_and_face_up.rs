@@ -361,3 +361,147 @@ fn tin_street_gossip_disjunction_consumes_for_turn_face_up_not_cast() {
     );
     assert_eq!(pool.total(), 1, "the {{R}} must remain unspent");
 }
+
+/// CR 106.6 + CR 702.37e: a prohibition on casting a nonartifact spell
+/// permits a morph payment, while a permission limited to casts or activations
+/// excludes it. Both real mana abilities produce the same blue pip.
+#[test]
+fn negative_spell_restriction_pays_willbender_while_positive_restriction_does_not() {
+    use crate::support::shared_card_db;
+    use engine::ai_support::{legal_actions, legal_actions_full};
+    use engine::game::engine::EngineError;
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::actions::{AlternativeCastDecision, GameAction};
+    use engine::types::events::GameEvent;
+    use engine::types::game_state::{CastingVariant, WaitingFor};
+    use engine::types::mana::ManaColor;
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+
+    for (name, oracle, toughness, can_turn_up) in [
+        (
+            "Guidelight Optimizer",
+            "{T}: Add {U}. Spend this mana only to cast an artifact spell or activate an ability.",
+            1,
+            false,
+        ),
+        (
+            "Hydraulic Helper",
+            "Defender
+{T}: Add {U}. This mana can't be spent to cast a nonartifact spell.",
+            3,
+            true,
+        ),
+    ] {
+        let db = shared_card_db().expect("integration card fixture");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        let willbender = scenario.add_real_card(P0, "Willbender", Zone::Hand, db);
+        let producer = scenario
+            .add_creature_from_oracle(P0, name, 2, toughness, oracle)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Robot"])
+            .id();
+        let mountain = scenario.add_basic_land(P0, ManaColor::Red);
+        scenario.with_mana_pool(
+            P0,
+            (0..3)
+                .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+
+        runner
+            .cast(willbender)
+            .casting_variant(CastingVariant::FaceDown)
+            .alternative_cast(AlternativeCastDecision::Alternative)
+            .resolve();
+        let card = &runner.state().objects[&willbender];
+        assert_eq!(card.zone, Zone::Battlefield);
+        assert!(
+            card.face_down,
+            "Willbender must resolve as a face-down creature"
+        );
+        assert!(runner.state().stack.is_empty());
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+
+        for source in [producer, mountain] {
+            let (_, _, grouped) = legal_actions_full(runner.state());
+            let mana_action = grouped[&source]
+                .iter()
+                .find(|action| match action {
+                    GameAction::TapLandForMana { selection }
+                    | GameAction::ActivateManaSource { selection } => {
+                        selection.source.object_id == source
+                    }
+                    GameAction::ActivateAbility {
+                        source_id,
+                        ability_index,
+                        ..
+                    } => {
+                        *source_id == source
+                            && engine::types::ability::is_mana_ability(
+                                &runner.state().objects[&source].abilities[*ability_index],
+                            )
+                    }
+                    _ => false,
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name} fixture needs a mana action from {source:?}: {:?}",
+                        grouped[&source]
+                    )
+                })
+                .clone();
+            runner.act(mana_action).expect("float that source's mana");
+        }
+        assert!(runner.state().objects[&producer].tapped);
+        let pool = &runner.state().players[0].mana_pool;
+        assert_eq!(pool.total(), 2);
+        assert!(
+            pool.units().any(|unit| {
+                unit.source_id == producer
+                    && unit.color == ManaType::Blue
+                    && !unit.restrictions.is_empty()
+            }),
+            "{name} must produce the only blue pip, and it must be restricted"
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+
+        let offered = legal_actions(runner.state()).iter().any(|action| {
+            matches!(action, GameAction::TurnFaceUp { object_id, x: 0 } if *object_id == willbender)
+        });
+        let result = runner.act(GameAction::TurnFaceUp {
+            object_id: willbender,
+            x: 0,
+        });
+        assert_eq!(
+            (offered, result.is_ok()),
+            (can_turn_up, can_turn_up),
+            "{name}: expected turn-face-up offer and payment to agree: {result:?}",
+        );
+
+        if can_turn_up {
+            let result = result.expect("Hydraulic Helper pays Willbender's blue pip");
+            assert!(result.events.iter().any(|event| {
+                matches!(event, GameEvent::TurnedFaceUp { object_id } if *object_id == willbender)
+            }));
+            assert_eq!(runner.state().objects[&willbender].name, "Willbender");
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        } else {
+            assert!(matches!(result, Err(EngineError::ActionNotAllowed(ref why))
+                if why.contains("Cannot pay mana cost")));
+            assert_eq!(runner.state().players[0].mana_pool.total(), 2);
+        }
+        assert_eq!(runner.state().objects[&willbender].face_down, !can_turn_up);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        assert!(runner.state().stack.is_empty());
+    }
+}

@@ -47,6 +47,7 @@ use crate::types::ability::{CostRecipientSelection, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::mana::{PaymentContext, SpecialAction};
 use crate::types::player::PlayerId;
 
 /// Outcome of attempting to pay life as a cost.
@@ -107,8 +108,23 @@ impl PayLifeCostResult {
 /// Otherwise floor-divides current life by 2 (CR 118.3: must have the resource
 /// to pay fully).
 pub fn max_phyrexian_life_payments(state: &GameState, player: PlayerId) -> u32 {
-    // CR 119.8 / CR 118.3: A cost that involves paying life can't be paid while prohibited.
-    if player_has_cant_lose_life(state, player) || player_cant_pay_life_as_cost(state, player) {
+    max_phyrexian_life_payments_for_payment(state, player, None)
+}
+
+/// CR 116.2f + CR 119.8: Suspend is outside a cast-or-activation
+/// prohibition, but still subject to the general prohibition on losing life.
+pub(super) fn max_phyrexian_life_payments_for_payment(
+    state: &GameState,
+    player: PlayerId,
+    ctx: Option<&PaymentContext<'_>>,
+) -> u32 {
+    let suspend = matches!(
+        ctx,
+        Some(PaymentContext::SpecialAction(SpecialAction::Suspend))
+    );
+    if player_has_cant_lose_life(state, player)
+        || (!suspend && player_cant_pay_life_as_cost(state, player))
+    {
         return 0;
     }
     // CR 119.4a: in a team format the payable budget is bounded by the team total.

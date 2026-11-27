@@ -5539,7 +5539,7 @@ fn powerstone_ability() -> AbilityDefinition {
             },
             restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: crate::types::mana::AbilityActivationScope::Any,
+                ability: crate::types::mana::AbilityActivationScope::AnyNonSpellPayment,
             }],
             grants: vec![],
             expiry: None,
@@ -8031,7 +8031,7 @@ mod tests {
                 restrictions.as_slice(),
                 [crate::types::ability::ManaSpendRestriction::SpellTypeOrAbilityActivation {
                     spell_type,
-                    ability: crate::types::mana::AbilityActivationScope::Any,
+                    ability: crate::types::mana::AbilityActivationScope::AnyNonSpellPayment,
                 }] if spell_type == "Artifact"
             )
         ));

@@ -1290,6 +1290,7 @@
       "onlyForSpellColor": "Nur für Zaubersprüche der Farbe {{color}}.",
       "onlyForSpellFromZone": "Nur für Zaubersprüche {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "Kann nicht für Zaubersprüche aus {{zone}} ausgegeben werden.",
+      "cannotCastSpellsOutsideType": "Dieses Mana kann nicht zum Wirken von Zaubersprüchen ausgegeben werden, die nicht den Typ {{spellType}} haben.",
       "onlyForFaceDownSpell": "Nur für verdeckte Zaubersprüche.",
       "onlyForAny": "Nur für eine dieser Verwendungen: {{restrictions}}",
       "onlyForSpecialAction": "Nur für die Sonderaktion {{action}}.",

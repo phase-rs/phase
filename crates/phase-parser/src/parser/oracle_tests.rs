@@ -5239,16 +5239,6 @@ fn brine_hag_durationless_descriptor_base_pt_effect_remains_unimplemented() {
     );
 }
 
-/// CR 106.6 + CR 702.6a: Hydraulic Helper — the full card must parse with
-/// zero `Effect::Unimplemented` parts. "Defender" extracts as a keyword and
-/// the `{T}: Add {U}` mana ability carries the negative spend restriction
-/// ("This mana can't be spent to cast a nonartifact spell") lowered to
-/// `ManaSpendRestriction::SpellTypeOrAbilityActivation { spell_type:
-/// "Artifact", ability: Any }`. The restriction governs only what *spells*
-/// the mana may cast (artifact spells); it must leave ability activation
-/// UNRESTRICTED. This is the discriminating assertion: a `SpellType("Artifact")`
-/// lowering would wrongly forbid paying for any ability, so the `ability: Any`
-/// scope is exactly what keeps ability activation payable.
 /// CR 613.4c + CR 701.10a: Tifa's Limit Break (Tiered) — all three tiers
 /// parse with zero Unimplemented. Somersault → `Pump`, Meteor Strikes →
 /// `DoublePT factor:2`, Final Heaven → `DoublePT factor:3`. The discriminating
@@ -5379,6 +5369,8 @@ fn crew_history_quantity_guard_is_typed_and_position_independent() {
     );
 }
 
+/// CR 106.6 + CR 702.3a: Hydraulic Helper parses Defender and retains its
+/// nonartifact spell prohibition as `AnyNonSpellPayment` on the mana ability.
 #[test]
 fn hydraulic_helper_full_card_supported_with_artifact_spend_restriction() {
     use crate::types::ability::{ManaProduction, ManaSpendRestriction};
@@ -5421,10 +5413,9 @@ fn hydraulic_helper_full_card_supported_with_artifact_spend_restriction() {
         restrictions,
         &[ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         }],
-        "negative nonartifact restriction must lower to \
-             SpellTypeOrAbilityActivation so ability activation stays unrestricted"
+        "negative nonartifact restriction must leave all non-spell payments eligible"
     );
 }
 
@@ -11819,7 +11810,7 @@ fn jetfire_front_face_activated_ability() {
         restrictions,
         &vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         }],
         "the following sentence must fold in the 'nonartifact' spend restriction"
     );
@@ -21512,10 +21503,8 @@ fn mana_spend_restriction_spell_only() {
 #[test]
 fn mana_spend_restriction_negative_nonartifact() {
     // CR 106.6: "this mana can't be spent to cast nonartifact spells" (Karn,
-    // Legacy Reforged) restricts spell-casting to artifact spells but leaves
-    // ability activation unrestricted — so it lowers to the OR variant with
-    // `ability: Any`, NOT a spells-only `SpellType` (which would wrongly
-    // forbid paying for abilities).
+    // Legacy Reforged) restricts spell-casting to artifact spells and leaves
+    // all non-spell payments eligible.
     use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
     use crate::types::ability::ManaSpendRestriction;
     use crate::types::mana::AbilityActivationScope;
@@ -21526,7 +21515,7 @@ fn mana_spend_restriction_negative_nonartifact() {
             .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         })
     );
 }
@@ -21545,7 +21534,7 @@ fn mana_spend_restriction_negative_article_singular_nonartifact() {
         Some(
             crate::types::ability::ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: crate::types::mana::AbilityActivationScope::Any,
+                ability: crate::types::mana::AbilityActivationScope::AnyNonSpellPayment,
             }
         )
     );
@@ -21565,7 +21554,7 @@ fn mana_spend_restriction_negative_noncreature() {
             .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Creature".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         })
     );
 }
@@ -21592,7 +21581,7 @@ At the beginning of your upkeep, add {C} for each artifact you control. This man
         if let Effect::Mana { restrictions, .. } = effect {
             if restrictions.contains(&ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: AbilityActivationScope::Any,
+                ability: AbilityActivationScope::AnyNonSpellPayment,
             }) {
                 *found = true;
             }

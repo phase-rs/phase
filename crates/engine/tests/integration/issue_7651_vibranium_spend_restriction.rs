@@ -10,7 +10,7 @@
 use engine::game::casting::can_cast_object_now;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaType};
+use engine::types::mana::{AbilityActivationScope, ManaCost, ManaRestriction, ManaType};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -114,6 +114,13 @@ fn vibranium_floating_mana_pays_for_artifact_spells_only() {
     let pool = &board.runner.state().players[0].mana_pool;
     assert_eq!(pool.total(), 1, "{pool:?}");
     assert_eq!(pool.count_color(ManaType::Colorless), 1, "{pool:?}");
+    assert_eq!(
+        pool.units().next().unwrap().restrictions.as_slice(),
+        &[ManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type: "Artifact".to_string(),
+            ability: AbilityActivationScope::AnyNonSpellPayment,
+        }],
+    );
 
     assert_creature_unpayable(&mut board);
     assert_eq!(board.runner.state().players[0].mana_pool.total(), 1);

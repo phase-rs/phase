@@ -1290,6 +1290,7 @@
       "onlyForSpellColor": "Solo para hechizos del color {{color}}.",
       "onlyForSpellFromZone": "Solo para hechizos {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "No se puede gastar para lanzar hechizos desde {{zone}}.",
+      "cannotCastSpellsOutsideType": "No se puede gastar para lanzar hechizos que no sean del tipo {{spellType}}.",
       "onlyForFaceDownSpell": "Solo para hechizos boca abajo.",
       "onlyForAny": "Solo para uno de estos usos: {{restrictions}}",
       "onlyForSpecialAction": "Solo para la acción especial {{action}}.",

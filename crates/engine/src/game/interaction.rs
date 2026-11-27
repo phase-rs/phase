@@ -5626,6 +5626,9 @@ fn interaction_mana_ability_activation_scope(
     match scope {
         AbilityActivationScope::OfSpellType => InteractionManaAbilityActivationScope::OfSpellType,
         AbilityActivationScope::Any => InteractionManaAbilityActivationScope::Any,
+        AbilityActivationScope::AnyNonSpellPayment => {
+            InteractionManaAbilityActivationScope::AnyNonSpellPayment
+        }
     }
 }
 
@@ -5638,6 +5641,7 @@ fn interaction_mana_special_action(action: SpecialAction) -> InteractionManaSpec
         SpecialAction::RollPlanarDie => InteractionManaSpecialAction::RollPlanarDie,
         SpecialAction::EndContinuousEffect => InteractionManaSpecialAction::EndContinuousEffect,
         SpecialAction::Foretell => InteractionManaSpecialAction::Foretell,
+        SpecialAction::Suspend => InteractionManaSpecialAction::Suspend,
     }
 }
 
@@ -12208,6 +12212,35 @@ mod tests {
     use super::*;
     use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
     use crate::types::game_state::{DistributionScope, DistributionUnit};
+
+    #[test]
+    fn typed_mana_restriction_preserves_non_spell_payment_scope() {
+        for (ability, serialized_scope) in [
+            (AbilityActivationScope::Any, "any"),
+            (
+                AbilityActivationScope::AnyNonSpellPayment,
+                "anyNonSpellPayment",
+            ),
+        ] {
+            let projected =
+                interaction_mana_restriction(&ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                    spell_type: "Artifact".to_string(),
+                    ability,
+                });
+            let wire = serde_json::to_value(&projected).unwrap();
+            assert_eq!(
+                wire,
+                serde_json::json!({
+                    "type": "onlyForTypeSpellsOrAbilities",
+                    "data": { "spellType": "Artifact", "ability": serialized_scope }
+                })
+            );
+            assert_eq!(
+                serde_json::from_value::<InteractionManaRestriction>(wire).unwrap(),
+                projected
+            );
+        }
+    }
 
     /// V5i: CR 608.2d — a resolution-time division is among ANY number of its
     /// candidates, so a response assigning the whole total to a strict subset

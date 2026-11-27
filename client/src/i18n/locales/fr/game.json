@@ -1290,6 +1290,7 @@
       "onlyForSpellColor": "Uniquement pour les sorts de la couleur {{color}}.",
       "onlyForSpellFromZone": "Uniquement pour les sorts {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "Ne peut pas être dépensé pour lancer des sorts depuis {{zone}}.",
+      "cannotCastSpellsOutsideType": "Ce mana ne peut pas être dépensé pour lancer des sorts qui ne sont pas du type {{spellType}}.",
       "onlyForFaceDownSpell": "Uniquement pour les sorts face cachée.",
       "onlyForAny": "Uniquement pour l'un de ces usages : {{restrictions}}",
       "onlyForSpecialAction": "Uniquement pour l'action spéciale {{action}}.",
