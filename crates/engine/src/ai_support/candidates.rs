@@ -5777,6 +5777,58 @@ fn select_cards_variants(
     }
 }
 
+/// A failed Suspend offer search may rule out payment only across domains it
+/// can fully enumerate. Other carriers can still supply a positive witness.
+pub(super) fn suspend_payment_candidates_are_exhaustive(
+    state: &GameState,
+    actions: &[GameAction],
+) -> bool {
+    match &state.waiting_for {
+        WaitingFor::ManaPayment {
+            convoke_mode: None, ..
+        } => actions.iter().all(|action| match action {
+            // Candidate mana activations use Auto. A nested mana leg can have
+            // a different manually funded route that this list doesn't offer.
+            GameAction::ActivateAbility { .. } => {
+                casting::activates_mana_ability_without_mana_payment(state, action)
+            }
+            GameAction::TapLandForMana { selection } => {
+                selection.ability_index.is_none_or(|ability_index| {
+                    state
+                        .objects
+                        .get(&selection.source.object_id)
+                        .and_then(|source| source.abilities.get(ability_index))
+                        .is_some_and(|ability| {
+                            crate::game::mana_abilities::mana_sub_cost_of(&ability.cost).is_none()
+                        })
+                })
+            }
+            GameAction::PassPriority | GameAction::CancelCast => true,
+            _ => false,
+        }),
+        WaitingFor::PayCost {
+            kind:
+                PayCostKind::Discard | PayCostKind::Sacrifice | PayCostKind::ExileFromManaZone { .. },
+            choices,
+            count: 1,
+            resume: CostResume::ManaAbility { .. },
+            ..
+        } => {
+            // Single-object choices are exhaustive if the pool fits. With
+            // multiple objects, the mana ability can use the first selection
+            // and the candidate generator lists combinations without ordering.
+            choices.len() <= SELECTION_POOL_CAP
+        }
+        WaitingFor::ChooseManaColor {
+            choice:
+                crate::types::game_state::ManaChoicePrompt::SingleColor { .. }
+                | crate::types::game_state::ManaChoicePrompt::Combination { .. },
+            ..
+        } => true,
+        _ => false,
+    }
+}
+
 fn bounded_select_card_candidates(
     player: PlayerId,
     cards: &[crate::types::identifiers::ObjectId],

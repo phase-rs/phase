@@ -2602,6 +2602,9 @@ export interface PendingCast {
   ability: ResolvedAbility;
   cost: ManaCost;
   activation_cost?: SerializedAbilityCost;
+  // Engine marker that `cost` holds the mana leg and `activation_cost` holds
+  // the unpaid tail. The default `None` is omitted on the wire.
+  activation_residual?: "XMana" | "ManaLeg";
   activation_ability_index?: number;
   target_constraints?: Array<{ type: string }>;
   deferred_sacrificed_permanents?: DeferredSpellSacrifice[];

@@ -14,6 +14,7 @@ use engine::game::restrictions::{
     spell_confined_to_sorcery_timing,
 };
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{ChosenAttribute, Effect, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -809,13 +810,20 @@ fn n2_suspend_does_not_get_activated_ability_discounts() {
     for extra_land in [false, true] {
         let mut s = GameScenario::new();
         s.at_phase(Phase::PreCombatMain);
-        s.add_basic_land(P0, ManaColor::Black);
+        let swamp = s.add_basic_land(P0, ManaColor::Black);
         if extra_land {
             s.add_basic_land(P0, ManaColor::Green);
         }
         s.add_creature(P0, "Zirda, the Dawnwaker", 3, 3)
             .as_legendary()
             .from_oracle_text("Companion — Each permanent card in your starting deck has an activated ability.\nAbilities you activate that aren't mana abilities cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.\n{1}, {T}: Target creature can't block this turn.");
+        let millstone = s
+            .add_artifact_from_oracle(P0, "Millstone", "{2}, {T}: Target player mills two cards.")
+            .id();
+        let milled = [
+            s.add_land_to_library_top(P1, "Forest").id(),
+            s.add_land_to_library_top(P1, "Island").id(),
+        ];
         let card = sentence(&mut s);
         let mut r = s.build();
         window(&mut r, P0, Phase::PreCombatMain);
@@ -824,6 +832,19 @@ fn n2_suspend_does_not_get_activated_ability_discounts() {
             [extra_land, extra_land, true],
             "offer and enforcement require the full suspend cost"
         );
+        if !extra_land {
+            let mut paid_activation = GameRunner::from_state(r.state().clone());
+            paid_activation
+                .activate(millstone, 0)
+                .target_player(P1)
+                .resolve();
+            assert!(paid_activation.state().objects[&swamp].tapped);
+            assert!(paid_activation.state().objects[&millstone].tapped);
+            assert_eq!(payment_pool(&paid_activation).total(), 0);
+            assert!(milled
+                .iter()
+                .all(|id| { paid_activation.state().objects[id].zone == Zone::Graveyard }));
+        }
     }
 }
 
@@ -1090,8 +1111,12 @@ fn suspend_payment_can_reveal_the_held_talisman_to_metalworker() {
         .with_mana_cost(ManaCost::NoCost).id();
     let mut r = s.build();
     open_manual_suspend(&mut r, card, "{1}");
-    r.act(mana_ability(&r, metalworker))
-        .expect("Metalworker opens its reveal prompt");
+    let action = mana_ability(&r, metalworker);
+    assert!(
+        witness_payment_continuation(r.state(), &action).is_some(),
+        "the Metalworker action has a certified path to Suspend completion"
+    );
+    r.act(action).expect("Metalworker opens its reveal prompt");
     let WaitingFor::RevealChoice {
         cards, player: P0, ..
     } = &r.state().waiting_for
@@ -1201,6 +1226,92 @@ fn suspend_payment_offers_a_hand_source_even_above_the_witness_limit() {
     }
 }
 
+/// CR 605.3a + CR 702.62a: a legal mana payment can lie beyond the AI's sacrifice shortlist.
+#[test]
+fn suspend_sacrifice_payment_can_use_a_choice_beyond_the_search_pool() {
+    let db = crate::support::shared_card_db().expect("card fixture database");
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    // Stage the battlefield after Murder destroys a Hangarback Walker with
+    // twelve counters, and Soldevi Adnate has since entered and untapped.
+    let thopters: Vec<_> = (0..12)
+        .map(|_| {
+            s.add_creature(P0, "Thopter", 1, 1)
+                .as_artifact_creature()
+                .with_subtypes(vec!["Thopter"])
+                .from_oracle_text_with_keywords(&["Flying"], "Flying")
+                .with_mana_cost(ManaCost::NoCost)
+                .id()
+        })
+        .collect();
+    let adnate = s.add_real_card(P0, "Soldevi Adnate", Zone::Battlefield, db);
+    let card = sentence(&mut s);
+    let mut r = s.build();
+    for id in &thopters {
+        r.state_mut().objects.get_mut(id).unwrap().is_token = true;
+    }
+    window(&mut r, P0, Phase::PreCombatMain);
+    assert_eq!(payment_pool(&r).total(), 0, "reach: no floating mana");
+
+    let manual = manual_suspend(&r, card);
+    let mut unpayable = GameRunner::from_state(r.state().clone());
+    unpayable
+        .state_mut()
+        .objects
+        .get_mut(&adnate)
+        .unwrap()
+        .tapped = true;
+    assert!(restriction_alone(&unpayable, P0, card));
+    assert!(!legal_actions(unpayable.state()).contains(&manual));
+    assert!(unpayable.act(manual.clone()).is_err());
+
+    let offered = legal_actions(r.state()).contains(&manual);
+    let opened = r
+        .act(manual)
+        .expect("Suspend can be paid by sacrificing the thirteenth choice");
+    assert!(offered, "the payable Manual Suspend is offered");
+    assert!(matches!(
+        opened.waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    assert_eq!(r.state().objects[&card].zone, Zone::Hand);
+    assert_eq!(
+        r.state().pending_cast.as_ref().expect("payment root").cost,
+        parse_mtgjson_mana_cost("{1}{B}"),
+    );
+
+    let produce = mana_ability(&r, adnate);
+    r.act(produce).expect("activate Adnate during payment");
+    let WaitingFor::PayCost {
+        player: P0,
+        kind: PayCostKind::Sacrifice,
+        choices,
+        count: 1,
+        ..
+    } = &r.state().waiting_for
+    else {
+        panic!(
+            "expected Adnate's sacrifice choice, got {:?}",
+            r.state().waiting_for
+        );
+    };
+    assert_eq!(choices.len(), 13);
+    assert_eq!(&choices[..12], thopters.as_slice());
+    assert_eq!(choices[12], adnate, "the only payable choice is last");
+    r.act(choose_card(adnate))
+        .expect("Adnate can sacrifice itself");
+    assert_eq!(r.state().objects[&adnate].zone, Zone::Graveyard);
+    assert_eq!(payment_pool(&r).count_color(ManaType::Black), 2);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    let finished = r.act(GameAction::PassPriority).expect("pay {1}{B}");
+    assert_eq!(payment_pool(&r).total(), 0);
+    check_suspend_delivery(&r, card, 3);
+    assert_counter_event(&finished.events, card, 3);
+}
+
 /// CR 106.6: restricted blue from Guidelight and Omen doesn't pay Suspend; Hydraulic's does.
 #[test]
 fn only_restrictions_covering_special_actions_can_fund_suspend() {
@@ -1224,6 +1335,9 @@ fn only_restrictions_covering_special_actions_can_fund_suspend() {
         let mut s = GameScenario::new();
         s.at_phase(Phase::PreCombatMain);
         let producer = s.add_creature_from_oracle(P0, name, 2, 3, oracle).id();
+        let key = s
+            .add_artifact_from_oracle(P0, "Voltaic Key", "{1}, {T}: Untap target artifact.")
+            .id();
         let card = spell(&mut s, P0, "Ancestral Vision", false, "", ANCESTRAL_VISION);
         let mut r = s.build();
         assert!(restriction_alone(&r, P0, card));
@@ -1239,6 +1353,29 @@ fn only_restrictions_covering_special_actions_can_fund_suspend() {
             assert!(r.state().objects[&producer].tapped);
             assert_eq!(payment_pool(&r).total(), 0);
         } else {
+            let mut paid_activation = GameRunner::from_state(r.state().clone());
+            assert_eq!(payment_pool(&paid_activation).total(), 0);
+            paid_activation
+                .act(mana_ability(&paid_activation, producer))
+                .expect("the restricted mana source actually produces mana");
+            assert!(paid_activation.state().objects[&producer].tapped);
+            assert_eq!(
+                payment_pool(&paid_activation).count_color(ManaType::Blue),
+                1
+            );
+            let produced = payment_pool(&paid_activation).total();
+            let outcome = paid_activation
+                .activate(key, 0)
+                .target_object(key)
+                .resolve();
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { player: P0 }
+            ));
+            assert_eq!(payment_pool(&paid_activation).total(), produced - 1);
+            assert!(!paid_activation.state().objects[&key].tapped);
+            assert!(paid_activation.state().stack.is_empty());
+
             assert!(!legal_actions(r.state()).contains(&manual));
             assert!(r.act(auto).is_err());
             assert!(r.act(manual).is_err());
@@ -1372,4 +1509,95 @@ fn powerstone_mana_can_pay_the_generic_suspend_cost() {
     assert!(r.state().objects[&swamp].tapped);
     assert!(r.state().objects[&powerstone].tapped);
     assert_eq!(payment_pool(&r).total(), 0);
+}
+
+/// CR 116.2f + CR 119.4: K'rrik pays a Suspend cost with life even under
+/// Yasharn's prohibition, which still applies to a real spell.
+#[test]
+fn suspend_can_pay_life_under_yasharn_with_krrik() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::game_state::ShardChoice;
+
+    let db = crate::support::shared_card_db().expect("card fixture database");
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.add_real_card(P0, "K'rrik, Son of Yawgmoth", Zone::Battlefield, db);
+    let yasharn = s.add_real_card(P1, "Yasharn, Implacable Earth", Zone::Battlefield, db);
+    let lands = [
+        s.add_real_card(P0, "Wastes", Zone::Battlefield, db),
+        s.add_real_card(P0, "Wastes", Zone::Battlefield, db),
+    ];
+    let ordinary = s.add_real_card(P0, "Blood Artist", Zone::Hand, db);
+    let card = s
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Living End",
+            false,
+            "Suspend 3—{2}{B}{B}\nEach player exiles all creature cards from their graveyard, then sacrifices all creatures they control, then puts all cards they exiled this way onto the battlefield.",
+        )
+        .with_mana_cost(ManaCost::NoCost)
+        .id();
+    let mut r = s.build();
+    for land in lands {
+        tap_land(&mut r, land);
+    }
+    let life = r.state().players[0].life;
+    assert_eq!(payment_pool(&r).total(), 2);
+    assert_eq!(payment_pool(&r).count_color(ManaType::Colorless), 2);
+    let cast = GameAction::CastSpell {
+        object_id: ordinary,
+        card_id: r.state().objects[&ordinary].card_id,
+        targets: Vec::new(),
+        payment_mode: CastPaymentMode::Auto,
+    };
+    let mut prohibited = GameRunner::from_state(r.state().clone());
+    assert!(!can_cast_object_now(prohibited.state(), P0, ordinary));
+    assert!(prohibited.act(cast.clone()).is_err());
+    assert_eq!(prohibited.state().objects[&ordinary].zone, Zone::Hand);
+    let mut permitted = GameRunner::from_state(r.state().clone());
+    engine::game::zones::move_to_zone(
+        permitted.state_mut(),
+        yasharn,
+        Zone::Graveyard,
+        &mut Vec::new(),
+    );
+    window(&mut permitted, P0, Phase::PreCombatMain);
+    assert!(can_cast_object_now(permitted.state(), P0, ordinary));
+    let announced = permitted
+        .act(cast)
+        .expect("without Yasharn, K'rrik pays for Blood Artist");
+    assert!(matches!(
+        announced.waiting_for,
+        WaitingFor::PhyrexianPayment { player: P0, ref shards, .. } if shards.len() == 1
+    ));
+    permitted
+        .act(GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife],
+        })
+        .expect("pay {B} with 2 life");
+    assert_eq!(permitted.state().objects[&ordinary].zone, Zone::Stack);
+    assert_eq!(permitted.state().players[0].life, life - 2);
+    assert_eq!(payment_pool(&permitted).total(), 1);
+
+    let action = suspend_action(&r, card);
+    let offered = legal_actions(r.state()).contains(&action);
+    let announced = r
+        .act(action)
+        .expect("Yasharn does not prohibit paying life to Suspend");
+    assert!(offered);
+    assert!(matches!(
+        announced.waiting_for,
+        WaitingFor::PhyrexianPayment { player: P0, ref shards, .. } if shards.len() == 2
+    ));
+    assert_eq!(r.state().players[0].life, life);
+    assert_eq!(r.state().objects[&card].zone, Zone::Hand);
+    let finished = r
+        .act(GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife; 2],
+        })
+        .expect("pay {2} and 4 life for Suspend");
+    assert_eq!(r.state().players[0].life, life - 4);
+    assert_eq!(payment_pool(&r).total(), 0);
+    check_suspend_delivery(&r, card, 3);
+    assert_counter_event(&finished.events, card, 3);
 }

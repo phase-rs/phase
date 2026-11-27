@@ -456,6 +456,7 @@ describe("ManaPaymentUI", () => {
       pending_cast: buildPendingCast({
         object_id: 701,
         activation_ability_index: 1,
+        activation_residual: "ManaLeg",
         cost: { type: "Cost", shards: ["Red"], generic: 0 },
         activation_cost: { type: "Exile", count: 1, zone: "Hand", filter: { type: "SelfRef" } },
       }),

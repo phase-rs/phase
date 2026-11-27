@@ -89,9 +89,15 @@ export function ManaPaymentUI() {
     // Checked first: an outer spell's `pending_cast` persists while a mana
     // ability activated to pay it has its own window open.
     if (manaAbilityPayment) return manaCostToShards(manaAbilityPayment.cost);
-    if (gameState.pending_cast) {
-      const activation = abilityCostToManaShards(gameState.pending_cast.activation_cost);
-      return activation?.length ? activation : manaCostToShards(gameState.pending_cast.cost);
+    const pending = gameState.pending_cast;
+    if (pending) {
+      if (pending.activation_residual === "ManaLeg" || pending.activation_residual === "XMana") {
+        return manaCostToShards(pending.cost);
+      }
+      if (pending.activation_cost) {
+        return abilityCostToManaShards(pending.activation_cost) ?? [];
+      }
+      return manaCostToShards(pending.cost);
     }
     if (isPhyrexianPayment && spellObjectId != null) {
       const sourceObj = gameState.objects[spellObjectId];

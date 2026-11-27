@@ -21833,10 +21833,11 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     // CR 107.4f + CR 118.1: Single-authority permission bundle — passes
     // `life_colors` through to `compute_phyrexian_shards` so K'rrik-promoted
     // shards surface in the pause UI.
-    let permissions = super::static_abilities::build_cost_permission_context(
+    let permissions = super::static_abilities::build_cost_permission_context_for_payment(
         &preview,
         player,
         mana_spend_permission,
+        effective_payment_context,
     );
 
     let (shards, payable) = {

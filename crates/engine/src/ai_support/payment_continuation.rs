@@ -9,6 +9,7 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use crate::ai_support::candidate_actions;
+use crate::ai_support::candidates::suspend_payment_candidates_are_exhaustive;
 use crate::game::casting::{pending_suspend, suspend_cost_destination};
 use crate::game::engine::{apply_as_current_for_simulation, apply_interaction_for_simulation};
 use crate::types::actions::GameAction;
@@ -139,7 +140,7 @@ pub enum PaymentContinuationIndeterminate {
     StoppedAtFirstCompletion,
     /// An offer search met a branch it may not certify or expand: one that
     /// left the supported payment carriers, lost the root without finalizing
-    /// it, or wasn't information-safe.
+    /// it, wasn't information-safe, or had an incomplete candidate domain.
     UnexploredBranch,
 }
 
@@ -623,8 +624,19 @@ fn witness_payment_continuations_inner(
         ),
         SearchPolicy::AnyRoot { attempts, .. } => attempts,
     };
-    // `AnyRoot` only: a successor this search may not certify or expand.
-    let mut unexplored = false;
+    let suspend_offer = matches!(policy, SearchPolicy::AnyRoot { .. })
+        && matches!(baseline.completion, CompletionBaseline::Suspend { .. });
+    // `AnyRoot` only: a branch this search may not certify or fully expand.
+    let mut unexplored = suspend_offer && {
+        // The witness doesn't offer undo. The player can undo a tap made before
+        // the search began and choose a different source action from there.
+        let can_undo_initial_tap = state
+            .waiting_for
+            .acting_player()
+            .and_then(|payer| state.lands_tapped_for_mana.get(&payer))
+            .is_some_and(|taps| !taps.is_empty());
+        can_undo_initial_tap || !suspend_payment_candidates_are_exhaustive(state, actions)
+    };
     let information_unsafe =
         |before: &GameState, successor: &GameState, step_events: &[GameEvent]| match policy {
             SearchPolicy::EveryRoot => false,
@@ -711,7 +723,7 @@ fn witness_payment_continuations_inner(
     }
 
     while let Some(mut node) = queue.pop_front() {
-        let Some(next_action) = node.next_action() else {
+        let Some(next_action) = node.next_action(suspend_offer.then_some(&mut unexplored)) else {
             continue;
         };
         if attempts == attempt_budget {
@@ -873,7 +885,7 @@ fn payment_action_priority(action: &GameAction) -> u8 {
 }
 
 impl WitnessNode {
-    fn next_action(&mut self) -> Option<GameAction> {
+    fn next_action(&mut self, unexplored: Option<&mut bool>) -> Option<GameAction> {
         if self.remaining_actions.is_none() {
             // The reducer below remains the legality authority. Reusing the
             // raw engine candidate domain avoids first simulating every broad
@@ -883,6 +895,9 @@ impl WitnessNode {
                 .into_iter()
                 .map(|candidate| candidate.action)
                 .collect();
+            if let Some(unexplored) = unexplored {
+                *unexplored |= !suspend_payment_candidates_are_exhaustive(&self.state, &actions);
+            }
             actions.sort_by(|left, right| {
                 payment_action_priority(left)
                     .cmp(&payment_action_priority(right))
@@ -1613,87 +1628,51 @@ mod tests {
     }
 
     #[test]
-    fn suspend_certifies_metalworker_revealing_the_exact_known_hand_card() {
-        use crate::game::scenario::{GameScenario, P0};
-        use crate::types::game_state::CastPaymentMode;
-
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
-        let metalworker = scenario
-            .add_creature_from_oracle(
-                P0, "Metalworker", 1, 2,
-                "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.",
-            )
-            .as_artifact()
-            .id();
-        let talisman = scenario
-            .add_artifact_to_hand_from_oracle(P0, "Sol Talisman", "Suspend 3—{1}\n{T}: Add {C}{C}.")
-            .id();
-        let mut runner = scenario.build();
-        let ability_index = runner.state().objects[&talisman]
-            .abilities
-            .iter()
-            .position(|ability| ability.activation_zone == Some(Zone::Hand))
-            .unwrap();
-        for (source_id, ability_index, payment_mode) in [
-            (talisman, ability_index, CastPaymentMode::Manual),
-            (metalworker, 0, CastPaymentMode::Auto),
-        ] {
-            runner
-                .act(GameAction::ActivateAbility {
-                    source_id,
-                    ability_index,
-                    payment_mode,
-                })
-                .unwrap();
-            if source_id == talisman {
-                assert_eq!(
-                    TargetedCastVerdict::for_suspend(runner.state()),
-                    TargetedCastVerdict::Completed
-                );
-            }
-        }
-
-        let before_reveal = runner.state().clone();
-        let result = runner
-            .act(GameAction::SelectCards {
-                cards: vec![talisman],
-            })
-            .unwrap();
-        let reveal = result
-            .events
-            .iter()
-            .find(|event| matches!(event, GameEvent::CardsRevealed { .. }))
-            .unwrap();
-        let origin = RngMark::of(&before_reveal);
-        let known_hand = Some((&before_reveal, P0));
+    fn suspend_offer_information_safety_requires_the_exact_known_hand_occurrence() {
+        let mut state = GameState::new_two_player(1);
+        let payer = PlayerId(0);
+        let card = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            payer,
+            "Sol Talisman".to_string(),
+            Zone::Hand,
+        );
+        let exact = ObjectIncarnationRef {
+            object_id: card,
+            incarnation: state.objects[&card].incarnation,
+        };
+        let reveal = |occurrences| {
+            [GameEvent::CardsRevealed {
+                player: payer,
+                card_ids: vec![card],
+                card_names: vec!["Sol Talisman".to_string()],
+                occurrences,
+            }]
+        };
+        let origin = RngMark::of(&state);
+        let known_hand = Some((&state, payer));
         assert!(step_is_information_safe(
             origin,
-            runner.state(),
-            std::slice::from_ref(reveal),
-            known_hand
+            &state,
+            &reveal(vec![exact]),
+            known_hand,
         ));
-
-        let mut unbound = reveal.clone();
-        let GameEvent::CardsRevealed { occurrences, .. } = &mut unbound else {
-            unreachable!()
+        let stale = ObjectIncarnationRef {
+            incarnation: exact.incarnation + 1,
+            ..exact
         };
-        occurrences[0].incarnation += 1;
         assert!(!step_is_information_safe(
             origin,
-            runner.state(),
-            std::slice::from_ref(&unbound),
-            known_hand
+            &state,
+            &reveal(vec![stale]),
+            known_hand,
         ));
-        let GameEvent::CardsRevealed { occurrences, .. } = &mut unbound else {
-            unreachable!()
-        };
-        occurrences.clear();
         assert!(!step_is_information_safe(
             origin,
-            runner.state(),
-            &[unbound],
-            known_hand
+            &state,
+            &reveal(Vec::new()),
+            known_hand,
         ));
     }
 
