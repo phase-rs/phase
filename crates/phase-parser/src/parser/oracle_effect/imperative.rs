@@ -25,6 +25,7 @@ use super::lower::{
     strip_trailing_where_x, WhereXBinding,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
+use super::subject::parse_chosen_controller_target;
 use super::token::try_parse_token;
 use super::{
     attach_controller_if_absent, hand_reveal_target_to_controller_ref, is_bare_object_pronoun,
@@ -2279,52 +2280,6 @@ fn parse_tap_total_power_floor(rem_lower: &str) -> Option<i32> {
     .parse(rem_lower)
     .ok()
     .and_then(|(_, floor)| i32::try_from(floor).ok())
-}
-
-/// CR 608.2c + CR 109.4: qualify a chosen-target reader by the controller
-/// phrase that follows it. ParentTarget supplies the announced chosen group;
-/// the typed controller leg selects the subset the instruction names.
-fn parse_chosen_controller_target(lower: &str) -> Option<TargetFilter> {
-    let input = lower.trim_end_matches('.');
-    let (rest, _) = preceded(
-        tag::<_, _, OracleError<'_>>("the chosen "),
-        alt((
-            tag("artifacts"),
-            tag("artifact"),
-            tag("cards"),
-            tag("card"),
-            tag("creatures"),
-            tag("creature"),
-            tag("enchantments"),
-            tag("enchantment"),
-            tag("lands"),
-            tag("land"),
-            tag("permanents"),
-            tag("permanent"),
-            tag("players"),
-            tag("player"),
-        )),
-    )
-    .parse(input)
-    .ok()?;
-    let (rest, controller) = alt((
-        value(
-            ControllerRef::You,
-            tag::<_, _, OracleError<'_>>(" you control"),
-        ),
-        value(
-            ControllerRef::Opponent,
-            tag::<_, _, OracleError<'_>>(" you don't control"),
-        ),
-    ))
-    .parse(rest)
-    .ok()?;
-    rest.is_empty().then_some(TargetFilter::And {
-        filters: vec![
-            TargetFilter::ParentTarget,
-            TargetFilter::Typed(TypedFilter::default().controller(controller)),
-        ],
-    })
 }
 
 /// CR 118.12: does a tap/untap target remainder carry a total-power
