@@ -4467,10 +4467,8 @@ pub enum ManaSpendRestriction {
     /// "Spend this mana only to cast a creature spell of the chosen type."
     /// Resolved at runtime from the source's `chosen_creature_type()`.
     ChosenCreatureType,
-    /// CR 106.6: "Spend this mana only to cast creature spells or activate abilities of creatures."
-    /// Combined restriction with OR semantics: allowed for spells of `spell_type` OR ability
-    /// activations described by `ability` — `OfSpellType` restricts to abilities of permanents
-    /// of `spell_type`, `Any` permits any ability ("… or to activate an ability").
+    /// CR 106.6: Allows spells of `spell_type` and non-spell payments described
+    /// by `ability`. `AnyNonSpellPayment` represents a prohibition affecting casts only.
     SpellTypeOrAbilityActivation {
         spell_type: String,
         ability: AbilityActivationScope,
@@ -20282,6 +20280,60 @@ pub enum CostRecipientSelection {
     Each,
 }
 
+/// CR 107.3a and CR 701.68a: the number of counters for a Blight cost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "BlightCountWire", into = "BlightCountWire")]
+pub enum BlightCount {
+    Fixed(u32),
+    AnnouncedX { maximum: Box<QuantityExpr> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum BlightCountWire {
+    Fixed(u32),
+    AnnouncedX {
+        #[serde(rename = "type")]
+        kind: BlightCountTag,
+        maximum: Box<QuantityExpr>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum BlightCountTag {
+    AnnouncedX,
+}
+
+impl From<BlightCountWire> for BlightCount {
+    fn from(wire: BlightCountWire) -> Self {
+        match wire {
+            BlightCountWire::Fixed(count) => Self::Fixed(count),
+            BlightCountWire::AnnouncedX { maximum, .. } => Self::AnnouncedX { maximum },
+        }
+    }
+}
+
+impl From<BlightCount> for BlightCountWire {
+    fn from(count: BlightCount) -> Self {
+        match count {
+            BlightCount::Fixed(count) => Self::Fixed(count),
+            BlightCount::AnnouncedX { maximum } => Self::AnnouncedX {
+                kind: BlightCountTag::AnnouncedX,
+                maximum,
+            },
+        }
+    }
+}
+
+impl BlightCount {
+    pub fn with_announced_x(&self, x: u32) -> u32 {
+        match self {
+            Self::Fixed(count) => *count,
+            Self::AnnouncedX { .. } => x,
+        }
+    }
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -20446,7 +20498,7 @@ pub enum AbilityCost {
     /// Blight N — put N -1/-1 counters on a creature you control.
     /// Used as both activated ability costs and optional additional casting costs.
     Blight {
-        count: u32,
+        count: BlightCount,
     },
     Reveal {
         /// CR 701.20a + CR 107.3a: how many cards are revealed. A `Variable("X")`
@@ -20794,6 +20846,9 @@ macro_rules! define_ability_cost_quantity_walk {
             | AbilityCost::PayEnergy { amount }
             | AbilityCost::PaySpeed { amount } => f(amount),
             AbilityCost::Discard { count, .. } | AbilityCost::Reveal { count, .. } => f(count),
+            AbilityCost::Blight {
+                count: BlightCount::AnnouncedX { maximum },
+            } => f(maximum),
             // --- Recursive forms: every nested cost's quantities are part of
             // --- paying THIS cost, so recurse.
             AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
@@ -20825,7 +20880,9 @@ macro_rules! define_ability_cost_quantity_walk {
             | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
-            | AbilityCost::Blight { .. }
+            | AbilityCost::Blight {
+                count: BlightCount::Fixed(_),
+            }
             | AbilityCost::Behold { .. }
             | AbilityCost::Waterbend { .. }
             | AbilityCost::NinjutsuFamily { .. }
@@ -41384,9 +41441,13 @@ pub enum TriggerCondition {
         min_count: u32,
     },
 
-    /// "if it's attacking" — true when the trigger source object is currently an attacker.
-    /// CR 508.1: Used by ninjutsu ETB triggers (e.g., Thousand-Faced Shadow).
-    SourceIsAttacking,
+    /// CR 506.3 + CR 508.1k + CR 603.4: the source is attacking. If a
+    /// player predicate is supplied, its current destination must be a player
+    /// who satisfies that predicate.
+    SourceIsAttacking {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player: Option<Box<PlayerFilter>>,
+    },
 
     /// CR 702.49 + CR 702.190a + CR 603.4 + CR 702.138b: "if its sneak/ninjutsu
     /// cost was paid this turn". True when the source permanent entered via the
@@ -41919,7 +41980,7 @@ impl TriggerCondition {
             | TriggerCondition::WasCast { .. }
             | TriggerCondition::WasPlayed
             | TriggerCondition::AdditionalCostPaid { .. }
-            | TriggerCondition::SourceIsAttacking
+            | TriggerCondition::SourceIsAttacking { .. }
             | TriggerCondition::CastVariantPaid { .. }
             | TriggerCondition::CastVariantPaidPersistent { .. }
             | TriggerCondition::ActivatedAbilityIsNonMana
@@ -42775,6 +42836,9 @@ pub struct TriggerDefinition {
     /// CR 508.3a: Filter for attack target type ("attacks a planeswalker").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attack_target_filter: Option<crate::types::triggers::AttackTargetFilter>,
+    /// CR 508.3a: Required attack declaration ordinal for the attacking creature this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_declaration_ordinal: Option<u32>,
     /// CR 509.3e: the attacker-side "becomes blocked by N or more <noun>"
     /// blocker-count threshold. Read only by `TriggerMode::BecomesBlocked`.
     /// When `Some`, the trigger fires once for an attacker whose matching
@@ -43743,6 +43807,7 @@ impl TriggerDefinition {
             gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
+            attack_declaration_ordinal: None,
             blocker_count: None,
             player_actions: None,
             scry_bottom_count: None,
@@ -50743,7 +50808,9 @@ mod tests {
 
     #[test]
     fn blight_cost_roundtrips() {
-        let cost = AbilityCost::Blight { count: 2 };
+        let cost = AbilityCost::Blight {
+            count: BlightCount::Fixed(2),
+        };
         let json = serde_json::to_value(&cost).unwrap();
         assert_eq!(json["type"], "Blight");
         assert_eq!(json["count"], 2);
@@ -50822,6 +50889,7 @@ mod tests {
             gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
+            attack_declaration_ordinal: None,
             blocker_count: None,
             player_actions: None,
             scry_bottom_count: None,
@@ -52848,7 +52916,9 @@ mod tests {
                 ("exert", AbilityCost::Exert, vec![CostCategory::Exerts]),
                 (
                     "blight_puts_counters",
-                    AbilityCost::Blight { count: 1 },
+                    AbilityCost::Blight {
+                        count: BlightCount::Fixed(1),
+                    },
                     vec![CostCategory::PutsCounters],
                 ),
                 (

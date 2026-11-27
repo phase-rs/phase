@@ -717,6 +717,7 @@ impl ScriptedGame {
             | WaitingFor::ActivationCostOneOfChoice { .. }
             | WaitingFor::CostTypeChoice { .. }
             | WaitingFor::BlightChoice { .. }
+            | WaitingFor::UnlessBlightChoice { .. }
             | WaitingFor::PayManaAbilityMana { .. }
             | WaitingFor::ManaAbilityManaPayment { .. }
             | WaitingFor::ChooseManaColor { .. }

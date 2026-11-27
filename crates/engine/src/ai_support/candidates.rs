@@ -2742,17 +2742,40 @@ pub fn candidate_actions_broad_with_probe(
             .collect(),
         // CR 701.68a: AI selects exactly one creature to put N -1/-1 counters on as cost.
         WaitingFor::BlightChoice {
-            player, creatures, ..
-        } => creatures
-            .iter()
-            .map(|id| {
-                candidate(
-                    GameAction::SelectCards { cards: vec![*id] },
-                    TacticalClass::Selection,
-                    Some(*player),
+            player,
+            counters,
+            creatures,
+            ..
+        }
+        | WaitingFor::UnlessBlightChoice {
+            player,
+            counters,
+            creatures,
+            ..
+        } => {
+            let eligible =
+                crate::game::effects::blight::eligible_blight_creatures(state, *player, *counters);
+            creatures
+                .iter()
+                .filter(|id| eligible.contains(id))
+                .map(|id| {
+                    candidate(
+                        GameAction::SelectCards { cards: vec![*id] },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .chain(
+                    matches!(state.waiting_for, WaitingFor::UnlessBlightChoice { .. }).then(|| {
+                        candidate(
+                            GameAction::PayUnlessCost { pay: false },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    }),
                 )
-            })
-            .collect(),
+                .collect()
+        }
         WaitingFor::CollectEvidenceChoice {
             player,
             minimum_mana_value,
@@ -5774,6 +5797,58 @@ fn select_cards_variants(
             }
             actions
         }
+    }
+}
+
+/// A failed Suspend offer search may rule out payment only across domains it
+/// can fully enumerate. Other carriers can still supply a positive witness.
+pub(super) fn suspend_payment_candidates_are_exhaustive(
+    state: &GameState,
+    actions: &[GameAction],
+) -> bool {
+    match &state.waiting_for {
+        WaitingFor::ManaPayment {
+            convoke_mode: None, ..
+        } => actions.iter().all(|action| match action {
+            // Candidate mana activations use Auto. A nested mana leg can have
+            // a different manually funded route that this list doesn't offer.
+            GameAction::ActivateAbility { .. } => {
+                casting::activates_mana_ability_without_mana_payment(state, action)
+            }
+            GameAction::TapLandForMana { selection } => {
+                selection.ability_index.is_none_or(|ability_index| {
+                    state
+                        .objects
+                        .get(&selection.source.object_id)
+                        .and_then(|source| source.abilities.get(ability_index))
+                        .is_some_and(|ability| {
+                            crate::game::mana_abilities::mana_sub_cost_of(&ability.cost).is_none()
+                        })
+                })
+            }
+            GameAction::PassPriority | GameAction::CancelCast => true,
+            _ => false,
+        }),
+        WaitingFor::PayCost {
+            kind:
+                PayCostKind::Discard | PayCostKind::Sacrifice | PayCostKind::ExileFromManaZone { .. },
+            choices,
+            count: 1,
+            resume: CostResume::ManaAbility { .. },
+            ..
+        } => {
+            // Single-object choices are exhaustive if the pool fits. With
+            // multiple objects, the mana ability can use the first selection
+            // and the candidate generator lists combinations without ordering.
+            choices.len() <= SELECTION_POOL_CAP
+        }
+        WaitingFor::ChooseManaColor {
+            choice:
+                crate::types::game_state::ManaChoicePrompt::SingleColor { .. }
+                | crate::types::game_state::ManaChoicePrompt::Combination { .. },
+            ..
+        } => true,
+        _ => false,
     }
 }
 

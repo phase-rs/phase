@@ -9707,60 +9707,65 @@ mod tests {
         ));
     }
 
-    /// CR 106.6: Hydraulic Helper — "{T}: Add {U}. This mana can't be spent to
-    /// cast a nonartifact spell." End-to-end through the production payment gate:
-    /// the real Oracle phrasing is parsed, lowered through `resolve_restrictions`,
-    /// loaded into a `ManaPool`, and spent via `can_pay_for_spell` (which funnels
-    /// through `ManaRestriction::allows`). The restriction governs only which
-    /// SPELLS the mana may cast; ability activation must stay UNRESTRICTED.
-    ///
-    /// Discriminating: with the buggy `SpellType("Artifact")` lowering
-    /// (`OnlyForSpellType`), `allows_activation` returns false and assertion (b)
-    /// fails. Only the fix's `SpellTypeOrAbilityActivation { ability: Any }`
-    /// (→ `OnlyForTypeSpellsOrAbilities { ability: Any }`) lets the {U} pay for an
-    /// ability while still rejecting a nonartifact spell.
+    /// CR 106.6: Hydraulic Helper restricts casts only. Guidelight Optimizer
+    /// names the same spell type and allows any activation. Legacy saved mana
+    /// and producer definitions with `Any` retain that positive interpretation.
     #[test]
     fn hydraulic_helper_restricted_mana_pays_artifacts_and_any_ability() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
         use crate::types::ability::ManaSpendRestriction;
-        use crate::types::mana::AbilityActivationScope;
+        use crate::types::mana::{AbilityActivationScope, SpecialAction};
 
-        // Parser fix under test: the negative phrasing must lower to the OR variant.
-        let (ast, _grants) = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
-            "this mana can't be spent to cast a nonartifact spell",
-        )
-        .expect("Hydraulic Helper's spend restriction must parse");
-        assert_eq!(
-            ast,
-            vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
-                spell_type: "Artifact".to_string(),
-                ability: AbilityActivationScope::Any,
-            }],
-            "negative nonartifact restriction must keep ability activation unrestricted"
-        );
-
-        // Lower through the real runtime resolver (state-independent for this variant).
         let state = GameState::new_two_player(42);
-        let runtime = crate::game::effects::mana::resolve_restrictions(&ast, &state, ObjectId(1));
-
-        // The produced {U} carries the lowered restriction.
-        let mut pool = ManaPool::default();
-        pool.add(ManaUnit {
-            color: ManaType::Blue,
-            source_id: ObjectId(1),
-            pip_id: crate::types::mana::ManaPipId(0),
-            supertype: None,
-            source_could_produce_two_or_more_colors: false,
-            restrictions: runtime,
-            grants: vec![],
-            expiry: None,
-        });
+        let source = ObjectId(1);
+        let legacy_definition: ManaSpendRestriction = serde_json::from_str(
+            r#"{"SpellTypeOrAbilityActivation":{"spell_type":"Artifact","ability":"Any"}}"#,
+        )
+        .unwrap();
+        let legacy_unit: ManaUnit = serde_json::from_str(
+            r#"{"color":"Blue","source_id":1,"restrictions":[{"OnlyForTypeSpellsOrAbilities":{"spell_type":"Artifact","ability":"Any"}}]}"#,
+        )
+        .unwrap();
+        let mut units = Vec::new();
+        for (text, scope) in [
+            (
+                "this mana can't be spent to cast a nonartifact spell",
+                AbilityActivationScope::AnyNonSpellPayment,
+            ),
+            (
+                "spend this mana only to cast an artifact spell or activate an ability",
+                AbilityActivationScope::Any,
+            ),
+        ] {
+            let (ast, _) = parse_mana_spend_restriction(text).expect("printed spend restriction");
+            assert_eq!(
+                ast,
+                vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Artifact".to_string(),
+                    ability: scope,
+                }],
+            );
+            let restrictions =
+                crate::game::effects::mana::resolve_restrictions(&ast, &state, source);
+            let unit = ManaUnit::new(ManaType::Blue, source, false, restrictions);
+            let json = serde_json::to_value(&unit).unwrap();
+            assert_eq!(
+                json["restrictions"][0]["OnlyForTypeSpellsOrAbilities"]["ability"],
+                serde_json::to_value(scope).unwrap()
+            );
+            assert_eq!(serde_json::from_value::<ManaUnit>(json).unwrap(), unit);
+            units.push((unit, scope == AbilityActivationScope::AnyNonSpellPayment));
+        }
+        let restored_restrictions =
+            crate::game::effects::mana::resolve_restrictions(&[legacy_definition], &state, source);
+        assert_eq!(legacy_unit.restrictions, units[1].0.restrictions);
+        assert_eq!(restored_restrictions, units[1].0.restrictions);
+        units.push((legacy_unit, false));
 
         let one_blue = ManaCost::Cost {
             shards: vec![ManaCostShard::Blue],
             generic: 0,
         };
-
-        // (a) Casting a nonartifact spell with this mana is rejected.
         let instant = SpellMeta {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
@@ -9775,37 +9780,6 @@ mod tests {
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
         };
-        assert!(
-            !can_pay_for_spell(
-                &pool,
-                &one_blue,
-                Some(&PaymentContext::Spell(&instant)),
-                crate::types::mana::CostPermissionContext::default(),
-            ),
-            "a nonartifact (instant) spell must not be payable with artifact-restricted mana"
-        );
-
-        // (b) DISCRIMINATING: activating an ability with this mana is allowed,
-        //     regardless of the activating permanent's types.
-        let creature_types = vec!["Creature".to_string()];
-        let no_subtypes: Vec<String> = vec![];
-        assert!(
-            can_pay_for_spell(
-                &pool,
-                &one_blue,
-                Some(&PaymentContext::Activation {
-                    source_types: &creature_types,
-                    source_subtypes: &no_subtypes,
-                    ability_tag: None,
-                    mana_color_constraint:
-                        crate::types::mana::ActivationManaColorConstraint::Unrestricted,
-                }),
-                crate::types::mana::CostPermissionContext::default(),
-            ),
-            "ability activation must remain payable — the restriction governs spells only"
-        );
-
-        // Sanity: an artifact spell IS payable.
         let artifact = SpellMeta {
             types: vec!["Artifact".to_string()],
             subtypes: vec![],
@@ -9820,15 +9794,37 @@ mod tests {
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
         };
-        assert!(
-            can_pay_for_spell(
-                &pool,
-                &one_blue,
-                Some(&PaymentContext::Spell(&artifact)),
-                crate::types::mana::CostPermissionContext::default(),
-            ),
-            "an artifact spell must be payable with the artifact-restricted mana"
-        );
+        let creature_types = ["Creature".to_string()];
+        let activation = PaymentContext::Activation {
+            source_types: &creature_types,
+            source_subtypes: &[],
+            ability_tag: None,
+            mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Unrestricted,
+        };
+        for (unit, allows_other_payments) in units {
+            let mut pool = ManaPool::default();
+            pool.add(unit);
+            let can_pay = |context: PaymentContext<'_>| {
+                can_pay_for_spell(
+                    &pool,
+                    &one_blue,
+                    Some(&context),
+                    crate::types::mana::CostPermissionContext::default(),
+                )
+            };
+            assert!(can_pay(PaymentContext::Spell(&artifact)));
+            assert!(!can_pay(PaymentContext::Spell(&instant)));
+            assert!(can_pay(activation));
+            assert_eq!(can_pay(PaymentContext::Effect), allows_other_payments);
+            assert_eq!(
+                can_pay(PaymentContext::SpecialAction(SpecialAction::UnlockDoor)),
+                allows_other_payments,
+            );
+            assert_eq!(
+                can_pay(PaymentContext::SpecialAction(SpecialAction::TurnFaceUp)),
+                allows_other_payments,
+            );
+        }
     }
 
     /// CR 106.6: Hydraulic Helper end-to-end through GameScenario + GameRunner —
@@ -9843,8 +9839,8 @@ mod tests {
     /// Discriminating: with the buggy `OnlyForSpellType("Artifact")` lowering,
     /// `allows_activation` returns false, `PassPriority` errors, and the driver's
     /// `.expect("finalizing the ability's mana payment must be accepted")` panics
-    /// — the test fails. Only the fix's `OnlyForTypeSpellsOrAbilities { ability:
-    /// Any }` lets the ability resolve and gain the life this asserts.
+    /// — the test fails. The legacy `Any` scope used in this fixture still lets
+    /// the ability resolve and gain the life this asserts.
     #[test]
     fn hydraulic_helper_restricted_mana_activates_ability_through_pipeline() {
         use crate::game::scenario::GameScenario;
@@ -9857,8 +9853,7 @@ mod tests {
         let sink = scenario
             .add_creature_from_oracle(p0, "Mana Sink", 1, 1, "{U}: You gain 1 life.")
             .id();
-        // Seed Hydraulic Helper's restricted {U} into P0's pool (the lowered form
-        // of "this mana can't be spent to cast a nonartifact spell").
+        // Seed the legacy form of Hydraulic Helper's restricted {U} into P0's pool.
         scenario.with_mana_pool(
             p0,
             vec![ManaUnit {

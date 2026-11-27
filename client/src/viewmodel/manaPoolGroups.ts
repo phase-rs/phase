@@ -122,13 +122,21 @@ export function groupManaPoolUnits(units: ManaUnit[]): ManaPoolGroup[] {
  * fall back to a generic label.
  */
 export function manaGroupTooltip(
-  translate: (key: ParseKeys<"game">) => string,
+  translate: (key: ParseKeys<"game">, options?: { spellType: string }) => string,
   group: Pick<ManaPoolGroup, "restrictions" | "grants" | "special">,
 ): string | undefined {
   if (!group.special) return undefined;
-  const parts = group.restrictions.map((r) =>
-    translate(RESTRICTION_LABEL_KEYS[restrictionTag(r)]),
-  );
+  const parts = group.restrictions.map((restriction) => {
+    if (typeof restriction === "object" && "OnlyForTypeSpellsOrAbilities" in restriction) {
+      const { ability, spell_type } = restriction.OnlyForTypeSpellsOrAbilities;
+      if (ability === "AnyNonSpellPayment") {
+        return translate("gamePage.manaRestrictions.cannotCastSpellsOutsideType", {
+          spellType: spell_type,
+        });
+      }
+    }
+    return translate(RESTRICTION_LABEL_KEYS[restrictionTag(restriction)]);
+  });
   for (const grant of group.grants) {
     parts.push(
       grant === "CantBeCountered"

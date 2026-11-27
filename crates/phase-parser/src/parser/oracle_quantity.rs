@@ -356,18 +356,7 @@ pub(crate) fn parse_quantity_ref_with_context(
 
     // Aggregate patterns: "the greatest X among" / "the total power of"
     if let Ok((rest, (func, prop))) = alt((
-        value(
-            (AggregateFunction::Max, ObjectProperty::Power),
-            tag::<_, _, OracleError<'_>>("the greatest power among "),
-        ),
-        value(
-            (AggregateFunction::Max, ObjectProperty::Toughness),
-            tag("the greatest toughness among "),
-        ),
-        value(
-            (AggregateFunction::Max, ObjectProperty::ManaValue),
-            tag("the greatest mana value among "),
-        ),
+        parse_greatest_among_prefix,
         value(
             (AggregateFunction::Sum, ObjectProperty::Power),
             tag("the total power of "),
@@ -1220,6 +1209,28 @@ fn parse_greatest_among_prefix(
         ),
     ))
     .parse(input)
+}
+
+pub(crate) fn parse_toughness_cap(input: &str) -> OracleResult<'_, QuantityExpr> {
+    let (input, (function, property)) =
+        nom::combinator::verify(parse_greatest_among_prefix, |&(_, property)| {
+            property == ObjectProperty::Toughness
+        })
+        .parse(input)?;
+    let (input, population) = tag("creatures you control").parse(input)?;
+    let (filter, remainder) = parse_type_phrase_folding(population);
+    if !remainder.is_empty() {
+        return Err(super::oracle_nom::error::oracle_err(remainder));
+    }
+    let aggregate =
+        PropertyAggregate::new(function, property, CardTypeSetSource::Objects { filter })
+            .expect("statically valid toughness aggregate");
+    Ok((
+        input,
+        QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(aggregate),
+        },
+    ))
 }
 
 /// CR 202.3 + CR 208.2a: "the greatest <prop> among <A> and <B>" → Max of two

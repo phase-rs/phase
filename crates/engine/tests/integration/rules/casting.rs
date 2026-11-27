@@ -3,7 +3,7 @@ use super::*;
 use std::sync::Arc;
 
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, QuantityExpr,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, BlightCount, Effect, QuantityExpr,
     TargetFilter, TargetRef,
 };
 use engine::types::game_state::{CastOfferKind, CastingVariant, StackEntryKind};
@@ -59,7 +59,9 @@ fn optional_cost_paid_sets_flag() {
             excess: None,
         })
         .with_additional_cost(AdditionalCost::Optional {
-            cost: AbilityCost::Blight { count: 1 },
+            cost: AbilityCost::Blight {
+                count: BlightCount::Fixed(1),
+            },
             repeatability: engine::types::ability::AdditionalCostRepeatability::Once,
         })
         .id();
@@ -152,7 +154,9 @@ fn optional_cost_skipped_clears_flag() {
             excess: None,
         })
         .with_additional_cost(AdditionalCost::Optional {
-            cost: AbilityCost::Blight { count: 1 },
+            cost: AbilityCost::Blight {
+                count: BlightCount::Fixed(1),
+            },
             repeatability: engine::types::ability::AdditionalCostRepeatability::Once,
         })
         .id();
@@ -347,7 +351,9 @@ fn cancel_cast_at_optional_cost_choice() {
             excess: None,
         })
         .with_additional_cost(AdditionalCost::Optional {
-            cost: AbilityCost::Blight { count: 1 },
+            cost: AbilityCost::Blight {
+                count: BlightCount::Fixed(1),
+            },
             repeatability: engine::types::ability::AdditionalCostRepeatability::Once,
         })
         .id();
@@ -1580,7 +1586,9 @@ fn optional_blight_with_no_creatures_skips_prompt() {
             excess: None,
         })
         .with_additional_cost(AdditionalCost::Optional {
-            cost: AbilityCost::Blight { count: 1 },
+            cost: AbilityCost::Blight {
+                count: BlightCount::Fixed(1),
+            },
             repeatability: engine::types::ability::AdditionalCostRepeatability::Once,
         })
         .id();
@@ -1635,7 +1643,9 @@ fn required_blight_with_no_creatures_rejects_cast() {
             damage_source: None,
             excess: None,
         })
-        .with_additional_cost(AdditionalCost::Required(AbilityCost::Blight { count: 1 }))
+        .with_additional_cost(AdditionalCost::Required(AbilityCost::Blight {
+            count: BlightCount::Fixed(1),
+        }))
         .id();
 
     let mut runner = scenario.build();
@@ -1689,7 +1699,9 @@ fn cast_choice_bolt_with_unpayable_blight(
             excess: None,
         })
         .with_additional_cost(AdditionalCost::Choice(vec![
-            AbilityCost::Blight { count: 1 },
+            AbilityCost::Blight {
+                count: BlightCount::Fixed(1),
+            },
             fallback,
         ]))
         .id();

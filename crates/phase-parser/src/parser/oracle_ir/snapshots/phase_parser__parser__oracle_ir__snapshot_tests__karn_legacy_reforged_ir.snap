@@ -223,7 +223,7 @@ expression: "&ir"
                               {
                                 "SpellTypeOrAbilityActivation": {
                                   "spell_type": "Artifact",
-                                  "ability": "Any"
+                                  "ability": "AnyNonSpellPayment"
                                 }
                               }
                             ],
