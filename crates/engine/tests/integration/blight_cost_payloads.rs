@@ -408,6 +408,40 @@ fn soul_immolation_recipient_owner_concession_rolls_back() {
 }
 
 #[test]
+fn soul_immolation_caster_concession_retires_parked_blight() {
+    let mut scenario = GameScenario::new_n_player(3, 206);
+    let spell = soul(&mut scenario);
+    let recipient = scenario.add_creature(P1, "Borrowed creature", 0, 7).id();
+    let aura = add_control_magic(&mut scenario, P0);
+    let [vorinclex, constrictor] = add_counter_replacements(&mut scenario, P0);
+    let mut runner = scenario.build();
+    attach_control_magic(&mut runner, aura, recipient);
+    announce(&mut runner, spell, CastPaymentMode::Auto).unwrap();
+    runner.act(GameAction::ChooseX { value: 2 }).unwrap();
+    assert_blight(&runner, 2, &[recipient, vorinclex, constrictor]);
+    runner.act(select(recipient)).unwrap();
+    counter_order_index(&runner, P0, "Vorinclex, Monstrous Raider");
+
+    // CR 800.4a + CR 701.68a: the caster leaves and loses control of the
+    // borrowed creature, so the abandoned Blight payment cannot place counters.
+    let result = runner.act(GameAction::Concede { player_id: P0 }).unwrap();
+    assert_eq!(minus_counters(&runner, recipient), 0);
+    assert!(!result.events.iter().any(|event| matches!(event,
+        GameEvent::CounterAdded { object_id, .. } if *object_id == recipient
+    )));
+    assert!(runner.state().players[0].is_eliminated);
+    assert_eq!(runner.state().objects[&recipient].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&recipient].controller, P1);
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().pending_cast.is_none());
+    assert!(runner.state().pending_replacement.is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 | P2 }
+    ));
+}
+
+#[test]
 fn soul_immolation_all_prohibited_recipient_offers_only_zero() {
     let mut scenario = GameScenario::new();
     let spell = soul(&mut scenario);
