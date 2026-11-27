@@ -36672,6 +36672,16 @@ pub struct DrawSequenceFrame {
     /// the working copy of the seat `player`; the dealer holds the others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dealer: Option<DrawDealer>,
+    /// CR 608.2c + CR 121.6b + CR 614.6: the "… this way" zone-change ledger in force
+    /// when this draw instruction began, held only when the instruction is directly
+    /// followed by a "… this way" head naming an earlier instruction
+    /// (`effects::keeps_this_way_ledger_for_following_head`). An action replacing one
+    /// of its draws (Dredge's mill-and-return, Notion Thief's draw) runs as its own
+    /// chain and publishes its own ledger; completion restores this one, so the head
+    /// reads its antecedent whether each draw was performed, replaced at once, or
+    /// replaced after a choice. Omitted when absent; older payloads decode as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub this_way_antecedent_ledger: Option<Vec<ObjectId>>,
 }
 
 /// CR 121.2 + the format's `DealOrder`: the seats of one simultaneous draw
@@ -36879,6 +36889,7 @@ impl DrawSequenceStack {
             capture_next_child_delivery: false,
             accumulated: 0,
             dealer: None,
+            this_way_antecedent_ledger: None,
         });
         debug_assert!(
             self.validate().is_ok(),
