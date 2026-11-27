@@ -1,15 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  ActiveDraftPointerTxn,
+  loadDraftGuestCapability,
+  withActiveDraftPointer,
+} from "../../services/draftPersistence";
 
 const persistenceMocks = vi.hoisted(() => ({
   saveDraftHostSession: vi.fn(async () => {}),
   clearDraftHostSession: vi.fn(async () => {}),
   saveDraftGuestSession: vi.fn(async () => {}),
-  saveActiveDraftGuest: vi.fn(),
   loadDraftDeckSubmission: vi.fn(async () => null),
   saveDraftDeckSubmission: vi.fn(async () => {}),
   clearDraftDeckSubmission: vi.fn(async () => {}),
   clearDraftGuestRecovery: vi.fn(async () => {}),
-  clearDraftGuestSession: vi.fn(async () => {}),
+  // No stored record owns this token unless a test answers otherwise.
+  loadDraftGuestCapability: vi.fn<typeof loadDraftGuestCapability>(async () => null),
+  // With no lock manager the real transaction runs its body at the call.
+  withActiveDraftPointer: vi.fn<typeof withActiveDraftPointer>(
+    async (body) => ({ status: "committed", value: body({} as ActiveDraftPointerTxn) }),
+  ),
 }));
 
 vi.mock("../../services/draftPersistence", () => persistenceMocks);
@@ -162,6 +171,9 @@ type SessionStub = {
 describe("P2P draft workspace persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // `clearAllMocks` clears calls, not queued once-answers.
+    persistenceMocks.loadDraftGuestCapability.mockReset();
+    persistenceMocks.loadDraftGuestCapability.mockResolvedValue(null);
   });
 
   it("serializes guest and host workspace updates with the authoritative mutation queue", async () => {
@@ -828,8 +840,8 @@ describe("P2P draft workspace persistence", () => {
     await Promise.all([received, initialized]);
 
     expect(events).toEqual(kind === "new"
-      ? ["workspaceRestored:true", "joined:", "viewUpdated:"]
-      : ["workspaceRestored:false", "reconnected:", "viewUpdated:"]);
+      ? ["recoveryCommitted:", "workspaceRestored:true", "joined:", "viewUpdated:"]
+      : ["recoveryCommitted:", "workspaceRestored:false", "reconnected:", "viewUpdated:"]);
     expect(eventsAtReplay).toEqual(events);
     guest.dispose();
   });

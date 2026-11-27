@@ -70,10 +70,12 @@ import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import {
   COMMANDER_P2P_SEAT_CEILING,
+  currentDraftOwnerGeneration,
   draftPodScreen,
   DRAFT_OFFLINE_ERROR,
   DRAFT_RECOVERY_CONNECTION_ERROR,
   DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+  DRAFT_RECOVERY_SAVE_ERROR,
   DRAFT_RECOVERY_UNREADABLE_ERROR,
   intergamePromptKey,
   isDraftPodWorkspacePhase,
@@ -90,9 +92,12 @@ import {
   LOBBY_HOST_NAME_MAX_CHARS,
   LOBBY_LABEL_MAX_CHARS,
   LOBBY_LISTING_MAX_SEATS,
+  nativeDraftSetupRouteGeneration,
   podListingEligible,
   useDraftPodStore,
   type HostedPodRecoveryFailure,
+  type NativeDraftSetup,
+  type NativeRecoveryFailure,
 } from "../stores/draftPodStore";
 import { useEffectiveOffline } from "../stores/connectivityStore";
 
@@ -123,10 +128,10 @@ function subscribePickInteraction(listener: () => void): () => void {
 /** Any entry of this length fits the lobby's byte bound for a password. */
 const POD_PASSWORD_MAX_LENGTH = 32;
 
-/** The offline key `DRAFT_OFFLINE_ERROR` and the host recovery keys
- *  `DRAFT_RECOVERY_INCOMPATIBLE_ERROR`, `DRAFT_RECOVERY_CONNECTION_ERROR` and
- *  `DRAFT_RECOVERY_UNREADABLE_ERROR` are translation keys and are translated;
- *  any other message is shown as written. */
+/** The offline key `DRAFT_OFFLINE_ERROR` and the recovery keys
+ *  `DRAFT_RECOVERY_INCOMPATIBLE_ERROR`, `DRAFT_RECOVERY_CONNECTION_ERROR`,
+ *  `DRAFT_RECOVERY_UNREADABLE_ERROR` and `DRAFT_RECOVERY_SAVE_ERROR` are
+ *  translation keys and are translated; any other message is shown as written. */
 function usePodErrorMessage(error: string | null): string | null {
   const { t } = useTranslation("draft");
   return error === DRAFT_OFFLINE_ERROR
@@ -137,7 +142,16 @@ function usePodErrorMessage(error: string | null): string | null {
         ? t("podError.connection")
         : error === DRAFT_RECOVERY_UNREADABLE_ERROR
           ? t("podError.unreadable")
-          : error;
+          : error === DRAFT_RECOVERY_SAVE_ERROR
+            ? t("podError.recoverySave")
+            : error;
+}
+
+/** Awaits the leave an exit has just called; true when no owner was installed, left or reset while it waited. */
+async function exitLeaveIsCurrent(leaving: Promise<void>): Promise<boolean> {
+  const generation = currentDraftOwnerGeneration();
+  await leaving;
+  return generation === currentDraftOwnerGeneration();
 }
 
 /** What a failed host recovery shows: its message, and whether it offers a retry. */
@@ -157,7 +171,19 @@ function hostRecoveryFailurePresentation(kind: HostedPodRecoveryFailure["kind"])
   }
 }
 
-function PodSetup() {
+/**
+ * The pod setup forms. With `nativeSetup`, the server this navigation admitted,
+ * they create and join on that server: sets only, no password and no room
+ * name. `nativeRecoveryFailure` is the native route entry's own seat recovery
+ * failure, shown on the choice screen only.
+ */
+function PodSetup({
+  nativeSetup,
+  nativeRecoveryFailure,
+}: {
+  nativeSetup: NativeDraftSetup | null;
+  nativeRecoveryFailure: NativeRecoveryFailure | null;
+}) {
   const { t } = useTranslation("draft");
   const effectiveOffline = useEffectiveOffline();
   const [mode, setMode] = useState<SetupMode>("choose");
@@ -257,7 +283,9 @@ function PodSetup() {
     podSizeItems.find((item) => item.value === String(config.podSize))?.label ??
     t("podSetup.playerCount", { count: config.podSize });
   const configErrorMessage = usePodErrorMessage(configError);
-  const listingEligible = podListingEligible(config.podSize);
+  const nativeRecoveryMessage = usePodErrorMessage(nativeRecoveryFailure?.error ?? null);
+  // The seat ceiling is the lobby broker's; a server lists any pod it admits.
+  const listingEligible = nativeSetup !== null || podListingEligible(config.podSize);
   const listed = listing.isPublic && listingEligible;
   const hostName = hostDisplayName.trim();
 
@@ -329,6 +357,12 @@ function PodSetup() {
             <li>{t("podSetup.howItWorks4")}</li>
           </ul>
         </div>
+
+        {nativeRecoveryMessage && (
+          <div className="rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300">
+            {nativeRecoveryMessage}
+          </div>
+        )}
       </div>
     );
   }
@@ -524,7 +558,7 @@ function PodSetup() {
               {t("podSetup.listingSeatLimit", { max: LOBBY_LISTING_MAX_SEATS })}
             </p>
           )}
-          {listed && (
+          {listed && nativeSetup === null && (
             <>
               <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
                 <input
@@ -574,34 +608,36 @@ function PodSetup() {
           )}
         </div>
 
-        {/* Pool source: Set vs Cube tab switch */}
-        <div className="flex gap-2 border-b border-white/10">
-          <button
-            type="button"
-            onClick={() => setPoolMode("set")}
-            className={
-              poolMode === "set"
-                ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
-                : "border-b-2 border-transparent px-4 py-2 text-sm text-white/50 hover:text-white/75"
-            }
-          >
-            {t("podSetup.tabs.set")}
-          </button>
-          <button
-            type="button"
-            onClick={() => setPoolMode("cube")}
-            disabled={packDistribution === "AllAtOnce"}
-            className={
-              poolMode === "cube"
-                ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
-                : "border-b-2 border-transparent px-4 py-2 text-sm text-white/50 hover:text-white/75"
-            }
-          >
-            {t("podSetup.tabs.cube")}
-          </button>
-        </div>
+        {/* Pool source: Set vs Cube tab switch. A native setup offers sets only. */}
+        {nativeSetup === null && (
+          <div className="flex gap-2 border-b border-white/10">
+            <button
+              type="button"
+              onClick={() => setPoolMode("set")}
+              className={
+                poolMode === "set"
+                  ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
+                  : "border-b-2 border-transparent px-4 py-2 text-sm text-white/50 hover:text-white/75"
+              }
+            >
+              {t("podSetup.tabs.set")}
+            </button>
+            <button
+              type="button"
+              onClick={() => setPoolMode("cube")}
+              disabled={packDistribution === "AllAtOnce"}
+              className={
+                poolMode === "cube"
+                  ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
+                  : "border-b-2 border-transparent px-4 py-2 text-sm text-white/50 hover:text-white/75"
+              }
+            >
+              {t("podSetup.tabs.cube")}
+            </button>
+          </div>
+        )}
 
-        {poolMode === "set" || packDistribution === "AllAtOnce" ? (
+        {nativeSetup !== null || poolMode === "set" || packDistribution === "AllAtOnce" ? (
           <>
             {/* A Chaos pod draws each (seat, round) booster from its own
                 privately-assigned set. A shared stack shuffles every booster
@@ -683,7 +719,7 @@ function PodSetup() {
                     setCode: distinctJoined(packs.map((pack) => pack.code), "+"),
                     setName: distinctJoined(packs.map((pack) => pack.name), " · "),
                   });
-                  void createPod();
+                  void createPod(nativeSetup);
                 }}
               />
             )}
@@ -761,7 +797,7 @@ function PodSetup() {
       )}
 
       <button
-        onClick={() => void joinPod()}
+        onClick={() => void joinPod(nativeSetup)}
         disabled={!joinCode.trim() || !guestDisplayName.trim()}
         className={menuButtonClass({
           tone: "blue",
@@ -1723,6 +1759,7 @@ function PodErrorView({
 
 function phaseContent(
   screen: DraftPodScreen,
+  podSetup: React.ReactNode,
   onLeave: () => void,
   responsiveLayout: ResponsiveDraftLayout,
   fillEmbeddedHeight: boolean,
@@ -1737,7 +1774,7 @@ function phaseContent(
   switch (screen) {
     case "idle":
     case "connecting":
-      return <PodSetup />;
+      return podSetup;
     case "lobby":
       return <DraftPodLobby onLeave={onLeave} />;
     case "drafting":
@@ -1786,6 +1823,7 @@ function DraftPodPageContent() {
   const leave = useMultiplayerDraftStore((s) => s.leave);
   const resumeDraft = useMultiplayerDraftStore((s) => s.resumeDraft);
   const resetPod = useDraftPodStore((s) => s.reset);
+  const resumeNativeDraftPod = useDraftPodStore((s) => s.resumeNativeDraftPod);
   const resumeHostedPod = useDraftPodStore((s) => s.resumeHostedPod);
   const retireHostedPodRecoveryFailure = useDraftPodStore((s) => s.retireHostedPodRecoveryFailure);
   const hostRecoveryFailure = useDraftPodStore((s) => s.hostRecoveryFailure);
@@ -1800,9 +1838,16 @@ function DraftPodPageContent() {
   // the fifth kind adds a map entry in `draftKind.ts` and nothing here.
   const requestedKind = draftKindForEntry(searchParams.get("kind"));
   const resumeRequested = searchParams.get("resume") === "1";
-  const entryMode = entry === "host" || entry === "guest" || entry === "auto"
+  const entryMode = entry === "host" || entry === "guest" || entry === "auto" || entry === "native"
     ? entry
     : resumeRequested ? "host" : "auto";
+  // The URL names no server: a native setup has authority only when this
+  // navigation's history state names the setup the pod store admitted.
+  const routeSetupGeneration = entryMode === "native" ? nativeDraftSetupRouteGeneration(location.state) : null;
+  const nativeSetup = useDraftPodStore((s) =>
+    routeSetupGeneration !== null && s.nativeSetup?.generation === routeSetupGeneration ? s.nativeSetup : null,
+  );
+  const nativeRecoveryFailure = useDraftPodStore((s) => s.nativeRecoveryFailure);
   const [responsiveViewport, setResponsiveViewport] = useState(() => ({
     width: window.innerWidth,
     height: window.innerHeight,
@@ -1818,6 +1863,12 @@ function DraftPodPageContent() {
     hostRecoveryFailure,
     entryGeneration.current,
   ) ? hostRecoveryFailure : null;
+  // Both conditions: route tokens restart with each page mount, so a later
+  // mount's first token can equal an earlier mount's.
+  const visibleNativeRecoveryFailure = entryMode === "native"
+    && nativeRecoveryFailure?.routeToken === entryGeneration.current
+    ? nativeRecoveryFailure
+    : null;
 
   const responsiveLayout: ResponsiveDraftLayout = getResponsiveDraftLayout(
     responsiveViewport.width,
@@ -1838,7 +1889,11 @@ function DraftPodPageContent() {
     setEndingDraft(true);
     void (async () => {
       try {
-        await leave(false);
+        if (!(await exitLeaveIsCurrent(leave(false)))) {
+          endingDraftLatch.current = false;
+          setEndingDraft(false);
+          return;
+        }
         resetPod();
         navigate("/");
       } catch (err) {
@@ -1929,6 +1984,13 @@ function DraftPodPageContent() {
     const controller = new AbortController();
 
     void (async () => {
+      if (entryMode === "native") {
+        // The tab's own native seat, if it holds one. This entry starts no pod
+        // operation; only an admitted setup's forms create or join.
+        retireHostedPodRecoveryFailure();
+        await resumeNativeDraftPod({ routeToken, signal: controller.signal });
+        return;
+      }
       if (entryMode === "host" || entryMode === "auto") {
         // A host locator gets first claim on automatic entry. A guest locator
         // is considered only after a terminal/invalid host locator has actually
@@ -1968,17 +2030,20 @@ function DraftPodPageContent() {
       retryController.current = null;
       if (generation.current === routeToken) generation.current++;
     };
-  }, [entryMode, location.pathname, location.search, resumeDraft, resumeHostedPod, retireHostedPodRecoveryFailure]);
+  }, [entryMode, location.pathname, location.search, resumeDraft, resumeHostedPod, resumeNativeDraftPod, retireHostedPodRecoveryFailure]);
 
   const retryGuestRecovery = useCallback(() => {
     retryController.current?.abort();
     const controller = new AbortController();
     retryController.current = controller;
     const routeToken = ++entryGeneration.current;
+    // The explicit retry supersedes a pending automatic entry recovery, the
+    // pod store's own steps included, and clears the failure it would leave.
+    retireHostedPodRecoveryFailure();
     void resumeDraft({ routeToken, signal: controller.signal }).finally(() => {
       if (retryController.current === controller) retryController.current = null;
     });
-  }, [resumeDraft]);
+  }, [resumeDraft, retireHostedPodRecoveryFailure]);
 
   const retryHostedRecovery = useCallback((failure: HostedPodRecoveryFailure | null) => {
     if (!failure || !isHostedPodRecoveryFailureCurrent(failure, entryGeneration.current)) return;
@@ -2006,19 +2071,13 @@ function DraftPodPageContent() {
     void enterKindForEntry(requestedKind);
   }, [requestedKind, enterKindForEntry, resumeRequested]);
 
+  // An exit whose owner changed while it waited leaves the pod store and the
+  // route to that successor.
   const handleLeave = useCallback(async () => {
-    await leave(false);
+    if (!(await exitLeaveIsCurrent(leave(false)))) return;
     resetPod();
     navigate("/");
   }, [leave, resetPod, navigate]);
-
-  // The lobby has already left the session it showed. A recovery that took over
-  // while that leave ran is not that session, so nothing here leaves again: the
-  // route's end ends it with its saved session kept.
-  const handleLobbyLeft = useCallback(() => {
-    resetPod();
-    navigate("/");
-  }, [resetPod, navigate]);
 
   // A host recovery failure is about a saved pod this tab is not running, so
   // its exit gives up nothing: a held session keeps running, with its recovery
@@ -2028,7 +2087,7 @@ function DraftPodPageContent() {
     if (isDraftPodSessionHeld(useMultiplayerDraftStore.getState())) {
       retireHostedPodRecoveryFailure();
     } else {
-      await leave(true);
+      if (!(await exitLeaveIsCurrent(leave(true)))) return;
       resetPod();
     }
     navigate("/");
@@ -2089,7 +2148,8 @@ function DraftPodPageContent() {
               />
             : phaseContent(
                 visibleScreen,
-                visibleScreen === "lobby" ? handleLobbyLeft : handleLeave,
+                <PodSetup nativeSetup={nativeSetup} nativeRecoveryFailure={visibleNativeRecoveryFailure} />,
+                handleLeave,
                 responsiveLayout,
                 fillEmbeddedHeight,
                 phoneLayout,

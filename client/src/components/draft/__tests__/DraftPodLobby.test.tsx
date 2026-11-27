@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PackDistribution } from "../../../adapter/draft-adapter";
 import { useConnectivityStore } from "../../../stores/connectivityStore";
 import { DRAFT_OFFLINE_ERROR } from "../../../stores/multiplayerDraftStore";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 const mocks = vi.hoisted(() => ({
   startDraft: vi.fn(async () => {}),
@@ -94,14 +94,6 @@ vi.mock("../../../services/copyText", () => ({ copyText: mocks.copyText }));
 
 import { DraftPodLobby } from "../DraftPodLobby";
 
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
-
 describe("DraftPodLobby", () => {
   beforeEach(() => {
     mocks.startDraft.mockReset();
@@ -172,7 +164,7 @@ describe("DraftPodLobby", () => {
   it.each([
     ["forced offline", { forcedOffline: true, browserOnline: true }],
     ["browser offline", { forcedOffline: false, browserOnline: false }],
-  ])("disables only Start and preserves host lobby controls while %s", async (_label, connectivity) => {
+  ])("disables only Start and preserves host lobby controls while %s", (_label, connectivity) => {
     const originalSeats = mocks.multiplayerState.seats;
     const originalError = mocks.multiplayerState.error;
     mocks.multiplayerState.seats = [
@@ -189,8 +181,6 @@ describe("DraftPodLobby", () => {
     mocks.multiplayerState.error = DRAFT_OFFLINE_ERROR;
     useConnectivityStore.setState(connectivity);
     const onLeave = vi.fn();
-    const leaveCompletion = deferred<void>();
-    mocks.leave.mockImplementationOnce(() => leaveCompletion.promise);
     render(<DraftPodLobby onLeave={onLeave} />);
 
     expect(screen.getByText("Reconnect or turn off Offline Mode to host, join, start, or watch a multiplayer draft.")).toBeInTheDocument();
@@ -205,15 +195,10 @@ describe("DraftPodLobby", () => {
     expect(mocks.kickPlayer).toHaveBeenCalledWith(1);
     expect(mocks.toggleBotFill).toHaveBeenCalledTimes(1);
     expect(mocks.copyText).toHaveBeenCalledWith("ABCDE");
-    expect(mocks.leave).toHaveBeenCalledTimes(1);
-    expect(onLeave).not.toHaveBeenCalled();
-
-    await act(async () => {
-      leaveCompletion.resolve();
-      await leaveCompletion.promise;
-    });
-
+    // The Leave is the page's exit, which leaves the session once: the lobby
+    // makes no leave of its own.
     expect(onLeave).toHaveBeenCalledTimes(1);
+    expect(mocks.leave).not.toHaveBeenCalled();
     mocks.multiplayerState.seats = originalSeats;
     mocks.multiplayerState.error = originalError;
   });

@@ -531,7 +531,7 @@ function seatDecksFor(view: DraftPlayerView, localSeat = 0): CommanderSeatDecks 
 }
 
 /**
- * Installs the store's module-private `activeHostAdapter` the way production
+ * Installs the store's module-private installed host the way production
  * does — by driving the real `hostDraft` against the mocked host adapter —
  * then publishes a completed Commander pod over it.
  */
@@ -557,7 +557,7 @@ async function installCompletedPod(view: DraftPlayerView, localSeat = 0, signal?
 }
 
 /**
- * Installs the store's module-private `activeGuestAdapter` the way production
+ * Installs the store's module-private installed guest the way production
  * does — the REAL `DraftPodGuestAdapter` over a faked `P2PDraftGuest` — so an
  * event driven through `capturedDraftGuestListener` travels that adapter's own
  * forwarding case on its way to `handleGuestEvent`. Mocking the pod adapter and
