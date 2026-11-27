@@ -1686,18 +1686,27 @@ fn finish_replacement_execute_epilogue(
         }
     }
 
+    let cost_boundary = match boundary {
+        ReplacementEpilogueBoundary::Answer => {
+            super::engine::CostMoveDrainBoundary::ReplacementDelivered {
+                action_event_start: replacement_action_event_start,
+            }
+        }
+        ReplacementEpilogueBoundary::Departure => {
+            super::engine::CostMoveDrainBoundary::ReplacementAbandoned {
+                action_event_start: replacement_action_event_start,
+            }
+        }
+    };
+
     // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A delivered cost
     // move resumes through the single typed dispatcher after the first
     // continuation drain, which defers unpaid ManaAbilityPayment roots.
     // Foretell completed at its dedicated delivery boundary above.
     if matches!(waiting_for, WaitingFor::Priority { .. }) {
-        if let Some(resumed) = super::engine::drain_pending_cost_move_resume(
-            state,
-            events,
-            super::engine::CostMoveDrainBoundary::ReplacementDelivered {
-                action_event_start: replacement_action_event_start,
-            },
-        )? {
+        if let Some(resumed) =
+            super::engine::drain_pending_cost_move_resume(state, events, cost_boundary)?
+        {
             waiting_for = resumed;
         }
     }
@@ -1731,13 +1740,9 @@ fn finish_replacement_execute_epilogue(
     if matches!(waiting_for, WaitingFor::Priority { .. })
         && state.counter_cost_root_subtree() == CounterCostRootSubtree::Retired
     {
-        if let Some(resumed) = super::engine::drain_pending_cost_move_resume(
-            state,
-            events,
-            super::engine::CostMoveDrainBoundary::ReplacementDelivered {
-                action_event_start: replacement_action_event_start,
-            },
-        )? {
+        if let Some(resumed) =
+            super::engine::drain_pending_cost_move_resume(state, events, cost_boundary)?
+        {
             waiting_for = resumed;
         }
     }
@@ -1750,6 +1755,26 @@ fn finish_replacement_execute_epilogue(
         && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
         && state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
     {
+        // CR 800.4a + CR 701.68a + CR 733.1: losing the recipient abandons
+        // the placement. The payer cannot finish casting with that cost unpaid.
+        if matches!(
+            cost_boundary,
+            super::engine::CostMoveDrainBoundary::ReplacementAbandoned { .. }
+        ) {
+            if let Some(cast) = state
+                .pending_cast
+                .as_ref()
+                .filter(|cast| cast.blight_in_flight.is_some())
+                .cloned()
+            {
+                return super::engine_casting::cancel_pending_cast(
+                    state,
+                    cast.ability.controller,
+                    &cast,
+                    events,
+                );
+            }
+        }
         let resume_cost_event_start = state
             .pending_discard_for_cost
             .is_some()

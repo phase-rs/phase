@@ -120,6 +120,8 @@ fn auntie_ool_blight_ward_is_a_fixed_payload_and_rejects_malformed_legs() {
         "Blight 4294967296",
         "Blight 2x",
         "Blight 2, nonsense",
+        "{2}, Blight 2",
+        "Blight 2, Pay 2 life",
     ] {
         let mutated = text.replace("Blight 2.", &format!("{bad_cost}."));
         let parsed = parse_card(&mutated);

@@ -699,11 +699,16 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
             // so every comma-separated leg is part of the one cost; a leg the
             // grammar declines leaves the cost unmodeled — decline rather than
             // re-read the whole text as one leg.
-            return parts
+            let legs = parts
                 .iter()
                 .map(|part| parse_ward_cost_single(part.trim()))
-                .collect::<Option<Vec<WardCost>>>()
-                .map(|legs| Keyword::Ward(WardCost::Compound(legs)));
+                .collect::<Option<Vec<WardCost>>>()?;
+            // CR 702.21a + CR 616.1: only standalone Blight can resume its
+            // payment after a counter placement replacement choice.
+            if legs.iter().any(|leg| matches!(leg, WardCost::Blight(_))) {
+                return None;
+            }
+            return Some(Keyword::Ward(WardCost::Compound(legs)));
         }
     }
 
@@ -3797,10 +3802,7 @@ mod tests {
         );
         assert_eq!(
             parse_router_keyword_line("Ward\u{2014}{2}, Blight 2.").and_then(|r| r.keyword),
-            Some(Keyword::Ward(WardCost::Compound(vec![
-                WardCost::Mana(ManaCost::generic(2)),
-                WardCost::Blight(2),
-            ])))
+            None
         );
         assert_eq!(
             parse_granted_keyword_fragment("ward\u{2014}blight 2"),

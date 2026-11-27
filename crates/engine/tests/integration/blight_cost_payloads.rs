@@ -1,12 +1,11 @@
 use engine::ai_support::candidate_actions;
 use engine::database::CardDatabase;
+use engine::game::effects::attach::attach_to;
 use engine::game::engine::apply;
+use engine::game::layers::evaluate_layers;
 use engine::game::printed_cards::{printed_ref_from_face, rehydrate_game_from_card_db};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{
-    AbilityCost, AdditionalCost, BlightCount, QuantityModification, ReplacementDefinition,
-    ReplacementMode, TargetFilter,
-};
+use engine::types::ability::{AbilityCost, AdditionalCost, BlightCount};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -19,7 +18,6 @@ use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor, ManaType, ManaUnit
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::proposed_event::ProposedEvent;
-use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 use std::sync::OnceLock;
 
@@ -29,7 +27,6 @@ const AUNTIE: &str = "Ward—Blight 2. (To blight 2, a player puts two -1/-1 cou
 const GNARLBARK: &str = "At the beginning of your end step, draw a card and blight 1. (Put a -1/-1 counter on a creature you control.)";
 const PYROMANCER: &str = "{T}: This creature deals 1 damage to any target.";
 const UNSUMMON: &str = "Return target creature to its owner's hand.";
-const VORINCLEX: &str = "Trample, haste\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
 
 fn mana(kinds: &[ManaType]) -> Vec<ManaUnit> {
     kinds
@@ -153,17 +150,71 @@ fn assert_blight(runner: &GameRunner, amount: u32, eligible: &[ObjectId]) {
     assert_eq!(creatures, eligible);
 }
 
-// Suncleanser is the printed single-creature prohibition precedent. The
-// fixture installs that scope directly so its unsupported Oracle clause
-// does not interfere with reaching the Blight payment.
-fn prevention(optional: bool) -> ReplacementDefinition {
-    let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
-        .valid_card(TargetFilter::SelfRef)
-        .quantity_modification(QuantityModification::Prevent);
-    if optional {
-        def.mode = ReplacementMode::Optional { decline: None };
-    }
-    def
+fn printed_text(name: &str) -> &str {
+    card_db()
+        .get_face_by_name(name)
+        .unwrap()
+        .oracle_text
+        .as_deref()
+        .unwrap()
+}
+
+fn add_counter_replacements(scenario: &mut GameScenario, payer: PlayerId) -> [ObjectId; 2] {
+    let vorinclex = "Vorinclex, Monstrous Raider";
+    let constrictor = "Winding Constrictor";
+    [
+        scenario
+            .add_creature(payer, vorinclex, 6, 6)
+            .as_legendary()
+            .from_oracle_text_with_keywords(&["Trample", "Haste"], printed_text(vorinclex))
+            .id(),
+        scenario
+            .add_creature_from_oracle(payer, constrictor, 2, 3, printed_text(constrictor))
+            .id(),
+    ]
+}
+
+fn add_solemnity(scenario: &mut GameScenario) {
+    scenario.add_enchantment_from_oracle(P0, "Solemnity", printed_text("Solemnity"));
+}
+
+fn add_control_magic(scenario: &mut GameScenario, payer: PlayerId) -> ObjectId {
+    scenario
+        .add_enchantment_from_oracle(payer, "Control Magic", printed_text("Control Magic"))
+        .with_subtypes(vec!["Aura"])
+        .id()
+}
+
+fn attach_control_magic(runner: &mut GameRunner, aura: ObjectId, recipient: ObjectId) {
+    attach_to(runner.state_mut(), aura, recipient);
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&recipient].controller,
+        runner.state().objects[&aura].controller
+    );
+}
+
+fn counter_order_index(runner: &GameRunner, payer: PlayerId, first: &str) -> usize {
+    let WaitingFor::ReplacementChoice {
+        player,
+        kind,
+        candidates,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected a replacement-order choice for the Blight placement");
+    };
+    assert_eq!(
+        (*player, *kind, candidates.len()),
+        (payer, ReplacementChoiceKind::Order, 2)
+    );
+    let names: Vec<_> = candidates
+        .iter()
+        .map(|candidate| runner.state().objects[&candidate.source_id].name.as_str())
+        .collect();
+    assert!(names.contains(&"Vorinclex, Monstrous Raider"));
+    assert!(names.contains(&"Winding Constrictor"));
+    names.iter().position(|name| *name == first).unwrap()
 }
 
 #[test]
@@ -177,8 +228,13 @@ fn soul_immolation_locks_derived_cap_separately_from_recipient() {
             .id();
         scenario.add_basic_land(P0, ManaColor::Blue);
         let cap = scenario
-            .add_creature(P0, "Protected creature", 0, 4)
-            .with_replacement_definition(prevention(false))
+            .add_creature_from_oracle(
+                P0,
+                "Melira's Keepers",
+                4,
+                4,
+                printed_text("Melira's Keepers"),
+            )
             .id();
         let recipient = scenario.add_vanilla(P0, 1, 1);
         let first = scenario.add_vanilla(P1, 1, 8);
@@ -316,44 +372,38 @@ fn soul_immolation_zero_still_requires_a_creature() {
 }
 
 #[test]
-fn soul_immolation_prevented_payment_rolls_back() {
-    let mut scenario = GameScenario::new();
+fn soul_immolation_recipient_owner_concession_rolls_back() {
+    let mut scenario = GameScenario::new_n_player(3, 206);
     let spell = soul(&mut scenario);
-    // An optional form of Darksteel Angel's counter prohibition opens the
-    // replacement decision needed to exercise rollback after announcement.
-    let recipient = scenario
-        .add_creature(P0, "Protected creature", 0, 3)
-        .with_replacement_definition(prevention(true))
-        .id();
+    let recipient = scenario.add_creature(P2, "Borrowed creature", 0, 7).id();
+    let aura = add_control_magic(&mut scenario, P0);
+    let [vorinclex, constrictor] = add_counter_replacements(&mut scenario, P0);
     let mut runner = scenario.build();
+    attach_control_magic(&mut runner, aura, recipient);
     let before = runner.state().players[0].mana_pool.total();
     announce(&mut runner, spell, CastPaymentMode::Auto).unwrap();
-    assert_x(&runner, 3);
+    assert_x(&runner, 7);
     runner.act(GameAction::ChooseX { value: 2 }).unwrap();
-    assert_blight(&runner, 2, &[recipient]);
+    assert_blight(&runner, 2, &[recipient, vorinclex, constrictor]);
     runner.act(select(recipient)).unwrap();
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice {
-            player: P0,
-            candidate_count: 2,
-            ..
-        }
-    ));
-    let result = runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .unwrap();
-    assert!(!result
-        .events
-        .iter()
-        .any(|event| matches!(event, GameEvent::CounterAdded { .. })));
+    counter_order_index(&runner, P0, "Vorinclex, Monstrous Raider");
+
+    // CR 800.4a + CR 733.1: the owner leaves with the recipient and the
+    // surviving caster must reverse the incomplete cast.
+    let result = runner.act(GameAction::Concede { player_id: P2 }).unwrap();
+    assert!(!result.events.iter().any(|event| matches!(event,
+        GameEvent::CounterAdded { object_id, .. } if *object_id == recipient
+    )));
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(runner.state().objects[&recipient].zone, Zone::Exile);
     assert_eq!(runner.state().players[0].mana_pool.total(), before);
     assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
-    assert_eq!(minus_counters(&runner, recipient), 0);
     assert!(runner.state().stack.is_empty());
+    assert!(runner.state().pending_cast.is_none());
+    assert!(runner.state().pending_replacement.is_none());
     assert!(matches!(
         runner.state().waiting_for,
-        WaitingFor::Priority { .. }
+        WaitingFor::Priority { player: P0 }
     ));
 }
 
@@ -361,10 +411,8 @@ fn soul_immolation_prevented_payment_rolls_back() {
 fn soul_immolation_all_prohibited_recipient_offers_only_zero() {
     let mut scenario = GameScenario::new();
     let spell = soul(&mut scenario);
-    let recipient = scenario
-        .add_creature(P0, "Protected creature", 0, 5)
-        .with_replacement_definition(prevention(false))
-        .id();
+    let recipient = scenario.add_creature(P0, "Protected creature", 0, 5).id();
+    add_solemnity(&mut scenario);
     let mut runner = scenario.build();
     announce(&mut runner, spell, CastPaymentMode::Auto).unwrap();
     assert_x(&runner, 0);
@@ -516,26 +564,18 @@ struct WardBoard {
 
 fn ward(
     ability: bool,
-    replacement: Option<ReplacementDefinition>,
+    prohibited: bool,
     has_recipient: bool,
-    with_doubler: bool,
+    order_replacements: bool,
 ) -> WardBoard {
     let mut scenario = GameScenario::new_n_player(3, 206);
     scenario.at_phase(Phase::PreCombatMain);
     let auntie = auntie(&mut scenario);
-    let recipient = has_recipient.then(|| {
-        let mut creature = scenario.add_creature(P2, "Blight recipient", 0, 7);
-        creature.controlled_by(P1);
-        if let Some(definition) = replacement {
-            creature.with_replacement_definition(definition);
-        }
-        creature.id()
-    });
-    if with_doubler {
-        scenario
-            .add_creature(P1, "Vorinclex, Monstrous Raider", 6, 6)
-            .as_legendary()
-            .from_oracle_text_with_keywords(&["Trample", "Haste"], VORINCLEX);
+    let recipient = has_recipient.then(|| scenario.add_creature(P2, "Blight recipient", 0, 7).id());
+    let aura = recipient.map(|_| add_control_magic(&mut scenario, P1));
+    let replacements = order_replacements.then(|| add_counter_replacements(&mut scenario, P1));
+    if prohibited {
+        add_solemnity(&mut scenario);
     }
     let target_source = if ability {
         scenario
@@ -560,6 +600,15 @@ fn ward(
     let mut runner = scenario.build();
     for id in [auntie, target_source, lower] {
         attach_printed_ref(&mut runner, id);
+    }
+    if let (Some(aura), Some(recipient)) = (aura, recipient) {
+        attach_printed_ref(&mut runner, aura);
+        attach_control_magic(&mut runner, aura, recipient);
+    }
+    if let Some(replacements) = replacements {
+        for id in replacements {
+            attach_printed_ref(&mut runner, id);
+        }
     }
     runner.act(GameAction::PassPriority).unwrap();
     runner.cast(lower).target_player(P2).commit();
@@ -667,7 +716,7 @@ fn auntie_ward_spell_and_ability_settle_exactly_one_stack_object() {
                 targeting_entry,
                 lower_entry,
                 recipient,
-            } = ward(ability, None, true, false);
+            } = ward(ability, false, true, false);
             let recipient = recipient.unwrap();
             if selection.is_some() {
                 ward_pick(&mut runner, recipient);
@@ -732,14 +781,13 @@ fn auntie_ward_spell_and_ability_settle_exactly_one_stack_object() {
 
 #[test]
 fn auntie_ward_cannot_pay_with_no_eligible_creature() {
-    for replacement in [None, Some(prevention(false))] {
-        let has_recipient = replacement.is_some();
+    for prohibited in [false, true] {
         let WardBoard {
             runner,
             targeting_entry,
             lower_entry,
             ..
-        } = ward(false, replacement, has_recipient, false);
+        } = ward(false, prohibited, prohibited, false);
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::Priority { .. }
@@ -756,7 +804,7 @@ fn auntie_ward_checkpoint_rejects_forged_recipient_and_placement_count() {
         auntie,
         recipient,
         ..
-    } = ward(false, Some(prevention(true)), true, false);
+    } = ward(false, false, true, true);
     let recipient = recipient.unwrap();
     ward_pick(&mut runner, recipient);
     let mut forged = checkpoint(&runner);
@@ -805,7 +853,7 @@ fn auntie_ward_clears_both_payment_pauses_when_the_payer_departs() {
             targeting_entry,
             recipient,
             ..
-        } = ward(false, Some(prevention(true)), true, false);
+        } = ward(false, false, true, true);
         let recipient = recipient.unwrap();
         ward_pick(&mut runner, recipient);
         if in_replacement {
@@ -833,67 +881,28 @@ fn auntie_ward_clears_both_payment_pauses_when_the_payer_departs() {
 
 #[test]
 fn auntie_ward_replacement_checkpoint_settles_once() {
-    for prevent in [false, true] {
-        // The printed Vorinclex competes with the optional form of
-        // Suncleanser's prevention, letting the test order the placement and
-        // resume it without discarding the original Ward frame.
+    for (first, expected) in [
+        ("Vorinclex, Monstrous Raider", 5),
+        ("Winding Constrictor", 6),
+    ] {
         let WardBoard {
             mut runner,
             auntie,
             targeting_entry,
             lower_entry,
             recipient,
-        } = ward(true, Some(prevention(true)), true, true);
+        } = ward(true, false, true, true);
         let recipient = recipient.unwrap();
         ward_pick(&mut runner, recipient);
         runner.act(select(recipient)).unwrap();
-        let WaitingFor::ReplacementChoice {
-            player,
-            kind,
-            candidates,
-            ..
-        } = &runner.state().waiting_for
-        else {
-            panic!("Vorinclex and the prevention must compete for the same placement");
-        };
-        assert_eq!(
-            (*player, *kind, candidates.len()),
-            (P1, ReplacementChoiceKind::Order, 2)
-        );
-        let index = candidates
-            .iter()
-            .position(|candidate| {
-                if prevent {
-                    candidate.source_id == recipient
-                } else {
-                    runner.state().objects[&candidate.source_id].name
-                        == "Vorinclex, Monstrous Raider"
-                }
-            })
-            .unwrap();
+        let index = counter_order_index(&runner, P1, first);
         assert!(on_stack(&runner, targeting_entry));
         assert_eq!(minus_counters(&runner, recipient), 0);
         let mut resumed = checkpoint(&runner);
         for runner in [&mut runner, &mut resumed] {
-            runner.act(GameAction::ChooseReplacement { index }).unwrap();
-            assert!(matches!(
-                runner.state().waiting_for,
-                WaitingFor::ReplacementChoice {
-                    player: P1,
-                    kind: ReplacementChoiceKind::OptionalBranch,
-                    candidate_count: 2,
-                    ..
-                }
-            ));
-            let result = runner
-                .act(GameAction::ChooseReplacement {
-                    index: usize::from(!prevent),
-                })
-                .unwrap();
-            assert_eq!(
-                minus_counters(runner, recipient),
-                if prevent { 0 } else { 4 }
-            );
+            let result = runner.act(GameAction::ChooseReplacement { index }).unwrap();
+            // CR 118.11 + CR 616.1: both orders pay the cost with a modified count.
+            assert_eq!(minus_counters(runner, recipient), expected);
             assert_eq!(
                 result
                     .events
@@ -902,9 +911,9 @@ fn auntie_ward_replacement_checkpoint_settles_once() {
                         GameEvent::CounterAdded { object_id, .. } if *object_id == recipient
                     ))
                     .count(),
-                usize::from(!prevent)
+                1
             );
-            assert_eq!(on_stack(runner, targeting_entry), !prevent);
+            assert!(on_stack(runner, targeting_entry));
             assert!(on_stack(runner, lower_entry));
             assert_eq!(
                 runner
@@ -913,13 +922,47 @@ fn auntie_ward_replacement_checkpoint_settles_once() {
                     .iter()
                     .filter(|entry| entry.source_id == auntie)
                     .count(),
-                usize::from(!prevent)
+                1
             );
             runner.advance_until_stack_empty();
-            assert_eq!(runner.life(P1), if prevent { 20 } else { 19 });
+            assert_eq!(runner.life(P1), 19);
             assert_eq!(runner.life(P2), 18);
         }
     }
+}
+
+#[test]
+fn auntie_ward_recipient_owner_concession_counters_targeting_ability() {
+    let WardBoard {
+        mut runner,
+        auntie,
+        targeting_entry,
+        lower_entry,
+        recipient,
+    } = ward(true, false, true, true);
+    let recipient = recipient.unwrap();
+    ward_pick(&mut runner, recipient);
+    runner.act(select(recipient)).unwrap();
+    counter_order_index(&runner, P1, "Vorinclex, Monstrous Raider");
+    assert!(on_stack(&runner, targeting_entry));
+
+    // CR 800.4a + CR 702.21a: the recipient leaves with its owner. Ward
+    // counters the targeting ability because the placement was abandoned.
+    let result = runner.act(GameAction::Concede { player_id: P2 }).unwrap();
+    assert!(!result.events.iter().any(|event| matches!(event,
+        GameEvent::CounterAdded { object_id, .. } if *object_id == recipient
+    )));
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(runner.state().objects[&recipient].zone, Zone::Exile);
+    assert!(!on_stack(&runner, targeting_entry));
+    assert!(on_stack(&runner, lower_entry));
+    assert!(!runner
+        .state()
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == auntie));
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert!(runner.state().pending_replacement.is_none());
 }
 
 #[test]

@@ -21886,8 +21886,8 @@ impl GameState {
                     != crate::game::effects::blight::eligible_blight_creatures(
                         self, *player, *counters,
                     )
-                || crate::game::engine_payment_choices::split_unless_blight(cost)
-                    .is_none_or(|(count, _)| count != *counters)
+                || crate::game::engine_payment_choices::fixed_unless_blight_count(cost)
+                    != Some(*counters)
                 || self.pending_cost_move_resume.is_some()
                 || cast_in_flight.is_some()
                 || !valid_unless_blight_referent(
@@ -21919,8 +21919,7 @@ impl GameState {
                 .any(|seat| seat.id == player && !seat.is_eliminated)
         };
         if let Some(blight) = blight {
-            let Some((count, None)) =
-                crate::game::engine_payment_choices::split_unless_blight(cost)
+            let Some(count) = crate::game::engine_payment_choices::fixed_unless_blight_count(cost)
             else {
                 return Err("invalid parked unless Blight counter placement".to_string());
             };

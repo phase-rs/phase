@@ -1448,7 +1448,7 @@ pub(super) fn handle_unless_payment(
     let post_action_event_start = None;
     let payment_event_start = events.len();
     if pay {
-        if let Some((_, suffix)) = split_unless_blight(&cost) {
+        if fixed_unless_blight_count(&cost).is_some() {
             if let UnlessSelectionPrep::Prompt(mut prompt) = prepare_unless_selection_payment(
                 state,
                 player,
@@ -1467,12 +1467,8 @@ pub(super) fn handle_unless_payment(
                     *poll = remaining.clone();
                     *affected = affected_object;
                 }
-                if suffix.as_ref().is_none_or(|suffix| {
-                    costs::can_pay_unless_blight_suffix(state, player, &pending_effect, suffix)
-                }) {
-                    state.waiting_for = *prompt;
-                    return Ok(action_result(events, state.waiting_for.clone()));
-                }
+                state.waiting_for = *prompt;
+                return Ok(action_result(events, state.waiting_for.clone()));
             }
             return finish_unless_payment(
                 state,
@@ -2512,20 +2508,27 @@ pub(crate) fn retire_parked_unless_payment_of_departing_players(
     ) {
         set_active_priority(state);
     }
-    if matches!(
-        &state.pending_cost_move_resume,
-        Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
-            pending_effect,
-            unpaid_suffix,
-            blight,
-            ..
-        }) if leaving.contains(&pending_effect.controller)
+    if let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+        pending_effect,
+        unpaid_suffix,
+        blight,
+        ..
+    }) = &state.pending_cost_move_resume
+    {
+        let controller_leaves = leaving.contains(&pending_effect.controller);
+        if let Some(placement) = blight {
+            if controller_leaves || leaving.contains(&placement.payer) {
+                // CR 800.4a + CR 701.68a: the retired payment cannot place
+                // counters on a surviving creature it borrowed from another player.
+                retire_unreconcilable_parked_unless_payment(state);
+            }
+        } else if controller_leaves
             || unpaid_suffix
                 .as_ref()
                 .is_some_and(|suffix| leaving.contains(&suffix.payer))
-            || blight.is_some_and(|placement| leaving.contains(&placement.payer))
-    ) {
-        state.pending_cost_move_resume = None;
+        {
+            state.pending_cost_move_resume = None;
+        }
     }
 }
 
@@ -3328,25 +3331,11 @@ pub(crate) enum UnlessSelectionPrep {
     Unpayable,
 }
 
-pub(crate) fn split_unless_blight(cost: &AbilityCost) -> Option<(u32, Option<AbilityCost>)> {
+pub(crate) fn fixed_unless_blight_count(cost: &AbilityCost) -> Option<u32> {
     match cost {
         AbilityCost::Blight {
             count: BlightCount::Fixed(count),
-        } => Some((*count, None)),
-        AbilityCost::Composite { costs } => {
-            let (index, (count, remainder)) = costs
-                .iter()
-                .enumerate()
-                .find_map(|(index, leg)| split_unless_blight(leg).map(|split| (index, split)))?;
-            let mut suffix = costs.clone();
-            suffix.splice(index..=index, remainder);
-            let remainder = match suffix.len() {
-                0 => None,
-                1 => suffix.pop(),
-                _ => Some(AbilityCost::Composite { costs: suffix }),
-            };
-            Some((count, remainder))
-        }
+        } => Some(*count),
         _ => None,
     }
 }
@@ -3387,54 +3376,6 @@ pub(super) fn handle_unless_blight_choice(
     };
     let recipient =
         effects::blight::validate_blight_selection(state, player, counters, &creatures, chosen)?;
-    if let WaitingFor::UnlessPayment {
-        cost,
-        pending_effect,
-        trigger_event,
-        ..
-    } = &frame
-    {
-        if let Some((_, Some(suffix))) = split_unless_blight(cost) {
-            // CR 118.3 + CR 118.12: commit the compound only after the
-            // placement and all remaining legs settle in the same payment.
-            let mut trial = state.clone();
-            let mut trial_events = Vec::new();
-            set_active_priority(&mut trial);
-            let outcome = effects::blight::place_blight_cost(
-                &mut trial,
-                player,
-                recipient,
-                counters,
-                &mut trial_events,
-            );
-            if matches!(outcome, effects::counters::CounterAdditionOutcome::Settled)
-                && matches!(
-                    costs::pay_ability_cost_for_resolution(
-                        &mut trial,
-                        player,
-                        &suffix,
-                        pending_effect,
-                        &mut trial_events,
-                    )?,
-                    PaymentOutcome::Paid
-                )
-            {
-                let event_start = events.len();
-                *state = trial;
-                events.extend(trial_events);
-                let wait = finish_successful_unless_payment(
-                    state,
-                    pending_effect,
-                    trigger_event,
-                    events,
-                    Some(event_start),
-                )?;
-                return Ok(action_result(events, wait));
-            }
-            set_active_priority(state);
-            return handle_unless_payment(state, frame, false, events);
-        }
-    }
     let recipient_ref =
         crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&recipient]);
     let event_start = events.len();
@@ -3536,7 +3477,7 @@ pub(crate) fn prepare_unless_selection_payment(
     pending_effect: &ResolvedAbility,
     trigger_event: Option<&GameEvent>,
 ) -> Result<UnlessSelectionPrep, EngineError> {
-    if let Some((counters, _)) = split_unless_blight(cost) {
+    if let Some(counters) = fixed_unless_blight_count(cost) {
         let creatures = effects::blight::eligible_blight_creatures(state, player, counters);
         return Ok(if creatures.is_empty() {
             UnlessSelectionPrep::Unpayable
@@ -4108,6 +4049,8 @@ pub(super) fn resume_counter_addition_unless_payment(
         unreachable!("counter-addition unless-payment resume requires its typed continuation")
     };
     if let Some(blight) = blight {
+        // CR 800.4a + CR 118.11 + CR 701.68a: an abandoned placement
+        // performs no payment. A delivered replacement can modify the count.
         let result = finish_unless_blight(
             state,
             matches!(boundary, CostMoveDrainBoundary::ReplacementDelivered { .. }),
@@ -4130,6 +4073,7 @@ pub(super) fn resume_counter_addition_unless_payment(
     // fail to compile at this site rather than silently pick a verdict.
     match boundary {
         CostMoveDrainBoundary::ReplacementDelivered { .. }
+        | CostMoveDrainBoundary::ReplacementAbandoned { .. }
         | CostMoveDrainBoundary::ReplacementPrevented { .. }
         | CostMoveDrainBoundary::PriorityBoundary => {}
     }

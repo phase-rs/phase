@@ -3799,19 +3799,6 @@ pub(crate) fn can_pay_unless_composite(
     }
 }
 
-pub(crate) fn can_pay_unless_blight_suffix(
-    state: &GameState,
-    player: PlayerId,
-    ability: &ResolvedAbility,
-    cost: &AbilityCost,
-) -> bool {
-    if matches!(cost, AbilityCost::Composite { .. }) {
-        can_pay_unless_composite(state, player, ability, cost)
-    } else {
-        can_pay_resolution(state, player, cost, ability)
-    }
-}
-
 /// CR 614.17b: would a mandatory can't-effect stop this player-counter gain?
 fn player_counter_gain_is_prohibited(
     state: &GameState,

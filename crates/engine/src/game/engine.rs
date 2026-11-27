@@ -9034,6 +9034,7 @@ pub(super) fn apply_for_seat_with_mode(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CostMoveDrainBoundary {
     ReplacementDelivered { action_event_start: usize },
+    ReplacementAbandoned { action_event_start: usize },
     ReplacementPrevented { action_event_start: usize },
     PriorityBoundary,
 }
@@ -9054,7 +9055,8 @@ pub(crate) fn drain_pending_cost_move_resume(
         return Ok(None);
     }
     let eligible = match boundary {
-        CostMoveDrainBoundary::ReplacementDelivered { .. } => matches!(
+        CostMoveDrainBoundary::ReplacementDelivered { .. }
+        | CostMoveDrainBoundary::ReplacementAbandoned { .. } => matches!(
             state.pending_cost_move_resume,
             Some(
                 PendingCostMoveResume::Cast { .. }
@@ -9142,6 +9144,7 @@ pub(crate) fn drain_pending_cost_move_resume(
 
     let action_event_start = match boundary {
         CostMoveDrainBoundary::ReplacementDelivered { action_event_start }
+        | CostMoveDrainBoundary::ReplacementAbandoned { action_event_start }
         | CostMoveDrainBoundary::ReplacementPrevented { action_event_start } => {
             Some(action_event_start)
         }
