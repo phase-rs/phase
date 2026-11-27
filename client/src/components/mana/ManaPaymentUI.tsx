@@ -90,13 +90,8 @@ export function ManaPaymentUI() {
     // ability activated to pay it has its own window open.
     if (manaAbilityPayment) return manaCostToShards(manaAbilityPayment.cost);
     if (gameState.pending_cast) {
-      // Activated-ability mana payment: prefer `activation_cost` when present.
-      // The engine reuses PendingCast for both spell casts and activated abilities;
-      // for the latter, the mana to be paid is stored on `activation_cost`.
-      if (gameState.pending_cast.activation_cost) {
-        return abilityCostToManaShards(gameState.pending_cast.activation_cost) ?? [];
-      }
-      return manaCostToShards(gameState.pending_cast.cost);
+      const activation = abilityCostToManaShards(gameState.pending_cast.activation_cost);
+      return activation?.length ? activation : manaCostToShards(gameState.pending_cast.cost);
     }
     if (isPhyrexianPayment && spellObjectId != null) {
       const sourceObj = gameState.objects[spellObjectId];

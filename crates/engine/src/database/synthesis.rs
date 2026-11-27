@@ -9223,15 +9223,13 @@ fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u
 /// CR 702.62a: Each face carrying `Keyword::Suspend { count, cost }` gets two exile triggers.
 /// A fixed count also gets a hand ability.
 ///
-///   1. **Hand-activated alt-cost** (not for Suspend X)
+///   1. **Hand special action** (fixed counts only, CR 116.2f)
 ///      ("Rather than cast this card from your hand,
 ///      you may pay [cost] and exile it with N time counters on it. This action
 ///      doesn't use the stack."). Modeled as an activated ability with
 ///      `activation_zone = Hand` and `ActivationRestriction::MatchesCardCastTiming`
 ///      (CR 702.62a "if you could begin to cast this card by putting it onto the
-///      stack from your hand"). Cost is composite (mana + exile self from hand);
-///      effect describes the time counters placed on the exiled card as part
-///      of the hand special action (CR 116.2f).
+///      stack from your hand"). Cost is composite (mana + exile self from hand).
 ///
 ///   2. **Upkeep counter-removal trigger** ("At the beginning of your upkeep,
 ///      if this card is suspended, remove a time counter from it.") fires from
@@ -9268,8 +9266,6 @@ pub fn synthesize_suspend(face: &mut CardFace) {
         return;
     };
 
-    // CR 702.62a: Hand special action — pay [cost], exile self from hand, then
-    // place N time counters on it. Composite cost mirrors `synthesize_cycling`.
     let already_has_activation = face.abilities.iter().any(|a| {
         a.activation_zone == Some(Zone::Hand)
             && a.activation_restrictions

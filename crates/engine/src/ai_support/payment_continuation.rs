@@ -1613,6 +1613,91 @@ mod tests {
     }
 
     #[test]
+    fn suspend_certifies_metalworker_revealing_the_exact_known_hand_card() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::game_state::CastPaymentMode;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let metalworker = scenario
+            .add_creature_from_oracle(
+                P0, "Metalworker", 1, 2,
+                "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.",
+            )
+            .as_artifact()
+            .id();
+        let talisman = scenario
+            .add_artifact_to_hand_from_oracle(P0, "Sol Talisman", "Suspend 3—{1}\n{T}: Add {C}{C}.")
+            .id();
+        let mut runner = scenario.build();
+        let ability_index = runner.state().objects[&talisman]
+            .abilities
+            .iter()
+            .position(|ability| ability.activation_zone == Some(Zone::Hand))
+            .unwrap();
+        for (source_id, ability_index, payment_mode) in [
+            (talisman, ability_index, CastPaymentMode::Manual),
+            (metalworker, 0, CastPaymentMode::Auto),
+        ] {
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id,
+                    ability_index,
+                    payment_mode,
+                })
+                .unwrap();
+            if source_id == talisman {
+                assert_eq!(
+                    TargetedCastVerdict::for_suspend(runner.state()),
+                    TargetedCastVerdict::Completed
+                );
+            }
+        }
+
+        let before_reveal = runner.state().clone();
+        let result = runner
+            .act(GameAction::SelectCards {
+                cards: vec![talisman],
+            })
+            .unwrap();
+        let reveal = result
+            .events
+            .iter()
+            .find(|event| matches!(event, GameEvent::CardsRevealed { .. }))
+            .unwrap();
+        let origin = RngMark::of(&before_reveal);
+        let known_hand = Some((&before_reveal, P0));
+        assert!(step_is_information_safe(
+            origin,
+            runner.state(),
+            std::slice::from_ref(reveal),
+            known_hand
+        ));
+
+        let mut unbound = reveal.clone();
+        let GameEvent::CardsRevealed { occurrences, .. } = &mut unbound else {
+            unreachable!()
+        };
+        occurrences[0].incarnation += 1;
+        assert!(!step_is_information_safe(
+            origin,
+            runner.state(),
+            std::slice::from_ref(&unbound),
+            known_hand
+        ));
+        let GameEvent::CardsRevealed { occurrences, .. } = &mut unbound else {
+            unreachable!()
+        };
+        occurrences.clear();
+        assert!(!step_is_information_safe(
+            origin,
+            runner.state(),
+            &[unbound],
+            known_hand
+        ));
+    }
+
+    #[test]
     fn direct_mana_payment_without_a_live_root_fails_closed() {
         let mut state = GameState::new_two_player(1);
         state.waiting_for = WaitingFor::ManaPayment {

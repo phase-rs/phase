@@ -443,6 +443,33 @@ describe("ManaPaymentUI", () => {
     expect(screen.getByAltText("U")).toBeInTheDocument();
   });
 
+  it("shows the locked Suspend mana when activation_cost holds the exile tail", () => {
+    const gargadon = buildGameObjectWithCoreTypes(["Creature"], {
+      id: 701,
+      card_id: 701,
+      name: "Greater Gargadon",
+      mana_cost: { type: "Cost", shards: ["Red"], generic: 9 },
+      zone: "Hand",
+    });
+    const gameState = createGameState({
+      objects: buildObjectMap(gargadon),
+      pending_cast: buildPendingCast({
+        object_id: 701,
+        activation_ability_index: 1,
+        cost: { type: "Cost", shards: ["Red"], generic: 0 },
+        activation_cost: { type: "Exile", count: 1, zone: "Hand", filter: { type: "SelfRef" } },
+      }),
+    });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    });
+    render(<ManaPaymentUI />);
+
+    expect(screen.getByAltText("R")).toBeInTheDocument();
+    expect(screen.queryByAltText("9")).not.toBeInTheDocument();
+  });
+
   // pending_cast absent — fall back to the stack spell object's mana_cost.
   it("falls back to the stack spell object mana_cost when pending_cast is absent", () => {
     const dispatch = vi.fn().mockResolvedValue([]);

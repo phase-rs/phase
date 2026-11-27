@@ -16770,8 +16770,9 @@ fn suspend_payment_witness_resumes_the_optional_exile_redirect() {
     let mountain = s.add_basic_land(P0, ManaColor::Red);
     let card = s.add_creature_to_hand_from_oracle(P0, "Greater Gargadon", 9, 7,
         "Suspend 10—{R}\nSacrifice an artifact, creature, or land: Remove a time counter from this card. Activate only if this card is suspended.").id();
-    // A controlled optional replacement makes both delivery branches reachable.
-    // Reuses the same Moved replacement seam as the Plot cost witness above.
+    // No printed card makes this Hand-to-Exile move optionally go to the graveyard.
+    // Dauthi Voidwalker redirects moves in the opposite direction. This optional
+    // fixture exercises the same cost-move continuation as the Plot witness above.
     s.add_creature(P0, "Optional Suspend Exile Redirect", 0, 0)
         .as_enchantment()
         .with_replacement_definition(
