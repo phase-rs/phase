@@ -3448,8 +3448,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(attacker) = enters_blocking {
                 d.push(("enters_blocking".into(), fmt_target(attacker)));
             }
-            for member in additional_members {
-                d.extend(effect_details(member.effect()));
+            // Each later member of the list gets its own labels, so every
+            // member's token stays visible in the details. Members are
+            // numbered from 2 because the instruction's own token is the first.
+            for (position, member) in (2..).zip(additional_members) {
+                d.extend(
+                    effect_details(member.effect())
+                        .into_iter()
+                        .map(|(label, value)| (format!("member {position} {label}"), value)),
+                );
             }
         }
         Effect::PutCounter {
@@ -18955,6 +18962,65 @@ mod tests {
         }));
         assert!(named.contains("attacking Player"), "{named}");
         assert_ne!(named, unnamed);
+    }
+
+    /// Every member of a shared-verb token list keeps its own detail labels,
+    /// so no member's token is hidden behind another's.
+    #[test]
+    fn token_list_members_render_under_their_own_labels() {
+        use crate::types::ability::{TokenAttackDestination, TokenCreationMember};
+
+        let token = |name: &str| Effect::Token {
+            enters_blocking: None,
+            name: name.to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), name.to_string()],
+            colors: vec![],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            additional_members: Vec::new(),
+        };
+        let mut list = token("Snake");
+        let Effect::Token {
+            additional_members, ..
+        } = &mut list
+        else {
+            unreachable!()
+        };
+        additional_members.extend(
+            ["Wolf", "Elephant"]
+                .map(|name| TokenCreationMember::new(token(name)).expect("single token")),
+        );
+
+        let details = effect_details(&list);
+        let token_detail = |label: &str| {
+            details
+                .iter()
+                .find(|(found, _)| found == label)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(token_detail("token"), Some("+1/+1 Snake (Creature Snake)"));
+        assert_eq!(
+            token_detail("member 2 token"),
+            Some("+1/+1 Wolf (Creature Wolf)")
+        );
+        assert_eq!(
+            token_detail("member 3 token"),
+            Some("+1/+1 Elephant (Creature Elephant)")
+        );
+        assert_eq!(
+            details.iter().filter(|(label, _)| label == "token").count(),
+            1
+        );
     }
 
     /// A copy-token instruction's named attack destination reaches the parse
