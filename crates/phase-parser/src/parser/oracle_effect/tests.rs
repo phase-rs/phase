@@ -44409,7 +44409,7 @@ fn reflector_mage_bounces_one_target_then_restricts_its_owner() {
         .expect("restriction follows the bounce");
     assert!(matches!(&*ban.effect, Effect::AddRestriction {
         restriction: GameRestriction::ProhibitActivity {
-            affected_players: RestrictionPlayerScope::ParentObjectTargetOwner,
+            affected_players: RestrictionPlayerScope::ParentObjectTarget { possession: PossessionAxis::Owner },
             activity: ProhibitedActivity::CastSpells { spell_filter: Some(TargetFilter::Typed(filter)) },
             ..
         }
@@ -44459,7 +44459,9 @@ fn render_silent_its_controller_cant_cast_spells() {
             &*sub.effect,
             Effect::AddRestriction {
                 restriction: GameRestriction::ProhibitActivity {
-                    affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+                    affected_players: RestrictionPlayerScope::ParentObjectTarget {
+                        possession: PossessionAxis::Controller
+                    },
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::CastSpells { spell_filter: None },
                     ..

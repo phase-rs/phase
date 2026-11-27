@@ -689,6 +689,35 @@ fn apply_name_stickers(obj: &mut GameObject, source_name: &str) {
     }
 }
 
+/// CR 123.6c + CR 709.5: Recover effective names per door using the same
+/// sticker positions as the combined display name. The display separator
+/// occupies one word in that position count.
+pub(super) fn apply_name_stickers_to_room_doors(
+    obj: &GameObject,
+    [left, right]: [String; 2],
+) -> [String; 2] {
+    if !obj
+        .stickers
+        .iter()
+        .any(|sticker| matches!(sticker, AppliedSticker::Name { .. }))
+    {
+        return [left, right];
+    }
+    let mut left: Vec<_> = left.split_whitespace().map(str::to_string).collect();
+    let mut right: Vec<_> = right.split_whitespace().map(str::to_string).collect();
+    for sticker in &obj.stickers {
+        let AppliedSticker::Name { text, position, .. } = sticker else {
+            continue;
+        };
+        if let Some(right_position) = usize::from(*position).checked_sub(left.len() + 1) {
+            insert_name_sticker_words(&mut right, text, right_position as u8);
+        } else {
+            insert_name_sticker_words(&mut left, text, *position);
+        }
+    }
+    [left.join(" "), right.join(" ")]
+}
+
 /// CR 123.6b + CR 123.6c: a name sticker's words go after `position` words of
 /// the current name, or at its end when the name now has fewer words.
 fn insert_name_sticker_words(words: &mut Vec<String>, text: &str, position: u8) {

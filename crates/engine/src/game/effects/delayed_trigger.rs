@@ -6806,6 +6806,7 @@ mod tests {
             source_id,
             LKISnapshot {
                 name: "Nine-Lives Familiar".to_string(),
+                room_door_names: None,
                 token_image_ref: None,
                 power: Some(3),
                 toughness: Some(3),

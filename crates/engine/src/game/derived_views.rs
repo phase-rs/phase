@@ -3275,8 +3275,7 @@ fn restriction_affected_players(
         // affected player stays the activator independently of the source.
         RestrictionPlayerScope::TargetedPlayer
         | RestrictionPlayerScope::ParentTargetedPlayer
-        | RestrictionPlayerScope::ParentObjectTargetController
-        | RestrictionPlayerScope::ParentObjectTargetOwner
+        | RestrictionPlayerScope::ParentObjectTarget { .. }
         | RestrictionPlayerScope::ScopedPlayer
         | RestrictionPlayerScope::SourceController => Vec::new(),
         // CR 508.5a: `add_restriction` resolves the defending player to

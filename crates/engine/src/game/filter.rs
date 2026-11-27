@@ -10457,6 +10457,7 @@ impl<'a> SourceContext<'a> {
             triggering_object: None,
             lki: LKISnapshot {
                 name: String::new(),
+                room_door_names: None,
                 token_image_ref: None,
                 power: None,
                 toughness: None,
@@ -10696,6 +10697,7 @@ fn source_context_from_filter<'a>(
             .or_else(|| state.lki_cache.get(&source_id).cloned())
             .unwrap_or_else(|| LKISnapshot {
                 name: String::new(),
+                room_door_names: None,
                 token_image_ref: None,
                 power: None,
                 toughness: None,
@@ -10788,18 +10790,57 @@ fn source_chosen_player(source: &SourceContext<'_>) -> Option<PlayerId> {
 /// Returns `None` when no ability is in scope, when the ability has no object
 /// targets, or when the referenced object has no record in either `state.objects`
 /// or `state.lki_cache`.
-pub(crate) fn parent_target_name(
+fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> Option<String> {
+    read_parent_target_name(
+        state,
+        ability?,
+        |object| object.name.clone(),
+        |snapshot| snapshot.name.clone(),
+    )
+}
+
+/// CR 201.2a + CR 709.5: use the captured per-door names when the
+/// parent target was a fully unlocked Room.
+pub(crate) fn parent_target_names(
     state: &GameState,
-    ability: Option<&ResolvedAbility>,
-) -> Option<String> {
-    let ability = ability?;
+    ability: &ResolvedAbility,
+) -> Option<Vec<String>> {
+    fn names(room_names: Option<[String; 2]>, name: &str) -> Vec<String> {
+        match room_names {
+            Some([left, right]) if !card_names_match(&left, &right) => [left, right]
+                .into_iter()
+                .filter(|name| !name.is_empty())
+                .collect(),
+            Some([left, _]) => vec![left],
+            None => name_value(name).map(str::to_owned).into_iter().collect(),
+        }
+    }
+    read_parent_target_name(
+        state,
+        ability,
+        |object| {
+            names(
+                super::room::effective_battlefield_door_names(object),
+                &object.name,
+            )
+        },
+        |snapshot| names(snapshot.room_door_names.as_deref().cloned(), &snapshot.name),
+    )
+}
+
+fn read_parent_target_name<T>(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    live_name: impl FnOnce(&GameObject) -> T,
+    captured_name: impl FnOnce(&LKISnapshot) -> T,
+) -> Option<T> {
     let id = first_object_target(ability)?;
     if let Some(snapshot) = ability
         .effect_context_object
         .as_ref()
         .filter(|snapshot| snapshot.object_id == id && snapshot.is_current(state))
     {
-        return Some(snapshot.lki.name.clone());
+        return Some(captured_name(&snapshot.lki));
     }
     if let Some(lki) = ability
         .targets
@@ -10809,12 +10850,12 @@ pub(crate) fn parent_target_name(
         .filter(|pin| !pin.is_current(state))
         .and_then(|pin| exit_lki_for_incarnation(state, id, pin.incarnation))
     {
-        return Some(lki.name.clone());
+        return Some(captured_name(lki));
     }
     if let Some(obj) = state.objects.get(&id) {
-        return Some(obj.name.clone());
+        return Some(live_name(obj));
     }
-    state.lki_cache.get(&id).map(|lki| lki.name.clone())
+    state.lki_cache.get(&id).map(captured_name)
 }
 
 fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
@@ -13772,6 +13813,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
         .or_else(|| context.state.lki_cache.get(&context.source_id).cloned())
         .unwrap_or_else(|| LKISnapshot {
             name: String::new(),
+            room_door_names: None,
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -18150,6 +18192,7 @@ mod tests {
             card,
             LKISnapshot {
                 name: "Forest".to_string(),
+                room_door_names: None,
                 token_image_ref: None,
                 power: None,
                 toughness: None,
@@ -22811,6 +22854,7 @@ mod tests {
             object_id: gone,
             lki: LKISnapshot {
                 name: String::new(),
+                room_door_names: None,
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
@@ -26422,6 +26466,7 @@ mod tests {
         );
         let lki = crate::types::game_state::LKISnapshot {
             name: "Returned Creature".into(),
+            room_door_names: None,
             token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
@@ -26473,6 +26518,7 @@ mod tests {
         );
         let lki = crate::types::game_state::LKISnapshot {
             name: "Original Entrant".into(),
+            room_door_names: None,
             token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
@@ -26614,6 +26660,7 @@ mod tests {
         );
         let mut lki = crate::types::game_state::LKISnapshot {
             name: "Destroyed Land".into(),
+            room_door_names: None,
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -26763,6 +26810,7 @@ mod tests {
 
         let lki = |tapped: bool| LKISnapshot {
             name: "Tap Probe".to_string(),
+            room_door_names: None,
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -27856,6 +27904,7 @@ mod tests {
 
         let creature_lki = LKISnapshot {
             name: "Test Creature".to_string(),
+            room_door_names: None,
             token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
@@ -27880,6 +27929,7 @@ mod tests {
         };
         let land_lki = LKISnapshot {
             name: "Test Land".to_string(),
+            room_door_names: None,
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -27999,6 +28049,7 @@ mod tests {
     fn same_name_as_parent_target_reads_only_a_current_matching_move_snapshot() {
         let copied_lki = LKISnapshot {
             name: "Grizzly Bears".to_string(),
+            room_door_names: None,
             token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
@@ -28143,6 +28194,7 @@ mod tests {
             stolen,
             LKISnapshot {
                 name: "Stolen Bear".to_string(),
+                room_door_names: None,
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
@@ -28219,6 +28271,7 @@ mod tests {
             spell,
             LKISnapshot {
                 name: "Cast From Exile".to_string(),
+                room_door_names: None,
                 token_image_ref: None,
                 power: None,
                 toughness: None,
@@ -31674,6 +31727,7 @@ mod attached_set_host_filter_tests {
     fn empty_lki() -> crate::types::game_state::LKISnapshot {
         crate::types::game_state::LKISnapshot {
             name: String::new(),
+            room_door_names: None,
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -31877,6 +31931,7 @@ mod attached_set_host_filter_tests {
             host,
             crate::types::game_state::LKISnapshot {
                 name: "Host".into(),
+                room_door_names: None,
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),

@@ -1200,8 +1200,7 @@ fn restriction_scope_matches_player(
             debug_assert!(false, "ScopedPlayer should be resolved by add_restriction");
             false
         }
-        RestrictionPlayerScope::ParentObjectTargetOwner
-        | RestrictionPlayerScope::ParentObjectTargetController => {
+        RestrictionPlayerScope::ParentObjectTarget { .. } => {
             // CR 608.2h: add_restriction resolves the affected player from the
             // referenced object. Without a referent the scope matches no player.
             false
@@ -1301,6 +1300,16 @@ fn is_blocked_by_cant_cast_spells(
     is_blocked_by_cant_cast_spells_for(state, caster, spell_obj, false)
 }
 
+fn captured_cast_name_property(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::Named { .. } => true,
+        FilterProp::AnyOf { props } => {
+            !props.is_empty() && props.iter().all(captured_cast_name_property)
+        }
+        _ => false,
+    }
+}
+
 /// Fuse-aware sibling of [`is_blocked_by_cant_cast_spells`]. `fused` projects a
 /// pre-payment fused split spell with its COMBINED characteristics (CR 702.102b)
 /// so `CastSpells { spell_filter }` prohibitions keyed on mana value / colors see
@@ -1366,9 +1375,7 @@ fn is_blocked_by_cant_cast_spells_for(
                     };
                     type_filters.is_empty()
                         && !properties.is_empty()
-                        && properties
-                            .iter()
-                            .all(|prop| matches!(prop, FilterProp::Named { .. }))
+                        && properties.iter().all(captured_cast_name_property)
                         && super::filter::spell_object_matches_filter_from_for(
                             spell_obj,
                             spell_obj.zone,
@@ -1708,8 +1715,11 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         .filter(|obj_id| {
             state.objects.get(obj_id).is_some_and(|obj| {
                 !is_blocked_by_cast_only_from_zones(state, obj, player)
-                    && !is_blocked_by_cant_cast_spells(state, player, Some(obj))
                     && !is_blocked_by_prohibit_play_from_zone(state, obj, player)
+                    // CR 601.3a: proposing another face or a face-down spell
+                    // can change the characteristics the prohibition reads.
+                    && (!is_blocked_by_cant_cast_spells(state, player, Some(obj))
+                        || can_cast_object_now(state, player, *obj_id))
             })
         })
         .collect()

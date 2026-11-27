@@ -1,14 +1,19 @@
 use crate::support::shared_card_db;
-use engine::game::casting::can_cast_object_now;
+use engine::ai_support::legal_actions;
+use engine::game::casting::{
+    can_cast_modal_face_now, can_cast_object_now, spell_objects_available_to_cast,
+};
 use engine::game::engine::EngineError;
+use engine::game::filter::spell_record_matches_filter;
+use engine::game::game_object::RoomDoor;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
-    ControllerRef, FilterProp, GameRestriction, ProhibitedActivity, RestrictionExpiry,
-    RestrictionPlayerScope, TargetFilter, TypeFilter, TypedFilter,
+    ControllerRef, FilterProp, GameRestriction, PossessionAxis, ProhibitedActivity,
+    RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::actions::{AlternativeCastDecision, GameAction};
-use engine::types::game_state::{CastingVariant, WaitingFor};
+use engine::types::game_state::{CastingVariant, SpellCastRecord, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
@@ -36,6 +41,30 @@ fn advance_to_main(runner: &mut GameRunner, player: PlayerId) {
     panic!("did not reach {player:?}'s main phase");
 }
 
+fn resolve_weight_room_manifest(runner: &mut GameRunner) {
+    runner.advance_until_stack_empty();
+    let WaitingFor::ManifestDreadChoice {
+        player: P1, cards, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("Weight Room should ask P1 to manifest a card");
+    };
+    assert_eq!(cards.len(), 2);
+    let chosen = cards[0];
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![chosen],
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert!(runner.state().objects[&chosen].face_down);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+}
+
 #[test]
 fn departed_mage_token_restricts_only_the_owner_until_the_installers_next_turn() {
     let db = shared_card_db().expect("integration card fixture");
@@ -58,7 +87,6 @@ fn departed_mage_token_restricts_only_the_owner_until_the_installers_next_turn()
     let same = scenario.add_real_card(P1, "Spectral Sailor", Zone::Hand, db);
     let different = scenario.add_real_card(P1, "Opt", Zone::Hand, db);
     let controller_copy = scenario.add_real_card(controller, "Spectral Sailor", Zone::Hand, db);
-    let land = scenario.add_real_card(P1, "Island", Zone::Hand, db);
     let mut runner = scenario.build();
     assert!(can_cast_object_now(runner.state(), P1, same));
     let outcome = runner.cast(copy).target_objects(&[mage, stolen]).resolve();
@@ -105,14 +133,6 @@ fn departed_mage_token_restricts_only_the_owner_until_the_installers_next_turn()
         runner.cast(same).try_resolve(),
         Err(EngineError::ActionNotAllowed(reason)) if reason.contains("temporary effect")
     ));
-    // CR 305.1 + CR 116.2a: playing a land remains a legal special action.
-    runner
-        .act(GameAction::PlayLand {
-            object_id: land,
-            card_id: runner.state().objects[&land].card_id,
-        })
-        .unwrap();
-    assert_eq!(runner.state().objects[&land].zone, Zone::Battlefield);
     advance_to_main(&mut runner, P0);
     assert!(runner.state().restrictions.is_empty());
     assert!(can_cast_object_now(runner.state(), P1, same));
@@ -137,7 +157,9 @@ fn unresolved_owner_and_source_relative_name_filters_restrict_no_player() {
             false,
         ),
         (
-            RestrictionPlayerScope::ParentObjectTargetOwner,
+            RestrictionPlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Owner,
+            },
             named.clone(),
             true,
         ),
@@ -153,10 +175,12 @@ fn unresolved_owner_and_source_relative_name_filters_restrict_no_player() {
         ),
         (
             RestrictionPlayerScope::SpecificPlayer(P0),
-            named.properties(vec![
-                FilterProp::Named { name: "Opt".into() },
-                FilterProp::InZone { zone: Zone::Hand },
-            ]),
+            named.properties(vec![FilterProp::AnyOf {
+                props: vec![
+                    FilterProp::Named { name: "Opt".into() },
+                    FilterProp::InZone { zone: Zone::Hand },
+                ],
+            }]),
             true,
         ),
     ] {
@@ -209,7 +233,7 @@ fn bounced_face_down_creature_shares_no_name_with_its_printed_face_or_another_fa
             activity: ProhibitedActivity::CastSpells { spell_filter: Some(TargetFilter::Typed(filter)) },
             ..
         }
-    ] if matches!(filter.properties.as_slice(), [FilterProp::Named { name }] if name.is_empty())));
+    ] if matches!(filter.properties.as_slice(), [FilterProp::AnyOf { props }] if props.is_empty())));
     // CR 201.2a + CR 708.4: the bounced creature had no name to share with
     // either the printed card or the face-down spell.
     assert!(can_cast_object_now(runner.state(), P0, morph));
@@ -220,4 +244,191 @@ fn bounced_face_down_creature_shares_no_name_with_its_printed_face_or_another_fa
         .resolve();
     assert!(runner.state().objects[&morph].face_down);
     assert_eq!(runner.state().objects[&morph].zone, Zone::Battlefield);
+}
+
+#[test]
+fn the_restricted_owner_can_play_the_bounced_dryad_arbor() {
+    let db = shared_card_db().expect("integration card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Forest"; 3]);
+    for mana in [ManaColor::Blue, ManaColor::White, ManaColor::Blue] {
+        scenario.add_basic_land(P0, mana);
+    }
+    let mage = scenario.add_real_card(P0, "Reflector Mage", Zone::Hand, db);
+    let arbor = scenario.add_real_card(P1, "Dryad Arbor", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+
+    runner.cast(mage).target_object(arbor).resolve();
+    assert_eq!(runner.state().objects[&arbor].zone, Zone::Hand);
+    advance_to_main(&mut runner, P1);
+    assert!(matches!(runner.state().restrictions.as_slice(), [
+        GameRestriction::ProhibitActivity {
+            affected_players: RestrictionPlayerScope::SpecificPlayer(P1),
+            activity: ProhibitedActivity::CastSpells { spell_filter: Some(TargetFilter::Typed(filter)) },
+            ..
+        }
+    ] if matches!(filter.properties.as_slice(), [FilterProp::Named { name }] if name == "Dryad Arbor")));
+
+    // CR 305.1 + CR 116.2a: the restricted player can play a land with the
+    // captured name during the prohibition.
+    let play = GameAction::PlayLand {
+        object_id: arbor,
+        card_id: runner.state().objects[&arbor].card_id,
+    };
+    assert!(legal_actions(runner.state()).contains(&play));
+    runner.act(play).unwrap();
+    assert_eq!(runner.state().objects[&arbor].zone, Zone::Battlefield);
+}
+
+#[test]
+fn a_face_up_morph_is_prohibited_but_its_face_down_cast_is_offered() {
+    let db = shared_card_db().expect("integration card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Island"; 3]);
+    for mana in [ManaColor::Blue, ManaColor::White, ManaColor::Blue] {
+        scenario.add_basic_land(P0, mana);
+    }
+    for _ in 0..2 {
+        scenario.add_basic_land(P1, ManaColor::Blue);
+    }
+    let mage = scenario.add_real_card(P0, "Reflector Mage", Zone::Hand, db);
+    let morph = scenario.add_real_card(P1, "Willbender", Zone::Battlefield, db);
+    let land = scenario.add_real_card(P1, "Island", Zone::Hand, db);
+    let mut runner = scenario.build();
+
+    runner.cast(mage).target_object(morph).resolve();
+    assert_eq!(runner.state().objects[&morph].zone, Zone::Hand);
+    advance_to_main(&mut runner, P1);
+    // CR 601.3 + CR 702.37c: two mana would pay the printed cost. The only
+    // permitted proposal costs three, so attempting the cast is rejected.
+    assert!(matches!(
+        runner.cast(morph).try_resolve(),
+        Err(EngineError::ActionNotAllowed(reason)) if reason.contains("temporary effect")
+    ));
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land,
+            card_id: runner.state().objects[&land].card_id,
+        })
+        .unwrap();
+    // CR 601.3a + CR 708.4: the face-down proposal is nameless.
+    assert!(spell_objects_available_to_cast(runner.state(), P1).contains(&morph));
+    assert!(legal_actions(runner.state()).iter().any(|action| {
+        matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == morph)
+    }));
+    let outcome = runner
+        .cast(morph)
+        .casting_variant(CastingVariant::FaceDown)
+        .alternative_cast(AlternativeCastDecision::Alternative)
+        .resolve();
+    outcome.assert_zone(&[morph], Zone::Battlefield);
+    assert!(outcome.state().objects[&morph].face_down);
+}
+
+#[test]
+fn the_room_restriction_matches_only_the_names_of_unlocked_doors() {
+    let db = shared_card_db().expect("integration card fixture");
+    for unlock_right in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Island"; 3]);
+        scenario.with_library_top(P1, &["Forest"; 8]);
+        for _ in 0..4 {
+            scenario.add_basic_land(P0, ManaColor::Blue);
+        }
+        for _ in 0..9 {
+            scenario.add_basic_land(P1, ManaColor::Green);
+        }
+        let mage = scenario.add_real_card(P0, "Reflector Mage", Zone::Battlefield, db);
+        let counterpart = scenario.add_real_card(P0, "Cackling Counterpart", Zone::Hand, db);
+        let unsummon = scenario.add_real_card(P0, "Unsummon", Zone::Hand, db);
+        scenario.add_real_card(P0, "Opalescence", Zone::Battlefield, db);
+        let room = scenario.add_real_card(P1, "Moldering Gym", Zone::Hand, db);
+        let other = scenario.add_real_card(P1, "Moldering Gym", Zone::Hand, db);
+        let mut runner = scenario.build();
+
+        advance_to_main(&mut runner, P1);
+        assert!(can_cast_modal_face_now(runner.state(), P1, other, false));
+        assert!(can_cast_modal_face_now(runner.state(), P1, other, true));
+        runner
+            .cast(room)
+            .modal_back_face(false)
+            .search_first_legal()
+            .resolve();
+        if unlock_right {
+            runner
+                .act(GameAction::UnlockRoomDoor {
+                    object_id: room,
+                    door: RoomDoor::Right,
+                })
+                .unwrap();
+            resolve_weight_room_manifest(&mut runner);
+        }
+        assert_eq!(
+            runner.state().objects[&room].name,
+            if unlock_right {
+                "Moldering Gym // Weight Room"
+            } else {
+                "Moldering Gym"
+            }
+        );
+
+        advance_to_main(&mut runner, P0);
+        let outcome = runner
+            .cast(counterpart)
+            .target_objects(&[mage, room])
+            .resolve();
+        outcome.assert_zone(&[room], Zone::Hand);
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        let [GameRestriction::ProhibitActivity {
+            source: token,
+            activity:
+                ProhibitedActivity::CastSpells {
+                    spell_filter: Some(filter),
+                },
+            ..
+        }] = runner.state().restrictions.as_slice()
+        else {
+            panic!("expected a captured cast prohibition")
+        };
+        // CR 201.2a + CR 608.2h + CR 709.5: use the Room's effective names
+        // immediately before it moved, including only its unlocked doors.
+        for (name, expected) in [("Moldering Gym", true), ("Weight Room", unlock_right)] {
+            let record = SpellCastRecord {
+                name: name.into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                spell_record_matches_filter(&record, filter, P1, &[]),
+                expected
+            );
+        }
+        let token = *token;
+        runner.cast(unsummon).target_object(token).resolve();
+        assert!(!runner.state().objects.contains_key(&token));
+
+        advance_to_main(&mut runner, P1);
+        assert!(!can_cast_modal_face_now(runner.state(), P1, other, false));
+        assert_eq!(
+            can_cast_modal_face_now(runner.state(), P1, other, true),
+            !unlock_right
+        );
+        assert_eq!(
+            spell_objects_available_to_cast(runner.state(), P1).contains(&other),
+            !unlock_right
+        );
+        if !unlock_right {
+            runner
+                .cast(other)
+                .modal_back_face(true)
+                .resolve()
+                .assert_zone(&[other], Zone::Battlefield);
+            resolve_weight_room_manifest(&mut runner);
+        }
+    }
 }

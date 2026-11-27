@@ -5027,7 +5027,7 @@ pub enum RestrictionScope {
 
 /// Identifies which players are affected by a temporary game restriction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[serde(tag = "type", content = "data", from = "RestrictionPlayerScopeRepr")]
 pub enum RestrictionPlayerScope {
     AllPlayers,
     SpecificPlayer(PlayerId),
@@ -5039,22 +5039,11 @@ pub enum RestrictionPlayerScope {
     /// Resolved to `SpecificPlayer` by `add_restriction` after parent target
     /// propagation, without declaring a second target slot.
     ParentTargetedPlayer,
-    /// CR 109.4 + CR 608.2c + CR 608.2h: The controller of the parent effect's
-    /// object target — "its controller" where "it" is the object countered/
-    /// destroyed/tapped by the parent instruction (Render Silent: "Counter target
-    /// spell. Its controller can't cast spells this turn."). Resolved to
-    /// `SpecificPlayer` by `add_restriction::fill_runtime_fields` at restriction-
-    /// creation time via `ability_utils::parent_target_controller`, capturing the
-    /// referent's controller from last-known information (the object has left the
-    /// stack by the time the chained restriction resolves). Distinct from
-    /// `ParentTargetedPlayer` ("that player", CR 608.2c — a reused *player* target):
-    /// this derives a player from an *object* target's controller (CR 109.4).
-    /// Mirrors `PlayerFilter::ParentObjectTargetController` /
-    /// `PlayerScope::ParentObjectTarget` on the sibling enums.
-    ParentObjectTargetController,
-    /// CR 108.3 + CR 608.2c + CR 608.2h: the owner of the preceding instruction's
-    /// object target, captured when the restriction is created after that instruction.
-    ParentObjectTargetOwner,
+    /// CR 108.3 + CR 109.4 + CR 608.2h: The parent object target's owner or
+    /// controller, captured as a specific player when the restriction is created.
+    ParentObjectTarget {
+        possession: PossessionAxis,
+    },
     OpponentsOfSourceController,
     /// CR 508.5 / CR 508.5a: The defending player for the source's attack
     /// ("Whenever ~ attacks, defending player can't cast spells this turn." —
@@ -5084,9 +5073,58 @@ pub enum RestrictionPlayerScope {
     /// creation — locking the activator so the ban survives the source changing
     /// controller or leaving play — exactly like the other affected-player scopes
     /// (`TargetedPlayer`, `DefendingPlayer`, `ScopedPlayer`,
-    /// `ParentObjectTargetController`). This parser-facing scope is never stored:
+    /// `ParentObjectTarget`). This parser-facing scope is never stored:
     /// enforcement and display only ever see the lowered `SpecificPlayer`.
     SourceController,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "data")]
+enum RestrictionPlayerScopeRepr {
+    AllPlayers,
+    SpecificPlayer(PlayerId),
+    TargetedPlayer,
+    ParentTargetedPlayer,
+    // The legacy controller tag is a unit payload with no `data` key.
+    #[serde(alias = "ParentObjectTargetController")]
+    ParentObjectTarget(Option<ParentObjectTargetPossession>),
+    #[serde(rename = "ParentObjectTargetOwner")]
+    LegacyParentOwner,
+    OpponentsOfSourceController,
+    DefendingPlayer,
+    ScopedPlayer,
+    SourceController,
+}
+
+#[derive(Deserialize)]
+struct ParentObjectTargetPossession {
+    #[serde(default = "default_parent_object_target_possession")]
+    possession: PossessionAxis,
+}
+
+impl From<RestrictionPlayerScopeRepr> for RestrictionPlayerScope {
+    fn from(repr: RestrictionPlayerScopeRepr) -> Self {
+        match repr {
+            RestrictionPlayerScopeRepr::AllPlayers => Self::AllPlayers,
+            RestrictionPlayerScopeRepr::SpecificPlayer(player) => Self::SpecificPlayer(player),
+            RestrictionPlayerScopeRepr::TargetedPlayer => Self::TargetedPlayer,
+            RestrictionPlayerScopeRepr::ParentTargetedPlayer => Self::ParentTargetedPlayer,
+            RestrictionPlayerScopeRepr::ParentObjectTarget(data) => Self::ParentObjectTarget {
+                possession: data.map_or_else(default_parent_object_target_possession, |data| {
+                    data.possession
+                }),
+            },
+            RestrictionPlayerScopeRepr::LegacyParentOwner => Self::ParentObjectTarget {
+                possession: PossessionAxis::Owner,
+            },
+            RestrictionPlayerScopeRepr::OpponentsOfSourceController => {
+                Self::OpponentsOfSourceController
+            }
+            RestrictionPlayerScopeRepr::DefendingPlayer => Self::DefendingPlayer,
+            RestrictionPlayerScopeRepr::ScopedPlayer => Self::ScopedPlayer,
+            RestrictionPlayerScopeRepr::SourceController => Self::SourceController,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -30258,7 +30296,7 @@ fn default_sum_aggregate() -> AggregateFunction {
     AggregateFunction::Sum
 }
 
-/// Backward-compat default for the legacy `PlayerScope::ParentObjectTargetController` unit tag.
+/// Backward-compat default for the legacy `ParentObjectTargetController` unit tag.
 /// Old saves carried no `possession` field; the tag itself meant the controller.
 fn default_parent_object_target_possession() -> PossessionAxis {
     PossessionAxis::Controller
@@ -50910,6 +50948,34 @@ mod tests {
             PlayerScope::ParentObjectTarget {
                 possession: PossessionAxis::Controller,
             }
+        );
+    }
+
+    #[test]
+    fn restriction_parent_object_target_decodes_legacy_controller_and_round_trips_owner() {
+        let legacy = r#"{"type":"ParentObjectTargetController"}"#;
+        assert_eq!(
+            serde_json::from_str::<RestrictionPlayerScope>(legacy).unwrap(),
+            RestrictionPlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            },
+        );
+        let owner = RestrictionPlayerScope::ParentObjectTarget {
+            possession: PossessionAxis::Owner,
+        };
+        assert_eq!(
+            serde_json::from_str::<RestrictionPlayerScope>(r#"{"type":"ParentObjectTargetOwner"}"#)
+                .unwrap(),
+            owner,
+        );
+        let json = serde_json::json!({
+            "type": "ParentObjectTarget",
+            "data": { "possession": "Owner" }
+        });
+        assert_eq!(serde_json::to_value(&owner).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<RestrictionPlayerScope>(json).unwrap(),
+            owner,
         );
     }
 

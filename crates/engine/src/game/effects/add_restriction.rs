@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, FilterProp, GameRestriction, ProhibitedActivity,
-    ResolvedAbility, RestrictionExpiry, TargetFilter,
+    Effect, EffectError, EffectKind, FilterProp, GameRestriction, PossessionAxis,
+    ProhibitedActivity, ResolvedAbility, RestrictionExpiry, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -106,8 +106,8 @@ fn fill_runtime_fields(
         }
     }
 
-    // CR 400.7 + CR 608.2h: capture the target's name as it last existed in
-    // the expected zone, while the resolving ability still carries that context.
+    // CR 201.2a + CR 608.2h: capture the target's names while the resolving
+    // ability still carries its last known information.
     if let GameRestriction::ProhibitActivity {
         activity:
             ProhibitedActivity::CastSpells {
@@ -118,8 +118,18 @@ fn fill_runtime_fields(
     {
         for prop in &mut filter.properties {
             if matches!(prop, FilterProp::SameNameAsParentTarget) {
-                if let Some(name) = crate::game::filter::parent_target_name(state, Some(ability)) {
-                    *prop = FilterProp::Named { name };
+                if let Some(mut names) = crate::game::filter::parent_target_names(state, ability) {
+                    *prop = match names.as_mut_slice() {
+                        [name] => FilterProp::Named {
+                            name: std::mem::take(name),
+                        },
+                        _ => FilterProp::AnyOf {
+                            props: names
+                                .into_iter()
+                                .map(|name| FilterProp::Named { name })
+                                .collect(),
+                        },
+                    };
                 }
             }
         }
@@ -166,27 +176,19 @@ fn fill_runtime_fields(
                         ability.scoped_player.unwrap_or(ability.controller),
                     );
                 }
-                // CR 108.3 + CR 608.2h: capture the owner of the object target
-                // if the preceding instruction moved it to another zone.
-                RestrictionPlayerScope::ParentObjectTargetOwner => {
-                    if let Some(owner) =
-                        crate::game::ability_utils::parent_target_owner(ability, state)
-                    {
-                        *affected_players = RestrictionPlayerScope::SpecificPlayer(owner);
-                    }
-                }
-                // CR 109.4 + CR 608.2c + CR 608.2h: "its controller" — capture the
-                // controller of the parent object target (the countered spell) as
-                // the restriction is created. By now the spell has left the stack
-                // (countered), so parent_target_controller reads it from
-                // last-known information. If the referent can't be resolved (no
-                // parent object target), leave the scope unresolved — enforcement
-                // then restricts no one (fail-closed).
-                RestrictionPlayerScope::ParentObjectTargetController => {
-                    if let Some(controller) =
-                        crate::game::ability_utils::parent_target_controller(ability, state)
-                    {
-                        *affected_players = RestrictionPlayerScope::SpecificPlayer(controller);
+                // CR 108.3 + CR 109.4 + CR 608.2h: resolve the possessor even
+                // after the preceding instruction moved the object to another zone.
+                RestrictionPlayerScope::ParentObjectTarget { possession } => {
+                    let player = match possession {
+                        PossessionAxis::Controller => {
+                            crate::game::ability_utils::parent_target_controller(ability, state)
+                        }
+                        PossessionAxis::Owner => {
+                            crate::game::ability_utils::parent_target_owner(ability, state)
+                        }
+                    };
+                    if let Some(player) = player {
+                        *affected_players = RestrictionPlayerScope::SpecificPlayer(player);
                     }
                 }
                 // CR 109.5 + CR 611.2a: `SourceController` (the "you" in "you
@@ -258,7 +260,9 @@ fn fill_runtime_fields(
             Some(RestrictionPlayerScope::ScopedPlayer) => {
                 *protected_player = Some(ability.scoped_player.unwrap_or(original_controller));
             }
-            Some(RestrictionPlayerScope::ParentObjectTargetOwner) => {
+            Some(RestrictionPlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Owner,
+            }) => {
                 *protected_player = crate::game::ability_utils::parent_target_owner(ability, state);
             }
             // No producer emits an explicit protected player today; an
@@ -269,12 +273,14 @@ fn fill_runtime_fields(
             // Controller-relative "you" (None, SourceController) and the
             // multi-player scopes no producer emits as a protected
             // player (AllPlayers, OpponentsOfSourceController,
-            // ParentObjectTargetController): the installer. A protected
+            // ParentObjectTarget with Controller): the installer. A protected
             // player must resolve to a single id, so unlisted scopes
             // collapse here rather than leaving the field empty.
             None
             | Some(RestrictionPlayerScope::SourceController)
-            | Some(RestrictionPlayerScope::ParentObjectTargetController)
+            | Some(RestrictionPlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            })
             | Some(RestrictionPlayerScope::AllPlayers)
             | Some(RestrictionPlayerScope::OpponentsOfSourceController) => {
                 *protected_player = Some(original_controller);
@@ -530,7 +536,9 @@ mod tests {
             Effect::AddRestriction {
                 restriction: GameRestriction::ProhibitActivity {
                     source: ObjectId(0),
-                    affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+                    affected_players: RestrictionPlayerScope::ParentObjectTarget {
+                        possession: PossessionAxis::Controller,
+                    },
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::CastSpells { spell_filter: None },
                 },
@@ -571,7 +579,9 @@ mod tests {
             Effect::AddRestriction {
                 restriction: GameRestriction::ProhibitActivity {
                     source: ObjectId(0),
-                    affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+                    affected_players: RestrictionPlayerScope::ParentObjectTarget {
+                        possession: PossessionAxis::Controller,
+                    },
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::CastSpells { spell_filter: None },
                 },
@@ -588,7 +598,9 @@ mod tests {
             matches!(
                 &state.restrictions[0],
                 GameRestriction::ProhibitActivity {
-                    affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+                    affected_players: RestrictionPlayerScope::ParentObjectTarget {
+                        possession: PossessionAxis::Controller
+                    },
                     ..
                 }
             ),

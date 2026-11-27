@@ -327,6 +327,17 @@ pub(crate) fn effective_room_halves(
 pub(crate) fn door_gated_battlefield_name(
     obj: &crate::game::game_object::GameObject,
 ) -> Option<String> {
+    let [left, right] = door_gated_battlefield_names(obj)?;
+    Some(match (left, right) {
+        (Some(left), Some(right)) => format!("{left} // {right}"),
+        (Some(half), None) | (None, Some(half)) => half,
+        (None, None) => String::new(),
+    })
+}
+
+fn door_gated_battlefield_names(
+    obj: &crate::game::game_object::GameObject,
+) -> Option<[Option<String>; 2]> {
     if obj.zone != Zone::Battlefield || !is_room(obj) {
         return None;
     }
@@ -334,17 +345,27 @@ pub(crate) fn door_gated_battlefield_name(
     let unlocks = obj.room_unlocks.unwrap_or_default();
     let left = unlocks
         .is_unlocked(RoomDoor::Left)
-        .then_some(halves.left.name.as_str());
+        .then_some(halves.left.name);
     let right = halves
         .right
-        .as_ref()
         .filter(|_| unlocks.is_unlocked(RoomDoor::Right))
-        .map(|half| half.name.as_str());
-    Some(match (left, right) {
-        (Some(left), Some(right)) => format!("{left} // {right}"),
-        (Some(half), None) | (None, Some(half)) => half.to_string(),
-        (None, None) => String::new(),
-    })
+        .map(|half| half.name);
+    Some([left, right])
+}
+
+/// CR 201.2a + CR 709.5: Read two effective names from a fully unlocked
+/// Room. A name-changing effect may have replaced both with one name.
+pub(crate) fn effective_battlefield_door_names(
+    obj: &crate::game::game_object::GameObject,
+) -> Option<[String; 2]> {
+    if obj.face_down {
+        return None;
+    }
+    let [Some(left), Some(right)] = door_gated_battlefield_names(obj)? else {
+        return None;
+    };
+    let [left, right] = super::stickers::apply_name_stickers_to_room_doors(obj, [left, right]);
+    (obj.name == format!("{left} // {right}")).then_some([left, right])
 }
 
 /// CR 709.5j: A "door" is a half of a Room permanent. A Room has a left door

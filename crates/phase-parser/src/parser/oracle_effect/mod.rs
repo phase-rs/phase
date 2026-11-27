@@ -7664,7 +7664,9 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
             // add_restriction + parent_target_controller. The sub-ability inherits
             // the counter's target at effects/mod.rs:7441-7450.
             value(
-                RestrictionPlayerScope::ParentObjectTargetController,
+                RestrictionPlayerScope::ParentObjectTarget {
+                    possession: crate::types::ability::PossessionAxis::Controller,
+                },
                 tag("its controller"),
             ),
             // CR 508.5: "defending player" — the player being attacked by the
@@ -35174,7 +35176,9 @@ fn lower_subject_predicate_ast_body(
                 if let Some(clause) = parse_cant_cast_predicate(
                     original_clause,
                     pred_tp,
-                    RestrictionPlayerScope::ParentObjectTargetOwner,
+                    RestrictionPlayerScope::ParentObjectTarget {
+                        possession: crate::types::ability::PossessionAxis::Owner,
+                    },
                     RestrictionExpiry::EndOfTurn,
                     None,
                 ) {

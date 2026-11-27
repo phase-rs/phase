@@ -26695,6 +26695,7 @@ mod tests {
         fn snapshot(power: i32) -> LKISnapshot {
             LKISnapshot {
                 name: "Member".to_string(),
+                room_door_names: None,
                 token_image_ref: None,
                 power: Some(power),
                 toughness: Some(2),
@@ -26786,6 +26787,7 @@ mod tests {
         fn snapshot(name: &str, power: i32) -> LKISnapshot {
             LKISnapshot {
                 name: name.to_string(),
+                room_door_names: None,
                 token_image_ref: None,
                 power: Some(power),
                 toughness: Some(2),
@@ -27379,6 +27381,7 @@ mod tests {
             incarnation,
             LKISnapshot {
                 name: "Loop Entrant".to_string(),
+                room_door_names: None,
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),

@@ -17,7 +17,7 @@
 use engine::game::casting::can_cast_object_now;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+    GameRestriction, PossessionAxis, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
 };
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
@@ -95,7 +95,9 @@ fn unresolved_parent_object_target_controller_restriction_is_fail_closed() {
         .restrictions
         .push(GameRestriction::ProhibitActivity {
             source: ObjectId(9999),
-            affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+            affected_players: RestrictionPlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            },
             expiry: RestrictionExpiry::EndOfTurn,
             activity: ProhibitedActivity::CastSpells { spell_filter: None },
         });
