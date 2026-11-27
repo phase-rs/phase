@@ -4195,6 +4195,12 @@ mod tests {
 
     /// CR 111.3 + CR 205.4a: Supertypes after the color descriptor belong
     /// to the created token's type line.
+    ///
+    /// Synthetic shape: no printed card creates a colorless legendary snow
+    /// artifact token. Combining both supertypes checks that the stripper
+    /// collects every supertype after the color in order, which no single
+    /// printed token shows. Nearest printed witness: Svella, Ice Shaper's
+    /// "colorless snow artifact token named Icy Manalith".
     #[test]
     fn named_noncreature_token_captures_supertypes_after_color() {
         let clause = "create a colorless legendary snow artifact token named Winter Relic";
