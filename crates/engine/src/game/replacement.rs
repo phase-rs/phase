@@ -7,15 +7,15 @@ use crate::game::cost_payability::AbilityCostPayability;
 use crate::game::filter::ReplacementDefinitionFilterExt;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, CastingPermission, ChoiceType, ChosenAttribute, CoinFlipRun,
-    CombatDamageScope, ContinuousModification, ControllerRef, CopyTargetPurpose,
-    DamageModification, DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope,
-    DrawReplacementScope, Duration, Effect, EffectScope, EntryAttackDestination,
-    ManaSpendPermission, PermissionGrantee, PlayerFilter, PostReplacementContinuation,
-    PreventionAmount, PreventionFormula, QuantityExpr, QuantityModification, QuantityRef,
-    RedirectionLifetime, ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, ResolvedAbility, RoundingMode, ShieldKind, SplitDamagePortion, TapStateChange,
-    TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, AbilityDefinition, CastVariantPaid, CastingPermission,
+    ChoiceType, ChosenAttribute, CoinFlipRun, CombatDamageScope, ContinuousModification,
+    ControllerRef, CopyTargetPurpose, DamageModification, DamageRedirectTarget, DamageTargetFilter,
+    DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope,
+    EntryAttackDestination, ManaSpendPermission, ObjectScope, PermissionGrantee, PlayerFilter,
+    PostReplacementContinuation, PreventionAmount, PreventionFormula, QuantityExpr,
+    QuantityModification, QuantityRef, RedirectionLifetime, ReplacementChoiceAuthority,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, ResolvedAbility, RoundingMode,
+    ShieldKind, SplitDamagePortion, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
@@ -9002,24 +9002,87 @@ fn entry_was_cast_with_escape(state: &GameState, event: &ProposedEvent) -> bool 
     }
 }
 
-/// CR 614.1c + CR 614.6 + CR 702.138c: select the counter placement before
-/// the entry modifiers fold it into the event.
-fn replacement_execute_for_event<'a>(
-    replacement: &'a ReplacementDefinition,
-    source_id: ObjectId,
-    state: &GameState,
-    event: &ProposedEvent,
-) -> Option<&'a AbilityDefinition> {
-    match super::printed_cards::escape_entry_counter_bodies(replacement) {
-        Some((escaped, ordinary)) if liminal_entry_ref(event) == Some(source_id) => {
-            Some(if entry_was_cast_with_escape(state, event) {
-                escaped
-            } else {
-                ordinary
-            })
-        }
-        _ => replacement.execute.as_deref(),
+/// CR 614.1c: the fixed counter modifier of a mandatory self-entry replacement.
+fn fixed_self_entry_counter_body(
+    definition: &ReplacementDefinition,
+) -> Option<(&AbilityDefinition, &CounterType)> {
+    if definition.event != ReplacementEvent::Moved
+        || definition.destination_zone != Some(Zone::Battlefield)
+        || definition.valid_card != Some(TargetFilter::SelfRef)
+        || !matches!(definition.mode, ReplacementMode::Mandatory)
+        || definition.runtime_execute.is_some()
+    {
+        return None;
     }
+
+    let body = definition.execute.as_deref()?;
+    let Effect::PutCounter {
+        counter_type,
+        count: QuantityExpr::Fixed { .. },
+        target: TargetFilter::SelfRef,
+    } = body.effect.as_ref()
+    else {
+        return None;
+    };
+
+    (body.sub_ability.is_none() && body.else_ability.is_none()).then_some((body, counter_type))
+}
+
+/// CR 616.1 + CR 702.138c: an older pending entry can still list the ordinary
+/// counter replacement or already include its counters. Its ordinal still
+/// identifies the ordinary replacement, but that effect cannot apply here.
+pub(crate) fn has_ambiguous_legacy_escape_entry(state: &GameState) -> bool {
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return false;
+    };
+    let ProposedEvent::ZoneChange {
+        object_id,
+        from: Zone::Stack,
+        to: Zone::Battlefield,
+        ..
+    } = &pending.proposed
+    else {
+        return false;
+    };
+    if !entry_was_cast_with_escape(state, &pending.proposed) {
+        return false;
+    }
+
+    state.objects[object_id]
+        .replacement_definitions
+        .iter_all()
+        .as_slice()
+        .windows(2)
+        .enumerate()
+        .any(|(index, pair)| {
+            let [ordinary, escape] = pair else {
+                return false;
+            };
+            let id = ReplacementId {
+                source: *object_id,
+                index: index as u64,
+            };
+            if ordinary.condition.is_some()
+                || escape.condition != Some(ReplacementCondition::CastViaEscape)
+                || !(pending.proposed.already_applied(&id)
+                    || pending.candidates.contains(&id)
+                    || pending.ordering_peers.contains(&id))
+            {
+                return false;
+            }
+
+            match (
+                fixed_self_entry_counter_body(ordinary),
+                fixed_self_entry_counter_body(escape),
+            ) {
+                (Some((ordinary, ordinary_counter)), Some((escape, escape_counter))) => {
+                    ordinary.condition.is_none()
+                        && escape.condition.is_none()
+                        && ordinary_counter == escape_counter
+                }
+                _ => false,
+            }
+        })
 }
 
 fn evaluate_replacement_condition(
@@ -10215,6 +10278,27 @@ fn object_replacement_candidate_applies_on_entry_board(
         if !matches_dest {
             return false;
         }
+    }
+    // CR 614.6 + CR 702.138c: the Escape amount takes the ordinary amount's
+    // place. Gate the ordinary fixed-counter definition before it can be offered.
+    if is_entering
+        && repl_def.condition.is_none()
+        && fixed_self_entry_counter_body(repl_def).is_some_and(|(body, _)| {
+            matches!(
+                &body.condition,
+                Some(AbilityCondition::Not { condition })
+                    if matches!(
+                        condition.as_ref(),
+                        AbilityCondition::CastVariantPaid {
+                            variant: CastVariantPaid::Escape,
+                            subject: ObjectScope::Source,
+                        }
+                    )
+            )
+        })
+        && entry_was_cast_with_escape(state, event)
+    {
+        return false;
     }
     if let Some(ref cond) = repl_def.condition {
         // CR 608.2f + CR 700.1: a guard the current simultaneous batch already read gives
@@ -13142,10 +13226,14 @@ pub(super) fn current_self_enter_replacement_modifiers(
 
         // CR 607.2d + CR 614.12: the choice's linked modifier tail is
         // evaluated after its answer, on the same entry board as the prefix.
-        let execute = replacement_execute_for_event(replacement, source_id, state, &event);
-        for ability in execute
-            .into_iter()
-            .chain(copy_entry_linked_counter_tail(execute))
+        for ability in
+            replacement
+                .execute
+                .as_deref()
+                .into_iter()
+                .chain(copy_entry_linked_counter_tail(
+                    replacement.execute.as_deref(),
+                ))
         {
             let modifiers = event_modifiers_for_ability(
                 Some(ability),
@@ -13926,9 +14014,7 @@ fn apply_single_replacement(
                     None
                 };
                 let ability = match branch {
-                    ReplacementBranch::Execute => {
-                        replacement_execute_for_event(repl_def, rid.source, state, &proposed)
-                    }
+                    ReplacementBranch::Execute => repl_def.execute.as_deref(),
                     ReplacementBranch::Decline => replacement_mode_decline(&repl_def.mode),
                 };
                 // CR 614.1c + CR 616.1: on a mandatory battlefield-entry

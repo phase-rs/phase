@@ -7,7 +7,7 @@ use nom::character::complete::{anychar, multispace0};
 use nom::combinator::{all_consuming, map, not, opt, recognize, value};
 use nom::multi::{many1, separated_list1};
 use nom::sequence::{preceded, terminated};
-use nom::{Offset, Parser};
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
@@ -338,13 +338,10 @@ fn parse_replacement_sentence_sequence_ir(
             return Ok(None);
         }
         if let Some(next) = sentences.peek().copied() {
-            let source = &line[line.offset(sentence)..line.offset(next) + next.len()];
-            if let Some(override_ir) =
-                parse_escape_entry_counter_override(sentence, next, source, card_name)
-            {
+            if let Some(pair) = parse_escape_entry_counter_override(sentence, next, card_name) {
                 sentences.next();
                 if let Some(parsed) = replacements.as_mut() {
-                    parsed.push(override_ir);
+                    parsed.extend(pair);
                 }
                 continue;
             }

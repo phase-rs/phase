@@ -72,7 +72,7 @@ use crate::types::ability::{
     SubAbilityLink, TapStateChange, TargetFilter, TokenAttackDestination, TriggerConstraint,
     TriggerDefinition, TypeFilter, TypedFilter,
 };
-use crate::types::ability::{CardPlayMode, CastingPermission, PlayerScope};
+use crate::types::ability::{CardPlayMode, CastingPermission, ObjectScope, PlayerScope};
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -5009,22 +5009,19 @@ fn is_line_owned_enters_with_clause(norm_lower: &str) -> bool {
 pub(crate) fn parse_escape_entry_counter_override(
     base: &str,
     override_sentence: &str,
-    source: &str,
     card_name: &str,
-) -> Option<ReplacementIr> {
-    let mut definition =
-        parse_simple_entry_counter_replacement(base, card_name, EntryVerb::Enters)?;
-    let override_definition =
+) -> Option<[ReplacementIr; 2]> {
+    let mut ordinary = parse_simple_entry_counter_replacement(base, card_name, EntryVerb::Enters)?;
+    let escape =
         parse_simple_entry_counter_replacement(override_sentence, card_name, EntryVerb::Escapes)?;
-    if definition.condition.is_some()
-        || override_definition.condition != Some(ReplacementCondition::CastViaEscape)
+    if ordinary.condition.is_some() || escape.condition != Some(ReplacementCondition::CastViaEscape)
     {
         return None;
     }
 
-    let fallback = definition.execute.take()?;
-    let escape = override_definition.execute?;
-    match (&*fallback.effect, &*escape.effect) {
+    let ordinary_body = ordinary.execute.as_deref_mut()?;
+    let escape_body = escape.execute.as_deref()?;
+    match (ordinary_body.effect.as_ref(), escape_body.effect.as_ref()) {
         (
             Effect::PutCounter {
                 counter_type: ordinary,
@@ -5040,15 +5037,17 @@ pub(crate) fn parse_escape_entry_counter_override(
         _ => return None,
     }
 
-    let execute = (*escape)
-        .condition(AbilityCondition::CastVariantPaidInstead {
+    // Keep the definition ordinals used by saved replacement choices.
+    ordinary_body.condition = Some(AbilityCondition::Not {
+        condition: Box::new(AbilityCondition::CastVariantPaid {
             variant: CastVariantPaid::Escape,
-        })
-        .with_else_ability(*fallback);
-    Some(ReplacementIr::from_definition(
-        source,
-        definition.execute(execute).description(source.to_owned()),
-    ))
+            subject: ObjectScope::Source,
+        }),
+    });
+    Some([
+        ReplacementIr::from_definition(base, ordinary),
+        ReplacementIr::from_definition(override_sentence, escape),
+    ])
 }
 
 /// Read one self-scoped counter-only instruction with its exact recipient.
@@ -26575,50 +26574,50 @@ Escape—{4}{B}{G}, Exile six other cards from your graveyard.";
             &["Creature".into()],
             &["Zombie".into(), "Hydra".into()],
         );
-        let [entry, damage] = parsed.replacements.as_slice() else {
+        let [ordinary, escape, damage] = parsed.replacements.as_slice() else {
             panic!(
-                "expected one entry replacement and one damage replacement, got {:?}",
+                "expected the ordinary, Escape, and damage slots, got {:?}",
                 parsed.replacements
             );
         };
-        assert_eq!(entry.event, ReplacementEvent::Moved);
-        assert_eq!(entry.mode, ReplacementMode::Mandatory);
-        assert_eq!(entry.valid_card, Some(TargetFilter::SelfRef));
-        assert_eq!(entry.destination_zone, Some(Zone::Battlefield));
-        assert_eq!(entry.condition, None);
-        assert!(entry.description.as_deref().unwrap().ends_with(
-            "enters with six +1/+1 counters on it. It escapes with twelve +1/+1 counters on it instead."
-        ));
-        let escape = entry.execute.as_deref().expect("escape entry amount");
+        for entry in [ordinary, escape] {
+            assert_eq!(entry.event, ReplacementEvent::Moved);
+            assert_eq!(entry.mode, ReplacementMode::Mandatory);
+            assert_eq!(entry.valid_card, Some(TargetFilter::SelfRef));
+            assert_eq!(entry.destination_zone, Some(Zone::Battlefield));
+        }
+        assert_eq!(ordinary.condition, None);
+        assert_eq!(escape.condition, Some(ReplacementCondition::CastViaEscape));
         assert_eq!(
-            escape.condition,
-            Some(AbilityCondition::CastVariantPaidInstead {
-                variant: CastVariantPaid::Escape,
+            ordinary.description.as_deref(),
+            Some("~ enters with six +1/+1 counters on it.")
+        );
+        assert_eq!(
+            escape.description.as_deref(),
+            Some("It escapes with twelve +1/+1 counters on it instead.")
+        );
+        let ordinary = ordinary.execute.as_deref().expect("ordinary entry amount");
+        let escape = escape.execute.as_deref().expect("Escape entry amount");
+        assert_eq!(
+            ordinary.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Escape,
+                    subject: ObjectScope::Source,
+                }),
             })
         );
-        assert!(matches!(
-            escape.effect.as_ref(),
-            Effect::PutCounter {
-                target: TargetFilter::SelfRef,
-                counter_type: CounterType::Plus1Plus1,
-                count: QuantityExpr::Fixed { value: 12 },
-                ..
-            }
-        ));
-        let ordinary = escape
-            .else_ability
-            .as_deref()
-            .expect("ordinary entry amount");
-        assert_eq!(ordinary.condition, None);
-        assert!(matches!(
-            ordinary.effect.as_ref(),
-            Effect::PutCounter {
-                target: TargetFilter::SelfRef,
-                counter_type: CounterType::Plus1Plus1,
-                count: QuantityExpr::Fixed { value: 6 },
-                ..
-            }
-        ));
+        assert_eq!(escape.condition, None);
+        for (body, expected_count) in [(ordinary, 6), (escape, 12)] {
+            assert!(matches!(
+                body.effect.as_ref(),
+                Effect::PutCounter {
+                    target: TargetFilter::SelfRef,
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value },
+                } if *value == expected_count
+            ));
+        }
         assert_eq!(damage.event, ReplacementEvent::DamageDone);
         assert!(matches!(
             parsed.abilities.as_slice(),
@@ -26632,6 +26631,8 @@ Escape—{4}{B}{G}, Exile six other cards from your graveyard.";
 
     #[test]
     fn escape_counter_override_without_compatible_base_fails_closed() {
+        // Synthetic mutations of Polukranos's first line exercise the missing
+        // and mismatched ordinary-counter clauses.
         let name = "Polukranos, Unchained";
         for text in [
             "It escapes with twelve +1/+1 counters on it instead.",

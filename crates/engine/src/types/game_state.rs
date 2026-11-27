@@ -22211,6 +22211,8 @@ pub enum PersistedRestoreError {
     /// during it, so the order the rule requires cannot be rebuilt.
     #[error("RESTORE_INCOMPATIBLE_TRIGGER_PLACEMENT: This saved game was paused while triggered abilities were being put on the stack, and it was made by an earlier version of the game that did not record which of them belong to that step. Their order cannot be rebuilt as the rules require, so it cannot be continued.")]
     LegacyTriggerPlacementNotRestorable,
+    #[error("RESTORE_INCOMPATIBLE_ESCAPE_ENTRY: This saved game was paused while a permanent cast with Escape was entering. The earlier version could apply both counter amounts. Load a save from before the cast or start a new game.")]
+    LegacyEscapeEntryNotRestorable,
 }
 
 /// CR 118.12 + CR 400.7: the object-naming prompts a staged payment parks
@@ -22564,6 +22566,9 @@ impl PersistedGameState {
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         state.restore_legacy_battlefield_entry_token_status()?;
+        if crate::game::replacement::has_ambiguous_legacy_escape_entry(&state) {
+            return Err(PersistedRestoreError::LegacyEscapeEntryNotRestorable);
+        }
         // The recovery checkpoint becomes the game when its payment settles,
         // so it must pass the same repair or refusal.
         if let Some(checkpoint) = state
@@ -22574,6 +22579,9 @@ impl PersistedGameState {
             checkpoint
                 .state
                 .restore_legacy_battlefield_entry_token_status()?;
+            if crate::game::replacement::has_ambiguous_legacy_escape_entry(&checkpoint.state) {
+                return Err(PersistedRestoreError::LegacyEscapeEntryNotRestorable);
+            }
         }
         state.rehydrate_recovered_checkpoint_rng();
         crate::game::engine_casting::restore_legacy_cast_timing_routes(&mut state)?;

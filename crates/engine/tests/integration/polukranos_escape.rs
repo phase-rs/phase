@@ -7,8 +7,9 @@ use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, CastingVariant, PayCostKind, PersistedGameState, PersistedRestoreFinalization,
-    ReplacementChoiceKind, StackEntryKind, WaitingFor,
+    CastPaymentMode, CastingVariant, GameState, PayCostKind, PersistedGameState,
+    PersistedRestoreError, PersistedRestoreFinalization, ReplacementChoiceKind, StackEntryKind,
+    WaitingFor,
 };
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::KeywordKind;
@@ -383,17 +384,10 @@ fn assert_graveyard_payment(
     }
 }
 
-fn checked_reload(runner: &GameRunner, stack_pin: ObjectIncarnationRef) -> GameRunner {
-    let serialized = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
-        .expect("the paused game must serialize");
-    assert_eq!(
-        serialized["state"]["resolving_stack_object"],
-        serde_json::to_value(stack_pin).unwrap()
-    );
-    let restored = serde_json::from_value::<PersistedGameState>(serialized)
+fn restore_saved_game(serialized: serde_json::Value) -> Result<GameState, PersistedRestoreError> {
+    serde_json::from_value::<PersistedGameState>(serialized)
         .expect("the saved game must decode")
-        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
-        .expect("the paused state must be admissible")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)?
         .finalize_after_rehydration(|state| {
             engine::game::rehydrate_game_from_card_db_with_finalization(
                 state,
@@ -402,7 +396,16 @@ fn checked_reload(runner: &GameRunner, stack_pin: ObjectIncarnationRef) -> GameR
             );
             Ok(())
         })
-        .expect("the restored state must be publishable");
+}
+
+fn checked_reload(runner: &GameRunner, stack_pin: ObjectIncarnationRef) -> GameRunner {
+    let serialized = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the paused game must serialize");
+    assert_eq!(
+        serialized["state"]["resolving_stack_object"],
+        serde_json::to_value(stack_pin).unwrap()
+    );
+    let restored = restore_saved_game(serialized).expect("the paused state must be restorable");
     let serialized = serde_json::to_value(PersistedGameState::capture(restored.clone()))
         .expect("the restored game must serialize");
     assert_eq!(
@@ -580,6 +583,111 @@ fn polukranos_escape_preserves_one_entry_candidate_across_replacement_order_relo
         !runner.state().objects[&polukranos].tapped,
         "Archelos must make the last tap-state write"
     );
+}
+
+#[test]
+fn polukranos_escape_refuses_the_ambiguous_legacy_entry_and_loads_before_entry() {
+    let mut scenario = golgari_mana_scenario(4);
+    let archelos = scenario.add_creature_from_oracle(
+        P0, "Archelos, Lagoon Mystic", 2, 4,
+        "As long as Archelos is tapped, other permanents enter tapped.\nAs long as Archelos is untapped, other permanents enter untapped.",
+    ).id();
+    let imposing = scenario
+        .add_creature_from_oracle(
+            P1,
+            "Imposing Sovereign",
+            2,
+            1,
+            "Creatures your opponents control enter tapped.",
+        )
+        .id();
+    let polukranos = polukranos_in_graveyard(&mut scenario);
+    let filler = add_filler(&mut scenario, 6);
+    let mut runner = scenario.build();
+
+    // Before the fix the ordinary slot had no Escape guard. The printed slot
+    // order and the Escape and damage definitions were the same.
+    let mut legacy_face = shared_card_db()
+        .unwrap()
+        .get_face_by_name(POLUKRANOS_NAME)
+        .unwrap()
+        .clone();
+    let ordinary = legacy_face.replacements[0].execute.as_deref_mut().unwrap();
+    assert!(ordinary.condition.take().is_some());
+
+    let object = runner.state_mut().objects.get_mut(&polukranos).unwrap();
+    engine::game::printed_cards::apply_card_face_to_object(object, &legacy_face);
+    assert!(
+        object.printed_ref.is_some(),
+        "restore must refresh the face"
+    );
+    let before_entry = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the older game must serialize before the cast");
+
+    let prompt = cast_spell(&mut runner, polukranos);
+    pay_escape_exile(&mut runner, prompt, &filler);
+    let pin = finalized_spell(
+        &mut runner,
+        polukranos,
+        Zone::Graveyard,
+        CastingVariant::Escape,
+        6,
+    );
+    pass_to_resolution(&mut runner);
+
+    let old_ordinary = entry_order_option(
+        &runner,
+        pin,
+        &[polukranos, polukranos, archelos, imposing],
+        polukranos,
+    );
+    let ordering = runner.state().pending_replacement.as_ref().unwrap();
+    assert_eq!(ordering.candidates[old_ordinary].index, 0);
+    runner
+        .act(GameAction::ChooseReplacement {
+            index: old_ordinary,
+        })
+        .unwrap();
+    let old_proposal = &runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .unwrap()
+        .proposed;
+    assert!(matches!(
+        old_proposal,
+        ProposedEvent::ZoneChange { enter_with_counters, .. }
+            if enter_with_counters == &[(CounterType::Plus1Plus1, 6)]
+    ));
+
+    let during_entry = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the older game must serialize during the entry");
+    let error = restore_saved_game(during_entry).expect_err("the earlier entry is ambiguous");
+    assert_eq!(error, PersistedRestoreError::LegacyEscapeEntryNotRestorable);
+    assert!(error
+        .to_string()
+        .contains("Load a save from before the cast"));
+
+    let restored = restore_saved_game(before_entry).expect("older saves before entry can load");
+    let mut runner = GameRunner::from_state(restored);
+    let prompt = cast_spell(&mut runner, polukranos);
+    pay_escape_exile(&mut runner, prompt, &filler);
+    let pin = finalized_spell(
+        &mut runner,
+        polukranos,
+        Zone::Graveyard,
+        CastingVariant::Escape,
+        6,
+    );
+    pass_to_resolution(&mut runner);
+    let index = entry_order_option(&runner, pin, &[polukranos, archelos, imposing], polukranos);
+    let ordering = runner.state().pending_replacement.as_ref().unwrap();
+    assert_eq!(ordering.candidates[index].index, 1);
+    runner.act(GameAction::ChooseReplacement { index }).unwrap();
+    let index = entry_order_option(&runner, pin, &[archelos, imposing], imposing);
+    runner.act(GameAction::ChooseReplacement { index }).unwrap();
+    assert_entry_counters(&runner, pin, Zone::Stack, 12);
+    assert!(!runner.state().objects[&polukranos].tapped);
 }
 
 #[test]
