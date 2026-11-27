@@ -175,8 +175,7 @@ fn assert_entry_incarnation(
         .identity;
     assert_eq!(source.reference, departure);
     assert_eq!(source.expected_zone, from);
-    let entrant = ObjectIncarnationRef::of(departure.object_id, object.incarnation);
-    entrant
+    ObjectIncarnationRef::of(departure.object_id, object.incarnation)
 }
 
 fn assert_entry_counters(
@@ -817,7 +816,7 @@ fn clone_uses_its_own_escape_payment_after_restoring_the_copy_choice() {
         let donor_pin = cast_polukranos_donor(&mut runner, donor);
         let paid =
             choose_graveyard_cast(&mut runner, clone, muldrotha, &filler, clone_cost, escape);
-        let stack_pin = finalized_spell(&mut runner, clone, Zone::Graveyard, paid.clone(), 4);
+        let stack_pin = finalized_spell(&mut runner, clone, Zone::Graveyard, paid, 4);
         assert_graveyard_payment(&runner, muldrotha, &filler, escape);
         pass_to_resolution(&mut runner);
 
@@ -845,7 +844,7 @@ fn clone_uses_its_own_escape_payment_after_restoring_the_copy_choice() {
             .act(GameAction::ChooseReplacement { index: 0 })
             .unwrap();
         let battlefield_pin = assert_clone_prompt(&runner, stack_pin, donor_pin);
-        assert_resolving_spell(&runner, stack_pin, paid.clone());
+        assert_resolving_spell(&runner, stack_pin, paid);
         assert_eq!(
             runner.state().objects[&clone].cast_origin_zone(),
             Some(Zone::Graveyard)
