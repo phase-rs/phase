@@ -1,9 +1,11 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
-use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, rest, value, verify};
+use nom::character::complete::{multispace0, space0, space1};
+use nom::combinator::{
+    all_consuming, eof, map, map_res, opt, peek, recognize, rest, value, verify,
+};
 use nom::error::ParseError;
-use nom::multi::separated_list1;
+use nom::multi::{many1_count, separated_list1};
 use nom::sequence::{pair, preceded, separated_pair, terminated};
 use nom::Parser;
 
@@ -2513,6 +2515,9 @@ fn try_parse_energy_cost(lower: &str) -> Option<QuantityExpr> {
         .map(|((), rest)| rest)
         .unwrap_or(lower)
         .trim();
+    if let Ok((_, value)) = all_consuming(parse_fixed_energy_amount).parse(text) {
+        return Some(QuantityExpr::Fixed { value });
+    }
     // Count {e} symbols
     if scan_contains(text, "{e}") {
         let count = text.matches("{e}").count() as u32;
@@ -2539,6 +2544,17 @@ fn try_parse_energy_cost(lower: &str) -> Option<QuantityExpr> {
         }
     }
     None
+}
+
+pub(crate) fn parse_fixed_energy_amount(input: &str) -> OracleResult<'_, i32> {
+    alt((
+        map_res(many1_count(terminated(tag("{e}"), space0)), i32::try_from),
+        map_res(
+            terminated(nom_primitives::parse_number, preceded(space1, tag("{e}"))),
+            i32::try_from,
+        ),
+    ))
+    .parse(input)
 }
 
 /// Parse "return [count|article] <filter> to <its owner's hand | their owner's

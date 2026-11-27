@@ -88,7 +88,12 @@ pub enum ManaActivationPurpose {
 impl ManaActivationPurpose {
     /// CR 601.2h: whether `id` is held from this activation's tap payments.
     pub(crate) fn excludes_held(self, state: &GameState, id: ObjectId) -> bool {
-        self == Self::Planning && super::restrictions::payment_tap_reserved(state, id)
+        (self == Self::Planning && super::restrictions::payment_tap_reserved(state, id))
+            || state
+                .pending_cast
+                .as_deref()
+                .or_else(|| state.waiting_for.pending_cast_ref())
+                .is_some_and(|pending| pending.holds_replicate_tap_reservation(id))
     }
 }
 
@@ -1528,6 +1533,16 @@ fn begin_mana_ability_activation(
             required_zone
         )));
     }
+    // CR 601.2h: a direct activation must honor the same held payment
+    // resources as a mana-source selection.
+    if ManaActivationPurpose::Explicit.excludes_held(state, source_id)
+        && (mana_sources::has_tap_component(&ability_def.cost)
+            || cost_removes_self_from_battlefield(&ability_def.cost))
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "This permanent is reserved for a spell cost".into(),
+        ));
+    }
     if mana_ability_activation_begun(state, source_id, ability_index, ability_def) {
         return Err(EngineError::ActionNotAllowed(
             "A mana ability can't be activated again until it has resolved (CR 605.3c)".to_string(),
@@ -2352,10 +2367,11 @@ pub fn handle_sacrifice_for_mana_ability(
 
 fn deferred_spell_sacrifice_reserved(state: &GameState, object_id: ObjectId) -> bool {
     state.pending_cast.as_ref().is_some_and(|pending| {
-        pending
-            .deferred_sacrificed_permanents
-            .iter()
-            .any(|selection| selection.selected_object() == Some(object_id))
+        pending.holds_replicate_tap_reservation(object_id)
+            || pending
+                .deferred_sacrificed_permanents
+                .iter()
+                .any(|selection| selection.selected_object() == Some(object_id))
     })
 }
 
@@ -5878,8 +5894,13 @@ fn cost_sacrifices_reserved_source(
     source_id: ObjectId,
     cost: &Option<AbilityCost>,
 ) -> bool {
-    deferred_spell_sacrifice_reserved(state, source_id)
-        && cost.as_ref().is_some_and(ability_cost_sacrifices_source)
+    (deferred_spell_sacrifice_reserved(state, source_id)
+        && cost.as_ref().is_some_and(ability_cost_sacrifices_source))
+        || (state
+            .pending_cast
+            .as_deref()
+            .is_some_and(|pending| pending.holds_replicate_tap_reservation(source_id))
+            && cost_removes_self_from_battlefield(cost))
 }
 
 fn ability_cost_sacrifices_source(cost: &AbilityCost) -> bool {
@@ -6690,6 +6711,9 @@ fn tap_creature_cost_choice(
         .iter()
         .copied()
         .filter(|&id| {
+            if ManaActivationPurpose::Explicit.excludes_held(state, id) {
+                return false;
+            }
             if cost_has_source_tap_component(cost) && id == source_id {
                 return false;
             }

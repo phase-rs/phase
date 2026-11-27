@@ -2215,6 +2215,14 @@
     "attachments": "{{names}}がついている"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "複製コストを支払いますか？",
+      "again": "複製コストをもう一度支払いますか？（支払い済み：{{times}}回）",
+      "decline": "完了",
+      "tapSubtype": "あなたがコントロールするアンタップ状態の{{subtype}}１体をタップする",
+      "tapCreature": "アンタップ状態のクリーチャー１体をタップする",
+      "payEnergy": "エネルギーを{{amount}}点支払う"
+    },
     "gift": {
       "title": "贈り物を約束しますか？",
       "pay": "{{gift}}を約束",

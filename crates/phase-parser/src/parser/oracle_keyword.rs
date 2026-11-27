@@ -2,13 +2,15 @@ use std::borrow::Cow;
 
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::{alpha1, alphanumeric1, space0, space1};
-use nom::combinator::{all_consuming, eof, not, opt, peek, value};
+use nom::combinator::{all_consuming, eof, not, opt, peek, recognize, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
-use super::oracle_cost::{parse_discard_cost_body, parse_oracle_cost};
+use super::oracle_cost::{
+    parse_discard_cost_body, parse_fixed_energy_amount, parse_oracle_cost, parse_single_cost,
+};
 use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_at_word_boundaries, scan_contains, split_once_on};
@@ -17,13 +19,13 @@ use super::oracle_target::parse_type_phrase_folding;
 use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
     AbilityCost, ActivationRestriction, AdditionalCost, CostObjectCount, CostReduction,
-    DiscardSelfScope, Effect, EffectScope, QuantityExpr, SacrificeRequirement, TapStateChange,
-    TargetFilter, TypeFilter, TypedFilter,
+    DiscardSelfScope, Effect, EffectScope, QuantityExpr, SacrificeRequirement,
+    TapCreaturesRequirement, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost,
     EmbalmCost, EmergeCost, EntwineCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword,
-    WardCost,
+    ReplicateCost, ReplicateEnergy, WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::text_grammar::craft_materials_from_typed_filter;
@@ -402,6 +404,12 @@ fn parse_keyword_list_with_policy(
 ) -> Option<Vec<Keyword>> {
     let line_without_reminder = strip_reminder_text(line);
     let line = strip_keyword_activation_cost_prefix(line_without_reminder.trim());
+
+    // A Replicate cost occupies the entire declaration. Give its cost grammar
+    // the compound-cost delimiter before the generic comma-list splitter runs.
+    if matches_keyword_prefix_at_word_boundary(&line.to_ascii_lowercase(), "replicate") {
+        return parse_router_keyword_line(line).map(|routed| routed.keyword.into_iter().collect());
+    }
 
     if mtgjson_keyword_names.is_empty() {
         return parse_mtgjson_missing_standalone_keyword_line(line, policy);
@@ -1554,8 +1562,60 @@ fn parse_devour_keyword_line(text: &str) -> Option<(Keyword, &str)> {
     ))
 }
 
+/// CR 702.56a: Parse one repeatable payment, preserving the enclosing punctuation.
+fn parse_replicate_keyword_line(text: &str) -> Option<(Keyword, &str)> {
+    let (after_head, _) = tag::<_, _, OracleError<'_>>("replicate").parse(text).ok()?;
+    let (body, dash) = alt((
+        value(true, (space0, tag::<_, _, OracleError<'_>>("—"), space0)),
+        value(false, space1),
+    ))
+    .parse(after_head)
+    .ok()?;
+    let (remainder, cost_text) = take_till::<_, _, OracleError<'_>>(|c| c == '.')
+        .parse(body)
+        .ok()?;
+    let cost_text = cost_text.trim_end();
+    let uppercase = cost_text.to_ascii_uppercase();
+    let cost = if let Ok((_, mana)) =
+        all_consuming(nom_primitives::parse_mana_cost).parse(uppercase.as_str())
+    {
+        ReplicateCost::Mana(mana)
+    } else if dash {
+        if let Some(amount) = all_consuming(preceded(tag("pay "), parse_fixed_energy_amount))
+            .parse(cost_text)
+            .ok()
+            .and_then(|(_, amount)| ReplicateEnergy::new(amount))
+        {
+            ReplicateCost::PayEnergy(amount)
+        } else {
+            peek((
+                tag::<_, _, OracleError<'_>>("tap "),
+                alt((recognize(nom_primitives::parse_number), tag("another"))),
+                preceded(space1, tag("untapped ")),
+            ))
+            .parse(cost_text)
+            .ok()?;
+            let AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::Count { count: 1 },
+                filter,
+            } = parse_single_cost(cost_text)
+            else {
+                return None;
+            };
+            ReplicateCost::TapOne(Box::new(filter))
+        }
+    } else {
+        return None;
+    };
+    Some((Keyword::Replicate(cost), remainder))
+}
+
 pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     use crate::types::keywords::PartnerType;
+
+    if matches_keyword_prefix_at_word_boundary(text, "replicate") {
+        return parse_replicate_keyword_line(text);
+    }
 
     if let Some(kw) = parse_disguise_keyword_line(text) {
         return Some((kw, ""));
@@ -2308,6 +2368,9 @@ fn parse_emerge_from_quality_keyword_line(text: &str) -> Option<(Keyword, &str)>
 /// swallow. Routers must use `parse_router_keyword_line`, which is mechanically
 /// enforced by `scripts/check-parser-combinators.sh`.
 pub fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
+    if matches_keyword_prefix_at_word_boundary(text, "replicate") {
+        return parse_router_keyword_fragment(text);
+    }
     parse_keyword_line_core(text).map(|(keyword, _discarded_remainder)| keyword)
 }
 
@@ -3112,7 +3175,7 @@ fn type_filter_subject_name(tf: &TypeFilter) -> String {
 /// exactly how a candidate recognizer starts silently swallowing card text.
 ///
 /// CR 702.29e adds the one NON-fixed rule (typecycling), handled separately below.
-pub(crate) const KEYWORD_COST_PREFIXES: [&str; 98] = [
+pub(crate) const KEYWORD_COST_PREFIXES: [&str; 99] = [
     "cycling",
     "basic landcycling",
     "flashback",
@@ -3161,6 +3224,7 @@ pub(crate) const KEYWORD_COST_PREFIXES: [&str; 98] = [
     "forecast",
     "recover",
     "escalate",
+    "replicate",
     "awaken",
     "reinforce",
     "retrace",
@@ -3404,6 +3468,21 @@ mod tests {
                 assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
             }
             other => panic!("expected creature-qualified Emerge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replicate_cost_parsing_preserves_the_keyword_boundary() {
+        for (text, remainder) in [
+            ("replicate {0}", ""),
+            ("replicate — {1}{g}.", "."),
+            ("replicate—tap an untapped horror you control.", "."),
+            ("replicate—pay {e}{e}{e}.", "."),
+            ("replicate—pay three {e}.", "."),
+        ] {
+            let (keyword, tail) = parse_keyword_line_core(text).unwrap();
+            assert!(matches!(keyword, Keyword::Replicate(_)), "{text}");
+            assert_eq!(tail, remainder, "{text}");
         }
     }
 
@@ -6753,6 +6832,11 @@ mod router_registry_tests {
         RouterKeywordCase {
             prefix: "cycling",
             valid_line: "Cycling {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "replicate",
+            valid_line: "Replicate {1}{R}",
             reach: ProductionReach::KeywordCostLine,
         },
         RouterKeywordCase {

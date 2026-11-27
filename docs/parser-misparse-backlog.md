@@ -63,7 +63,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 317 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 222 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
-| 8 | Additional / alternative casting cost dropped | 207 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
+| 8 | Additional / alternative casting cost dropped | 206 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 176 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 162 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 150 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
@@ -2956,7 +2956,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 8. Additional / alternative casting cost dropped  (207 cards)
+### 8. Additional / alternative casting cost dropped  (206 cards)
 
 **Signature.** Spell ability cost is null; an 'As an additional cost' / 'rather than pay its mana cost' / pitch / disjunctive cost clause is not parsed onto the ability.
 
@@ -3109,7 +3109,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Ramosian Rally
 - Ravenous Trap
 - Raze
-- Reiterating Bolt
 - Relentless Skaabs
 - Renewal
 - Reshape

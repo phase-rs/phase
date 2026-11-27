@@ -25,6 +25,7 @@ mod repeat_directive_gate;
 mod replacement_choice_remember;
 mod replacement_mill_double_application;
 mod replacement_mill_trigger_collection;
+mod replicate_non_mana_costs;
 mod repro_pilot_crew;
 mod resolution_optional_payments;
 mod resolution_tap_x_binding;

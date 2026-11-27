@@ -2177,6 +2177,14 @@
     "attachments": "Z: {{names}}"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "Zapłacić koszt replikacji?",
+      "again": "Ponownie zapłacić koszt replikacji? (Zapłacono {{times}} razy)",
+      "decline": "Gotowe",
+      "tapSubtype": "Przekręć nieprzekręconą istotę typu {{subtype}}, którą kontrolujesz",
+      "tapCreature": "Przekręć nieprzekręconą istotę",
+      "payEnergy": "Zapłać {{amount}} energii"
+    },
     "gift": {
       "title": "Obiecać prezent?",
       "pay": "Obiecaj {{gift}}",

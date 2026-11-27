@@ -21729,6 +21729,7 @@ pub enum AdditionalCostOrigin {
     Offspring,
     Squad,
     Replicate,
+    Conspire,
     /// CR 702.166a: Bargain's optional sacrifice of an artifact, enchantment,
     /// or token. A dedicated origin prevents an unrelated additional cost from
     /// satisfying an "if it was bargained" rider.

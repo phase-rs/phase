@@ -12486,6 +12486,8 @@ pub enum DeferredSpellSacrifice {
 pub struct DeferredSpellTap {
     pub object_ids: Vec<ObjectId>,
     pub cost: AbilityCost,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicate_ordinal: Option<u32>,
 }
 
 impl DeferredSpellSacrifice {
@@ -12924,6 +12926,9 @@ pub struct PendingCast {
     /// held for that payment until then (`holds_tap_reservation`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_tapped_permanents: Vec<DeferredSpellTap>,
+    /// Energy already declared for Replicate, held until spell payment.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub unpaid_replicate_energy: u32,
     /// CR 118.3a: Player-directed pin hints recorded during
     /// `WaitingFor::ManaPayment`. Each id names a pool `ManaUnit` the caster
     /// prefers to spend first; pins are priority hints, not removals — the unit
@@ -14007,6 +14012,7 @@ impl PendingCast {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             deferred_tapped_permanents: Vec::new(),
+            unpaid_replicate_energy: 0,
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -14085,6 +14091,12 @@ impl PendingCast {
         self.deferred_tap_ids().any(|held| held == id)
     }
 
+    pub(crate) fn holds_replicate_tap_reservation(&self, id: ObjectId) -> bool {
+        self.deferred_tapped_permanents
+            .iter()
+            .any(|tap| tap.replicate_ordinal.is_some() && tap.object_ids.contains(&id))
+    }
+
     /// Every permanent held for this spell's deferred tap costs.
     pub fn deferred_tap_ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
         self.deferred_tapped_permanents
@@ -14099,6 +14111,7 @@ impl PendingCast {
         !self.deferred_sacrificed_permanents.is_empty()
             || self.deferred_hand_discard_cost.is_some()
             || !self.deferred_tapped_permanents.is_empty()
+            || self.unpaid_replicate_energy != 0
     }
 }
 
@@ -69116,6 +69129,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 delved_cards: Vec::new(),
                 deferred_sacrificed_permanents: Vec::new(),
                 deferred_tapped_permanents: Vec::new(),
+                unpaid_replicate_energy: 0,
                 pinned_pool_units: Vec::new(),
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
@@ -69819,6 +69833,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             deferred_tapped_permanents: Vec::new(),
+            unpaid_replicate_energy: 0,
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,

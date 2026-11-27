@@ -2683,6 +2683,9 @@ pub(crate) fn finalize_persisted_restore(
     recovered_terminal_rest: bool,
 ) -> Result<(), PersistedRestoreError> {
     finalize_rules_state(state);
+    super::casting_costs::restore_conspire_payment_origin(state);
+    super::casting_costs::validate_restored_replicate_payment(state)
+        .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
     restore_engine_derived_retarget_prompts(state)?;
     let recovered_terminal_rest =
         recovered_terminal_rest || recover_terminal_resolution_rest_on_restore(state)?;

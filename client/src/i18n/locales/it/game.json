@@ -2177,6 +2177,14 @@
     "attachments": "Con {{names}}"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "Pagare il costo di replicare?",
+      "again": "Pagare di nuovo il costo di replicare? (Pagato {{times}} volte)",
+      "decline": "Fatto",
+      "tapSubtype": "Tappa un {{subtype}} STAPpato che controlli",
+      "tapCreature": "Tappa una creatura STAPpata",
+      "payEnergy": "Paga {{amount}} energia"
+    },
     "gift": {
       "title": "Promettere un dono?",
       "pay": "Prometti {{gift}}",

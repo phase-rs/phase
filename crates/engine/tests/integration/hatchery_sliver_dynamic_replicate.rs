@@ -5,7 +5,7 @@ use engine::types::ability::{
     AbilityCost, AdditionalCost, AdditionalCostOrigin, AdditionalCostRepeatability,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -139,11 +139,13 @@ fn hatchery_granted_replicate_charges_the_recipient_slivers_mana_cost_once() {
     runner
         .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("paying the granted Replicate cost must be accepted");
-    assert_replicate_prompt(&runner, 0, 1);
-
-    runner
-        .act(GameAction::DecideOptionalCost { index: 1 })
-        .expect("declining another Replicate payment must finish casting");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(runner
+        .act(GameAction::DecideOptionalCost { index: 0 })
+        .is_err());
 
     assert_replicate_payment_records(&runner, muscle, &[(0, 1)]);
     assert_eq!(
@@ -178,10 +180,10 @@ fn one_hatchery_grant_paid_four_times_creates_exactly_four_tokens() {
             .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("each granted Replicate payment must be accepted");
     }
-    assert_replicate_prompt(&runner, 0, 4);
-    runner
-        .act(GameAction::DecideOptionalCost { index: 1 })
-        .expect("declining a fifth payment must finish casting");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
 
     assert_replicate_payment_records(&runner, muscle, &[(0, 1), (0, 1), (0, 1), (0, 1)]);
     assert_eq!(
@@ -247,11 +249,6 @@ fn printed_and_granted_replicate_instances_each_copy_only_their_own_payments() {
             .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("each granted Replicate payment must be accepted");
     }
-    assert_replicate_prompt(&runner, 1, 3);
-    runner
-        .act(GameAction::DecideOptionalCost { index: 1 })
-        .expect("declining a fourth granted payment must finish casting");
-
     // Reach-guard: both instances really took payments, on their own ordinals.
     assert_replicate_payment_records(
         &runner,
@@ -264,6 +261,37 @@ fn printed_and_granted_replicate_instances_each_copy_only_their_own_payments() {
         "the base cost and five Replicate payments must consume all twelve green mana"
     );
 
+    assert!(matches!(
+        &runner.state().waiting_for,
+        WaitingFor::OrderTriggers { player: P0, triggers } if triggers.len() == 2
+    ));
+    runner
+        .act(GameAction::OrderTriggers { order: vec![1, 0] })
+        .expect("order the independent Replicate triggers");
+    let mut copy_counts = Vec::new();
+    for _ in 0..2 {
+        for _ in 0..2 {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve one trigger");
+        }
+        let copies = runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| {
+                entry.id != cast_hatchery && matches!(entry.kind, StackEntryKind::Spell { .. })
+            })
+            .count();
+        copy_counts.push(copies);
+        for _ in 0..(2 * copies) {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve the copies before the next trigger");
+        }
+    }
+    copy_counts.sort_unstable();
+    assert_eq!(copy_counts, [2, 3]);
     runner.advance_until_stack_empty();
     let hatchery_tokens = runner
         .state()
@@ -299,11 +327,10 @@ fn two_hatchery_grants_keep_replicate_payments_on_distinct_ordinals() {
     runner
         .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("second granted Replicate payment must be accepted");
-    assert_replicate_prompt(&runner, 1, 1);
-
-    runner
-        .act(GameAction::DecideOptionalCost { index: 1 })
-        .expect("declining another payment for the second grant must finish casting");
+    assert!(matches!(
+        &runner.state().waiting_for,
+        WaitingFor::OrderTriggers { player: P0, triggers } if triggers.len() == 2
+    ));
 
     assert_replicate_payment_records(&runner, muscle, &[(0, 1), (1, 1)]);
     assert_eq!(
@@ -338,11 +365,10 @@ fn printed_hatchery_replicate_keeps_its_fixed_cost() {
     runner
         .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("paying printed Replicate must be accepted");
-    assert_replicate_prompt(&runner, 0, 1);
-
-    runner
-        .act(GameAction::DecideOptionalCost { index: 1 })
-        .expect("declining another printed Replicate payment must finish casting");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
 
     assert_replicate_payment_records(&runner, hatchery, &[(0, 1)]);
     assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
@@ -359,4 +385,77 @@ fn printed_hatchery_replicate_keeps_its_fixed_cost() {
         hatchery_tokens, 1,
         "one printed Replicate payment must create one Hatchery Sliver token"
     );
+}
+
+#[test]
+fn one_paid_hatchery_instance_produces_only_its_trigger_and_tokens() {
+    for paid_ordinal in [0, 1] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature_from_oracle(P0, "Hatchery Sliver", 2, 2, HATCHERY_SLIVER_ORACLE)
+            .with_mana_cost(sliver_mana_cost())
+            .with_subtypes(vec!["Sliver"]);
+        let spell = scenario
+            .add_creature_to_hand_from_oracle(P0, "Hatchery Sliver", 2, 2, HATCHERY_SLIVER_ORACLE)
+            .with_mana_cost(sliver_mana_cost())
+            .with_subtypes(vec!["Sliver"])
+            .id();
+        let mut runner = scenario.build();
+        add_green_mana(&mut runner, 8);
+        cast_creature(&mut runner, spell);
+        for ordinal in [0, 1] {
+            let payments = if ordinal == paid_ordinal { 2 } else { 0 };
+            for count in 0..=payments {
+                assert_replicate_prompt(&runner, ordinal, count);
+                runner
+                    .act(GameAction::DecideOptionalCost {
+                        index: usize::from(count == payments),
+                    })
+                    .expect("accept the election");
+            }
+        }
+        assert_replicate_payment_records(&runner, spell, &[(paid_ordinal, 1); 2]);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 2);
+        assert_eq!(runner.state().stack.len(), 2);
+        assert!(matches!(
+            runner.state().stack[1].kind,
+            StackEntryKind::TriggeredAbility { .. }
+        ));
+        for _ in 0..2 {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve the one trigger");
+        }
+        assert_eq!(runner.state().stack.len(), 3);
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .filter(
+                    |entry| entry.id != spell && matches!(entry.kind, StackEntryKind::Spell { .. })
+                )
+                .count(),
+            2
+        );
+        runner.advance_until_stack_empty();
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(
+            runner
+                .state()
+                .battlefield
+                .iter()
+                .filter(|id| {
+                    let object = &runner.state().objects[id];
+                    object.name == "Hatchery Sliver" && object.is_token
+                })
+                .count(),
+            2
+        );
+    }
 }

@@ -17,7 +17,7 @@ use engine::types::zones::Zone;
 
 const PYROMATICS: &str = "Replicate {1}{R} (When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)\nPyromatics deals 1 damage to any target.";
 
-const DJINN_ILLUMINATUS: &str = "Flying\nEach instant and sorcery spell you cast has replicate. \
+const DJINN_ILLUMINATUS: &str = "({U/R} can be paid with either {U} or {R}.)\nFlying\nEach instant and sorcery spell you cast has replicate. \
 The replicate cost is equal to its mana cost. (When you cast it, copy it for each time you paid \
 its replicate cost. You may choose new targets for the copies.)";
 
@@ -456,6 +456,34 @@ fn printed_and_granted_replicate_on_a_targeted_spell_are_each_offered_once() {
     );
 }
 
+#[test]
+fn paying_only_one_pyromatics_replicate_instance_survives_a_mana_only_save() {
+    for ordinal in [0, 1] {
+        let pays = if ordinal == 0 { [2, 0] } else { [0, 2] };
+        for restore_after in [None, Some(ordinal as usize + 1)] {
+            let mut board = pyromatics_board(Beside::Djinn);
+            let trail =
+                cast_restoring_after(&mut board, &pays, PaymentDecision::Decline, restore_after);
+            let expected: Vec<_> = offers(0, pays[0])
+                .chain(offers(1, pays[1]))
+                .chain([Prompt::Target])
+                .collect();
+            assert_eq!(trail, expected);
+            assert_eq!(mana_spent(&board), 6);
+            assert_eq!(replicate_records(&board), vec![(ordinal, 1); 2]);
+            assert_eq!(copies_per_trigger(&mut board), vec![2]);
+            assert_eq!(
+                board
+                    .events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::SpellCast { .. }))
+                    .count(),
+                1,
+            );
+        }
+    }
+}
+
 /// CR 117.3d: P0 passes with the replicate triggers on the stack; P1 casts a
 /// Lightning Bolt at `target` and both players pass so it resolves.
 fn respond_with_bolt(board: &mut Board, bolt: ObjectId, target: ObjectId) {
@@ -532,7 +560,7 @@ fn conspire_is_announced_with_replicate_before_targets() {
     let mut expected: Vec<Prompt> = offers(0, 1).collect();
     expected.extend([
         Prompt::Once {
-            origin: AdditionalCostOrigin::Other,
+            origin: AdditionalCostOrigin::Conspire,
             decision: PaymentDecision::Pay,
         },
         Prompt::PayCost,

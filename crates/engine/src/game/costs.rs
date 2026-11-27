@@ -2702,7 +2702,7 @@ fn pay_ability_cost_inner(
                 resolve_cost_quantity(state, amount, player, source_id, scope).max(0),
             )
             .unwrap_or(0);
-            let energy = state.players[player.0 as usize].energy;
+            let energy = super::restrictions::energy_available_for_payment(state, player);
             if energy < amount {
                 return Ok(payment_failed("Not enough energy"));
             }

@@ -37,6 +37,45 @@ afterEach(() => {
 });
 
 describe("OptionalCostModalContent (issue #454)", () => {
+  it.each([
+    {
+      times: 0,
+      cost: {
+        type: "TapCreatures",
+        requirement: { requirement: "count", count: 1 },
+        filter: {
+          type: "Typed",
+          type_filters: [{ Subtype: "Dalek" }],
+          controller: "You",
+        },
+      },
+      title: "Pay the replicate cost?",
+      pay: "Tap an untapped Dalek you control",
+    },
+    {
+      times: 1,
+      cost: { type: "PayEnergy", amount: { type: "Fixed", value: 3 } },
+      title: "Pay the replicate cost again? (Paid 1×)",
+      pay: "Pay 3 energy",
+    },
+  ])("routes the $cost.type replicate payment through the option indices", ({ times, cost, title, pay }) => {
+    const dispatch = renderModal({
+      ...kickerWaitingFor(times),
+      data: {
+        ...kickerWaitingFor(times).data,
+        origin: "Replicate",
+        cost: { type: "Optional", data: { cost, repeatable: true } },
+      },
+    });
+    expect(screen.getByText(title)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: pay }));
+    expect(dispatch).toHaveBeenLastCalledWith({ type: "DecideOptionalCost", data: { index: 0 } });
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(dispatch).toHaveBeenLastCalledWith({ type: "DecideOptionalCost", data: { index: 1 } });
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(dispatch).toHaveBeenLastCalledWith({ type: "CancelCast" });
+  });
+
   it("first prompt exposes three distinct affordances with the right actions", () => {
     const dispatch = renderModal(kickerWaitingFor(0));
 

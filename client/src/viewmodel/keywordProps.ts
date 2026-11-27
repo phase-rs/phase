@@ -1,6 +1,6 @@
 import type { Keyword, ManaCost } from "../adapter/types";
 import i18n from "../i18n";
-import { SHARD_ABBREVIATION, formatKnownCost } from "./costLabel";
+import { SHARD_ABBREVIATION, formatEnergyCost, formatKnownCost, formatTapOneCost } from "./costLabel";
 
 /**
  * Standard reminder text for common keywords, keyed by the display name
@@ -343,7 +343,7 @@ const MANA_COST_KEYWORDS = new Set([
   "Harmonize", "Foretell", "Mutate", "Disturb", "Overload",
   "Spectacle", "Surge", "Encore", "Outlast", "Scavenge", "Fortify",
   "Plot", "Offspring", "LevelUp", "Warp", "Sneak", "WebSlinging", "Squad",
-  "Transmute", "Transfigure", "Recover", "Cleave", "Replicate",
+  "Transmute", "Transfigure", "Recover", "Cleave",
   "MoreThanMeetsTheEye", "Freerunning", "Specialize",
 ]);
 
@@ -446,6 +446,11 @@ export function getKeywordDetail(kw: Keyword): string | null {
   const key = Object.keys(kw)[0];
   const val = kw[key];
 
+  if (key === "Replicate") {
+    if (val?.type === "TapOne") return formatTapOneCost(val.filter);
+    if (val?.type === "PayEnergy") return formatEnergyCost(val.amount);
+    return formatKeywordManaCost(val);
+  }
   if (MANA_COST_KEYWORDS.has(key)) return formatKeywordManaCost(val);
   if (MANA_OR_NON_MANA_COST_KEYWORDS.has(key)) return formatManaOrNonManaCost(val);
   if (ABILITY_COST_KEYWORDS.has(key)) return formatKeywordAbilityCost(val);

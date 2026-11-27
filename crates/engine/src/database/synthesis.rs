@@ -2660,10 +2660,7 @@ pub(crate) fn replicate_copy_ability_definition_for_ordinal(
             starting_loyalty_from_casualty_sacrifice: false,
         },
     )
-    // CR 702.56a: "if a replicate cost was paid for it". With zero payments the
-    // count is also zero, but the condition keeps the trigger's resolution a
-    // no-op (no SpellCopied events) when replicate was declined, matching the
-    // intervening-if phrasing exactly.
+    // CR 702.56a and CR 603.4: Recheck the paid instance as the trigger resolves.
     .condition(AbilityCondition::AdditionalCostPaid {
         subject: ObjectScope::Source,
         source: AdditionalCostPaymentSource::NonKicker,
@@ -2717,15 +2714,10 @@ pub fn synthesize_replicate(face: &mut CardFace) {
     }
 
     // CR 702.56a: "As an additional cost to cast this spell, you may pay [cost]
-    // any number of times." Repeatable optional mana cost — the cast-time
+    // any number of times." Repeatable optional cost — the cast-time
     // payment loop records each payment in `additional_cost_payment_count`.
     if face.additional_cost.is_none() {
-        face.additional_cost = Some(AdditionalCost::Optional {
-            cost: AbilityCost::Mana {
-                cost: replicate_costs[0].clone(),
-            },
-            repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
-        });
+        face.additional_cost = Some(replicate_cost_instance(replicate_costs[0].clone(), 0).cost);
     }
 
     // CR 702.56a: "When you cast this spell, if a replicate cost was paid for
@@ -2733,7 +2725,15 @@ pub fn synthesize_replicate(face: &mut CardFace) {
     for (replicate_ordinal, _) in replicate_costs.iter().enumerate() {
         let replicate_ordinal = u32::try_from(replicate_ordinal).unwrap_or(u32::MAX);
         let execute = replicate_copy_ability_definition_for_ordinal(Some(replicate_ordinal));
-        let already_has_trigger = face.triggers.iter().any(|t| {
+        let condition = TriggerCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::NonKicker,
+            origin: Some(AdditionalCostOrigin::Replicate),
+            origin_ordinal: Some(replicate_ordinal),
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+        };
+        let existing = face.triggers.iter_mut().find(|t| {
             matches!(t.mode, TriggerMode::SpellCast)
                 && matches!(t.valid_card, Some(TargetFilter::SelfRef))
                 && t.trigger_zones.contains(&Zone::Stack)
@@ -2741,7 +2741,9 @@ pub fn synthesize_replicate(face: &mut CardFace) {
                     .as_deref()
                     .is_some_and(|ability| ability == &execute)
         });
-        if already_has_trigger {
+        if let Some(trigger) = existing {
+            // CR 603.4: Older exports carried the check only on the ability.
+            trigger.condition.get_or_insert(condition);
             continue;
         }
 
@@ -2749,6 +2751,7 @@ pub fn synthesize_replicate(face: &mut CardFace) {
             TriggerDefinition::new(TriggerMode::SpellCast)
                 .valid_card(TargetFilter::SelfRef)
                 .trigger_zones(vec![Zone::Stack])
+                .condition(condition)
                 .execute(execute)
                 .description(
                     "Replicate — copy this spell once for each time its replicate cost was paid"
@@ -2756,6 +2759,37 @@ pub fn synthesize_replicate(face: &mut CardFace) {
                 ),
         );
     }
+}
+
+pub(crate) fn replicate_cost_instance(
+    cost: crate::types::keywords::ReplicateCost,
+    ordinal: u32,
+) -> crate::types::ability::AdditionalCostInstance {
+    use crate::types::ability::{
+        AdditionalCostInstance, AdditionalCostRepeatability, TapCreaturesRequirement,
+    };
+    use crate::types::keywords::ReplicateCost;
+
+    let cost = match cost {
+        ReplicateCost::Mana(cost) => AbilityCost::Mana { cost },
+        ReplicateCost::TapOne(filter) => AbilityCost::TapCreatures {
+            requirement: TapCreaturesRequirement::count(1),
+            filter: *filter,
+        },
+        ReplicateCost::PayEnergy(amount) => AbilityCost::PayEnergy {
+            amount: QuantityExpr::Fixed {
+                value: amount.get(),
+            },
+        },
+    };
+    AdditionalCostInstance::new_with_ordinal(
+        AdditionalCostOrigin::Replicate,
+        ordinal,
+        AdditionalCost::Optional {
+            cost,
+            repeatability: AdditionalCostRepeatability::Repeatable,
+        },
+    )
 }
 
 /// CR 702.144a: The `AbilityDefinition` produced by a Demonstrate trigger — an
@@ -2909,13 +2943,27 @@ pub fn synthesize_conspire(face: &mut CardFace) {
         });
     }
 
-    // CR 702.78a: "When you cast this spell, if its conspire cost was paid, copy
-    // it." Idempotent against re-synthesis.
-    if !face.triggers.iter().any(is_conspire_copy_trigger) {
+    // CR 702.78a + CR 603.4: the spell's other costs cannot satisfy this trigger.
+    let paid = TriggerCondition::AdditionalCostPaid {
+        source: AdditionalCostPaymentSource::NonKicker,
+        origin: Some(AdditionalCostOrigin::Conspire),
+        origin_ordinal: Some(0),
+        variant: None,
+        kicker_cost: None,
+        min_count: 1,
+    };
+    if let Some(trigger) = face
+        .triggers
+        .iter_mut()
+        .find(|trigger| is_conspire_copy_trigger(trigger))
+    {
+        trigger.condition.get_or_insert(paid);
+    } else {
         face.triggers.push(
             TriggerDefinition::new(TriggerMode::SpellCast)
                 .valid_card(TargetFilter::SelfRef)
                 .trigger_zones(vec![Zone::Stack])
+                .condition(paid)
                 .execute(conspire_copy_ability_definition())
                 .description(
                     "CR 702.78a: Conspire — when you cast this spell, if its conspire cost was \
@@ -20707,7 +20755,9 @@ mod replicate_synthesis_tests {
             shards: vec![ManaCostShard::Blue],
         };
         let mut face = CardFace {
-            keywords: vec![Keyword::Replicate(replicate_cost.clone())],
+            keywords: vec![Keyword::Replicate(
+                crate::types::keywords::ReplicateCost::Mana(replicate_cost.clone()),
+            )],
             ..CardFace::default()
         };
 
@@ -20763,10 +20813,12 @@ mod replicate_synthesis_tests {
     #[test]
     fn synthesize_replicate_is_idempotent() {
         let mut face = CardFace {
-            keywords: vec![Keyword::Replicate(ManaCost::Cost {
-                generic: 2,
-                shards: vec![],
-            })],
+            keywords: vec![Keyword::Replicate(
+                crate::types::keywords::ReplicateCost::Mana(ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![],
+                }),
+            )],
             ..CardFace::default()
         };
 
@@ -20785,14 +20837,18 @@ mod replicate_synthesis_tests {
     fn synthesize_replicate_emits_one_trigger_per_instance() {
         let mut face = CardFace {
             keywords: vec![
-                Keyword::Replicate(ManaCost::Cost {
-                    generic: 1,
-                    shards: vec![],
-                }),
-                Keyword::Replicate(ManaCost::Cost {
-                    generic: 2,
-                    shards: vec![],
-                }),
+                Keyword::Replicate(crate::types::keywords::ReplicateCost::Mana(
+                    ManaCost::Cost {
+                        generic: 1,
+                        shards: vec![],
+                    },
+                )),
+                Keyword::Replicate(crate::types::keywords::ReplicateCost::Mana(
+                    ManaCost::Cost {
+                        generic: 2,
+                        shards: vec![],
+                    },
+                )),
             ],
             ..CardFace::default()
         };
