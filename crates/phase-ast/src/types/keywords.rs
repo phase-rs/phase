@@ -974,6 +974,7 @@ impl MatchedProtectionQuality {
 #[serde(remote = "Self", tag = "type", content = "data")]
 pub enum WardCost {
     Mana(ManaCost),
+    Blight(u32),
     PayLife(i32),
     /// CR 702.21a: Ward whose life payment is the warded creature's power at resolution.
     PayLifeEqualToPower,
@@ -2519,6 +2520,8 @@ impl Keyword {
     ///   (CR 702.40b: each instance triggers separately) — stack-functioning
     ///   triggered abilities whose instance count is consumed by `for _ in 0..count`
     ///   loops in `game/triggers.rs`.
+    /// - Prowess (CR 702.108b: each instance triggers separately) — a
+    ///   battlefield triggered ability counted by the spell-cast collector.
     /// - Myriad (CR 702.116a: a triggered ability; CR 702.116b: each instance
     ///   triggers separately) / Increment (CR 702.191a: a triggered ability;
     ///   CR 702.191b: each instance triggers separately) / Provoke (CR 702.39b:
@@ -2534,13 +2537,12 @@ impl Keyword {
     ///   realized by `synthesize_sunburst` (one ETB-counter replacement per
     ///   `Keyword::Sunburst`), not by the runtime trigger installer this
     ///   predicate gates. Out of this class for that reason.
-    /// - Prowess — runtime presence is a boolean `has_prowess` check, so counting
-    ///   instances would be inert (separate deeper bug, not addressed here).
     pub fn instances_function_separately(&self) -> bool {
         matches!(
             self,
             Keyword::Cascade
                 | Keyword::Storm
+                | Keyword::Prowess
                 | Keyword::Myriad
                 | Keyword::Increment
                 | Keyword::Provoke
@@ -2549,19 +2551,14 @@ impl Keyword {
         )
     }
 
-    /// CR 702.164b + CR 702.44d: Keywords whose multiple instances must COEXIST on
-    /// the keyword list rather than collapse to one when an identical instance is
-    /// granted on top of a printed one. When such a keyword is granted on top of an
-    /// identical printed instance, BOTH must remain on the keyword list so each
-    /// instance's effect is realized separately. Two disjoint reasons a keyword
-    /// belongs here, both served by the same "don't dedup identical instances"
-    /// mechanic in the keyword-grant paths:
+    /// Keywords whose identical instances must coexist when granted. Each
+    /// occurrence contributes to the keyword's effect in one of these ways:
     ///
     /// - **Parameter-value summation** (CR 702.164b): the aggregate reader sums
     ///   each instance's parameter (a creature's total toxic value). Only Toxic
     ///   sums today. Protection (CR 702.16g), Ward, Annihilator, Afflict, Frenzy do
     ///   NOT sum — they keep deduping identical instances.
-    /// - **Instance-count multiplicity** (CR 702.44d + CR 702.54c): an as-enters
+    /// - **As-enters multiplicity** (CR 702.44d + CR 702.54c): an as-enters
     ///   static ability where "each instance works separately" — Sunburst places
     ///   its as-enters counters once per instance (CR 702.44a), and Bloodthirst
     ///   likewise places its counters once per instance (CR 702.54a). A GRANTED
@@ -2574,12 +2571,13 @@ impl Keyword {
     ///   silently lost. (Bloodthirst carries a `BloodthirstValue`, so the
     ///   granted-count is per DISTINCT value — a granted `bloodthirst 3` and a
     ///   printed `bloodthirst 1` never dedup regardless.)
+    /// - **Triggered-ability multiplicity** (CR 702.108b): each instance of
+    ///   Prowess supplies its own trigger when its controller casts a
+    ///   noncreature spell.
     ///
-    /// Distinct from `instances_function_separately` (which gates per-instance
-    /// TRIGGER installation, and deliberately excludes Sunburst because its
-    /// multiplicity is realized by synthesis / the granted-replacement path, not by
-    /// the trigger installer — a different semantic axis). Add any future keyword
-    /// whose identical instances must coexist here.
+    /// `instances_function_separately` preserves repeated printed keyword
+    /// occurrences for their trigger paths. This policy preserves identical
+    /// instances added by grants.
     ///
     /// Out of scope (intentionally not gated by this predicate): cast-time spell
     /// keyword merge (`casting.rs` `upsert_keyword_by_kind`/`merge_spell_keyword` —
@@ -2588,7 +2586,7 @@ impl Keyword {
     pub fn instances_must_coexist(&self) -> bool {
         matches!(
             self,
-            Keyword::Toxic(_) | Keyword::Sunburst | Keyword::Bloodthirst(_)
+            Keyword::Toxic(_) | Keyword::Sunburst | Keyword::Bloodthirst(_) | Keyword::Prowess
         )
     }
 
@@ -3183,7 +3181,22 @@ impl FromStr for Keyword {
                         parse_keyword_mana_cost(p),
                     )))
                 }
-                "ward" => return Ok(Keyword::Ward(WardCost::Mana(parse_keyword_mana_cost(p)))),
+                "ward" => {
+                    let mut words = p.split_ascii_whitespace();
+                    if words
+                        .next()
+                        .is_some_and(|word| word.eq_ignore_ascii_case("blight"))
+                    {
+                        return Ok(match (words.next(), words.next()) {
+                            (Some(count), None) => count.parse().map_or_else(
+                                |_| Keyword::Unknown(s.to_string()),
+                                |count| Keyword::Ward(WardCost::Blight(count)),
+                            ),
+                            _ => Keyword::Unknown(s.to_string()),
+                        });
+                    }
+                    return Ok(Keyword::Ward(WardCost::Mana(parse_keyword_mana_cost(p))));
+                }
                 "equip" => return Ok(Keyword::Equip(parse_keyword_mana_cost(p))),
                 "landwalk" => return Ok(Keyword::Landwalk(p.clone())),
                 "rampage" => return Ok(Keyword::Rampage(p.parse().unwrap_or(1))),

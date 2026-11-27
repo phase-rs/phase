@@ -20282,6 +20282,60 @@ pub enum CostRecipientSelection {
     Each,
 }
 
+/// CR 107.3a and CR 701.68a: the number of counters for a Blight cost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "BlightCountWire", into = "BlightCountWire")]
+pub enum BlightCount {
+    Fixed(u32),
+    AnnouncedX { maximum: Box<QuantityExpr> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum BlightCountWire {
+    Fixed(u32),
+    AnnouncedX {
+        #[serde(rename = "type")]
+        kind: BlightCountTag,
+        maximum: Box<QuantityExpr>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum BlightCountTag {
+    AnnouncedX,
+}
+
+impl From<BlightCountWire> for BlightCount {
+    fn from(wire: BlightCountWire) -> Self {
+        match wire {
+            BlightCountWire::Fixed(count) => Self::Fixed(count),
+            BlightCountWire::AnnouncedX { maximum, .. } => Self::AnnouncedX { maximum },
+        }
+    }
+}
+
+impl From<BlightCount> for BlightCountWire {
+    fn from(count: BlightCount) -> Self {
+        match count {
+            BlightCount::Fixed(count) => Self::Fixed(count),
+            BlightCount::AnnouncedX { maximum } => Self::AnnouncedX {
+                kind: BlightCountTag::AnnouncedX,
+                maximum,
+            },
+        }
+    }
+}
+
+impl BlightCount {
+    pub fn with_announced_x(&self, x: u32) -> u32 {
+        match self {
+            Self::Fixed(count) => *count,
+            Self::AnnouncedX { .. } => x,
+        }
+    }
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -20446,7 +20500,7 @@ pub enum AbilityCost {
     /// Blight N — put N -1/-1 counters on a creature you control.
     /// Used as both activated ability costs and optional additional casting costs.
     Blight {
-        count: u32,
+        count: BlightCount,
     },
     Reveal {
         /// CR 701.20a + CR 107.3a: how many cards are revealed. A `Variable("X")`
@@ -20794,6 +20848,9 @@ macro_rules! define_ability_cost_quantity_walk {
             | AbilityCost::PayEnergy { amount }
             | AbilityCost::PaySpeed { amount } => f(amount),
             AbilityCost::Discard { count, .. } | AbilityCost::Reveal { count, .. } => f(count),
+            AbilityCost::Blight {
+                count: BlightCount::AnnouncedX { maximum },
+            } => f(maximum),
             // --- Recursive forms: every nested cost's quantities are part of
             // --- paying THIS cost, so recurse.
             AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
@@ -20825,7 +20882,9 @@ macro_rules! define_ability_cost_quantity_walk {
             | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
-            | AbilityCost::Blight { .. }
+            | AbilityCost::Blight {
+                count: BlightCount::Fixed(_),
+            }
             | AbilityCost::Behold { .. }
             | AbilityCost::Waterbend { .. }
             | AbilityCost::NinjutsuFamily { .. }
@@ -23691,6 +23750,100 @@ where
     })
 }
 
+/// An additional token noun phrase in a single creation instruction (CR 701.7a).
+/// Its characteristics and quantity remain unresolved until the instruction runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TokenCreationMember {
+    #[serde(flatten)]
+    effect: Box<Effect>,
+    /// CR 115.10a + CR 608.2d: A described host is chosen during creation.
+    #[serde(skip_serializing_if = "TargetChoiceTiming::is_stack")]
+    host_choice_timing: TargetChoiceTiming,
+}
+
+impl TokenCreationMember {
+    pub fn new(effect: Effect) -> Option<Self> {
+        Self::with_host_choice_timing(effect, TargetChoiceTiming::Stack)
+    }
+
+    pub fn with_host_choice_timing(
+        effect: Effect,
+        host_choice_timing: TargetChoiceTiming,
+    ) -> Option<Self> {
+        match &effect {
+            Effect::Token {
+                additional_members, ..
+            } if additional_members.is_empty() => Some(Self {
+                effect: Box::new(effect),
+                host_choice_timing,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn effect(&self) -> &Effect {
+        &self.effect
+    }
+
+    pub fn resolution_host_filter(&self) -> Option<&TargetFilter> {
+        match self.effect() {
+            Effect::Token { attach_to, .. }
+                if self.host_choice_timing == TargetChoiceTiming::Resolution =>
+            {
+                attach_to.as_ref()
+            }
+            _ => None,
+        }
+    }
+    pub fn count_and_pt_mut(&mut self) -> (&mut QuantityExpr, &mut PtValue, &mut PtValue) {
+        let Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } = self.effect.as_mut()
+        else {
+            unreachable!("a token creation member carries a token effect");
+        };
+        (count, power, toughness)
+    }
+
+    pub(crate) fn static_abilities_mut(&mut self) -> &mut [StaticDefinition] {
+        let Effect::Token {
+            static_abilities, ..
+        } = self.effect.as_mut()
+        else {
+            unreachable!("a token creation member carries a token effect");
+        };
+        static_abilities
+    }
+
+    pub(crate) fn static_abilities(&self) -> &[StaticDefinition] {
+        let Effect::Token {
+            static_abilities, ..
+        } = self.effect()
+        else {
+            unreachable!("a token creation member carries a token effect");
+        };
+        static_abilities
+    }
+}
+
+impl<'de> Deserialize<'de> for TokenCreationMember {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Member {
+            #[serde(flatten)]
+            effect: Effect,
+            #[serde(default)]
+            host_choice_timing: TargetChoiceTiming,
+        }
+        let member = Member::deserialize(deserializer)?;
+        Self::with_host_choice_timing(member.effect, member.host_choice_timing)
+            .ok_or_else(|| de::Error::custom("expected a single token creation member"))
+    }
+}
+
 /// CR 701.21a + CR 608.2c: How a sacrifice instruction selects permanents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SacrificeSelection {
@@ -24003,6 +24156,9 @@ pub enum Effect {
         /// X +1/+1 counters on it" patterns.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// Further noun phrases governed by this instruction's creation verb and owner.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_members: Vec<TokenCreationMember>,
     },
     GainLife {
         #[serde(default = "default_quantity_one")]
@@ -32203,6 +32359,22 @@ impl Effect {
         )
     }
 
+    /// The token batches governed by this creation instruction, in Oracle order.
+    pub fn token_creation_members(&self) -> impl Iterator<Item = &Effect> {
+        let members = match self {
+            Effect::Token {
+                additional_members, ..
+            } => Some(additional_members.as_slice()),
+            _ => None,
+        };
+        members.map(|_| self).into_iter().chain(
+            members
+                .into_iter()
+                .flatten()
+                .map(TokenCreationMember::effect),
+        )
+    }
+
     /// Single authority for constructing the "parser couldn't handle this"
     /// effect. Parser code must use this instead of a literal
     /// `Effect::Unimplemented { .. }` (enforced for new code by
@@ -35075,6 +35247,7 @@ macro_rules! define_effect_quantity_walk {
                 toughness,
                 count,
                 enter_with_counters,
+                additional_members,
                 ..
             } => {
                 visit_pt(power, f);
@@ -35082,6 +35255,9 @@ macro_rules! define_effect_quantity_walk {
                 f(count);
                 for (_, q) in enter_with_counters {
                     f(q);
+                }
+                for member in additional_members {
+                    member.effect.$name(f);
                 }
             }
             Effect::GainLife { amount, .. } => {
@@ -44686,6 +44862,26 @@ impl DefinitionOrigin {
     }
 }
 
+/// CR 614.1a + CR 616.1f: Token characteristics and quantity appended to
+/// the same creation event by a replacement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdditionalTokenSpec {
+    #[serde(flatten)]
+    pub spec: crate::types::token_spec::TokenSpec,
+    /// "That many" reads the count admitted when the replacement applies.
+    #[serde(default = "AdditionalTokenSpec::proportional_count")]
+    pub count: QuantityExpr,
+}
+
+impl AdditionalTokenSpec {
+    /// Legacy records appended proportionally to the admitted token count.
+    pub const fn proportional_count() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        }
+    }
+}
+
 /// Replacement effect definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplacementDefinition {
@@ -44888,11 +45084,8 @@ pub struct ReplacementDefinition {
     /// pattern class (Chatterfang, Squirrel General; Donatello, Sol Invictus).
     /// The stored spec carries static characteristics only; `source_id` and
     /// `controller` are filled from the replacement source at apply time.
-    /// Count equals the primary event's `count` at apply time, so additional
-    /// replacements (e.g., Doubling Season) ordered before Chatterfang are
-    /// reflected in the Squirrel count per CR 616.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_token_spec: Option<Box<crate::types::token_spec::TokenSpec>>,
+    pub additional_token_spec: Option<Box<AdditionalTokenSpec>>,
     /// CR 614.1a + CR 111.1: Ensure-all token-creation replacement. Used by
     /// Academy Manufactor ("If you would create a Clue, Food, or Treasure
     /// token, instead create one of each"). Each listed spec whose subtype
@@ -45428,8 +45621,12 @@ impl ReplacementDefinition {
     /// the primary `CreateToken` event (Chatterfang Squirrels, Donatello
     /// Mutagen). The stored spec's `source_id` / `controller` are placeholders
     /// overwritten with the replacement source at apply time.
-    pub fn additional_token_spec(mut self, spec: crate::types::token_spec::TokenSpec) -> Self {
-        self.additional_token_spec = Some(Box::new(spec));
+    pub fn additional_token_spec(
+        mut self,
+        spec: crate::types::token_spec::TokenSpec,
+        count: QuantityExpr,
+    ) -> Self {
+        self.additional_token_spec = Some(Box::new(AdditionalTokenSpec { spec, count }));
         self
     }
 
@@ -46378,6 +46575,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         }
     }
 
@@ -49629,6 +49827,7 @@ mod tests {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         };
         assert_eq!(token.count_expr(), Some(&fixed(4)));
 
@@ -50618,7 +50817,9 @@ mod tests {
 
     #[test]
     fn blight_cost_roundtrips() {
-        let cost = AbilityCost::Blight { count: 2 };
+        let cost = AbilityCost::Blight {
+            count: BlightCount::Fixed(2),
+        };
         let json = serde_json::to_value(&cost).unwrap();
         assert_eq!(json["type"], "Blight");
         assert_eq!(json["count"], 2);
@@ -51737,6 +51938,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();
@@ -52722,7 +52924,9 @@ mod tests {
                 ("exert", AbilityCost::Exert, vec![CostCategory::Exerts]),
                 (
                     "blight_puts_counters",
-                    AbilityCost::Blight { count: 1 },
+                    AbilityCost::Blight {
+                        count: BlightCount::Fixed(1),
+                    },
                     vec![CostCategory::PutsCounters],
                 ),
                 (

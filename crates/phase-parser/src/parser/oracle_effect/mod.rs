@@ -9122,10 +9122,7 @@ fn try_parse_create_token_choice(
     }))
 }
 
-/// CR 111.2 + CR 608.2c: Shared-verb token sequences such as "create a ...
-/// token with deathtouch and a ... token with lifelink" carry two token noun
-/// phrases in written order, not one token with a long keyword suffix. Parse
-/// both noun phrases through the normal token grammar and chain the second.
+/// CR 701.7a + CR 608.2c: One creation verb governs all of the noun phrases.
 fn try_parse_create_token_sequence(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
@@ -9138,44 +9135,23 @@ fn try_parse_create_token_sequence(
 
     let items = split_create_token_sequence(after_create)?;
 
-    // Parse every list item as a predefined/created token in written order
-    // (CR 608.2c). If the conjunctive "and"-gate fired and produced >= 2 items
-    // but some item is not an `Effect::Token`, do NOT fall through to the silent
-    // single-leading-token path — that is exactly the middle-drop bug this fix
-    // removes. Surface an honest `Effect::unimplemented` for the whole clause so
-    // coverage stays red rather than claiming partial support.
-    let mut effects: Vec<(&str, Effect)> = Vec::with_capacity(items.len());
-    for (orig, lower) in items {
-        match token::try_parse_token(lower, orig.trim(), ctx) {
-            Some(effect @ Effect::Token { .. }) => effects.push((orig, effect)),
-            _ => {
-                return Some(parsed_clause(Effect::unimplemented(
-                    "create_token_sequence_non_token_item",
-                    tp.original,
-                )));
-            }
-        }
-    }
-
-    // Chain every token via `sub_ability` in written order, reproducing the
-    // former binary builder shape (head clause + trailing sub-abilities). Both
-    // `AbilityDefinition::new` and `parsed_clause` take `Effect` by value, so the
-    // owned effects are consumed here (`into_iter`, not `iter`).
-    let mut iter = effects.into_iter();
-    let (_, head_effect) = iter.next()?;
-    let tail: Vec<(&str, Effect)> = iter.collect();
-
-    let mut chain: Option<Box<AbilityDefinition>> = None;
-    for (orig, effect) in tail.into_iter().rev() {
-        let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
-        def.description = Some(format!("create {}", orig.trim()));
-        def.sub_ability = chain.take();
-        chain = Some(Box::new(def));
-    }
-
-    let mut clause = parsed_clause(head_effect);
-    clause.sub_ability = chain;
-    Some(clause)
+    let mut items = items.into_iter();
+    let list = items.next().and_then(|(original, lower)| {
+        let mut head = token::try_parse_token(lower, original.trim(), ctx)?;
+        let Effect::Token {
+            additional_members, ..
+        } = &mut head
+        else {
+            return None;
+        };
+        *additional_members = items
+            .map(|(original, lower)| token::parse_token_creation_member(original, lower, ctx))
+            .collect::<Option<Vec<_>>>()?;
+        Some(head)
+    });
+    Some(parsed_clause(list.unwrap_or_else(|| {
+        Effect::unimplemented("create_token_sequence_non_token_item", tp.original)
+    })))
 }
 
 fn token_source_pt_followup_can_apply_to_chunk(text: &str) -> bool {
@@ -18505,6 +18481,84 @@ fn parse_blight_with_player(tp: TextPair) -> Option<(TargetFilter, u32, String)>
         .map(|(count, rest_orig)| (filter, count, rest_orig.to_string()))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OwnerLibraryShuffleVerb {
+    Shuffle,
+    Shuffles,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OwnerLibraryShuffleDestination {
+    TheirLibrary,
+    ItsOwnersLibrary,
+}
+
+fn parse_owner_library_shuffle_verb(input: &str) -> OracleResult<'_, OwnerLibraryShuffleVerb> {
+    alt((
+        value(OwnerLibraryShuffleVerb::Shuffle, tag("shuffle ")),
+        value(OwnerLibraryShuffleVerb::Shuffles, tag("shuffles ")),
+    ))
+    .parse(input)
+}
+
+fn parse_singular_owner_library_shuffle<'a, O>(
+    input: &'a str,
+    operand: impl Parser<&'a str, Output = O, Error = OracleError<'a>>,
+) -> OracleResult<'a, (OwnerLibraryShuffleVerb, OwnerLibraryShuffleDestination)> {
+    let (input, (verb, _, _, library)) = (
+        parse_owner_library_shuffle_verb,
+        operand,
+        tag(" into "),
+        alt((
+            value(
+                OwnerLibraryShuffleDestination::TheirLibrary,
+                tag("their library"),
+            ),
+            value(
+                OwnerLibraryShuffleDestination::ItsOwnersLibrary,
+                tag("its owner's library"),
+            ),
+        )),
+    )
+        .parse(input)?;
+    Ok((input, (verb, library)))
+}
+
+/// CR 608.2k + CR 701.24a: the trigger has established the source as the
+/// antecedent of the whole bare-owner instruction.
+pub(super) fn try_parse_trigger_source_owner_shuffle(body: &str) -> Option<ParsedEffectClause> {
+    let lower = body.to_lowercase();
+    all_consuming(delimited(
+        tag("its owner "),
+        verify(
+            |input| parse_singular_owner_library_shuffle(input, tag("it")),
+            |predicate| {
+                matches!(
+                    predicate,
+                    (
+                        OwnerLibraryShuffleVerb::Shuffles,
+                        OwnerLibraryShuffleDestination::TheirLibrary
+                    )
+                )
+            },
+        ),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .ok()?;
+    let mut clause = imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
+        target: TargetFilter::SelfRef,
+        owner_library: true,
+    });
+    let Effect::ChangeZone { actor, .. } = &mut clause.effect else {
+        return None;
+    };
+    *actor = crate::types::ability::LibraryInstructionActor::Player {
+        player: TargetFilter::Owner,
+    };
+    Some(clause)
+}
+
 /// CR 701.24a + CR 400.3: Parse "the owner of target [filter] shuffles it into their library".
 ///
 /// Handles both subject forms:
@@ -18521,8 +18575,9 @@ fn try_parse_owner_of_target_shuffle(
     // CR 608.2c: this shortcut owns only the shuffle instruction, never an
     // earlier action followed by a shuffle elsewhere in the clause.
     let predicate_start = subject::find_predicate_start(tp.original)?;
-    let (object_text, _) = alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles ")))
-        .parse(&tp.lower[predicate_start..])
+    let predicate = &tp.lower[predicate_start..];
+    peek(parse_owner_library_shuffle_verb)
+        .parse(predicate)
         .ok()?;
     let subject_text = tp.original[..predicate_start].trim();
     // CR 108.3 + CR 400.7e + CR 115.10a: the SOURCE's owner as the possessive
@@ -18543,21 +18598,24 @@ fn try_parse_owner_of_target_shuffle(
     if matches!(owner_subject, Some(subject::OwnerSubject::Source)) {
         // CR 201.5: source-name references still name this particular object
         // even when an earlier instruction declared a different target.
-        let (_, (_, _, _, draw_tail)) = all_consuming((
-            alt((
-                verify(nom_target::parse_self_reference, |target: &TargetFilter| {
-                    matches!(target, TargetFilter::SelfRef)
-                }),
-                value(
-                    TargetFilter::SelfRef,
-                    nom_primitives::parse_object_recipient_pronoun,
-                ),
-            )),
-            tag(" into "),
-            alt((tag("their library"), tag("its owner's library"))),
+        let (_, draw_tail) = all_consuming(preceded(
+            |input| {
+                parse_singular_owner_library_shuffle(
+                    input,
+                    alt((
+                        verify(nom_target::parse_self_reference, |target: &TargetFilter| {
+                            matches!(target, TargetFilter::SelfRef)
+                        }),
+                        value(
+                            TargetFilter::SelfRef,
+                            nom_primitives::parse_object_recipient_pronoun,
+                        ),
+                    )),
+                )
+            },
             opt(preceded(tag(" and "), rest)),
         ))
-        .parse(object_text)
+        .parse(predicate)
         .ok()?;
         let draw = if let Some(tail) = draw_tail {
             // Reuse the numeric grammar's whole-count/noun guard after the
@@ -18586,12 +18644,9 @@ fn try_parse_owner_of_target_shuffle(
         *ctx = subject_ctx;
         return Some(movement);
     }
-    all_consuming((
-        tag::<_, _, OracleError<'_>>("it into "),
-        alt((tag("their library"), tag("its owner's library"))),
-    ))
-    .parse(object_text)
-    .ok()?;
+    all_consuming(|input| parse_singular_owner_library_shuffle(input, tag("it")))
+        .parse(predicate)
+        .ok()?;
     // The owner actor was classified once above; dispatch on that typed result
     // instead of splitting and parsing the subject again.
     let target = match owner_subject {
@@ -22863,6 +22918,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 static_abilities,
                 enter_with_counters,
                 count: base_count,
+                additional_members: _,
             } => {
                 // CR 109.4: a "their <zone>" possessive in the for-each clause
                 // binds to the player creating the token. Stamp ScopedPlayer
@@ -22916,6 +22972,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                     static_abilities,
                     enter_with_counters,
                     count: replace_fixed_quantity(base_count, count),
+                    additional_members: Vec::new(),
                 }
             }
             other => other,
@@ -35935,7 +35992,7 @@ fn lower_subject_predicate_ast_body(
                     &player,
                 );
             }
-            inject_subject_into_shared_token_sequence(&mut clause, &subject, original_clause);
+            inject_subject_into_token_tail(&mut clause, &subject, original_clause);
             if let Some(subject_filter) = subject.target.as_ref().or(subject.affected.as_ref()) {
                 sync_player_into_nested_shuffle_sub(&mut clause, subject_filter);
             }
@@ -38550,12 +38607,9 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
     }
 }
 
-/// CR 111.2 + CR 608.2c: A subject preceding a shared-verb token list applies
-/// to every token creation in that list. `try_parse_create_token_sequence`
-/// lowers each noun phrase as a linked `Effect::Token`, so thread the same
-/// already-bound subject through the contiguous token tail rather than leaving
-/// later tokens at their `Controller` default.
-fn inject_subject_into_shared_token_sequence(
+/// Bind the subject on token instructions already lowered into a tail. The
+/// members of one shared verb use the owner stored on that instruction.
+fn inject_subject_into_token_tail(
     clause: &mut ParsedEffectClause,
     subject: &SubjectPhraseAst,
     original_clause: &str,
@@ -65521,6 +65575,7 @@ mod iteration_destination_rebinding_tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         }
     }
 

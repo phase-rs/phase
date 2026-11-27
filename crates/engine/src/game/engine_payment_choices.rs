@@ -1,14 +1,15 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, Effect, EffectKind, ResolvedAbility, SacrificeRequirement,
-    SubAbilityLink, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, BlightCount, Effect, EffectKind, ResolvedAbility,
+    SacrificeRequirement, SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AutoMayChoice, CastPaymentMode, GameState, MayTriggerAutoChoiceScope,
     MayTriggerAutoChoiceSelector, PendingContinuation, PendingCostMoveResume,
-    PendingPlayerScopeUnlessPayment, ResolutionOptionalPaymentOption, UnpaidCostRemainder,
-    UnpaidCostSuffix, WaitingFor, WardSacrificePaymentResume,
+    PendingPlayerScopeUnlessPayment, ResolutionOptionalPaymentOption, UnlessBlightPlacement,
+    UnpaidCostRemainder, UnpaidCostSuffix, WaitingFor, WardSacrificePaymentResume,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -1447,6 +1448,42 @@ pub(super) fn handle_unless_payment(
     let post_action_event_start = None;
     let payment_event_start = events.len();
     if pay {
+        if fixed_unless_blight_count(&cost).is_some() {
+            if let UnlessSelectionPrep::Prompt(mut prompt) = prepare_unless_selection_payment(
+                state,
+                player,
+                &cost,
+                &pending_effect,
+                trigger_event.as_ref(),
+            )? {
+                if let WaitingFor::UnlessBlightChoice {
+                    effect_description: description,
+                    remaining: poll,
+                    affected_object: affected,
+                    ..
+                } = prompt.as_mut()
+                {
+                    *description = effect_description.clone();
+                    *poll = remaining.clone();
+                    *affected = affected_object;
+                }
+                state.waiting_for = *prompt;
+                return Ok(action_result(events, state.waiting_for.clone()));
+            }
+            return finish_unless_payment(
+                state,
+                true,
+                true,
+                cost,
+                pending_effect,
+                trigger_event,
+                effect_description,
+                remaining,
+                affected_object,
+                None,
+                events,
+            );
+        }
         // CR 702.24a: a repeated draw cost is one printed instruction per age
         // counter, paid one instruction at a time through the counter-addition
         // payment owner, whatever the count.
@@ -1616,6 +1653,7 @@ pub(super) fn handle_unless_payment(
                                 trigger_event: trigger_event.clone(),
                                 effect_description: effect_description.clone(),
                                 remaining: remaining.clone(),
+                                blight: None,
                                 unpaid_suffix: remaining_cost
                                     .map(|cost| UnpaidCostSuffix::legs(player, cost)),
                             });
@@ -1921,6 +1959,7 @@ pub(super) fn handle_unless_payment(
                                 trigger_event: trigger_event.clone(),
                                 effect_description: effect_description.clone(),
                                 remaining: remaining.clone(),
+                                blight: None,
                                 unpaid_suffix: remaining_cost
                                     .map(|cost| UnpaidCostSuffix::legs(player, cost)),
                             });
@@ -2429,6 +2468,7 @@ fn park_owed_instructions(
         trigger_event,
         effect_description,
         remaining,
+        blight: None,
         unpaid_suffix: std::num::NonZeroU32::new(owed).map(|owed| {
             Box::new(UnpaidCostSuffix {
                 payer,
@@ -2462,17 +2502,33 @@ pub(crate) fn retire_parked_unless_payment_of_departing_players(
     leaving: &std::collections::HashSet<PlayerId>,
 ) {
     if matches!(
-        &state.pending_cost_move_resume,
-        Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
-            pending_effect,
-            unpaid_suffix,
-            ..
-        }) if leaving.contains(&pending_effect.controller)
+        &state.waiting_for,
+        WaitingFor::UnlessBlightChoice { player, pending_effect, .. }
+            if leaving.contains(player) || leaving.contains(&pending_effect.controller)
+    ) {
+        set_active_priority(state);
+    }
+    if let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+        pending_effect,
+        unpaid_suffix,
+        blight,
+        ..
+    }) = &state.pending_cost_move_resume
+    {
+        let controller_leaves = leaving.contains(&pending_effect.controller);
+        if let Some(placement) = blight {
+            if controller_leaves || leaving.contains(&placement.payer) {
+                // CR 800.4a + CR 701.68a: the retired payment cannot place
+                // counters on a surviving creature it borrowed from another player.
+                retire_unreconcilable_parked_unless_payment(state);
+            }
+        } else if controller_leaves
             || unpaid_suffix
                 .as_ref()
                 .is_some_and(|suffix| leaving.contains(&suffix.payer))
-    ) {
-        state.pending_cost_move_resume = None;
+        {
+            state.pending_cost_move_resume = None;
+        }
     }
 }
 
@@ -2585,6 +2641,7 @@ pub(crate) fn payment_continuation_prompt(state: &GameState) -> Option<WaitingFo
         effect_description,
         remaining,
         unpaid_suffix: Some(suffix),
+        ..
     }) = &state.pending_cost_move_resume
     else {
         return None;
@@ -2670,6 +2727,7 @@ fn continue_repeated_draw_payment(
         effect_description,
         remaining,
         unpaid_suffix: Some(suffix),
+        ..
     }) = state.pending_cost_move_resume.take()
     else {
         unreachable!("a continuation prompt is derived from its parked owner");
@@ -3273,6 +3331,178 @@ pub(crate) enum UnlessSelectionPrep {
     Unpayable,
 }
 
+pub(crate) fn fixed_unless_blight_count(cost: &AbilityCost) -> Option<u32> {
+    match cost {
+        AbilityCost::Blight {
+            count: BlightCount::Fixed(count),
+        } => Some(*count),
+        AbilityCost::Blight {
+            count: BlightCount::AnnouncedX { .. },
+        }
+        | AbilityCost::Composite { .. }
+        | AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::SayPhrase { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => None,
+    }
+}
+
+pub(super) fn handle_unless_blight_choice(
+    state: &mut GameState,
+    prompt: WaitingFor,
+    chosen: Option<&[ObjectId]>,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let WaitingFor::UnlessBlightChoice {
+        player,
+        counters,
+        creatures,
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+        affected_object,
+    } = prompt
+    else {
+        unreachable!("Blight payment requires its choice prompt");
+    };
+    let frame = WaitingFor::UnlessPayment {
+        player,
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+        affected_object,
+        repeat: None,
+    };
+    let Some(chosen) = chosen else {
+        set_active_priority(state);
+        return handle_unless_payment(state, frame, false, events);
+    };
+    let recipient =
+        effects::blight::validate_blight_selection(state, player, counters, &creatures, chosen)?;
+    let recipient_ref =
+        crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&recipient]);
+    let event_start = events.len();
+    let outcome = effects::blight::place_blight_cost(state, player, recipient, counters, events);
+    let WaitingFor::UnlessPayment {
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+        ..
+    } = frame
+    else {
+        unreachable!("Blight payment carries an unless frame");
+    };
+    use effects::counters::CounterAdditionOutcome;
+    match outcome {
+        CounterAdditionOutcome::Paused => {
+            state.pending_cost_move_resume =
+                Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+                    cost,
+                    pending_effect,
+                    trigger_event,
+                    effect_description,
+                    remaining,
+                    unpaid_suffix: None,
+                    blight: Some(UnlessBlightPlacement {
+                        payer: player,
+                        recipient: recipient_ref,
+                        affected_object,
+                    }),
+                });
+            Ok(action_result(events, state.waiting_for.clone()))
+        }
+        CounterAdditionOutcome::Settled | CounterAdditionOutcome::Prevented => {
+            // A settled placement pays this cost. This path treats a
+            // prevented placement as unpaid and resumes the unless effect.
+            finish_unless_blight(
+                state,
+                matches!(outcome, CounterAdditionOutcome::Settled),
+                cost,
+                pending_effect,
+                trigger_event,
+                effect_description,
+                remaining,
+                affected_object,
+                Some(event_start),
+                events,
+            )
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_unless_blight(
+    state: &mut GameState,
+    paid: bool,
+    cost: AbilityCost,
+    pending_effect: Box<ResolvedAbility>,
+    trigger_event: Option<GameEvent>,
+    effect_description: Option<String>,
+    remaining: Vec<PlayerId>,
+    affected_object: Option<ObjectId>,
+    event_start: Option<usize>,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    set_active_priority(state);
+    if !paid {
+        return finish_unless_payment(
+            state,
+            true,
+            true,
+            cost,
+            pending_effect,
+            trigger_event,
+            effect_description,
+            remaining,
+            affected_object,
+            event_start,
+            events,
+        );
+    }
+    let waiting_for = finish_successful_unless_payment(
+        state,
+        &pending_effect,
+        &trigger_event,
+        events,
+        event_start,
+    )?;
+    Ok(action_result(events, waiting_for))
+}
+
 /// CR 118.12a + CR 701.9 + CR 701.21: Single typed preparation authority for
 /// selection-based unless payments (discard and sacrifice, including fixed
 /// counts and aggregate constraints). Used by both the immediate unless-payment
@@ -3284,6 +3514,24 @@ pub(crate) fn prepare_unless_selection_payment(
     pending_effect: &ResolvedAbility,
     trigger_event: Option<&GameEvent>,
 ) -> Result<UnlessSelectionPrep, EngineError> {
+    if let Some(counters) = fixed_unless_blight_count(cost) {
+        let creatures = effects::blight::eligible_blight_creatures(state, player, counters);
+        return Ok(if creatures.is_empty() {
+            UnlessSelectionPrep::Unpayable
+        } else {
+            UnlessSelectionPrep::Prompt(Box::new(WaitingFor::UnlessBlightChoice {
+                player,
+                counters,
+                creatures,
+                cost: cost.clone(),
+                pending_effect: Box::new(pending_effect.clone()),
+                trigger_event: trigger_event.cloned(),
+                effect_description: None,
+                remaining: Vec::new(),
+                affected_object: None,
+            }))
+        });
+    }
     match cost {
         AbilityCost::Discard {
             count,
@@ -3832,10 +4080,29 @@ pub(super) fn resume_counter_addition_unless_payment(
         effect_description,
         remaining,
         unpaid_suffix,
+        blight,
     }) = state.pending_cost_move_resume.take()
     else {
         unreachable!("counter-addition unless-payment resume requires its typed continuation")
     };
+    if let Some(blight) = blight {
+        // CR 800.4a + CR 118.11 + CR 701.68a: an abandoned placement
+        // performs no payment. A delivered replacement can modify the count.
+        let result = finish_unless_blight(
+            state,
+            matches!(boundary, CostMoveDrainBoundary::ReplacementDelivered { .. }),
+            cost,
+            pending_effect,
+            trigger_event,
+            effect_description,
+            remaining,
+            blight.affected_object,
+            None,
+            events,
+        )?;
+        *events = result.events;
+        return Ok(result.waiting_for);
+    }
     // CR 118.12: whichever way the replacement settled, the payer already chose
     // to pay. The boundary is no longer a verdict — it is an ELIGIBILITY
     // ASSERTION. See the header for why a can't-effect never arrives here, and
@@ -3843,6 +4110,7 @@ pub(super) fn resume_counter_addition_unless_payment(
     // fail to compile at this site rather than silently pick a verdict.
     match boundary {
         CostMoveDrainBoundary::ReplacementDelivered { .. }
+        | CostMoveDrainBoundary::ReplacementAbandoned { .. }
         | CostMoveDrainBoundary::ReplacementPrevented { .. }
         | CostMoveDrainBoundary::PriorityBoundary => {}
     }
@@ -3885,6 +4153,7 @@ pub(super) fn resume_counter_addition_unless_payment(
                         trigger_event,
                         effect_description,
                         remaining,
+                        blight: None,
                         unpaid_suffix: remaining_cost
                             .map(|cost| UnpaidCostSuffix::legs(payer, cost)),
                     });

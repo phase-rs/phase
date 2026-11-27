@@ -575,6 +575,7 @@ mod player_scope_created_token_union;
 mod player_scope_linked_exile_batch;
 mod player_scope_paused_this_way_gate;
 mod player_scope_sacrifice_carrier;
+mod plus_token_replacement_count;
 mod ponder_decline_shuffle_regression;
 mod possessive_controller_object_anaphor;
 mod power_leak_dynamic_prevention;

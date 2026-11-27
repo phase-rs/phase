@@ -253,6 +253,7 @@ mod tests {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Spell, token_effect);
         ability.kind = AbilityKind::Spell;

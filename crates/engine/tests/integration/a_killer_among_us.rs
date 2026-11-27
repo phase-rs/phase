@@ -35,17 +35,6 @@ const ORACLE: &str = "When this enchantment enters, create a 1/1 white Human cre
 
 // --- helpers ---------------------------------------------------------------
 
-/// Collect every `Effect` in an ability's `sub_ability` chain (root first).
-fn chain_effects(def: &engine::types::ability::AbilityDefinition) -> Vec<&Effect> {
-    let mut out = Vec::new();
-    let mut cur = Some(def);
-    while let Some(d) = cur {
-        out.push(&*d.effect);
-        cur = d.sub_ability.as_deref();
-    }
-    out
-}
-
 fn parse_killer() -> engine::parser::oracle::ParsedAbilities {
     parse_oracle_text(
         ORACLE,
@@ -463,7 +452,7 @@ fn multi_authority_read_is_source_scoped() {
 }
 
 /// #7 — parser SHAPE. Confirms the corrected AST the runtime tests depend on:
-/// ETB chain = 3 Token + one Choose{CreatureType{options}, persist}; the
+/// ETB chain = one three-member Token + one Choose{CreatureType{options}, persist}; the
 /// activated ability has a single Sacrifice(SelfRef) cost (no phantom second
 /// Sacrifice, no Reveal), an IsChosenCreatureType gate bound to slot 0, and its
 /// counters/deathtouch target the attacking token (not SelfRef).
@@ -471,41 +460,50 @@ fn multi_authority_read_is_source_scoped() {
 fn parse_shape_matches_corrected_ast() {
     let parsed = parse_killer();
 
-    // --- ETB trigger: 3 Token + Choose ---
+    // --- ETB trigger: compound Token + Choose ---
     assert_eq!(parsed.triggers.len(), 1, "one ETB trigger");
     let etb = parsed.triggers[0]
         .execute
         .as_deref()
         .expect("ETB has an effect chain");
-    let effects = chain_effects(etb);
-
-    let token_names: Vec<&str> = effects
+    let Effect::Token {
+        name,
+        additional_members,
+        ..
+    } = etb.effect.as_ref()
+    else {
+        panic!("ETB must start with the compound token instruction");
+    };
+    assert_eq!(name, "Human");
+    let additional_names: Vec<&str> = additional_members
         .iter()
-        .filter_map(|e| match e {
-            Effect::Token { name, .. } => Some(name.as_str()),
-            _ => None,
+        .map(|member| match member.effect() {
+            Effect::Token { name, .. } => name.as_str(),
+            other => panic!("expected a token member, got {other:?}"),
         })
         .collect();
     assert_eq!(
-        token_names,
-        vec!["Human", "Merfolk", "Goblin"],
-        "ETB creates all three tokens in order (middle not dropped)"
+        additional_names,
+        ["Merfolk", "Goblin"],
+        "the same instruction creates the Merfolk and Goblin in written order"
     );
 
-    let choose = effects
-        .iter()
-        .find_map(|e| match e {
-            Effect::Choose {
-                choice_type,
-                persist,
-                ..
-            } => Some((choice_type, *persist)),
-            _ => None,
-        })
-        .expect("ETB chain contains a Choose");
-    assert!(choose.1, "choose must persist onto the enchantment");
+    let choose = etb
+        .sub_ability
+        .as_deref()
+        .expect("ETB choice follows creation");
+    let Effect::Choose {
+        choice_type,
+        persist,
+        ..
+    } = choose.effect.as_ref()
+    else {
+        panic!("the compound token instruction must be followed by the choice");
+    };
+    assert!(choose.sub_ability.is_none(), "choice ends the ETB chain");
+    assert!(*persist, "choose must persist onto the enchantment");
     assert_eq!(
-        *choose.0,
+        *choice_type,
         ChoiceType::creature_type_from(vec![
             "Human".to_string(),
             "Merfolk".to_string(),

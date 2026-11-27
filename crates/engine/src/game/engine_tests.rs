@@ -1423,6 +1423,7 @@ fn dragonstorm_globe_counters_created_dragon_token() {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         ));
     }
@@ -9404,6 +9405,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         activation_residual: crate::types::game_state::ActivationResidual::None,
         activation_target_selection: crate::types::game_state::ActivationTargetSelection::Pending,
         activation_cost_committed: false,
+        blight_in_flight: None,
         alt_cost_grant_source: None,
         activation_trigger_collection: None,
         activation_phyrexian_intent: None,
@@ -9858,6 +9860,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         activation_residual: crate::types::game_state::ActivationResidual::None,
         activation_target_selection: crate::types::game_state::ActivationTargetSelection::Pending,
         activation_cost_committed: false,
+        blight_in_flight: None,
         alt_cost_grant_source: None,
         activation_trigger_collection: None,
         activation_phyrexian_intent: None,

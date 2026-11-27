@@ -2123,6 +2123,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             source,

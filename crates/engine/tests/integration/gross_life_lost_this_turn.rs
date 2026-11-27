@@ -229,6 +229,7 @@ fn resolve_sigil(runner: &mut GameRunner, sigil: ObjectId, expected: [i32; 3]) {
             | WaitingFor::UnlessPayment { .. }
             | WaitingFor::UnlessPaymentChooseCost { .. }
             | WaitingFor::WardDiscardChoice { .. }
+            | WaitingFor::UnlessBlightChoice { .. }
             | WaitingFor::WardSacrificeChoice { .. }
             | WaitingFor::UnlessBounceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }

@@ -64,6 +64,7 @@ use super::filter::{
     matches_target_filter_on_lki_snapshot, spell_record_matches_filter, FilterContext,
 };
 use super::game_object::GameObject;
+use super::keywords::battlefield_keyword_instance_count;
 use super::speed::{
     effective_speed, has_max_speed, mark_speed_trigger_used, speed_key_source,
     speed_trigger_available,
@@ -406,6 +407,9 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
             legs => AbilityCost::Composite {
                 costs: legs.iter().map(ward_cost_to_ability_cost).collect(),
             },
+        },
+        WardCost::Blight(count) => AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(*count),
         },
         WardCost::GetPlayerCounters {
             counter_kind,
@@ -1769,21 +1773,12 @@ fn counter_event_object(event: &GameEvent) -> Option<ObjectId> {
     }
 }
 
-/// CR 508.3d + CR 508.5a + CR 603.2c: collect one firing per ATTACKED player
-/// from each admitted attack declaration. A batched attack trigger whose head
-/// names the attacked player ("Whenever one or more creatures attack one of
-/// your opponents, if any of those creatures … to defending player") takes its
-/// occurrence granularity from that player — the shared per-attacked-player
-/// expansion (`matching_attack_events_by_defending_player`) supplies each
-/// group's narrowed context, and the intervening-if is checked PER GROUP:
-/// "those creatures" quantifies over the creatures attacking that one player,
-/// never over the combined declaration set. Grouping runs before the
-/// aggregate batching arm, so one declaration against two opponents produces
-/// two firings, each carrying its own defending player ("that player",
-/// `TargetFilter::DefendingPlayer`) and its own event for the CR 603.4
-/// resolution recheck.
+/// CR 603.2c + CR 603.4: collect one firing per qualifying destination.
+/// Check the intervening-if against each group's narrowed attack declaration.
+/// The group supplies both "those creatures" and the defending player, and its
+/// event is retained for the resolution recheck.
 #[allow(clippy::too_many_arguments)] // The shared per-candidate filter chain needs each input.
-fn matching_batched_attack_events_by_defending_player(
+fn matching_batched_attack_events_by_destination(
     state: &GameState,
     event_batch: &[GameEvent],
     trig_def: &TriggerDefinition,
@@ -1809,7 +1804,7 @@ fn matching_batched_attack_events_by_defending_player(
         if !matcher(candidate, trig_def, source_context, state) {
             continue;
         }
-        for group_event in super::trigger_matchers::matching_attack_events_by_defending_player(
+        for group_event in super::trigger_matchers::matching_attack_events_by_destination(
             candidate,
             trig_def,
             source_context,
@@ -1824,14 +1819,10 @@ fn matching_batched_attack_events_by_defending_player(
     groups
 }
 
-/// CR 508.3d + CR 508.5a + CR 603.2c: whether a batched attack trigger's
-/// occurrence grammar is the attacked player, taken from the ACTIVE
-/// "one or more creatures attack <player>" head — whose scope lowers to a
-/// player-scope `valid_target` (`Typed { controller: … }` for "one of your
-/// opponents", `Controller` for "you"). That grammar fires once per defended
-/// player with that player's own attacker set (see
-/// `matching_attack_events_by_defending_player`).
-///
+/// CR 508.1b + CR 603.2c: whether a batched attack trigger fires per
+/// destination. The active "one or more creatures attack <destination>" head
+/// uses a player-scope `valid_target` for either the attacked player or the
+/// attacked planeswalker's controller.
 /// Two neighbouring shapes deliberately stay on the aggregate branch:
 /// the passive "one or more of your opponents are attacked" head lowers its
 /// scope to the bare `TargetFilter::Opponent`, which `is_player_scope()`
@@ -1841,7 +1832,7 @@ fn matching_batched_attack_events_by_defending_player(
 /// "attack one or more players", the Curse cycle's "enchanted player") is not
 /// this gate either: those scopes were never split and keep their existing
 /// firing shape.
-fn attack_fires_per_defending_player(trig_def: &TriggerDefinition) -> bool {
+fn attack_fires_per_destination(trig_def: &TriggerDefinition) -> bool {
     trig_def.batched
         && matches!(trig_def.mode, TriggerMode::Attacks)
         && trig_def
@@ -2633,11 +2624,8 @@ fn trigger_firing_groups(
             active_suppress_triggers,
             conditions,
         ))
-    } else if attack_fires_per_defending_player(trig_def) {
-        // CR 508.3d + CR 508.5a: the "one or more creatures attack <player>"
-        // class fires once per attacked player, with that player's own
-        // attacker set as the firing context.
-        indexed_groups(matching_batched_attack_events_by_defending_player(
+    } else if attack_fires_per_destination(trig_def) {
+        indexed_groups(matching_batched_attack_events_by_destination(
             state,
             event_batch,
             trig_def,
@@ -7944,7 +7932,7 @@ fn collect_pending_triggers_with_collection(
             let (
                 controller,
                 timestamp,
-                has_prowess,
+                prowess_instances,
                 has_exploit,
                 has_ravenous,
                 firebending_amount,
@@ -7982,8 +7970,11 @@ fn collect_pending_triggers_with_collection(
                 (
                     obj.controller,
                     obj.entered_battlefield_turn.unwrap_or(0),
-                    matches!(event, GameEvent::SpellCast { .. })
-                        && obj.has_keyword(&Keyword::Prowess),
+                    if matches!(event, GameEvent::SpellCast { .. }) {
+                        battlefield_keyword_instance_count(obj, KeywordKind::Prowess)
+                    } else {
+                        0
+                    },
                     matches!(event, GameEvent::ZoneChanged { .. })
                         && obj.has_keyword(&Keyword::Exploit),
                     obj.has_keyword(&Keyword::Ravenous),
@@ -8029,16 +8020,15 @@ fn collect_pending_triggers_with_collection(
                 pending.push(trigger_context);
             }
 
-            // CR 702.108a: Prowess triggers when controller casts a noncreature spell.
-            // Cards define Prowess as K:Prowess with no explicit trigger_definition,
-            // so we synthetically generate the trigger here.
+            // CR 702.108a + CR 702.108b: Each effective instance of Prowess
+            // supplies a separate trigger when its controller casts a noncreature spell.
             if let GameEvent::SpellCast {
                 controller: caster,
                 object_id: spell_obj_id,
                 ..
             } = event
             {
-                if has_prowess
+                if prowess_instances > 0
                     && synthetic_keyword_spell_cast_trigger_applies(
                         state,
                         obj_id,
@@ -8046,32 +8036,34 @@ fn collect_pending_triggers_with_collection(
                         *spell_obj_id,
                     )
                 {
-                    let prowess_effect = Effect::Pump {
-                        power: crate::types::ability::PtValue::Fixed(1),
-                        toughness: crate::types::ability::PtValue::Fixed(1),
-                        target: TargetFilter::SelfRef,
-                    };
-                    let prowess_ability =
-                        ResolvedAbility::new(prowess_effect, Vec::new(), obj_id, controller);
-                    let prowess_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
-                        .description("Prowess".to_string());
-                    pending.push(PendingTriggerContext::single(PendingTrigger {
-                        source_id: obj_id,
-                        controller,
-                        condition: prowess_trig_def.condition,
-                        ability: Box::new(prowess_ability),
-                        timestamp,
-                        target_constraints: Vec::new(),
-                        distribute: None,
-                        trigger_event: Some(event.clone()),
-                        modal: None,
-                        mode_abilities: vec![],
-                        description: prowess_trig_def.description,
-                        may_trigger_origin: None,
-                        subject_match_count: None,
-                        die_result: None,
-                        provenance: None,
-                    }));
+                    for _ in 0..prowess_instances {
+                        let prowess_effect = Effect::Pump {
+                            power: crate::types::ability::PtValue::Fixed(1),
+                            toughness: crate::types::ability::PtValue::Fixed(1),
+                            target: TargetFilter::SelfRef,
+                        };
+                        let prowess_ability =
+                            ResolvedAbility::new(prowess_effect, Vec::new(), obj_id, controller);
+                        let prowess_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
+                            .description("Prowess".to_string());
+                        pending.push(PendingTriggerContext::single(PendingTrigger {
+                            source_id: obj_id,
+                            controller,
+                            condition: prowess_trig_def.condition,
+                            ability: Box::new(prowess_ability),
+                            timestamp,
+                            target_constraints: Vec::new(),
+                            distribute: None,
+                            trigger_event: Some(event.clone()),
+                            modal: None,
+                            mode_abilities: vec![],
+                            description: prowess_trig_def.description,
+                            may_trigger_origin: None,
+                            subject_match_count: None,
+                            die_result: None,
+                            provenance: None,
+                        }));
+                    }
                 }
             }
 
@@ -41606,6 +41598,7 @@ pub mod tests {
                                 supertypes: vec![],
                                 static_abilities: vec![],
                                 enter_with_counters: vec![],
+                                additional_members: Vec::new(),
                             },
                         )
                         .player_scope(
