@@ -2552,6 +2552,7 @@ fn checked_restore_refuses_a_checkpoint_whose_parked_payment_names_no_seat() {
                     std::num::NonZeroU32::new(2).expect("two is not zero"),
                 ),
             })),
+            blight: None,
         });
     let refusal = checked_round_trip(&state);
     assert!(

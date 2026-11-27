@@ -1791,7 +1791,7 @@ fn fold_cost(acc: &mut NodeAcc, cost: &AbilityCost) {
             *acc.net
                 .counters
                 .entry((CounterClass::Minus1Minus1, ObjectClass::Creature))
-                .or_insert(0) += *count as i64;
+                .or_insert(0) += i64::from(count.with_announced_x(0));
         }
         // CR 701.21a: sacrificing PRODUCES sac/LTB (and dies) events (R3-SAC-POLARITY).
         // CR 700.4: the dies (Death) event is gated to creature-or-undeterminable
@@ -3073,7 +3073,9 @@ mod tests {
         )));
 
         let mut blight = activated(Effect::unimplemented("t", "blight"));
-        blight.cost = Some(AbilityCost::Blight { count: 1 });
+        blight.cost = Some(AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(1),
+        });
         let nb = build_node(ORIGIN, &blight, None);
         assert!(nb.produces.contains(&AxisKey::Counter(
             CounterClass::Minus1Minus1,

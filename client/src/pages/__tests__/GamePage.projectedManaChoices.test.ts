@@ -10,7 +10,8 @@ import type {
   InteractionPresentationSurface,
   ViewerInteraction,
 } from "../../adapter/generated/interaction";
-import type { ObjectId } from "../../adapter/types";
+import type { ManaUnit, ObjectId } from "../../adapter/types";
+import { groupManaPoolUnits, manaGroupTooltip } from "../../viewmodel/manaPoolGroups";
 
 const FOREST: ObjectId = 42;
 const MOUNTAIN: ObjectId = 43;
@@ -80,6 +81,36 @@ describe("projectedManaChoices", () => {
         data: { zone: "hand" },
       }),
     ).toBe("Can't be spent to cast spells from hand.");
+  });
+
+  it("labels distinct spell restriction scopes in mana choices and the pool", () => {
+    const t = i18n.getFixedT("en", "game");
+    const spellType = "Artifact";
+    const prohibition = "Can't be spent to cast spells outside the Artifact type.";
+    for (const [ability, label] of [
+      ["ofSpellType", "Only for Artifact spells or abilities of Artifacts."],
+      ["any", "Only for Artifact spells or abilities."],
+      ["anyNonSpellPayment", prohibition],
+    ] as const) {
+      expect(manaRestrictionLabel(t, {
+        type: "onlyForTypeSpellsOrAbilities",
+        data: { spellType, ability },
+      })).toBe(label);
+    }
+
+    const units = (["Any", "AnyNonSpellPayment"] as const).map((ability, index): ManaUnit => ({
+      color: "Blue",
+      source_id: FOREST,
+      pip_id: index + 1,
+      snow: false,
+      restrictions: [{ OnlyForTypeSpellsOrAbilities: { spell_type: spellType, ability } }],
+    }));
+    const groups = groupManaPoolUnits(units);
+    expect(groups.map((group) => group.pipIds)).toEqual([[1], [2]]);
+    expect(groups.map((group) => manaGroupTooltip((key, options) => t(key, options), group))).toEqual([
+      "Spend only on spells or abilities of a specific type",
+      prohibition,
+    ]);
   });
 
   it("keys each tapLandForMana choice by its action id", () => {

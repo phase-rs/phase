@@ -2171,6 +2171,27 @@ fn reconcile_parked_unless_payment_after_departure(
     if departure.is_none() {
         return Ok(false);
     }
+    if let WaitingFor::UnlessBlightChoice {
+        player,
+        counters,
+        creatures,
+        ..
+    } = &mut result.waiting_for
+    {
+        let eligible = effects::blight::eligible_blight_creatures(state, *player, *counters);
+        if eligible.is_empty() {
+            *result = engine_payment_choices::handle_unless_blight_choice(
+                state,
+                result.waiting_for.clone(),
+                None,
+                &mut result.events,
+            )?;
+        } else {
+            *creatures = eligible;
+        }
+        state.waiting_for = result.waiting_for.clone();
+        return Ok(true);
+    }
     match parked_unless_payment_repair(state, &result.waiting_for) {
         Some(ParkedPaymentRepair::StalePrompt) => {
             sync_waiting_for(state, &result.waiting_for);
@@ -6532,10 +6553,11 @@ fn submit_ordinary_phyrexian_choices(
                 Some(spell_object),
                 Some(&activation_ctx),
             );
-            let permissions = super::static_abilities::build_cost_permission_context(
+            let permissions = super::static_abilities::build_cost_permission_context_for_payment(
                 state,
                 player,
                 mana_spend_permission,
+                Some(&activation_ctx),
             );
             mana_payment::compute_phyrexian_shards(
                 &player_pool,
@@ -9013,6 +9035,7 @@ pub(super) fn apply_for_seat_with_mode(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CostMoveDrainBoundary {
     ReplacementDelivered { action_event_start: usize },
+    ReplacementAbandoned { action_event_start: usize },
     ReplacementPrevented { action_event_start: usize },
     PriorityBoundary,
 }
@@ -9033,7 +9056,8 @@ pub(crate) fn drain_pending_cost_move_resume(
         return Ok(None);
     }
     let eligible = match boundary {
-        CostMoveDrainBoundary::ReplacementDelivered { .. } => matches!(
+        CostMoveDrainBoundary::ReplacementDelivered { .. }
+        | CostMoveDrainBoundary::ReplacementAbandoned { .. } => matches!(
             state.pending_cost_move_resume,
             Some(
                 PendingCostMoveResume::Cast { .. }
@@ -9121,6 +9145,7 @@ pub(crate) fn drain_pending_cost_move_resume(
 
     let action_event_start = match boundary {
         CostMoveDrainBoundary::ReplacementDelivered { action_event_start }
+        | CostMoveDrainBoundary::ReplacementAbandoned { action_event_start }
         | CostMoveDrainBoundary::ReplacementPrevented { action_event_start } => {
             Some(action_event_start)
         }
@@ -9742,11 +9767,14 @@ fn drain_pending_deferred_life_cost_resume(
                         "Deferred life payment is missing its cast or activation root".to_string(),
                     )
                 })?;
+                let pay_life = if super::casting::pending_suspend(&pending, player).is_some() {
+                    super::life_costs::pay_life_as_cost
+                } else {
+                    super::life_costs::pay_life_as_cast_or_activation_cost
+                };
                 let mut remaining = remaining_life_payments.into_iter();
                 while let Some(amount) = remaining.next() {
-                    match super::life_costs::pay_life_as_cast_or_activation_cost(
-                        state, player, amount, events,
-                    ) {
+                    match pay_life(state, player, amount, events) {
                         super::life_costs::PayLifeCostResult::Paid { .. } => {}
                         super::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution {
                             ..
@@ -14951,6 +14979,28 @@ fn apply_non_priority_pass_action(
             )?
         }
         // CR 118.12: Player decided whether to pay an "unless pays" cost.
+        (
+            waiting_for @ WaitingFor::UnlessBlightChoice { .. },
+            GameAction::SelectCards { cards },
+        ) => {
+            return engine_payment_choices::handle_unless_blight_choice(
+                state,
+                waiting_for.clone(),
+                Some(&cards),
+                &mut events,
+            );
+        }
+        (
+            waiting_for @ WaitingFor::UnlessBlightChoice { .. },
+            GameAction::PayUnlessCost { pay: false },
+        ) => {
+            return engine_payment_choices::handle_unless_blight_choice(
+                state,
+                waiting_for.clone(),
+                None,
+                &mut events,
+            );
+        }
         (waiting_for @ WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { pay }) => {
             return engine_payment_choices::handle_unless_payment(
                 state,
@@ -15224,6 +15274,22 @@ fn apply_non_priority_pass_action(
                 // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
                 // metadata in SpellMeta and enforced during mana payment.
                 let mut trial = pending.as_ref().clone();
+                if let Some(crate::types::ability::AdditionalCost::Required(cost)) =
+                    &trial.additional_cost_flow
+                {
+                    if casting_costs::bounded_blight_cost_max(state, player, trial.object_id, cost)
+                        .is_some_and(|max| {
+                            value > max
+                                || !casting_costs::bounded_blight_x_can_be_paid(
+                                    state, player, cost, value,
+                                )
+                        })
+                    {
+                        return Err(EngineError::InvalidAction(format!(
+                            "X={value} cannot pay the Blight cost"
+                        )));
+                    }
+                }
                 trial.ability.set_chosen_x_recursive(value);
                 trial.cost.concretize_x(value);
                 if trial.activation_ability_index.is_some()
@@ -27916,6 +27982,7 @@ mod cost_move_drain_priority_boundary_tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: Vec::new(),
+                blight: None,
                 unpaid_suffix: None,
             });
         let mut events = Vec::new();

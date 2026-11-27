@@ -226,8 +226,29 @@ pub fn add_counter_with_replacement(
     cause: CounterCause,
     events: &mut Vec<GameEvent>,
 ) -> bool {
+    !matches!(
+        place_counter_addition(state, actor, object_id, counter_type, count, cause, events),
+        CounterAdditionOutcome::Paused
+    )
+}
+
+pub(crate) enum CounterAdditionOutcome {
+    Settled,
+    Prevented,
+    Paused,
+}
+
+pub(crate) fn place_counter_addition(
+    state: &mut GameState,
+    actor: PlayerId,
+    object_id: ObjectId,
+    counter_type: CounterType,
+    count: u32,
+    cause: CounterCause,
+    events: &mut Vec<GameEvent>,
+) -> CounterAdditionOutcome {
     if count == 0 {
-        return true;
+        return CounterAdditionOutcome::Settled;
     }
     // CR 614.1c + CR 122.6a: an entrant whose entry has been decided but has not
     // yet committed is in `liminal_entries` and in no zone at all, so there is no
@@ -242,7 +263,7 @@ pub fn add_counter_with_replacement(
     // BEFORE it inserts the object and re-enters this function for those counters,
     // so the second pass takes the ordinary live-object path below.
     if state.schedule_entry_counters(object_id, counter_type.clone(), count) {
-        return true;
+        return CounterAdditionOutcome::Settled;
     }
     let proposed = ProposedEvent::AddCounter {
         placement: CounterPlacement::Object {
@@ -271,13 +292,13 @@ pub fn add_counter_with_replacement(
             {
                 apply_counter_addition(state, actor, object_id, counter_type, count, events);
             }
-            true
+            CounterAdditionOutcome::Settled
         }
-        ReplacementResult::Prevented => true,
+        ReplacementResult::Prevented => CounterAdditionOutcome::Prevented,
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
-            false
+            CounterAdditionOutcome::Paused
         }
     }
 }

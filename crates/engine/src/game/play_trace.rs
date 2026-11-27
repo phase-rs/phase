@@ -1254,6 +1254,7 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::WardSacrificeChoice { .. }
         | WaitingFor::UnlessBounceChoice { .. }
+        | WaitingFor::UnlessBlightChoice { .. }
         | WaitingFor::ChooseRingBearer { .. }
         | WaitingFor::ChooseRoomDoor { .. }
         | WaitingFor::ChooseDungeon { .. }

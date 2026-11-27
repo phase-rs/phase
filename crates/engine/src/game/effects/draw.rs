@@ -110,6 +110,7 @@ pub fn preview_draw_delivery(
         requested,
         HashSet::new(),
         DrawSequenceOrigin::Plain,
+        None,
         &mut events,
     ) {
         DrawSequenceOutcome::Completed { delivered, .. }
@@ -357,11 +358,17 @@ pub fn resolve(
     // (num_cards > 1) performs that many individual card draws, each offered
     // replacement independently, instead of the whole count being replaced or
     // drawn as one atomic batch.
+    // CR 608.2c: a draw directly followed by a "… this way" head naming an
+    // earlier instruction holds that instruction's ledger on its frame, so a
+    // replacement of one of its draws cannot leave its own result for the head.
+    let this_way_antecedent_ledger = super::keeps_this_way_ledger_for_following_head(ability)
+        .then(|| state.last_zone_changed_ids.clone());
     match start_draw_sequence_with_replacement_applied(
         state,
         drawing_player,
         num_cards,
         ability.replacement_applied.clone(),
+        this_way_antecedent_ledger,
         events,
     ) {
         ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}
@@ -504,16 +511,19 @@ fn start_draw_sequence_with_replacement_applied(
     player: crate::types::player::PlayerId,
     count: u32,
     applied: HashSet<AppliedReplacementKey>,
+    this_way_antecedent_ledger: Option<Vec<ObjectId>>,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
-    start_draw_sequence_with_origin(
+    start_draw_sequence_with_origin_outcome(
         state,
         player,
         count,
         applied,
         DrawSequenceOrigin::Plain,
+        this_way_antecedent_ledger,
         events,
     )
+    .into_replacement_result()
 }
 
 /// CR 121.2 + CR 121.6b: Begin a draw instruction with its completion origin.
@@ -527,7 +537,7 @@ pub(crate) fn start_draw_sequence_with_origin(
     origin: DrawSequenceOrigin,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
-    start_draw_sequence_with_origin_outcome(state, player, count, applied, origin, events)
+    start_draw_sequence_with_origin_outcome(state, player, count, applied, origin, None, events)
         .into_replacement_result()
 }
 
@@ -537,6 +547,7 @@ fn start_draw_sequence_with_origin_outcome(
     count: u32,
     applied: HashSet<AppliedReplacementKey>,
     origin: DrawSequenceOrigin,
+    this_way_antecedent_ledger: Option<Vec<ObjectId>>,
     events: &mut Vec<GameEvent>,
 ) -> DrawSequenceOutcome {
     let Some(frame_id) =
@@ -544,6 +555,12 @@ fn start_draw_sequence_with_origin_outcome(
     else {
         return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
     };
+    if this_way_antecedent_ledger.is_some() {
+        state
+            .draw_sequence_frame_mut(frame_id)
+            .expect("a newly pushed draw instruction is live")
+            .this_way_antecedent_ledger = this_way_antecedent_ledger;
+    }
     if let ControlFlow::Break(parked) =
         consult_draw_instruction(state, frame_id, player, count, applied, events)
     {
@@ -799,6 +816,13 @@ fn resume_draw_sequence_outcome(
         debug_assert!(false, "draw frame {frame_id:?} vanished before completion");
         return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
     };
+    // CR 608.2c + CR 121.6b + CR 614.11a: every replacement of this
+    // instruction's draws has completed, including any action that ran as its
+    // own chain and published its own ledger; restore the earlier instruction's
+    // ledger for the "… this way" head that follows this draw.
+    if let Some(ledger) = frame.this_way_antecedent_ledger.take() {
+        state.last_zone_changed_ids = ledger;
+    }
     if !credit_completed_draw_child_result(state, &frame) {
         return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
     }

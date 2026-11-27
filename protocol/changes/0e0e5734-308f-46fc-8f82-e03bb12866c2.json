@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Draw-sequence frames carry this_way_antecedent_ledger (resolution_state_version 17) so a draw followed by a '... this way' head restores the earlier instruction's ledger after a replacement of its draws; older peers would drop it."
+}

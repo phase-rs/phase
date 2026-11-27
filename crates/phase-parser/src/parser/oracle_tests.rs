@@ -21,6 +21,163 @@ use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
 #[test]
+fn soul_immolation_parses_the_complete_blight_cap_and_shared_damage_x() {
+    use crate::types::ability::{BlightCount, CardTypeSetSource, PlayerFilter, PropertyAggregate};
+
+    let text = "As an additional cost to cast this spell, blight X. X can't be greater than the greatest toughness among creatures you control. (Put X -1/-1 counters on a creature you control.)\nSoul Immolation deals X damage to each opponent and each creature they control.";
+    let parse_card = |oracle: &str| {
+        parse_oracle_text(
+            oracle,
+            "Soul Immolation",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        )
+    };
+    let parsed = parse_card(text);
+    let Some(AdditionalCost::Required(AbilityCost::Blight {
+        count: BlightCount::AnnouncedX { maximum },
+    })) = parsed.additional_cost
+    else {
+        panic!(
+            "expected announced Blight X, got {:?}",
+            parsed.additional_cost
+        );
+    };
+    let creatures_you_control =
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You));
+    assert_eq!(
+        *maximum,
+        QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(
+                    AggregateFunction::Max,
+                    ObjectProperty::Toughness,
+                    CardTypeSetSource::Objects {
+                        filter: creatures_you_control,
+                    },
+                )
+                .unwrap(),
+            ),
+        }
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(matches!(
+        parsed.abilities[0].effect.as_ref(),
+        Effect::DamageAll {
+            amount: QuantityExpr::Ref { qty: QuantityRef::Variable { name } },
+            target: TargetFilter::Typed(filter),
+            player_filter: Some(PlayerFilter::Opponent),
+            ..
+        } if name == "X" && filter.controller == Some(ControllerRef::Opponent)
+            && filter.type_filters == [TypeFilter::Creature]
+    ));
+
+    for malformed in [
+        text.replace(
+            " X can't be greater than the greatest toughness among creatures you control.",
+            "",
+        ),
+        text.replace("creatures you control.", "creatures."),
+        text.replace("you control.", "you control nonsense."),
+        text.replace("blight X.", "blight Xylophone."),
+        text.replace("blight X.", "blight 2."),
+    ] {
+        assert!(
+            matches!(
+                parse_card(&malformed).additional_cost,
+                Some(AdditionalCost::Required(AbilityCost::Unimplemented { .. }))
+            ),
+            "{malformed}"
+        );
+    }
+}
+
+#[test]
+fn auntie_ool_blight_ward_is_a_fixed_payload_and_rejects_malformed_legs() {
+    use crate::types::keywords::WardCost;
+
+    let text = "Ward—Blight 2. (To blight 2, a player puts two -1/-1 counters on a creature they control.)\nWhenever one or more -1/-1 counters are put on a creature, draw a card if you control that creature. If you don't control it, its controller loses 1 life.";
+    let parse_card = |oracle: &str| {
+        parse_oracle_text(
+            oracle,
+            "Auntie Ool, Cursewretch",
+            &["Ward".to_string()],
+            &["Creature".to_string()],
+            &["Goblin".to_string(), "Warlock".to_string()],
+        )
+    };
+    let printed = parse_card(text);
+    assert_eq!(
+        printed.extracted_keywords,
+        [Keyword::Ward(WardCost::Blight(2))]
+    );
+    assert!(printed.abilities.is_empty(), "{:?}", printed.abilities);
+    assert_eq!(printed.triggers.len(), 1);
+    for bad_cost in [
+        "Blight",
+        "Blight X",
+        "Blight 4294967296",
+        "Blight 2x",
+        "Blight 2, nonsense",
+        "{2}, Blight 2",
+        "Blight 2, Pay 2 life",
+    ] {
+        let mutated = text.replace("Blight 2.", &format!("{bad_cost}."));
+        let parsed = parse_card(&mutated);
+        assert!(parsed.extracted_keywords.is_empty(), "{bad_cost}");
+        assert!(parsed.abilities.iter().any(has_unimplemented), "{bad_cost}");
+    }
+}
+
+#[test]
+fn sinister_gnarlbark_draw_and_blight_is_a_sequential_chain() {
+    let text = "At the beginning of your end step, draw a card and blight 1. (Put a -1/-1 counter on a creature you control.)";
+    let parse_card = |oracle: &str| {
+        parse_oracle_text(
+            oracle,
+            "Sinister Gnarlbark",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        )
+    };
+    let parsed = parse_card(text);
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected one end-step trigger, got {:?}", parsed.triggers);
+    };
+    let draw = trigger
+        .execute
+        .as_deref()
+        .expect("trigger must execute the draw");
+    assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
+    let blight = draw
+        .sub_ability
+        .as_deref()
+        .expect("draw must chain into Blight");
+    assert!(matches!(
+        blight.effect.as_ref(),
+        Effect::BlightEffect {
+            count: 1,
+            player: TargetFilter::Controller
+        }
+    ));
+    assert!(blight.sub_ability.is_none());
+
+    for bad in [
+        "blight 1 nonsense",
+        "blight count",
+        "blight 1x",
+        "blight 4294967296",
+    ] {
+        let bad = text.replace("blight 1.", &format!("{bad}."));
+        let malformed = parse_card(&bad);
+        let effect = malformed.triggers[0].execute.as_deref().unwrap();
+        assert!(has_unimplemented(effect), "{bad}");
+    }
+}
+
+#[test]
 fn delayed_this_turn_head_requires_a_terminal_word_boundary_and_keeps_body_case() {
     use crate::parser::oracle_effect::parse_delayed_this_turn_head;
     use crate::parser::oracle_util::TextPair;
@@ -5082,16 +5239,6 @@ fn brine_hag_durationless_descriptor_base_pt_effect_remains_unimplemented() {
     );
 }
 
-/// CR 106.6 + CR 702.6a: Hydraulic Helper — the full card must parse with
-/// zero `Effect::Unimplemented` parts. "Defender" extracts as a keyword and
-/// the `{T}: Add {U}` mana ability carries the negative spend restriction
-/// ("This mana can't be spent to cast a nonartifact spell") lowered to
-/// `ManaSpendRestriction::SpellTypeOrAbilityActivation { spell_type:
-/// "Artifact", ability: Any }`. The restriction governs only what *spells*
-/// the mana may cast (artifact spells); it must leave ability activation
-/// UNRESTRICTED. This is the discriminating assertion: a `SpellType("Artifact")`
-/// lowering would wrongly forbid paying for any ability, so the `ability: Any`
-/// scope is exactly what keeps ability activation payable.
 /// CR 613.4c + CR 701.10a: Tifa's Limit Break (Tiered) — all three tiers
 /// parse with zero Unimplemented. Somersault → `Pump`, Meteor Strikes →
 /// `DoublePT factor:2`, Final Heaven → `DoublePT factor:3`. The discriminating
@@ -5222,6 +5369,8 @@ fn crew_history_quantity_guard_is_typed_and_position_independent() {
     );
 }
 
+/// CR 106.6 + CR 702.3a: Hydraulic Helper parses Defender and retains its
+/// nonartifact spell prohibition as `AnyNonSpellPayment` on the mana ability.
 #[test]
 fn hydraulic_helper_full_card_supported_with_artifact_spend_restriction() {
     use crate::types::ability::{ManaProduction, ManaSpendRestriction};
@@ -5264,10 +5413,9 @@ fn hydraulic_helper_full_card_supported_with_artifact_spend_restriction() {
         restrictions,
         &[ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         }],
-        "negative nonartifact restriction must lower to \
-             SpellTypeOrAbilityActivation so ability activation stays unrestricted"
+        "negative nonartifact restriction must leave all non-spell payments eligible"
     );
 }
 
@@ -11662,7 +11810,7 @@ fn jetfire_front_face_activated_ability() {
         restrictions,
         &vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         }],
         "the following sentence must fold in the 'nonartifact' spend restriction"
     );
@@ -21355,10 +21503,8 @@ fn mana_spend_restriction_spell_only() {
 #[test]
 fn mana_spend_restriction_negative_nonartifact() {
     // CR 106.6: "this mana can't be spent to cast nonartifact spells" (Karn,
-    // Legacy Reforged) restricts spell-casting to artifact spells but leaves
-    // ability activation unrestricted — so it lowers to the OR variant with
-    // `ability: Any`, NOT a spells-only `SpellType` (which would wrongly
-    // forbid paying for abilities).
+    // Legacy Reforged) restricts spell-casting to artifact spells and leaves
+    // all non-spell payments eligible.
     use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
     use crate::types::ability::ManaSpendRestriction;
     use crate::types::mana::AbilityActivationScope;
@@ -21369,7 +21515,7 @@ fn mana_spend_restriction_negative_nonartifact() {
             .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         })
     );
 }
@@ -21388,7 +21534,7 @@ fn mana_spend_restriction_negative_article_singular_nonartifact() {
         Some(
             crate::types::ability::ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: crate::types::mana::AbilityActivationScope::Any,
+                ability: crate::types::mana::AbilityActivationScope::AnyNonSpellPayment,
             }
         )
     );
@@ -21408,7 +21554,7 @@ fn mana_spend_restriction_negative_noncreature() {
             .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Creature".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         })
     );
 }
@@ -21435,7 +21581,7 @@ At the beginning of your upkeep, add {C} for each artifact you control. This man
         if let Effect::Mana { restrictions, .. } = effect {
             if restrictions.contains(&ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: AbilityActivationScope::Any,
+                ability: AbilityActivationScope::AnyNonSpellPayment,
             }) {
                 *found = true;
             }

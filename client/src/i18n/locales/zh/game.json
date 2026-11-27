@@ -432,6 +432,9 @@
     "prompt": {
       "exactCount_one": "{{action}}{{count}}个永久物",
       "exactCount_other": "{{action}}{{count}}个永久物",
+      "protectedObject": "支付以保护{{object}}",
+      "blightCounters_one": "在一个由你操控的生物上放置一个-1/-1指示物",
+      "blightCounters_other": "在一个由你操控的生物上放置{{count}}个-1/-1指示物",
       "rangeCount_one": "{{action}}{{min}}-{{count}}个永久物",
       "rangeCount_other": "{{action}}{{min}}-{{count}}个永久物",
       "single": "{{action}}一个永久物",
@@ -1541,6 +1544,8 @@
       "discardCard": "弃一张牌",
       "energy": "{{amount}}点能量",
       "generic": "一项费用",
+      "blight": "衰萎 {{count}}",
+      "blightBoundedX": "衰萎 X (至多为由你操控的生物中的最大防御力)",
       "life": "{{amount}}点生命",
       "pay": "支付{{cost}}",
       "playerCounterKind": {
@@ -1603,6 +1608,7 @@
     "manaRestrictions": {
       "anySpell": "任意",
       "cannotCastSpellFromZone": "不能用于从{{zone}}施放咒语。",
+      "cannotCastSpellsOutsideType": "不能用于施放类别不属于{{spellType}}的咒语。",
       "convokePayment": "仅可用于本次召集支付。",
       "hasXInCostCriterion": "费用中包含 X",
       "impossible": "此法术力无法被使用。",

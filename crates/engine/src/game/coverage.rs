@@ -5022,6 +5022,9 @@ fn trigger_details(trig: &TriggerDefinition) -> Vec<(String, String)> {
     if let Some(atf) = &trig.attack_target_filter {
         d.push(("attack target".into(), fmt_attack_target_filter(atf)));
     }
+    if let Some(ordinal) = trig.attack_declaration_ordinal {
+        d.push(("attack declaration ordinal".into(), ordinal.to_string()));
+    }
     // CR 509.3e: the blocker-count threshold decides whether a becomes-blocked
     // trigger fires at all, so it belongs in the parse-diff signature.
     if let Some(threshold) = &trig.blocker_count {
@@ -5323,7 +5326,10 @@ fn fmt_trigger_condition(
         },
         TC::WasPlayed => "was played".into(),
         TC::AdditionalCostPaid { .. } => "additional cost was paid".into(),
-        TC::SourceIsAttacking => "source is attacking".into(),
+        TC::SourceIsAttacking { player } => match player {
+            Some(player) => format!("source is attacking {}", fmt_player_filter(player)),
+            None => "source is attacking".into(),
+        },
         TC::CastVariantPaid { .. } => "cast variant was paid".into(),
         TC::CastVariantPaidPersistent { .. } => "cast variant was paid (persistent)".into(),
         TC::ActivatedAbilityIsNonMana => "activated ability is not a mana ability".into(),
@@ -11790,7 +11796,7 @@ fn extract_trigger_condition_features(
         | TriggerCondition::WasCast { .. }
         | TriggerCondition::WasPlayed
         | TriggerCondition::AdditionalCostPaid { .. }
-        | TriggerCondition::SourceIsAttacking
+        | TriggerCondition::SourceIsAttacking { .. }
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana

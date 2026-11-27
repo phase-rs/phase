@@ -3079,6 +3079,7 @@ fn ward_power_life_payments(cost: &WardCost) -> usize {
         WardCost::PayLifeEqualToPower => 1,
         WardCost::Mana(_)
         | WardCost::PayLife(_)
+        | WardCost::Blight(_)
         | WardCost::Discard { .. }
         | WardCost::Sacrifice { .. }
         | WardCost::Waterbend(_)

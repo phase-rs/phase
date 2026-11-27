@@ -151,9 +151,12 @@ fn search_for_tomorrow_last_counter_accept_casts_onto_stack() {
 
     let suspend_idx = suspend_ability_index(runner.state(), search);
     runner
-        .activate(search, suspend_idx)
-        .target_object(search)
-        .resolve();
+        .act(GameAction::ActivateAbility {
+            source_id: search,
+            ability_index: suspend_idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("take the indexed Suspend action");
 
     assert_eq!(runner.state().objects[&search].zone, Zone::Exile);
     assert_eq!(time_counters(runner.state(), search), 2);
