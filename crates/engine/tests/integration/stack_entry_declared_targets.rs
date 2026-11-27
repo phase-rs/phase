@@ -217,7 +217,8 @@ fn opponent_attack_destination_resolves_each_firing_against_its_own_creatures() 
         let expected_groups = match name {
             "Frontier Warmonger" => {
                 vec![
-                    vec![toward_p2, also_toward_p2, toward_p2_walker],
+                    vec![toward_p2, also_toward_p2],
+                    vec![toward_p2_walker],
                     vec![toward_p3],
                 ]
             }
@@ -277,7 +278,7 @@ fn opponent_attack_destination_resolves_each_firing_against_its_own_creatures() 
             }
 
             let mut phased = None;
-            if name == "Frontier Warmonger" && ids.len() == 3 {
+            if name == "Frontier Warmonger" && ids.contains(&toward_p2) {
                 assert!(
                     engine::game::effects::remove_from_combat::remove_object_from_combat(
                         runner.state_mut(),

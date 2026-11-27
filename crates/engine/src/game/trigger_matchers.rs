@@ -2796,22 +2796,16 @@ pub fn attack_trigger_matches_attack(
         && attack_target_matches(trigger, state, target, defending_player, &source_context)
 }
 
-/// CR 508.3d + CR 508.5a: expand one `AttackersDeclared` event into one
-/// narrowed context per ATTACKED player, each carrying that player's complete
-/// matching attacker set — the antecedent of the followed clause's "those
-/// creatures" and the referent of "defending player" / "that player"
-/// ("Whenever one or more creatures attack one of your opponents, if any of
-/// those creatures have power or toughness equal to the chosen number, Squall
-/// deals damage equal to its power to defending player."). Wizards' Neyali,
-/// the Plumecrest release note states the same occurrence grammar for
-/// "attack <player>" ("triggers for each player you are attacking with one or
-/// more tokens"): the attacked player is the grouping axis, so one declaration
-/// against two opponents is TWO occurrences, each with its own attacker set —
-/// never one combined set answered by the first defender. An attacked player
-/// with no matching attacker produces no group. The player-subject branch of
-/// [`matching_attack_events`] already narrows one context per attacked player
-/// (the subject there is the attacking player), so it is reused as-is.
-pub(super) fn matching_attack_events_by_defending_player(
+/// CR 508.1b + CR 603.2c: expand a declaration into one occurrence per
+/// qualifying destination named by the trigger. For "attack one of your
+/// opponents or a planeswalker they control", a planeswalker is its own
+/// destination. Its controller determines whether the attack qualifies.
+/// Player-only heads group by attacked player, which also supplies the
+/// "defending player" referent (CR 508.5a). Each occurrence carries the
+/// corresponding attacker set for "those creatures".
+/// The player-subject branch of [`matching_attack_events`] already narrows
+/// one context per attacked player, so reuse it here.
+pub(super) fn matching_attack_events_by_destination(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_context: &TriggerSourceContext,
@@ -2833,8 +2827,12 @@ pub(super) fn matching_attack_events_by_defending_player(
     {
         return matching_attack_events(event, trigger, source_context, state);
     }
-    let mut groups: Vec<(PlayerId, Vec<(ObjectId, crate::game::combat::AttackTarget)>)> =
-        Vec::new();
+    use crate::game::combat::AttackTarget;
+    use crate::types::triggers::AttackTargetFilter;
+
+    let groups_by_destination =
+        trigger.attack_target_filter == Some(AttackTargetFilter::PlayerOrPlaneswalker);
+    let mut groups: Vec<(AttackTarget, Vec<(ObjectId, AttackTarget)>)> = Vec::new();
     for id in attacker_ids {
         if !attack_declaration_attacker_matches(trigger, state, *id, source_context) {
             continue;
@@ -2842,23 +2840,27 @@ pub(super) fn matching_attack_events_by_defending_player(
         let target = attacks
             .iter()
             .find_map(|(attacker_id, target)| (*attacker_id == *id).then_some(*target))
-            .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
+            .unwrap_or(AttackTarget::Player(*defending_player));
         if !attack_target_matches(trigger, state, target, *defending_player, source_context) {
             continue;
         }
-        let event_defending_player =
-            crate::game::combat::defending_player_for_target_or(state, target, *defending_player);
-        match groups
-            .iter_mut()
-            .find(|(player, _)| *player == event_defending_player)
-        {
+        let destination = if groups_by_destination {
+            target
+        } else {
+            AttackTarget::Player(crate::game::combat::defending_player_for_target_or(
+                state,
+                target,
+                *defending_player,
+            ))
+        };
+        match groups.iter_mut().find(|(key, _)| *key == destination) {
             Some((_, members)) => members.push((*id, target)),
-            None => groups.push((event_defending_player, vec![(*id, target)])),
+            None => groups.push((destination, vec![(*id, target)])),
         }
     }
     groups
         .into_iter()
-        .map(|(event_defending_player, members)| {
+        .map(|(destination, members)| {
             let attacker_ids: Vec<ObjectId> = members.iter().map(|(id, _)| *id).collect();
             GameEvent::AttackersDeclared {
                 declaration_records: super::triggers::declaration_records_for_attackers(
@@ -2866,7 +2868,11 @@ pub(super) fn matching_attack_events_by_defending_player(
                     &attacker_ids,
                 ),
                 attacker_ids,
-                defending_player: event_defending_player,
+                defending_player: crate::game::combat::defending_player_for_target_or(
+                    state,
+                    destination,
+                    *defending_player,
+                ),
                 attacks: members,
             }
         })
