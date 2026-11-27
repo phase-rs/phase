@@ -1,8 +1,11 @@
 //! CR 702.62a + CR 702.62c: suspend's hand restriction checks whether the cast could begin.
-//! `assert_suspend` checks the offer, enforcement and the restriction alone. Pithing Needle can
-//! still block the synthesized activated ability at offer and enforcement.
+//! `assert_suspend` checks the offer, enforcement and the restriction alone.
 
-use engine::ai_support::{activation_block_reasons, legal_actions};
+use engine::ai_support::{
+    activation_block_reasons, candidate_actions, legal_actions, witness_payment_continuation,
+    witness_payment_continuations, PaymentContinuationBatchStatus,
+    PaymentContinuationIndeterminate,
+};
 use engine::game::casting::can_cast_object_now;
 use engine::game::keywords::effective_sneak_cost;
 use engine::game::layers::evaluate_layers;
@@ -14,11 +17,13 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{ChosenAttribute, Effect, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor, ManaCost};
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor, ManaCost, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -199,13 +204,13 @@ fn suspend_action(r: &GameRunner, card: ObjectId) -> GameAction {
 fn suspended(r: &GameRunner, card: ObjectId) -> Option<GameRunner> {
     let mut copy = GameRunner::from_state(r.state().clone());
     let accepted = copy.act(suspend_action(r, card)).is_ok();
-    let (zone, entries) = if accepted {
-        (Zone::Exile, 1)
-    } else {
-        (Zone::Hand, 0)
-    };
-    assert_eq!(copy.state().objects[&card].zone, zone);
-    assert_eq!(copy.state().stack.len(), r.state().stack.len() + entries);
+    let object = &copy.state().objects[&card];
+    assert_eq!(object.zone, if accepted { Zone::Exile } else { Zone::Hand });
+    assert_eq!(copy.state().stack, r.state().stack);
+    if accepted {
+        assert!(!object.face_down);
+        assert!(object.counters[&CounterType::Time] > 0);
+    }
     accepted.then_some(copy)
 }
 
@@ -754,18 +759,617 @@ fn z2_hand_only_lock_still_stops_the_cast() {
     assert!(!cast_accepted(&r, card));
 }
 
-/// Pithing Needle prohibits no cast, so the restriction accepts. CR 116.2f makes suspending a
-/// special action it doesn't stop; offer and enforcement still treat it as an activated ability.
+/// CR 116.2f: naming Greater Gargadon with Pithing Needle cannot stop its suspend special action.
 #[test]
-fn n1_pithing_needle_as_an_activated_ability() {
+fn n1_pithing_needle_allows_the_suspend_special_action() {
     let (mut r, (needle, gargadon)) = board(|s| {
         let needle = s
             .add_artifact_from_oracle(P1, "Pithing Needle", PITHING_NEEDLE)
             .id();
-        (needle, gargadon(s))
+        let gargadon = s
+            .add_creature_to_hand_from_oracle(P0, "Greater Gargadon", 9, 7, GREATER_GARGADON)
+            .with_mana_cost(parse_mtgjson_mana_cost("{9}{R}"))
+            .id();
+        (needle, gargadon)
     });
     name_card(&mut r, needle, "Rift Bolt");
     assert_suspend(&r, gargadon, true);
     name_card(&mut r, needle, "Greater Gargadon");
-    assert_eq!(readings(&r, gargadon), [false, false, true]);
+    assert_suspend(&r, gargadon, true);
+
+    let mut exiled = suspended(&r, gargadon).expect("hand action takes place under Needle");
+    let index = exiled.state().objects[&gargadon]
+        .abilities
+        .iter()
+        .position(|ability| {
+            matches!(
+                *ability.effect,
+                engine::types::ability::Effect::RemoveCounter { .. }
+            )
+        })
+        .expect("printed exile activation");
+    let sacrifice = GameAction::ActivateAbility {
+        source_id: gargadon,
+        ability_index: index,
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(!legal_actions(exiled.state()).contains(&sacrifice));
+    assert!(exiled.act(sacrifice.clone()).is_err());
+    name_card(&mut exiled, needle, "Rift Bolt");
+    assert!(legal_actions(exiled.state()).contains(&sacrifice));
+    assert!(matches!(
+        exiled.act(sacrifice).unwrap().waiting_for,
+        WaitingFor::PayCost { .. }
+    ));
+}
+
+/// CR 702.62a: Suspended Sentence costs {1}{B} to suspend even with Zirda.
+#[test]
+fn n2_suspend_does_not_get_activated_ability_discounts() {
+    for extra_land in [false, true] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        s.add_basic_land(P0, ManaColor::Black);
+        if extra_land {
+            s.add_basic_land(P0, ManaColor::Green);
+        }
+        s.add_creature(P0, "Zirda, the Dawnwaker", 3, 3)
+            .as_legendary()
+            .from_oracle_text("Companion — Each permanent card in your starting deck has an activated ability.\nAbilities you activate that aren't mana abilities cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.\n{1}, {T}: Target creature can't block this turn.");
+        let card = sentence(&mut s);
+        let mut r = s.build();
+        window(&mut r, P0, Phase::PreCombatMain);
+        assert_eq!(
+            readings(&r, card),
+            [extra_land, extra_land, true],
+            "offer and enforcement require the full suspend cost"
+        );
+    }
+}
+
+fn manual_suspend(r: &GameRunner, card: ObjectId) -> GameAction {
+    GameAction::ActivateAbility {
+        source_id: card,
+        ability_index: suspend_index(r, card).expect("indexed Suspend action"),
+        payment_mode: CastPaymentMode::Manual,
+    }
+}
+
+fn choose_card(card: ObjectId) -> GameAction {
+    GameAction::SelectCards { cards: vec![card] }
+}
+
+fn mana_ability(r: &GameRunner, object: ObjectId) -> GameAction {
+    let (_, _, mut grouped) = engine::ai_support::legal_actions_for_viewer(r.state(), P0);
+    let actions = grouped.remove(&object).unwrap_or_default();
+    actions
+        .into_iter()
+        .find(|action| match action {
+            GameAction::ActivateAbility { source_id, .. } => *source_id == object,
+            GameAction::TapLandForMana { selection }
+            | GameAction::ActivateManaSource { selection } => selection.source.object_id == object,
+            _ => false,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a mana action for {object:?} during {:?}",
+                r.state().waiting_for
+            )
+        })
+}
+
+fn tap_land(r: &mut GameRunner, land: ObjectId) {
+    let action = mana_ability(r, land);
+    r.act(action).expect("the land adds mana");
+}
+
+fn payment_pool(r: &GameRunner) -> &engine::types::mana::ManaPool {
+    &r.state().players[P0.0 as usize].mana_pool
+}
+
+fn check_suspend_delivery(r: &GameRunner, card: ObjectId, count: u32) {
+    let object = &r.state().objects[&card];
+    assert_eq!(object.zone, Zone::Exile);
+    assert!(!object.face_down);
+    assert_eq!(object.counters[&CounterType::Time], count);
+    assert!(r.state().stack.is_empty());
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+}
+
+fn assert_counter_event(events: &[GameEvent], card: ObjectId, count: u32) {
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::CounterAdded {
+            object_id, counter_type: CounterType::Time, count: added, actor: P0,
+        } if *object_id == card && *added == count))
+            .count(),
+        1
+    );
+    assert!(!events.iter().any(
+        |event| matches!(event, GameEvent::AbilityActivated { source_id, .. } if *source_id == card)
+    ));
+}
+
+fn open_manual_suspend(r: &mut GameRunner, card: ObjectId, mana: &str) {
+    let action = manual_suspend(r, card);
+    assert!(
+        legal_actions(r.state()).contains(&action),
+        "Manual Suspend is offered"
+    );
+    let opened = r.act(action).expect("the offered action opens payment");
+    assert!(matches!(
+        opened.waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    assert_eq!(
+        r.state().pending_cast.as_ref().expect("payment root").cost,
+        parse_mtgjson_mana_cost(mana),
+    );
+    assert_eq!(r.state().objects[&card].zone, Zone::Hand);
+    assert!(opened.events.iter().all(
+        |event| !matches!(event, GameEvent::CounterAdded { object_id, .. } if *object_id == card)
+    ));
+}
+
+fn familiar(s: &mut GameScenario) -> ObjectId {
+    s.add_creature(P0, "Skirge Familiar", 3, 2)
+        .from_oracle_text_with_keywords(&["Flying"], "Flying\nDiscard a card: Add {B}.")
+        .id()
+}
+
+fn discard_choices(r: &GameRunner) -> &[ObjectId] {
+    let WaitingFor::PayCost {
+        player: P0,
+        kind: PayCostKind::Discard,
+        choices,
+        count: 1,
+        ..
+    } = &r.state().waiting_for
+    else {
+        panic!(
+            "expected the Familiar's discard cost, got {:?}",
+            r.state().waiting_for
+        );
+    };
+    choices
+}
+
+/// CR 118.3 + CR 702.62a: the hand action holds one exact occurrence for self-exile.
+#[test]
+fn suspend_payment_holds_the_announced_hand_occurrence() {
+    for spare in [false, true] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let swamp = s.add_basic_land(P0, ManaColor::Black);
+        let skirge = familiar(&mut s);
+        let card = sentence(&mut s);
+        let extra = spare.then(|| sentence(&mut s));
+        let mut r = s.build();
+        assert!(restriction_alone(&r, P0, card));
+        assert!(!legal_actions(r.state()).contains(&suspend_action(&r, card)));
+
+        let Some(extra) = extra else {
+            let manual = manual_suspend(&r, card);
+            assert!(!legal_actions(r.state()).contains(&manual));
+            assert!(r.act(manual).is_err());
+            assert_eq!(r.state().objects[&card].zone, Zone::Hand);
+            assert!(!r.state().objects[&swamp].tapped);
+            assert_eq!(payment_pool(&r).total(), 0);
+
+            r.act(mana_ability(&r, skirge))
+                .expect("outside Suspend the Familiar can discard the card");
+            assert_eq!(discard_choices(&r), &[card]);
+            r.act(choose_card(card))
+                .expect("complete the ordinary mana ability");
+            assert_eq!(r.state().objects[&card].zone, Zone::Graveyard);
+            assert_eq!(payment_pool(&r).count_color(ManaType::Black), 1);
+            continue;
+        };
+
+        let mut canceled = GameRunner::from_state(r.state().clone());
+        open_manual_suspend(&mut canceled, card, "{1}{B}");
+        canceled
+            .act(GameAction::CancelCast)
+            .expect("cancel before using a mana source");
+        assert!(canceled.state().pending_cast.is_none());
+        canceled.act(mana_ability(&canceled, skirge)).unwrap();
+        assert!(
+            discard_choices(&canceled).contains(&card),
+            "cancel releases the held occurrence"
+        );
+
+        open_manual_suspend(&mut r, card, "{1}{B}");
+        r.act(mana_ability(&r, skirge))
+            .expect("a distinct copy pays the Familiar");
+        assert_eq!(discard_choices(&r), &[extra]);
+        assert!(
+            r.act(choose_card(card)).is_err(),
+            "the same-name held card can't be submitted"
+        );
+        assert_eq!(discard_choices(&r), &[extra]);
+        assert_eq!(payment_pool(&r).total(), 0);
+        r.act(choose_card(extra))
+            .expect("discard the distinct occurrence");
+        tap_land(&mut r, swamp);
+        assert_eq!(payment_pool(&r).count_color(ManaType::Black), 2);
+
+        let mut stale = GameRunner::from_state(r.state().clone());
+        stale
+            .state_mut()
+            .objects
+            .get_mut(&card)
+            .unwrap()
+            .bump_incarnation();
+        assert!(
+            stale.act(GameAction::PassPriority).is_err(),
+            "the prior hand occurrence cannot confirm"
+        );
+        assert_eq!(stale.state().objects[&card].zone, Zone::Hand);
+        assert_eq!(payment_pool(&stale).count_color(ManaType::Black), 2);
+
+        let finished = r
+            .act(GameAction::PassPriority)
+            .expect("spend the two eligible units");
+        check_suspend_delivery(&r, card, 3);
+        assert_eq!(r.state().objects[&extra].zone, Zone::Graveyard);
+        assert_eq!(payment_pool(&r).total(), 0);
+        assert_counter_event(&finished.events, card, 3);
+    }
+}
+
+/// CR 118.3: two discard producers share the same expendable hand cards.
+#[test]
+fn suspend_payment_witness_counts_distinct_discards_and_certifies_completion() {
+    for spare_count in [1, 2] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let sources = [familiar(&mut s), familiar(&mut s)];
+        let card = sentence(&mut s);
+        let spares: Vec<_> = (0..spare_count).map(|_| sentence(&mut s)).collect();
+        let mut r = s.build();
+        let manual = manual_suspend(&r, card);
+        if spare_count == 1 {
+            assert!(restriction_alone(&r, P0, card));
+            assert!(!legal_actions(r.state()).contains(&manual));
+            assert!(r.act(manual).is_err());
+            continue;
+        }
+
+        open_manual_suspend(&mut r, card, "{1}{B}");
+        let first = mana_ability(&r, sources[0]);
+        assert!(witness_payment_continuation(r.state(), &first).is_some());
+        for (source, spare) in sources.into_iter().zip(&spares) {
+            r.act(mana_ability(&r, source)).unwrap();
+            assert!(discard_choices(&r).contains(spare));
+            assert!(!discard_choices(&r).contains(&card));
+            r.act(choose_card(*spare)).unwrap();
+        }
+        let confirm = GameAction::PassPriority;
+        let actions = payment_candidates(&r);
+        let batch = witness_payment_continuations(r.state(), &actions);
+        let certificate = batch.successors[actions
+            .iter()
+            .position(|action| *action == confirm)
+            .unwrap()]
+        .as_ref()
+        .expect("actual stackless completion certifies the confirmation");
+        let simulated = GameRunner::from_state(certificate.state.clone());
+        check_suspend_delivery(&simulated, card, 3);
+        assert_counter_event(&certificate.trace.events, card, 3);
+
+        let finished = r.act(confirm).unwrap();
+        check_suspend_delivery(&r, card, 3);
+        assert_counter_event(&finished.events, card, 3);
+        assert_eq!(payment_pool(&r).total(), 0);
+        assert!(spares
+            .iter()
+            .all(|spare| r.state().objects[spare].zone == Zone::Graveyard));
+    }
+}
+
+fn payment_candidates(r: &GameRunner) -> Vec<GameAction> {
+    candidate_actions(r.state())
+        .into_iter()
+        .map(|candidate| candidate.action)
+        .collect()
+}
+
+#[test]
+fn suspend_payment_can_reveal_the_held_talisman_to_metalworker() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let metalworker = s.add_creature_from_oracle(P0, "Metalworker", 1, 2,
+        "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.")
+        .as_artifact().id();
+    let card = s.add_artifact_to_hand_from_oracle(P0, "Sol Talisman",
+        "Suspend 3—{1} (Rather than cast this card from your hand, pay {1} and exile it with three time counters on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost.)\n{T}: Add {C}{C}.")
+        .with_mana_cost(ManaCost::NoCost).id();
+    let mut r = s.build();
+    open_manual_suspend(&mut r, card, "{1}");
+    r.act(mana_ability(&r, metalworker))
+        .expect("Metalworker opens its reveal prompt");
+    let WaitingFor::RevealChoice {
+        cards, player: P0, ..
+    } = &r.state().waiting_for
+    else {
+        panic!(
+            "expected the actual reveal choice, got {:?}",
+            r.state().waiting_for
+        );
+    };
+    assert_eq!(cards, &[card]);
+    let mut empty = GameRunner::from_state(r.state().clone());
+    empty
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("reveal zero cards");
+    assert_eq!(payment_pool(&empty).total(), 0);
+    assert!(empty.act(GameAction::PassPriority).is_err());
+
+    let reveal = r.act(choose_card(card)).unwrap();
+    assert!(reveal.events.iter().any(
+        |event| matches!(event, GameEvent::CardsRevealed { card_ids, .. } if card_ids == &[card])
+    ));
+    assert_eq!(payment_pool(&r).count_color(ManaType::Colorless), 2);
+    r.act(GameAction::PassPriority).unwrap();
+    check_suspend_delivery(&r, card, 3);
+    assert_eq!(payment_pool(&r).count_color(ManaType::Colorless), 1);
+}
+
+/// CR 605.3a + CR 702.62a: the Guide can fund the hand action from its own hand zone.
+#[test]
+fn suspend_payment_offers_a_hand_source_even_above_the_witness_limit() {
+    for islands in [0, 63] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let lands: Vec<_> = (0..islands)
+            .map(|_| s.add_basic_land(P0, ManaColor::Blue))
+            .collect();
+        let card = gargadon(&mut s);
+        let guide = s
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Simian Spirit Guide",
+                2,
+                2,
+                "Exile this card from your hand: Add {R}.",
+            )
+            .id();
+        let mut r = s.build();
+        let card_incarnation = r.state().objects[&card].incarnation;
+        let guide_incarnation = r.state().objects[&guide].incarnation;
+        let undo = GameRunner::from_state(r.state().clone());
+        assert_eq!(undo.state().objects[&card].zone, Zone::Hand);
+        assert_eq!(undo.state().objects[&guide].zone, Zone::Hand);
+        open_manual_suspend(&mut r, card, "{R}");
+        let guide_action = mana_ability(&r, guide);
+        let actions = payment_candidates(&r);
+        let batch = witness_payment_continuations(r.state(), &actions);
+        if islands > 0 {
+            assert_eq!(
+                actions
+                    .iter()
+                    .filter(|action| **action != GameAction::CancelCast)
+                    .count(),
+                65
+            );
+            assert_eq!(
+                batch.status,
+                PaymentContinuationBatchStatus::Indeterminate(
+                    PaymentContinuationIndeterminate::OverRootCapacity
+                )
+            );
+            assert!(batch.successors.iter().all(Option::is_none));
+        } else {
+            let guide_index = actions
+                .iter()
+                .position(|action| action == &guide_action)
+                .unwrap();
+            assert!(batch.successors[guide_index].is_some());
+        }
+        assert!(
+            r.act(GameAction::PassPriority).is_err(),
+            "unfunded confirmation never finishes"
+        );
+        r.act(GameAction::CancelCast)
+            .expect("cancel before committing a mana source");
+        for (id, incarnation) in [(card, card_incarnation), (guide, guide_incarnation)] {
+            assert_eq!(r.state().objects[&id].zone, Zone::Hand);
+            assert_eq!(r.state().objects[&id].incarnation, incarnation);
+            assert!(r.state().objects[&id].counters.is_empty());
+        }
+        assert!(matches!(
+            r.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        assert!(r.state().pending_cast.is_none());
+        assert_eq!(payment_pool(&r).total(), 0);
+
+        open_manual_suspend(&mut r, card, "{R}");
+        r.act(mana_ability(&r, guide)).unwrap();
+        assert_eq!(payment_pool(&r).count_color(ManaType::Red), 1);
+        assert_eq!(r.state().objects[&guide].zone, Zone::Exile);
+        assert!(r.state().objects[&guide].counters.is_empty());
+        let finished = r.act(GameAction::PassPriority).unwrap();
+        check_suspend_delivery(&r, card, 10);
+        assert_counter_event(&finished.events, card, 10);
+        assert_eq!(payment_pool(&r).total(), 0);
+        assert!(lands.iter().all(|land| !r.state().objects[land].tapped));
+    }
+}
+
+/// CR 106.6: restricted blue from Guidelight and Omen doesn't pay Suspend; Hydraulic's does.
+#[test]
+fn only_restrictions_covering_special_actions_can_fund_suspend() {
+    for (name, oracle, payable) in [
+        (
+            "Omen Hawker",
+            "{T}: Add {C}{U}. Spend this mana only to activate abilities.",
+            false,
+        ),
+        (
+            "Guidelight Optimizer",
+            "{T}: Add {U}. Spend this mana only to cast an artifact spell or activate an ability.",
+            false,
+        ),
+        (
+            "Hydraulic Helper",
+            "Defender\n{T}: Add {U}. This mana can't be spent to cast a nonartifact spell.",
+            true,
+        ),
+    ] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let producer = s.add_creature_from_oracle(P0, name, 2, 3, oracle).id();
+        let card = spell(&mut s, P0, "Ancestral Vision", false, "", ANCESTRAL_VISION);
+        let mut r = s.build();
+        assert!(restriction_alone(&r, P0, card));
+        let auto = suspend_action(&r, card);
+        let manual = manual_suspend(&r, card);
+        assert_eq!(legal_actions(r.state()).contains(&auto), payable, "{name}");
+        if payable {
+            let result = r
+                .act(auto)
+                .expect("Hydraulic's prohibition only applies to casting");
+            check_suspend_delivery(&r, card, 4);
+            assert_counter_event(&result.events, card, 4);
+            assert!(r.state().objects[&producer].tapped);
+            assert_eq!(payment_pool(&r).total(), 0);
+        } else {
+            assert!(!legal_actions(r.state()).contains(&manual));
+            assert!(r.act(auto).is_err());
+            assert!(r.act(manual).is_err());
+            assert!(!r.state().objects[&producer].tapped);
+            assert_eq!(r.state().objects[&card].zone, Zone::Hand);
+        }
+    }
+}
+
+#[test]
+fn suspend_manual_confirmation_leaves_legacy_activation_mana_unspent() {
+    use engine::types::mana::{ManaRestriction, ManaUnit};
+    let legacy: ManaRestriction = serde_json::from_value(serde_json::json!({
+        "OnlyForTypeSpellsOrAbilities": { "spell_type": "Artifact", "ability": "Any" }
+    }))
+    .expect("decode the legacy restriction");
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let card = sentence(&mut s);
+    let skirge = familiar(&mut s);
+    let spare = sentence(&mut s);
+    let swamp = s.add_basic_land(P0, ManaColor::Black);
+    let beacon = s
+        .add_artifact_from_oracle(P0, "Voltaic Key", "{1}, {T}: Untap target artifact.")
+        .id();
+    let mut r = s.build();
+    let denied = r
+        .state_mut()
+        .add_mana_to_pool(
+            P0,
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![legacy]),
+        )
+        .expect("add and stamp the legacy unit");
+
+    let mut can_activate = GameRunner::from_state(r.state().clone());
+    can_activate
+        .act(GameAction::ActivateAbility {
+            source_id: beacon,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("a real activation accepts the legacy unit");
+    assert!(can_activate.state().objects[&beacon].tapped);
+    assert_eq!(payment_pool(&can_activate).total(), 0);
+    assert!(!can_activate.state().stack.is_empty());
+
+    open_manual_suspend(&mut r, card, "{1}{B}");
+    assert!(r
+        .act(GameAction::SpendPoolMana {
+            pip_id: denied.pip_id
+        })
+        .is_err());
+    tap_land(&mut r, swamp);
+    assert!(
+        r.act(GameAction::PassPriority).is_err(),
+        "one eligible mana and one denied mana are insufficient"
+    );
+    r.act(mana_ability(&r, skirge)).unwrap();
+    r.act(choose_card(spare)).unwrap();
+    let result = r.act(GameAction::PassPriority).unwrap();
+    check_suspend_delivery(&r, card, 3);
+    assert_counter_event(&result.events, card, 3);
+    assert_eq!(payment_pool(&r).total(), 1);
+    assert_eq!(
+        payment_pool(&r).units().next().unwrap().pip_id,
+        denied.pip_id
+    );
+}
+
+#[test]
+fn suspend_does_not_use_creature_spell_spend_as() {
+    use engine::types::mana::ManaUnit;
+    for orrery in [false, true] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        s.add_creature_from_oracle(P0, "Vizier of the Menagerie", 3, 4,
+            "You may look at the top card of your library any time.\nYou may cast creature spells from the top of your library.\nYou can spend mana of any type to cast creature spells.");
+        let source = orrery.then(|| s.add_artifact_from_oracle(P0, "Chromatic Orrery",
+            "You may spend mana as though it were mana of any color.\n{T}: Add {C}{C}{C}{C}{C}.\n{5}, {T}: Draw a card for each color among permanents you control.").id());
+        let card = gargadon(&mut s);
+        let goblin = s
+            .add_creature_to_hand_from_oracle(P0, "Raging Goblin", 1, 1, "Haste")
+            .with_mana_cost(parse_mtgjson_mana_cost("{R}"))
+            .id();
+        let mut r = s.build();
+        if let Some(id) = source {
+            r.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+        }
+        r.state_mut()
+            .add_mana_to_pool(
+                P0,
+                ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            )
+            .unwrap();
+        if orrery {
+            let action = suspend_action(&r, card);
+            assert!(legal_actions(r.state()).contains(&action));
+            r.act(action).expect("board-wide spend-as pays Suspend");
+            check_suspend_delivery(&r, card, 10);
+        } else {
+            assert_eq!(readings(&r, card), [false, false, true]);
+            r.cast(goblin)
+                .resolve()
+                .assert_zone(&[goblin], Zone::Battlefield);
+            assert_eq!(payment_pool(&r).total(), 0);
+        }
+    }
+}
+
+/// CR 111.10h + CR 106.6: the Powerstone producer covers Suspend's generic mana.
+#[test]
+fn powerstone_mana_can_pay_the_generic_suspend_cost() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let swamp = s.add_basic_land(P0, ManaColor::Black);
+    let printed_ability = engine::game::effects::token::predefined_token_abilities("Powerstone")
+        .pop()
+        .expect("Powerstone has a real token-catalog mana ability");
+    let powerstone = s
+        .add_creature(P0, "Powerstone", 0, 0)
+        .as_artifact()
+        .with_ability_definition(printed_ability)
+        .id();
+    let card = sentence(&mut s);
+    let mut r = s.build();
+    let action = suspend_action(&r, card);
+    assert!(legal_actions(r.state()).contains(&action));
+    let finished = r.act(action).expect("Swamp and Powerstone pay {1}{B}");
+    check_suspend_delivery(&r, card, 3);
+    assert_counter_event(&finished.events, card, 3);
+    assert!(r.state().objects[&swamp].tapped);
+    assert!(r.state().objects[&powerstone].tapped);
+    assert_eq!(payment_pool(&r).total(), 0);
 }

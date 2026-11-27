@@ -335,6 +335,8 @@ pub enum InteractionManaSpecialAction {
     EndContinuousEffect,
     /// CR 116.2h: pay {2} to foretell a card from hand.
     Foretell,
+    /// CR 116.2f: pay a card’s Suspend cost.
+    Suspend,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

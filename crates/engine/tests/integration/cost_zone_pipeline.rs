@@ -16759,3 +16759,141 @@ fn commit_with_one_parking_fuel_among_three_triggers_for_every_fuel() {
         assert_eq!(counters, 3);
     }
 }
+
+/// CR 118.11 + CR 702.62a: the paid self-exile may be redirected. Only face-up exile gets counters.
+#[test]
+fn suspend_payment_witness_resumes_the_optional_exile_redirect() {
+    use engine::ai_support::{candidate_actions, legal_actions, witness_payment_continuations};
+
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let mountain = s.add_basic_land(P0, ManaColor::Red);
+    let card = s.add_creature_to_hand_from_oracle(P0, "Greater Gargadon", 9, 7,
+        "Suspend 10—{R}\nSacrifice an artifact, creature, or land: Remove a time counter from this card. Activate only if this card is suspended.").id();
+    // A controlled optional replacement makes both delivery branches reachable.
+    // Reuses the same Moved replacement seam as the Plot cost witness above.
+    s.add_creature(P0, "Optional Suspend Exile Redirect", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(
+            redirect_moved_to(Zone::Exile, Zone::Graveyard)
+                .mode(ReplacementMode::Optional { decline: None }),
+        );
+    let mut r = s.build();
+    let action = legal_actions(r.state())
+        .into_iter()
+        .find(|action| {
+            matches!(action,
+                GameAction::ActivateAbility { source_id, .. } if *source_id == card
+            )
+        })
+        .expect("Suspend is offered through the real action");
+    let GameAction::ActivateAbility { ability_index, .. } = action else {
+        unreachable!()
+    };
+    let opened = r
+        .act(GameAction::ActivateAbility {
+            source_id: card,
+            ability_index,
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the selected Suspend opens Manual payment");
+    assert!(matches!(
+        opened.waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    let (_, _, mut grouped) = engine::ai_support::legal_actions_for_viewer(r.state(), P0);
+    let tap = grouped
+        .remove(&mountain)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|action| {
+            matches!(
+                action,
+                GameAction::TapLandForMana { .. } | GameAction::ActivateManaSource { .. }
+            )
+        })
+        .expect("the Mountain offers its mana action");
+    r.act(tap).unwrap();
+
+    let confirm = witness_payment_continuations(r.state(), &[GameAction::PassPriority]);
+    assert!(
+        confirm.successors[0].is_some(),
+        "the witness follows the parked self-exile"
+    );
+    let paused = r
+        .act(GameAction::PassPriority)
+        .expect("pay the red and reach the move choice");
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    assert_eq!(r.state().objects[&card].zone, Zone::Hand);
+    assert!(r.state().objects[&card].counters.is_empty());
+    assert!(paused.events.iter().all(|event| !matches!(
+        event,
+        GameEvent::AbilityActivated { .. } | GameEvent::CounterAdded { .. }
+    )));
+    assert!(r.state().stack.is_empty());
+    assert_eq!(r.state().players[P0.0 as usize].mana_pool.total(), 0);
+
+    let actions: Vec<_> = candidate_actions(r.state())
+        .into_iter()
+        .map(|candidate| candidate.action)
+        .collect();
+    let certificates = witness_payment_continuations(r.state(), &actions);
+    for (index, destination) in [(0, Zone::Graveyard), (1, Zone::Exile)] {
+        let selection = GameAction::ChooseReplacement { index };
+        let slot = actions
+            .iter()
+            .position(|action| *action == selection)
+            .unwrap();
+        assert!(
+            certificates.successors[slot].is_some(),
+            "certify redirect and ordinary delivery"
+        );
+        let mut branch = GameRunner::from_state(r.state().clone());
+        let result = branch
+            .act(selection)
+            .expect("settle the selected replacement branch");
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        let object = &branch.state().objects[&card];
+        assert_eq!(object.zone, destination);
+        assert!(!object.face_down);
+        let should_suspend = destination == Zone::Exile;
+        assert_eq!(
+            object
+                .counters
+                .get(&CounterType::Time)
+                .copied()
+                .unwrap_or_default(),
+            if should_suspend { 10 } else { 0 }
+        );
+        assert_eq!(branch.state().players[P0.0 as usize].mana_pool.total(), 0);
+        assert!(branch.state().stack.is_empty());
+        let events: Vec<_> = paused.events.iter().chain(&result.events).collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::ZoneChanged {
+            object_id, from: Some(Zone::Hand), to, ..
+        } if *object_id == card && *to == destination))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::CounterAdded {
+            object_id, counter_type: CounterType::Time, count: 10, actor: P0,
+        } if *object_id == card))
+                .count(),
+            usize::from(should_suspend)
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::AbilityActivated { .. })));
+    }
+}

@@ -419,17 +419,27 @@ pub fn mana_actions_for_player(
 ) -> Vec<GameAction> {
     let aura_sources = taps_for_mana_trigger_sources(state);
     let mana_activation_gates = mana_abilities::ManaActivationGates::compute_for(state, purpose);
+    let suspend_hand = super::casting::reserved_suspend_card(state, player)
+        .map(|_| &state.players[player.0 as usize].hand);
     let mut actions = Vec::new();
-    for &object_id in &state.battlefield {
+    for &object_id in state
+        .battlefield
+        .iter()
+        .chain(suspend_hand.into_iter().flatten())
+    {
         let Some(object) = state.objects.get(&object_id) else {
             continue;
         };
-        if object.controller != player {
+        if !matches!(object.zone, Zone::Battlefield | Zone::Hand)
+            || object.controller_or_owner() != player
+        {
             continue;
         }
 
         let mut handled_indices = std::collections::HashSet::new();
-        if object.card_types.core_types.contains(&CoreType::Land) {
+        if object.zone == Zone::Battlefield
+            && object.card_types.core_types.contains(&CoreType::Land)
+        {
             let options = activatable_land_mana_options_indexed_gated(
                 state,
                 object_id,
@@ -3081,6 +3091,7 @@ pub(crate) fn spell_being_cast(state: &GameState, player: PlayerId) -> Option<Ob
         .pending_cast
         .as_ref()
         .filter(|pending| pending.ability.controller == player)
+        .filter(|pending| super::casting::pending_suspend(pending, player).is_none())
         .map(|pending| pending.object_id)
 }
 

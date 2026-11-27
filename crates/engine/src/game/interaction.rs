@@ -5637,6 +5637,7 @@ fn interaction_mana_special_action(action: SpecialAction) -> InteractionManaSpec
         SpecialAction::RollPlanarDie => InteractionManaSpecialAction::RollPlanarDie,
         SpecialAction::EndContinuousEffect => InteractionManaSpecialAction::EndContinuousEffect,
         SpecialAction::Foretell => InteractionManaSpecialAction::Foretell,
+        SpecialAction::Suspend => InteractionManaSpecialAction::Suspend,
     }
 }
 

@@ -91,7 +91,7 @@ fn terminal_cast_cancellation_error(err: &EngineError) -> Option<EngineError> {
 
 pub(crate) const ABANDONED_CAST_FINALIZATION_ERROR: &str = "__abandoned_cast_finalization__";
 
-fn abandoned_cast_finalization_error() -> EngineError {
+pub(super) fn abandoned_cast_finalization_error() -> EngineError {
     EngineError::InvalidAction(ABANDONED_CAST_FINALIZATION_ERROR.to_string())
 }
 
@@ -263,7 +263,11 @@ fn ensure_pending_spell_announcement_is_live(
     state: &GameState,
     pending: &PendingCast,
 ) -> Result<(), EngineError> {
-    if pending.activation_ability_index.is_none()
+    if let Some(source) = super::casting::pending_suspend(pending, pending.ability.controller) {
+        if !super::casting::suspend_source_is_live(state, pending.ability.controller, source) {
+            return Err(abandoned_cast_finalization_error());
+        }
+    } else if pending.activation_ability_index.is_none()
         && !state
             .stack
             .iter()
@@ -9788,6 +9792,12 @@ pub(super) fn push_activated_ability_to_stack(
             &top_library_exile_cost_ids,
             CostMoveOutcome::Relocation,
         );
+    }
+
+    if let Some(waiting) =
+        super::casting::finish_suspend(state, player, &resolved, activation_cost_snapshot, events)
+    {
+        return Ok(waiting);
     }
 
     // CR 702.170b: Plot is a special action that never uses the stack. Its
@@ -20920,6 +20930,7 @@ fn finalize_mana_payment_with_resume(
                     // Interactive activation resume: top-level, no outer cost on the stack.
                     None,
                     &mana_resume,
+                    manual_payment.is_some(),
                 )? {
                     super::casting::ManaCostPayment::Paid(()) => {}
                     super::casting::ManaCostPayment::Paused {
@@ -21361,6 +21372,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                     // Interactive Phyrexian-choice resume: top-level activation, no outer cost.
                     None,
                     &mana_resume,
+                    manual_payment.is_some(),
                 )? {
                     super::casting::ManaCostPayment::Paid(()) => {}
                     super::casting::ManaCostPayment::Paused {
@@ -21765,7 +21777,12 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     // choice waste the source even though no mana was required.
     let mut preview = state.clone();
     let mut preview_events = Vec::new();
-    if payment_context.is_none() && excluded_sources.is_empty() {
+    if state.pending_cast.as_deref().is_some_and(|pending| {
+        super::casting::activation_pays_mana_manually(pending)
+            && super::casting::pending_suspend(pending, player).is_some()
+    }) {
+        // A manual Suspend confirmation may spend the pool the player assembled.
+    } else if payment_context.is_none() && excluded_sources.is_empty() {
         auto_tap_mana_sources_with_context_and_resume(
             &mut preview,
             player,

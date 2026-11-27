@@ -9230,9 +9230,8 @@ fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u
 ///      `activation_zone = Hand` and `ActivationRestriction::MatchesCardCastTiming`
 ///      (CR 702.62a "if you could begin to cast this card by putting it onto the
 ///      stack from your hand"). Cost is composite (mana + exile self from hand);
-///      effect is a Time-counter `PutCounter` on the now-exiled SelfRef. Stifle
-///      can counter the synthesized activation on the stack. Under CR 116.2f and
-///      CR 702.62a, suspending is a special action that skips the stack.
+///      effect describes the time counters placed on the exiled card as part
+///      of the hand special action (CR 116.2f).
 ///
 ///   2. **Upkeep counter-removal trigger** ("At the beginning of your upkeep,
 ///      if this card is suspended, remove a time counter from it.") fires from
@@ -9269,7 +9268,7 @@ pub fn synthesize_suspend(face: &mut CardFace) {
         return;
     };
 
-    // CR 702.62a: Activated ability — pay [cost], exile self from hand, then
+    // CR 702.62a: Hand special action — pay [cost], exile self from hand, then
     // place N time counters on it. Composite cost mirrors `synthesize_cycling`.
     let already_has_activation = face.abilities.iter().any(|a| {
         a.activation_zone == Some(Zone::Hand)

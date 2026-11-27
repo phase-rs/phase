@@ -508,6 +508,7 @@ fn special_action_rank(value: SpecialAction) -> u8 {
         SpecialAction::RollPlanarDie => 4,
         SpecialAction::EndContinuousEffect => 5,
         SpecialAction::Foretell => 6,
+        SpecialAction::Suspend => 7,
     }
 }
 

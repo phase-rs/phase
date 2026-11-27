@@ -9,15 +9,17 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use crate::ai_support::candidate_actions;
+use crate::game::casting::{pending_suspend, suspend_cost_destination};
 use crate::game::engine::{apply_as_current_for_simulation, apply_interaction_for_simulation};
 use crate::types::actions::GameAction;
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CollectEvidenceResume, CostResume, DeferredLifeCostResume, GameState, ManaAbilityCostCursor,
-    ManaAbilityResume, ManaChoiceContext, PendingCast, PendingCostMoveCompletion,
+    ManaAbilityResume, ManaChoiceContext, PendingCast, PendingCastOwner, PendingCostMoveCompletion,
     PendingCostMoveResume, PendingManaAbility, StackEntryKind, WaitingFor,
 };
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -303,9 +305,34 @@ impl RngMark {
 /// A step is information-safe when it neither draws from the game's random
 /// generator (random costs, shuffles, coin flips, die rolls) nor moves or
 /// shows a card from a hidden zone.
-fn step_is_information_safe(origin: RngMark, state: &GameState, events: &[GameEvent]) -> bool {
+fn step_is_information_safe(
+    origin: RngMark,
+    state: &GameState,
+    events: &[GameEvent],
+    known_hand: Option<(&GameState, PlayerId)>,
+) -> bool {
     RngMark::of(state) == origin
         && !events.iter().any(|event| {
+            if let GameEvent::CardsRevealed {
+                player,
+                occurrences,
+                card_ids,
+                ..
+            } = event
+            {
+                // CR 400.2 + CR 701.20a: exact occurrences already known to the payer.
+                return !known_hand.is_some_and(|(before, payer)| {
+                    *player == payer
+                        && !occurrences.is_empty()
+                        && occurrences.len() == card_ids.len()
+                        && occurrences.iter().zip(card_ids).all(|(source, id)| {
+                            source.object_id == *id
+                                && crate::game::casting::suspend_source_is_live(
+                                    before, payer, *source,
+                                )
+                        })
+                });
+            }
             matches!(
                 event,
                 GameEvent::ZoneChanged {
@@ -314,7 +341,6 @@ fn step_is_information_safe(origin: RngMark, state: &GameState, events: &[GameEv
                 } | GameEvent::CardDrawn { .. }
                     | GameEvent::CardsDrawn { .. }
                     | GameEvent::Milled { .. }
-                    | GameEvent::CardsRevealed { .. }
                     | GameEvent::HiddenSearchViewed { .. }
                     | GameEvent::Clash { .. }
                     | GameEvent::DieRolled { .. }
@@ -406,7 +432,7 @@ fn targeted_cast_verdict(
         return TargetedCastVerdict::Indeterminate;
     }
     let root = root_from_pending_cast(pending_cast, pending_cast.ability.controller);
-    if !step_is_information_safe(origin, &current, &announced.events) {
+    if !step_is_information_safe(origin, &current, &announced.events, None) {
         return TargetedCastVerdict::Indeterminate;
     }
     let Some(baseline) = WitnessBaseline::capture(&current, &root) else {
@@ -435,7 +461,7 @@ fn targeted_cast_verdict(
             *attempts += 1;
             let mut next = current.clone();
             if let Ok(result) = apply_as_current_for_simulation(&mut next, action) {
-                if !step_is_information_safe(origin, &next, &result.events) {
+                if !step_is_information_safe(origin, &next, &result.events, None) {
                     return TargetedCastVerdict::Indeterminate;
                 }
                 events.extend(result.events);
@@ -462,12 +488,31 @@ fn targeted_cast_verdict(
     ) {
         return TargetedCastVerdict::Indeterminate;
     }
-    let actions: Vec<_> = candidate_actions(&current)
+    payment_offer_verdict(&current, origin, max_attempts, attempts)
+}
+
+impl TargetedCastVerdict {
+    pub(crate) fn for_suspend(state: &GameState) -> Self {
+        if finalizes_in_one_step(state, &GameAction::PassPriority).is_some() {
+            return Self::Completed;
+        }
+        const BUDGET: usize = TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS;
+        payment_offer_verdict(state, RngMark::of(state), BUDGET, &mut 1)
+    }
+}
+
+fn payment_offer_verdict(
+    current: &GameState,
+    origin: RngMark,
+    max_attempts: usize,
+    attempts: &mut usize,
+) -> TargetedCastVerdict {
+    let actions: Vec<_> = candidate_actions(current)
         .into_iter()
         .map(|candidate| candidate.action)
         .collect();
     let (batch, used) = witness_payment_continuations_inner(
-        &current,
+        current,
         &actions,
         SearchPolicy::AnyRoot {
             attempts: max_attempts - *attempts,
@@ -580,12 +625,17 @@ fn witness_payment_continuations_inner(
     };
     // `AnyRoot` only: a successor this search may not certify or expand.
     let mut unexplored = false;
-    let information_unsafe = |successor: &GameState, step_events: &[GameEvent]| match policy {
-        SearchPolicy::EveryRoot => false,
-        SearchPolicy::AnyRoot { origin, .. } => {
-            !step_is_information_safe(origin, successor, step_events)
-        }
-    };
+    let information_unsafe =
+        |before: &GameState, successor: &GameState, step_events: &[GameEvent]| match policy {
+            SearchPolicy::EveryRoot => false,
+            SearchPolicy::AnyRoot { origin, .. } => {
+                let known_hand = match baseline.completion {
+                    CompletionBaseline::Suspend { payer, .. } => Some((before, payer)),
+                    CompletionBaseline::Spell { .. } | CompletionBaseline::Activation => None,
+                };
+                !step_is_information_safe(origin, successor, step_events, known_hand)
+            }
+        };
 
     let mut attempts = 0;
     let mut successors = empty();
@@ -611,7 +661,7 @@ fn witness_payment_continuations_inner(
         let Ok(result) = apply_as_current_for_simulation(&mut successor, action.clone()) else {
             continue;
         };
-        if information_unsafe(&successor, &result.events) {
+        if information_unsafe(state, &successor, &result.events) {
             unexplored = true;
             continue;
         }
@@ -693,7 +743,7 @@ fn witness_payment_continuations_inner(
         let Ok(result) = result else {
             continue;
         };
-        if information_unsafe(&next_state, &result.events) {
+        if information_unsafe(&node.state, &next_state, &result.events) {
             unexplored = true;
             continue;
         }
@@ -877,6 +927,10 @@ enum CompletionBaseline {
         controller: PlayerId,
     },
     Activation,
+    Suspend {
+        source: ObjectIncarnationRef,
+        payer: PlayerId,
+    },
 }
 
 impl WitnessBaseline {
@@ -911,7 +965,18 @@ impl WitnessBaseline {
                     controller: *payer,
                 }
             }
-            PaymentContinuationRoot::Activation { .. } => CompletionBaseline::Activation,
+            PaymentContinuationRoot::Activation { payer, .. } => state
+                .pending_cast
+                .as_deref()
+                .or_else(|| state.pending_cast_at(PendingCastOwner::CostMove))
+                .filter(|pending| pending_matches_root(pending, root))
+                .and_then(|pending| pending_suspend(pending, *payer))
+                .map_or(CompletionBaseline::Activation, |source| {
+                    CompletionBaseline::Suspend {
+                        source,
+                        payer: *payer,
+                    }
+                }),
         };
         Some(Self {
             pre_stack_ids,
@@ -927,6 +992,16 @@ fn finalized_root_matches(
     events: &[GameEvent],
 ) -> bool {
     match (&baseline.completion, root) {
+        (CompletionBaseline::Suspend { source, payer }, PaymentContinuationRoot::Activation { .. }) => {
+            match suspend_cost_destination(state, *source) {
+                Some(Zone::Exile) => events.iter().any(|event| matches!(event,
+                    GameEvent::CounterAdded { object_id, counter_type: CounterType::Time, actor, .. }
+                        if *object_id == source.object_id && actor == payer
+                )),
+                Some(_) => true,
+                None => false,
+            }
+        }
         (
             CompletionBaseline::Spell {
                 entry_id,
@@ -1045,6 +1120,11 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
                 PaymentContinuationState::NotAffiliated
             }
         },
+        PendingCostMoveResume::Cast {
+            player, pending: Some(pending), completion: PendingCostMoveCompletion::FinishPending,
+            destination: Zone::Exile, chosen, ..
+        } if chosen.as_slice() == [pending.object_id] && pending_suspend(pending, *player).is_some() =>
+            PaymentContinuationState::Affiliated(root_from_pending_cast(pending, *player)),
         // CR 601.2h: a Delve commit parked mid-exile still owns the cast's payment root.
         PendingCostMoveResume::Cast {
             pending: Some(pending),
@@ -1495,13 +1575,14 @@ mod tests {
         use crate::types::game_state::RandomDraw;
         let mut state = GameState::new_two_player(1);
         let origin = RngMark::of(&state);
-        assert!(step_is_information_safe(origin, &state, &[]));
+        assert!(step_is_information_safe(origin, &state, &[], None));
         assert!(step_is_information_safe(
             origin,
             &state,
             &[GameEvent::DamageCleared {
                 object_id: ObjectId(1),
-            }]
+            }],
+            None,
         ));
         assert!(!step_is_information_safe(
             origin,
@@ -1510,7 +1591,8 @@ mod tests {
                 player_id: PlayerId(0),
                 object_id: ObjectId(1),
                 to: Zone::Graveyard,
-            }]
+            }],
+            None,
         ));
         assert!(!step_is_information_safe(
             origin,
@@ -1520,11 +1602,12 @@ mod tests {
                 card_ids: vec![ObjectId(1)],
                 card_names: vec!["Hidden".to_string()],
                 occurrences: Vec::new(),
-            }]
+            }],
+            None,
         ));
         let _ = rand::RngCore::next_u32(state.rng.draw(RandomDraw::Placement));
         assert!(
-            !step_is_information_safe(origin, &state, &[]),
+            !step_is_information_safe(origin, &state, &[], None),
             "a shuffle or random order moved the generator"
         );
     }
