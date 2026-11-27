@@ -40,9 +40,29 @@ use super::super::oracle_util::{
 };
 use crate::parser::oracle_ir::ast::*;
 
+/// CR 111.4 + CR 704.5j: a token clause ending "... and name it" (A Girl and
+/// Her Dogs) lets the controller choose each token's name. Nothing implements
+/// that choice, and without it every legendary token would share one name and
+/// the legend rule would put all but one into the graveyard, so the whole
+/// clause stays an honest gap instead of creating a misnamed token.
+pub(super) fn try_fence_token_naming(tp: TextPair<'_>) -> Option<Effect> {
+    nom_primitives::scan_at_word_boundaries(tp.lower.trim(), |input| {
+        value(
+            (),
+            all_consuming(terminated(tag("and name it"), opt(tag(".")))),
+        )
+        .parse(input)
+    })
+    .map(|()| Effect::unimplemented("name_created_token", tp.original))
+}
+
 pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
+
+    if let Some(gap) = try_fence_token_naming(TextPair::new(&text, &lower)) {
+        return Some(gap);
+    }
 
     // "create a token that's a copy of {target}"
     if let Ok((_, (mut tapped, mut enters_attacking))) = parse_copy_token_entry_modifiers(&lower) {
@@ -572,7 +592,8 @@ fn parse_characteristic_only_token_mode(
 ) -> Option<TokenDescription> {
     let mode = mode.trim();
     let mode = mode.trim_end_matches('.').trim_end();
-    let (supertypes, characteristics) = strip_token_supertypes(mode);
+    let mut supertypes = Vec::new();
+    let characteristics = strip_token_supertypes(mode, &mut supertypes);
     let (after_pt, (power, toughness)) = nom_primitives::parse_pt_value
         .parse(characteristics.trim_start())
         .ok()?;
@@ -932,8 +953,8 @@ fn parse_token_description_with_context(
         break;
     }
 
-    let (supertypes, rest_after_supertypes) = strip_token_supertypes(rest);
-    rest = rest_after_supertypes;
+    let mut supertypes = Vec::new();
+    rest = strip_token_supertypes(rest, &mut supertypes);
 
     let (mut power, mut toughness, rest) =
         if let Ok((rest, (power, toughness))) = nom_primitives::parse_pt_value.parse(rest) {
@@ -943,6 +964,7 @@ fn parse_token_description_with_context(
         };
 
     let (mut colors, rest) = parse_token_color_prefix(rest);
+    let rest = strip_token_supertypes(rest, &mut supertypes);
     let (descriptor, suffix) = split_token_head(rest)?;
     let (name_override, suffix) = parse_token_name_clause(suffix);
     // CR 105.1 + CR 105.2: "that's all colors" (Mechtitan Core, etc.) makes the
@@ -1246,13 +1268,12 @@ fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
     None
 }
 
-/// CR 205.4a: Strip leading supertype words from the token description and
-/// return the captured supertypes alongside the remaining text. Previously the
-/// supertypes were discarded; capturing them lets legendary/snow tokens (Marit
-/// Lage etc.) carry their supertype through to `Effect::Token` — load-bearing
-/// for the legend rule (CR 704.5j).
-fn strip_token_supertypes(mut text: &str) -> (Vec<Supertype>, &str) {
-    let mut supertypes = Vec::new();
+/// CR 205.4a: Capture leading supertype words into `supertypes` and return
+/// the rest of the token description. Called before the P/T and again after
+/// the color descriptor ("a colorless snow artifact token"), so legendary and
+/// snow tokens (Marit Lage, Icy Manalith) carry their supertypes through to
+/// `Effect::Token`, which the legend rule (CR 704.5j) needs.
+fn strip_token_supertypes<'a>(mut text: &'a str, supertypes: &mut Vec<Supertype>) -> &'a str {
     loop {
         let trimmed = text.trim_start();
         let trimmed_lower = trimmed.to_lowercase();
@@ -1264,7 +1285,7 @@ fn strip_token_supertypes(mut text: &str) -> (Vec<Supertype>, &str) {
             ))
             .parse(i)
         }) else {
-            return (supertypes, trimmed);
+            return trimmed;
         };
         if !supertypes.contains(&supertype) {
             supertypes.push(supertype);
@@ -1856,6 +1877,8 @@ fn parse_token_identity_with_default_type(
             "creature" => push_unique_string(&mut core_types, "Creature"),
             "enchantment" => push_unique_string(&mut core_types, "Enchantment"),
             "land" => push_unique_string(&mut core_types, "Land"),
+            // CR 205.4a: supertypes are captured by `strip_token_supertypes`
+            // before the descriptor; never mistake one for a subtype.
             "snow" | "legendary" | "basic" => {}
             _ => subtypes.push(title_case_word(word)),
         }
@@ -4189,6 +4212,33 @@ mod tests {
         assert_eq!(toughness, PtValue::Fixed(20));
         assert!(keywords.contains(&Keyword::Flying));
         assert!(keywords.contains(&Keyword::Indestructible));
+    }
+
+    /// CR 111.3 + CR 205.4a: Supertypes after the color descriptor belong
+    /// to the created token's type line.
+    ///
+    /// Synthetic shape: no printed card creates a colorless legendary snow
+    /// artifact token. Combining both supertypes checks that the stripper
+    /// collects every supertype after the color in order, which no single
+    /// printed token shows. Nearest printed witness: Svella, Ice Shaper's
+    /// "colorless snow artifact token named Icy Manalith".
+    #[test]
+    fn named_noncreature_token_captures_supertypes_after_color() {
+        let clause = "create a colorless legendary snow artifact token named Winter Relic";
+        let effect = try_parse_token(&clause.to_lowercase(), clause, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            name,
+            types,
+            supertypes,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Winter Relic");
+        assert_eq!(types, ["Artifact"]);
+        assert_eq!(supertypes, [Supertype::Legendary, Supertype::Snow]);
     }
 
     #[test]
