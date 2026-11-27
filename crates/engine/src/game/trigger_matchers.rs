@@ -2844,6 +2844,7 @@ fn attack_declaration_attacker_matches(
 /// per attacker, so such a trigger answers false. A `valid_target` beside an
 /// attacker-side filter ("whenever this creature attacks the player with the
 /// most life") is checked per attacker like any other.
+/// A declaration ordinal is checked against this attacker's next declaration.
 pub fn attack_trigger_matches_attack(
     state: &GameState,
     source: &crate::game::game_object::GameObject,
@@ -2866,7 +2867,11 @@ pub fn attack_trigger_matches_attack(
         return false;
     };
     let source_context = super::triggers::trigger_source_context_for_latch(state, source);
-    attack_declaration_attacker_matches(trigger, state, attacker, &source_context)
+    trigger.attack_declaration_ordinal.is_none_or(|ordinal| {
+        state.objects.get(&attacker).is_some_and(|object| {
+            super::combat::next_attack_declaration_ordinal(state, object) == ordinal
+        })
+    }) && attack_declaration_attacker_matches(trigger, state, attacker, &source_context)
         && attack_target_matches(trigger, state, target, defending_player, &source_context)
 }
 

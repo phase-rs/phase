@@ -5,11 +5,12 @@
 
 use engine::ai_support::legal_actions_full;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::triggers::attack_trigger_matches_attack;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{TargetRef, TriggerCondition};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -322,6 +323,87 @@ fn scourge_checks_the_actual_attacked_player_at_detection_and_resolution() {
 }
 
 #[test]
+fn scourge_removed_from_combat_before_resolution_grants_no_extra_combat() {
+    const RECONNAISSANCE: &str = "{0}: Remove target attacking creature you control from combat and untap it. (If you activate during end of combat, the creature will untap after it deals combat damage.)";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let scourge = scenario
+        .add_creature(P0, "Scourge of the Throne", 5, 5)
+        .from_oracle_text_with_keywords(&["Flying", "Dethrone"], SCOURGE_ORACLE)
+        .id();
+    let ally = scenario.add_creature(P0, "Other attacker", 2, 2).id();
+    let reconnaissance = scenario
+        .add_enchantment_from_oracle(P0, "Reconnaissance", RECONNAISSANCE)
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (scourge, AttackTarget::Player(P1)),
+            (ally, AttackTarget::Player(P1)),
+        ])
+        .unwrap();
+    if let WaitingFor::OrderTriggers { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::OrderTriggers { order: vec![0, 1] })
+            .unwrap();
+    }
+    assert_eq!(runner.state().stack.len(), 2);
+    assert!(runner.state().stack.iter().any(|entry| {
+        entry.source_id == scourge
+            && matches!(
+                entry.kind,
+                StackEntryKind::TriggeredAbility {
+                    condition: Some(TriggerCondition::SourceIsAttacking { .. }),
+                    ..
+                }
+            )
+    }));
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: reconnaissance,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(scourge)),
+        })
+        .unwrap();
+    assert_eq!(runner.state().stack.len(), 3);
+    runner.resolve_top();
+    assert_eq!(runner.state().stack.len(), 2);
+    assert_eq!(runner.state().objects[&scourge].zone, Zone::Battlefield);
+    let attackers = &runner.state().combat.as_ref().unwrap().attackers;
+    assert!(attackers
+        .iter()
+        .all(|attacker| attacker.object_id != scourge));
+    assert!(attackers.iter().any(|attacker| attacker.object_id == ally));
+
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().extra_phases.is_empty());
+    assert!(runner.state().objects[&ally].tapped);
+    assert_eq!(
+        runner.state().objects[&scourge]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&1)
+    );
+}
+
+#[test]
 fn scourge_attacking_a_planeswalker_spends_its_first_declaration() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -335,6 +417,22 @@ fn scourge_attacking_a_planeswalker_spends_its_first_declaration() {
         .id();
     let mut runner = scenario.build();
     runner.advance_to_combat();
+    let matches_prospective_attack = |runner: &GameRunner| {
+        let state = runner.state();
+        let source = &state.objects[&scourge];
+        let trigger =
+            engine::game::functioning_abilities::active_trigger_definitions(state, source)
+                .find(|active| active.definition.attack_declaration_ordinal == Some(1))
+                .expect("Scourge's first-declaration trigger");
+        attack_trigger_matches_attack(
+            state,
+            source,
+            trigger.definition,
+            scourge,
+            AttackTarget::Player(P1),
+        )
+    };
+    assert!(matches_prospective_attack(&runner));
     let turn = runner.state().turn_number;
     runner
         .declare_attackers(&[
@@ -348,6 +446,7 @@ fn scourge_attacking_a_planeswalker_spends_its_first_declaration() {
     assert!(!runner.state().extra_phases.is_empty());
     advance_to_next_attack_declaration(&mut runner);
     assert_eq!(runner.state().turn_number, turn);
+    assert!(!matches_prospective_attack(&runner));
 
     runner
         .declare_attackers(&[(scourge, AttackTarget::Player(P1))])
