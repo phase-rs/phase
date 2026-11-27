@@ -23366,27 +23366,17 @@ pub enum WaitingFor {
         /// and generic Aura entry can preserve source metadata for completion.
         pending_effect: Box<ResolvedAbility>,
     },
-    /// Digital-only Alchemy (no CR entry): a batch-semantics boon's "one of
-    /// them" token host ("one or more creatures enter … attached to one of
-    /// them", Dunbarrow Revivalist). The fire path stamped every matching
-    /// entrant on the ability; 2+ are still legal, so the controller picks
-    /// the host. This is a CHOICE, not a target (no "target" word), so
-    /// hexproof / shroud / protection do NOT filter `legal_targets`. The
-    /// resume path re-enters token creation with the choice bound.
-    ///
-    /// Shaped like the `ReturnAsAuraTarget` cluster
-    /// (`player`/`source_id`/`legal_targets`/pending payload) for a future
-    /// `ObjectPick` unification (see that variant's note); a dedicated
-    /// variant today because the resume re-enters token creation rather
-    /// than attaching an existing entrant, which no cluster member does.
+    /// CR 115.10a + CR 608.2d: Choose the current token member's attachment host
+    /// during resolution. This also carries stamped Alchemy boon host choices.
     ChooseTokenHost {
         player: PlayerId,
         source_id: ObjectId,
-        /// The still-legal stamped entrants (incarnation-current battlefield
-        /// objects, in batch order) the controller chooses among.
         legal_targets: Vec<TargetRef>,
-        /// The token-creation ability to resume once the host is chosen.
         pending_ability: Box<ResolvedAbility>,
+        /// The processed prefix in creation order. Its length identifies the
+        /// member currently prompting. Old boon prompts omitted the prefix.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        chosen_hosts: Vec<Option<TargetRef>>,
     },
     EquipTarget {
         player: PlayerId,
@@ -75595,6 +75585,7 @@ mod restored_exact_attack_authority_tests {
                     source_id: attacker,
                     legal_targets: vec![],
                     pending_ability: node.clone(),
+                    chosen_hosts: Vec::new(),
                 },
                 1 => WaitingFor::CollectEvidenceChoice {
                     player: P0,
@@ -75717,6 +75708,7 @@ mod restored_exact_attack_authority_tests {
             source_id: attacker,
             legal_targets: vec![],
             pending_ability: node.clone(),
+            chosen_hosts: Vec::new(),
         };
         let pre_payment_checks = || FinalizePrePaymentChecks {
             early_waiting_for: Some(token_host()),
@@ -76056,6 +76048,7 @@ mod restored_exact_attack_authority_tests {
                                     source_id: attacker,
                                     legal_targets: vec![],
                                     pending_ability: node.clone(),
+                                    chosen_hosts: Vec::new(),
                                 },
                             )),
                             prepaid_actual_mana_spent: None,
@@ -76547,6 +76540,7 @@ mod restored_exact_attack_authority_tests {
                             source_id,
                             legal_targets: vec![],
                             pending_ability: node.clone(),
+                            chosen_hosts: Vec::new(),
                         },
                         Some(ResolvingTriggerContext {
                             event: trigger_event.clone(),

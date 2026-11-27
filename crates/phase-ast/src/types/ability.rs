@@ -23653,21 +23653,47 @@ where
 /// An additional token noun phrase in a single creation instruction (CR 701.7a).
 /// Its characteristics and quantity remain unresolved until the instruction runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
-pub struct TokenCreationMember(Box<Effect>);
+pub struct TokenCreationMember {
+    #[serde(flatten)]
+    effect: Box<Effect>,
+    /// CR 115.10a + CR 608.2d: A described host is chosen during creation.
+    #[serde(skip_serializing_if = "TargetChoiceTiming::is_stack")]
+    host_choice_timing: TargetChoiceTiming,
+}
 
 impl TokenCreationMember {
     pub fn new(effect: Effect) -> Option<Self> {
+        Self::with_host_choice_timing(effect, TargetChoiceTiming::Stack)
+    }
+
+    pub fn with_host_choice_timing(
+        effect: Effect,
+        host_choice_timing: TargetChoiceTiming,
+    ) -> Option<Self> {
         match &effect {
             Effect::Token {
                 additional_members, ..
-            } if additional_members.is_empty() => Some(Self(Box::new(effect))),
+            } if additional_members.is_empty() => Some(Self {
+                effect: Box::new(effect),
+                host_choice_timing,
+            }),
             _ => None,
         }
     }
 
     pub fn effect(&self) -> &Effect {
-        &self.0
+        &self.effect
+    }
+
+    pub fn resolution_host_filter(&self) -> Option<&TargetFilter> {
+        match self.effect() {
+            Effect::Token { attach_to, .. }
+                if self.host_choice_timing == TargetChoiceTiming::Resolution =>
+            {
+                attach_to.as_ref()
+            }
+            _ => None,
+        }
     }
     pub fn count_and_pt_mut(&mut self) -> (&mut QuantityExpr, &mut PtValue, &mut PtValue) {
         let Effect::Token {
@@ -23675,7 +23701,7 @@ impl TokenCreationMember {
             power,
             toughness,
             ..
-        } = self.0.as_mut()
+        } = self.effect.as_mut()
         else {
             unreachable!("a token creation member carries a token effect");
         };
@@ -23685,7 +23711,7 @@ impl TokenCreationMember {
     pub(crate) fn static_abilities_mut(&mut self) -> &mut [StaticDefinition] {
         let Effect::Token {
             static_abilities, ..
-        } = self.0.as_mut()
+        } = self.effect.as_mut()
         else {
             unreachable!("a token creation member carries a token effect");
         };
@@ -23705,7 +23731,15 @@ impl TokenCreationMember {
 
 impl<'de> Deserialize<'de> for TokenCreationMember {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::new(Effect::deserialize(deserializer)?)
+        #[derive(Deserialize)]
+        struct Member {
+            #[serde(flatten)]
+            effect: Effect,
+            #[serde(default)]
+            host_choice_timing: TargetChoiceTiming,
+        }
+        let member = Member::deserialize(deserializer)?;
+        Self::with_host_choice_timing(member.effect, member.host_choice_timing)
             .ok_or_else(|| de::Error::custom("expected a single token creation member"))
     }
 }
@@ -35108,7 +35142,7 @@ macro_rules! define_effect_quantity_walk {
                     f(q);
                 }
                 for member in additional_members {
-                    member.0.$name(f);
+                    member.effect.$name(f);
                 }
             }
             Effect::GainLife { amount, .. } => {

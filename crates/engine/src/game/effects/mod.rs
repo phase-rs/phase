@@ -9428,7 +9428,14 @@ fn declined_search_object_operands(ability: &ResolvedAbility) -> Vec<&TargetFilt
             crate::types::ability::UntilCondition::CumulativeThreshold { .. } => Vec::new(),
         },
         Effect::RevealHand { card_filter, .. } => vec![card_filter],
-        Effect::Token { attach_to, .. } => attach_to.iter().collect(),
+        Effect::Token { .. } => ability
+            .effect
+            .token_creation_members()
+            .filter_map(|member| match member {
+                Effect::Token { attach_to, .. } => attach_to.as_ref(),
+                _ => None,
+            })
+            .collect(),
         Effect::CopyTokenOf {
             target,
             source_filter,
@@ -11932,11 +11939,15 @@ fn effect_fields_read_filter_population(
             owner,
             attach_to,
             keywords,
+            additional_members,
             ..
         } => {
             has_filter(owner)
                 || attach_to.as_ref().is_some_and(has_filter)
                 || keywords.iter().any(has_keyword)
+                || additional_members.iter().any(|member| {
+                    effect_fields_read_filter_population(member.effect(), leaf)
+                })
         }
         Effect::GainLife { player, .. } => has_filter(player),
         Effect::LoseLife { target, .. } => target.as_ref().is_some_and(has_filter),
@@ -27879,7 +27890,7 @@ fn try_resolve_simultaneous_token_fan_out(
         Vec::with_capacity(matching_players.len());
     for seat in matching_players {
         let bound = bind_scoped_seat(scoped_template, controller, *seat);
-        match token::propose_token_instruction(state, &bound, None) {
+        match token::propose_token_instruction(state, &bound, Vec::new()) {
             token::TokenBatchProposal::Ready(event) => singles.push(*event),
             token::TokenBatchProposal::Parked | token::TokenBatchProposal::NoToken => {
                 state.waiting_for = waiting_before;

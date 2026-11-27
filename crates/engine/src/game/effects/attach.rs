@@ -721,7 +721,7 @@ fn attachment_tree_contains(state: &GameState, root_id: ObjectId, candidate_id: 
 /// target is the Aura being moved: that helper returned only the Aura and
 /// shadowed the real host population, collapsing the prompt to zero legal hosts
 /// (the attach then silently did nothing).
-fn battlefield_ids_matching_filter(
+pub(super) fn battlefield_ids_matching_filter(
     state: &GameState,
     ability: &ResolvedAbility,
     filter: &TargetFilter,

@@ -694,3 +694,175 @@ fn allenals_extra_soldier_inherits_the_attacking_instruction() {
         }
     }
 }
+
+const COMPANION: &str = "The Companion of the Wilds";
+const COMPANION_ETB: &str = r#"When The Companion of the Wilds enters the battlefield, create a Food token, a 1/1 black Rat creature token with "This creature can't block," and a Royal role token attached to a creature you control."#;
+
+fn companion_scenario(other_creature: bool) -> (GameRunner, ObjectId, Option<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let companion = scenario
+        .add_creature_to_hand_from_oracle(P0, COMPANION, 3, 3, COMPANION_ETB)
+        .with_mana_cost(parse_mtgjson_mana_cost("{5}"))
+        .id();
+    let other = other_creature.then(|| scenario.add_creature(P0, "Other Host", 2, 2).id());
+    scenario.add_creature(P1, "Opponent's Creature", 2, 2);
+    scenario.with_mana_pool(
+        P0,
+        (0..5)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    (scenario.build(), companion, other)
+}
+
+fn assert_companion_tokens(runner: &GameRunner, host: Option<ObjectId>) {
+    use engine::game::game_object::AttachTarget;
+    use engine::types::statics::StaticMode;
+
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    let tokens = tokens(runner, P0);
+    let token = |name| tokens.iter().copied().find(|object| object.name == name);
+    assert_eq!(tokens.len(), 2 + usize::from(host.is_some()));
+    assert!(token("Food").is_some());
+    assert!(token("Rat")
+        .expect("Rat created")
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition.mode == StaticMode::CantBlock));
+    assert_eq!(
+        token("Royal Role").map(|object| object.attached_to),
+        host.map(|id| Some(AttachTarget::Object(id)))
+    );
+}
+
+#[test]
+fn companion_chooses_a_royal_role_host_during_resolution() {
+    for restore in [false, true] {
+        let (mut runner, companion, other) = companion_scenario(true);
+        runner.cast(companion).resolve();
+        assert!(
+            tokens(&runner, P0).is_empty(),
+            "the instruction is still pending"
+        );
+        let WaitingFor::ChooseTokenHost {
+            player,
+            legal_targets,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected a resolution-time Role host choice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(legal_targets.len(), 2);
+        assert!(legal_targets.contains(&TargetRef::Object(companion)));
+        assert!(legal_targets.contains(&TargetRef::Object(other.unwrap())));
+        let TargetRef::Object(chosen) = legal_targets[1] else {
+            panic!("expected a creature host");
+        };
+        if restore {
+            let bytes = serde_json::to_vec(runner.state()).expect("serialize parked state");
+            runner = GameRunner::from_state(
+                serde_json::from_slice(&bytes).expect("restore member host choice"),
+            );
+        }
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(chosen)),
+            })
+            .expect("choose the second host");
+        assert_companion_tokens(&runner, Some(chosen));
+    }
+}
+
+#[test]
+fn companion_can_be_its_own_sole_royal_role_host() {
+    let (mut runner, companion, _) = companion_scenario(false);
+    runner.cast(companion).resolve();
+    assert_companion_tokens(&runner, Some(companion));
+}
+
+#[test]
+fn companion_chooses_from_creatures_present_when_the_trigger_resolves() {
+    for other_creature in [true, false] {
+        let (mut runner, companion, other) = companion_scenario(other_creature);
+        {
+            let _committed = runner.cast(companion).commit();
+        }
+        runner.pass_both_players();
+        assert_eq!(runner.state().objects[&companion].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "the ETB trigger is on the stack"
+        );
+
+        engine::game::zones::move_to_zone(
+            runner.state_mut(),
+            companion,
+            Zone::Graveyard,
+            &mut Vec::new(),
+        );
+        runner.pass_both_players();
+        assert_companion_tokens(&runner, other);
+    }
+}
+
+#[test]
+fn token_list_retains_earlier_member_host_when_later_member_prompts() {
+    use engine::game::game_object::AttachTarget;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Two Role Lists",
+            false,
+            "Create a Food token, a Royal Role token attached to a creature you control, and a Wicked Role token attached to a creature you control.",
+        )
+        .id();
+    let first = scenario.add_creature(P0, "First Host", 2, 2).id();
+    let second = scenario.add_creature(P0, "Second Host", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    for host in [second, first] {
+        let WaitingFor::ChooseTokenHost { legal_targets, .. } = &runner.state().waiting_for else {
+            panic!("expected an independent host choice for each Role");
+        };
+        assert_eq!(
+            legal_targets,
+            &[TargetRef::Object(first), TargetRef::Object(second)]
+        );
+        assert!(tokens(&runner, P0).is_empty());
+        let bytes = serde_json::to_vec(runner.state()).expect("serialize parked state");
+        runner =
+            GameRunner::from_state(serde_json::from_slice(&bytes).expect("restore parked state"));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(host)),
+            })
+            .expect("choose the member's host");
+    }
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    let tokens = tokens(&runner, P0);
+    assert_eq!(tokens.len(), 3);
+    for (name, host) in [("Royal Role", second), ("Wicked Role", first)] {
+        let token = tokens
+            .iter()
+            .find(|token| token.name == name)
+            .expect("Role created");
+        assert_eq!(token.attached_to, Some(AttachTarget::Object(host)));
+    }
+}

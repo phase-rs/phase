@@ -708,7 +708,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    resolve_with_host_override(state, ability, events, None)
+    resolve_with_token_hosts(state, ability, events, Vec::new())
 }
 
 /// CR 608.2f: one seat's token-batch proposal for a simultaneous multi-seat
@@ -716,7 +716,7 @@ pub fn resolve(
 /// running the replacement pipeline or delivering anything, so a coordinator
 /// can assemble every seat's batch into one compound event (one pipeline run,
 /// one one-shot consumption). This IS the single-seat path's proposal
-/// sequence (shared, not duplicated): `resolve_with_host_override` below
+/// sequence (shared, not duplicated): `resolve_with_token_hosts` below
 /// calls it and then runs the pipeline, delivery, and bookkeeping.
 pub(crate) enum TokenBatchProposal {
     /// The seat's single-batch event, ready for the replacement pipeline.
@@ -724,26 +724,18 @@ pub(crate) enum TokenBatchProposal {
     /// CR 608.2b: no token can be created (the owner failed to resolve); the
     /// caller emits the shared `no_token` outcome.
     NoToken,
-    /// A "one of them" host choice was parked (`WaitingFor::ChooseTokenHost`);
+    /// A host choice was parked (`WaitingFor::ChooseTokenHost`);
     /// nothing was proposed or mutated. The caller returns to the waiter.
     Parked,
 }
 
-fn propose_token_batch(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    host_override: Option<AttachTarget>,
-) -> TokenBatchProposal {
-    propose_token_member(state, ability, &ability.effect, None, host_override)
-}
-
 fn propose_token_member(
-    state: &mut GameState,
+    state: &GameState,
     ability: &ResolvedAbility,
     effect: &Effect,
-    shared_owner: Option<&TargetFilter>,
-    host_override: Option<AttachTarget>,
-) -> TokenBatchProposal {
+    token_owner: PlayerId,
+    host_request: TokenHostRequest,
+) -> ProposedEvent {
     let (
         script_name,
         fallback_power,
@@ -753,13 +745,11 @@ fn propose_token_member(
         fallback_keywords,
         tapped,
         count,
-        owner_filter,
         enters_attacking,
         attack_destination,
         fallback_supertypes,
         token_statics,
         etb_counters,
-        attach_to,
         enters_blocking_filter,
     ) = match effect {
         Effect::Token {
@@ -771,15 +761,13 @@ fn propose_token_member(
             keywords,
             tapped,
             count,
-            owner,
-            attach_to,
             enters_attacking,
             attack_destination,
             enters_blocking,
             supertypes,
             static_abilities,
             enter_with_counters,
-            additional_members: _,
+            ..
         } => (
             name.clone(),
             power.clone(),
@@ -789,88 +777,17 @@ fn propose_token_member(
             keywords.clone(),
             *tapped,
             count,
-            owner,
             *enters_attacking,
             attack_destination.clone(),
             supertypes.clone(),
             static_abilities.clone(),
             enter_with_counters.clone(),
-            attach_to.as_ref(),
             enters_blocking.as_ref(),
         ),
-        _ => (
-            "Token".to_string(),
-            PtValue::Fixed(0),
-            PtValue::Fixed(0),
-            vec![],
-            vec![],
-            vec![],
-            false,
-            &QuantityExpr::Fixed { value: 1 },
-            &TargetFilter::Controller,
-            false,
-            TokenAttackDestination::ControllerChooses,
-            vec![],
-            vec![],
-            vec![],
-            None,
-            None,
-        ),
+        _ => unreachable!("token instructions only contain token members"),
     };
     let (count, enters_attacking, attack_request) =
         resolve_token_batch(state, ability, count, enters_attacking, &attack_destination);
-    // CR 608.2b: a declared player whose target was illegal creates no token.
-    let Some(token_owner) =
-        resolve_token_owner(state, ability, shared_owner.unwrap_or(owner_filter))
-    else {
-        return TokenBatchProposal::NoToken;
-    };
-
-    // CR 303.4 + CR 303.4i: Resolve the specified Aura/Role host once, at propose
-    // time. ParentTarget reads the first Object target (the for-each loop's
-    // per-iteration rebind binds it); Typed/event-context filters resolve via the
-    // shared target/event-context path.
-    //
-    // The result keeps "the instruction named no host" apart from "it named one
-    // and nothing bound it": CR 303.4i denies the entry of an Aura token in the
-    // second case and says nothing about the first, and the seam that applies
-    // that verdict runs after the CR 614 replacement pipeline, far from here.
-    let host_request = if let Some(host) = host_override
-        .filter(|_| shared_owner.is_none() || matches!(attach_to, Some(TargetFilter::ParentTarget)))
-    {
-        // Resumed after a "one of them" host choice: the choice is bound.
-        TokenHostRequest::Bound(host)
-    } else {
-        match boon_batch_host_candidates(state, ability, attach_to) {
-            // A batch-semantics boon ("one of them") with several legal
-            // entrants: pause for the controller's choice. Nothing has been
-            // proposed or mutated yet, so the resume path's re-entry is
-            // side-effect-free up to this point.
-            Some(candidates) if candidates.len() > 1 => {
-                state.waiting_for = WaitingFor::ChooseTokenHost {
-                    player: ability.controller,
-                    source_id: ability.source_id,
-                    legal_targets: candidates,
-                    pending_ability: Box::new(ability.clone()),
-                };
-                return TokenBatchProposal::Parked;
-            }
-            // Zero or one legal entrant: `Unbound` (→ CR 303.4i denial for
-            // Aura tokens) or auto-bound. No prompt either way.
-            Some(candidates) => TokenHostRequest::from_binding(
-                true,
-                candidates
-                    .into_iter()
-                    .next()
-                    .map(target_ref_to_attach_target),
-            ),
-            None => TokenHostRequest::from_binding(
-                attach_to.is_some(),
-                attach_to.and_then(|f| resolve_attach_host(state, ability, f)),
-            ),
-        }
-    };
-
     // CR 509.1h + CR 506.3e: Resolve the blocking rider's attacker once, at
     // propose time (like the Aura host above). `TriggeringSource` reads the
     // singleton firing's lone attacker; unresolvable (attacker left combat)
@@ -920,7 +837,7 @@ fn propose_token_member(
     // Replacement effects (Doubling Season, Primal Vigor) modify count. A
     // token substitute's branch tokens are rewritten into the event they
     // modify, so a fresh proposal carries an empty applied set.
-    TokenBatchProposal::Ready(Box::new(ProposedEvent::CreateToken {
+    ProposedEvent::CreateToken {
         redirected_to: None,
         owner: token_owner,
         spec: Box::new(spec),
@@ -929,52 +846,85 @@ fn propose_token_member(
         count,
         appended: Vec::new(),
         applied: HashSet::new(),
-    }))
+    }
 }
 
-/// CR 701.7a: Bind the members against one pre-creation state and propose
-/// their batches together. The verb's subject controls every member.
+/// CR 701.7a + CR 608.2d: Choose all hosts against the pre-creation state,
+/// then propose one event for the entire instruction.
 pub(crate) fn propose_token_instruction(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    host_override: Option<AttachTarget>,
+    mut chosen_hosts: Vec<Option<TargetRef>>,
 ) -> TokenBatchProposal {
-    let Effect::Token {
-        owner,
-        additional_members,
-        ..
-    } = &ability.effect
-    else {
-        return propose_token_batch(state, ability, host_override);
+    let Effect::Token { owner, .. } = &ability.effect else {
+        return TokenBatchProposal::NoToken;
     };
-    if additional_members.is_empty() {
-        return propose_token_batch(state, ability, host_override);
-    }
+    let Some(token_owner) = resolve_token_owner(state, ability, owner) else {
+        return TokenBatchProposal::NoToken;
+    };
 
-    let mut views = Vec::with_capacity(1 + additional_members.len());
-    for effect in ability.effect.token_creation_members() {
-        match propose_token_member(state, ability, effect, Some(owner), host_override) {
-            TokenBatchProposal::Ready(event) => views.push(*event),
-            TokenBatchProposal::Parked => return TokenBatchProposal::Parked,
-            TokenBatchProposal::NoToken => return TokenBatchProposal::NoToken,
+    let mut requests = Vec::new();
+    // A stamped boon has one shared pronoun referent even if several tokens read it.
+    let mut boon_host = None;
+    for (index, effect) in ability.effect.token_creation_members().enumerate() {
+        let Effect::Token { attach_to, .. } = effect else {
+            unreachable!("token instructions only contain token members");
+        };
+        let boon_member = uses_boon_host(ability, attach_to.as_ref());
+        let host = if let Some(chosen) = chosen_hosts.get(index) {
+            chosen.clone()
+        } else {
+            let chosen = if boon_member && boon_host.is_some() {
+                boon_host.clone().flatten()
+            } else {
+                let candidates = token_host_candidates(state, ability, index, token_owner);
+                if candidates.len() > 1 {
+                    state.waiting_for = WaitingFor::ChooseTokenHost {
+                        player: ability.controller,
+                        source_id: ability.source_id,
+                        legal_targets: candidates,
+                        pending_ability: Box::new(ability.clone()),
+                        chosen_hosts,
+                    };
+                    return TokenBatchProposal::Parked;
+                }
+                candidates.into_iter().next()
+            };
+            chosen_hosts.push(chosen.clone());
+            chosen
+        };
+        if boon_member {
+            boon_host = Some(host.clone());
         }
+        // CR 303.4i: An unbound Aura host suppresses that token's creation.
+        let binding = if boon_member || resolution_member_host_filter(ability, index).is_some() {
+            host.map(target_ref_to_attach_target)
+        } else {
+            attach_to
+                .as_ref()
+                .and_then(|filter| resolve_attach_host(state, ability, filter))
+        };
+        requests.push(TokenHostRequest::from_binding(attach_to.is_some(), binding));
     }
+    let views = ability
+        .effect
+        .token_creation_members()
+        .zip(requests)
+        .map(|(member, request)| propose_token_member(state, ability, member, token_owner, request))
+        .collect();
     TokenBatchProposal::Ready(Box::new(
         ProposedEvent::from_token_batch_views(views).expect("token members produce token views"),
     ))
 }
 
-/// `resolve` with a pre-chosen token host. `Some` resumes a "one of them"
-/// host choice the first pass paused for (`WaitingFor::ChooseTokenHost`):
-/// the choice binds the host and the pause branch is skipped, so a resumed
-/// resolution never prompts twice. `None` is the ordinary first pass.
-pub(crate) fn resolve_with_host_override(
+/// Resume before proposal with the saved choices in member order.
+pub(crate) fn resolve_with_token_hosts(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
-    host_override: Option<AttachTarget>,
+    chosen_hosts: Vec<Option<TargetRef>>,
 ) -> Result<(), EffectError> {
-    match propose_token_instruction(state, ability, host_override) {
+    match propose_token_instruction(state, ability, chosen_hosts) {
         TokenBatchProposal::Parked => Ok(()),
         TokenBatchProposal::NoToken => no_token(state, ability, events),
         TokenBatchProposal::Ready(proposed) => {
@@ -4767,7 +4717,7 @@ pub(crate) fn resolve_token_spec(
 /// non-Token ability never carries a batch stamp, so this is
 /// defensive-only), no filter applies and the CR 303.4i final entry check
 /// stays the backstop.
-pub(crate) fn boon_host_passes_projected_legality(
+fn boon_host_passes_projected_legality(
     state: &GameState,
     ability: &ResolvedAbility,
     host: &TargetRef,
@@ -4861,44 +4811,115 @@ fn token_member_host_passes_projected_legality(
     }
 }
 
-/// Digital-only Alchemy (no CR entry): the live host candidates for a
-/// batch-semantics boon's "one of them" token host. `Some` ⟺ the ability
-/// carries a fire-time stamped entrant set (Dunbarrow Revivalist's "one or
-/// more creatures enter … attached to one of them") AND names a pronoun
-/// host (`ParentTarget` — the "one of them" set reference, 1:1 with the
-/// `Pronoun` authority); `None` ⟺ existing host resolution applies
-/// unchanged. The set is filtered to incarnation-current battlefield
-/// objects (CR 400.7): an entrant that left (or left and returned) before
-/// resolution is not choosable. Candidates must also pass projected attach
-/// legality (CR 303.4c/702.16c — protection-illegal entrants are never
-/// offered, CR 608.2d); the `Bound`-but-illegal CR 303.4i final entry check
-/// remains the backstop.
-fn boon_batch_host_candidates(
+fn uses_boon_host(ability: &ResolvedAbility, filter: Option<&TargetFilter>) -> bool {
+    matches!(filter, Some(TargetFilter::ParentTarget))
+        && !ability.context.boon_trigger_batch_objects.is_empty()
+}
+
+fn resolution_member_host_filter(ability: &ResolvedAbility, index: usize) -> Option<&TargetFilter> {
+    let Effect::Token {
+        additional_members, ..
+    } = &ability.effect
+    else {
+        return None;
+    };
+    additional_members
+        .get(index.checked_sub(1)?)?
+        .resolution_host_filter()
+}
+
+// CR 115.10a + CR 608.2d + CR 303.4c: An untargeted host must match the
+// described population and be legal to enchant. Targeting restrictions do
+// not apply. The projection uses the same attachment rules as actual entry.
+fn token_host_candidates(
     state: &GameState,
     ability: &ResolvedAbility,
-    attach_to: Option<&TargetFilter>,
-) -> Option<Vec<TargetRef>> {
-    if !matches!(attach_to, Some(TargetFilter::ParentTarget)) {
-        return None;
-    }
-    let stamped = &ability.context.boon_trigger_batch_objects;
-    if stamped.is_empty() {
-        return None;
-    }
-    Some(
-        stamped
+    member_index: usize,
+    token_owner: PlayerId,
+) -> Vec<TargetRef> {
+    let Some(member @ Effect::Token { attach_to, .. }) =
+        ability.effect.token_creation_members().nth(member_index)
+    else {
+        return Vec::new();
+    };
+    if uses_boon_host(ability, attach_to.as_ref()) {
+        // CR 400.7: The stamped entrants must still be the same objects.
+        return ability
+            .context
+            .boon_trigger_batch_objects
             .iter()
-            .filter(|pin| {
-                pin.is_current(state)
-                    && state
-                        .objects
-                        .get(&pin.object_id)
-                        .is_some_and(|obj| obj.zone == Zone::Battlefield)
-            })
+            .filter(|pin| pin.is_current(state) && state.battlefield.contains(&pin.object_id))
             .map(|pin| TargetRef::Object(pin.object_id))
             .filter(|host| boon_host_passes_projected_legality(state, ability, host))
-            .collect(),
-    )
+            .collect();
+    }
+    let Some(filter) = resolution_member_host_filter(ability, member_index) else {
+        return Vec::new();
+    };
+    use crate::game::filter::player_matches_target_filter_in_state;
+    let candidates: Vec<_> = if filter.denotes_player_target() {
+        state
+            .players
+            .iter()
+            .filter(|player| {
+                !player.is_eliminated
+                    && player_matches_target_filter_in_state(
+                        state,
+                        filter,
+                        player.id,
+                        Some(ability.controller),
+                        Some(ability.source_id),
+                    )
+            })
+            .map(|player| TargetRef::Player(player.id))
+            .collect()
+    } else {
+        super::attach::battlefield_ids_matching_filter(state, ability, filter)
+            .into_iter()
+            .map(TargetRef::Object)
+            .collect()
+    };
+    candidates
+        .into_iter()
+        .filter(|host| {
+            token_member_host_passes_projected_legality(state, ability, member, token_owner, host)
+        })
+        .collect()
+}
+
+pub(crate) fn token_host_choice_is_legal(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    member_index: usize,
+    chosen: &TargetRef,
+) -> bool {
+    let Effect::Token { owner, .. } = &ability.effect else {
+        return false;
+    };
+    resolve_token_owner(state, ability, owner).is_some_and(|owner| {
+        token_host_candidates(state, ability, member_index, owner).contains(chosen)
+    })
+}
+
+/// Older saves parked a stamped boon host without recording which member
+/// requested it. That request always belonged to the first pronoun host.
+pub(crate) fn legacy_token_host_member(ability: &ResolvedAbility) -> usize {
+    if ability.context.boon_trigger_batch_objects.is_empty() {
+        return 0;
+    }
+    ability
+        .effect
+        .token_creation_members()
+        .position(|member| {
+            matches!(
+                member,
+                Effect::Token {
+                    attach_to: Some(TargetFilter::ParentTarget),
+                    ..
+                }
+            )
+        })
+        .unwrap_or_default()
 }
 
 pub(super) fn place_token_blocking(

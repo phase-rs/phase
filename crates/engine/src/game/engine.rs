@@ -16460,6 +16460,7 @@ fn apply_non_priority_pass_action(
                 source_id: _,
                 legal_targets,
                 pending_ability,
+                chosen_hosts,
             },
             GameAction::ChooseTarget { target },
         ) => {
@@ -16474,64 +16475,26 @@ fn apply_non_priority_pass_action(
                     ));
                 }
             };
-            // Fail-closed liveness backstop: the choice was offered moments
-            // ago against incarnation-current battlefield objects, and
-            // nothing resolves during a prompt — but a stale answer must
-            // never bind a departed host.
-            let host = match &chosen {
-                TargetRef::Object(id) => {
-                    let live = state
-                        .objects
-                        .get(id)
-                        .is_some_and(|obj| obj.zone == Zone::Battlefield);
-                    if !live {
-                        return Err(EngineError::InvalidAction(
-                            "ChooseTokenHost: chosen host is no longer legal".to_string(),
-                        ));
-                    }
-                    super::game_object::AttachTarget::Object(*id)
-                }
-                TargetRef::Player(id) => super::game_object::AttachTarget::Player(*id),
-            };
-            // CR 400.7 (F2): the stamped incarnation pin must still be
-            // current. At the sandbox/debug boundary an offered object can
-            // leave and return during the prompt with the same stored
-            // ObjectId and a new incarnation — a new object that must not
-            // receive the Role. The pin lives in the pending ability's
-            // stamped batch (the single stamp authority); absence of a pin
-            // means a non-boon prompt, which skips this check.
-            if let TargetRef::Object(id) = &chosen {
-                let stale = pending_ability
-                    .context
-                    .boon_trigger_batch_objects
-                    .iter()
-                    .find(|pin| pin.object_id == *id)
-                    .is_some_and(|pin| !pin.is_current(state));
-                if stale {
-                    return Err(EngineError::InvalidAction(
-                        "ChooseTokenHost: chosen host is no longer the stamped object".to_string(),
-                    ));
-                }
+            let mut chosen_hosts = chosen_hosts.clone();
+            if chosen_hosts.is_empty() {
+                chosen_hosts.resize(
+                    super::effects::token::legacy_token_host_member(pending_ability),
+                    None,
+                );
             }
-            // CR 303.4c + CR 608.2d: re-verify projected attach legality at
-            // accept time — a protection grant could have landed between the
-            // offer snapshot and this answer (only prompt answers interleave,
-            // but the check is cheap and load-bearing against tag forgery).
-            if !super::effects::token::boon_host_passes_projected_legality(
+            // CR 608.2d: Revalidate against the current member's host pool,
+            // including the stamped incarnation for a boon.
+            if !super::effects::token::token_host_choice_is_legal(
                 state,
                 pending_ability,
+                chosen_hosts.len(),
                 &chosen,
             ) {
                 return Err(EngineError::InvalidAction(
-                    "ChooseTokenHost: chosen host cannot be enchanted".to_string(),
+                    "ChooseTokenHost: chosen host is no longer legal".to_string(),
                 ));
             }
-            // Digital-only Alchemy (no CR entry): resume the paused token
-            // creation with the choice bound. The pause pass mutated nothing
-            // (it returned before proposing), so re-entry applies exactly
-            // once; the override skips the pause branch, so a resumed
-            // resolution never prompts twice.
-            //
+            chosen_hosts.push(Some(chosen));
             // CR 616.1: clear the answered host prompt BEFORE re-entering the
             // token resolver, so anything non-Priority afterwards is a pause
             // the resumed creation opened itself (replacement ordering on
@@ -16543,11 +16506,11 @@ fn apply_non_priority_pass_action(
             state.waiting_for = WaitingFor::Priority {
                 player: active_player,
             };
-            super::effects::token::resolve_with_host_override(
+            super::effects::token::resolve_with_token_hosts(
                 state,
                 &pending,
                 &mut events,
-                Some(host),
+                chosen_hosts,
             )
             .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {

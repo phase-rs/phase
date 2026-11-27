@@ -9129,18 +9129,17 @@ fn try_parse_create_token_sequence(
 
     let items = split_create_token_sequence(after_create)?;
 
-    let mut effects = items
-        .into_iter()
-        .map(|(original, lower)| token::try_parse_token(lower, original.trim(), ctx));
-    let list = effects.next().flatten().and_then(|mut head| {
+    let mut items = items.into_iter();
+    let list = items.next().and_then(|(original, lower)| {
+        let mut head = token::try_parse_token(lower, original.trim(), ctx)?;
         let Effect::Token {
             additional_members, ..
         } = &mut head
         else {
             return None;
         };
-        *additional_members = effects
-            .map(|effect| effect.and_then(crate::types::ability::TokenCreationMember::new))
+        *additional_members = items
+            .map(|(original, lower)| token::parse_token_creation_member(original, lower, ctx))
             .collect::<Option<Vec<_>>>()?;
         Some(head)
     });
