@@ -1423,6 +1423,7 @@ fn dragonstorm_globe_counters_created_dragon_token() {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         ));
     }

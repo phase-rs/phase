@@ -5234,6 +5234,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             supertypes: token.supertypes,
             static_abilities: token.static_abilities,
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         },
         SearchCreationImperativeAst::Seek {
             filter,
@@ -18674,6 +18675,7 @@ fn lower_imperative_family_clause(ast: ImperativeFamilyAst) -> ParsedEffectClaus
                     supertypes: Vec::new(),
                     static_abilities: Vec::new(),
                     enter_with_counters: Vec::new(),
+                    additional_members: Vec::new(),
                 },
             )
             .condition(AbilityCondition::DiscardedCardMatchesFilter { filter: nonland });

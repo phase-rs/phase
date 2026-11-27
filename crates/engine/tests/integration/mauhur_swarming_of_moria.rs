@@ -558,7 +558,10 @@ fn chatterfang_style_token_replacement_does_not_become_amassed_army() {
         .with_replacement_definition(
             ReplacementDefinition::new(ReplacementEvent::CreateToken)
                 .token_owner_scope(ControllerRef::You)
-                .additional_token_spec(squirrel_spec()),
+                .additional_token_spec(
+                    squirrel_spec(),
+                    engine::types::ability::AdditionalTokenSpec::proportional_count(),
+                ),
         );
     let foray = scenario
         .add_spell_to_hand_from_oracle(P0, "Foray of Orcs", false, FORAY_OF_ORCS)

@@ -4120,6 +4120,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             supertypes: supertypes.clone(),
             static_abilities: static_abilities.clone(),
             enter_with_counters: enter_with_counters.clone(),
+            additional_members: Vec::new(),
         }),
         _ => None,
     };
@@ -15790,6 +15791,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         );
         creator.condition = Some(AbilityCondition::WhenYouDo);
@@ -17276,6 +17278,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         );
         let mut cleanup = AbilityDefinition::new(
@@ -19284,6 +19287,7 @@ mod where_x_tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
 
         super::apply_where_x_effect_expression(
@@ -19798,6 +19802,7 @@ mod token_anaphor_rewrite_tests {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         };
         let mut cur = Effect::unimplemented("create", "create two of those tokens");
         rewrite_those_tokens_from_antecedent(&mut cur, &antecedent);
