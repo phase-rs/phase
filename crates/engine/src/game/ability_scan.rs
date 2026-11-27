@@ -9263,11 +9263,12 @@ fn scan_activation_restriction(
             counters: _,
             minimum: _,
             maximum: _,
-        }
-        | ActivationRestriction::MatchesCardCastTiming => Axes::NONE,
-        // The turn's step tally: a bare window closes once the first combat phase has ended.
+        } => Axes::NONE,
+        // The turn's step tally: a bare window closes once the first combat phase has ended; a
+        // card's cast prohibitions read the turn's cast journal (Rule of Law).
         ActivationRestriction::BeforeAttackersDeclared
-        | ActivationRestriction::BeforeCombatDamage => Axes {
+        | ActivationRestriction::BeforeCombatDamage
+        | ActivationRestriction::MatchesCardCastTiming => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
@@ -15762,6 +15763,19 @@ mod tests {
             Some(Effect::SearchLibrary { .. })
         ));
         assert!(trigger_refers_to_its_player(&search_only));
+    }
+
+    /// CR 702.62c: suspending from hand reads Rule of Law's cast journal, a plain sorcery window
+    /// doesn't.
+    #[test]
+    fn card_cast_timing_restriction_reads_projected_resources() {
+        use crate::types::ability::ActivationRestriction;
+
+        let projected = |r: &ActivationRestriction| {
+            scan_activation_restriction(r, ScanMode::LoopFirewall).projected
+        };
+        assert!(projected(&ActivationRestriction::MatchesCardCastTiming));
+        assert!(!projected(&ActivationRestriction::AsSorcery));
     }
 }
 

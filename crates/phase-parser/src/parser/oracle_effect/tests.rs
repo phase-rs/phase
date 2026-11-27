@@ -110592,57 +110592,57 @@ fn delayed_player_damage_full_faces_commit_compound_payloads() {
             let mut strict = Vec::new();
             let mut payloads = Vec::new();
             let mut visit = |effect: &Effect| {
-                match effect {
-                    Effect::CreateDelayedTrigger {
-                        condition:
-                            DelayedTriggerCondition::WheneverEvent {
-                                trigger,
-                                expiry: WheneverEventExpiry::EndOfTurn,
-                            },
-                        effect,
-                        ..
-                    } => {
-                        installers += 1;
-                        assert_eq!(trigger.mode, mode);
-                        assert!(trigger.batched);
-                        assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
-                        assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
-                        let mut node = Some(effect.as_ref());
-                        while let Some(def) = node {
-                            payloads.push(match def.effect.as_ref() {
-                                Effect::BecomeMonarch {
-                                    target: TargetFilter::Controller,
-                                } => "monarch",
-                                Effect::Draw {
-                                    target: TargetFilter::Controller,
-                                    count: QuantityExpr::Fixed { value: 1 },
-                                } => "draw",
-                                Effect::Discard {
-                                    count: QuantityExpr::Fixed { value: 1 },
-                                    ..
-                                } => "discard",
-                                Effect::RevealHand {
-                                    target: TargetFilter::TriggeringPlayer,
-                                    reveal: false,
-                                    ..
-                                } => "look",
-                                Effect::RevealHand {
-                                    target: TargetFilter::Controller,
-                                    reveal: false,
-                                    ..
-                                } => "look-controller",
-                                other => panic!("{name}: unexpected watcher payload {other:?}"),
-                            });
-                            node = def.sub_ability.as_deref();
-                        }
+                if let Effect::CreateDelayedTrigger {
+                    condition:
+                        DelayedTriggerCondition::WheneverEvent {
+                            trigger,
+                            expiry: WheneverEventExpiry::EndOfTurn,
+                        },
+                    effect,
+                    ..
+                } = effect
+                {
+                    installers += 1;
+                    assert_eq!(trigger.mode, mode);
+                    assert!(trigger.batched);
+                    assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+                    assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+                    let mut node = Some(effect.as_ref());
+                    while let Some(def) = node {
+                        payloads.push(match def.effect.as_ref() {
+                            Effect::BecomeMonarch {
+                                target: TargetFilter::Controller,
+                            } => "monarch",
+                            Effect::Draw {
+                                target: TargetFilter::Controller,
+                                count: QuantityExpr::Fixed { value: 1 },
+                            } => "draw",
+                            Effect::Discard {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                ..
+                            } => "discard",
+                            Effect::RevealHand {
+                                target: TargetFilter::TriggeringPlayer,
+                                reveal: false,
+                                ..
+                            } => "look",
+                            Effect::RevealHand {
+                                target: TargetFilter::Controller,
+                                reveal: false,
+                                ..
+                            } => "look-controller",
+                            other => panic!("{name}: unexpected watcher payload {other:?}"),
+                        });
+                        node = def.sub_ability.as_deref();
                     }
-                    Effect::Unimplemented { name, description }
-                        if name == "delayed_player_damage_body"
-                            || name == "delayed_player_damage_head" =>
-                    {
+                }
+                if let Effect::Unimplemented { name, description } = effect {
+                    if matches!(
+                        name.as_str(),
+                        "delayed_player_damage_body" | "delayed_player_damage_head"
+                    ) {
                         strict.push(description.clone().expect("strict failure source text"));
                     }
-                    _ => {}
                 }
                 ControlFlow::Continue(())
             };

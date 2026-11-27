@@ -3291,18 +3291,20 @@ pub(super) fn granted_spell_alternative_cost(
     caster: PlayerId,
     object_id: ObjectId,
 ) -> Option<GrantedSpellAlternativeCost> {
-    granted_spell_alternative_cost_for(state, caster, object_id, false)
+    granted_spell_alternative_cost_for(state, caster, object_id, false, None)
 }
 
 /// Fuse-aware sibling of [`granted_spell_alternative_cost`]. `fused` projects a
 /// pre-payment fused split spell with its COMBINED characteristics (CR 702.102b)
 /// so `CastWithAlternativeCost` `affected` filters keyed on mana value / colors
 /// see the fused spell. The non-`_for` entry delegates with `fused = false`.
+/// `timing` keeps only the grants that carry it; `None` keeps all.
 pub(super) fn granted_spell_alternative_cost_for(
     state: &GameState,
     caster: PlayerId,
     object_id: ObjectId,
     fused: bool,
+    timing: Option<CastTimingPermission>,
 ) -> Option<GrantedSpellAlternativeCost> {
     let spell_obj = state.objects.get(&object_id)?;
     // CR 601.2a: same origin chain as the keyword-grant walkers, so a re-ask
@@ -3320,6 +3322,12 @@ pub(super) fn granted_spell_alternative_cost_for(
         else {
             continue;
         };
+
+        // CR 601.3c: only a grant carrying the asked-for timing, whichever grant this cast
+        // would apply and whether or not it can be paid.
+        if timing.is_some() && *timing_permission != timing {
+            continue;
+        }
 
         // CR 118.9 + CR 601.2b: a once-per-turn grant already applied this turn
         // offers nothing further (As Foretold's slot is spent for the turn).
@@ -10494,68 +10502,10 @@ fn prepare_spell_cast_announced_inner(
         ));
     }
 
-    // CR 601.3 + CR 101.2 + CR 109.5: "Can't" beats "can" — check CantCastFrom statics.
-    // Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
-    // Drannith Magistrate: "Your opponents can't cast spells from anywhere other
-    // than their hands." This overrides graveyard/library/exile/command casting
-    // permissions (Escape, Lurrus, flashback, foretell, commander, etc.).
-    if mode == CastingMode::Actual && is_blocked_from_casting_from_zone(state, obj, player) {
-        return Err(EngineError::ActionNotAllowed(
-            "A static ability prevents casting from this zone".to_string(),
-        ));
-    }
-
-    // CR 101.2: Continuous casting prohibition — "can't" overrides "can".
-    // E.g., Teferi, Time Raveler: "Your opponents can't cast spells during your turn."
-    if mode == CastingMode::Actual && is_blocked_by_cant_cast_during(state, player) {
-        return Err(EngineError::ActionNotAllowed(
-            "A static ability prevents casting during this phase/turn".to_string(),
-        ));
-    }
-
-    // CR 101.2: Temporary blanket prohibition — "can't cast spells this turn."
-    // E.g., Silence: "Your opponents can't cast spells this turn."
-    if mode == CastingMode::Actual
-        && is_blocked_by_cant_cast_spells_for(state, player, Some(obj), is_fuse_variant)
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "A temporary effect prevents you from casting spells this turn".to_string(),
-        ));
-    }
-
-    // CR 101.2: Blanket casting prohibition — "you can't cast [type] spells."
-    // E.g., Steel Golem: "You can't cast creature spells."
-    if mode == CastingMode::Actual
-        && is_blocked_by_cant_be_cast_for(state, player, obj, is_fuse_variant)
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "A static ability prevents you from casting this spell".to_string(),
-        ));
-    }
-
-    if mode == CastingMode::Actual && is_blocked_by_cast_only_from_zones(state, obj, player) {
-        return Err(EngineError::ActionNotAllowed(
-            "A temporary effect prevents casting from this zone".to_string(),
-        ));
-    }
-
-    // CR 116.2a + CR 601.2a: A `ProhibitPlayFromZone` deny prevents casting a
-    // spell from the named zone (Memory Vessel: "can't play cards from their
-    // hand" — the cast half of "play").
-    if mode == CastingMode::Actual && is_blocked_by_prohibit_play_from_zone(state, obj, player) {
-        return Err(EngineError::ActionNotAllowed(
-            "A temporary effect prevents playing cards from this zone".to_string(),
-        ));
-    }
-
-    // CR 101.2 + CR 604.1: Per-turn casting limit — "can't cast more than N spells each turn."
-    // E.g., Rule of Law, High Noon, Deafening Silence.
-    if mode == CastingMode::Actual
-        && is_blocked_by_per_turn_cast_limit_for(state, player, obj, is_fuse_variant)
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "A static ability limits the number of spells you can cast this turn".to_string(),
-        ));
+    if mode == CastingMode::Actual {
+        if let Some(reason) = cast_prohibition(state, player, obj, is_fuse_variant) {
+            return Err(EngineError::ActionNotAllowed(reason.to_string()));
+        }
     }
 
     // Only Spell-kind abilities define the spell's on-cast effect and targets.
@@ -38286,6 +38236,63 @@ fn is_blocked_from_casting_from_zone(
     false
 }
 
+/// CR 601.3 + CR 101.2: the effect that stops `player` from beginning to cast `obj` from its
+/// current zone, as the message shown for it. The cast proposal and suspend's hand ability
+/// (CR 702.62c) both read it; split second (CR 702.61a) is asked beside it. `fused` projects a
+/// pre-payment fused split spell (CR 702.102b).
+fn cast_prohibition(
+    state: &GameState,
+    player: PlayerId,
+    obj: &GameObject,
+    fused: bool,
+) -> Option<&'static str> {
+    // CR 101.2: "can't" beats a casting permission for the zone (Grafdigger's Cage,
+    // Drannith Magistrate).
+    if is_blocked_from_casting_from_zone(state, obj, player) {
+        return Some("A static ability prevents casting from this zone");
+    }
+    // Teferi, Time Raveler: "Each opponent can cast spells only any time they could cast a
+    // sorcery."
+    if is_blocked_by_cant_cast_during(state, player) {
+        return Some("A static ability prevents casting during this phase/turn");
+    }
+    // Silence: "Your opponents can't cast spells this turn."
+    if is_blocked_by_cant_cast_spells_for(state, player, Some(obj), fused) {
+        return Some("A temporary effect prevents you from casting spells this turn");
+    }
+    // Steel Golem: "You can't cast creature spells."
+    if is_blocked_by_cant_be_cast_for(state, player, obj, fused) {
+        return Some("A static ability prevents you from casting this spell");
+    }
+    if is_blocked_by_cast_only_from_zones(state, obj, player) {
+        return Some("A temporary effect prevents casting from this zone");
+    }
+    // Memory Vessel: "they can't play cards from their hand", the cast half of "play".
+    if is_blocked_by_prohibit_play_from_zone(state, obj, player) {
+        return Some("A temporary effect prevents playing cards from this zone");
+    }
+    // CR 604.1: Rule of Law: "Each player can't cast more than one spell each turn."
+    if is_blocked_by_per_turn_cast_limit_for(state, player, obj, fused) {
+        return Some("A static ability limits the number of spells you can cast this turn");
+    }
+    None
+}
+
+/// CR 702.62a + CR 702.62c + CR 601.3: could `player` begin to cast the hand card `object_id`,
+/// timing aside (`restrictions::restriction_confines_to_sorcery_timing`)? Costs, targets and a
+/// missing mana cost (CR 118.6, Ancestral Vision) don't stop a cast from beginning.
+pub(super) fn hand_cast_may_begin(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        // CR 702.61a: "players can't cast other spells".
+        !super::keywords::stack_has_split_second(state)
+            && cast_prohibition(state, player, obj, false).is_none()
+    })
+}
+
 /// CR 602.5 + CR 605.1a: shared predicate — does one `CantBeActivated` static
 /// (`bf_obj`/`def`) prohibit `activating_ability` on `activating_source_id` for
 /// `caster`? Sole authority the bool enforcement shim and the source collector
@@ -38468,21 +38475,27 @@ fn evaluate_casting_prohibition_condition(
 ) -> bool {
     match when {
         // CR 109.5: "during your turn" — bound to the static's source controller.
-        CastingProhibitionCondition::DuringYourTurn => state.active_player == source_controller,
+        CastingProhibitionCondition::DuringYourTurn => {
+            super::players::is_turn_player(state, source_controller)
+        }
         // CR 506.1: "during combat" — any combat phase, game-wide.
         CastingProhibitionCondition::DuringCombat => state.phase.is_combat(),
         // CR 109.5 + CR 117.1a + CR 604.1: "only during your turn" — blocked
         // when it is NOT the source-controller's turn (Fires of Invention's
         // "your turn"). Differs from `NotDuringAffectedPlayersTurn`: this
         // binds to the static source's controller per CR 109.5.
-        CastingProhibitionCondition::NotDuringYourTurn => state.active_player != source_controller,
+        CastingProhibitionCondition::NotDuringYourTurn => {
+            !super::players::is_turn_player(state, source_controller)
+        }
         // CR 102.1 + CR 117.1a + CR 604.1: "only during their own turn" —
         // distributive per-affected-player binding (Dosan / City of Solitude).
         // Blocked when it is NOT the *caster's* turn. The pronoun "their own"
         // is not governed by CR 109.5 (which binds "you/your"); the
         // distributive reading follows from CR 102.1 + the template structure
         // of "[every player] can [action] only during their own [time]".
-        CastingProhibitionCondition::NotDuringAffectedPlayersTurn => state.active_player != caster,
+        CastingProhibitionCondition::NotDuringAffectedPlayersTurn => {
+            !super::players::is_turn_player(state, caster)
+        }
         // CR 117.1a + CR 117.1b: "only any time they could cast a sorcery"
         // — blocked when not at sorcery speed. `restrictions` owns the
         // sorcery-speed timing predicate (CR 307.1); never re-derive it.

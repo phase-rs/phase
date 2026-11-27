@@ -1288,7 +1288,7 @@ pub(crate) fn lower_oracle_block_ir(
         } => {
             let payload = ModalPayloadIr {
                 choice: build_modal_choice(&header, &modes),
-                modes: parse_modal_mode_irs(&modes, AbilityKind::Activated, ctx),
+                modes: parse_modal_mode_irs(None, &modes, AbilityKind::Activated, ctx),
             };
             let mut ability = modal_marker_ir(&header, AbilityKind::Activated, payload, ctx);
             ability.shell.cost = Some(parse_oracle_cost(&cost_text));
@@ -1297,7 +1297,7 @@ pub(crate) fn lower_oracle_block_ir(
         }
         OracleBlockAst::Modal { header, modes } => OracleBlockIr::Modal {
             choice: build_modal_choice(&header, &modes),
-            modes: parse_modal_mode_irs(&modes, AbilityKind::Spell, ctx),
+            modes: parse_modal_mode_irs(Some(&header), &modes, AbilityKind::Spell, ctx),
         },
         OracleBlockAst::TriggeredModal {
             trigger_line,
@@ -1382,7 +1382,12 @@ pub(crate) fn lower_oracle_block_ir(
                         true,
                     ),
                     choice: build_modal_choice(&header, &modes),
-                    modes: parse_modal_mode_irs(&modes, AbilityKind::Spell, &mut mode_ctx),
+                    modes: parse_modal_mode_irs(
+                        Some(&header),
+                        &modes,
+                        AbilityKind::Spell,
+                        &mut mode_ctx,
+                    ),
                     optionality: header.optionality,
                 };
                 ctx.diagnostics.extend(mode_ctx.diagnostics);
@@ -1596,6 +1601,7 @@ fn mode_anaphor_subject(subject: Option<TargetFilter>) -> Option<TargetFilter> {
 }
 
 fn parse_modal_mode_irs(
+    header: Option<&ModalHeaderAst>,
     modes: &[ModeAst],
     kind: AbilityKind,
     base_ctx: &mut ParseContext,
@@ -1614,6 +1620,17 @@ fn parse_modal_mode_irs(
             mode_ctx.body_scope = super::oracle_ir::context::BodyScope::ModalMode;
             mode_ctx.diagnostics.clear();
             let mut ability = parse_ability_ir_with_context(&mode.body, kind, &mut mode_ctx);
+            if let Some(header) = header {
+                if let Some(effect) =
+                    super::oracle_effect::token::parse_characteristic_only_token_modal_mode(
+                        &header.raw,
+                        &mode.body,
+                        &mode_ctx,
+                    )
+                {
+                    replace_characteristic_only_mode_effect(&mut ability, effect);
+                }
+            }
             guard_unsupported_mode_qualifiers_ir(&mut ability, kind, &mode_ctx);
             base_ctx.diagnostics.extend(mode_ctx.diagnostics);
             // CR 700.2: the selected modes resolve as one chain, so their declared-player groups must not repeat.
@@ -1625,6 +1642,18 @@ fn parse_modal_mode_irs(
             }
         })
         .collect()
+}
+
+/// CR 700.2: A characteristic-only token bullet is a complete token mode even
+/// though its printed effect is supplied by the modal header. Replace the
+/// ordinary parser's effect only after the typed characteristic-only parser
+/// matches; valid non-token modes never enter this function because the
+/// specialized parser returns `None` for them.
+fn replace_characteristic_only_mode_effect(ability: &mut AbilityIr, effect: Effect) {
+    let [clause] = ability.body.clauses.as_mut_slice() else {
+        return;
+    };
+    clause.parsed.effect = effect;
 }
 
 fn anchor_mode_irs(
@@ -2298,7 +2327,7 @@ pub(crate) fn lower_mode_abilities_with_scope(
         relative_player_scope,
         ..Default::default()
     };
-    parse_modal_mode_irs(modes, kind, &mut ctx)
+    parse_modal_mode_irs(None, modes, kind, &mut ctx)
         .into_iter()
         .map(|mode| lower_ability_ir(&mode.ability))
         .collect()
@@ -2466,7 +2495,7 @@ pub(crate) fn try_parse_inline_modal_ir(effect_body: &str, ctx: &ParseContext) -
             ctx.in_trigger,
         ),
         choice: build_modal_choice(&header, &modes),
-        modes: parse_modal_mode_irs(&modes, AbilityKind::Spell, &mut mode_ctx),
+        modes: parse_modal_mode_irs(None, &modes, AbilityKind::Spell, &mut mode_ctx),
         optionality: header.optionality,
     })
 }
@@ -4415,9 +4444,11 @@ mod tests {
     use crate::parser::oracle_ir::doc::OracleNodeIr;
     use crate::parser::oracle_ir::trigger::TriggerNodeIr;
     use crate::types::ability::{
-        ChoiceType, ControllerRef, Effect, QuantityExpr, QuantityRef, StaticCondition,
-        TargetFilter, TriggerCondition,
+        ChoiceType, ContinuousModification, ControllerRef, Effect, PtValue, QuantityExpr,
+        QuantityRef, StaticCondition, TargetFilter, TargetSelectionMode, TriggerCondition,
     };
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaColor;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -4425,6 +4456,260 @@ mod tests {
     const AO_ORACLE: &str = "Flying, vigilance\nWhen Ao dies, choose one —\n\
 • Look at the top seven cards of your library. Put any number of nonland permanent cards with total mana value 4 or less from among them onto the battlefield. Put the rest on the bottom of your library in a random order.\n\
 • Put two +1/+1 counters on each permanent you control that's a creature or Vehicle.";
+
+    const GENKU_ORACLE: &str = "Whenever another nontoken permanent you control leaves the battlefield, choose one that hasn't been chosen this turn. Create a creature token with those characteristics.\n\
+• 2/2 white Fox with vigilance.\n\
+• 1/2 blue Moonfolk with flying.\n\
+• 1/1 black Rat with lifelink.\n\
+{3}{W}{U}: Put a +1/+1 counter on each creature you control.";
+
+    const OUTLAWS_MERRIMENT_ORACLE: &str = "At the beginning of your upkeep, choose one at random. Create a red and white creature token with those characteristics.\n\
+• 3/1 Human Warrior with trample and haste.\n\
+• 2/1 Human Cleric with lifelink and haste.\n\
+• 1/2 Human Rogue with haste and \"When this token enters, it deals 1 damage to any target.\"";
+
+    const PLAIN_CHARACTERISTIC_TOKEN_MODAL_ORACLE: &str =
+        "Choose one. Create a creature token with those characteristics.\n\
+• 2/2 white Fox with vigilance.\n\
+• 1/1 blue Bird with flying.";
+
+    fn assert_token_mode(
+        mode: &AbilityDefinition,
+        expected_pt: (i32, i32),
+        expected_types: &[&str],
+        expected_colors: &[ManaColor],
+        expected_keywords: &[Keyword],
+    ) {
+        let Effect::Token {
+            name,
+            power: PtValue::Fixed(power),
+            toughness: PtValue::Fixed(toughness),
+            types,
+            colors,
+            keywords,
+            count: QuantityExpr::Fixed { value: 1 },
+            ..
+        } = mode.effect.as_ref()
+        else {
+            panic!(
+                "modal mode must be a fixed one-token Effect::Token: {:?}",
+                mode.effect
+            );
+        };
+        assert_eq!((*power, *toughness), expected_pt);
+        assert_eq!(
+            types,
+            &expected_types
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(colors, expected_colors);
+        assert_eq!(keywords, expected_keywords);
+        assert!(!name.is_empty(), "token mode must retain its token name");
+    }
+
+    /// SHAPE / CR 700.2: Genku's exact printed characteristic-only modes are
+    /// lowered through the TriggeredModal path into complete token effects.
+    #[test]
+    fn genku_full_oracle_expands_triggered_modal_token_modes() {
+        let parsed = parse_oracle_text(GENKU_ORACLE, "Genku, Future Shaper", &[], &[], &[]);
+        assert_eq!(parsed.triggers.len(), 1, "reach: Genku has one trigger");
+        let trigger = &parsed.triggers[0];
+        let execute = trigger.execute.as_deref().expect("reach: trigger body");
+        let modal = execute.modal.as_ref().expect("reach: TriggeredModal");
+        assert_eq!(modal.selection, TargetSelectionMode::Chosen);
+        assert!(modal
+            .constraints
+            .iter()
+            .any(|constraint| matches!(constraint, ModalSelectionConstraint::NoRepeatThisTurn)));
+        assert_eq!(execute.mode_abilities.len(), 3);
+        for mode in &execute.mode_abilities {
+            assert!(
+                !chain_has_unimplemented(mode),
+                "mode must be complete: {mode:?}"
+            );
+        }
+        assert_token_mode(
+            &execute.mode_abilities[0],
+            (2, 2),
+            &["Creature", "Fox"],
+            &[ManaColor::White],
+            &[Keyword::Vigilance],
+        );
+        assert_token_mode(
+            &execute.mode_abilities[1],
+            (1, 2),
+            &["Creature", "Moonfolk"],
+            &[ManaColor::Blue],
+            &[Keyword::Flying],
+        );
+        assert_token_mode(
+            &execute.mode_abilities[2],
+            (1, 1),
+            &["Creature", "Rat"],
+            &[ManaColor::Black],
+            &[Keyword::Lifelink],
+        );
+    }
+
+    /// SHAPE / CR 700.2b: Outlaws' Merriment uses the same characteristic-only
+    /// TriggeredModal form. All three modes are characteristic-only token
+    /// bullets; the quoted trigger in the third mode belongs on the created
+    /// token as a GrantTrigger.
+    #[test]
+    fn outlaws_merriment_full_oracle_expands_random_triggered_modal() {
+        let parsed = parse_oracle_text(
+            OUTLAWS_MERRIMENT_ORACLE,
+            "Outlaws' Merriment",
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(parsed.triggers.len(), 1, "reach: upkeep trigger");
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("reach: trigger body");
+        let modal = execute.modal.as_ref().expect("reach: TriggeredModal");
+        assert_eq!(modal.selection, TargetSelectionMode::Random);
+        assert_eq!(execute.mode_abilities.len(), 3);
+        for mode in &execute.mode_abilities {
+            assert!(
+                !chain_has_unimplemented(mode),
+                "mode must be complete: {mode:?}"
+            );
+        }
+        assert_token_mode(
+            &execute.mode_abilities[0],
+            (3, 1),
+            &["Creature", "Human", "Warrior"],
+            &[ManaColor::Red, ManaColor::White],
+            &[Keyword::Trample, Keyword::Haste],
+        );
+        assert_token_mode(
+            &execute.mode_abilities[1],
+            (2, 1),
+            &["Creature", "Human", "Cleric"],
+            &[ManaColor::Red, ManaColor::White],
+            &[Keyword::Lifelink, Keyword::Haste],
+        );
+
+        let Effect::Token {
+            types,
+            colors,
+            power: PtValue::Fixed(power),
+            toughness: PtValue::Fixed(toughness),
+            keywords,
+            static_abilities,
+            ..
+        } = execute.mode_abilities[2].effect.as_ref()
+        else {
+            panic!(
+                "third mode must create a token, not resolve its quoted damage directly: {:?}",
+                execute.mode_abilities[2].effect
+            );
+        };
+        assert_eq!((*power, *toughness), (1, 2));
+        assert_eq!(
+            types,
+            &["Creature", "Human", "Rogue"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(colors, &[ManaColor::Red, ManaColor::White]);
+        assert_eq!(keywords, &[Keyword::Haste]);
+        assert!(
+            static_abilities.iter().any(|static_ability| {
+                static_ability.modifications.iter().any(|modification| {
+                    matches!(modification, ContinuousModification::GrantTrigger { .. })
+                })
+            }),
+            "quoted ETB ability must be a GrantTrigger: {static_abilities:?}"
+        );
+    }
+
+    #[test]
+    fn characteristic_only_token_plain_modal_preserves_source_and_lowers_token() {
+        let lines: Vec<_> = PLAIN_CHARACTERISTIC_TOKEN_MODAL_ORACLE.lines().collect();
+        let (block, _) = parse_oracle_block(&lines, 0).expect("plain modal block");
+        let ir = lower_oracle_block_ir(block, "Source Witness", None, &mut ParseContext::default());
+        let OracleBlockIr::Modal { modes, .. } = ir else {
+            panic!("characteristic-only block must remain a plain modal");
+        };
+        assert_eq!(
+            modes[0].source_text, "• 2/2 white Fox with vigilance.",
+            "mode provenance must retain the printed bullet"
+        );
+        assert_eq!(
+            modes[0].ability.source_text, "2/2 white Fox with vigilance.",
+            "mode AbilityIr source must retain the characteristic-only body"
+        );
+
+        let mode = lower_ability_ir(&modes[0].ability);
+        assert_token_mode(
+            &mode,
+            (2, 2),
+            &["Creature", "Fox"],
+            &[ManaColor::White],
+            &[Keyword::Vigilance],
+        );
+    }
+
+    #[test]
+    fn characteristic_only_token_modal_expansion_fails_closed_on_malformed_mode() {
+        let header = "choose one. Create a creature token with those characteristics.";
+        assert!(
+            super::super::oracle_effect::token::parse_characteristic_only_token_modal_mode(
+                header,
+                "not a characteristic",
+                &ParseContext::default(),
+            )
+            .is_none(),
+            "malformed characteristic-only mode must not synthesize a token effect"
+        );
+    }
+
+    #[test]
+    fn characteristic_only_token_modal_expansion_preserves_valid_non_token_effect() {
+        let header = "choose one. Create a creature token with those characteristics.";
+        let mode = "Deal 1 damage to any target.";
+        assert!(
+            super::super::oracle_effect::token::parse_characteristic_only_token_modal_mode(
+                header,
+                mode,
+                &ParseContext::default(),
+            )
+            .is_none(),
+            "ordinary non-token mode must not match the token parser"
+        );
+
+        let oracle = format!("{header}\n• {mode}\n• You gain 1 life.");
+        let lines: Vec<_> = oracle.lines().collect();
+        let (block, _) = parse_oracle_block(&lines, 0).expect("plain modal block");
+        let OracleBlockIr::Modal { modes, .. } = lower_oracle_block_ir(
+            block,
+            "Boundary Witness",
+            None,
+            &mut ParseContext::default(),
+        ) else {
+            panic!("ordinary modes must remain a plain modal");
+        };
+        let mode_ability = lower_ability_ir(&modes[0].ability);
+        assert!(
+            matches!(
+                mode_ability.effect.as_ref(),
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                    ..
+                }
+            ),
+            "valid non-token mode must remain DealDamage: {:?}",
+            mode_ability.effect
+        );
+    }
 
     #[test]
     fn ao_dies_trigger_parses_as_changeszone_graveyard() {
