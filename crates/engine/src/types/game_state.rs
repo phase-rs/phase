@@ -1082,10 +1082,6 @@ pub struct CombatPhaseSkipState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LKISnapshot {
     pub name: String,
-    /// CR 201.2a + CR 608.2h + CR 709.5: the two effective names of a fully
-    /// unlocked Room. `name` retains its combined display value in that case.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub room_door_names: Option<Box<[String; 2]>>,
     /// Display-only token catalog ref as it last existed in the public zone.
     /// Preserved so stack entries from dead token sources can render the exact
     /// token image without falling back to name-based lookup.
@@ -44999,7 +44995,6 @@ impl GameState {
         fn lki_incarnations(lki: &mut LKISnapshot, f: &mut impl FnMut(ObjectId, &mut u64)) {
             let LKISnapshot {
                 name: _,
-                room_door_names: _,
                 token_image_ref: _,
                 power: _,
                 toughness: _,
@@ -60156,7 +60151,6 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         fn snapshot(power: i32) -> LKISnapshot {
             LKISnapshot {
                 name: "Loop Entrant".to_string(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: Some(power),
                 toughness: Some(2),
@@ -60280,7 +60274,6 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         fn snapshot(power: i32) -> LKISnapshot {
             LKISnapshot {
                 name: "Loop Entrant".to_string(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: Some(power),
                 toughness: Some(2),
@@ -60697,7 +60690,6 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         fn snapshot(controller: PlayerId) -> LKISnapshot {
             LKISnapshot {
                 name: "Prodigal Pyromancer".to_string(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
@@ -64666,7 +64658,6 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         fn snapshot(controller: PlayerId) -> LKISnapshot {
             LKISnapshot {
                 name: "Prodigal Pyromancer".to_string(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
@@ -64991,7 +64982,6 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         let pyromancer = ObjectId(50);
         let snapshot = LKISnapshot {
             name: "Prodigal Pyromancer".to_string(),
-            room_door_names: None,
             token_image_ref: None,
             power: Some(1),
             toughness: Some(1),

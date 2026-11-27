@@ -178,7 +178,6 @@ mod tests {
     fn empty_lki() -> LKISnapshot {
         LKISnapshot {
             name: String::new(),
-            room_door_names: None,
             token_image_ref: None,
             power: None,
             toughness: None,

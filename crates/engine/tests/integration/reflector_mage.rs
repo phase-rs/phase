@@ -366,14 +366,12 @@ fn the_room_restriction_matches_only_the_names_of_unlocked_doors() {
                 .unwrap();
             resolve_weight_room_manifest(&mut runner);
         }
-        assert_eq!(
-            runner.state().objects[&room].name,
-            if unlock_right {
-                "Moldering Gym // Weight Room"
-            } else {
-                "Moldering Gym"
-            }
-        );
+        let departure_name = if unlock_right {
+            "Moldering Gym // Weight Room"
+        } else {
+            "Moldering Gym"
+        };
+        assert_eq!(runner.state().objects[&room].name, departure_name);
 
         advance_to_main(&mut runner, P0);
         let outcome = runner
@@ -381,6 +379,9 @@ fn the_room_restriction_matches_only_the_names_of_unlocked_doors() {
             .target_objects(&[mage, room])
             .resolve();
         outcome.assert_zone(&[room], Zone::Hand);
+        let departure = &runner.state().lki_cache[&room];
+        assert_eq!(departure.name, departure_name);
+        assert!(departure.subtypes.iter().any(|subtype| subtype == "Room"));
         assert!(matches!(
             outcome.final_waiting_for(),
             WaitingFor::Priority { .. }
@@ -398,7 +399,11 @@ fn the_room_restriction_matches_only_the_names_of_unlocked_doors() {
         };
         // CR 201.2a + CR 608.2h + CR 709.5: use the Room's effective names
         // immediately before it moved, including only its unlocked doors.
-        for (name, expected) in [("Moldering Gym", true), ("Weight Room", unlock_right)] {
+        for (name, expected) in [
+            ("Moldering Gym", true),
+            ("Weight Room", unlock_right),
+            ("Moldering Gym // Weight Room", false),
+        ] {
             let record = SpellCastRecord {
                 name: name.into(),
                 ..Default::default()

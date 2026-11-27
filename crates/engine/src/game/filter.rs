@@ -10457,7 +10457,6 @@ impl<'a> SourceContext<'a> {
             triggering_object: None,
             lki: LKISnapshot {
                 name: String::new(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: None,
                 toughness: None,
@@ -10697,7 +10696,6 @@ fn source_context_from_filter<'a>(
             .or_else(|| state.lki_cache.get(&source_id).cloned())
             .unwrap_or_else(|| LKISnapshot {
                 name: String::new(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: None,
                 toughness: None,
@@ -10799,19 +10797,21 @@ fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> O
     )
 }
 
-/// CR 201.2a + CR 709.5: use the captured per-door names when the
-/// parent target was a fully unlocked Room.
+/// CR 201.2a + CR 608.2h + CR 709.5: a fully unlocked Room has two names.
+/// Its last-known name uses the Room separator, and its last-known subtypes
+/// distinguish it from other objects with the same separator in their name.
 pub(crate) fn parent_target_names(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Option<Vec<String>> {
-    fn names(room_names: Option<[String; 2]>, name: &str) -> Vec<String> {
+    fn names(room_names: Option<(&str, &str)>, name: &str) -> Vec<String> {
         match room_names {
-            Some([left, right]) if !card_names_match(&left, &right) => [left, right]
+            Some((left, right)) if !card_names_match(left, right) => [left, right]
                 .into_iter()
-                .filter(|name| !name.is_empty())
+                .filter_map(name_value)
+                .map(str::to_owned)
                 .collect(),
-            Some([left, _]) => vec![left],
+            Some((left, _)) => vec![left.to_owned()],
             None => name_value(name).map(str::to_owned).into_iter().collect(),
         }
     }
@@ -10819,12 +10819,22 @@ pub(crate) fn parent_target_names(
         state,
         ability,
         |object| {
+            let door_names = super::room::effective_battlefield_door_names(object);
             names(
-                super::room::effective_battlefield_door_names(object),
+                door_names
+                    .as_ref()
+                    .map(|[left, right]| (left.as_str(), right.as_str())),
                 &object.name,
             )
         },
-        |snapshot| names(snapshot.room_door_names.as_deref().cloned(), &snapshot.name),
+        |snapshot| {
+            let door_names = if super::room::has_room_subtype(&snapshot.subtypes) {
+                snapshot.name.split_once(super::room::DOOR_NAME_SEPARATOR)
+            } else {
+                None
+            };
+            names(door_names, &snapshot.name)
+        },
     )
 }
 
@@ -13813,7 +13823,6 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
         .or_else(|| context.state.lki_cache.get(&context.source_id).cloned())
         .unwrap_or_else(|| LKISnapshot {
             name: String::new(),
-            room_door_names: None,
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -18192,7 +18201,6 @@ mod tests {
             card,
             LKISnapshot {
                 name: "Forest".to_string(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: None,
                 toughness: None,
@@ -22854,7 +22862,6 @@ mod tests {
             object_id: gone,
             lki: LKISnapshot {
                 name: String::new(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
@@ -26466,7 +26473,6 @@ mod tests {
         );
         let lki = crate::types::game_state::LKISnapshot {
             name: "Returned Creature".into(),
-            room_door_names: None,
             token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
@@ -26518,7 +26524,6 @@ mod tests {
         );
         let lki = crate::types::game_state::LKISnapshot {
             name: "Original Entrant".into(),
-            room_door_names: None,
             token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
@@ -26660,7 +26665,6 @@ mod tests {
         );
         let mut lki = crate::types::game_state::LKISnapshot {
             name: "Destroyed Land".into(),
-            room_door_names: None,
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -26810,7 +26814,6 @@ mod tests {
 
         let lki = |tapped: bool| LKISnapshot {
             name: "Tap Probe".to_string(),
-            room_door_names: None,
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -27904,7 +27907,6 @@ mod tests {
 
         let creature_lki = LKISnapshot {
             name: "Test Creature".to_string(),
-            room_door_names: None,
             token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
@@ -27929,7 +27931,6 @@ mod tests {
         };
         let land_lki = LKISnapshot {
             name: "Test Land".to_string(),
-            room_door_names: None,
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -28039,6 +28040,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parent_target_names_splits_only_captured_room_names() {
+        let mut state = setup();
+        let target = add_creature(&mut state, PlayerId(1), "Current Name");
+        let object = &state.objects[&target];
+        let mut ability = ResolvedAbility::new(
+            Effect::unimplemented("test effect", ""),
+            vec![TargetRef::Object(target)],
+            target,
+            PlayerId(0),
+        );
+        let mut lki = object.snapshot_public_characteristics();
+        lki.name = "Moldering Gym // Weight Room".into();
+        ability.effect_context_object = Some(CostPaidObjectSnapshot::capture(object, lki));
+        assert_eq!(
+            parent_target_names(&state, &ability).unwrap(),
+            ["Moldering Gym // Weight Room"],
+        );
+
+        let captured = ability.effect_context_object.as_mut().unwrap();
+        captured.lki.subtypes.push("Room".into());
+        assert_eq!(
+            parent_target_names(&state, &ability).unwrap(),
+            ["Moldering Gym", "Weight Room"],
+        );
+    }
+
     /// CR 608.2h + CR 201.2a + CR 707.2: `SameNameAsParentTarget` reads the
     /// parent target's name from the effect-context snapshot only when that
     /// snapshot names the SAME object and is still current (the object is as
@@ -28049,7 +28077,6 @@ mod tests {
     fn same_name_as_parent_target_reads_only_a_current_matching_move_snapshot() {
         let copied_lki = LKISnapshot {
             name: "Grizzly Bears".to_string(),
-            room_door_names: None,
             token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
@@ -28194,7 +28221,6 @@ mod tests {
             stolen,
             LKISnapshot {
                 name: "Stolen Bear".to_string(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
@@ -28271,7 +28297,6 @@ mod tests {
             spell,
             LKISnapshot {
                 name: "Cast From Exile".to_string(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: None,
                 toughness: None,
@@ -31727,7 +31752,6 @@ mod attached_set_host_filter_tests {
     fn empty_lki() -> crate::types::game_state::LKISnapshot {
         crate::types::game_state::LKISnapshot {
             name: String::new(),
-            room_door_names: None,
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -31931,7 +31955,6 @@ mod attached_set_host_filter_tests {
             host,
             crate::types::game_state::LKISnapshot {
                 name: "Host".into(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),

@@ -5893,7 +5893,6 @@ fn redact_damage_record_source(record: &mut crate::types::game_state::DamageReco
 fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
     let crate::types::game_state::LKISnapshot {
         name,
-        room_door_names,
         token_image_ref,
         power,
         toughness,
@@ -5917,7 +5916,6 @@ fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
         intensity,
     } = snapshot;
     *name = HIDDEN_CARD_NAME.to_string();
-    *room_door_names = None;
     *intensity = 0;
     // CR 106.7: what the object could produce is read from its abilities, so it
     // identifies the card as much as its other characteristics do.

@@ -14,6 +14,8 @@ use crate::types::zones::Zone;
 use super::casting::{self, SpecialActionManaPayment};
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 
+pub(super) const DOOR_NAME_SEPARATOR: &str = " // ";
+
 /// An engine-authored Room-door unlock announcement for Priority preflight.
 /// The Room identity and locked door stay private to the Room authority until
 /// the facade reconstructs the ordinary special-action primer.
@@ -91,7 +93,11 @@ pub(in crate::game) fn priority_unlock_room_door_announcements(
 /// printed-form reader `transform::stored_double_face`, cannot drift apart — they
 /// differ only in WHICH type line they hand it.
 pub(crate) fn has_shared_type_line(types: &crate::types::card_type::CardType) -> bool {
-    types.subtypes.iter().any(|s| s == "Room")
+    has_room_subtype(&types.subtypes)
+}
+
+pub(super) fn has_room_subtype(subtypes: &[String]) -> bool {
+    subtypes.iter().any(|subtype| subtype == "Room")
 }
 
 /// The object IS a Room right now — its current, post-copy card types. Every
@@ -329,7 +335,7 @@ pub(crate) fn door_gated_battlefield_name(
 ) -> Option<String> {
     let [left, right] = door_gated_battlefield_names(obj)?;
     Some(match (left, right) {
-        (Some(left), Some(right)) => format!("{left} // {right}"),
+        (Some(left), Some(right)) => format!("{left}{DOOR_NAME_SEPARATOR}{right}"),
         (Some(half), None) | (None, Some(half)) => half,
         (None, None) => String::new(),
     })
@@ -365,7 +371,7 @@ pub(crate) fn effective_battlefield_door_names(
         return None;
     };
     let [left, right] = super::stickers::apply_name_stickers_to_room_doors(obj, [left, right]);
-    (obj.name == format!("{left} // {right}")).then_some([left, right])
+    (obj.name == format!("{left}{DOOR_NAME_SEPARATOR}{right}")).then_some([left, right])
 }
 
 /// CR 709.5j: A "door" is a half of a Room permanent. A Room has a left door

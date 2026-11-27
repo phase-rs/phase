@@ -3612,7 +3612,6 @@ impl GameObject {
     pub fn snapshot_public_characteristics(&self) -> LKISnapshot {
         LKISnapshot {
             name: self.name.clone(),
-            room_door_names: super::room::effective_battlefield_door_names(self).map(Box::new),
             token_image_ref: self.token_image_ref.clone(),
             power: self.power,
             toughness: self.toughness,

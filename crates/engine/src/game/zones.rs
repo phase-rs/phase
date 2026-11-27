@@ -236,9 +236,35 @@ pub(super) fn capture_exit_lki(
     let lki_copiable_values =
         crate::game::layers::compute_current_copiable_values(state, object_id);
     let lki = crate::types::game_state::LKISnapshot {
+        name: obj.name.clone(),
+        token_image_ref: obj.token_image_ref.clone(),
+        power: obj.power,
+        toughness: obj.toughness,
+        // CR 208.4b + CR 613.4b: keep both current and layer-7b base values.
+        base_power: obj.layer_base_power.or(obj.base_power),
+        base_toughness: obj.layer_base_toughness.or(obj.base_toughness),
+        // CR 202.3d + CR 709.4d + CR 709.5: reuse the zone-aware
+        // characteristic readers, including fused spells and unlocked Rooms.
+        mana_value: obj.effective_mana_value(),
+        controller: obj.controller,
+        owner: obj.owner,
+        card_types: obj.card_types.core_types.clone(),
+        subtypes: obj.card_types.subtypes.clone(),
+        supertypes: obj.card_types.supertypes.clone(),
+        keywords: obj.keywords.clone(),
+        colors: obj.effective_colors(),
+        chosen_attributes: obj.chosen_attributes.clone(),
+        counters: obj.counters.clone(),
+        // CR 110.5d: the new off-battlefield object has no tap status.
+        tapped: obj.tapped,
+        // CR 701.60b: suspected status is read at exit.
+        is_suspected: obj.is_suspected,
+        // CR 722.3a + CR 400.7: keep the old object's prepared designation.
+        was_prepared: obj.prepared.is_some(),
+        intensity: obj.intensity,
         // CR 701.3d: the caller captures these before any attachment sever.
         attachments,
-        ..obj.snapshot_public_characteristics()
+        produceable_mana_types: Vec::new(),
     };
     state.lki_cache.insert(object_id, lki.clone());
     state

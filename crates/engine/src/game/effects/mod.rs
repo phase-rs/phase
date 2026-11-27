@@ -4875,7 +4875,6 @@ fn reveal_until_object_context_from_events(events: &[GameEvent]) -> Option<CostP
             object_id: subject.identity.object_id,
             lki: LKISnapshot {
                 name: subject.name.clone(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: subject.power,
                 toughness: subject.toughness,
@@ -4938,18 +4937,8 @@ fn revealed_object_context_from_events(
 }
 
 pub(crate) fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapshot {
-    use crate::types::game_state::{
-        battlefield_departure_source_context_from_record, BattlefieldDepartureSourceContext,
-    };
-
-    let room_door_names = match battlefield_departure_source_context_from_record(record) {
-        BattlefieldDepartureSourceContext::Present(context) => context.lki.room_door_names.clone(),
-        BattlefieldDepartureSourceContext::Absent
-        | BattlefieldDepartureSourceContext::Malformed => None,
-    };
     LKISnapshot {
         name: record.name.clone(),
-        room_door_names,
         token_image_ref: None,
         power: record.power,
         toughness: record.toughness,
@@ -45912,7 +45901,6 @@ mod tests {
             source,
             LKISnapshot {
                 name: "Choice Source".to_string(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: None,
                 toughness: None,
@@ -50336,7 +50324,6 @@ mod tests {
             sacrificed,
             crate::types::game_state::LKISnapshot {
                 name: "Sacrificed".to_string(),
-                room_door_names: None,
                 token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
