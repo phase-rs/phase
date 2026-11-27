@@ -6033,6 +6033,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![token_static],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         walk_effect(&token, &mut names);
 

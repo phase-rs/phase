@@ -811,15 +811,8 @@ fn parse_replacement_line_inner(
     // those tokens plus an additional <subtype> token" (Xorn class).
     // Distinguished from the Chatterfang/Doubling-Season class above by its
     // subtype condition AND inverted "instead create" word order.
-    if nom_primitives::scan_contains(&lower, "would create one or more")
-        && nom_primitives::scan_contains(&lower, "instead create those tokens plus")
-    {
-        if let Some(def) = parse_xorn_subtype_token_replacement(&lower, &text) {
-            return Some(def);
-        }
-        if let Some(def) = parse_generic_additional_token_replacement(&lower, &text) {
-            return Some(def);
-        }
+    if let Some(def) = parse_active_additional_token_replacement(&lower, &text) {
+        return Some(def);
     }
 
     // CR 614.1a + CR 111.1: Manufactor-class ensure-all token replacement —
@@ -14071,8 +14064,8 @@ pub(crate) fn parse_token_replacement(
         TokenReplacementShape::Half => {
             def = def.quantity_modification(QuantityModification::Half);
         }
-        TokenReplacementShape::PlusSpec { spec } => {
-            def = def.additional_token_spec(*spec);
+        TokenReplacementShape::PlusSpec { payload } => {
+            def.additional_token_spec = Some(payload);
         }
         TokenReplacementShape::Substitute { token } => {
             // CR 614.1a + CR 111.1: Full token substitution (Divine Visitation).
@@ -14119,7 +14112,7 @@ enum TokenReplacementShape {
     Half,
     /// "those tokens plus [spec] are created instead" (Chatterfang, Donatello).
     PlusSpec {
-        spec: Box<crate::types::token_spec::TokenSpec>,
+        payload: Box<crate::types::ability::AdditionalTokenSpec>,
     },
     /// "that many [spec] are created instead" — full token substitution
     /// (Divine Visitation). The substitute characteristics are carried as an
@@ -14147,9 +14140,9 @@ fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
     }
 
     // "those tokens plus <spec> (is|are) created instead" → Chatterfang / Donatello.
-    if let Some(spec) = parse_token_plus_spec_shape(lower) {
+    if nom_primitives::scan_contains(lower, "those tokens plus ") {
         return Some(TokenReplacementShape::PlusSpec {
-            spec: Box::new(spec),
+            payload: Box::new(parse_token_plus_spec_shape(lower)?),
         });
     }
 
@@ -14198,27 +14191,21 @@ fn scan_token_multiplier_factor(lower: &str) -> Option<u32> {
 /// CR 614.1a + CR 111.1: Extract the "those tokens plus <spec> (is|are) created
 /// instead" appended-token spec (Chatterfang / Donatello). Returns the parsed
 /// `TokenSpec` for the appended token, or `None` if the phrase is absent.
-fn parse_token_plus_spec_shape(lower: &str) -> Option<crate::types::token_spec::TokenSpec> {
-    // Extract the spec descriptor between "those tokens plus " and the trailing
-    // "are/is created instead" clause using nom combinators.
-    let ((descriptor_start, descriptor_len), _rest) = nom_on_lower(lower, lower, |i| {
-        let (i, pre) = take_until::<_, _, OracleError<'_>>("those tokens plus ").parse(i)?;
-        let start_offset = pre.len() + "those tokens plus ".len();
-        let (i, _) = tag("those tokens plus ").parse(i)?;
-        let (_, descriptor) = alt((
-            take_until::<_, _, OracleError<'_>>(" are created instead"),
-            take_until::<_, _, OracleError<'_>>(" is created instead"),
-        ))
-        .parse(i)?;
-        Ok((i, (start_offset, descriptor.len())))
-    })?;
-
-    let descriptor = lower
-        .get(descriptor_start..descriptor_start + descriptor_len)?
-        .trim();
-    let descriptor = normalize_additional_token_descriptor(descriptor)?;
-    let token = super::oracle_effect::parse_token_description(&descriptor)?;
-    token_description_to_spec(&token)
+fn parse_token_plus_spec_shape(lower: &str) -> Option<crate::types::ability::AdditionalTokenSpec> {
+    let suffix = || alt((tag(" are created instead"), tag(" is created instead")));
+    let (_, descriptor) = all_consuming(terminated(
+        preceded(
+            (take_until("those tokens plus "), tag("those tokens plus ")),
+            alt((
+                take_until::<_, _, OracleError<'_>>(" are created instead"),
+                take_until(" is created instead"),
+            )),
+        ),
+        (suffix(), opt(tag("."))),
+    ))
+    .parse(lower)
+    .ok()?;
+    parse_additional_token_descriptor(descriptor)
 }
 
 /// CR 614.1a + CR 111.1: Extract the "that many <spec> (is|are) created instead"
@@ -14327,102 +14314,72 @@ fn parse_token_core_type_gate(lower: &str) -> Option<crate::types::card_type::Co
 /// CR 614.1a + CR 111.1: Normalize the optional "additional" modifier on
 /// token descriptors before delegating to `parse_token_description`, whose token
 /// grammar expects an article or numeric count prefix.
-fn normalize_additional_token_descriptor(descriptor: &str) -> Option<String> {
-    let (rest, stripped_additional) = opt(value(
-        (),
-        preceded(
-            opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))),
-            tag("additional "),
-        ),
+fn parse_additional_token_descriptor(
+    descriptor: &str,
+) -> Option<crate::types::ability::AdditionalTokenSpec> {
+    let (body, (count, _)) = (
+        alt((
+            value("a ", alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))),
+            tag("that many "),
+        )),
+        opt(tag("additional ")),
+    )
+        .parse(descriptor)
+        .ok()?;
+    let (_, (_, _, keywords)) = all_consuming((
+        take_until::<_, _, OracleError<'_>>(" token"),
+        (tag(" token"), opt(tag("s"))),
+        opt(preceded(tag(" with "), nom::combinator::rest)),
     ))
-    .parse(descriptor)
+    .parse(body)
     .ok()?;
-    let descriptor = rest.trim();
-    if descriptor.is_empty() {
-        return None;
+    if let Some(keywords) = keywords {
+        super::oracle_effect::token::parse_complete_token_keyword_list(keywords)?;
     }
-    if stripped_additional.is_some() {
-        let (_, article) = peek(opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))))
-            .parse(descriptor)
-            .ok()?;
-        if article.is_none() && additional_token_descriptor_needs_leading_article(descriptor) {
-            return Some(format!("a {descriptor}"));
-        }
-    }
-    Some(descriptor.to_string())
+    let token = super::oracle_effect::parse_token_description(&format!("{count}{body}"))?;
+    Some(crate::types::ability::AdditionalTokenSpec {
+        spec: token_description_to_spec(&token)?,
+        count: token.count,
+    })
 }
 
-/// True when the descriptor needs a leading `"a "` before `parse_token_description`.
-/// Subtype-only specs (`"Food token"`) have no count and require an article.
-/// P/T-led specs (`"1/1 …"`, `"10/10 …"`) also require one: without it
-/// the token count position (`oracle_util::parse_count_slot`'s `parse_count_expr`
-/// head) mis-reads the leading digits before `/` as a bare count and leaves
-/// `/toughness …`, breaking P/T parsing.
-fn additional_token_descriptor_needs_leading_article(descriptor: &str) -> bool {
-    let trimmed = descriptor.trim_start();
-    if nom_primitives::parse_pt_value(trimmed).is_ok() {
-        return true;
-    }
-    parse_count_expr(trimmed).is_none()
-}
-
-/// CR 614.1a + CR 111.1: Parse Xorn-class subtype-gated additional-token
-/// replacements. Matches the shape:
-///
-/// ```text
-/// "If you would create one or more <subtype> tokens, instead create
-///  those tokens plus an additional <subtype> token."
-/// ```
-///
-/// Differs from `parse_token_replacement` (Chatterfang) in two ways:
-/// (1) the original event already creates tokens of the listed subtype, so a
-/// `ReplacementCondition::TokenSubtypeMatches` gate is emitted; (2) the
-/// "instead create those tokens plus X" word order is inverted from
-/// Chatterfang's "those tokens plus X are created instead." Manufactor
-/// ("instead create one of each") shares the same prefix and is parsed
-/// separately in Item 5b.
-fn parse_xorn_subtype_token_replacement(
+/// CR 614.1a + CR 111.1: Parse active additional-token replacements, with
+/// an optional core-type or subtype gate on the original tokens.
+fn parse_active_additional_token_replacement(
     lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    // Extract the subtype after "would create one or more ".
-    // Stops at " tokens," — the comma separator before "instead create".
-    let ((subtype_start, subtype_len), _) = nom_on_lower(lower, lower, |i| {
-        let (i, pre) = take_until::<_, _, OracleError<'_>>("would create one or more ").parse(i)?;
-        let start_offset = pre.len() + "would create one or more ".len();
-        let (i, _) = tag("would create one or more ").parse(i)?;
-        let (_, subtype) = take_until::<_, _, OracleError<'_>>(" tokens,").parse(i)?;
-        Ok((i, (start_offset, subtype.len())))
-    })?;
-
-    let subtype_phrase = lower
-        .get(subtype_start..subtype_start + subtype_len)?
-        .trim();
-    if subtype_phrase.is_empty() || subtype_phrase.contains(' ') {
-        // Multi-word subtypes (e.g., "or more Treasure") indicate the prefix
-        // didn't isolate a single canonical subtype — bail and let a future
-        // multi-subtype branch (Manufactor) handle it.
-        return None;
+    let (_, (gate, _, descriptor, _)) = all_consuming(preceded(
+        tag("if you would create one or more "),
+        (
+            opt(terminated(
+                nom::character::complete::alpha1::<_, OracleError<'_>>,
+                tag(" "),
+            )),
+            tag("tokens, instead create those tokens plus "),
+            nom::bytes::complete::take_till(|c| c == '.'),
+            opt(tag(".")),
+        ),
+    ))
+    .parse(lower)
+    .ok()?;
+    let payload = parse_additional_token_descriptor(descriptor)?;
+    let mut def = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+        .token_owner_scope(ControllerRef::You)
+        .additional_token_spec(payload.spec, payload.count)
+        .description(original_text.to_string());
+    if let Some(gate) = gate {
+        let gate = canonicalize_subtype(gate);
+        def = def.condition(match crate::types::card_type::CoreType::from_str(&gate) {
+            Ok(core) => ReplacementCondition::TokenCoreTypeMatches {
+                core_types: vec![core],
+            },
+            Err(()) => ReplacementCondition::TokenSubtypeMatches {
+                subtypes: vec![gate],
+            },
+        });
     }
-
-    let spec = parse_instead_create_those_tokens_plus_spec(lower)?;
-
-    // Capitalize the subtype to match the parser's existing convention
-    // (TokenSpec.subtypes uses title-case: "Treasure", not "treasure").
-    let canonical_subtype = canonicalize_subtype(subtype_phrase);
-
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::CreateToken)
-            .condition(ReplacementCondition::TokenSubtypeMatches {
-                subtypes: vec![canonical_subtype],
-            })
-            // CR 614.1a + CR 109.5: "If *you* would create..." scopes the
-            // replacement to the source's controller — it must not fire for
-            // tokens created by other players (issue #1967).
-            .token_owner_scope(ControllerRef::You)
-            .additional_token_spec(spec)
-            .description(original_text.to_string()),
-    )
+    Some(def)
 }
 
 /// CR 614.1a + CR 111.1: Parse subtype-gated replacements that preserve the
@@ -14474,57 +14431,12 @@ fn parse_same_subtype_plus_additional_token_replacement(
             // CR 109.5 + CR 111.2: "you" is the source controller, and only
             // token batches that player creates are affected.
             .token_owner_scope(ControllerRef::You)
-            .additional_token_spec(spec)
+            .additional_token_spec(
+                spec,
+                crate::types::ability::AdditionalTokenSpec::proportional_count(),
+            )
             .description(original_text.to_string()),
     )
-}
-
-/// CR 614.1a + CR 111.1: Tippy-Toe class — generic additional token without subtype gate.
-fn parse_generic_additional_token_replacement(
-    lower: &str,
-    original_text: &str,
-) -> Option<ReplacementDefinition> {
-    if !nom_primitives::scan_contains(lower, "would create one or more tokens") {
-        return None;
-    }
-    let spec = parse_instead_create_those_tokens_plus_spec(lower)?;
-
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::CreateToken)
-            // CR 614.1a + CR 109.5: "If you would create..." scopes this
-            // replacement to the source's controller, without Xorn's subtype gate.
-            .token_owner_scope(ControllerRef::You)
-            .additional_token_spec(spec)
-            .description(original_text.to_string()),
-    )
-}
-
-/// CR 614.1a + CR 111.1: Extract the appended token spec from the
-/// "instead create those tokens plus ..." wording shared by Xorn- and
-/// Tippy-Toe-class replacement effects.
-fn parse_instead_create_those_tokens_plus_spec(
-    lower: &str,
-) -> Option<crate::types::token_spec::TokenSpec> {
-    let total_len = lower.len();
-    let ((descriptor_start, descriptor_len), _) = nom_on_lower(lower, lower, |i| {
-        let (i, _) =
-            take_until::<_, _, OracleError<'_>>("instead create those tokens plus ").parse(i)?;
-        let (i, _) = tag("instead create those tokens plus ").parse(i)?;
-        let start_offset = total_len - i.len();
-        let (i, descriptor) = alt((
-            take_until::<_, _, OracleError<'_>>("."),
-            nom::combinator::rest,
-        ))
-        .parse(i)?;
-        Ok((i, (start_offset, descriptor.len())))
-    })?;
-
-    let descriptor = lower
-        .get(descriptor_start..descriptor_start + descriptor_len)?
-        .trim();
-    let descriptor = normalize_additional_token_descriptor(descriptor)?;
-    let token = super::oracle_effect::parse_token_description(&descriptor)?;
-    token_description_to_spec(&token)
 }
 
 /// Title-case a single-word subtype string for canonical TokenSpec storage.
@@ -32803,15 +32715,82 @@ Escape—{4}{B}{G}, Exile six other cards from your graveyard.";
             def.quantity_modification.is_none(),
             "Chatterfang adds tokens, not a count modifier"
         );
-        let spec = def
+        let spec = &def
             .additional_token_spec
-            .as_ref()
-            .expect("additional_token_spec set");
+            .as_deref()
+            .expect("additional_token_spec set")
+            .spec;
         assert_eq!(spec.characteristics.power, Some(1));
         assert_eq!(spec.characteristics.toughness, Some(1));
         assert_eq!(spec.characteristics.core_types, vec![CoreType::Creature]);
         assert_eq!(spec.characteristics.subtypes, vec!["Squirrel".to_string()]);
         assert_eq!(spec.characteristics.colors, vec![ManaColor::Green]);
+    }
+
+    #[test]
+    fn printed_additional_token_replacements_preserve_the_append_count() {
+        use crate::types::ability::AdditionalTokenSpec;
+        let single = QuantityExpr::Fixed { value: 1 };
+        let proportional = AdditionalTokenSpec::proportional_count();
+        // CR 614.5 + CR 616.1f: an article adds one token per event;
+        // "that many" reads the admitted count, as does Bilbo's singular antecedent.
+        let rows = [
+            ("Bilbo, Fellow Conspirator", "If you would create a Food token, instead create a Food token and a Treasure token.", &proportional),
+            ("Case of the Pilfered Proof", "Solved — If one or more tokens would be created under your control, those tokens plus a Clue token are created instead. (It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")", &single),
+            ("Chatterfang, Squirrel General", "If one or more tokens would be created under your control, those tokens plus that many 1/1 green Squirrel creature tokens are created instead.", &proportional),
+            ("Donatello, the Brains", "If one or more tokens would be created under your control, those tokens plus a Mutagen token are created instead.", &single),
+            ("Jolene, the Plunder Queen", "If you would create one or more Treasure tokens, instead create those tokens plus an additional Treasure token.", &single),
+            ("Peregrin Took", "If one or more tokens would be created under your control, those tokens plus an additional Food token are created instead. (It's an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")", &single),
+            ("Queen Allenal of Ruadach", "If one or more creature tokens would be created under your control, those tokens plus a 1/1 white Soldier creature token are created instead.", &single),
+            ("Quina, Qu Gourmet", "If one or more tokens would be created under your control, those tokens plus a 1/1 green Frog creature token are created instead.", &single),
+            ("Stridehangar Automaton", "If one or more artifact tokens would be created under your control, those tokens plus an additional 1/1 colorless Thopter artifact creature token with flying are created instead.", &single),
+            ("Tippy-Toe, Terrific Partner", "If you would create one or more tokens, instead create those tokens plus an additional Food token. (It's an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")", &single),
+            ("Worldwalker Helm", "If you would create one or more artifact tokens, instead create those tokens plus an additional Map token. (It's an artifact with \"{1}, {T}, Sacrifice this token: Target creature you control explores. Activate only as a sorcery.\")", &single),
+            ("Xorn", "If you would create one or more Treasure tokens, instead create those tokens plus an additional Treasure token.", &single),
+        ];
+        for (name, text, expected) in rows {
+            let def = parse_replacement_line(text, name)
+                .unwrap_or_else(|| panic!("{name}: expected a replacement"));
+            let append = def
+                .additional_token_spec
+                .unwrap_or_else(|| panic!("{name}: expected an additional token payload"));
+            assert_eq!(&append.count, expected, "{name}");
+            if name == "Worldwalker Helm" {
+                assert_eq!(
+                    def.condition,
+                    Some(ReplacementCondition::TokenCoreTypeMatches {
+                        core_types: vec![CoreType::Artifact],
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn former_additional_token_payload_decodes_as_proportional() {
+        use crate::types::ability::AdditionalTokenSpec;
+        let def = parse_replacement_line(
+            "If one or more tokens would be created under your control, those tokens plus an additional Food token are created instead.",
+            "Peregrin Took",
+        ).expect("Peregrin replacement");
+        let mut json = serde_json::to_value(def).unwrap();
+        let former_payload = json["additional_token_spec"].as_object_mut().unwrap();
+        assert!(former_payload.remove("count").is_some());
+        assert!(former_payload.contains_key("characteristics"));
+        let decoded: ReplacementDefinition = serde_json::from_value(json).unwrap();
+        let append = decoded.additional_token_spec.unwrap();
+        assert_eq!(append.spec.characteristics.subtypes, ["Food"]);
+        assert_eq!(append.count, AdditionalTokenSpec::proportional_count());
+    }
+
+    #[test]
+    fn malformed_plus_clause_cannot_become_token_substitution() {
+        let passive = "If one or more tokens would be created under your control, those tokens plus that many 1/1 green Squirrel creature tokens with flying nonsense are created instead.";
+        let active = "If you would create one or more tokens, instead create those tokens plus an additional Food token and then draw a card.";
+        assert!(parse_token_replacement_shape(&passive.to_lowercase()).is_none());
+        assert!(
+            parse_active_additional_token_replacement(&active.to_lowercase(), active).is_none()
+        );
     }
 
     /// CR 614.1a + CR 111.1: Peregrin Took's "those tokens plus an additional
@@ -32822,10 +32801,11 @@ Escape—{4}{B}{G}, Exile six other cards from your graveyard.";
         let def = parse_replacement_line(text, "Peregrin Took").expect("should parse Peregrin");
         assert_eq!(def.event, ReplacementEvent::CreateToken);
         assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
-        let spec = def
+        let spec = &def
             .additional_token_spec
-            .as_ref()
-            .expect("additional Food token spec");
+            .as_deref()
+            .expect("additional Food token spec")
+            .spec;
         assert_eq!(spec.characteristics.subtypes, vec!["Food".to_string()]);
     }
 
@@ -32846,10 +32826,11 @@ Escape—{4}{B}{G}, Exile six other cards from your graveyard.";
             "artifact tokens gate must be TokenCoreTypeMatches, got {:?}",
             def.condition
         );
-        let spec = def
+        let spec = &def
             .additional_token_spec
-            .as_ref()
-            .expect("additional Thopter token spec");
+            .as_deref()
+            .expect("additional Thopter token spec")
+            .spec;
         assert_eq!(spec.characteristics.power, Some(1));
         assert_eq!(spec.characteristics.toughness, Some(1));
         assert_eq!(spec.characteristics.subtypes, vec!["Thopter".to_string()]);
@@ -32873,10 +32854,11 @@ Escape—{4}{B}{G}, Exile six other cards from your graveyard.";
         let def =
             parse_replacement_line(text, "Eldrazi Spawn").expect("should parse multi-digit P/T");
         assert_eq!(def.event, ReplacementEvent::CreateToken);
-        let spec = def
+        let spec = &def
             .additional_token_spec
-            .as_ref()
-            .expect("additional Eldrazi token spec");
+            .as_deref()
+            .expect("additional Eldrazi token spec")
+            .spec;
         assert_eq!(spec.characteristics.power, Some(10));
         assert_eq!(spec.characteristics.toughness, Some(10));
         assert_eq!(spec.characteristics.subtypes, vec!["Eldrazi".to_string()]);
@@ -32927,10 +32909,11 @@ Escape—{4}{B}{G}, Exile six other cards from your graveyard.";
             Some(ControllerRef::You),
             "Xorn 'if you would create' must scope to the controller's tokens"
         );
-        let spec = def
+        let spec = &def
             .additional_token_spec
-            .as_ref()
-            .expect("Xorn must populate additional_token_spec");
+            .as_deref()
+            .expect("Xorn must populate additional_token_spec")
+            .spec;
         assert!(
             spec.characteristics
                 .subtypes
@@ -32959,7 +32942,8 @@ Escape—{4}{B}{G}, Exile six other cards from your graveyard.";
         ));
         let additional = def
             .additional_token_spec
-            .expect("Bilbo must append a token spec");
+            .expect("Bilbo must append a token spec")
+            .spec;
         assert_eq!(
             additional.characteristics.subtypes,
             vec!["Treasure".to_string()]
@@ -33846,10 +33830,11 @@ Escape—{4}{B}{G}, Exile six other cards from your graveyard.";
             def.condition.is_none(),
             "generic token wording must not inherit Xorn's subtype gate"
         );
-        let spec = def
+        let spec = &def
             .additional_token_spec
-            .as_ref()
-            .expect("additional Food token spec");
+            .as_deref()
+            .expect("additional Food token spec")
+            .spec;
         assert_eq!(spec.characteristics.display_name, "Food");
         assert_eq!(spec.characteristics.core_types, vec![CoreType::Artifact]);
         assert_eq!(spec.characteristics.subtypes, vec!["Food".to_string()]);

@@ -1189,6 +1189,7 @@ fn dunbarrow_batch_host_prompt_projects_without_leak() {
             source_id,
             legal_targets,
             pending_ability,
+            ..
         } => (
             *player,
             *source_id,
@@ -1214,6 +1215,7 @@ fn dunbarrow_batch_host_prompt_projects_without_leak() {
                 source_id: view_source,
                 legal_targets: view_targets,
                 pending_ability: view_pending,
+                ..
             } => {
                 assert_eq!(*view_player, player, "{label}: prompt player preserved");
                 assert_eq!(*view_source, source_id, "{label}: prompt source preserved");

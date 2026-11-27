@@ -225,12 +225,10 @@ pub(crate) fn ability_creates_token_with_plus_one_counters(ability: &AbilityDefi
         .iter()
         .enumerate()
         .any(|(index, effect)| match effect {
-            Effect::Token {
-                enter_with_counters,
-                ..
-            } => enter_with_counters
-                .iter()
-                .any(|(counter_type, _)| counter_type == &CounterType::Plus1Plus1),
+            Effect::Token { .. } => effect.token_creation_members().any(|member| {
+                matches!(member, Effect::Token { enter_with_counters, .. }
+                    if enter_with_counters.iter().any(|(counter_type, _)| counter_type == &CounterType::Plus1Plus1))
+            }),
             Effect::PutCounter { counter_type, .. } => {
                 counter_type == &CounterType::Plus1Plus1
                     && created_token_placement_source(&chain, index).is_some()
@@ -612,6 +610,7 @@ mod tests {
                 )],
                 owner: TargetFilter::Controller,
                 attach_to: None,
+                additional_members: Vec::new(),
             },
         ));
         assert!(face_etb_with_plus_one_counters(&face));

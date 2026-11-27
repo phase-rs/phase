@@ -306,6 +306,7 @@ fn role_token_effect(attach_to: TargetFilter) -> Effect {
         supertypes: Vec::new(),
         static_abilities: Vec::new(),
         enter_with_counters: Vec::new(),
+        additional_members: Vec::new(),
     }
 }
 
@@ -343,6 +344,7 @@ fn curse_token_effect(attach_to: TargetFilter) -> Effect {
                 keyword: Keyword::Enchant(TargetFilter::Player),
             }])],
         enter_with_counters: Vec::new(),
+        additional_members: Vec::new(),
     }
 }
 
