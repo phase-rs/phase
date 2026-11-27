@@ -216,6 +216,7 @@ mod tests {
                     supertypes: Vec::new(),
                     static_abilities: Vec::new(),
                     enter_with_counters: Vec::new(),
+                    additional_members: Vec::new(),
                 };
                 let ability = AbilityDefinition::new(AbilityKind::Spell, token_effect);
                 let obj = state.objects.get_mut(&oid).unwrap();

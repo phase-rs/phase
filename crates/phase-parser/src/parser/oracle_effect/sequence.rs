@@ -14000,6 +14000,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         assert_eq!(
             parse_followup_continuation_ast(
@@ -14035,6 +14036,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         assert_eq!(
             parse_followup_continuation_ast(
@@ -14068,6 +14070,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         assert_eq!(
             parse_followup_continuation_ast(

@@ -494,6 +494,7 @@ fn curse_token(attach_to: TargetFilter) -> Effect {
                 keyword: Keyword::Enchant(TargetFilter::Player),
             }])],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 
@@ -527,6 +528,7 @@ fn soldier_token(owner: TargetFilter) -> Effect {
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 

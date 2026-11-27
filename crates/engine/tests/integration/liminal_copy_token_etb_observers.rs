@@ -231,6 +231,7 @@ fn enter_plain_creature(runner: &mut GameRunner) {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         },
         Vec::new(),
         source,
