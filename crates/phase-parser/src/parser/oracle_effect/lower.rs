@@ -29,9 +29,9 @@ use super::super::oracle_quantity::{
 };
 use super::super::oracle_target::{
     parse_bare_was_dealt_damage_suffix, parse_block_history_clause,
-    parse_controller_predicate_leaves, parse_target, parse_target_with_ctx,
-    parse_target_with_syntax, parse_that_clause_suffix, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, TargetSyntax,
+    parse_controller_predicate_leaves, parse_except_for_qualified_subset, parse_target,
+    parse_target_with_ctx, parse_target_with_syntax, parse_that_clause_suffix,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, TargetSyntax,
 };
 use super::super::oracle_util::{
     parse_comparator_prefix, parse_count_expr, parse_count_expr_combinator, strip_after, TextPair,
@@ -8089,6 +8089,32 @@ fn fold_each_object_legs<'a>(
     }
 }
 
+fn parse_each_damage_population<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str) {
+    let (target, remainder) = parse_target_with_ctx(text, ctx);
+    let (target, remainder) = refine_damage_target_remainder(target, remainder);
+    let (target, remainder) = fold_each_object_legs(target, remainder, ctx);
+    let Some((subset, after)) = parse_except_for_qualified_subset(remainder, ctx) else {
+        return (target, remainder);
+    };
+
+    // CR 608.2c + CR 608.2h + CR 109.5: Subtract the qualified subset from the
+    // entire damage population, using current objects and the resolving controller.
+    (
+        TargetFilter::And {
+            filters: vec![
+                target,
+                TargetFilter::Not {
+                    filter: Box::new(subset),
+                },
+            ],
+        },
+        after,
+    )
+}
+
 /// CR 102.2 + CR 102.3: leading "each opponent/player/foe/other opponent/other
 /// player" damage scope, returning the matched filter AND the unconsumed
 /// remainder. Unlike `parse_damage_each_player_scope` it is NOT all-consuming —
@@ -11522,9 +11548,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                             "",
                         ));
                     }
-                    let (filter, remainder) = parse_target_with_ctx(target_phrase, ctx);
-                    let (filter, remainder) = refine_damage_target_remainder(filter, remainder);
-                    let (filter, remainder) = fold_each_object_legs(filter, remainder, ctx);
+                    let (filter, remainder) = parse_each_damage_population(target_phrase, ctx);
                     // CR 119.2 + CR 120.3: "[N] damage to each creature and each
                     // player" — composite scope. The "each creature" parse
                     // captures the object filter; the trailing "and each player"
@@ -11795,9 +11819,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 rem_full,
             ));
         }
-        let (target, rem) = parse_target_with_ctx(after_to_for_classification, ctx);
-        let (target, rem) = refine_damage_target_remainder(target, rem);
-        let (target, rem) = fold_each_object_legs(target, rem, ctx);
+        let (target, rem) = parse_each_damage_population(after_to_for_classification, ctx);
         // CR 119.2 + CR 120.3: Composite "each <object> and each <player>"
         // (Chandra's Ignition: "to each other creature and each opponent"). The
         // object filter is captured above; if the remainder begins with
@@ -15404,7 +15426,8 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
 mod tests {
     use super::{
         accepting_bindings_confined, accepting_player_bindings, operand_bindings,
-        parse_effect_clause, target_filter_controller_ref, ParsedEffectClause,
+        parse_each_damage_population, parse_effect_clause, target_filter_controller_ref,
+        ParsedEffectClause,
     };
     use super::{
         extract_put_counter_multi_target, gate_other_revealed_card_on_multiplayer_reveal,
@@ -15420,6 +15443,63 @@ mod tests {
     };
     use crate::parser::oracle_ir::ast::parsed_clause;
     use crate::parser::oracle_ir::context::ParseContext;
+
+    #[test]
+    fn each_damage_population_subtracts_after_folding_object_legs() {
+        // The measured corpus has no printed card with both object legs and a
+        // qualified exception. Underworld Fires is the closest object-leg example.
+        // Grammar boundary: combine the object legs of Underworld Fires with
+        // a qualified token exception and leave the next sentence untouched.
+        let (target, remainder) = parse_each_damage_population(
+            "each creature and each planeswalker EXCEPT FOR Artifact    Tokens You control. Draw a card.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            target,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::creature()),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                        ],
+                    },
+                    TargetFilter::Not {
+                        filter: Box::new(TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Artifact)
+                                .controller(ControllerRef::You)
+                                .properties(vec![FilterProp::Token]),
+                        )),
+                    },
+                ],
+            }
+        );
+        assert_eq!(remainder, ". Draw a card.");
+    }
+
+    #[test]
+    fn each_damage_population_leaves_unsupported_exceptions_intact() {
+        let mut ctx = ParseContext::default();
+        // The shared type reader can bind "they" to You in this context.
+        ctx.with_player_scope(ControllerRef::You, |ctx| {
+            for exception in [
+                "except for tokens you controlled.",
+                "except for tokens they control.",
+                "except for Mageta you control.",
+                "except for tokens you control with an unknown quality.",
+                "except for you control.",
+            ] {
+                let text = format!("each creature {exception}");
+                let (target, remainder) = parse_each_damage_population(&text, ctx);
+                assert_eq!(
+                    target,
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    "{text}"
+                );
+                assert_eq!(remainder.trim_start(), exception);
+            }
+        });
+    }
 
     #[test]
     fn where_x_with_owner_binds_bare_and_composed_pronouns_to_owner() {
@@ -15523,10 +15603,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, CardSelectionMode,
         Chooser, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
-        EffectScope, ModalChoice, MultiTargetSpec, ObjectProperty, ObjectScope, OpponentMayScope,
-        PerPlayerScope, PtValue, QuantityExpr, QuantityRef, SubAbilityLink, TapStateChange,
-        TargetChoiceTiming, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-        ZoneChoiceCandidateSource, ZoneOwner,
+        EffectScope, FilterProp, ModalChoice, MultiTargetSpec, ObjectProperty, ObjectScope,
+        OpponentMayScope, PerPlayerScope, PtValue, QuantityExpr, QuantityRef, SubAbilityLink,
+        TapStateChange, TargetChoiceTiming, TargetFilter, TriggerDefinition, TypeFilter,
+        TypedFilter, ZoneChoiceCandidateSource, ZoneOwner,
     };
     use crate::types::counter::CounterType;
     use crate::types::identifiers::TrackedSetId;

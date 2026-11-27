@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::str::FromStr;
 
+use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
@@ -38,17 +39,6 @@ use super::super::oracle_util::{
     rewrite_quantity_expr_rounding, strip_reminder_text, CountHead, TextPair,
 };
 use crate::parser::oracle_ir::ast::*;
-
-/// Bridge: run a nom combinator on a lowercase copy, mapping the consumed length
-/// back to the original-case text to compute the correct remainder.
-fn nom_on_lower<'a, T, F>(text: &'a str, lower: &str, mut parser: F) -> Option<(T, &'a str)>
-where
-    F: FnMut(&str) -> OracleResult<'_, T>,
-{
-    let (rest, result) = parser(lower).ok()?;
-    let consumed = lower.len() - rest.len();
-    Some((result, &text[consumed..]))
-}
 
 pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let text = strip_reminder_text(text);
@@ -170,7 +160,11 @@ pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Opti
     {
         super::rebind_anaphoric_object_scope(&mut token.count, ObjectScope::Source);
     }
-    Some(Effect::Token {
+    Some(token_description_to_effect(token))
+}
+
+fn token_description_to_effect(token: TokenDescription) -> Effect {
+    Effect::Token {
         name: token.name,
         power: token.power.unwrap_or(PtValue::Fixed(0)),
         toughness: token.toughness.unwrap_or(PtValue::Fixed(0)),
@@ -189,7 +183,7 @@ pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Opti
         supertypes: token.supertypes,
         static_abilities: token.static_abilities,
         enter_with_counters: vec![],
-    })
+    }
 }
 
 pub(super) fn parse_copy_token_entry_modifiers(input: &str) -> OracleResult<'_, (bool, bool)> {
@@ -503,6 +497,106 @@ fn parse_token_except_boundary(input: &str) -> OracleResult<'_, &str> {
 
 pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     parse_token_description_with_context(text, &ParseContext::default())
+}
+
+/// CR 111.3: Parse one characteristic-only modal token bullet into
+/// the same typed token data used by ordinary create-token instructions. The
+/// modal header supplies the shared colors; the bullet supplies P/T and the
+/// remaining token characteristics.
+///
+/// This deliberately returns the typed effect rather than rewriting the mode's
+/// Oracle text. The caller can therefore keep the original mode source and
+/// parsing context while replacing only the fail-closed placeholder effect.
+pub(crate) fn parse_characteristic_only_token_modal_mode(
+    header: &str,
+    mode: &str,
+    ctx: &ParseContext,
+) -> Option<Effect> {
+    let shared_colors = parse_characteristic_only_token_header(header)?;
+    let token = parse_characteristic_only_token_mode(mode, &shared_colors, ctx)?;
+    Some(token_description_to_effect(token))
+}
+
+fn parse_characteristic_only_token_header(header: &str) -> Option<Vec<ManaColor>> {
+    let lower = header.to_lowercase();
+    let (_, _, after_create) =
+        nom_primitives::scan_preceded(&lower, |input| value((), tag("create ")).parse(input))?;
+    let (after_article, _) = tag::<_, _, OracleError<'_>>("a ")
+        .parse(after_create)
+        .ok()?;
+    let (colors, rest) = parse_token_color_prefix(after_article);
+    let (rest, _) = tag::<_, _, OracleError<'_>>("creature token with those characteristics")
+        .parse(rest)
+        .ok()?;
+    all_consuming(terminated(
+        opt(tag::<_, _, OracleError<'_>>(".")),
+        nom::character::complete::multispace0,
+    ))
+    .parse(rest)
+    .ok()?;
+    Some(colors)
+}
+
+fn parse_characteristic_only_token_mode(
+    mode: &str,
+    shared_colors: &[ManaColor],
+    ctx: &ParseContext,
+) -> Option<TokenDescription> {
+    let mode = mode.trim();
+    let mode = mode.trim_end_matches('.').trim_end();
+    let (supertypes, characteristics) = strip_token_supertypes(mode);
+    let (after_pt, (power, toughness)) = nom_primitives::parse_pt_value
+        .parse(characteristics.trim_start())
+        .ok()?;
+    let characteristics = after_pt.trim_start();
+    let characteristics_lower = characteristics.to_lowercase();
+    let with_offset =
+        nom_primitives::scan_at_word_boundaries_with_offset(&characteristics_lower, |input| {
+            value((), tag("with ")).parse(input)
+        })
+        .map(|(offset, _, _)| offset);
+    let (head, suffix) = with_offset.map_or((characteristics, ""), |offset| {
+        (&characteristics[..offset], &characteristics[offset..])
+    });
+    let (mode_colors, descriptor) = parse_token_color_prefix(head.trim());
+    if descriptor.trim().is_empty() {
+        return None;
+    }
+    let (name, types) = parse_token_identity_with_default_type(
+        descriptor.trim(),
+        ctx.card_name.as_deref(),
+        Some("Creature"),
+    )?;
+    let (suffix, is_all_colors) = strip_token_all_colors_suffix(suffix.trim());
+    let mut colors = if is_all_colors {
+        ManaColor::ALL.to_vec()
+    } else {
+        shared_colors.to_vec()
+    };
+    for color in mode_colors {
+        if !colors.contains(&color) {
+            colors.push(color);
+        }
+    }
+    let keywords = parse_token_keyword_clause(suffix);
+    let static_abilities = extract_token_static_abilities(suffix, &name)?;
+
+    Some(TokenDescription {
+        name,
+        power: Some(power),
+        toughness: Some(toughness),
+        types,
+        supertypes,
+        colors,
+        keywords,
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        attach_to: None,
+        static_abilities,
+        enters_attacking: false,
+        enters_blocking: None,
+        attack_destination: TokenAttackDestination::ControllerChooses,
+    })
 }
 
 /// True iff a `for each … this way` count restricts to a specific card type
@@ -1717,6 +1811,14 @@ fn parse_token_identity(
     descriptor: &str,
     source_name: Option<&str>,
 ) -> Option<(String, Vec<String>)> {
+    parse_token_identity_with_default_type(descriptor, source_name, None)
+}
+
+fn parse_token_identity_with_default_type(
+    descriptor: &str,
+    source_name: Option<&str>,
+    default_core_type: Option<&str>,
+) -> Option<(String, Vec<String>)> {
     let mut core_types = Vec::new();
     let mut subtypes = Vec::new();
 
@@ -1732,7 +1834,11 @@ fn parse_token_identity(
     }
 
     if core_types.is_empty() {
-        return known_named_token_identity(descriptor, source_name);
+        if let Some(default_core_type) = default_core_type {
+            push_unique_string(&mut core_types, default_core_type);
+        } else {
+            return known_named_token_identity(descriptor, source_name);
+        }
     }
 
     let name = if subtypes.is_empty() {
