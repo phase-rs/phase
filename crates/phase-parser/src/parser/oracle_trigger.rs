@@ -43,6 +43,7 @@ use super::oracle_nom::condition::{
 };
 use super::oracle_nom::condition::{
     parse_inner_condition, parse_spell_history_filter, parse_there_are_battlefield_count_clause,
+    source_attacked_or_blocked_this_turn_filter,
 };
 use super::oracle_nom::condition::{parse_source_counters_exist, parse_source_has_counters};
 use super::oracle_nom::duration::parse_self_reference_subject;
@@ -8187,14 +8188,6 @@ fn parse_chose_other_ring_bearer_intervening_if(input: &str) -> OracleResult<'_,
     .parse(input)
 }
 
-fn source_attacked_or_blocked_this_turn_filter() -> TargetFilter {
-    // CR 700.7 + CR 603.4: "This creature" identifies the source even if its
-    // types change before the intervening-if is checked again.
-    TargetFilter::Typed(
-        TypedFilter::default().properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
-    )
-}
-
 fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
     // The zone phrases shared by the passive split's two legs: each scopes its
     // own origin-zone owner ("your graveyard" → owner You; "a graveyard" /
@@ -9273,22 +9266,6 @@ fn extract_if_condition_with_card_name(
                         TypedFilter::creature()
                             .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
                     ),
-                },
-            ),
-            // CR 508.1 + CR 509.1 + CR 603.4: source-scoped "if ~ attacked or
-            // blocked this turn" — the sibling of the attacked-only arm above,
-            // gating on the source having attacked OR blocked this turn
-            // (Inferno Hellion). Reuses the existing, already-evaluated
-            // `FilterProp::AttackedOrBlockedThisTurn` (checked against
-            // `state.creatures_attacked_this_turn` / `creatures_blocked_this_turn`)
-            // via `SourceMatchesFilter`, so no new `TriggerCondition` variant is
-            // needed. The turn-scoped "this turn" form only; the "this combat"
-            // form (Clockwork cycle, Kjeldoran Home Guard) needs combat-scoped
-            // tracking the engine does not yet keep and is intentionally excluded.
-            (
-                "if ~ attacked or blocked this turn",
-                TriggerCondition::SourceMatchesFilter {
-                    filter: source_attacked_or_blocked_this_turn_filter(),
                 },
             ),
             // CR 603.4: past-turn life loss.

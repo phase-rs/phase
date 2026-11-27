@@ -37,7 +37,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{DelayedTriggerCondition, Effect, EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, PlayerActionKind};
-use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor, ManaType, ManaUnit};
@@ -1067,8 +1067,6 @@ fn assert_owner_shuffle(events: &[GameEvent], source: ObjectId, owner: PlayerId)
 
 #[test]
 fn lembas_departure_shuffles_by_owner_after_controller_sacrifices() {
-    use engine::types::game_state::CastPaymentMode;
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let lembas = scenario
