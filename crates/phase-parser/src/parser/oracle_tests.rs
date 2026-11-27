@@ -5082,16 +5082,6 @@ fn brine_hag_durationless_descriptor_base_pt_effect_remains_unimplemented() {
     );
 }
 
-/// CR 106.6 + CR 702.6a: Hydraulic Helper — the full card must parse with
-/// zero `Effect::Unimplemented` parts. "Defender" extracts as a keyword and
-/// the `{T}: Add {U}` mana ability carries the negative spend restriction
-/// ("This mana can't be spent to cast a nonartifact spell") lowered to
-/// `ManaSpendRestriction::SpellTypeOrAbilityActivation { spell_type:
-/// "Artifact", ability: Any }`. The restriction governs only what *spells*
-/// the mana may cast (artifact spells); it must leave ability activation
-/// UNRESTRICTED. This is the discriminating assertion: a `SpellType("Artifact")`
-/// lowering would wrongly forbid paying for any ability, so the `ability: Any`
-/// scope is exactly what keeps ability activation payable.
 /// CR 613.4c + CR 701.10a: Tifa's Limit Break (Tiered) — all three tiers
 /// parse with zero Unimplemented. Somersault → `Pump`, Meteor Strikes →
 /// `DoublePT factor:2`, Final Heaven → `DoublePT factor:3`. The discriminating
@@ -5222,6 +5212,8 @@ fn crew_history_quantity_guard_is_typed_and_position_independent() {
     );
 }
 
+/// CR 106.6 + CR 702.3a: Hydraulic Helper parses Defender and retains its
+/// nonartifact spell prohibition as `AnyNonSpellPayment` on the mana ability.
 #[test]
 fn hydraulic_helper_full_card_supported_with_artifact_spend_restriction() {
     use crate::types::ability::{ManaProduction, ManaSpendRestriction};

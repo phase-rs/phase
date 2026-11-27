@@ -4467,10 +4467,8 @@ pub enum ManaSpendRestriction {
     /// "Spend this mana only to cast a creature spell of the chosen type."
     /// Resolved at runtime from the source's `chosen_creature_type()`.
     ChosenCreatureType,
-    /// CR 106.6: "Spend this mana only to cast creature spells or activate abilities of creatures."
-    /// Combined restriction with OR semantics: allowed for spells of `spell_type` OR ability
-    /// activations described by `ability` — `OfSpellType` restricts to abilities of permanents
-    /// of `spell_type`, `Any` permits any ability ("… or to activate an ability").
+    /// CR 106.6: Allows spells of `spell_type` and non-spell payments described
+    /// by `ability`. `AnyNonSpellPayment` represents a prohibition affecting casts only.
     SpellTypeOrAbilityActivation {
         spell_type: String,
         ability: AbilityActivationScope,
