@@ -17,15 +17,21 @@
  * without a record skips and records the committed generation locally. The
  * timeout alone never advances a recording resource's local generation.
  *
+ * A recording resource's step is kept only once its result is recorded, or
+ * when it left the value its write-ahead recorded. A step that cannot record a
+ * changed result writes that recorded value back into its view and ends as
+ * reverted, so a later step that restores the record undoes nothing a caller
+ * was told had happened.
+ *
  * With no lock manager nothing is serialized: a caller either runs its body
  * unguarded or skips it. A tab running a build that takes no lock is not
  * serialized either.
  */
-import { get, getMany, set, setMany, type UseStore } from "idb-keyval";
+import { get, getMany, promisifyRequest, set, setMany, type UseStore } from "idb-keyval";
 import { assertNever } from "../utils/assertNever";
 
 /** What one transaction resource is: its lock, its two generation counters and its stale-view rule. */
-export interface CrossTabResource {
+export interface CrossTabResource<Rule extends StaleViewRule = AdoptCommittedRule> {
   readonly lockName: string;
   /** The `localStorage` key holding the last generation this tab published. */
   readonly localGenerationKey: string;
@@ -34,7 +40,7 @@ export interface CrossTabResource {
   /** The write-ahead generation's key in that store. */
   readonly generationKey: string;
   /** What a step does when this tab's view has not reached the committed generation within the bound. */
-  readonly staleView: StaleViewRule;
+  readonly staleView: Rule;
 }
 
 /** A resource's view, when it is one value a step can record and restore. */
@@ -47,11 +53,13 @@ export interface RecordedView {
   write(value: string | null): void;
 }
 
-export type StaleViewRule =
-  /** Skips the body and records the committed generation locally. */
-  | { readonly kind: "adopt-committed" }
-  /** Writes the last recorded value into this tab's view and runs the body on it. */
-  | { readonly kind: "restore-recorded"; readonly view: RecordedView };
+/** Skips the body and records the committed generation locally. */
+export type AdoptCommittedRule = { readonly kind: "adopt-committed" };
+
+/** Writes the last recorded value into this tab's view and runs the body on it. */
+export type RestoreRecordedRule = { readonly kind: "restore-recorded"; readonly view: RecordedView };
+
+export type StaleViewRule = AdoptCommittedRule | RestoreRecordedRule;
 
 /** The value a recording resource's step left, with the generation it was left at. */
 interface ViewRecord {
@@ -77,6 +85,13 @@ export type CrossTabTxnSkipReason = "lock-unavailable" | CrossTabTxnFailure;
 export type CrossTabTxnResult<T, R extends CrossTabTxnSkipReason = CrossTabTxnSkipReason> =
   | { status: "committed"; value: T }
   | { status: "skipped"; reason: R };
+
+/** A step on a recording resource whose body ran but whose result could not be recorded. */
+export type CrossTabTxnReverted<T> = { status: "reverted"; value: T };
+
+/** What a step on a resource with `Rule` can end in. */
+export type CrossTabTxnOutcome<Rule extends StaleViewRule, T, R extends CrossTabTxnSkipReason> =
+  Rule extends RestoreRecordedRule ? CrossTabTxnResult<T, R> | CrossTabTxnReverted<T> : CrossTabTxnResult<T, R>;
 
 export type NoLockManagerPolicy = "run-unguarded" | "skip";
 
@@ -125,7 +140,7 @@ function lockWaitMs(): number {
   return import.meta.env.MODE === "test" && lockWaitForTests !== null ? lockWaitForTests : LOCK_WAIT_TIMEOUT_MS;
 }
 
-function localGeneration(resource: CrossTabResource): number {
+function localGeneration(resource: CrossTabResource<StaleViewRule>): number {
   return Number(localStorage.getItem(resource.localGenerationKey) ?? 0);
 }
 
@@ -133,7 +148,7 @@ function localGeneration(resource: CrossTabResource): number {
  * Wait until this tab's view of the resource reflects every committed
  * transaction, or give up after VIEW_TIMEOUT_MS.
  */
-function awaitView(resource: CrossTabResource, committed: number): Promise<boolean> {
+function awaitView(resource: CrossTabResource<StaleViewRule>, committed: number): Promise<boolean> {
   if (localGeneration(resource) >= committed) return Promise.resolve(true);
   return new Promise<boolean>((resolve) => {
     let done = false;
@@ -158,11 +173,16 @@ function awaitView(resource: CrossTabResource, committed: number): Promise<boole
 }
 
 type BarrierOutcome =
-  | { proceed: true; publish: number }
+  | {
+      proceed: true;
+      publish: number;
+      /** The record its write-ahead wrote; null for a resource without one. */
+      written: ViewRecord | null;
+    }
   | { proceed: false; reason: CrossTabTxnFailure; publish: number | null };
 
-function runBarrier(resource: CrossTabResource): Promise<BarrierOutcome> {
-  const rule = resource.staleView;
+function runBarrier(resource: CrossTabResource<StaleViewRule>): Promise<BarrierOutcome> {
+  const rule: StaleViewRule = resource.staleView;
   switch (rule.kind) {
     case "adopt-committed":
       return runAdoptingBarrier(resource);
@@ -173,7 +193,7 @@ function runBarrier(resource: CrossTabResource): Promise<BarrierOutcome> {
   }
 }
 
-async function runAdoptingBarrier(resource: CrossTabResource): Promise<BarrierOutcome> {
+async function runAdoptingBarrier(resource: CrossTabResource<StaleViewRule>): Promise<BarrierOutcome> {
   const read = await within(
     () => get<number>(resource.generationKey, resource.generationStore()),
     GENERATION_IO_TIMEOUT_MS,
@@ -198,10 +218,13 @@ async function runAdoptingBarrier(resource: CrossTabResource): Promise<BarrierOu
   if (!published.settled) {
     return { proceed: false, reason: "generation-unpublished", publish: next };
   }
-  return { proceed: true, publish: next };
+  return { proceed: true, publish: next, written: null };
 }
 
-async function runRecordingBarrier(resource: CrossTabResource, view: RecordedView): Promise<BarrierOutcome> {
+async function runRecordingBarrier(
+  resource: CrossTabResource<StaleViewRule>,
+  view: RecordedView,
+): Promise<BarrierOutcome> {
   const read = await within(
     () => getMany<unknown>([resource.generationKey, view.recordKey], resource.generationStore()),
     GENERATION_IO_TIMEOUT_MS,
@@ -221,8 +244,9 @@ async function runRecordingBarrier(resource: CrossTabResource, view: RecordedVie
     // an earlier one, the step that wrote the committed generation ahead never recorded its
     // result, and this rolls back to the value from before it. The restore is a plain write: it
     // removes nothing the value it replaces led to. Rolling forward, the step that left the
-    // recorded value already removed what its own write displaced; rolling back, what the
-    // unrecorded step's value led to is left unreachable, as when a tab closes before publishing.
+    // recorded value removes what its own write displaced once its result is recorded; rolling
+    // back, what the unrecorded step's value led to is left unreachable, as when a tab closes
+    // before publishing.
     if (!isViewRecord(storedRecord)) {
       return { proceed: false, reason: "view-stale", publish: null };
     }
@@ -239,6 +263,7 @@ async function runRecordingBarrier(resource: CrossTabResource, view: RecordedVie
     return { proceed: false, reason: "view-stale", publish: null };
   }
   const next = Math.max(localGeneration(resource), committed) + 1;
+  const written: ViewRecord = { generation: committed, value: current };
   // One transaction, so a step that writes its generation ahead and then never records its
   // result still leaves the record of the value it started from.
   const published = await within(
@@ -246,7 +271,7 @@ async function runRecordingBarrier(resource: CrossTabResource, view: RecordedVie
       setMany(
         [
           [resource.generationKey, next],
-          [view.recordKey, { generation: committed, value: current } satisfies ViewRecord],
+          [view.recordKey, written],
         ],
         resource.generationStore(),
       ),
@@ -258,29 +283,111 @@ async function runRecordingBarrier(resource: CrossTabResource, view: RecordedVie
     // an unrecorded step, which the next step waits for and rolls back.
     return { proceed: false, reason: "generation-unpublished", publish: null };
   }
-  return { proceed: true, publish: next };
+  return { proceed: true, publish: next, written };
 }
+
+/** One refused result write does not fail a step; the lock is held at most this many bounds for it. */
+const RESULT_WRITE_ATTEMPTS = 2;
 
 /**
- * Record the value this tab's view holds after a step's body, with the generation that step
- * committed. A record whose write outlasts its bound still lands before any later holder's
- * write: IndexedDB starts a read-write transaction only after every earlier-created one over the
- * same store has finished, and each record write is created inside the lock.
+ * Writes `record` at `key` in one read-write transaction and says whether it committed: true
+ * only once that transaction completes after its put was issued; false when the put throws (the
+ * transaction is then aborted, committing nothing) or the transaction aborts, which is how a write
+ * that fails while committing reaches the page. At its bound the attempt aborts its transaction
+ * and answers false; one not yet created aborts itself when created, issuing no put. A transaction
+ * whose abort throws at the bound is committing or finished, and answers by the event it fires.
+ * So a write reported as not committed never lands later.
  */
-async function recordView(resource: CrossTabResource, view: RecordedView, generation: number): Promise<void> {
-  let value: string | null;
-  try {
-    value = view.read();
-  } catch {
-    return;
-  }
-  await within(
-    () => set(view.recordKey, { generation, value } satisfies ViewRecord, resource.generationStore()),
-    GENERATION_IO_TIMEOUT_MS,
-  );
+function writeRecord(store: UseStore, key: string, record: ViewRecord): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const attempt: { expired: boolean; transaction: IDBTransaction | null } = { expired: false, transaction: null };
+    let answered = false;
+    const answer = (committed: boolean) => {
+      if (answered) return;
+      answered = true;
+      clearTimeout(timer);
+      resolve(committed);
+    };
+    const timer = setTimeout(() => {
+      attempt.expired = true;
+      const { transaction } = attempt;
+      if (transaction !== null) {
+        try {
+          transaction.abort();
+        } catch {
+          // Committing or finished: its own complete or abort event answers.
+          return;
+        }
+      }
+      answer(false);
+    }, GENERATION_IO_TIMEOUT_MS);
+    Promise.resolve()
+      .then(() =>
+        store("readwrite", (objects) => {
+          const { transaction } = objects;
+          if (attempt.expired) {
+            transaction.abort();
+            return;
+          }
+          attempt.transaction = transaction;
+          try {
+            objects.put(record, key);
+          } catch {
+            try {
+              transaction.abort();
+            } catch {
+              // Already aborting: it commits nothing either way.
+            }
+            answer(false);
+            return;
+          }
+          promisifyRequest(transaction).then(
+            () => answer(true),
+            () => answer(false),
+          );
+        }),
+      )
+      .catch(() => answer(false));
+  });
 }
 
-function publishLocalGeneration(resource: CrossTabResource, next: number): void {
+type KeptResult = "kept" | "reverted" | "unreverted";
+
+/**
+ * Records the value this tab's view holds after a step's body with the generation it committed.
+ * When it cannot, a step that changed the view writes back the value its write-ahead recorded, so
+ * the durable record and the view agree again.
+ */
+async function keepResult(
+  resource: CrossTabResource<StaleViewRule>,
+  view: RecordedView,
+  generation: number,
+  written: ViewRecord,
+): Promise<KeptResult> {
+  let left: string | null = null;
+  let readable = true;
+  try {
+    left = view.read();
+  } catch {
+    readable = false;
+  }
+  if (readable) {
+    for (let attempt = 0; attempt < RESULT_WRITE_ATTEMPTS; attempt += 1) {
+      if (await writeRecord(resource.generationStore(), view.recordKey, { generation, value: left })) return "kept";
+    }
+    // The write-ahead's record already describes what this step leaves, so rolling its
+    // generation back restores the same value.
+    if (left === written.value) return "kept";
+  }
+  try {
+    view.write(written.value);
+  } catch {
+    return "unreverted";
+  }
+  return "reverted";
+}
+
+function publishLocalGeneration(resource: CrossTabResource<StaleViewRule>, next: number): void {
   try {
     localStorage.setItem(resource.localGenerationKey, String(next));
   } catch (error) {
@@ -289,10 +396,10 @@ function publishLocalGeneration(resource: CrossTabResource, next: number): void 
 }
 
 async function runLocked<T>(
-  resource: CrossTabResource,
+  resource: CrossTabResource<StaleViewRule>,
   locks: LockManager,
   body: () => T | Promise<T>,
-): Promise<CrossTabTxnResult<T, CrossTabTxnFailure>> {
+): Promise<CrossTabTxnResult<T, CrossTabTxnFailure> | CrossTabTxnReverted<T>> {
   const controller = new AbortController();
   let granted = false;
   let timedOut = false;
@@ -309,23 +416,32 @@ async function runLocked<T>(
       granted = true;
       if (timer) clearTimeout(timer);
       const outcome = await runBarrier(resource);
+      let publish = outcome.publish;
       try {
         if (!outcome.proceed) {
           return { status: "skipped", reason: outcome.reason } as CrossTabTxnResult<T, CrossTabTxnFailure>;
         }
-        const rule = resource.staleView;
-        if (rule.kind !== "restore-recorded") {
+        const rule: StaleViewRule = resource.staleView;
+        if (rule.kind !== "restore-recorded" || outcome.written === null) {
           const value = await body();
           return { status: "committed", value } as CrossTabTxnResult<T, CrossTabTxnFailure>;
         }
+        let ran: { threw: false; value: T } | { threw: true; error: unknown };
         try {
-          const value = await body();
-          return { status: "committed", value } as CrossTabTxnResult<T, CrossTabTxnFailure>;
-        } finally {
-          await recordView(resource, rule.view, outcome.publish);
+          ran = { threw: false, value: await body() };
+        } catch (error) {
+          ran = { threw: true, error };
         }
+        const kept = await keepResult(resource, rule.view, outcome.publish, outcome.written);
+        // A view that could not be written back is no evidence this tab saw its own generation:
+        // its next step waits and restores the record like any lagging tab.
+        if (kept === "unreverted") publish = null;
+        if (ran.threw) throw ran.error;
+        return kept === "kept"
+          ? ({ status: "committed", value: ran.value } as CrossTabTxnResult<T, CrossTabTxnFailure>)
+          : ({ status: "reverted", value: ran.value } as CrossTabTxnReverted<T>);
       } finally {
-        if (outcome.publish !== null) publishLocalGeneration(resource, outcome.publish);
+        if (publish !== null) publishLocalGeneration(resource, publish);
       }
     });
   } catch (error) {
@@ -339,35 +455,38 @@ async function runLocked<T>(
  * Run `body` under `resource`'s lock and its write-ahead generation barrier, or skip it
  * without running it if either cannot be confirmed within its bound. A recording resource's
  * step that cannot read or restore its record, or whose write-ahead does not settle, is skipped
- * and publishes no generation. A throw
+ * and publishes no generation. One whose body ran but whose changed result cannot be recorded
+ * ends as reverted, its view written back to the value its write-ahead recorded; when that write
+ * back throws, it publishes no generation, so a later step restores that value. A throw
  * from `body` rejects. With no lock manager, `noLockManager` decides whether `body` runs unguarded, at
  * the call, or is skipped: "run-unguarded" never yields "lock-unavailable" (that reason only
  * arises from "skip"), so its overload narrows the skip reason to `CrossTabTxnFailure`.
  */
-export async function runCrossTabTransaction<T>(
-  resource: CrossTabResource,
+export async function runCrossTabTransaction<T, Rule extends StaleViewRule = AdoptCommittedRule>(
+  resource: CrossTabResource<Rule>,
   body: () => T | Promise<T>,
   noLockManager: "run-unguarded",
-): Promise<CrossTabTxnResult<T, CrossTabTxnFailure>>;
-export async function runCrossTabTransaction<T>(
-  resource: CrossTabResource,
+): Promise<CrossTabTxnOutcome<Rule, T, CrossTabTxnFailure>>;
+export async function runCrossTabTransaction<T, Rule extends StaleViewRule = AdoptCommittedRule>(
+  resource: CrossTabResource<Rule>,
   body: () => T | Promise<T>,
   noLockManager: "skip",
-): Promise<CrossTabTxnResult<T>>;
-export async function runCrossTabTransaction<T>(
-  resource: CrossTabResource,
+): Promise<CrossTabTxnOutcome<Rule, T, CrossTabTxnSkipReason>>;
+export async function runCrossTabTransaction<T, Rule extends StaleViewRule = AdoptCommittedRule>(
+  resource: CrossTabResource<Rule>,
   body: () => T | Promise<T>,
   noLockManager: NoLockManagerPolicy,
-): Promise<CrossTabTxnResult<T>>;
-export async function runCrossTabTransaction<T>(
-  resource: CrossTabResource,
+): Promise<CrossTabTxnOutcome<Rule, T, CrossTabTxnSkipReason>>;
+export async function runCrossTabTransaction<T, Rule extends StaleViewRule = AdoptCommittedRule>(
+  resource: CrossTabResource<Rule>,
   body: () => T | Promise<T>,
   noLockManager: NoLockManagerPolicy,
-): Promise<CrossTabTxnResult<T>> {
+): Promise<CrossTabTxnOutcome<Rule, T, CrossTabTxnSkipReason>> {
+  type Outcome = CrossTabTxnOutcome<Rule, T, CrossTabTxnSkipReason>;
   const locks = globalThis.navigator?.locks ?? null;
   if (!locks) {
-    if (noLockManager === "skip") return { status: "skipped", reason: "lock-unavailable" };
-    return { status: "committed", value: await body() };
+    if (noLockManager === "skip") return { status: "skipped", reason: "lock-unavailable" } as Outcome;
+    return { status: "committed", value: await body() } as Outcome;
   }
-  return runLocked(resource, locks, body);
+  return (await runLocked(resource, locks, body)) as Outcome;
 }

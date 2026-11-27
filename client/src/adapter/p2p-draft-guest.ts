@@ -1253,7 +1253,8 @@ export class P2PDraftGuest {
    * recovery-pointer transaction this guest holds, so the owner's publication
    * is ordered against every other tab's pointer step. A session retired while
    * the transaction waited hands over nothing and returns false. A transaction
-   * that cannot run throws, as a refused write does.
+   * that cannot run, or whose result cannot be recorded, throws, as a refused
+   * write does.
    */
   private async handOverRecoveryPointer(pointer: DraftGuestRecoveryPointer, session: DraftPeerSession): Promise<boolean> {
     const handedOver = await withActiveDraftPointer((recovery) => {
@@ -1262,6 +1263,7 @@ export class P2PDraftGuest {
       return true;
     });
     if (handedOver.status === "skipped") throw new ActiveDraftPointerUnavailableError(handedOver.reason);
+    if (handedOver.status === "reverted") throw new ActiveDraftPointerUnavailableError("result-unrecorded");
     return handedOver.value;
   }
 

@@ -27,7 +27,8 @@ import {
   runCrossTabTransaction,
   type CrossTabResource,
   type CrossTabTxnFailure,
-  type CrossTabTxnResult,
+  type CrossTabTxnOutcome,
+  type RestoreRecordedRule,
 } from "./crossTabTransaction";
 import type { DraftIntergameCommand } from "./intergameCommandLedger";
 
@@ -475,9 +476,9 @@ function activeDraftGuestPointer(meta: ActiveDraftGuestPublication): ActiveDraft
  * Writes over whatever is stored. Settles once a native seat's record this
  * pointer replaces is dealt with.
  */
-function publishGuestBody(meta: ActiveDraftGuestPublication): Promise<void> {
+function publishGuestBody(step: PointerStep, meta: ActiveDraftGuestPublication): Promise<void> {
   const written = activeDraftGuestPointer(meta);
-  return written === null ? Promise.resolve() : replaceActiveDraftPointer(JSON.stringify(written));
+  return written === null ? Promise.resolve() : replaceActiveDraftPointer(step, JSON.stringify(written));
 }
 
 /**
@@ -485,7 +486,9 @@ function publishGuestBody(meta: ActiveDraftGuestPublication): Promise<void> {
  * recovery-pointer transaction; otherwise as `ActiveDraftPointerTxn.publishGuest`.
  * Settles once a native record the pointer replaces is dealt with, after the
  * transaction ends. Rejects with `ActiveDraftPointerUnavailableError`, writing
- * nothing, when the transaction cannot run, and as the write does.
+ * nothing, when the transaction cannot run or its result cannot be recorded
+ * (a write it cannot undo stays until a later step restores the recorded
+ * pointer), and as the write does.
  */
 export async function saveActiveDraftGuest(meta: ActiveDraftGuestPublication): Promise<void> {
   const removal = committedPointerStep(await withActiveDraftPointer((txn) => txn.publishGuest(meta)));
@@ -499,12 +502,13 @@ export async function saveActiveDraftGuest(meta: ActiveDraftGuestPublication): P
  * is a guest pointer, which names no native record. Throws as the write does.
  */
 function republishGuestBody(
+  step: PointerStep,
   standsOn: ActiveDraftGuestMetaCapture,
   meta: ActiveDraftGuestPublication,
 ): ActiveDraftGuestMetaCapture | null {
   const written = activeDraftGuestPointer(meta);
   if (written === null) return null;
-  const settled = replaceActiveDraftPointerIfCurrent(JSON.stringify(written), (stored) => {
+  const settled = replaceActiveDraftPointerIfCurrent(step, JSON.stringify(written), (stored) => {
     const current = storedGuestCapture(stored);
     return current !== null && sameActiveDraftGuestCapture(current, standsOn);
   });
@@ -516,7 +520,9 @@ function republishGuestBody(
  * recovery-pointer transaction; otherwise as `ActiveDraftPointerTxn.republishGuest`.
  * Resolves to the capture of what it wrote, or null when it wrote nothing.
  * Rejects with `ActiveDraftPointerUnavailableError`, writing nothing, when the
- * transaction cannot run, and as the write does.
+ * transaction cannot run or its result cannot be recorded (a write it cannot
+ * undo stays until a later step restores the recorded pointer), and as the
+ * write does.
  */
 export async function republishActiveDraftGuest(
   standsOn: ActiveDraftGuestMetaCapture,
@@ -1065,7 +1071,7 @@ export async function clearDraftGuestRecovery(capability: DraftGuestCapability):
 const ACTIVE_DRAFT_POINTER_GENERATION_KEY = "phase-active-draft-pointer-generation";
 const ACTIVE_DRAFT_POINTER_RECORD_KEY = "phase-active-draft-pointer-record";
 
-const ACTIVE_DRAFT_POINTER_RESOURCE: CrossTabResource = {
+const ACTIVE_DRAFT_POINTER_RESOURCE: CrossTabResource<RestoreRecordedRule> = {
   lockName: "phase-active-draft-pointer",
   localGenerationKey: ACTIVE_DRAFT_POINTER_GENERATION_KEY,
   generationStore: getDraftStore,
@@ -1076,10 +1082,10 @@ const ACTIVE_DRAFT_POINTER_RESOURCE: CrossTabResource = {
       recordKey: ACTIVE_DRAFT_POINTER_RECORD_KEY,
       read: () => localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY),
       // A plain write, removing no private record: rolling forward, the step
-      // that left the recorded pointer already removed the record its own
-      // write displaced; rolling back, the record an unrecorded step's
-      // pointer named is left unreachable, as when a tab closes before
-      // publishing.
+      // that left the recorded pointer removes the record its own write
+      // displaced once its result is recorded; rolling back, the record an
+      // unrecorded step's pointer named is left unreachable, as when a tab
+      // closes before publishing.
       write: (value) => {
         if (value === null) localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
         else localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, value);
@@ -1104,14 +1110,28 @@ export interface ActiveDraftPointerTxn {
   clearGuestIfCurrent(capture: ActiveDraftGuestMetaCapture): void;
   clearNativeIfCurrent(capture: NativeDraftPointerCapture): boolean;
   clearUnreadableGuest(): void;
+  /** Runs `undo` if this step's write is reverted because its result could not be recorded. */
+  onReverted(undo: () => void): void;
 }
 
-export type ActiveDraftPointerTxnResult<T> = CrossTabTxnResult<T, CrossTabTxnFailure>;
+export type ActiveDraftPointerTxnResult<T> = CrossTabTxnOutcome<RestoreRecordedRule, T, CrossTabTxnFailure>;
 
-/** A recovery-pointer publication was refused before its step ran. */
+/** Why a recovery-pointer step did not take effect. */
+export type ActiveDraftPointerFailure = CrossTabTxnFailure | "result-unrecorded";
+
+/**
+ * The step a pointer write belongs to. An effect registered with
+ * `afterRecorded` starts only once the step's result is recorded; the returned
+ * promise settles when it has run, or at once, unrun, when the step is reverted.
+ */
+interface PointerStep {
+  afterRecorded(effect: () => Promise<void>): Promise<void>;
+}
+
+/** A recovery-pointer step was refused before it ran, or reverted after it. */
 export class ActiveDraftPointerUnavailableError extends Error {
-  readonly reason: CrossTabTxnFailure;
-  constructor(reason: CrossTabTxnFailure) {
+  readonly reason: ActiveDraftPointerFailure;
+  constructor(reason: ActiveDraftPointerFailure) {
     super(`Recovery pointer unavailable: ${reason}`);
     this.name = "ActiveDraftPointerUnavailableError";
     this.reason = reason;
@@ -1128,40 +1148,72 @@ export class ActiveDraftPointerUnavailableError extends Error {
  * an exported pointer function, whose own lock request would wait on this one.
  * A promise `body` returns is not awaited under the lock. A transaction whose
  * view can be neither confirmed nor restored skips `body`, and a throw from
- * `body` rejects. With no lock manager `body`
+ * `body` rejects. A step whose body changed the pointer but whose result
+ * cannot be recorded is reverted: its pointer write is undone (or, when the
+ * undo throws, left until a later step restores the recorded pointer), the record
+ * removals its write would start never run, the undos its body registered
+ * run, and it ends as `reverted`; a removal a kept step's write started runs
+ * once its result is recorded. With no lock manager `body`
  * runs unguarded at the call, and nothing orders it against another tab.
  */
 export async function withActiveDraftPointer<T>(
   body: (pointer: ActiveDraftPointerTxn) => T,
 ): Promise<ActiveDraftPointerTxnResult<T>> {
+  const deferred: Array<(kept: boolean) => void> = [];
+  const undos: Array<() => void> = [];
+  const step: PointerStep = {
+    afterRecorded: (effect) => new Promise<void>((resolve, reject) => {
+      deferred.push((kept) => {
+        if (kept) effect().then(resolve, reject);
+        else resolve();
+      });
+    }),
+  };
   const result = await runCrossTabTransaction(ACTIVE_DRAFT_POINTER_RESOURCE, () => {
     let open = true;
     const scoped = <A extends unknown[], R>(operation: (...args: A) => R) => (...args: A): R => {
       if (!open) throw new Error("Recovery-pointer transaction already ended");
       return operation(...args);
     };
+    const inStep = <A extends unknown[], R>(operation: (step: PointerStep, ...args: A) => R) =>
+      scoped((...args: A): R => operation(step, ...args));
     const pointer: ActiveDraftPointerTxn = {
-      publishNative: scoped(publishNativeBody),
-      republishNative: scoped(republishNativeBody),
-      publishGuest: scoped(publishGuestBody),
-      republishGuest: scoped(republishGuestBody),
+      publishNative: inStep(publishNativeBody),
+      republishNative: inStep(republishNativeBody),
+      publishGuest: inStep(publishGuestBody),
+      republishGuest: inStep(republishGuestBody),
       clearGuestIfCurrent: scoped(clearGuestIfCurrentBody),
       clearNativeIfCurrent: scoped(clearNativeIfCurrentBody),
       clearUnreadableGuest: scoped(clearUnreadableGuestBody),
+      onReverted: scoped((undo: () => void) => {
+        undos.push(undo);
+      }),
     };
     try {
-      // Boxed, so a removal the body started settles outside the lock.
-      return { value: body(pointer) };
+      // Boxed, so a removal the body started settles outside the lock, and a
+      // throw rejects only once the step's result is recorded or reverted.
+      return { ok: true, value: body(pointer) } as const;
+    } catch (error) {
+      return { ok: false, error } as const;
     } finally {
       open = false;
     }
   }, "run-unguarded");
-  return result.status === "committed" ? { status: "committed", value: result.value.value } : result;
+  if (result.status === "skipped") return result;
+  const kept = result.status === "committed";
+  for (const settle of deferred) settle(kept);
+  if (!kept) for (const undo of undos) undo();
+  const boxed = result.value;
+  if (!boxed.ok) throw boxed.error;
+  return result.status === "committed"
+    ? { status: "committed", value: boxed.value }
+    : { status: "reverted", value: boxed.value };
 }
 
-/** The value of a step that ran; a step that could not run rejects. */
+/** The value of a step that ran and was kept; any other step rejects. */
 function committedPointerStep<T>(result: ActiveDraftPointerTxnResult<T>): T {
   if (result.status === "skipped") throw new ActiveDraftPointerUnavailableError(result.reason);
+  if (result.status === "reverted") throw new ActiveDraftPointerUnavailableError("result-unrecorded");
   return result.value;
 }
 
@@ -1278,23 +1330,26 @@ async function removeUnnamedNativeDraftCapability(capabilityId: string): Promise
  * The one write of the tab's recovery pointer, over `stored`, the text it
  * replaces; throws as the write does. A native pointer it replaces leaves its
  * seat's private record with no route back, so the returned promise settles
- * once that record is removed or kept.
+ * once that record is removed or kept, which waits for the step's result to
+ * be recorded, and settles at once, keeping it, when the step is reverted.
  */
-function writeActiveDraftPointerOver(stored: string | null, text: string): Promise<void> {
+function writeActiveDraftPointerOver(step: PointerStep, stored: string | null, text: string): Promise<void> {
   const replaced = nativePointerCapabilityId(stored);
   localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, text);
-  return replaced === null ? Promise.resolve() : removeUnnamedNativeDraftCapability(replaced);
+  return replaced === null
+    ? Promise.resolve()
+    : step.afterRecorded(() => removeUnnamedNativeDraftCapability(replaced));
 }
 
 /** Writes the tab's one recovery pointer over whatever is stored. */
-function replaceActiveDraftPointer(text: string): Promise<void> {
+function replaceActiveDraftPointer(step: PointerStep, text: string): Promise<void> {
   let stored: string | null;
   try {
     stored = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
   } catch {
     stored = null;
   }
-  return writeActiveDraftPointerOver(stored, text);
+  return writeActiveDraftPointerOver(step, stored, text);
 }
 
 /**
@@ -1304,12 +1359,13 @@ function replaceActiveDraftPointer(text: string): Promise<void> {
  * is no evidence that the stored pointer is current.
  */
 function replaceActiveDraftPointerIfCurrent(
+  step: PointerStep,
   text: string,
   isCurrent: (stored: string | null) => boolean,
 ): Promise<void> | null {
   const stored = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
   if (!isCurrent(stored)) return null;
-  return writeActiveDraftPointerOver(stored, text);
+  return writeActiveDraftPointerOver(step, stored, text);
 }
 
 /** A native pointer's stored text, its fields in their stored order. */
@@ -1329,9 +1385,9 @@ function nativePointerText(pointer: ActiveNativeDraftPointer): string {
  * Writes a native pointer over whatever is stored; one that does not validate
  * is not written. Settles once a native record the pointer replaces is dealt with.
  */
-function publishNativeBody(pointer: ActiveNativeDraftPointer): Promise<void> {
+function publishNativeBody(step: PointerStep, pointer: ActiveNativeDraftPointer): Promise<void> {
   if (!isActiveNativeDraftPointer(pointer)) return Promise.resolve();
-  return replaceActiveDraftPointer(nativePointerText(pointer));
+  return replaceActiveDraftPointer(step, nativePointerText(pointer));
 }
 
 /**
@@ -1339,7 +1395,9 @@ function publishNativeBody(pointer: ActiveNativeDraftPointer): Promise<void> {
  * transaction; one that does not validate is not written. Settles once a
  * native record the pointer replaces is dealt with, after the transaction
  * ends. Rejects with `ActiveDraftPointerUnavailableError`, writing nothing,
- * when the transaction cannot run, and as the write does.
+ * when the transaction cannot run or its result cannot be recorded (a write it
+ * cannot undo stays until a later step restores the recorded pointer), and as
+ * the write does.
  */
 export async function publishActiveNativeDraft(pointer: ActiveNativeDraftPointer): Promise<void> {
   const removal = committedPointerStep(await withActiveDraftPointer((txn) => txn.publishNative(pointer)));
@@ -1427,15 +1485,23 @@ export type NativeDraftRepublication =
  * another capability than the capture, and as the read or the write does.
  */
 function republishNativeBody(
+  step: PointerStep,
   capture: NativeDraftPointerCapture,
   pointer: ActiveNativeDraftPointer,
 ): NativeDraftRepublication {
   if (!isActiveNativeDraftPointer(pointer) || nativePointerCapabilityId(capture.raw) !== pointer.capabilityId) {
     throw new Error("Invalid native draft recovery pointer");
   }
-  const settled = replaceActiveDraftPointerIfCurrent(nativePointerText(pointer), (stored) => stored === capture.raw);
+  const settled = replaceActiveDraftPointerIfCurrent(
+    step,
+    nativePointerText(pointer),
+    (stored) => stored === capture.raw,
+  );
   return settled === null
-    ? { status: "superseded", settled: removeUnnamedNativeDraftCapability(pointer.capabilityId) }
+    ? {
+        status: "superseded",
+        settled: step.afterRecorded(() => removeUnnamedNativeDraftCapability(pointer.capabilityId)),
+      }
     : { status: "published", settled };
 }
 
@@ -1443,7 +1509,9 @@ function republishNativeBody(
  * A native republication compared and written inside the recovery-pointer
  * transaction; otherwise as `ActiveDraftPointerTxn.republishNative`. Rejects
  * with `ActiveDraftPointerUnavailableError`, writing nothing, when the
- * transaction cannot run, and on what the republication throws.
+ * transaction cannot run or its result cannot be recorded (a write it cannot
+ * undo stays until a later step restores the recorded pointer), and on what
+ * the republication throws.
  */
 export async function republishActiveNativeDraft(
   capture: NativeDraftPointerCapture,
@@ -1470,7 +1538,9 @@ function clearNativeIfCurrentBody(capture: NativeDraftPointerCapture): boolean {
 /**
  * Removes the native pointer only when its stored text is still the captured
  * text, compared and removed inside the recovery-pointer transaction, and
- * says whether it did. A transaction that cannot run removes nothing.
+ * says whether it did. A transaction that cannot run, or whose result cannot
+ * be recorded, removes nothing (a removal it cannot undo stays until a later
+ * step restores the recorded pointer).
  */
 export async function clearActiveNativeDraftIfCurrent(capture: NativeDraftPointerCapture): Promise<boolean> {
   const cleared = await withActiveDraftPointer((pointer) => pointer.clearNativeIfCurrent(capture));

@@ -879,5 +879,114 @@ describe("guest recovery pointer publication", () => {
         }
       },
     );
+
+    /**
+     * Refuses every step's result write until restored: a put of the pointer's
+     * record in a transaction that has not written its generation (a
+     * write-ahead writes both in one transaction).
+     */
+    function refuseResultWrites(): { refused: () => number; restore: () => void } {
+      const put = IDBObjectStore.prototype.put;
+      const writesAhead = new WeakSet<IDBTransaction>();
+      let refused = 0;
+      const spy = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+        this: IDBObjectStore,
+        value: unknown,
+        key?: IDBValidKey,
+      ) {
+        if (key === "phase-active-draft-pointer-generation") writesAhead.add(this.transaction);
+        if (key !== "phase-active-draft-pointer-record" || writesAhead.has(this.transaction)) {
+          return put.call(this, value, key);
+        }
+        refused += 1;
+        throw new DOMException("refused", "UnknownError");
+      });
+      return { refused: () => refused, restore: () => spy.mockRestore() };
+    }
+
+    it("a new seat whose pointer's result cannot be recorded fails its join and leaves no pointer", async () => {
+      installFifoWebLocks();
+      const fault = refuseResultWrites();
+      const errors: Array<string | null> = [];
+      const unsubscribe = useMultiplayerDraftStore.subscribe((state, previous) => {
+        if (state.error !== previous.error) errors.push(state.error);
+      });
+      try {
+        const { joined } = await startNewJoin();
+        await connFor("ABCDE").receiveRaw(rawMessage(welcome()));
+        await expect(joined).resolves.toMatchObject({ status: "failed" });
+        expect(errors).toContain("Could not save draft recovery details");
+        expect(storedPointer()).toBeNull();
+
+        // Reach: the private record committed and the hand-over's body wrote the seat's pointer,
+        // whose result writes were refused.
+        expect(harness.log).toContain("privateSave:committed");
+        expect(pointerWrites()).toHaveLength(1);
+        expect(fault.refused()).toBeGreaterThanOrEqual(2);
+      } finally {
+        unsubscribe();
+        fault.restore();
+      }
+    });
+
+    it(
+      "a reconnect whose pointer's result cannot be recorded leaves the pointer it stood on, and the next acknowledgement republishes over it",
+      { timeout: 15_000 },
+      async () => {
+        installFifoWebLocks();
+        let fault: { refused: () => number; restore: () => void } | null = null;
+        const errors: Array<string | null> = [];
+        const unsubscribe = useMultiplayerDraftStore.subscribe((state, previous) => {
+          if (state.error !== previous.error) errors.push(state.error);
+        });
+        try {
+          const { joined } = await startNewJoin();
+          await connFor("ABCDE").receiveRaw(rawMessage(welcome()));
+          await expect(joined).resolves.toEqual({ status: "opened" });
+          const welcomed = localStorage.getItem(POINTER_KEY);
+          const capabilityId = storedPointer()?.capabilityId as string;
+          expect(capabilityId).toEqual(expect.any(String));
+
+          connFor("ABCDE").simulateClose();
+          await new Promise((done) => setTimeout(done, 1_100));
+          const dial = roomFor("ABCDE").dials.at(-1)!;
+          dial.simulateOpen();
+          await vi.waitFor(() => expect(dial.sentRaw.length).toBeGreaterThan(0));
+          fault = refuseResultWrites();
+          await dial.receiveRaw(rawMessage(reconnectAck()));
+          // The acknowledgement's commit ran, its hand-over wrote, and its step has ended.
+          await vi.waitFor(() => expect(pointerWrites()).toHaveLength(2));
+          await vi.waitFor(async () => expect((await navigator.locks.query()).held).toEqual([]));
+          await flush();
+          const refused = fault.refused();
+          fault.restore();
+          fault = null;
+
+          // The faulted acknowledgement's write was undone.
+          expect(localStorage.getItem(POINTER_KEY)).toBe(welcomed);
+          // Reach: its commit ran, both of its step's result writes were refused, and its handshake failed.
+          expect(harness.log.filter((entry) => entry === "privateSave:committed")).toHaveLength(2);
+          expect(refused).toBe(2);
+          await vi.waitFor(() => expect(errors).toContain("Could not save draft recovery details"));
+
+          // The guest's loop dials again, and the next acknowledgement republishes over that pointer.
+          await vi.waitFor(() => expect(roomFor("ABCDE").dials.length).toBeGreaterThan(1), { timeout: 8_000 });
+          const redial = roomFor("ABCDE").dials.at(-1)!;
+          redial.simulateOpen();
+          await vi.waitFor(() => expect(redial.sentRaw.length).toBeGreaterThan(0));
+          await redial.receiveRaw(rawMessage(reconnectAck()));
+          await vi.waitFor(() => expect(harness.log.filter((entry) => entry === "privateSave:committed")).toHaveLength(3));
+          await flush();
+
+          expect(harness.log).not.toContain(`pointerRefused:${capabilityId}`);
+          const latest = storedPointer()!;
+          expect(latest).toMatchObject({ capabilityId });
+          expect(latest.timestamp as number).toBeGreaterThan(JSON.parse(welcomed!).timestamp as number);
+        } finally {
+          unsubscribe();
+          fault?.restore();
+        }
+      },
+    );
   });
 });

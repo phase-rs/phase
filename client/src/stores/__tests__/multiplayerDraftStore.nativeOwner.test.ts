@@ -2040,6 +2040,85 @@ describe("a native owner under the cross-tab recovery-pointer transaction", () =
     },
   );
 
+  /**
+   * Refuses every step's result write until restored: a put of the pointer's
+   * record in a transaction that has not written its generation (a
+   * write-ahead writes both in one transaction).
+   */
+  function refuseResultWrites(): { refused: () => number; restore: () => void } {
+    const put = IDBObjectStore.prototype.put;
+    const writesAhead = new WeakSet<IDBTransaction>();
+    let refused = 0;
+    const spy = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      key?: IDBValidKey,
+    ) {
+      if (key === "phase-active-draft-pointer-generation") writesAhead.add(this.transaction);
+      if (key !== "phase-active-draft-pointer-record" || writesAhead.has(this.transaction)) {
+        return put.call(this, value, key);
+      }
+      refused += 1;
+      throw new DOMException("refused", "UnknownError");
+    });
+    return { refused: () => refused, restore: () => spy.mockRestore() };
+  }
+
+  it.each(["create", "join"] as const)(
+    "a native %s whose pointer's result cannot be recorded reports the save error and leaves the pointer it would have replaced, with its record",
+    async (kind) => {
+      const { capabilityId, pointerText } = await storeNativePair();
+      const recordBefore = await storedRecord(capabilityId);
+      installFifoWebLocks();
+      const fault = refuseResultWrites();
+      let outcome: unknown;
+      try {
+        outcome = kind === "create"
+          ? await store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings })
+          : await store().joinNativeDraft({ endpoint: ENDPOINT, draftCode: "NAT001", displayName: "Bo" });
+      } finally {
+        fault.restore();
+        uninstallWebLocks();
+      }
+      expect(outcome).toEqual({ status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR });
+      expect(localStorage.getItem(POINTER_KEY)).toBe(pointerText);
+      await expect(storedRecord(capabilityId)).resolves.toEqual(recordBefore);
+      // Reach: its record committed and its step wrote its own pointer, whose result was refused.
+      const ownId = storage.lastSavedId!;
+      expect(ownId).not.toBe(capabilityId);
+      expect(storage.log).toContain("privateSave:committed");
+      expect(storage.log).toContain(`pointerWrite:${ownId}`);
+      expect(fault.refused()).toBeGreaterThanOrEqual(2);
+      await expect(storedRecord(ownId)).resolves.toBeUndefined();
+      expect(store()).toMatchObject({ role: null, transport: null });
+    },
+  );
+
+  it("a native resume whose result cannot be recorded keeps its session and the pointer it resumed from", async () => {
+    const { capabilityId } = await storeNativePair();
+    await ageNativePair(capabilityId, 60_000);
+    const agedPointerText = localStorage.getItem(POINTER_KEY);
+    const agedRecord = await storedRecord(capabilityId) as { timestamp: number };
+    installFifoWebLocks();
+    const fault = refuseResultWrites();
+    let outcome: unknown;
+    try {
+      outcome = await store().resumeNativeDraft();
+    } finally {
+      fault.restore();
+      uninstallWebLocks();
+    }
+    expect(localStorage.getItem(POINTER_KEY)).toBe(agedPointerText);
+    expect(outcome).toEqual({ status: "resumed" });
+    expect(store()).toMatchObject({ transport: "native" });
+    // Reach: the resume published its refreshed pointer and refreshed its record,
+    // and both of that step's result writes were refused.
+    expect(storage.log).toContain(`republish:published:${capabilityId}`);
+    expect(fault.refused()).toBe(2);
+    const recordAfter = await storedRecord(capabilityId) as { timestamp: number };
+    expect(recordAfter.timestamp).toBeGreaterThan(agedRecord.timestamp);
+  });
+
   it("a native create superseded while it waits for the pointer lock publishes nothing", async () => {
     installFifoWebLocks();
     const holder = holdPointerLock();

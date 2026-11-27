@@ -2274,7 +2274,9 @@ async function openNativeOwner(
     let published: Promise<void> | null;
     try {
       const transaction = await withActiveDraftPointer((txn) => isCurrentOwner() ? txn.publishNative(pointer) : null);
-      if (transaction.status === "skipped") throw new Error(DRAFT_RECOVERY_SAVE_ERROR);
+      // A step whose result could not be recorded has written the
+      // predecessor's pointer back: it fails like one that could not run.
+      if (transaction.status !== "committed") throw new Error(DRAFT_RECOVERY_SAVE_ERROR);
       published = transaction.value;
     } catch {
       throw new Error(DRAFT_RECOVERY_SAVE_ERROR);
@@ -3053,6 +3055,9 @@ export const useMultiplayerDraftStore = create<
         if (getEffectiveOffline()) return { status: "offline" };
         return { status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR };
       }
+      // A step whose result could not be recorded wrote back the pointer this
+      // resume read, which names the same seat; only its published arm changes
+      // the pointer, and that arm has handed off, so it goes on as resumed.
       const step = transaction.value;
       switch (step.kind) {
         case "superseded":
@@ -4694,14 +4699,16 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
  * welcome is an explicit open and writes over whatever is stored; what it
  * wrote becomes the seat's standing pointer only when it is the pointer
  * actually stored. Every later commit writes only over the pointer the seat
- * stands on.
+ * stands on. If the step's result cannot be recorded and its write is
+ * reverted, the seat goes back to standing on the pointer it stood on before.
  */
 function publishGuestRecoveryPointer(
   owner: InstalledGuestOwner,
   pointer: DraftGuestRecoveryPointer,
   recovery: ActiveDraftPointerTxn,
 ): void {
-  if (owner.standsOn === null) {
+  const standsOn = owner.standsOn;
+  if (standsOn === null) {
     // A native pointer it replaces takes its record with it.
     void recovery.publishGuest(pointer);
     const stored = inspectActiveDraftGuest();
@@ -4712,10 +4719,16 @@ function publishGuestRecoveryPointer(
     ) {
       owner.standsOn = stored.capture;
     }
-    return;
+  } else {
+    const written = recovery.republishGuest(standsOn, pointer);
+    if (written !== null) owner.standsOn = written;
   }
-  const written = recovery.republishGuest(owner.standsOn, pointer);
-  if (written !== null) owner.standsOn = written;
+  const standing = owner.standsOn;
+  if (standing !== standsOn) {
+    recovery.onReverted(() => {
+      if (owner.standsOn === standing) owner.standsOn = standsOn;
+    });
+  }
 }
 
 function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn, owner: InstalledGuestOwner): void {

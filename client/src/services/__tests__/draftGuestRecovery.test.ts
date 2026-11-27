@@ -950,6 +950,53 @@ describe("guest recovery records", () => {
         return () => state;
       }
 
+      /**
+       * Refuses a step's result write: a put of the record key in a transaction that has not
+       * written the generation key (a write-ahead writes both in one transaction). "throw" throws
+       * from the put; "abort" issues the put and then aborts its transaction, as a write that fails
+       * while committing does. Refuses the first `times` such puts, or every one until restored.
+       */
+      function refuseResultWrites(
+        times: number | "every",
+        shape: "throw" | "abort",
+      ): { attempts: () => number; refused: () => number; aborted: () => number; restore: () => void } {
+        const put = IDBObjectStore.prototype.put;
+        const writesAhead = new WeakSet<IDBTransaction>();
+        let attempts = 0;
+        let refused = 0;
+        let aborted = 0;
+        const spy = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+          this: IDBObjectStore,
+          value: unknown,
+          key?: IDBValidKey,
+        ) {
+          if (key === GENERATION_KEY) writesAhead.add(this.transaction);
+          if (key !== RECORD_KEY || writesAhead.has(this.transaction)) return put.call(this, value, key);
+          attempts += 1;
+          if (times !== "every" && refused >= times) return put.call(this, value, key);
+          refused += 1;
+          if (shape === "throw") throw new DOMException("refused", "UnknownError");
+          const { transaction } = this;
+          transaction.addEventListener("abort", () => {
+            aborted += 1;
+          });
+          const request = put.call(this, value, key);
+          transaction.abort();
+          return request;
+        });
+        let restored = false;
+        return {
+          attempts: () => attempts,
+          refused: () => refused,
+          aborted: () => aborted,
+          restore: () => {
+            if (restored) return;
+            restored = true;
+            spy.mockRestore();
+          },
+        };
+      }
+
       /** Counts pointer steps' entries into their view wait: registrations of a `storage` listener, from now. */
       function enteredViewWait(): () => number {
         const addEventListener = window.addEventListener.bind(window);
@@ -1735,6 +1782,292 @@ describe("guest recovery records", () => {
         },
       );
 
+      it.each(
+        (["throw", "abort"] as const).flatMap((shape) =>
+          (["once", "every"] as const).flatMap((times) =>
+            (["clear", "republication"] as const).map((later) => [shape, times, later] as const),
+          ),
+        ),
+      )(
+        "a publication whose result write is refused is kept or reverted, and a lagging context's later step leaves what it reported: %s, %s, %s",
+        async (shape, times, later) => {
+          installFifoWebLocks();
+          let fault: ReturnType<typeof refuseResultWrites> | null = null;
+          try {
+            const { pointer, capture: captureC } = await storeNativeA();
+            const recordC = await storedNative("cap-C");
+            const generation = (await get(GENERATION_KEY, getDraftStore())) as number;
+            const refreshed = nativePointer({ timestamp: pointer.timestamp + 1_000 });
+            const tab = await otherTab();
+            const pointerB = await tab.saveNativeDraftCapability(capB);
+            const recordB = await storedNative("cap-B");
+
+            const armed = refuseResultWrites(times === "once" ? 1 : "every", shape);
+            fault = armed;
+            let publishedB: unknown = null;
+            let viewAfterB: string | null = null;
+            let recordAfterB: unknown;
+            const deliver = await withholdFromView([POINTER_KEY, GENERATION_KEY], async () => {
+              try {
+                publishedB = await tab.publishActiveNativeDraft(pointerB).then(
+                  () => "resolved",
+                  (error: unknown) => error,
+                );
+              } finally {
+                armed.restore();
+              }
+              viewAfterB = localStorage.getItem(POINTER_KEY);
+              // Reach: the other context's step wrote its generation ahead.
+              await expect(get(GENERATION_KEY, getDraftStore())).resolves.toBe(generation + 1);
+              recordAfterB = await get(RECORD_KEY, getDraftStore());
+            });
+            // Reach: this tab's view shows neither that step's writes nor its generation.
+            expect(localStorage.getItem(POINTER_KEY)).toBe(captureC.raw);
+            expect(localStorage.getItem(GENERATION_KEY)).toBe(String(generation));
+            expect(JSON.stringify(refreshed)).not.toBe(captureC.raw);
+
+            vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+            const waits = enteredViewWait();
+            const step: Promise<unknown> = later === "clear"
+              ? Promise.resolve(clearActiveNativeDraftIfCurrent(captureC))
+              : republishActiveNativeDraft(captureC, refreshed);
+            step.catch(() => {}); // its outcome is asserted after delivery
+            const state = track(step);
+            await untilReached(() => waits() > 0);
+            expect(waits()).toBe(1);
+            await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS - 1);
+            // Reach: the step is still waiting on its view, under the lock.
+            expect(state()).toBe("pending");
+            expect((await navigator.locks.query()).held).toEqual([{ name: LOCK, mode: "exclusive" }]);
+            await vi.advanceTimersByTimeAsync(1);
+            await Promise.allSettled([step]);
+            vi.useRealTimers();
+            deliver();
+
+            if (times === "once") {
+              // The publication recorded its result on its second write and was kept.
+              expect(storedPointer()).toMatchObject({ transport: "native", capabilityId: "cap-B" });
+              await expect(storedNative("cap-B")).resolves.toEqual(recordB);
+              expect(publishedB).toBe("resolved");
+              if (later === "clear") await expect(step).resolves.toBe(false);
+              else await expect(step).resolves.toMatchObject({ status: "superseded" });
+            } else {
+              // The publication could record no result, wrote back what it replaced and reported that.
+              expect(publishedB).toMatchObject({ name: "ActiveDraftPointerUnavailableError", reason: "result-unrecorded" });
+              await expect(storedNative("cap-C")).resolves.toEqual(recordC);
+              if (later === "clear") {
+                await expect(step).resolves.toBe(true);
+                expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+              } else {
+                const republished = await step as Awaited<ReturnType<typeof republishActiveNativeDraft>>;
+                expect(republished.status).toBe("published");
+                await republished.settled;
+                expect(storedPointer()).toEqual(refreshed);
+                await expect(storedNative("cap-C")).resolves.toEqual(recordC);
+              }
+            }
+
+            // Reach: the fault refused the other context's result writes, and it tried twice.
+            expect(armed.refused()).toBe(times === "once" ? 1 : 2);
+            expect(armed.attempts()).toBe(2);
+            if (shape === "abort") expect(armed.aborted()).toBe(armed.refused());
+            // Reach: what that step left durably, and in its own view.
+            if (times === "once") {
+              expect(JSON.parse(viewAfterB!)).toMatchObject({ transport: "native", capabilityId: "cap-B" });
+              expect(recordAfterB).toEqual({ generation: generation + 1, value: viewAfterB });
+            } else {
+              expect(viewAfterB).toBe(captureC.raw);
+              expect(recordAfterB).toEqual({ generation, value: captureC.raw });
+            }
+            await expect(storedNative("cap-B")).resolves.toEqual(recordB);
+          } finally {
+            fault?.restore();
+            vi.useRealTimers();
+            uninstallWebLocks();
+          }
+        },
+      );
+
+      it("a result write that outlasts its bound is abandoned, so it never lands after its step is reported", async () => {
+        installFifoWebLocks();
+        let holding: { mockRestore: () => void } | null = null;
+        const holds: Array<() => void> = [];
+        const endHolds = () => {
+          for (const end of holds.splice(0)) end();
+        };
+        try {
+          const { capture } = await storeNativeA();
+          const recordC = await storedNative("cap-C");
+          const generation = (await get(GENERATION_KEY, getDraftStore())) as number;
+          let attempts = 0;
+          const put = IDBObjectStore.prototype.put;
+          const writesAhead = new WeakSet<IDBTransaction>();
+          holding = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+            this: IDBObjectStore,
+            value: unknown,
+            key?: IDBValidKey,
+          ) {
+            if (key === GENERATION_KEY) writesAhead.add(this.transaction);
+            if (key !== RECORD_KEY || writesAhead.has(this.transaction)) return put.call(this, value, key);
+            attempts += 1;
+            // Holds the result write's transaction open with reads until the hold ends.
+            const request = put.call(this, value, key);
+            let open = true;
+            const keepAlive = (objects: IDBObjectStore) => {
+              if (open) objects.get("keep-alive").onsuccess = () => keepAlive(objects);
+            };
+            keepAlive(this);
+            holds.push(() => {
+              open = false;
+            });
+            return request;
+          });
+          vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+          const published = Promise.resolve(publishActiveNativeDraft(nativePointer({ capabilityId: "cap-D" })));
+          published.catch(() => {}); // its outcome is asserted after the record
+          const state = track(published);
+          await untilReached(() => attempts > 0 || state() !== "pending");
+          await vi.advanceTimersByTimeAsync(GENERATION_IO_TIMEOUT_MS);
+          await untilReached(() => attempts > 1 || state() !== "pending");
+          await vi.advanceTimersByTimeAsync(GENERATION_IO_TIMEOUT_MS);
+          await Promise.allSettled([published]);
+          vi.useRealTimers();
+          endHolds();
+          holding.mockRestore();
+          holding = null;
+          await untilReached(() => false);
+
+          // No result write the step gave up on landed after it.
+          await expect(get(RECORD_KEY, getDraftStore())).resolves.toEqual({ generation, value: capture.raw });
+          await expect(published).rejects.toBeInstanceOf(ActiveDraftPointerUnavailableError);
+          await expect(published).rejects.toMatchObject({ reason: "result-unrecorded" });
+          expect(localStorage.getItem(POINTER_KEY)).toBe(capture.raw);
+          await expect(storedNative("cap-C")).resolves.toEqual(recordC);
+          // Reach: two result writes were issued, and the write-ahead landed.
+          expect(attempts).toBe(2);
+          await expect(get(GENERATION_KEY, getDraftStore())).resolves.toBe(generation + 1);
+        } finally {
+          endHolds();
+          holding?.mockRestore();
+          vi.useRealTimers();
+          uninstallWebLocks();
+        }
+      });
+
+      it.each([
+        "a publication",
+        "a guest seat's publication",
+        "a republication",
+        "a clear",
+        "a refused republication",
+        "the revert itself fails",
+      ] as const)(
+        "a step whose result cannot be recorded writes back what it started from and takes no effect: %s",
+        async (leg) => {
+          installFifoWebLocks();
+          let fault: ReturnType<typeof refuseResultWrites> | null = null;
+          let refusing: { mockRestore: () => void } | null = null;
+          try {
+            const { pointer, capture } = await storeNativeA();
+            const recordC = await storedNative("cap-C");
+            const textB = JSON.stringify(nativePointer({ capabilityId: "cap-B", draftCode: "NAT002", seatIndex: 1 }));
+            if (leg === "a refused republication") localStorage.setItem(POINTER_KEY, textB);
+            const generation = (await get(GENERATION_KEY, getDraftStore())) as number;
+            const refreshed = nativePointer({ timestamp: pointer.timestamp + 1_000 });
+            const pointerD = nativePointer({ capabilityId: "cap-D" });
+            // Reach: this tab's view is caught up, so the step runs at once.
+            expect(localStorage.getItem(GENERATION_KEY)).toBe(String(generation));
+
+            const run = (): Promise<unknown> => {
+              switch (leg) {
+                case "a publication":
+                case "the revert itself fails":
+                  return publishActiveNativeDraft(pointerD);
+                case "a guest seat's publication":
+                  return saveActiveDraftGuest(guestPublicationA);
+                case "a republication":
+                case "a refused republication":
+                  return republishActiveNativeDraft(capture, refreshed);
+                case "a clear":
+                  return Promise.resolve(clearActiveNativeDraftIfCurrent(capture));
+              }
+            };
+            let step: Promise<unknown>;
+            try {
+              if (leg === "the revert itself fails") {
+                // The step's own pointer write lands; the write back after it throws.
+                const setItem = localStorage.setItem.bind(localStorage);
+                let pointerWrites = 0;
+                refusing = vi.spyOn(localStorage, "setItem").mockImplementation((key: string, value: string) => {
+                  if (key === POINTER_KEY && ++pointerWrites > 1) throw new DOMException("full", "QuotaExceededError");
+                  setItem(key, value);
+                });
+              }
+              fault = refuseResultWrites("every", "throw");
+              step = run();
+              step.catch(() => {}); // its outcome is asserted below
+              await Promise.allSettled([step]);
+            } finally {
+              fault?.restore();
+              refusing?.mockRestore();
+              refusing = null;
+            }
+
+            switch (leg) {
+              case "a publication":
+              case "a guest seat's publication":
+              case "a republication":
+                await expect(step).rejects.toBeInstanceOf(ActiveDraftPointerUnavailableError);
+                await expect(step).rejects.toMatchObject({ reason: "result-unrecorded" });
+                expect(localStorage.getItem(POINTER_KEY)).toBe(capture.raw);
+                if (leg !== "a republication") await expect(storedNative("cap-C")).resolves.toEqual(recordC);
+                break;
+              case "a clear":
+                await expect(step).resolves.toBe(false);
+                expect(localStorage.getItem(POINTER_KEY)).toBe(capture.raw);
+                break;
+              case "a refused republication":
+                await expect(step).resolves.toMatchObject({ status: "superseded" });
+                expect(localStorage.getItem(POINTER_KEY)).toBe(textB);
+                await expect(get(RECORD_KEY, getDraftStore())).resolves.toEqual({ generation, value: textB });
+                break;
+              case "the revert itself fails":
+                await expect(step).rejects.toBeInstanceOf(ActiveDraftPointerUnavailableError);
+                await expect(step).rejects.toMatchObject({ reason: "result-unrecorded" });
+                // It took no generation as seen, since its view still holds its own write.
+                expect(localStorage.getItem(GENERATION_KEY)).toBe(String(generation));
+                expect(storedPointer()).toEqual(pointerD);
+                await expect(storedNative("cap-C")).resolves.toEqual(recordC);
+                break;
+            }
+
+            // Reach: both result writes were refused after the write-ahead landed.
+            if (leg === "a refused republication") expect(fault!.refused()).toBeGreaterThan(0);
+            else expect(fault!.refused()).toBe(2);
+            await expect(get(GENERATION_KEY, getDraftStore())).resolves.toBe(generation + 1);
+            if (leg === "a republication") expect(JSON.stringify(refreshed)).not.toBe(capture.raw);
+            if (leg !== "the revert itself fails") {
+              // The view agrees with the durable record again, so the step published its generation.
+              expect(localStorage.getItem(GENERATION_KEY)).toBe(String(generation + 1));
+            } else {
+              // A later clean step waits, restores the recorded pointer and acts on it.
+              vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+              const waits = enteredViewWait();
+              const cleared = Promise.resolve(clearActiveNativeDraftIfCurrent(capture));
+              await untilReached(() => waits() > 0);
+              expect(waits()).toBe(1);
+              await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS);
+              await expect(cleared).resolves.toBe(true);
+              expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+            }
+          } finally {
+            fault?.restore();
+            vi.useRealTimers();
+            uninstallWebLocks();
+          }
+        },
+      );
+
       it("a refused pointer transaction rejects a publication and keeps the pointer for a clear", async () => {
         const { capture } = await storeNativeA();
         installRefusingWebLocks(new DOMException("denied", "SecurityError"));
@@ -1761,45 +2094,65 @@ describe("guest recovery records", () => {
         await expect(step).resolves.toMatchObject({ status: "committed" });
       });
 
-      it("a pointer write's record removal settles after its transaction ends", async () => {
+      it("a pointer write's record removal starts once its step's result is recorded and settles after its transaction ends", async () => {
         installFifoWebLocks();
         let release!: () => void;
         const gate = new Promise<void>((resolve) => {
           release = resolve;
         });
+        let watching: { mockRestore: () => void } | null = null;
         try {
           await storeNativeA();
           // Reach: the pointer it replaces names a stored record.
           await expect(storedNative("cap-C")).resolves.toMatchObject({ capabilityId: "cap-C" });
-          const step = await withActiveDraftPointer((txn) => {
-            // A read-write transaction on the draft store, kept alive until the gate opens,
-            // so the removal's own transaction waits behind it.
-            let open = true;
-            void gate.then(() => {
-              open = false;
-            });
-            void getDraftStore()("readwrite", (objects) => new Promise<void>((resolve) => {
-              const keepAlive = () => {
-                if (!open) {
-                  resolve();
-                  return;
-                }
-                objects.get("keep-alive").onsuccess = keepAlive;
-              };
-              keepAlive();
-            }));
-            return txn.publishNative(nativePointer({ capabilityId: "cap-D" }));
+          let recorded = false;
+          const put = IDBObjectStore.prototype.put;
+          const writesAhead = new WeakSet<IDBTransaction>();
+          watching = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+            this: IDBObjectStore,
+            value: unknown,
+            key?: IDBValidKey,
+          ) {
+            if (key === GENERATION_KEY) writesAhead.add(this.transaction);
+            if (key === RECORD_KEY && !writesAhead.has(this.transaction)) {
+              // Once the step's result is recorded, a read-write transaction on the draft store,
+              // kept alive until the gate opens, so a removal started after it waits behind it.
+              this.transaction.addEventListener("complete", () => {
+                recorded = true;
+                let open = true;
+                void gate.then(() => {
+                  open = false;
+                });
+                void getDraftStore()("readwrite", (objects) => new Promise<void>((resolve) => {
+                  const keepAlive = () => {
+                    if (!open) {
+                      resolve();
+                      return;
+                    }
+                    objects.get("keep-alive").onsuccess = keepAlive;
+                  };
+                  keepAlive();
+                }));
+              });
+            }
+            return put.call(this, value, key);
           });
+          const step = await withActiveDraftPointer((txn) => txn.publishNative(nativePointer({ capabilityId: "cap-D" })));
+          // Reach: the step's result was recorded before it returned.
+          expect(recorded).toBe(true);
           expect(step.status).toBe("committed");
           if (step.status !== "committed") return;
           const removal = track(step.value);
           expect((await navigator.locks.query()).held).toEqual([]);
+          await untilReached(() => removal() !== "pending");
           expect(removal()).toBe("pending");
+          // No draft-store read before the gate opens: it would wait behind the held transaction.
           release();
           await step.value;
           await expect(storedNative("cap-C")).resolves.toBeUndefined();
         } finally {
           release();
+          watching?.mockRestore();
           uninstallWebLocks();
         }
       });
