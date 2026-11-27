@@ -94,7 +94,8 @@ fn windgrace_plus_two(hand: WindgraceHand, land_on_top: bool) -> (usize, usize) 
             let bolt = scenario.add_bolt_to_hand(P0);
             Some(match hand {
                 WindgraceHand::DiscardForest => forest,
-                _ => bolt,
+                WindgraceHand::DiscardBolt => bolt,
+                WindgraceHand::Empty => unreachable!("Empty takes the outer arm"),
             })
         }
     };
@@ -207,4 +208,79 @@ fn old_rutstein_creature_makes_only_an_insect() {
 #[test]
 fn old_rutstein_instant_makes_only_blood() {
     assert_eq!(old_rutstein_upkeep(Milled::Instant), (0, 0, 1));
+}
+
+const STINKWEED_IMP: &str = "Flying\nWhenever this creature deals combat damage to a creature, destroy that creature.\nDredge 5 (If you would draw a card, you may mill five cards instead. If you do, return this card from your graveyard to your hand.)";
+
+/// Activate Lord Windgrace's +2 with Stinkweed Imp in the graveyard, accept
+/// Dredge for the first draw, and return how many draws the library lost
+/// beyond the five milled cards. `discard_land` picks Forest (else Bolt);
+/// `mill_lands` stages five lands (else five sorceries) on top.
+fn windgrace_plus_two_dredged(discard_land: bool, mill_lands: bool) -> usize {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let walker = scenario
+        .add_planeswalker_from_oracle(P0, "Lord Windgrace", "Windgrace", 5, LORD_WINDGRACE)
+        .id();
+    for n in 0..3 {
+        scenario.add_spell_to_library_top(P0, &format!("Filler {n}"), false);
+    }
+    for n in 0..5 {
+        if mill_lands {
+            scenario.add_land_to_library_top(P0, &format!("Swamp {n}"));
+        } else {
+            scenario.add_spell_to_library_top(P0, &format!("Sorcery {n}"), false);
+        }
+    }
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP);
+    let pick = if discard_land {
+        scenario.add_land_to_hand(P0, "Forest").id()
+    } else {
+        scenario.add_bolt_to_hand(P0)
+    };
+    let mut runner = scenario.build();
+    let library_before = runner.state().players[0].library.len();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: walker,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate +2");
+    let mut dredged = false;
+    for _ in 0..64 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::DiscardChoice { .. } => GameAction::SelectCards { cards: vec![pick] },
+            WaitingFor::ReplacementChoice { .. } if !dredged => {
+                dredged = true;
+                GameAction::ChooseReplacement { index: 0 }
+            }
+            WaitingFor::ReplacementChoice { .. } => GameAction::ChooseReplacement { index: 1 },
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        runner.act(action).expect("action accepted");
+    }
+    assert!(dredged, "Dredge was offered for the first draw");
+    assert!(runner.state().stack.is_empty(), "resolution completed");
+    library_before - runner.state().players[0].library.len() - 5
+}
+
+/// CR 608.2c + CR 702.52a: when Dredge replaces the draw, the gate still reads
+/// the discard, not the milled cards.
+#[test]
+fn lord_windgrace_dredged_draw_gate_reads_the_discard() {
+    assert_eq!(
+        windgrace_plus_two_dredged(false, true),
+        0,
+        "Bolt discarded, lands milled"
+    );
+    assert_eq!(
+        windgrace_plus_two_dredged(true, false),
+        1,
+        "Forest discarded, sorceries milled"
+    );
 }
