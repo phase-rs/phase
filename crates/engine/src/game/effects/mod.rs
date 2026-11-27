@@ -36788,9 +36788,7 @@ fn resolve_add_pending_etb_counters(
         Some(crate::game::targeting::TriggeringSpell::OnStack(_))
     );
     // Extract the object_id from the triggering SpellCast event.
-    if let Some(GameEvent::SpellCast { object_id, .. }) =
-        state.current_trigger_event.as_ref()
-    {
+    if let Some(GameEvent::SpellCast { object_id, .. }) = state.current_trigger_event.as_ref() {
         let object_id = *object_id;
         if spell_still_on_stack {
             state
