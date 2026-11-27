@@ -1446,6 +1446,9 @@
       "poisonCounters": "Marcadores de veneno",
       "players": "Jogadores",
       "whoGoesFirst": "Quem Começa",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "Você",
+      "archenemyOpponent": "Oponente {{number}}",
       "firstPlayer": {
         "random": "Aleatório",
         "play": "Jogar",

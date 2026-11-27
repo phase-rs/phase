@@ -1446,6 +1446,9 @@
       "poisonCounters": "Contadores de veneno",
       "players": "Jugadores",
       "whoGoesFirst": "Quién empieza",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "Tú",
+      "archenemyOpponent": "Oponente {{number}}",
       "firstPlayer": {
         "random": "Aleatorio",
         "play": "Jugar",

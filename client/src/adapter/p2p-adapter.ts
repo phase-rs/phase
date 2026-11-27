@@ -112,6 +112,7 @@ import {
 } from "../services/p2pTerminalResult";
 import { NativeEngineSocket } from "../services/nativeEngineSocket";
 import { minimumDeckSizeOf } from "../services/draftFormatConfig";
+import { isArchenemyFamilyFormat } from "../data/formatRegistry";
 import i18n from "i18next";
 
 /**
@@ -1461,6 +1462,30 @@ export function hordeAnchorSeat(seats: SeatKind[], rosterSize: number): number {
   return seats.findIndex((_, s) =>
     Array.from({ length: rosterSize }, (_, o) => seats[s + o]?.type === "Ai").every(Boolean),
   );
+}
+
+/**
+ * Archenemy: remap the host-picked lobby archenemy seat onto the compacted
+ * engine seat order, or -1 when the picked seat has no player. A partial
+ * start (`startNow` with waiting seats) drops unfilled seats from the engine
+ * order, so lobby seat N is engine seat (N minus unfilled seats below N) —
+ * passing the lobby seat through would designate the wrong player. Seat 0
+ * (the host) always maps to engine seat 0. The filled-seat predicate here
+ * must stay identical to the opponent-collection loop in
+ * `startPregameGameInner` (JoinedHuman + Ai); anything else never reaches
+ * the engine. The caller rejects a -1 rather than designating a seat with
+ * no player.
+ */
+export function remapArchenemySeat(seats: SeatKind[], lobbySeat: number): number {
+  if (!Number.isInteger(lobbySeat) || lobbySeat < 0 || lobbySeat >= seats.length) return -1;
+  const kind = seats[lobbySeat]?.type;
+  if (kind === "WaitingHuman") return -1;
+  if (lobbySeat === 0) return 0;
+  let filledBelow = 0;
+  for (let s = 1; s < lobbySeat; s++) {
+    if (seats[s]?.type === "JoinedHuman" || seats[s]?.type === "Ai") filledBelow++;
+  }
+  return filledBelow + 1;
 }
 
 function traceAdapter(side: "Host" | "Guest", event: string, data?: Record<string, unknown>): void {
@@ -3211,6 +3236,24 @@ export class P2PHostAdapter implements EngineAdapter {
           );
         }
         formatConfigForInit = { ...formatConfigForInit, archenemy_player: hordeSeat };
+      }
+      // Archenemy: the host picks the archenemy seat at setup. A partial
+      // start compacts unfilled seats out of the engine order, so remap the
+      // lobby seat onto the engine order (identity when the room is full);
+      // a picked seat with no player rejects here rather than designating
+      // the wrong player (or tripping the engine's past-the-edge gate with
+      // a seat number from the wrong numbering).
+      if (formatConfigForInit && isArchenemyFamilyFormat(formatConfigForInit.format)) {
+        const picked = formatConfigForInit.archenemy_player ?? 0;
+        const remapped = remapArchenemySeat(this.pregameSeatState.seats, picked);
+        if (remapped < 0) {
+          throw new AdapterError(
+            "P2P_ERROR",
+            `Cannot start Archenemy game: seat ${picked + 1} (the picked archenemy) has no player`,
+            false,
+          );
+        }
+        formatConfigForInit = { ...formatConfigForInit, archenemy_player: remapped };
       }
 
       if (this.disposed) await this.bailDisposed(false, "start");

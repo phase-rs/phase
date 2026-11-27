@@ -473,6 +473,7 @@ fn type_word(type_filter: &TypeFilter) -> Option<String> {
         TypeFilter::Planeswalker => "planeswalker",
         TypeFilter::Battle => "battle",
         TypeFilter::Kindred => "kindred",
+        TypeFilter::Scheme => "scheme",
         TypeFilter::Permanent => "permanent",
         TypeFilter::Card => "card",
         TypeFilter::Subtype(subtype) => return Some(subtype.clone()),

@@ -1446,6 +1446,9 @@
       "poisonCounters": "Giftmarken",
       "players": "Spieler",
       "whoGoesFirst": "Wer beginnt",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "Du",
+      "archenemyOpponent": "Gegner {{number}}",
       "firstPlayer": {
         "random": "Zufällig",
         "play": "Spielen",

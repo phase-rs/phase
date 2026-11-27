@@ -114,11 +114,15 @@ function setOpponentLibraryTop(
   reveal: {
     revealedCards?: number[];
     displayVisible?: boolean;
+    actions?: GameAction[];
   } = {},
 ) {
   const topCardId = 77;
   const top = makeObject(topCardId, topCardName);
+  top.owner = 1;
+  top.controller = 1;
   top.display_visible_to_viewer = reveal.displayVisible ?? false;
+  const actions = reveal.actions ?? [];
   const gameState = buildGameState({
     active_player: 0,
     objects: buildObjectMap(top),
@@ -143,14 +147,14 @@ function setOpponentLibraryTop(
   useGameStore.setState({
     gameState,
     waitingFor: gameState.waiting_for,
-    legalActions: [],
-    legalActionsByObject: {},
+    legalActions: actions,
+    legalActionsByObject: actions.length > 0 ? { [topCardId]: actions } : {},
     spellCosts: {},
     gameMode: "ai",
   });
 }
 
-function setSharedLibrary({ shared }: { shared: boolean }) {
+function setSharedLibrary() {
   const top = makeObject(11, "Sol Ring");
   top.display_visible_to_viewer = true;
   const action = castAction(11);
@@ -167,7 +171,7 @@ function setSharedLibrary({ shared }: { shared: boolean }) {
     stack: [],
     revealed_cards: [],
     waiting_for: buildPriorityWaitingFor({ data: { player: 1 } }),
-    ...(shared ? { derived: { shared_piles: { library: 0, graveyard: 0 } } } : {}),
+    derived: { shared_piles: { library: 0, graveyard: 0 } },
   });
   useGameStore.setState({
     gameState,
@@ -191,7 +195,7 @@ describe("LibraryPile shared library", () => {
   });
 
   it("renders the holder's pile for the non-holder seat's request", () => {
-    setSharedLibrary({ shared: true });
+    setSharedLibrary();
     const { container } = render(<LibraryPile playerId={1} />);
     expect(container.querySelector('[data-library-pile="0"]')).not.toBeNull();
     expect(container.querySelector('[data-library-pile="1"]')).toBeNull();
@@ -202,21 +206,12 @@ describe("LibraryPile shared library", () => {
   });
 
   it("lets the non-holder seat play from the shared top the engine offers", () => {
-    setSharedLibrary({ shared: true });
+    setSharedLibrary();
     render(<LibraryPile playerId={0} />);
     const button = screen.getByRole("button", { name: /play sol ring from top of library/i });
     expect(button).not.toBeDisabled();
     fireEvent.click(button);
     expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "CastSpell" }));
-  });
-
-  it("still refuses the opponent's own library when nothing is shared", () => {
-    setSharedLibrary({ shared: false });
-    render(<LibraryPile playerId={0} />);
-    const button = screen.getByRole("button", { name: /library \(3 cards\)/i });
-    expect(button).toHaveAttribute("data-library-top-cast", "false");
-    fireEvent.click(button);
-    expect(dispatchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -295,16 +290,32 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
     expect(screen.queryByAltText("Card back")).not.toBeInTheDocument();
   });
 
+  it("shows and casts an opponent's projected top card when the engine offers the action", () => {
+    const action = castAction(77);
+    setOpponentLibraryTop("Lightning Bolt", { displayVisible: true, actions: [action] });
+    render(<LibraryPile playerId={1} />);
+
+    const button = screen.getByRole("button", { name: /play lightning bolt from top of library/i });
+    expect(button).toHaveAttribute("data-library-top-cast", "true");
+    expect(screen.getByRole("img", { name: "Lightning Bolt" })).toBeInTheDocument();
+    fireEvent.click(button);
+    expect(dispatchMock).toHaveBeenCalledExactlyOnceWith(action);
+  });
+
   it("keeps an opponent library top hidden when nothing reveals it (no leak)", () => {
     // Regression guard (#2631): single-player renders the raw, unredacted state,
-    // so the opponent's top carries a real name. With NO reveal set membership it
-    // must stay a card-back — never inferred visible from the name.
+    // so the opponent's top carries a real name even when the projection hides it.
     setOpponentLibraryTop("Lightning Bolt");
     render(<LibraryPile playerId={1} />);
     const button = screen.getByRole("button", { name: /library \(1 card\)/i });
     expect(button.className).toContain("border-gray-600");
     expect(button).not.toHaveAttribute("data-grouped-ids");
+    expect(button).toHaveAttribute("data-library-top-cast", "false");
+    expect(button).toBeDisabled();
     expect(screen.getByAltText("Card back")).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Lightning Bolt" })).not.toBeInTheDocument();
+    fireEvent.click(button);
+    expect(dispatchMock).not.toHaveBeenCalled();
   });
 
   it("uses reveal state only for the public-reveal treatment, not visibility", () => {

@@ -1,0 +1,71 @@
+---
+source: crates/phase-parser/src/parser/oracle_trigger_snapshot_tests.rs
+assertion_line: 1450
+expression: def
+---
+{
+  "mode": {
+    "AbilityTriggered": {
+      "cause": {
+        "EntersBattlefield": {
+          "core_types": []
+        }
+      },
+      "source": "Any"
+    }
+  },
+  "execute": {
+    "kind": "Spell",
+    "effect": {
+      "type": "Counter",
+      "target": {
+        "type": "ParentTarget"
+      }
+    },
+    "cost": null,
+    "sub_ability": null,
+    "duration": null,
+    "description": null,
+    "target_prompt": null,
+    "condition": null,
+    "optional_targeting": false,
+    "optional": false,
+    "forward_result": false
+  },
+  "valid_card": {
+    "type": "Typed",
+    "type_filters": [
+      "Permanent"
+    ],
+    "controller": null,
+    "properties": []
+  },
+  "origin": null,
+  "destination": null,
+  "trigger_zones": [
+    "Battlefield"
+  ],
+  "phase": null,
+  "optional": false,
+  "damage_kind": "Any",
+  "secondary": false,
+  "valid_target": null,
+  "valid_source": null,
+  "description": "Whenever a permanent entering causes a triggered ability to trigger, counter that ability unless its controller pays {2}.",
+  "constraint": null,
+  "condition": null,
+  "unless_pay": {
+    "cost": {
+      "type": "Mana",
+      "cost": {
+        "type": "Cost",
+        "shards": [],
+        "generic": 2
+      }
+    },
+    "payer": {
+      "type": "TriggeringSpellController"
+    }
+  },
+  "batched": false
+}

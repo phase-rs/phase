@@ -203,6 +203,7 @@ fn type_filter_deps(filter: &TypeFilter) -> RetargetDeps {
         | TypeFilter::Kindred
         | TypeFilter::Permanent
         | TypeFilter::Card
+        | TypeFilter::Scheme
         | TypeFilter::Any
         | TypeFilter::Subtype(_) => RetargetDeps::Independent,
     }
@@ -271,7 +272,7 @@ fn filter_prop_deps(prop: &FilterProp) -> RetargetDeps {
             }
             CombatRelationSubject::Source => RetargetDeps::Independent,
         },
-        FilterProp::Attacking { defender } => defender
+        FilterProp::Attacking { defender, .. } => defender
             .as_ref()
             .map_or(RetargetDeps::Independent, controller_deps),
         FilterProp::CastThisTurn { caster: controller }

@@ -244,6 +244,15 @@ pub struct Player {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_attributes: Vec<crate::types::ability::ChosenAttribute>,
 
+    /// CR 601.2g-h + CR 118.3: the cards this player owns, in a hand or a
+    /// graveyard, that a payment probe holds for another leg of the cost it is
+    /// judging (`casting::CardHoldScratch`). A held card stays in its zone and
+    /// can't be chosen to pay a cost (`casting::is_held_by_payment_probe`). Set
+    /// only on a probe's scratch state, so it is empty on every live state;
+    /// never serialized.
+    #[serde(skip)]
+    pub(crate) probe_held_cards: Vec<ObjectId>,
+
     // Derived fields (computed in WASM bridge, not persisted)
     #[serde(skip_deserializing, default)]
     pub can_look_at_top_of_library: bool,
@@ -264,6 +273,7 @@ impl Default for Player {
             id: PlayerId(0),
             life: 20,
             has_no_life_total: false,
+            probe_held_cards: Vec::new(),
             mana_pool: ManaPool::default(),
             library: im::Vector::new(),
             hand: im::Vector::new(),

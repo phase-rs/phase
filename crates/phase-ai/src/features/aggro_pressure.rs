@@ -586,7 +586,10 @@ mod tests {
         let attacking_filter = TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Creature],
             controller: None,
-            properties: vec![FilterProp::Attacking { defender: None }],
+            properties: vec![FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            }],
         });
         let static_anthem = StaticDefinition {
             origin: Default::default(),

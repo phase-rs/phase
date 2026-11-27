@@ -1480,20 +1480,21 @@ fn activation_restriction_is_cast_stable_for_pre_cast(
         | crate::types::ability::ActivationRestriction::BeforeCombatDamage
         | crate::types::ability::ActivationRestriction::OnlyOnceEachTurn
         | crate::types::ability::ActivationRestriction::OnlyOnce
-        | crate::types::ability::ActivationRestriction::MaxTimesEachTurn { .. }
-        | crate::types::ability::ActivationRestriction::MatchesCardCastTiming => true,
+        | crate::types::ability::ActivationRestriction::MaxTimesEachTurn { .. } => true,
         crate::types::ability::ActivationRestriction::RequiresCondition {
             condition: Some(condition),
         } => parsed_condition_is_cast_stable_for_pre_cast(condition),
         crate::types::ability::ActivationRestriction::RequiresCondition { condition: None } => true,
         // Source designations, levels, and counter thresholds are independent
         // state readers. This proof admits only modeled restrictions so a new
-        // state-dependent gate cannot silently make a known-zero cast vanish.
+        // state-dependent gate cannot silently make a known-zero cast vanish;
+        // a hand card's cast prohibitions read the turn's cast journal (Rule of Law).
         crate::types::ability::ActivationRestriction::IsSolved
         | crate::types::ability::ActivationRestriction::SourceIsHarnessed
         | crate::types::ability::ActivationRestriction::ClassLevelIs { .. }
         | crate::types::ability::ActivationRestriction::LevelCounterRange { .. }
-        | crate::types::ability::ActivationRestriction::CounterThreshold { .. } => false,
+        | crate::types::ability::ActivationRestriction::CounterThreshold { .. }
+        | crate::types::ability::ActivationRestriction::MatchesCardCastTiming => false,
     }
 }
 
@@ -1735,6 +1736,7 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
         saga_chapter: _,
         unless_pay: None,
         batched: _,
+        damage_received_grouping: _,
         die_sides: _,
         gotcha_condition: _,
         expend_threshold: _,
@@ -2052,6 +2054,7 @@ fn type_filter_is_context_free(filter: &TypeFilter) -> bool {
         | TypeFilter::Kindred
         | TypeFilter::Permanent
         | TypeFilter::Card
+        | TypeFilter::Scheme
         | TypeFilter::Any
         | TypeFilter::Subtype(_) => true,
     }
@@ -2697,6 +2700,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 122.1f: the poison predicate reads poison counters, never mana.
         | StaticCondition::PlayerIsPoisoned { .. }
@@ -3440,8 +3444,10 @@ fn entered_object_perturbs_quantity_ref(
         QuantityRef::PartySize { .. } => {
             entered.card_types.core_types.contains(&CoreType::Creature)
         }
-        // CR 903.3d: a commander entering the battlefield or command zone can change
-        // the single-commander mana value. Conservatively perturb on any commander entry.
+        // CR 903.3d / CR 903.3e: a commander entering any zone the read
+        // covers can change the single-commander mana value. Conservatively
+        // perturb on any commander entry (already owner/zone-blind; no printed
+        // static carries this quantity).
         QuantityRef::CommanderManaValue { .. } => entered.is_commander,
         // Player-level, single-object, history-record, payment, and choice refs:
         // an object's battlefield entry/exit cannot change their value. Identical
@@ -5156,6 +5162,35 @@ fn current_cast_occurrence_matches(
     crate::game::ledger::cast_occurrence_is_current(state, occurrence, ability.source_id)
 }
 
+/// CR 903.3d / CR 903.3e: the shared `CommanderManaValue` population —
+/// every commander `owner` owns in `zones`. Ownership, not control, decides
+/// membership (control is irrelevant); the per-production `zones` preserve
+/// Stinging Study's explicit battlefield-or-command limit and the possessive's
+/// every-zone widening. Sorted by `ObjectId` so the sync reader's first
+/// pick and the commander's prompt order are deterministic. Serves the
+/// `CommanderManaValue` reader arm and the `resolve_chain_body` commander
+/// gate — the only two enumerators, so they cannot drift.
+pub(crate) fn commander_mana_value_candidates(
+    state: &GameState,
+    filter_ctx: &FilterContext,
+    owner: &ControllerRef,
+    zones: &[Zone],
+) -> Vec<ObjectId> {
+    let filter = TargetFilter::Typed(TypedFilter::default().properties(vec![
+        FilterProp::Owned {
+            controller: owner.clone(),
+        },
+        FilterProp::IsCommander,
+    ]));
+    let mut ids: Vec<ObjectId> = zones
+        .iter()
+        .flat_map(|zone| crate::game::targeting::zone_object_ids(state, *zone))
+        .filter(|&id| matches_target_filter(state, id, &filter, filter_ctx))
+        .collect();
+    ids.sort();
+    ids
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_ref(
     state: &GameState,
@@ -6572,28 +6607,16 @@ fn resolve_ref(
         QuantityRef::CommanderCastFromCommandZoneCount => u32_to_i32_saturating(
             super::commander::commander_casts_from_command_zone(state, controller),
         ),
-        // CR 903.3d: Mana value of a commander you own on the battlefield or in the command zone.
-        // Used by Stinging Study's "X is the mana value of a commander you own on the battlefield
-        // or in the command zone" pattern. Returns the mana value of the first matching commander
-        // (any one if multiple exist).
-        QuantityRef::CommanderManaValue { owner } => {
-            let filter = TargetFilter::Typed(
-                TypedFilter::default()
-                    .controller(owner.clone())
-                    .properties(vec![FilterProp::IsCommander]),
-            );
-            let zones = [
-                crate::types::zones::Zone::Battlefield,
-                crate::types::zones::Zone::Command,
-            ];
-            let ids: Vec<ObjectId> = zones
-                .into_iter()
-                .flat_map(|zone| crate::game::targeting::zone_object_ids(state, zone))
-                .filter(|&id| matches_target_filter(state, id, &filter, &filter_ctx))
-                .collect();
-
-            // Return mana value of first matching commander (any one if multiple exist)
-            ids.first()
+        // CR 903.3d / CR 903.3e: mana value of a commander the owner owns,
+        // read live (CR 903.3e "current characteristics", CR 202.3). The sync
+        // reader takes the first candidate by `ObjectId`, else 0: inside a
+        // resolving chain the commander gate parks 2+ candidates for an
+        // interactive choice and rewrites these reads onto the stamped pick,
+        // so this arm answers only the 0/1 fast paths and out-of-resolution
+        // reads (layers/AI-eval/statics — none on printed cards).
+        QuantityRef::CommanderManaValue { owner, zones } => {
+            commander_mana_value_candidates(state, &filter_ctx, owner, zones)
+                .first()
                 .and_then(|&id| state.objects.get(&id))
                 .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
                 .unwrap_or(0)
@@ -11497,11 +11520,12 @@ mod tests {
                 minimum: 1,
                 maximum: Some(3),
             },
+            ActivationRestriction::MatchesCardCastTiming,
         ] {
             definition.activation_restrictions = vec![restriction];
             assert!(
                 !ability_definition_is_cast_stable_for_pre_cast(&definition),
-                "source-state activation restrictions must remain conservative"
+                "state-reading activation restrictions must remain conservative"
             );
         }
     }
@@ -15207,6 +15231,7 @@ mod tests {
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::CommanderManaValue {
                 owner: ControllerRef::You,
+                zones: vec![Zone::Battlefield, Zone::Command],
             },
         };
 
@@ -15244,6 +15269,7 @@ mod tests {
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::CommanderManaValue {
                 owner: ControllerRef::You,
+                zones: vec![Zone::Battlefield, Zone::Command],
             },
         };
 

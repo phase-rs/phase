@@ -1484,6 +1484,9 @@
       "poisonCounters": "毒カウンター",
       "players": "プレイヤー",
       "whoGoesFirst": "先攻プレイヤー",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "自分",
+      "archenemyOpponent": "対戦相手{{number}}",
       "firstPlayer": {
         "random": "ランダム",
         "play": "先攻",

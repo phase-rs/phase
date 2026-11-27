@@ -4373,6 +4373,12 @@ fn finish_mana_ability_cost_payment(
         // activation began, before any cost; never `mana_ability_definition`'s
         // post-payment live fallback (a pending without its snapshot is `Unknown`).
         let activation_cost = BoundActivationCost::of_definition(pending.ability_snapshot.as_ref());
+        // CR 401.5: synchronous auto-taps and cursor children are part of
+        // their caller's cost procedure. A manual child can also have a
+        // parked parent in its resume, even on the very same source.
+        if !resolves_automatically && is_ultimate_root {
+            retire_mana_activation_look(state, pending.player, pending.source_id, &pending.resume);
+        }
         let activation_event = super::casting_targets::emit_ability_activated(
             state,
             pending.player,
@@ -4871,8 +4877,48 @@ pub(super) fn continue_mana_ability_activation(
         *state = before;
         events.truncate(events_before);
         super::play_trace::mana_ability_reversed(state, source_id, place);
-        resume_mana_ability_root(state, player, resume, events)
+        cancel_mana_ability_activation(state, player, source_id, resume, events)
     })
+}
+
+/// CR 401.5 + CR 733.1: retire the cancelled activation before resuming what
+/// it was paying for. An enclosing activation on the same source keeps its look.
+pub(super) fn cancel_mana_ability_activation(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    resume: ManaAbilityResume,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    retire_mana_activation_look(state, player, source_id, &resume);
+    resume_mana_ability_root(state, player, resume, events)
+}
+
+pub(super) fn retire_mana_activation_look(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    resume: &ManaAbilityResume,
+) {
+    let same_source_is_enclosing = matches!(
+        resume,
+        ManaAbilityResume::ManaAbilityManaPayment { pending_mana_ability }
+            if pending_mana_ability.suspended_chain().any(|outer| {
+                outer.player == player && outer.source_id == source_id
+            })
+    ) || (resume.resumes_pending_cast()
+        && state.pending_cast.as_deref().is_some_and(|outer| {
+            outer.activation_ability_index.is_some()
+                && outer.ability.controller == player
+                && outer.object_id == source_id
+        }));
+    if !same_source_is_enclosing {
+        super::visibility::retire_foreign_library_look(
+            state,
+            player,
+            crate::types::game_state::ForeignLibraryLookAction::Activate(source_id),
+        );
+    }
 }
 
 pub(crate) fn resume_mana_ability_root(
@@ -8442,6 +8488,7 @@ mod tests {
             (
                 "Token granted ability",
                 Effect::Token {
+                    enters_blocking: None,
                     name: "Test".to_string(),
                     power: crate::types::ability::PtValue::Fixed(1),
                     toughness: crate::types::ability::PtValue::Fixed(1),
@@ -10037,11 +10084,10 @@ mod tests {
 
     /// CR 614.1a positive case: the `Add {C}{C}{C} instead` sub-ability is a
     /// replacement effect (the word "instead" per CR 614.1a). When its `And`
-    /// condition is satisfied (all three Urza lands controlled), the delta
-    /// replaces the base `Add {C}` production and the pool ends with three
-    /// colorless mana.
+    /// condition is satisfied (all three Urza lands controlled), it replaces the
+    /// base production with one production of three colorless mana.
     #[test]
-    fn resolve_mana_ability_conditional_urza_delta() {
+    fn resolve_mana_ability_conditional_urza_swap() {
         let mut state = GameState::new_two_player(42);
         let tower = create_object(
             &mut state,
@@ -10089,7 +10135,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Mana {
                     produced: ManaProduction::Colorless {
-                        count: QuantityExpr::Fixed { value: 2 },
+                        count: QuantityExpr::Fixed { value: 3 },
                     },
                     restrictions: vec![],
                     grants: vec![],
@@ -10097,23 +10143,25 @@ mod tests {
                     target: None,
                 },
             )
-            .condition(AbilityCondition::And {
-                conditions: vec![
-                    AbilityCondition::ControllerControlsMatching {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::land()
-                                .subtype("Mine".to_string())
-                                .controller(ControllerRef::You),
-                        ),
-                    },
-                    AbilityCondition::ControllerControlsMatching {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::land()
-                                .subtype("Power-Plant".to_string())
-                                .controller(ControllerRef::You),
-                        ),
-                    },
-                ],
+            .condition(AbilityCondition::ConditionInstead {
+                inner: Box::new(AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::ControllerControlsMatching {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::land()
+                                    .subtype("Mine".to_string())
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                        AbilityCondition::ControllerControlsMatching {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::land()
+                                    .subtype("Power-Plant".to_string())
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                    ],
+                }),
             }),
         );
 
@@ -10129,11 +10177,10 @@ mod tests {
     /// CR 614.1a negative case: when the sub-ability's "instead" replacement
     /// (CR 614.1a) cannot fire because its condition is false (here, Urza's
     /// Power-Plant is missing), only the base `Add {C}` resolves and the
-    /// `And { Mine, Power-Plant }` delta does not apply — the pool ends with
-    /// one colorless, not three. Mirrors
-    /// `resolve_mana_ability_conditional_urza_delta` but omits Power-Plant.
+    /// `And { Mine, Power-Plant }` condition leaves the pool with one colorless. Mirrors
+    /// `resolve_mana_ability_conditional_urza_swap` but omits Power-Plant.
     #[test]
-    fn resolve_mana_ability_urza_delta_skips_when_companion_land_missing() {
+    fn resolve_mana_ability_urza_swap_skips_when_companion_land_missing() {
         let mut state = GameState::new_two_player(42);
         let tower = create_object(
             &mut state,
@@ -10176,7 +10223,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Mana {
                     produced: ManaProduction::Colorless {
-                        count: QuantityExpr::Fixed { value: 2 },
+                        count: QuantityExpr::Fixed { value: 3 },
                     },
                     restrictions: vec![],
                     grants: vec![],
@@ -10184,23 +10231,25 @@ mod tests {
                     target: None,
                 },
             )
-            .condition(AbilityCondition::And {
-                conditions: vec![
-                    AbilityCondition::ControllerControlsMatching {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::land()
-                                .subtype("Mine".to_string())
-                                .controller(ControllerRef::You),
-                        ),
-                    },
-                    AbilityCondition::ControllerControlsMatching {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::land()
-                                .subtype("Power-Plant".to_string())
-                                .controller(ControllerRef::You),
-                        ),
-                    },
-                ],
+            .condition(AbilityCondition::ConditionInstead {
+                inner: Box::new(AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::ControllerControlsMatching {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::land()
+                                    .subtype("Mine".to_string())
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                        AbilityCondition::ControllerControlsMatching {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::land()
+                                    .subtype("Power-Plant".to_string())
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                    ],
+                }),
             }),
         );
 
@@ -16726,7 +16775,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         )

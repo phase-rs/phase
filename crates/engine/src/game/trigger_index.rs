@@ -99,9 +99,12 @@ fn narrow_core_type(filter: &Option<TargetFilter>) -> Option<CoreType> {
         // Non-narrow filter shapes — broad emission carries the trigger.
         // CR 308.1: Kindred is a non-permanent supplemental type, never a
         // narrowing battlefield-trigger card type.
+        // CR 314.1: Scheme is a command-zone card type, never a narrowing
+        // battlefield-trigger card type.
         TypeFilter::Instant
         | TypeFilter::Sorcery
         | TypeFilter::Kindred
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -956,6 +959,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ArrangePlanarDeckTop
         | EffectKind::Planeswalk
         | EffectKind::AbandonScheme
+        | EffectKind::SetSchemeInMotion
         | EffectKind::ChaosEnsues
         // Redistribute emits LifeChanged handled by that event's own arm; no
         // EffectResolved-dispatching matcher. No-op here.

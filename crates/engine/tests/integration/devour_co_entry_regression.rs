@@ -69,7 +69,8 @@ fn devour_replacement(n: i32) -> ReplacementDefinition {
                         TypedFilter::creature().controller(ControllerRef::You),
                     ),
                 },
-            }),
+            })
+            .into(),
             min_count: 0,
         },
     )
@@ -380,7 +381,7 @@ fn single_pick_devour_does_not_leak_snapshot_to_later_sacrifice() {
     let unrelated_sacrifice = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 1,
         },
         vec![],

@@ -706,6 +706,12 @@ fn exempt_from_hiding(
     crate::game::casting::cast_permissions_name_their_grantee(obj)
         && state.players.iter().any(|pl| {
             can_view_private_for_player(pl.id)
+                // CR 401.5: The cast-grant inference must respect the same
+                // stopped look window as the explicit top-of-library grant.
+                && !(obj.zone == Zone::Library
+                    && !foreign_library_top_visible_during_action(state, pl.id, obj.owner, obj.id)
+                    && state.players.iter().any(|seat| seat.id == obj.owner)
+                    && state.library_of(obj.owner).front() == Some(&obj.id))
                 && crate::game::casting::castable_from_current_zone(state, obj, pl.id, None)
         })
 }
@@ -912,22 +918,22 @@ pub(crate) fn identity_projection_for_viewer(
             HashSet::new()
         };
 
-    // CR 701.20e + CR 400.2: "looking at a card ... is shown only to the
-    // specified player." A player with a continuous "you may look at the top
-    // card of your library" permission (MayLookAtTopOfLibrary — Vizier of the
-    // Menagerie, Fblthp, Lost on the Range, etc.) privately sees their OWN
-    // library top. Engine-authoritative exposure (never client-side): the
-    // top-of-library object is the source/render target of cast-from-top
-    // (CR 601.2a) and plot-from-top (CR 702.170f) actions, so without this it
-    // would be redacted for the very player allowed to act on it. The derived
-    // `can_look_at_top_of_library` flag already encodes the static check;
-    // `can_view_private_for_player` extends the look to a player controlling
-    // this player's turn, mirroring the private-look / face-down look paths.
+    // CR 701.20e: A private look belongs to the grantee or the player
+    // controlling their turn. Public reveals follow their separate audience.
     let look_top_visible: HashSet<ObjectId> = state
         .players
         .iter()
-        .filter(|p| p.can_look_at_top_of_library && can_view_private_for_player(p.id))
-        .filter_map(|p| state.library_of(p.id).front().copied())
+        .filter(|p| can_view_private_for_player(p.id))
+        .flat_map(|p| {
+            p.can_look_at_top_of_library
+                .then_some(p.id)
+                .into_iter()
+                .chain(
+                    super::static_abilities::top_of_library_look_owners(state, p.id)
+                        .filter(move |&owner| owner != p.id),
+                )
+                .filter_map(move |owner| visible_library_top_for_look(state, p.id, owner))
+        })
         .collect();
     let all_library_ids: Vec<ObjectId> = state
         .players
@@ -955,8 +961,7 @@ pub(crate) fn identity_projection_for_viewer(
             // does NOT unhide a library object. Its identity is public, but its
             // library position is not, so the identity is published only through
             // the unindexed `DerivedViews::stack_revealed_cards`.
-            // CR 701.20e: own (or controlled-turn) library top under a
-            // MayLookAtTopOfLibrary permission — see `look_top_visible` above.
+            // CR 701.20e: Privately visible top under a look grant.
             || look_top_visible.contains(&obj_id);
         if !visible
             && !effect_zone_hand_cards.contains(&obj_id)
@@ -1443,6 +1448,309 @@ pub fn filter_state_for_unseated_viewer(state: &GameState) -> GameState {
     filter_state_for_scope(state, None)
 }
 
+/// CR 401.5: For a foreign-library look, only the top at the start of a
+/// pending play may be seen, and only while that object is still on top.
+fn visible_library_top_for_look(
+    state: &GameState,
+    grantee: PlayerId,
+    owner: PlayerId,
+) -> Option<ObjectId> {
+    if !state.players.iter().any(|seat| seat.id == owner) {
+        return None;
+    }
+    let live = *state.library_of(owner).front()?;
+    foreign_library_top_visible_during_action(state, grantee, owner, live).then_some(live)
+}
+
+fn foreign_library_top_visible_during_action(
+    state: &GameState,
+    grantee: PlayerId,
+    owner: PlayerId,
+    live: ObjectId,
+) -> bool {
+    owner == grantee
+        || state
+            .foreign_library_look_snapshot
+            .as_deref()
+            .is_none_or(|snapshot| snapshot.tops.contains(&(owner, live)))
+}
+
+pub(super) fn begin_foreign_library_look_boundary(
+    state: &mut GameState,
+    player: PlayerId,
+    action: &crate::types::actions::GameAction,
+) {
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::ForeignLibraryLookAction;
+
+    let kind = match action {
+        GameAction::CastSpell { .. }
+        | GameAction::CastSpellForFree { .. }
+        | GameAction::CastSpellAsMiracle { .. }
+        | GameAction::CastSpellAsMadness { .. }
+        | GameAction::CastSpellAsSneak { .. }
+        | GameAction::CastSpellAsWebSlinging { .. }
+        | GameAction::PlayFaceDown { .. }
+        | GameAction::CastPreparedCopy { .. }
+        | GameAction::CastParadigmCopy { .. } => ForeignLibraryLookAction::Cast,
+        GameAction::PlayLand { .. } => ForeignLibraryLookAction::PlayLand,
+        GameAction::ActivateAbility { .. }
+        | GameAction::ActivateManaSource { .. }
+        | GameAction::TapLandForMana { .. }
+        | GameAction::ActivateNinjutsu { .. }
+        | GameAction::Equip { .. }
+        | GameAction::CrewVehicle { .. }
+        | GameAction::ActivateStation { .. }
+        | GameAction::SaddleMount { .. } => {
+            let Some(source) = action.source_object() else {
+                return;
+            };
+            ForeignLibraryLookAction::Activate(source)
+        }
+        // CR 116.2: paid special actions open the boundary in their cost
+        // procedures. Plot and suspend enter through ActivateAbility.
+        GameAction::PassPriority
+        | GameAction::ChooseMeldPair { .. }
+        | GameAction::ChooseEntryAttackTarget { .. }
+        | GameAction::Foretell { .. }
+        | GameAction::DeclareAttackers { .. }
+        | GameAction::DeclareBlockers { .. }
+        | GameAction::ChooseUntap { .. }
+        | GameAction::ChooseExert { .. }
+        | GameAction::ChooseEnlist { .. }
+        | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseZoneOpponentChooser { .. }
+        | GameAction::ChoosePileOpponent { .. }
+        | GameAction::ChooseAnnouncingOpponent { .. }
+        | GameAction::ChooseGiftRecipient { .. }
+        | GameAction::ChooseAssistPlayer { .. }
+        | GameAction::CommitAssistPayment { .. }
+        | GameAction::MulliganDecision { .. }
+        | GameAction::ReorderHand { .. }
+        | GameAction::BackToManaPayment
+        | GameAction::UntapLandForMana { .. }
+        | GameAction::SpendPoolMana { .. }
+        | GameAction::UnspendPoolMana { .. }
+        | GameAction::SelectCards { .. }
+        | GameAction::ChooseRemoveCounterCostDistribution { .. }
+        | GameAction::SelectCoinFlips { .. }
+        | GameAction::SelectDieRolls { .. }
+        | GameAction::ChooseOutsideGameCards { .. }
+        | GameAction::SelectTargets { .. }
+        | GameAction::ChooseTarget { .. }
+        | GameAction::ChooseReplacement { .. }
+        | GameAction::ChooseReplacementAndRemember { .. }
+        | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::ChooseEntryController { .. }
+        | GameAction::OrderTriggers { .. }
+        | GameAction::OrderCostReductions { .. }
+        | GameAction::CancelCast
+        | GameAction::Transform { .. }
+        | GameAction::TurnFaceUp { .. }
+        | GameAction::SubmitSideboard { .. }
+        | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseStartingPlayer { .. }
+        | GameAction::ChooseOption { .. }
+        | GameAction::SubmitVoteCandidate { .. }
+        | GameAction::SubmitSpellbookDraft { .. }
+        | GameAction::SubmitPilePartition { .. }
+        | GameAction::ChoosePile { .. }
+        | GameAction::ChooseBranch { .. }
+        | GameAction::SubmitLifeRedistribution { .. }
+        | GameAction::ChooseDamageSource { .. }
+        | GameAction::SelectModes { .. }
+        | GameAction::DecideOptionalCost { .. }
+        | GameAction::ChooseAdventureFace { .. }
+        | GameAction::ChooseModalFace { .. }
+        | GameAction::ChooseAlternativeCast { .. }
+        | GameAction::ChooseCastingVariant { .. }
+        | GameAction::KeepAllCopyTargets
+        | GameAction::ChoosePermanentTypeSlot { .. }
+        | GameAction::DecideOptionalEffect { .. }
+        | GameAction::ChooseResolutionOptionalPaymentBranch { .. }
+        | GameAction::RespondToSpliceOffer { .. }
+        | GameAction::DecideOptionalEffectAndRemember { .. }
+        | GameAction::PayUnlessCost { .. }
+        | GameAction::ChooseUnlessCostBranch { .. }
+        | GameAction::ChooseActivationCostBranch { .. }
+        | GameAction::PayCombatTax { .. }
+        | GameAction::ChooseRingBearer { .. }
+        | GameAction::ChoosePair { .. }
+        | GameAction::ChooseDungeon { .. }
+        | GameAction::ChooseDungeonRoom { .. }
+        | GameAction::UnlockRoomDoor { .. }
+        | GameAction::RollPlanarDie
+        | GameAction::ChooseRoomDoor { .. }
+        | GameAction::TapForConvoke { .. }
+        | GameAction::HarmonizeTap { .. }
+        | GameAction::ChooseSecretAgendaNames { .. }
+        | GameAction::DeclareCompanion { .. }
+        | GameAction::CompanionToHand
+        | GameAction::DiscoverChoice { .. }
+        | GameAction::GraveyardPaidCastChoice { .. }
+        | GameAction::CascadeChoice { .. }
+        | GameAction::RippleChoice { .. }
+        | GameAction::FreeCastWindowChoice { .. }
+        | GameAction::ChooseTopOrBottom { .. }
+        | GameAction::ChooseMutateMergeSide { .. }
+        | GameAction::CipherEncode { .. }
+        | GameAction::ChooseLegend { .. }
+        | GameAction::ChooseBattleProtector { .. }
+        | GameAction::SetAutoPass { .. }
+        | GameAction::CancelAutoPass
+        | GameAction::SetPhaseStops { .. }
+        | GameAction::SetPriorityPassingMode { .. }
+        | GameAction::SetPriorityYield { .. }
+        | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::UnAction { .. }
+        | GameAction::SetTriggerOrderTemplate { .. }
+        | GameAction::AssignCombatDamage { .. }
+        | GameAction::AssignBlockerDamage { .. }
+        | GameAction::DistributeAmong { .. }
+        | GameAction::ChooseCounterMoveDistribution { .. }
+        | GameAction::ChooseCountersToRemove { .. }
+        | GameAction::SubmitPayAmount { .. }
+        | GameAction::RetargetSpell { .. }
+        | GameAction::LearnDecision { .. }
+        | GameAction::SelectCategoryPermanents { .. }
+        | GameAction::ChooseKeptCreatures { .. }
+        | GameAction::ChooseKeptPermanents { .. }
+        | GameAction::ChooseX { .. }
+        | GameAction::SubmitPhyrexianChoices { .. }
+        | GameAction::ChooseManaColor { .. }
+        | GameAction::PayManaAbilityMana { .. }
+        | GameAction::ChooseSpecializeColor { .. }
+        | GameAction::PassParadigmOffer
+        | GameAction::Debug(..)
+        | GameAction::GrantDebugPermission { .. }
+        | GameAction::RevokeDebugPermission { .. }
+        | GameAction::Concede { .. }
+        | GameAction::DeclareShortcut { .. }
+        | GameAction::RespondToShortcut { .. }
+        | GameAction::DeclineShortcut
+        | GameAction::PrecastCopyShortcut { .. }
+        | GameAction::EndContinuousEffect { .. }
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. } => return,
+    };
+    snapshot_foreign_library_tops(state, player, kind);
+}
+
+/// CR 401.5: Capture the foreign tops before the action can change them.
+/// Resolution can start a cast from an answer to a parent choice, so the
+/// spell announcement can also open the snapshot.
+pub(super) fn snapshot_foreign_library_tops(
+    state: &mut GameState,
+    player: PlayerId,
+    action: crate::types::game_state::ForeignLibraryLookAction,
+) {
+    use crate::types::game_state::ForeignLibraryLookSnapshot;
+
+    if state.foreign_library_look_snapshot.is_some() {
+        return;
+    }
+    if !state.players.iter().any(|viewer| {
+        super::static_abilities::top_of_library_look_owners(state, viewer.id)
+            .any(|owner| owner != viewer.id)
+    }) {
+        return;
+    }
+    let tops = state
+        .players
+        .iter()
+        .filter_map(|seat| Some((seat.id, *state.library_of(seat.id).front()?)))
+        .collect();
+    state.foreign_library_look_snapshot = Some(Box::new(ForeignLibraryLookSnapshot {
+        player,
+        action,
+        tops,
+    }));
+}
+
+/// CR 401.5 + CR 733.1: retire the snapshot for an announcement that
+/// completed or was cancelled. Callers must identify the owning action.
+pub(super) fn retire_foreign_library_look(
+    state: &mut GameState,
+    player: PlayerId,
+    action: crate::types::game_state::ForeignLibraryLookAction,
+) {
+    if state
+        .foreign_library_look_snapshot
+        .as_deref()
+        .is_some_and(|snapshot| snapshot.player == player && snapshot.action == action)
+    {
+        state.foreign_library_look_snapshot = None;
+    }
+}
+
+pub(super) fn finish_foreign_library_look_boundary(
+    state: &mut GameState,
+    result: &crate::types::game_state::ActionResult,
+) {
+    use crate::types::game_state::ForeignLibraryLookAction;
+    use crate::types::mana::SpecialAction;
+
+    let Some(snapshot) = state.foreign_library_look_snapshot.as_deref() else {
+        return;
+    };
+    let completed = matches!(
+        result.waiting_for,
+        WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
+    ) || result
+        .events
+        .iter()
+        .any(|event| match (&snapshot.action, event) {
+            (ForeignLibraryLookAction::Cast, GameEvent::SpellCast { controller, .. }) => {
+                *controller == snapshot.player
+            }
+            (ForeignLibraryLookAction::PlayLand, GameEvent::LandPlayed { player_id, .. }) => {
+                *player_id == snapshot.player
+            }
+            (
+                ForeignLibraryLookAction::Special(SpecialAction::TurnFaceUp),
+                GameEvent::TurnedFaceUp { .. },
+            ) => true,
+            (
+                ForeignLibraryLookAction::Special(SpecialAction::CompanionToHand),
+                GameEvent::CompanionMovedToHand { player, .. },
+            )
+            | (
+                ForeignLibraryLookAction::Special(SpecialAction::EndContinuousEffect),
+                GameEvent::ContinuousEffectEnded { player, .. },
+            )
+            | (
+                ForeignLibraryLookAction::Special(SpecialAction::Foretell),
+                GameEvent::Foretold {
+                    player_id: player, ..
+                },
+            )
+            | (
+                ForeignLibraryLookAction::Special(SpecialAction::UnlockDoor),
+                GameEvent::RoomDoorUnlocked {
+                    player_id: player, ..
+                },
+            )
+            | (
+                ForeignLibraryLookAction::Special(SpecialAction::RollPlanarDie),
+                GameEvent::PlanarDieRolled {
+                    player_id: player, ..
+                },
+            ) => *player == snapshot.player,
+            (
+                ForeignLibraryLookAction::Activate(source),
+                GameEvent::BecomesPlotted {
+                    player_id,
+                    object_id,
+                },
+            ) => *player_id == snapshot.player && source == object_id,
+            _ => false,
+        });
+    if completed {
+        state.foreign_library_look_snapshot = None;
+    }
+}
+
 fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameState {
     // CR 601.2h + CR 608.2c: only the actor entitled to answer the staged
     // prompt receives its materialized shadow. Other viewers retain the
@@ -1846,7 +2154,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     if let Some(crate::types::game_state::LibrarySearchDeliveryResume::Standard {
         hidden_search_audiences,
         ..
-    }) = filtered.pending_library_search_delivery.as_mut()
+    }) = filtered.pending_library_search_delivery.as_deref_mut()
     {
         hidden_search_audiences.clear();
     }
@@ -1905,6 +2213,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             }
         }
     }
+    filtered.foreign_library_look_snapshot = None;
 
     // CR 702.106c + CR 702.106f: an agenda's secretly chosen names — and how
     // many names it takes — belong to its controller until the turn-face-up
@@ -1949,10 +2258,19 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // CR 400.2 + CR 402.3: stack trigger events retain independent LKI records.
     // Apply the same hidden-object decision used by the zone-change journal
     // before either the state or its derived stack context reaches a client.
+    // Departed trigger records ride along: their entries keep their own trigger
+    // event. (Departed activations and spells need no chain — neither kind
+    // carries a trigger event, so the match below could never fire for them.)
     for entry in filtered
         .stack
         .iter_mut()
         .chain(filtered.resolving_stack_entry.iter_mut())
+        .chain(
+            filtered
+                .departed_triggered_abilities
+                .iter_mut()
+                .map(|(_, entry)| entry),
+        )
     {
         if let StackEntryKind::TriggeredAbility {
             trigger_event: Some(event),
@@ -2150,8 +2468,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // hidden-object redaction in every carrier the projection retains:
     // installed delayed triggers, queued/ordering/deferred triggers, and stack
     // entries. (`resolution_stack` and the paused-resolution resumes are blanked
-    // above; the departed tables hold spells and activated abilities, never delayed
-    // abilities; a departed activated ability takes this same per-entry redaction,
+    // above; the departed tables hold spells and abilities, never delayed
+    // abilities; a departed ability takes this same per-entry redaction,
     // CR 400.2: it was public on the stack.)
     // CR 601.2h + CR 113.7a: the same carriers latch their source's payment snapshots in
     // `ResolvedAbility::trigger_source`; a hidden mana source's entry is blanked there too,
@@ -2171,6 +2489,12 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         .chain(
             filtered
                 .departed_activated_abilities
+                .iter_mut()
+                .map(|(_, entry)| entry),
+        )
+        .chain(
+            filtered
+                .departed_triggered_abilities
                 .iter_mut()
                 .map(|(_, entry)| entry),
         )
@@ -5074,7 +5398,7 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
     if let Some(crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
         after_scope: Some(after_scope),
         ..
-    }) = state.pending_library_search_delivery.as_mut()
+    }) = state.pending_library_search_delivery.as_deref_mut()
     {
         redact_ability_payment(after_scope, hidden_ids);
     }
@@ -5322,6 +5646,11 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
     // departed spell keyed by a hidden id is. Projection only.
     state
         .departed_activated_abilities
+        .retain(|_, entry| !hidden_ids.contains(&entry.source_id));
+    // Same for a departed triggered ability: it names its source and carries
+    // that source's ability. Projection only.
+    state
+        .departed_triggered_abilities
         .retain(|_, entry| !hidden_ids.contains(&entry.source_id));
     // CR 601.2h + CR 400.2: only public-id departed spells remain; each keeps its entry and
     // object, and loses the last-known identity of any hidden mana source that paid for it.
@@ -5894,6 +6223,12 @@ fn redact_hidden_library_identity_carriers(
                 .iter_mut()
                 .map(|(_, entry)| entry),
         )
+        .chain(
+            filtered
+                .departed_triggered_abilities
+                .iter_mut()
+                .map(|(_, entry)| entry),
+        )
     {
         match &mut entry.kind {
             StackEntryKind::Spell {
@@ -6208,6 +6543,77 @@ mod tests {
                 "owner LKI retention after a move to {destination:?}"
             );
         }
+    }
+
+    /// CR 400.2: a departed trigger record whose source is hidden from the
+    /// viewer is dropped from the projection, as a departed activation record
+    /// is; a public source's record is kept. SHAPE test: the records are
+    /// seeded, not written by the production writer (V1 drives that path).
+    #[test]
+    fn departed_trigger_with_hidden_source_is_dropped_for_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let secret = create_object(
+            &mut state,
+            CardId(7),
+            owner,
+            "Sentinel Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let public = create_object(
+            &mut state,
+            CardId(8),
+            owner,
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let departed_trigger = |id: ObjectId, source_id: ObjectId| StackEntry {
+            id,
+            source_id,
+            controller: owner,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], source_id, owner)),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        };
+        let hidden_id = ObjectId(901);
+        let kept_id = ObjectId(902);
+        state
+            .departed_triggered_abilities
+            .insert(hidden_id, departed_trigger(hidden_id, secret));
+        state
+            .departed_triggered_abilities
+            .insert(kept_id, departed_trigger(kept_id, public));
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, secret, Zone::Hand, &mut events);
+
+        assert!(
+            state.departed_triggered_abilities.contains_key(&hidden_id)
+                && state.departed_triggered_abilities.contains_key(&kept_id),
+            "reach guard: authoritative state keeps both records"
+        );
+        let opponent = filter_state_for_viewer(&state, PlayerId(1));
+        assert!(
+            !opponent
+                .departed_triggered_abilities
+                .contains_key(&hidden_id),
+            "the hidden source's departed trigger is dropped for the opponent"
+        );
+        assert!(
+            opponent.departed_triggered_abilities.contains_key(&kept_id),
+            "reach guard: the public source's departed trigger is kept"
+        );
+        assert!(
+            state.departed_triggered_abilities.contains_key(&hidden_id),
+            "authoritative state keeps the hidden source's record"
+        );
     }
 
     /// CR 400.2 + CR 400.7: the cast-history, entry, sacrifice, damage and attack-declaration
@@ -6829,6 +7235,30 @@ mod tests {
                 },
             },
         );
+        // A departed trigger of the same public source gets the per-entry
+        // redaction a live stack entry gets. Seeds `ability` (trigger-source
+        // payment + linked members, sub/else chain), never an activation
+        // record — production never latches one onto a trigger.
+        let departed_trigger = ObjectId(805);
+        state.departed_triggered_abilities.insert(
+            departed_trigger,
+            StackEntry {
+                id: departed_trigger,
+                source_id: paid,
+                controller: owner,
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: paid,
+                    ability: Box::new(ability.clone()),
+                    condition: None,
+                    trigger_event: Some(event.clone()),
+                    description: None,
+                    source_name: "Paid Permanent".to_string(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            },
+        );
         let departed_activation_record = |state: &GameState| {
             state.departed_activated_abilities[&departed_activation]
                 .ability()
@@ -7075,6 +7505,26 @@ mod tests {
                     }
                 }
             }
+            for (id, entry) in state.departed_triggered_abilities.iter() {
+                if let Some(ability) = entry.ability() {
+                    push(
+                        &format!("departed trigger {id:?} ability"),
+                        &from_ability(ability),
+                    );
+                    if let Some(sub) = ability.sub_ability.as_deref() {
+                        push(
+                            &format!("departed trigger {id:?} sub_ability"),
+                            &from_ability(sub),
+                        );
+                    }
+                    if let Some(other) = ability.else_ability.as_deref() {
+                        push(
+                            &format!("departed trigger {id:?} else_ability"),
+                            &from_ability(other),
+                        );
+                    }
+                }
+            }
             for (_, incarnations) in state.departed_stack_spells.iter() {
                 for (incarnation, spell) in incarnations.iter() {
                     if !spell.object.mana_spent_source_snapshots.is_empty() {
@@ -7147,6 +7597,9 @@ mod tests {
             "departed activation ObjectId(804) ability",
             "departed activation ObjectId(804) sub_ability",
             "departed activation ObjectId(804) else_ability",
+            "departed trigger ObjectId(805) ability",
+            "departed trigger ObjectId(805) sub_ability",
+            "departed trigger ObjectId(805) else_ability",
         ];
         for label in expected_labels {
             assert!(
@@ -7249,6 +7702,7 @@ mod tests {
             "/transient_continuous_effects/",
             "/departed_stack_spells/",
             "/departed_activated_abilities/",
+            "/departed_triggered_abilities/",
         ] {
             assert!(
                 raw_linked
@@ -8444,13 +8898,13 @@ mod tests {
                 2,
                 Box::new(|state: &mut GameState| {
                     state.pending_library_search_delivery =
-                        Some(LibrarySearchDeliveryResume::Scoped {
+                        Some(Box::new(LibrarySearchDeliveryResume::Scoped {
                             player: owner,
                             source_id: paid,
                             search_keys: vec![owner],
                             grants: Vec::new(),
                             after_scope: Some(effect()),
-                        });
+                        }));
                 }),
             ),
             (
@@ -9363,8 +9817,8 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::KeywordAction {
                 action: KeywordAction::Equip {
-                    equipment_id: ObjectId(72),
-                    target_creature_id: ObjectId(73),
+                    equipment: ObjectIncarnationRef::of(ObjectId(72), 0),
+                    target_creature: ObjectIncarnationRef::of(ObjectId(73), 0),
                 },
             },
         };
@@ -9443,6 +9897,7 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             crate::types::game_state::LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(
@@ -15799,13 +16254,15 @@ mod tests {
 
     use crate::game::game_object::GameObject;
 
-    /// CR 601.2a: `top_of_library_permission_source` requires a non-`None` `affected`
+    /// CR 601.2a: `top_of_library_grant_for_object` requires a non-`None` `affected`
     /// filter — the permission scopes WHICH top cards it names — so a bare
     /// `StaticDefinition::new` would make every row below vacuously refuse.
     fn top_of_library_static() -> crate::types::ability::StaticDefinition {
         use crate::types::ability::{CardPlayMode, StaticDefinition};
         use crate::types::statics::{CastFrequency, StaticMode};
         let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode: CardPlayMode::Cast,
             frequency: CastFrequency::Unlimited,
             alt_cost: None,
@@ -16568,8 +17025,36 @@ mod tests {
                 },
             );
         }
+        // Same for departed trigger records.
+        for (id, object) in [(ObjectId(812), library_card), (ObjectId(813), permanent)] {
+            state.departed_triggered_abilities.insert(
+                id,
+                StackEntry {
+                    id,
+                    source_id: permanent,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id: permanent,
+                        ability: Box::new(with_context(object, &state)),
+                        condition: None,
+                        trigger_event: None,
+                        description: None,
+                        source_name: String::new(),
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    },
+                },
+            );
+        }
         let departed_context = |state: &GameState, id: ObjectId| {
             state.departed_activated_abilities[&id]
+                .ability()
+                .and_then(|ability| ability.effect_context_object.as_ref())
+                .map(|snapshot| snapshot.object_id)
+        };
+        let departed_trigger_context = |state: &GameState, id: ObjectId| {
+            state.departed_triggered_abilities[&id]
                 .ability()
                 .and_then(|ability| ability.effect_context_object.as_ref())
                 .map(|snapshot| snapshot.object_id)
@@ -16633,6 +17118,14 @@ mod tests {
                 (None, Some(permanent)),
                 "departed activation carriers, viewer {viewer:?}"
             );
+            assert_eq!(
+                (
+                    departed_trigger_context(&projected, ObjectId(812)),
+                    departed_trigger_context(&projected, ObjectId(813)),
+                ),
+                (None, Some(permanent)),
+                "departed trigger carriers, viewer {viewer:?}"
+            );
         }
         let projected = filter_state_for_unseated_viewer(&state);
         assert!(projected.last_revealed_ids.is_empty());
@@ -16641,11 +17134,17 @@ mod tests {
             vec![stripped(&library_event), permanent_event.clone()]
         );
         assert_eq!(departed_context(&projected, ObjectId(810)), None);
+        assert_eq!(departed_trigger_context(&projected, ObjectId(812)), None);
         assert_eq!(state.last_revealed_ids, vec![library_card]);
         assert_eq!(
             departed_context(&state, ObjectId(810)),
             Some(library_card),
             "the rules state keeps the departed record's context"
+        );
+        assert_eq!(
+            departed_trigger_context(&state, ObjectId(812)),
+            Some(library_card),
+            "the rules state keeps the departed trigger's context"
         );
         assert!(matches!(
             &state.current_trigger_events[0],

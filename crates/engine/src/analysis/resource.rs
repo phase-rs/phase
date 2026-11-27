@@ -3866,6 +3866,7 @@ fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Opti
         | StaticMode::Indestructible
         | StaticMode::CantBeDestroyed
         | StaticMode::CantBeRegenerated
+        | StaticMode::CantSetSchemeInMotion
         | StaticMode::FlashBack
         | StaticMode::Shroud
         | StaticMode::Hexproof
@@ -3886,7 +3887,7 @@ fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Opti
         | StaticMode::CantCrew
         | StaticMode::CantPhaseIn
         | StaticMode::CrewContribution { .. }
-        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtTopOfLibrary { .. }
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
         | StaticMode::MayChooseNotToUntap
@@ -7048,7 +7049,7 @@ fn grown_objects_are_inert_unless_unused(
 /// The growth-invariant non-object remainder of the two projected frames, through
 /// `impl PartialEq for GameState`: strip the grown ids from both object maps and clear the
 /// battlefield ordering + stack, with its per-entry tables and the `lki_by_incarnation` and
-/// departed stack records (spells and activated abilities) only they carry
+/// departed stack records (spells, activated abilities, and triggered abilities) only they carry
 /// (the grown ids live there, and those axes are covered by `board_covers` / the stack gate), so
 /// what is left for `PartialEq` to answer is
 /// `objects.len()` plus the non-object axes it compares.
@@ -7121,8 +7122,8 @@ fn eq_except_growable(
     b.0.battlefield.clear(); // allow-raw-zone: clears a discarded comparison CLONE from read-only projected frames, not a gameplay zone event
 
     // The stack leaves the remainder with its per-entry tables, and the `lki_by_incarnation` and
-    // departed stack records (spells and activated abilities) only they carry go with them;
-    // last-known copiable values stay.
+    // departed stack records (spells, activated abilities, and triggered abilities) only they
+    // carry go with them; last-known copiable values stay.
     // CR 405.5 + CR 608.2h: an entry beneath the recurrence resolves only after it and reads its
     // LKI then.
     crate::game::stack::clear_stack_with_entry_tables(&mut a.0);
@@ -7976,6 +7977,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::Indestructible
         | StaticMode::CantBeDestroyed
         | StaticMode::CantBeRegenerated
+        | StaticMode::CantSetSchemeInMotion
         | StaticMode::FlashBack
         | StaticMode::Shroud
         | StaticMode::Hexproof
@@ -7996,7 +7998,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::CantCrew
         | StaticMode::CantPhaseIn
         | StaticMode::CrewContribution { .. }
-        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtTopOfLibrary { .. }
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
         | StaticMode::MayChooseNotToUntap
@@ -9165,6 +9167,7 @@ fn project_out_player_consumables(p: &mut Player) {
         sticker_sheets: _,
         has_drawn_this_turn: _,
         has_no_life_total: _,
+        probe_held_cards: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
         spells_cast_last_turn,
@@ -9784,6 +9787,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         sticker_sheets: _,
         has_drawn_this_turn: _,
         has_no_life_total: _,
+        probe_held_cards: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
         spells_cast_last_turn: _,
@@ -9848,6 +9852,7 @@ fn projected_player_maps(
         sticker_sheets: _,
         has_drawn_this_turn: _,
         has_no_life_total: _,
+        probe_held_cards: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
         spells_cast_last_turn: _,
@@ -10897,7 +10902,7 @@ mod tests {
             },
             PinCarrier::RegisteredSacrifice | PinCarrier::FiredSacrifice => Effect::Sacrifice {
                 target: TargetFilter::EventTarget,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             PinCarrier::AnnouncedSpellTarget => Effect::Destroy {
@@ -17232,7 +17237,7 @@ mod tests {
             let runtime_body = ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
                 vec![],
@@ -19142,7 +19147,7 @@ mod tests {
                 Box::new(ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::ParentTarget,
-                        count: QuantityExpr::Fixed { value: 1 },
+                        count: QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![TargetRef::Object(ObjectId(705))],
@@ -27574,6 +27579,77 @@ mod tests {
         let (pa, pb) = (frame(2), frame(4));
         assert_ne!(
             pa.departed_activated_abilities, pb.departed_activated_abilities,
+            "reach-guard: the named record survives normalization and differs"
+        );
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));
+    }
+
+    /// CR 104.4b + CR 608.2h: a departed triggered ability only a stack entry's
+    /// observer trigger names leaves `eq_except_growable`'s remainder with the stack.
+    #[test]
+    fn eq_except_growable_drops_a_departed_trigger_record_only_a_stack_entry_names() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::events::{GameEvent, TriggeredAbilityOrigin};
+        use crate::types::game_state::StackEntryKind;
+        let observed_source = ObjectId(30);
+        let trigger_source = ObjectId(31);
+        let observed = ObjectId(41);
+        let frame = |x: u32| {
+            let mut s = GameState::new_two_player(7);
+            s.stack.push_back(StackEntry {
+                id: ObjectId(40),
+                source_id: trigger_source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: trigger_source,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        trigger_source,
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: Some(GameEvent::AbilityTriggered {
+                        stack_entry: Some(observed),
+                        source_id: observed_source,
+                        controller: PlayerId(0),
+                        origin: TriggeredAbilityOrigin::SourceAbility,
+                        causes: vec![],
+                    }),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            let mut ability =
+                ResolvedAbility::new(Effect::NoOp, vec![], observed_source, PlayerId(0));
+            ability.chosen_x = Some(x);
+            s.departed_triggered_abilities.insert(
+                observed,
+                StackEntry {
+                    id: observed,
+                    source_id: observed_source,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id: observed_source,
+                        ability: Box::new(ability),
+                        condition: None,
+                        trigger_event: None,
+                        description: None,
+                        source_name: String::new(),
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    },
+                },
+            );
+            project_out_resources(&s)
+        };
+        let (pa, pb) = (frame(2), frame(4));
+        assert_ne!(
+            pa.departed_triggered_abilities, pb.departed_triggered_abilities,
             "reach-guard: the named record survives normalization and differs"
         );
         assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));

@@ -48,6 +48,8 @@ fn scenario_with_parsed_bilbo() -> GameRunner {
 
 fn artifact_token_spec(subtype: &str, controller: PlayerId) -> TokenSpec {
     TokenSpec {
+        blocking_attacker: None,
+        blocking_attacker_incarnation: None,
         characteristics: TokenCharacteristics {
             display_name: subtype.to_string(),
             power: None,

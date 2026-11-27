@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::str::FromStr;
 
+use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
@@ -31,24 +32,13 @@ use super::super::oracle_static::{
     classify_quoted_inner, parse_static_line_multi, promote_nested_ability_quotes,
     strip_enclosing_sentence_comma,
 };
-use super::super::oracle_target::parse_target_with_ctx;
+use super::super::oracle_target::{parse_direct_attacker_target, parse_target_with_ctx};
 use super::super::oracle_util::{
     comma_short_self_name, granting_self_reference_count, normalize_card_name_refs_reporting,
     parse_count_expr, parse_count_head, parse_count_slot, parse_rounding_suffix_only,
     rewrite_quantity_expr_rounding, strip_reminder_text, CountHead, TextPair,
 };
 use crate::parser::oracle_ir::ast::*;
-
-/// Bridge: run a nom combinator on a lowercase copy, mapping the consumed length
-/// back to the original-case text to compute the correct remainder.
-fn nom_on_lower<'a, T, F>(text: &'a str, lower: &str, mut parser: F) -> Option<(T, &'a str)>
-where
-    F: FnMut(&str) -> OracleResult<'_, T>,
-{
-    let (rest, result) = parser(lower).ok()?;
-    let consumed = lower.len() - rest.len();
-    Some((result, &text[consumed..]))
-}
 
 pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let text = strip_reminder_text(text);
@@ -84,7 +74,20 @@ pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Opti
         let (target_text, extra_keywords, additional_modifications) =
             split_token_except_clause(target_text, ctx);
         let target_lower = target_text.trim().to_lowercase();
-        let (mut target, target_remainder) = if parse_cost_paid_object_copy_target(&target_lower) {
+        let linked_attack = parse_exiled_copy_source(&target_lower)
+            .and_then(|(rest, ())| parse_copy_token_attack_destination(rest))
+            .ok();
+        let (mut target, target_remainder) = if linked_attack.is_some() {
+            (
+                super::resolve_singular_exiled_card_target(
+                    ctx.chain_prior_publishers,
+                    TargetFilter::TrackedSet {
+                        id: crate::types::identifiers::TrackedSetId(0),
+                    },
+                ),
+                "",
+            )
+        } else if parse_cost_paid_object_copy_target(&target_lower) {
             (TargetFilter::CostPaidObject, "")
         } else {
             parse_target_with_ctx(target_text, ctx)
@@ -141,10 +144,13 @@ pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Opti
             // subject is lifted into `owner` later by `inject_subject_target`.
             owner: TargetFilter::Controller,
             source_filter: None,
-            enters_attacking,
-            // CR 508.4: the copy modifiers name no destination; a following
-            // "enters tapped and attacking …" sentence sets it.
-            attack_destination: TokenAttackDestination::ControllerChooses,
+            enters_attacking: enters_attacking || linked_attack.is_some(),
+            // CR 508.4: an explicitly named defender takes precedence over
+            // the controller's default choice on entry.
+            attack_destination: linked_attack.map_or(
+                TokenAttackDestination::ControllerChooses,
+                |(_, destination)| destination,
+            ),
             tapped,
             count,
             extra_keywords,
@@ -170,7 +176,11 @@ pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Opti
     {
         super::rebind_anaphoric_object_scope(&mut token.count, ObjectScope::Source);
     }
-    Some(Effect::Token {
+    Some(token_description_to_effect(token))
+}
+
+fn token_description_to_effect(token: TokenDescription) -> Effect {
+    Effect::Token {
         name: token.name,
         power: token.power.unwrap_or(PtValue::Fixed(0)),
         toughness: token.toughness.unwrap_or(PtValue::Fixed(0)),
@@ -183,12 +193,13 @@ pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Opti
         attach_to: token.attach_to,
         enters_attacking: token.enters_attacking,
         attack_destination: token.attack_destination,
+        enters_blocking: token.enters_blocking,
         // CR 205.4a: Carry parsed supertypes (e.g. "legendary" for Marit Lage)
         // onto the token so the legend rule (CR 704.5j) applies.
         supertypes: token.supertypes,
         static_abilities: token.static_abilities,
         enter_with_counters: vec![],
-    })
+    }
 }
 
 pub(super) fn parse_copy_token_entry_modifiers(input: &str) -> OracleResult<'_, (bool, bool)> {
@@ -271,6 +282,18 @@ fn parse_copy_token_trailing_entry_modifiers(
     parse_suffix(remainder.trim_start(), count_bound_by_where_x)
         .ok()
         .map(|(_, flags)| flags)
+}
+
+fn parse_exiled_copy_source(input: &str) -> OracleResult<'_, ()> {
+    value((), tag("the exiled card")).parse(input)
+}
+
+fn parse_copy_token_attack_destination(input: &str) -> OracleResult<'_, TokenAttackDestination> {
+    all_consuming(terminated(
+        preceded(tag(" attacking"), parse_token_attack_destination),
+        opt(tag(".")),
+    ))
+    .parse(input)
 }
 
 fn parse_cost_paid_object_copy_target(lower: &str) -> bool {
@@ -504,6 +527,106 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     parse_token_description_with_context(text, &ParseContext::default())
 }
 
+/// CR 111.3: Parse one characteristic-only modal token bullet into
+/// the same typed token data used by ordinary create-token instructions. The
+/// modal header supplies the shared colors; the bullet supplies P/T and the
+/// remaining token characteristics.
+///
+/// This deliberately returns the typed effect rather than rewriting the mode's
+/// Oracle text. The caller can therefore keep the original mode source and
+/// parsing context while replacing only the fail-closed placeholder effect.
+pub(crate) fn parse_characteristic_only_token_modal_mode(
+    header: &str,
+    mode: &str,
+    ctx: &ParseContext,
+) -> Option<Effect> {
+    let shared_colors = parse_characteristic_only_token_header(header)?;
+    let token = parse_characteristic_only_token_mode(mode, &shared_colors, ctx)?;
+    Some(token_description_to_effect(token))
+}
+
+fn parse_characteristic_only_token_header(header: &str) -> Option<Vec<ManaColor>> {
+    let lower = header.to_lowercase();
+    let (_, _, after_create) =
+        nom_primitives::scan_preceded(&lower, |input| value((), tag("create ")).parse(input))?;
+    let (after_article, _) = tag::<_, _, OracleError<'_>>("a ")
+        .parse(after_create)
+        .ok()?;
+    let (colors, rest) = parse_token_color_prefix(after_article);
+    let (rest, _) = tag::<_, _, OracleError<'_>>("creature token with those characteristics")
+        .parse(rest)
+        .ok()?;
+    all_consuming(terminated(
+        opt(tag::<_, _, OracleError<'_>>(".")),
+        nom::character::complete::multispace0,
+    ))
+    .parse(rest)
+    .ok()?;
+    Some(colors)
+}
+
+fn parse_characteristic_only_token_mode(
+    mode: &str,
+    shared_colors: &[ManaColor],
+    ctx: &ParseContext,
+) -> Option<TokenDescription> {
+    let mode = mode.trim();
+    let mode = mode.trim_end_matches('.').trim_end();
+    let (supertypes, characteristics) = strip_token_supertypes(mode);
+    let (after_pt, (power, toughness)) = nom_primitives::parse_pt_value
+        .parse(characteristics.trim_start())
+        .ok()?;
+    let characteristics = after_pt.trim_start();
+    let characteristics_lower = characteristics.to_lowercase();
+    let with_offset =
+        nom_primitives::scan_at_word_boundaries_with_offset(&characteristics_lower, |input| {
+            value((), tag("with ")).parse(input)
+        })
+        .map(|(offset, _, _)| offset);
+    let (head, suffix) = with_offset.map_or((characteristics, ""), |offset| {
+        (&characteristics[..offset], &characteristics[offset..])
+    });
+    let (mode_colors, descriptor) = parse_token_color_prefix(head.trim());
+    if descriptor.trim().is_empty() {
+        return None;
+    }
+    let (name, types) = parse_token_identity_with_default_type(
+        descriptor.trim(),
+        ctx.card_name.as_deref(),
+        Some("Creature"),
+    )?;
+    let (suffix, is_all_colors) = strip_token_all_colors_suffix(suffix.trim());
+    let mut colors = if is_all_colors {
+        ManaColor::ALL.to_vec()
+    } else {
+        shared_colors.to_vec()
+    };
+    for color in mode_colors {
+        if !colors.contains(&color) {
+            colors.push(color);
+        }
+    }
+    let keywords = parse_token_keyword_clause(suffix);
+    let static_abilities = extract_token_static_abilities(suffix, &name)?;
+
+    Some(TokenDescription {
+        name,
+        power: Some(power),
+        toughness: Some(toughness),
+        types,
+        supertypes,
+        colors,
+        keywords,
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        attach_to: None,
+        static_abilities,
+        enters_attacking: false,
+        enters_blocking: None,
+        attack_destination: TokenAttackDestination::ControllerChooses,
+    })
+}
+
 /// True iff a `for each … this way` count restricts to a specific card type
 /// (Dread Summons' "creature card"), so it should override the unfiltered
 /// `TrackedSetSize`. A bare/generic "card" filter (e.g. "card discarded this
@@ -689,6 +812,39 @@ fn parse_token_description_with_context(
                 false,
                 TokenAttackDestination::ControllerChooses,
             ),
+        };
+    // CR 509.1h + CR 506.3e + CR 509.4: Read the blocking rider before token keywords.
+    // An attack trigger supplies its attacker; a qualified block trigger
+    // instead binds the attacker from the declared blocker/attacker pair.
+    let blocking_lower = text.to_ascii_lowercase();
+    let outside = nom_primitives::mask_double_quoted_spans_preserving_len(&blocking_lower);
+    let blocking_clause = |i| -> OracleResult<'_, TargetFilter> {
+        let (i, _) =
+            alt((tag("that's"), tag("that is"), tag("thats"), tag("that are"))).parse(i)?;
+        let (i, _) = tag(" blocking ").parse(i)?;
+        let (i, filter) = alt((
+            value(
+                ctx.blocking_rider_antecedent
+                    .clone()
+                    .unwrap_or(TargetFilter::TriggeringSource),
+                tag("that creature"),
+            ),
+            parse_direct_attacker_target,
+        ))
+        .parse(i)?;
+        let (i, _) = alt((
+            value((), nom::combinator::eof),
+            value((), tag(" ")),
+            value((), tag(",")),
+            value((), tag(".")),
+        ))
+        .parse(i)?;
+        Ok((i, filter))
+    };
+    let (text, enters_blocking) =
+        match nom_primitives::scan_at_word_boundaries_with_offset(&outside, blocking_clause) {
+            Some((offset, filter, _)) => (text[..offset].trim_end(), Some(filter)),
+            None => (text, None),
         };
     let (mut count, leading_name, mut rest) = match slot_count {
         Some(count) => (count, None, text),
@@ -946,6 +1102,7 @@ fn parse_token_description_with_context(
         static_abilities,
         enters_attacking,
         attack_destination,
+        enters_blocking,
     })
 }
 
@@ -1682,6 +1839,14 @@ fn parse_token_identity(
     descriptor: &str,
     source_name: Option<&str>,
 ) -> Option<(String, Vec<String>)> {
+    parse_token_identity_with_default_type(descriptor, source_name, None)
+}
+
+fn parse_token_identity_with_default_type(
+    descriptor: &str,
+    source_name: Option<&str>,
+    default_core_type: Option<&str>,
+) -> Option<(String, Vec<String>)> {
     let mut core_types = Vec::new();
     let mut subtypes = Vec::new();
 
@@ -1697,7 +1862,11 @@ fn parse_token_identity(
     }
 
     if core_types.is_empty() {
-        return known_named_token_identity(descriptor, source_name);
+        if let Some(default_core_type) = default_core_type {
+            push_unique_string(&mut core_types, default_core_type);
+        } else {
+            return known_named_token_identity(descriptor, source_name);
+        }
     }
 
     let name = if subtypes.is_empty() {
@@ -2396,9 +2565,10 @@ mod tests {
             panic!("expected typed target, got {target:?}");
         };
         assert!(typed_target.type_filters.contains(&TypeFilter::Creature));
-        assert!(typed_target
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(typed_target.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert_eq!(remainder, " and that's tapped and attacking.");
 
         let oracle = "Create a token that's a copy of another target attacking creature and that's tapped and attacking.";
@@ -2417,9 +2587,10 @@ mod tests {
             panic!("expected typed copy target, got {target:?}");
         };
         assert!(typed_target.type_filters.contains(&TypeFilter::Creature));
-        assert!(typed_target
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(typed_target.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(typed_target.properties.contains(&FilterProp::Another));
         assert!(tapped, "trailing tapped clause must set tapped=true");
         assert!(
@@ -2446,7 +2617,7 @@ mod tests {
         assert!(matches!(
             target,
             TargetFilter::Typed(ref typed)
-                if typed.properties.contains(&FilterProp::Attacking { defender: None })
+                if typed.properties.contains(&FilterProp::Attacking { scope: Default::default(), defender: None })
         ));
         assert!(
             !tapped,
@@ -2487,9 +2658,10 @@ mod tests {
             panic!("expected full attack trigger to start with CopyTokenOf, got {execute:?}");
         };
         assert!(target.type_filters.contains(&TypeFilter::Creature));
-        assert!(target
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(target.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(target.properties.contains(&FilterProp::Another));
         assert!(*tapped && *enters_attacking);
 

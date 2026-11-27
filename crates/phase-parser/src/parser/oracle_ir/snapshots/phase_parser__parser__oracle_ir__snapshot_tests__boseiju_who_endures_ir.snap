@@ -96,7 +96,6 @@ expression: "&ir"
             },
             "description": "{T}: Add {G}.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

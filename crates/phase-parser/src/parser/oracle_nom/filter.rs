@@ -962,7 +962,13 @@ mod tests {
     #[test]
     fn test_parse_property_filter_attacking() {
         let (rest, p) = parse_property_filter("attacking").unwrap();
-        assert_eq!(p, FilterProp::Attacking { defender: None });
+        assert_eq!(
+            p,
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }
+        );
         assert_eq!(rest, "");
     }
 

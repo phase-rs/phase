@@ -11,10 +11,10 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition as nom_condition;
 use super::super::oracle_nom::condition::{
-    inject_controller_you, parse_cast_using_teamwork_phrase, parse_pair_attack_predicate,
-    parse_scoped_player_opponent_and_has_condition, parse_spell_target_superlative_suffix,
-    parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
-    DamagedThisWayRecipient,
+    inject_controller, inject_controller_you, parse_cast_using_teamwork_phrase,
+    parse_pair_attack_predicate, parse_scoped_player_opponent_and_has_condition,
+    parse_spell_target_superlative_suffix, parse_you_put_onto_battlefield_this_way_clause,
+    parse_zone_changed_this_way_clause, DamagedThisWayRecipient,
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -2515,7 +2515,8 @@ fn type_filter_can_occur_on_permanent(tf: &TypeFilter) -> bool {
         | TypeFilter::Non(_)
         | TypeFilter::Any => true,
         TypeFilter::AnyOf(inners) => inners.iter().any(type_filter_can_occur_on_permanent),
-        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card => false,
+        // CR 314.2: schemes remain in the command zone — never permanents.
+        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card | TypeFilter::Scheme => false,
     }
 }
 
@@ -3040,7 +3041,13 @@ fn parse_reflexive_object_property(input: &str) -> OracleResult<'_, FilterProp> 
         // `tapped` is immaterial. The verb parser supplies tense and polarity.
         value(FilterProp::Untapped, tag("untapped")),
         // CR 508.1b: combat status (Wisecrack "is attacking").
-        value(FilterProp::Attacking { defender: None }, tag("attacking")),
+        value(
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+            tag("attacking"),
+        ),
         // CR 509.1a: combat status (blocking sibling).
         value(FilterProp::Blocking, tag("blocking")),
         // CR 202.3: "mana value N or less/greater" (Consuming Ashes).
@@ -3081,7 +3088,12 @@ enum ReferentSurface {
     DemonstrativeStat,
     /// "its mana value was N or less|greater" / "it has mana value N or less|greater".
     ManaValueFixed,
-    /// "its mana value is <comparator> <quantity>".
+    /// "its mana value is <comparator> <quantity>" (Dispersal Shield) and the
+    /// subject-verb sibling "it has mana value <comparator> <quantity>" (Anchor
+    /// to Reality). The leading-"if" entry point only licenses the "it has" leg:
+    /// leading "its mana value is ..." keeps its established
+    /// `parse_inner_condition` route (a `QuantityCheck`, not this surface's
+    /// `TargetMatchesFilter`), so claiming it here would reroute existing parses.
     ManaValueDynamic,
     /// `it['s]|is [not] <supertype>` / `that creature|permanent|card is [not] <supertype>`.
     Supertype,
@@ -3089,8 +3101,8 @@ enum ReferentSurface {
     NonbasicLand,
     /// Bare possessive "its power|toughness is <threshold>".
     ItsStat,
-    /// `that spell|permanent` + "'s mana value was N or less|greater" / " has mana value N or
-    /// less|greater". The noun names the referent (see [`ReferentNoun`]). The present-tense
+    /// `that spell|permanent|card` + "'s mana value was N or less|greater" / " has mana value N
+    /// or less|greater". The noun names the referent (see [`ReferentNoun`]). The present-tense
     /// possessive "that spell's mana value is N or greater" keeps its quantity route
     /// (`parse_inner_condition`; Prismari Pianist, Zaffai), so this surface does not claim it.
     NounManaValue,
@@ -3104,6 +3116,11 @@ enum ReferentNoun {
     Spell,
     /// "that permanent": the earlier instruction's declared target.
     Object,
+    /// "that card": the card an earlier instruction in the same effect selected —
+    /// Break Out's revealed creature card, Turntimber Symbiosis's chosen creature
+    /// card. Read through the gated node's own target chain
+    /// (`ObjectScope::Target`), which names that selection (`ParentTarget`).
+    Card,
 }
 
 /// The characteristic a referent clause tests.
@@ -3237,11 +3254,12 @@ fn parse_referent_predicate(
             ))
         }
         ReferentSurface::ManaValueDynamic => {
-            let (rest, _) = tag("its mana value is ").parse(input)?;
-            let (comparator, qty) =
+            let (rest, _) =
+                alt((tag("its mana value is "), tag("it has mana value "))).parse(input)?;
+            let (rest, comparator, qty) =
                 parse_dynamic_mana_value_threshold(rest).ok_or_else(|| oracle_err(input))?;
             Ok((
-                "",
+                rest,
                 ReferentClause::filter(
                     mana_value_filter(comparator, qty),
                     ReferentPolarity::Affirmative,
@@ -3255,6 +3273,7 @@ fn parse_referent_predicate(
                 alt((
                     value(ReferentNoun::Spell, tag("spell")),
                     value(ReferentNoun::Object, tag("permanent")),
+                    value(ReferentNoun::Card, tag("card")),
                 )),
             )
             .parse(input)?;
@@ -3545,10 +3564,11 @@ fn spell_referent_scope(ctx: &ParseContext) -> ObjectScope {
 }
 
 /// CR 202.3 + CR 608.2c: "that spell's mana value was N or less" / "that permanent's mana
-/// value was N or less" / "that spell has mana value N or greater" — the owner's noun
-/// surface. `that permanent` reads the earlier instruction's declared target
-/// (the P/T threshold family's binding guard applies); `that spell` binds through
-/// [`spell_referent_scope`].
+/// value was N or less" / "that spell has mana value N or greater" / "that card has mana
+/// value N or less" — the owner's noun surface. `that permanent` reads the earlier
+/// instruction's declared target (the P/T threshold family's binding guard applies);
+/// `that card` reads the same target chain, which in its dig/reveal class names the
+/// selected card (`ParentTarget`); `that spell` binds through [`spell_referent_scope`].
 fn parse_referent_noun_mana_value_condition_text(
     text: &str,
     ctx: &ParseContext,
@@ -3560,7 +3580,7 @@ fn parse_referent_noun_mana_value_condition_text(
             .ok()?;
     let subject = match clause.noun? {
         ReferentNoun::Spell => spell_referent_scope(ctx),
-        ReferentNoun::Object => ObjectScope::Target,
+        ReferentNoun::Object | ReferentNoun::Card => ObjectScope::Target,
     };
     // The binding guard of the threshold route protects the `Target` reading (the condition
     // reads the gated node's own first object target); an event-object reading has no such
@@ -4574,26 +4594,41 @@ pub(super) fn strip_counter_conditional(
 /// Handles the class of cards that conditionally apply effects based on target mana value
 /// (Fatal Push, Anoint with Affliction, Angrath, Cosmic Rebirth, etc.).
 pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityCondition>, String) {
-    // Leading "If its mana value was N or less/greater, [effect]" (LKI hint)
-    // and "If it has mana value N or less/greater, [effect]" (no hint).
+    // Leading "If its mana value was N or less/greater, [effect]" (LKI hint),
+    // "If it has mana value N or less/greater, [effect]" (no hint), and the
+    // subject-verb dynamic form "If it has mana value <comparator> <quantity>,
+    // [effect]" (Anchor to Reality).
     // CR 608.2h: either tense can read a pinned exit snapshot if the object left.
     if let Ok((tail, _)) = tag_no_case::<_, _, OracleError<'_>>("if ").parse(text) {
         let lower = tail.to_lowercase();
-        if let Ok((rest, clause)) =
-            parse_referent_predicate(lower.as_str(), ReferentSurface::ManaValueFixed)
-        {
-            if let Ok((rest, _)) = preceded(
+        // Fixed thresholds first, then the dynamic surface. The dynamic attempt
+        // is gated on the "it has mana value " prefix: leading "its mana value
+        // is ..." keeps its established `parse_inner_condition` route (see
+        // `ReferentSurface::ManaValueDynamic`) and must not be claimed here.
+        let dynamic_licensed = peek(tag::<_, _, OracleError<'_>>("it has mana value "))
+            .parse(lower.as_str())
+            .is_ok();
+        if let Some((rest, clause)) = [
+            ReferentSurface::ManaValueFixed,
+            ReferentSurface::ManaValueDynamic,
+        ]
+        .into_iter()
+        .filter(|surface| !matches!(surface, ReferentSurface::ManaValueDynamic) || dynamic_licensed)
+        .find_map(|surface| {
+            let (rest, clause) = parse_referent_predicate(lower.as_str(), surface).ok()?;
+            let (rest, _) = preceded(
                 multispace0::<_, OracleError<'_>>,
                 terminated(tag(","), multispace0),
             )
             .parse(rest)
-            {
-                let consumed = lower.len() - rest.len();
-                return (
-                    Some(lower_referent_clause(clause, ObjectScope::Target)),
-                    tail[consumed..].to_string(),
-                );
-            }
+            .ok()?;
+            Some((rest, clause))
+        }) {
+            let consumed = lower.len() - rest.len();
+            return (
+                Some(lower_referent_clause(clause, ObjectScope::Target)),
+                tail[consumed..].to_string(),
+            );
         }
     }
 
@@ -4834,8 +4869,18 @@ fn trailing_rider_subject(effect_text: &str, ctx: &ParseContext) -> Option<Targe
     }
 }
 
-fn parse_dynamic_mana_value_threshold(text: &str) -> Option<(Comparator, QuantityExpr)> {
-    let text = text.trim().trim_end_matches('.');
+/// CR 202.3 + CR 608.2c: "<comparator> <quantity>" tail of a dynamic mana-value
+/// threshold ("less than the sacrificed permanent's mana value"). Returns the
+/// unconsumed remainder so the leading-"if" entry point can split the guard
+/// from the effect at the comma; the suffix entry point enforces full
+/// consumption itself (`all_consuming` in `parse_trailing_referent`), so both
+/// positions share this one tail.
+fn parse_dynamic_mana_value_threshold(text: &str) -> Option<(&str, Comparator, QuantityExpr)> {
+    // No trailing-period strip: the remainder is returned to the caller, so
+    // stripping here would eat the effect sentence's final period in leading
+    // position (and corrupt the caller's consumed-length arithmetic). The
+    // suffix entry point strips its own period before calling.
+    let text = text.trim();
     let (rest, comparator) = alt((
         value(
             Comparator::LE,
@@ -4849,10 +4894,8 @@ fn parse_dynamic_mana_value_threshold(text: &str) -> Option<(Comparator, Quantit
     .parse(text)
     .ok()?;
     let (rest, qty) = nom_quantity::parse_quantity_ref.parse(rest).ok()?;
-    if !rest.trim().is_empty() {
-        return None;
-    }
     Some((
+        rest,
         comparator,
         QuantityExpr::Ref {
             qty: canonicalize_quantity_ref(qty),
@@ -6902,6 +6945,7 @@ pub(crate) fn lower_instead_condition(
         .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
         .or_else(|| parse_condition_text_in(cond_text, ctx))
         .or_else(|| parse_control_count_as_ability_condition(cond_text))
+        .or_else(|| parse_they_control_fewer_count_as_ability_condition(cond_text))
 }
 
 /// Shared assembly: build an `AbilityDefinition` for an instead override.
@@ -7301,6 +7345,40 @@ fn parse_control_count_as_ability_condition(text: &str) -> Option<AbilityConditi
     })
 }
 
+/// CR 608.2c + CR 107.1: "they control fewer than N [types]" — a fixed
+/// control-count threshold over the opponents' collective board (My Wealth
+/// Will Bury You: "If they control fewer than four artifacts and
+/// enchantments, ..."). "They" is the nearest plural player antecedent
+/// ("your opponents" in the preceding sentence), so the count is
+/// opponent-scoped — NOT the `ScopedPlayer` of the per-player punishment
+/// arms (`parse_they_control_count_ge`), which needs a relative-player slot
+/// this trigger body never establishes. The only corpus member is the scheme
+/// above; a future per-player "they control fewer than" would extend this
+/// arm with a scope check rather than rebind it.
+fn parse_they_control_fewer_count_as_ability_condition(text: &str) -> Option<AbilityCondition> {
+    let text = text.trim();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("they control ")
+        .parse(text)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("fewer than ")
+        .parse(rest)
+        .ok()?;
+    let (rest, n) = nom_primitives::parse_number(rest).ok()?;
+    let rest = rest.trim_start();
+    let (filter, leftover) = parse_type_phrase_folding(rest);
+    if filter == TargetFilter::Any || !leftover.trim().trim_end_matches('.').is_empty() {
+        return None;
+    }
+    let filter = inject_controller(filter, ControllerRef::Opponent);
+    Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::LT,
+        rhs: QuantityExpr::Fixed { value: n as i32 },
+    })
+}
+
 /// CR 122.1 + CR 608.2c: Build an `AbilityCondition` from a counter-threshold
 /// `(minimum, maximum)` pair against a counter-quantity expression. Shared by
 /// the typed (`CountersOnSelf`) and any-type (`AnyCountersOnSelf`) arms of
@@ -7581,6 +7659,11 @@ pub(crate) fn static_condition_to_ability_condition(
             player: PlayerScope::Controller,
         } => Some(AbilityCondition::IsMonarch),
         StaticCondition::IsMonarch { .. } => None,
+        // CR 508.5: no `AbilityCondition` defending-player variant exists —
+        // "if you're the defending player" is printed only as a trigger
+        // intervening-if (Nature Shields Its Own), which bridges to
+        // `TriggerCondition::IsDefendingPlayer` instead.
+        StaticCondition::IsDefendingPlayer { .. } => None,
         // Digital-only Alchemy (no CR entry): no `AbilityCondition` boon
         // variant exists — "if you have a boon" is printed only as a
         // trigger intervening-if (Underbridge Warlock), which bridges to
@@ -7807,7 +7890,7 @@ pub(crate) fn static_condition_to_ability_condition(
         // an additional combat phase") gate.
         StaticCondition::SourceIsAttacking => Some(AbilityCondition::SourceMatchesFilter {
             filter: TargetFilter::Typed(TypedFilter {
-                properties: vec![FilterProp::Attacking { defender: None }],
+                properties: vec![FilterProp::Attacking { scope: Default::default(), defender: None }],
                 ..Default::default()
             }),
         }),
@@ -7984,6 +8067,7 @@ fn static_condition_to_delayed_ability_condition(
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
@@ -8721,7 +8805,8 @@ pub(super) fn try_routed_nom_condition_as_ability_condition(
     // CR 202.3 + CR 608.2c: "that spell's mana value was 3 or less" (Reject Imperfection,
     // Sound the Trumpets), "that permanent's mana value was 3 or less" (Carnivorous Canopy,
     // Vindictive Triumph), "that spell has mana value 5 or greater" (Prismari Apprentice,
-    // Herald of Ilharg): the mana-value leaf of the threshold family, with the demonstrative
+    // Herald of Ilharg), "that card has mana value N or less" (Break Out, Turntimber
+    // Symbiosis): the mana-value leaf of the threshold family, with the demonstrative
     // noun deciding the referent.
     if let Some(routed) = parse_referent_noun_mana_value_condition_text(lower.as_str(), ctx) {
         return Some(routed);
@@ -9149,7 +9234,13 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                 value(false, tag("it was ")),
             )),
             alt((
-                value(FilterProp::Attacking { defender: None }, tag("attacking")),
+                value(
+                    FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None,
+                    },
+                    tag("attacking"),
+                ),
                 value(FilterProp::Blocking, tag("blocking")),
             )),
         );
@@ -17137,6 +17228,67 @@ mod tests {
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
     }
 
+    #[test]
+    fn they_control_fewer_count_instead_condition_parses() {
+        // CR 608.2c + CR 107.1: My Wealth Will Bury You's floor gate — "they"
+        // is the opponents collective, compared strictly against four.
+        let cond = lower_instead_condition(
+            "they control fewer than four artifacts and enchantments",
+            &mut ParseContext::default(),
+        )
+        .expect("the fewer-than control count must lower");
+        let AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        } = &cond
+        else {
+            panic!("expected QuantityCheck, got {cond:?}");
+        };
+        assert_eq!(*comparator, Comparator::LT);
+        assert_eq!(*rhs, QuantityExpr::Fixed { value: 4 });
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = lhs
+        else {
+            panic!("expected an object-count lhs, got {lhs:?}");
+        };
+        fn typed_leaves<'f>(
+            filter: &'f TargetFilter,
+            out: &mut Vec<&'f crate::types::ability::TypedFilter>,
+        ) {
+            match filter {
+                TargetFilter::Typed(typed) => out.push(typed),
+                TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                    for inner in filters {
+                        typed_leaves(inner, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut leaves = Vec::new();
+        typed_leaves(filter, &mut leaves);
+        assert!(!leaves.is_empty(), "expected typed leaves, got: {filter:?}");
+        assert!(
+            leaves
+                .iter()
+                .all(|typed| typed.controller
+                    == Some(crate::types::ability::ControllerRef::Opponent)),
+            "the count must be opponent-scoped, got: {filter:?}"
+        );
+        let names = |wanted: crate::types::ability::TypeFilter| {
+            leaves
+                .iter()
+                .any(|typed| typed.type_filters.contains(&wanted))
+        };
+        assert!(
+            names(crate::types::ability::TypeFilter::Artifact)
+                && names(crate::types::ability::TypeFilter::Enchantment),
+            "the count must cover both types, got: {filter:?}"
+        );
+    }
+
     // ---- reflexive-if-rider recognizer (S01) ----
     //
     // Discrimination / revert-probe: reverting the `parse_reflexive_object_property`
@@ -17252,7 +17404,13 @@ mod tests {
             panic!("expected Not, got {cond:?}");
         };
         let (prop, use_lki) = single_prop(condition);
-        assert_eq!(*prop, FilterProp::Attacking { defender: None });
+        assert_eq!(
+            *prop,
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }
+        );
         assert!(!use_lki, "present-tense 'isn't' must read live state");
     }
 
@@ -17333,7 +17491,13 @@ mod tests {
         let cond =
             parse_target_reflexive_property_condition_text("that creature is attacking").unwrap();
         let (prop, use_lki) = single_prop(&cond);
-        assert_eq!(*prop, FilterProp::Attacking { defender: None });
+        assert_eq!(
+            *prop,
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }
+        );
         assert!(!use_lki, "present-tense 'is attacking' reads live combat");
     }
 
@@ -18211,7 +18375,10 @@ mod tests {
         let cases = [
             (
                 StaticCondition::SourceIsAttacking,
-                vec![FilterProp::Attacking { defender: None }],
+                vec![FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None,
+                }],
             ),
             (
                 StaticCondition::SourceIsBlocking,
@@ -18803,6 +18970,11 @@ mod referent_owner_tests {
             ReferentSurface::ManaValueDynamic,
         ),
         (
+            "Anchor to Reality",
+            "it has mana value less than the sacrificed permanent's mana value",
+            ReferentSurface::ManaValueDynamic,
+        ),
+        (
             "Coiling Rebirth",
             "that creature isn't legendary",
             ReferentSurface::Supertype,
@@ -18833,6 +19005,16 @@ mod referent_owner_tests {
             "Lily Bowen, Raging Grandma",
             "its power is 16 or less",
             ReferentSurface::ItsStat,
+        ),
+        (
+            "Break Out",
+            "that card has mana value 2 or less",
+            ReferentSurface::NounManaValue,
+        ),
+        (
+            "Turntimber Symbiosis",
+            "that card has mana value 3 or less",
+            ReferentSurface::NounManaValue,
         ),
     ];
 
@@ -18935,6 +19117,42 @@ mod referent_owner_tests {
             )
         );
         assert_eq!(body, "you may put it onto the battlefield.");
+        // Leading dynamic form (Anchor to Reality): the owner's condition, then
+        // the body after the comma.
+        let (condition, body) = strip_mana_value_conditional(
+            "If it has mana value less than the sacrificed permanent's mana value, scry 2.",
+        );
+        assert_eq!(
+            condition,
+            owner_condition(
+                "it has mana value less than the sacrificed permanent's mana value",
+                ReferentSurface::ManaValueDynamic
+            )
+        );
+        assert_eq!(body, "scry 2.");
+        // Leading "its mana value is ..." keeps its `parse_inner_condition`
+        // route: the referent stripper must not claim it.
+        let (condition, body) = strip_mana_value_conditional(
+            "If its mana value is less than the number of cards in your hand, scry 2.",
+        );
+        assert_eq!(condition, None);
+        assert_eq!(
+            body,
+            "If its mana value is less than the number of cards in your hand, scry 2."
+        );
+        // Suffix position of the same shared arm (no printed card; the arm is
+        // one combinator serving both positions, with Anchor covering leading).
+        let (condition, body) = strip_mana_value_conditional(
+            "Destroy target creature if it has mana value less than the number of cards in your hand.",
+        );
+        assert_eq!(
+            condition,
+            owner_condition(
+                "it has mana value less than the number of cards in your hand",
+                ReferentSurface::ManaValueDynamic
+            )
+        );
+        assert_eq!(body, "Destroy target creature");
 
         // Supertype (Ancient Animus) and nonbasic (Molten Rain).
         let (condition, body) = strip_target_supertype_conditional(

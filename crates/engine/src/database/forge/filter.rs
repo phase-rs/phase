@@ -1,7 +1,7 @@
 use crate::parser::oracle_util::canonicalize_subtype_name;
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr, TargetFilter,
-    TypeFilter, TypedFilter,
+    AttackDefenderMatch, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::Zone;
@@ -94,7 +94,10 @@ fn translate_dotted_filter(segments: &[&str]) -> Result<TargetFilter, ForgeTrans
             // Property predicates
             "tapped" => properties.push(FilterProp::Tapped),
             "untapped" => properties.push(FilterProp::Untapped),
-            "attacking" => properties.push(FilterProp::Attacking { defender: None }),
+            "attacking" => properties.push(FilterProp::Attacking {
+                defender: None,
+                scope: AttackDefenderMatch::DefendingSide,
+            }),
             "token" => properties.push(FilterProp::Token),
 
             // Zone predicates

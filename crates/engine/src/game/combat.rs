@@ -1246,24 +1246,26 @@ pub fn enter_attacking_at_destination(
 ) {
     use crate::types::ability::EntryAttackDestination;
 
+    // CR 506.3a: use the entrant's effective type after copy and entry
+    // modifications. A noncreature still enters, but never attacks.
+    crate::game::layers::flush_layers(state);
+    let Some(entrant) = state.objects.get(&object_id) else {
+        return;
+    };
+    if !entrant.card_types.core_types.contains(&CoreType::Creature) {
+        return;
+    }
     match destination {
         EntryAttackDestination::AnyDefender | EntryAttackDestination::PlayerOrPlaneswalker => {
             // CR 508.4: no single destination named; `enter_attacking` derives one.
             enter_attacking(state, object_id, source_id, controller);
         }
         EntryAttackDestination::Exact { target } => {
-            let Some(entrant_controller) = state
-                .objects
-                .get(&object_id)
-                .map(|object| object.controller)
-            else {
-                return;
-            };
             // CR 508.4a + CR 506.3b + CR 506.3c: a named destination that is not a
             // legal one for the token's controller leaves the token on the
             // battlefield, never attacking.
             if let Some(defending_player) =
-                entry_attack_target_defender(state, entrant_controller, *target)
+                entry_attack_target_defender(state, entrant.controller, *target)
             {
                 enter_attacking_at_target(state, object_id, defending_player, *target);
             }
@@ -24654,6 +24656,7 @@ mod tests {
             def.affected,
             Some(TargetFilter::Typed(TypedFilter::creature().properties(
                 vec![FilterProp::Attacking {
+                    scope: Default::default(),
                     defender: Some(ControllerRef::Opponent),
                 }]
             ))),

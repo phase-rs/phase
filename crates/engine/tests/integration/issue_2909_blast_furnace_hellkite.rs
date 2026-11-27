@@ -69,6 +69,7 @@ fn blast_furnace_hellkite_parses_artifact_offering_and_attacking_opponents_stati
         static_def.affected,
         Some(TargetFilter::Typed(TypedFilter::creature().properties(
             vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::Opponent)
             }]
         ),))

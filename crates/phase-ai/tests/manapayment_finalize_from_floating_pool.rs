@@ -82,6 +82,61 @@ fn load_turn4_capture() -> GameState {
     load_saved_game_state(&raw).expect("the turn-4 capture deserializes and restores")
 }
 
+/// CR 603.3b: the capture holds a queue written before queued triggered
+/// abilities recorded their placement process, at a payment with a spell on
+/// the stack and nothing being placed, so the restore's placement refusal
+/// admits it (`load_turn4_capture` restores it through `PersistedGameState`).
+/// Pins that this capture still reaches that refusal with every one of its
+/// terms false.
+fn assert_capture_queue_reads_nothing_under_way() {
+    let raw = gunzip_fixture(include_bytes!(
+        "../fixtures/scenarios/galvanic-blast-manapayment-turn4.json.gz"
+    ));
+    let document: serde_json::Value = serde_json::from_str(&raw).expect("the capture parses");
+    let state = &document["gameState"];
+    let queue = state["deferred_triggers"]
+        .as_array()
+        .expect("the capture has a queue");
+    assert!(!queue.is_empty(), "reach: the queue is not empty");
+    assert!(
+        queue
+            .iter()
+            .all(|context| context.get("placement_process").is_none()),
+        "reach: no queued context carries the placement-process record"
+    );
+    for field in [
+        "pending_trigger",
+        "pending_trigger_entry",
+        "pending_trigger_order",
+    ] {
+        assert!(
+            state.get(field).is_none_or(serde_json::Value::is_null),
+            "{field} is unset"
+        );
+    }
+    assert_eq!(state["waiting_for"]["type"], "ManaPayment");
+    let stack = state["stack"].as_array().expect("the stack is an array");
+    assert_eq!(
+        stack
+            .iter()
+            .map(|entry| entry["kind"]["type"].clone())
+            .collect::<Vec<_>>(),
+        vec![serde_json::json!("Spell")],
+        "only the spell being paid for is on the stack"
+    );
+    assert!(
+        state["resolving_stack_entry"].is_null(),
+        "no resolution is under way"
+    );
+    assert!(
+        queue
+            .iter()
+            .flat_map(|context| context["trigger_events"].as_array().into_iter().flatten())
+            .all(|event| event["type"] != "AbilityTriggered"),
+        "no observer of an ability triggering is queued"
+    );
+}
+
 /// Non-vacuity guard: pin the shape that makes finalizing both necessary and
 /// sufficient. Without this, a green below could mean the AI answered some
 /// unrelated prompt.
@@ -159,6 +214,7 @@ fn assert_capture_is_the_reported_wedge(state: &GameState) {
 /// of them raise "Engine Connection Lost" and stop the game.
 #[test]
 fn ai_advances_a_manapayment_it_can_already_afford() {
+    assert_capture_queue_reads_nothing_under_way();
     let state = load_turn4_capture();
     assert_capture_is_the_reported_wedge(&state);
 

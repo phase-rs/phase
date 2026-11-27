@@ -68,6 +68,5 @@ crates/phase-parser/src/parser/oracle_static/grammar.rs 1
 crates/phase-parser/src/parser/oracle_static/keyword_grant.rs 3
 crates/phase-parser/src/parser/oracle_static/restriction.rs 6
 crates/phase-parser/src/parser/oracle_static/shared.rs 1
-crates/phase-parser/src/parser/oracle_static/static_helpers.rs 1
 crates/phase-parser/src/parser/oracle_target.rs 3
 crates/phase-parser/src/parser/oracle_trigger.rs 4

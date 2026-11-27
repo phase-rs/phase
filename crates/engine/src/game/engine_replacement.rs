@@ -492,6 +492,7 @@ fn finish_simultaneous_token_clause(state: &mut GameState, events: &mut Vec<Game
     // linked-exile batch).
     let template = ResolvedAbility::new(
         Effect::Token {
+            enters_blocking: None,
             name: String::new(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -4791,11 +4792,17 @@ fn complete_token_entry_after_copy(
     // The entry's `name` / `source_id` ride the parked `pending_token_battlefield_entry` that
     // the `Suppress` commit installs, so only the liminal entry's PRESENCE matters here.
     let has_liminal_entry = state.liminal_entries.contains_key(&source_id);
-    // CR 508.4: how many tokens of the batch exist once this entry is realized.
-    let entrants_through_this_entry = state
+    let attack_on_entry = state
         .liminal_entries
         .get(&source_id)
-        .map_or(0, |entry| entry.created_ids.len() + 1);
+        .filter(|entry| entry.enters_attacking)
+        .map(|entry| {
+            (
+                entry.source_id,
+                entry.controller,
+                entry.attack_destination.clone(),
+            )
+        });
     // Captured before the settlement may rewrite the entry's copy description.
     let copy_continuation = token::liminal_copy_token_continuation(state, source_id);
     // CR 403.3 + CR 603.6a: the commit applies the token's enter-with-counters, which can
@@ -4862,7 +4869,11 @@ fn complete_token_entry_after_copy(
                 return Ok(state.waiting_for.clone());
             }
             state.finish_active_paused_post_replacement_dispatch();
-            token::continue_liminal_copy_token_batch(state, copy_continuation, events);
+            token::continue_liminal_copy_token_batch(
+                state,
+                copy_continuation.map(|continuation| continuation.after_entry()),
+                events,
+            );
             return Ok(state.waiting_for.clone());
         }
         TokenEntrySettlement::Prevented => {
@@ -4900,6 +4911,12 @@ fn complete_token_entry_after_copy(
     ) {
         return Ok(state.waiting_for.clone());
     }
+    // CR 508.4: advance only if this destination's copy was created.
+    let copy_continuation = if state.last_created_token_ids.contains(&source_id) {
+        copy_continuation.map(|continuation| continuation.after_entry())
+    } else {
+        copy_continuation
+    };
     let entrant_pin = state
         .objects
         .get(&source_id)
@@ -4951,6 +4968,24 @@ fn complete_token_entry_after_copy(
             let _ = effects::resolve_ability_chain(state, ability, events, 0);
         }
     }
+    // CR 506.3a + CR 508.4: the parked token's initial projection may have a
+    // different type from the object it becomes. Assign combat membership
+    // after the selected copy has installed its characteristics.
+    if let Some((creator, controller, destination)) = attack_on_entry {
+        if state
+            .pending_token_battlefield_entry
+            .as_ref()
+            .is_some_and(|pending| pending.object_id == source_id)
+        {
+            super::combat::enter_attacking_at_destination(
+                state,
+                source_id,
+                creator,
+                controller,
+                &destination,
+            );
+        }
+    }
     // CR 707.9f: type-gated exceptions apply only to an installed copy,
     // not to the uncopied entrant if installation failed.
     let copy_applied =
@@ -4973,7 +5008,6 @@ fn complete_token_entry_after_copy(
     if let Some(continuation) = copy_continuation.clone() {
         counter_pause_post_actions.push(token::liminal_copy_token_continuation_post_action(
             continuation,
-            entrants_through_this_entry,
         ));
     }
     let entry_counters = match settled_counters {
@@ -5113,6 +5147,7 @@ fn apply_copy_target_choice(
                     EngineError::InvalidAction("Copy target has no copiable values".into())
                 })?;
             let copy = crate::types::proposed_event::CopyTokenSpec {
+                blocking_attacker: None,
                 values: Box::new(values),
                 display: target.display_identity(),
                 extra_keywords: Vec::new(),
@@ -11055,6 +11090,8 @@ mod tests {
         install_optional_replacement(&mut state, ReplacementEvent::CreateToken);
 
         let spec = TokenSpec {
+            blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Soldier".to_string(),
                 power: Some(2),
@@ -11148,6 +11185,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: name.to_string(),
                     power: PtValue::Fixed(2),
                     toughness: PtValue::Fixed(2),
@@ -11187,6 +11225,8 @@ mod tests {
         state.battlefield.push_back(replacement_source);
 
         let treasure_spec = TokenSpec {
+            blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Treasure".to_string(),
                 power: None,
@@ -11312,6 +11352,7 @@ mod tests {
         let branch = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                enters_blocking: None,
                 name: "Cat".to_string(),
                 power: PtValue::Fixed(2),
                 toughness: PtValue::Fixed(2),
@@ -11351,6 +11392,8 @@ mod tests {
             redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(TokenSpec {
+                blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: TokenCharacteristics {
                     display_name: "Treasure".to_string(),
                     power: None,
@@ -11431,6 +11474,7 @@ mod tests {
         let instruction = |source_id| {
             ResolvedAbility::new(
                 Effect::Token {
+                    enters_blocking: None,
                     name: "Soldier".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),
@@ -12714,7 +12758,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Sacrifice {
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         );
@@ -13391,6 +13435,7 @@ mod tests {
         let continuation = PendingCounterPostAction::ContinueCopyTokenCreation {
             owner: PlayerId(0),
             copy: Box::new(CopyTokenSpec {
+                blocking_attacker: None,
                 values: Box::new(values),
                 display: crate::game::game_object::DisplayIdentity {
                     display_source: crate::game::game_object::DisplaySource::Token,
@@ -14065,6 +14110,7 @@ mod tests {
         state.liminal_entries.insert(
             liminal_id,
             LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(liminal),

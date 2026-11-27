@@ -6822,7 +6822,7 @@ mod tests {
     fn opponent_may_infeasible_accept_reprompt_preserves_latched_subject() {
         let effect = Effect::Sacrifice {
             target: TargetFilter::Typed(TypedFilter::creature()),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         };
         let mut state = opponent_may_state(effect, vec![PlayerId(1)]);

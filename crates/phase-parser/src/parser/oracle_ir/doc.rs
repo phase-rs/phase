@@ -1426,6 +1426,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::ArrangePlanarDeckTop { .. } => {}
         Effect::Planeswalk => {}
         Effect::AbandonScheme => {}
+        Effect::SetSchemeInMotion { .. } => {}
         Effect::ChaosEnsues => {}
         Effect::ReverseTurnOrder => {}
         Effect::RedistributeLifeTotals => {}

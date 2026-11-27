@@ -615,10 +615,12 @@ fn confirmed_misparse_default_schemes_full_export() {
 /// `explain_blank_gaps` call from `analyze_coverage` fails this test.
 #[test]
 fn analyze_coverage_names_the_census_clauses_and_gap_analysis_groups_them() {
-    let key = "a good day to die";
+    let key = "i call for slaughter";
     let entry = ConfirmedMisparses::committed()
         .get(key)
         .expect("the committed list carries this face");
+    assert_eq!(entry.class, MisparseClass::MissingEffect);
+    assert_eq!(entry.clauses, ["They gain haste until end of turn."]);
     let raw: Map<String, Value> = [key]
         .into_iter()
         .map(|key| (key.to_string(), fixture()[key].clone()))

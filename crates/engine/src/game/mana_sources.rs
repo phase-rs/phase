@@ -979,7 +979,7 @@ fn live_base_mana_output(
         return Vec::new();
     };
     let production_override =
-        super::casting_costs::production_override_for_option(ability_def, option);
+        super::casting_costs::production_override_for_option(&ability.effect, option);
     live_mana_output_units(
         state,
         &ability,
@@ -1050,17 +1050,13 @@ fn resolved_mana_ability_for_live_output(
     player: PlayerId,
     ability_def: &AbilityDefinition,
 ) -> ResolvedAbility {
-    let ability = match &*ability_def.effect {
-        Effect::Mana { produced, .. } => {
-            largest_sizing_resolution(state, produced, ability_def, source_id, player)
-                .map(|(resolved, _)| resolved)
-        }
-        _ => None,
-    }
-    .unwrap_or_else(|| {
-        super::ability_utils::build_resolved_from_def(ability_def, source_id, player)
-    });
-    mana_abilities::apply_condition_instead_mana_swap(state, &ability)
+    largest_sizing_resolution(state, ability_def, source_id, player)
+        .map(|(resolved, _)| resolved)
+        .unwrap_or_else(|| {
+            let ability =
+                super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
+            mana_abilities::apply_condition_instead_mana_swap(state, &ability)
+        })
 }
 
 /// CR 608.2h + CR 118.3: The resolutions a mana ability is sized by before it
@@ -1093,21 +1089,26 @@ fn sizing_resolutions(
         .collect()
 }
 
+/// CR 601.2g + CR 614.15: Size the whole resolution selected by the
+/// mana ability's self-replacement.
 /// The sizing resolution that adds the most mana, with that amount. An
 /// any-one-color amount that reads the color chosen for it is sized by its
 /// best color (`planned_gross_mana`).
 fn largest_sizing_resolution(
     state: &GameState,
-    produced: &ManaProduction,
     ability: &AbilityDefinition,
     object_id: ObjectId,
     controller: PlayerId,
 ) -> Option<(ResolvedAbility, u32)> {
     sizing_resolutions(state, ability, object_id, controller)
         .into_iter()
-        .map(|resolved| {
+        .filter_map(|resolved| {
+            let resolved = mana_abilities::apply_condition_instead_mana_swap(state, &resolved);
+            let Effect::Mana { produced, .. } = &resolved.effect else {
+                return None;
+            };
             let gross = planned_gross_mana(produced, state, &resolved);
-            (resolved, gross)
+            Some((resolved, gross))
         })
         .max_by_key(|(_, gross)| *gross)
 }
@@ -1275,7 +1276,13 @@ pub(crate) fn activate_mana_source_option_with_output(
             })?;
         let production_override = match output {
             ManaSourceOutput::Concrete(_) => {
-                super::casting_costs::production_override_for_option(&ability, option)
+                let resolved = super::ability_utils::build_resolved_from_def(
+                    &ability,
+                    option.object_id,
+                    player,
+                );
+                let resolved = mana_abilities::apply_condition_instead_mana_swap(state, &resolved);
+                super::casting_costs::production_override_for_option(&resolved.effect, option)
             }
             ManaSourceOutput::DeferredColorChoice { .. } => None,
         };
@@ -1306,6 +1313,7 @@ pub(crate) fn activate_mana_source_option_with_output(
         // CR 305.6 + CR 605.3: tapping a basic land for mana activates its
         // intrinsic mana ability; observe its triggers at that boundary. Its
         // activation cost is the intrinsic "{T}" (CR 305.6).
+        mana_abilities::retire_mana_activation_look(state, player, option.object_id, &resume);
         let activation_event = super::casting_targets::emit_ability_activated(
             state,
             player,
@@ -1680,6 +1688,41 @@ pub(crate) fn player_mana_ability_reach(state: &GameState, player: PlayerId) -> 
         }
     }
     reach
+}
+
+/// CR 605.1a + CR 118.3: the hand and graveyard cards the costs of `player`'s
+/// battlefield mana abilities could consume (Rubble Rouser's graveyard exile,
+/// Skirge Familiar's discard), for holding cards for another leg of a cost.
+/// Whether an ability can be activated now isn't asked: a larger set only costs
+/// the caller more probes.
+pub(crate) fn mana_ability_card_fodder(
+    state: &GameState,
+    player: PlayerId,
+) -> std::collections::HashSet<ObjectId> {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.controller == player)
+        .flat_map(|obj| {
+            obj.abilities
+                .iter()
+                .filter(|ability| {
+                    ability.kind == AbilityKind::Activated
+                        && mana_abilities::is_mana_ability(ability)
+                })
+                .filter_map(|ability| ability.cost.as_ref())
+                .flat_map(|cost| {
+                    super::cost_payability::object_cost_candidates(state, player, obj.id, cost)
+                })
+        })
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|card| matches!(card.zone, Zone::Hand | Zone::Graveyard))
+        })
+        .collect()
 }
 
 /// CR 118.3: whether paying this cost sacrifices, exiles or returns an object
@@ -2598,10 +2641,9 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
             )
         })
         .filter_map(|(_, ability)| match &*ability.effect {
-            Effect::Mana { produced, .. } => {
-                let gross =
-                    largest_sizing_resolution(state, produced, ability, object_id, controller)
-                        .map_or(0, |(_, gross)| gross);
+            Effect::Mana { .. } => {
+                let gross = largest_sizing_resolution(state, ability, object_id, controller)
+                    .map_or(0, |(_, gross)| gross);
                 // CR 605.3b: Net the mana paid to activate this ability —
                 // gross output overstates what a filter land actually adds.
                 let activation_cost = mana_abilities::mana_sub_cost_of(&ability.cost)
@@ -3237,7 +3279,7 @@ fn usable_mana_ability_net(
             super::quantity::resolve_quantity_with_targets(state, count, &resolved).max(0) as u32
         }
     } else {
-        let sizing = largest_sizing_resolution(state, produced, ability, object_id, controller);
+        let sizing = largest_sizing_resolution(state, ability, object_id, controller);
         if capacity_use == CapacityUse::XCeiling
             && sizing.as_ref().is_some_and(|(resolved, _)| {
                 activation_amount_depends_on_color(state, produced, resolved)
@@ -3676,7 +3718,7 @@ fn activatable_mana_profiles_for_object(
         ) {
             continue;
         }
-        let Effect::Mana { produced, .. } = &*ability.effect else {
+        let Effect::Mana { .. } = &*ability.effect else {
             // CR 605.3a + CR 107.1c: a reveal-then-mana ability's production
             // follows its reveal, so it joins the shard profiles through the
             // same sizing as its capacity — else a colourless shard ({C}) is
@@ -3771,8 +3813,12 @@ fn activatable_mana_profiles_for_object(
         for kind in sizing_resolutions(state, ability, object_id, controller)
             .iter()
             .filter_map(|resolved| {
+                let resolved = mana_abilities::apply_condition_instead_mana_swap(state, resolved);
+                let Effect::Mana { produced, .. } = &resolved.effect else {
+                    return None;
+                };
                 profile_kind_from_production(
-                    state, object_id, controller, ability, produced, resolved,
+                    state, object_id, controller, ability, produced, &resolved,
                 )
                 .and_then(|kind| profile_kind_allowed_for_context(kind, payment_context))
             })
@@ -4608,11 +4654,12 @@ fn emit_source_rows(
     ability: &AbilityDefinition,
     payability_mode: ManaPayabilityMode,
 ) -> Vec<SourceRow> {
+    let resolved = resolved_mana_ability_for_live_output(state, object_id, controller, ability);
     let Effect::Mana {
         produced,
         restrictions,
         ..
-    } = &*ability.effect
+    } = &resolved.effect
     else {
         return Vec::new();
     };
@@ -4639,8 +4686,6 @@ fn emit_source_rows(
         ManaProduction::Fixed { .. }
         | ManaProduction::Colorless { .. }
         | ManaProduction::Mixed { .. } => {
-            let resolved =
-                super::ability_utils::build_resolved_from_def(ability, object_id, controller);
             let types =
                 super::effects::mana::resolve_mana_types_for_ability(produced, state, &resolved);
             if types.is_empty() {
@@ -4649,7 +4694,7 @@ fn emit_source_rows(
             vec![SourceRow {
                 mana_type: types[0],
                 atomic_combination: (types.len() > 1).then_some(types),
-                restrictions: concrete_restrictions.clone(),
+                restrictions: concrete_restrictions,
             }]
         }
         // CR 106.1 + CR 608.2d: an amount that reads the color chosen for this
@@ -4671,8 +4716,6 @@ fn emit_source_rows(
                     })
                     .collect();
             }
-            let resolved =
-                super::ability_utils::build_resolved_from_def(ability, object_id, controller);
             super::effects::mana::any_one_color_outputs(state, produced, &resolved)
                 .into_iter()
                 .map(|(mana_type, _)| SourceRow {
@@ -4688,17 +4731,7 @@ fn emit_source_rows(
         produced
             if single_color_production_count(produced).is_some_and(|count| !count.contains_x()) =>
         {
-            // Reuse the live label's sizing authority: a paid-object amount
-            // needs its candidate bound, and an "instead" condition can
-            // replace the base output before its amount is evaluated.
-            let resolved =
-                resolved_mana_ability_for_live_output(state, object_id, controller, ability);
-            let count = match &resolved.effect {
-                Effect::Mana { produced, .. } => {
-                    resolved_production_count(produced, state, &resolved) as usize
-                }
-                _ => 0,
-            };
+            let count = resolved_production_count(produced, state, &resolved) as usize;
             // CR 605.2: a legal explicit activation may add zero mana; it
             // still pays its costs, but cannot fund an automatic payment.
             if count == 0 && payability_mode == ManaPayabilityMode::Planning {

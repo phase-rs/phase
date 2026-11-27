@@ -7,6 +7,7 @@ import { U8_MAX } from "../adapter/types";
 import {
   formatMetadata,
   formatSuppliesDeck,
+  isArchenemyFamilyFormat,
   isPlanechaseFamilyFormat,
   isSetupFormat,
   SETUP_FORMATS,
@@ -184,6 +185,18 @@ export function GameSetupPage() {
     setMatchType(restoredLastFormat ? lastMatchType : "Bo1");
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A picked archenemy seat strands when the table shrinks below it. Clamp to
+  // the last seat (an AI seat in solo play), preserving the "someone else is
+  // the archenemy" intent rather than silently handing the role to the player.
+  // Guarded on the comparison so it settles after one correction.
+  useEffect(() => {
+    if (!formatConfig || !isArchenemyFamilyFormat(formatConfig.format)) return;
+    const seat = formatConfig.archenemy_player ?? 0;
+    if (seat >= playerCount) {
+      setFormatConfig({ ...formatConfig, archenemy_player: playerCount - 1 });
+    }
+  }, [formatConfig, playerCount]);
+
   function applyFormat(format: GameFormat) {
     const defaults = setupDefaults(format);
     if (!defaults) return;
@@ -273,10 +286,18 @@ export function GameSetupPage() {
       deckId: s.deckId === "Random" ? null : s.deckId,
     }));
     const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
+    // Clamp a stranded archenemy seat at the submit boundary too: the
+    // effect above normally corrects it live, but a click that beats the
+    // effect to the commit boundary must not submit a past-the-edge seat.
+    const submitConfig =
+      isArchenemyFamilyFormat(formatConfig.format) &&
+      (formatConfig.archenemy_player ?? 0) >= playerCount
+        ? { ...formatConfig, archenemy_player: playerCount - 1 }
+        : formatConfig;
     // The native server owns a fresh AI session and v1 deliberately has no
     // resume contract. Preserve the existing pointer only for the WASM route.
     if (!canAttemptNativeEngine(prefs.nativeEngineEnabled) || firstPlayer !== "random") {
-      saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats, formatConfig });
+      saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats, formatConfig: submitConfig });
     }
     useGameStore.setState({ gameId });
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
@@ -299,7 +320,7 @@ export function GameSetupPage() {
     // native-engine route above deliberately writes no resume pointer.
     navigate(
       `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${effectiveMatchType.toLowerCase()}${loopParam}${firstParam}${pileParam}${hordeDeckParam}`,
-      { state: { formatConfig } },
+      { state: { formatConfig: submitConfig } },
     );
   };
 
@@ -647,6 +668,30 @@ export function GameSetupPage() {
                         className="w-full"
                       />
                     </label>
+                  )}
+
+                  {isArchenemyFamilyFormat(formatConfig.format) && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-xs text-slate-400">{t("gameSetup.config.archenemySeat")}</span>
+                      <div className="flex flex-wrap gap-1 rounded-[10px] border border-gray-700 bg-gray-950/70 p-1">
+                        {Array.from({ length: playerCount }, (_, seat) => (
+                          <button
+                            key={seat}
+                            type="button"
+                            onClick={() => setFormatConfig({ ...formatConfig, archenemy_player: seat })}
+                            className={`min-w-0 flex-1 whitespace-nowrap rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
+                              (formatConfig.archenemy_player ?? 0) === seat
+                                ? "bg-indigo-600 text-white"
+                                : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+                            }`}
+                          >
+                            {seat === 0
+                              ? t("gameSetup.config.archenemyYou")
+                              : t("gameSetup.config.archenemyOpponent", { number: seat })}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   )}
 
                   <div className="grid grid-cols-2 gap-1 rounded-[10px] border border-gray-700 bg-gray-950/70 p-1">
