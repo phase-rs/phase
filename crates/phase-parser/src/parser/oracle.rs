@@ -3816,6 +3816,7 @@ fn filter_references_source_chosen_player(filter: &TargetFilter) -> bool {
                         prop,
                         FilterProp::Attacking {
                             defender: Some(ControllerRef::SourceChosenPlayer),
+                            ..
                         }
                     )
                 })
@@ -13092,18 +13093,18 @@ fn parse_equip_target_filter(cost_text: &str) -> Option<TargetFilter> {
         nom::sequence::terminated(take_until::<_, _, OracleError<'_>>("{"), tag("{"))
             .parse(lower.as_str())
     else {
-        return Some(default_equip_target_filter());
+        return Some(TargetFilter::equip_target());
     };
     let descriptor = descriptor.trim();
     if descriptor.is_empty() {
-        return Some(default_equip_target_filter());
+        return Some(TargetFilter::equip_target());
     }
 
     if tag::<_, _, OracleError<'_>>("pay")
         .parse(descriptor)
         .is_ok()
     {
-        return Some(default_equip_target_filter());
+        return Some(TargetFilter::equip_target());
     }
 
     if alt((
@@ -13164,12 +13165,6 @@ fn equip_target_has_explicit_attachable_type(typed: &TypedFilter) -> bool {
                 | crate::types::ability::TypeFilter::Planeswalker
         )
     })
-}
-
-fn default_equip_target_filter() -> TargetFilter {
-    TargetFilter::Typed(
-        TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
-    )
 }
 
 fn parse_equip_cost(cost_text: &str) -> AbilityCost {

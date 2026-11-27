@@ -37,7 +37,10 @@ fn najeela_chain(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
     let attacking_creatures = TargetFilter::Typed(TypedFilter {
         type_filters: vec![TypeFilter::Creature],
         controller: None,
-        properties: vec![FilterProp::Attacking { defender: None }],
+        properties: vec![FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        }],
     });
 
     // Link 3: additional combat phase (the only effect that currently works).

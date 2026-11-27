@@ -1835,6 +1835,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(1),
             LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: LiminalEntrant::Token(TokenProjection::materialize(first.clone())),
                 name: "First liminal".to_string(),
@@ -1857,6 +1858,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(2),
             LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: LiminalEntrant::Token(TokenProjection::materialize(second.clone())),
                 name: "Second liminal".to_string(),
@@ -3025,8 +3027,8 @@ fn stack_resolution_session_fixture(budget: StackResolutionBudget) -> GameState 
         controller: PlayerId(2),
         kind: StackEntryKind::KeywordAction {
             action: KeywordAction::Equip {
-                equipment_id: ObjectId(9_004),
-                target_creature_id: ObjectId(9_005),
+                equipment: ObjectIncarnationRef::of(ObjectId(9_004), 0),
+                target_creature: ObjectIncarnationRef::of(ObjectId(9_005), 0),
             },
         },
     };

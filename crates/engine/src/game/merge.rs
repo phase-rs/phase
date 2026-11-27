@@ -704,8 +704,7 @@ pub(crate) fn restore_pre_merge_tokenness_for_leave(state: &mut GameState, merge
 /// entry.
 ///
 /// This is a no-op unless the effect references a RECORDED DEPARTURE — the
-/// object a merged permanent became when it left the battlefield — and a
-/// resolved object is a former survivor with co-located components. A freshly
+/// objects a merged permanent became when it left the battlefield. A freshly
 /// chosen target (Riftsweeper choosing one exiled card; reanimating one specific
 /// card) carries no departure evidence for that object and must not over-return.
 /// A tracked-set filter expands per resolved referent from the set's recorded
@@ -753,6 +752,23 @@ pub(crate) fn expand_returned_merge_components(
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
     ) {
         return expand_tracked_set_referents(state, ability, resolved, target_filter);
+    }
+    if let (TargetFilter::TriggeringSource, Some(watched), Some(event)) = (
+        target_filter,
+        ability.context.delayed_watch_incarnation,
+        state.current_trigger_event.as_ref(),
+    ) {
+        if super::triggers::recorded_battlefield_departure_pin(event) == Some(watched) {
+            // CR 400.7e + CR 730.3c + CR 609.3: the pinned watcher's return
+            // follows each component even if the survivor has since moved.
+            let mut expanded = resolved;
+            for component in departed_identity_components(state, event, watched) {
+                if !expanded.contains(&component) {
+                    expanded.push(component);
+                }
+            }
+            return expanded;
+        }
     }
     let mut expanded = resolved.clone();
     for &survivor_id in &resolved {

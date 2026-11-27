@@ -9817,8 +9817,8 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::KeywordAction {
                 action: KeywordAction::Equip {
-                    equipment_id: ObjectId(72),
-                    target_creature_id: ObjectId(73),
+                    equipment: ObjectIncarnationRef::of(ObjectId(72), 0),
+                    target_creature: ObjectIncarnationRef::of(ObjectId(73), 0),
                 },
             },
         };
@@ -9897,6 +9897,7 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             crate::types::game_state::LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(

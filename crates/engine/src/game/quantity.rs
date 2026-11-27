@@ -1480,20 +1480,21 @@ fn activation_restriction_is_cast_stable_for_pre_cast(
         | crate::types::ability::ActivationRestriction::BeforeCombatDamage
         | crate::types::ability::ActivationRestriction::OnlyOnceEachTurn
         | crate::types::ability::ActivationRestriction::OnlyOnce
-        | crate::types::ability::ActivationRestriction::MaxTimesEachTurn { .. }
-        | crate::types::ability::ActivationRestriction::MatchesCardCastTiming => true,
+        | crate::types::ability::ActivationRestriction::MaxTimesEachTurn { .. } => true,
         crate::types::ability::ActivationRestriction::RequiresCondition {
             condition: Some(condition),
         } => parsed_condition_is_cast_stable_for_pre_cast(condition),
         crate::types::ability::ActivationRestriction::RequiresCondition { condition: None } => true,
         // Source designations, levels, and counter thresholds are independent
         // state readers. This proof admits only modeled restrictions so a new
-        // state-dependent gate cannot silently make a known-zero cast vanish.
+        // state-dependent gate cannot silently make a known-zero cast vanish;
+        // a hand card's cast prohibitions read the turn's cast journal (Rule of Law).
         crate::types::ability::ActivationRestriction::IsSolved
         | crate::types::ability::ActivationRestriction::SourceIsHarnessed
         | crate::types::ability::ActivationRestriction::ClassLevelIs { .. }
         | crate::types::ability::ActivationRestriction::LevelCounterRange { .. }
-        | crate::types::ability::ActivationRestriction::CounterThreshold { .. } => false,
+        | crate::types::ability::ActivationRestriction::CounterThreshold { .. }
+        | crate::types::ability::ActivationRestriction::MatchesCardCastTiming => false,
     }
 }
 
@@ -11519,11 +11520,12 @@ mod tests {
                 minimum: 1,
                 maximum: Some(3),
             },
+            ActivationRestriction::MatchesCardCastTiming,
         ] {
             definition.activation_restrictions = vec![restriction];
             assert!(
                 !ability_definition_is_cast_stable_for_pre_cast(&definition),
-                "source-state activation restrictions must remain conservative"
+                "state-reading activation restrictions must remain conservative"
             );
         }
     }

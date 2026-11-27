@@ -861,14 +861,8 @@ pub(crate) fn propose_token_batch(
     // singleton firing's lone attacker; unresolvable (attacker left combat)
     // means the tokens enter unblocking — the creation is the instruction's
     // core, the block its rider.
-    let blocking_attacker = enters_blocking_filter.and_then(|filter| {
-        crate::game::targeting::affected_event_context_target(state, ability, filter).and_then(
-            |target_ref| match target_ref {
-                crate::types::ability::TargetRef::Object(id) => Some(id),
-                crate::types::ability::TargetRef::Player(_) => None,
-            },
-        )
-    });
+    let blocking_attacker = enters_blocking_filter
+        .and_then(|filter| resolve_token_blocking_attacker(state, ability, filter));
 
     // CR 111.1 + CR 111.4: Resolve the token's characteristics into a
     // self-describing `TokenSpec`. Script-name parsing takes precedence;
@@ -1125,6 +1119,31 @@ pub(crate) fn token_creator_has_left_game(state: &GameState, owner: PlayerId) ->
     !crate::game::players::is_alive(state, owner)
 }
 
+fn resolve_token_blocking_attacker(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Option<ObjectIncarnationRef> {
+    // CR 509.4 + CR 608.2b: resolve the announced or inherited target while
+    // the instruction can still find it. Preserve Nature Shields Its Own's
+    // triggering-attacker binding through the event referent authority.
+    let target = if matches!(filter, TargetFilter::TriggeringSource) {
+        crate::game::targeting::affected_event_context_target(state, ability, filter)
+    } else {
+        crate::game::targeting::resolved_targets(ability, filter, state)
+            .into_iter()
+            .next()
+    };
+    // CR 400.7: replacement and multiplication carry this exact incarnation.
+    let TargetRef::Object(id) = target? else {
+        return None;
+    };
+    state
+        .objects
+        .get(&id)
+        .map(ObjectIncarnationRef::from_object)
+}
+
 /// CR 111.1 + CR 111.4 + CR 111.10: Build the resolved `TokenSpec` for a
 /// token creation event, combining parsed script attributes with typed
 /// `Effect::Token` fallback fields and ability context (source/controller/
@@ -1138,7 +1157,7 @@ fn build_token_spec(
     tapped: bool,
     enters_attacking: bool,
     attack_request: TokenAttackRequest,
-    blocking_attacker: Option<crate::types::identifiers::ObjectId>,
+    blocking_attacker: Option<ObjectIncarnationRef>,
     mut static_abilities: Vec<crate::types::ability::StaticDefinition>,
     enter_with_counters: Vec<(CounterType, u32)>,
     attach_to: TokenHostRequest,
@@ -1208,7 +1227,8 @@ fn build_token_spec(
         tapped,
         enters_attacking,
         attack_request,
-        blocking_attacker,
+        blocking_attacker: blocking_attacker.map(|pin| pin.object_id),
+        blocking_attacker_incarnation: blocking_attacker.map(|pin| pin.incarnation),
         sacrifice_at: ability.duration.clone(),
         source_id: ability.source_id,
         controller: ability.controller,
@@ -1859,7 +1879,8 @@ fn apply_create_token_batch(
         };
     };
 
-    if let Some(copy) = copy {
+    if let Some(mut copy) = copy {
+        copy.blocking_attacker = spec.blocking_attacker_ref().or(copy.blocking_attacker);
         // CR 608.2c + CR 614.6: a single-batch copy event delivered under its
         // CopyToken owner (the frame a replacement-choice answer left parked)
         // gets the compound event's custody: the owner is detached for the
@@ -2030,9 +2051,7 @@ fn apply_create_token_batch(
         // CR 509.1h + CR 506.3e: Token enters blocking — not declared as a
         // blocker. The attacker resolved once at propose time; every created
         // token blocks it (the Mirror Match shared path).
-        if let Some(attacker) = spec.blocking_attacker {
-            crate::game::combat::place_blocking(state, obj_id, attacker, events);
-        }
+        place_token_blocking(state, obj_id, spec.blocking_attacker_ref(), events);
 
         // CR 122.6a: Place counters on the token as it enters the battlefield.
         for (counter_index, (counter_type, counter_count)) in
@@ -3472,6 +3491,7 @@ fn liminal_token_entry_finalization_action(
         controller: entry.controller,
         enters_attacking: entry.enters_attacking,
         attack_destination: entry.attack_destination.clone(),
+        blocking_attacker: entry.blocking_attacker,
         attach_to: entry.attach_to,
         sacrifice_at: entry.sacrifice_at.clone(),
         created_ids: entry.created_ids.clone(),
@@ -3496,6 +3516,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
         controller,
         enters_attacking,
         attack_destination,
+        blocking_attacker,
         attach_to,
         sacrifice_at,
         created_ids,
@@ -3550,6 +3571,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     // state at the moment of the move" from a pre-copy 0/0 Shapeshifter.
     match entry_events {
         TokenEntryEventEmission::Emit => {
+            place_token_blocking(state, object_id, blocking_attacker, events);
             push_committed_token_entry_events(state, object_id, name, source_id, events);
         }
         TokenEntryEventEmission::Suppress => {
@@ -3575,11 +3597,12 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
                 stranded.is_none(),
                 "CR 400.7: parking a token battlefield entry over a live pending one: {stranded:?}"
             );
-            state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+            state.pending_token_battlefield_entry = Some(Box::new(PendingTokenBattlefieldEntry {
                 object_id,
                 name,
                 source_id,
-            });
+                blocking_attacker,
+            }));
         }
     }
     if matches!(sacrifice_at, Some(Duration::UntilEndOfCombat)) {
@@ -3890,6 +3913,7 @@ pub(crate) fn flush_pending_token_battlefield_entry(
     else {
         return false;
     };
+    place_token_blocking(state, pending.object_id, pending.blocking_attacker, events);
     push_committed_token_entry_events(
         state,
         pending.object_id,
@@ -4501,6 +4525,7 @@ pub(crate) fn copy_probe_spec_for(
         controller,
         attach_to: TokenHostRequest::NotRequested,
         blocking_attacker: None,
+        blocking_attacker_incarnation: None,
     }
 }
 
@@ -4574,14 +4599,9 @@ pub(crate) fn resolve_token_spec(
     // CR 509.1h + CR 506.3e: Resolve the blocking rider's attacker once, at
     // propose time — the same resolution the `resolve` path performs, so the
     // spec-preview spec carries the identical `blocking_attacker`.
-    let blocking_attacker = enters_blocking.as_ref().and_then(|filter| {
-        crate::game::targeting::affected_event_context_target(state, ability, filter).and_then(
-            |target_ref| match target_ref {
-                crate::types::ability::TargetRef::Object(id) => Some(id),
-                crate::types::ability::TargetRef::Player(_) => None,
-            },
-        )
-    });
+    let blocking_attacker = enters_blocking
+        .as_ref()
+        .and_then(|filter| resolve_token_blocking_attacker(state, ability, filter));
 
     let parsed = parse_token_script(name).or_else(|| {
         build_token_attrs_from_effect(
@@ -4761,6 +4781,24 @@ fn boon_batch_host_candidates(
             .filter(|host| boon_host_passes_projected_legality(state, ability, host))
             .collect(),
     )
+}
+
+pub(super) fn place_token_blocking(
+    state: &mut GameState,
+    token: ObjectId,
+    attacker: Option<ObjectIncarnationRef>,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 509.4a and CR 400.7: a missing or changed attacker leaves the token unblocking.
+    let Some(attacker) = attacker else { return };
+    // Main's in-flight proposals retain ID-only semantics. Combat placement
+    // still checks that the referenced creature is a legal attacker (CR 509.4a).
+    if state.battlefield.contains(&token)
+        && (attacker.incarnation == crate::types::identifiers::LEGACY_INCARNATION
+            || attacker.is_current(state))
+    {
+        crate::game::combat::place_blocking(state, token, attacker.object_id, events);
+    }
 }
 
 fn resolve_attach_host(
@@ -6450,6 +6488,7 @@ mod tests {
         let (mut state, source) = attacking_token_board();
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Goblin".to_string(),
                 power: Some(1),
@@ -6704,6 +6743,7 @@ mod tests {
         assert!(finalize_committed_liminal_token_entry_from_action(
             &mut state,
             PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+                blocking_attacker: None,
                 object_id,
                 name: "Record Probe".to_string(),
                 source_id,
@@ -6746,11 +6786,12 @@ mod tests {
         );
         assert_eq!(
             state.pending_token_battlefield_entry,
-            Some(PendingTokenBattlefieldEntry {
+            Some(Box::new(PendingTokenBattlefieldEntry {
+                blocking_attacker: None,
                 object_id,
                 name: "Record Probe".to_string(),
                 source_id: ObjectId(1),
-            }),
+            })),
             "the whole entry is parked on GameState so it survives any number of round trips"
         );
     }
@@ -6953,11 +6994,12 @@ mod tests {
     #[test]
     fn pending_token_battlefield_entry_round_trips() {
         let mut state = GameState::new_two_player(42);
-        state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+        state.pending_token_battlefield_entry = Some(Box::new(PendingTokenBattlefieldEntry {
+            blocking_attacker: None,
             object_id: ObjectId(7),
             name: "Record Probe".to_string(),
             source_id: ObjectId(1),
-        });
+        }));
         let encoded = serde_json::to_string(&state).expect("GameState serializes");
         let decoded: GameState = serde_json::from_str(&encoded).expect("GameState deserializes");
         assert_eq!(
@@ -8512,6 +8554,7 @@ mod tests {
         );
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Gingerbrute".to_string(),
                 power: Some(1),
@@ -8921,6 +8964,7 @@ mod tests {
 
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Pest".to_string(),
                 power: Some(1),
@@ -9025,6 +9069,7 @@ mod tests {
                 offered_batch: OfferedBatchCustody::Settled,
             });
             let copy = CopyTokenSpec {
+                blocking_attacker: None,
                 values: Box::new(intrinsic_copiable_values(&state.objects[&voice])),
                 display: DisplayIdentity {
                     display_source: DisplaySource::Token,
@@ -9127,6 +9172,7 @@ mod tests {
         );
         let creature_spec = |name: &str| TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: name.to_string(),
                 power: Some(1),
@@ -9211,6 +9257,7 @@ mod tests {
             .push("0060ce13-67e2-5607-a29b-721c743e6770".to_string());
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Treasure".to_string(),
                 power: None,
@@ -9285,6 +9332,7 @@ mod tests {
             .push("48b5010a-9c00-5cc1-b5e1-f407670846ba".to_string());
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Royal".to_string(),
                 power: None,
@@ -9367,6 +9415,7 @@ mod tests {
         );
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 // The name the parser actually produces for "a Monster Role token".
                 display_name: "Monster Role".to_string(),
@@ -9566,6 +9615,7 @@ mod tests {
         }
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Monster Role".to_string(),
                 power: None,
@@ -10132,6 +10182,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Construct".to_string(),
                 power: Some(0),
@@ -10202,6 +10253,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Stoneforged Blade".to_string(),
                 power: Some(0),
@@ -10263,6 +10315,7 @@ mod tests {
     ) -> ProposedEvent {
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Probe Curse".to_string(),
                 power: Some(0),
@@ -10418,6 +10471,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Conditional Blade".to_string(),
                 power: Some(0),
@@ -10498,6 +10552,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Meteorite".to_string(),
                 power: Some(0),
@@ -10557,6 +10612,7 @@ mod tests {
         use crate::types::proposed_event::TokenCharacteristics;
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: TokenCharacteristics {
                 display_name: "Hero".to_string(),
                 power: Some(1),
@@ -10765,6 +10821,7 @@ mod tests {
         source_id: ObjectId,
     ) -> crate::types::game_state::LiminalEntry {
         crate::types::game_state::LiminalEntry {
+            blocking_attacker: None,
             copy_settlement: None,
             object,
             name: "Unhosted Aura".to_string(),
@@ -11034,6 +11091,7 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(token),
@@ -11048,6 +11106,7 @@ mod tests {
                 remaining_count: 0,
                 created_ids: Vec::new(),
                 copy_resume: Some(Box::new(CopyTokenSpec {
+                    blocking_attacker: None,
                     values: Box::new(values.clone()),
                     display: DisplayIdentity {
                         display_source: DisplaySource::Token,
